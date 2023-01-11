@@ -41,6 +41,7 @@ func eval(expression scmer, en *env) (value scmer) {
 			} else {
 				value = eval(e[3], en)
 			}
+		/* set! is forbidden due to side effects
 		case "set!":
 			v := e[1].(symbol)
 			en2 := en.FindWrite(v)
@@ -48,9 +49,9 @@ func eval(expression scmer, en *env) (value scmer) {
 				// not yet defined: set in innermost env
 				en2 = en
 			}
-			en2.vars[v] = eval(e[2], en)
-			value = "ok"
-		case "define":
+			en.vars[v] = eval(e[2], en)
+			value = "ok"*/
+		case "define", "set": // set only works in innermost env
 			en.vars[e[1].(symbol)] = eval(e[2], en)
 			value = "ok"
 		case "lambda":
