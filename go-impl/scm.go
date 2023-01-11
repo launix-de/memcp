@@ -218,6 +218,15 @@ func init() {
 		nil}
 }
 
+/* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt
+zero?, negative?, positive?, off?, even?
+max, min
+sin, cos, tan, asin, acos, atan
+exp, log
+number->string, string->number
+integer?, rational?, real?, complex?, number?
+*/
+
 /*
  Parsing
 */
@@ -247,6 +256,20 @@ func readFrom(tokens *[]scmer) (expression scmer) {
 				}
 				*tokens = (*tokens)[1:]
 				return L
+			} else if token == symbol("'") && len(*tokens) > 0 {
+				if (*tokens)[0] == symbol("(") {
+					*tokens = (*tokens)[1:]
+					// list literal
+					L := make([]scmer, 1)
+					L[0] = symbol("list")
+					for (*tokens)[0] != symbol(")") {
+						L = append(L, readFrom(tokens))
+					}
+					*tokens = (*tokens)[1:]
+					return L
+				} else {
+					return token
+				}
 			} else {
 				return token
 			}
