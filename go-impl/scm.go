@@ -303,7 +303,7 @@ func tokenize(s string) []scmer {
 	
 	tokens are either number, symbol, string or symbol('(') or symbol(')')
 	*/
-	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r")
+	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t")
 	state := 0
 	startToken := 0
 	result := make([]scmer, 0)
@@ -312,7 +312,7 @@ func tokenize(s string) []scmer {
 			// another character added to number
 		} else if state == 2 && ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t' && ch != ')' && ch != '(' {
 			// another character added to symbol
-		} else if state == 3 && ch != '"' && ch != '\\' {
+		} else if state == 3 && ch != '"' && ch != '\\' && ch != 't' && ch != 'r' && ch != 'n' {
 			// another character added to string
 		} else if state == 3 && ch == '\\' {
 			// escape sequence
@@ -353,7 +353,7 @@ func tokenize(s string) []scmer {
 			} else if ch >= '0' && ch <= '9' || ch == '-' {
 				// start number
 				state = 1
-			} else if ch == ' ' || ch == '\t' || ch == '\rn' || ch == '\n' {
+			} else if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
 				// white space
 				state = 0
 			} else {
