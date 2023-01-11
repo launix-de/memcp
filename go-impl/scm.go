@@ -399,6 +399,22 @@ func Serialize(b *bytes.Buffer, v scmer, en *env) {
 			Serialize(b, x, en)
 		}
 		b.WriteByte(')')
+	case func(...scmer) scmer:
+		// native func serialization is the hardest; reverse the env!
+		// when later functional JIT is done, this must also handle deoptimization
+		en2 := en
+		for en2 != nil {
+			for k, v2 := range en2.vars {
+				// compare function pointers (hacky but golang dosent give another opt)
+				if fmt.Sprint(v) == fmt.Sprint(v2) {
+					// found the right global function
+					b.WriteString(fmt.Sprint(k)) // print out variable name
+					return
+				}
+			}
+			en2 = en2.outer
+		}
+		b.WriteString("[unserializable native func]")
 	case proc:
 		b.WriteString("(lambda ")
 		Serialize(b, v.params, v.en)
