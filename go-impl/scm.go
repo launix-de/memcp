@@ -264,6 +264,7 @@ func tokenize(s string) []scmer {
 	
 	tokens are either number, symbol, string or symbol('(') or symbol(')')
 	*/
+	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\")
 	state := 0
 	startToken := 0
 	result := make([]scmer, 0)
@@ -281,7 +282,7 @@ func tokenize(s string) []scmer {
 			state = 3 // continue with string
 		} else if state == 3 && ch == '"' {
 			// finish string
-			result = append(result, string(s[startToken+1:i]))
+			result = append(result, stringreplacer.Replace(string(s[startToken+1:i])))
 			state = 0
 		} else {
 			// otherwise: state change!
@@ -346,21 +347,75 @@ func tokenize(s string) []scmer {
 */
 
 func String(v scmer) string {
+	return StringEnv(v, &globalenv)
+}
+
+func StringEnv(v scmer, en *env) string {
 	switch v := v.(type) {
 	case []scmer:
 		l := make([]string, len(v))
 		for i, x := range v {
-			l[i] = String(x)
+			l[i] = StringEnv(x, en)
 		}
 		return "(" + strings.Join(l, " ") + ")"
+	case proc:
+		return "(lambda " + StringEnv(v.params, v.en) + " " + StringEnv(v.body, v.en) + ")"
+	case symbol:
+		for en != nil && en != &globalenv {
+			if v, ok := en.vars[v]; ok {
+				// if symbol is defined in a lambda, print the real value
+				return StringEnv(v, en)
+			}
+			en = en.outer
+		}
+		// otherwise print as symbol
+		return fmt.Sprint(v)
 	default:
 		return fmt.Sprint(v)
+	}
+}
+func Serialize(b *bytes.Buffer, v scmer, en *env) {
+	switch v := v.(type) {
+	case []scmer:
+		b.WriteByte('(')
+		for i, x := range v {
+			if i != 0 {
+				b.WriteByte(' ')
+			}
+			Serialize(b, x, en)
+		}
+		b.WriteByte(')')
+	case proc:
+		b.WriteString("(lambda ")
+		Serialize(b, v.params, v.en)
+		b.WriteByte(' ')
+		Serialize(b, v.body, v.en)
+		b.WriteByte(')')
+	case symbol:
+		for en != nil && en != &globalenv {
+			if v, ok := en.vars[v]; ok {
+				// if symbol is defined in a lambda, print the real value
+				Serialize(b, v, en)
+				return
+			}
+			en = en.outer
+		}
+		// otherwise print as symbol
+		b.WriteString(fmt.Sprint(v))
+	case string:
+		b.WriteByte('"')
+		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\").Replace(v))
+		b.WriteByte('"')
+	default:
+		b.WriteString(fmt.Sprint(v))
 	}
 }
 
 func Repl() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for fmt.Print("> "); scanner.Scan(); fmt.Print("> ") {
-		fmt.Println("==>", String(eval(read(scanner.Text()), &globalenv)))
+		var b bytes.Buffer
+		Serialize(&b, eval(read(scanner.Text()), &globalenv), &globalenv)
+		fmt.Println("==>", b.String())
 	}
 }
