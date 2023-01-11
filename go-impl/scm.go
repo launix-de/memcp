@@ -94,6 +94,8 @@ func apply(procedure scmer, args []scmer) (value scmer) {
 	return
 }
 
+// TODO: func optimize für parzielle lambda-Ausdrücke und JIT
+
 type proc struct {
 	params, body scmer
 	en           *env
@@ -347,29 +349,17 @@ func tokenize(s string) []scmer {
 */
 
 func String(v scmer) string {
-	return StringEnv(v, &globalenv)
-}
-
-func StringEnv(v scmer, en *env) string {
 	switch v := v.(type) {
 	case []scmer:
 		l := make([]string, len(v))
 		for i, x := range v {
-			l[i] = StringEnv(x, en)
+			l[i] = String(x)
 		}
 		return "(" + strings.Join(l, " ") + ")"
 	case proc:
-		return "(lambda " + StringEnv(v.params, v.en) + " " + StringEnv(v.body, v.en) + ")"
-	case symbol:
-		for en != nil && en != &globalenv {
-			if v, ok := en.vars[v]; ok {
-				// if symbol is defined in a lambda, print the real value
-				return StringEnv(v, en)
-			}
-			en = en.outer
-		}
-		// otherwise print as symbol
-		return fmt.Sprint(v)
+		return "[func]"
+	case func(...scmer) scmer:
+		return "[native func]"
 	default:
 		return fmt.Sprint(v)
 	}
