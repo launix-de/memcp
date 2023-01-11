@@ -9,6 +9,7 @@ package main
 import "fmt"
 
 func main() {
+	// define user specific functions
 	globalenv.vars["print"] = func (a ...scmer) scmer {
 		for _, s := range a {
 			fmt.Print(String(s))
@@ -16,6 +17,5 @@ func main() {
 		fmt.Println()
 		return "ok"
 	}
-	globalenv.vars["nope"] = "nope"
 	Repl()
 }

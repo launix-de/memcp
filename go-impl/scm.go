@@ -264,7 +264,7 @@ func tokenize(s string) []scmer {
 	
 	tokens are either number, symbol, string or symbol('(') or symbol(')')
 	*/
-	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\")
+	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n")
 	state := 0
 	startToken := 0
 	result := make([]scmer, 0)
@@ -404,7 +404,7 @@ func Serialize(b *bytes.Buffer, v scmer, en *env) {
 		b.WriteString(fmt.Sprint(v))
 	case string:
 		b.WriteByte('"')
-		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\").Replace(v))
+		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\", "\n", "\\n").Replace(v))
 		b.WriteByte('"')
 	default:
 		b.WriteString(fmt.Sprint(v))
