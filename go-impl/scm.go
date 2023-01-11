@@ -303,14 +303,14 @@ func tokenize(s string) []scmer {
 	
 	tokens are either number, symbol, string or symbol('(') or symbol(')')
 	*/
-	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n")
+	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r")
 	state := 0
 	startToken := 0
 	result := make([]scmer, 0)
 	for i, ch := range s {
 		if state == 1 && (ch == '.' || ch >= '0' && ch <= '9') {
 			// another character added to number
-		} else if state == 2 && ch != ' ' && ch != '\n' && ch != '\t' && ch != ')' && ch != '(' {
+		} else if state == 2 && ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t' && ch != ')' && ch != '(' {
 			// another character added to symbol
 		} else if state == 3 && ch != '"' && ch != '\\' {
 			// another character added to string
@@ -353,7 +353,7 @@ func tokenize(s string) []scmer {
 			} else if ch >= '0' && ch <= '9' || ch == '-' {
 				// start number
 				state = 1
-			} else if ch == ' ' || ch == '\t' || ch == '\n' {
+			} else if ch == ' ' || ch == '\t' || ch == '\rn' || ch == '\n' {
 				// white space
 				state = 0
 			} else {
@@ -447,7 +447,7 @@ func Serialize(b *bytes.Buffer, v scmer, en *env) {
 		b.WriteString(fmt.Sprint(v))
 	case string:
 		b.WriteByte('"')
-		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\", "\n", "\\n").Replace(v))
+		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(v))
 		b.WriteByte('"')
 	default:
 		b.WriteString(fmt.Sprint(v))
