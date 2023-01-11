@@ -5,7 +5,7 @@ project (cpdb)
 
 include_directories (${CMAKE_SOURCE_DIR}/src)
 add_executable (cpdb)
-target_link_libraries (cpdb -llmdb)
+target_link_libraries (cpdb -llmdb -luv)
 
 # Add files from src
 file (GLOB SOURCE_FILES "src/*.cpp" "src/*.hpp")
