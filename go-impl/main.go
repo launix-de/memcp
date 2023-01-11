@@ -10,7 +10,10 @@ import "fmt"
 
 func main() {
 	globalenv.vars["print"] = func (a ...scmer) scmer {
-		fmt.Println(a[0].(string))
+		for _, s := range a {
+			fmt.Print(String(s))
+		}
+		fmt.Println()
 		return "ok"
 	}
 	globalenv.vars["nope"] = "nope"

@@ -204,7 +204,7 @@ func init() {
 				// concat strings
 				var b bytes.Buffer
 				for _, s := range a {
-					b.WriteString(s.(string))
+					b.WriteString(String(s))
 				}
 				return b.String()
 			},
