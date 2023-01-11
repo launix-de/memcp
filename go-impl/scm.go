@@ -36,7 +36,20 @@ func eval(expression scmer, en *env) (value scmer) {
 		case "quote":
 			value = e[1]
 		case "if":
-			if eval(e[1], en).(bool) {
+			v := eval(e[1], en)
+			var b bool
+			switch v.(type) {
+				case nil:
+					b = false
+				case string:
+					b = v != ""
+				case number:
+					b = v != 0
+				default:
+					// []scmer, native function, lambdas
+					b = true
+			}
+			if b {
 				value = eval(e[2], en)
 			} else {
 				value = eval(e[3], en)
