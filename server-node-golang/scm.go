@@ -19,6 +19,22 @@ import (
 	"bytes"
 )
 
+func toBool(v scmer) bool {
+	switch v.(type) {
+		case nil:
+			return false
+		case string:
+			return v != ""
+		case number:
+			return v != 0
+		case bool:
+			return v != false
+		default:
+			// []scmer, native function, lambdas
+			return true
+	}
+}
+
 /*
  Eval / Apply
 */
@@ -36,20 +52,7 @@ func eval(expression scmer, en *env) (value scmer) {
 		case "quote":
 			value = e[1]
 		case "if":
-			v := eval(e[1], en)
-			var b bool
-			switch v.(type) {
-				case nil:
-					b = false
-				case string:
-					b = v != ""
-				case number:
-					b = v != 0
-				default:
-					// []scmer, native function, lambdas
-					b = true
-			}
-			if b {
+			if toBool(eval(e[1], en)) {
 				value = eval(e[2], en)
 			} else {
 				value = eval(e[3], en)
@@ -224,6 +227,8 @@ func init() {
 				}
 				return b.String()
 			},
+			"true": true,
+			"false": false,
 			"list": eval(read(
 				"(lambda z z)"),
 				&globalenv),
@@ -312,7 +317,7 @@ func tokenize(s string) []scmer {
 			// another character added to number
 		} else if state == 2 && ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t' && ch != ')' && ch != '(' {
 			// another character added to symbol
-		} else if state == 3 && ch != '"' && ch != '\\' && ch != 't' && ch != 'r' && ch != 'n' {
+		} else if state == 3 && ch != '"' && ch != '\\' {
 			// another character added to string
 		} else if state == 3 && ch == '\\' {
 			// escape sequence

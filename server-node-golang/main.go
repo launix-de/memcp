@@ -17,5 +17,7 @@ func main() {
 		fmt.Println()
 		return "ok"
 	}
+	initStorageEngine(globalenv)
+	loadStorageFrom("test.jsonl")
 	Repl()
 }
