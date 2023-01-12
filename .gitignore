@@ -1,8 +1,4 @@
 Makefile
 *.sw*
 *.o
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-cpdb
-
+tools/Makefile
