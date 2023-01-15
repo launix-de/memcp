@@ -8,11 +8,16 @@ import "runtime"
 import "encoding/json"
 
 type ColumnStorage interface {
-	getValue(int) scmer // read function
-	// buildup functions 1) scan, 2) init, 3) build; all values are passed through twice
-	scan(int, scmer)
-	init(int)
-	build(int, scmer)
+	getValue(uint) scmer // read function
+	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
+	// analyze
+	prepare()
+	scan(uint, scmer)
+	proposeCompression() ColumnStorage
+
+	// store
+	init(uint)
+	build(uint, scmer)
 }
 
 // todo: enhance table datatype
@@ -20,11 +25,11 @@ type dataset map[string]scmer
 type table struct {
 	name string
 	// main storage
-	main_count int // size of main storage
+	main_count uint // size of main storage
 	columns map[string]ColumnStorage
 	// delta storage
 	inserts []dataset // items added to storage
-	deletions map[int]struct{} // items removed from main or inserts (based on main_count + i)
+	deletions map[uint]struct{} // items removed from main or inserts (based on main_count + i)
 }
 
 func (t *table) insert(d dataset) {
@@ -45,37 +50,49 @@ func (t *table) rebuild() *table {
 	if len(t.inserts) > 0 || len(t.deletions) > 0 {
 		fmt.Println("rebuilding table", t.name)
 		result.columns = make(map[string]ColumnStorage)
-		result.deletions = make(map[int]struct{})
+		result.deletions = make(map[uint]struct{})
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		for col, c := range t.columns {
-			newcol := new(StorageSCMER) // currently only scmer-storages
-			// scan phase
-			i := 0
-			// scan main
-			for idx := 0; idx < t.main_count; idx++ {
-				// check for deletion
-				if _, ok := t.deletions[idx]; ok {
-					continue
+			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages
+			var i uint
+			for {
+				// scan phase
+				i = 0
+				newcol.prepare()
+				// scan main
+				for idx := uint(0); idx < t.main_count; idx++ {
+					// check for deletion
+					if _, ok := t.deletions[idx]; ok {
+						continue
+					}
+					// scan
+					newcol.scan(i, c.getValue(idx))
+					i++
 				}
-				// scan
-				newcol.scan(i, c.getValue(idx))
-				i++
-			}
-			// scan delta
-			for idx, item := range t.inserts {
-				// check for deletion
-				if _, ok := t.deletions[t.main_count + idx]; ok {
-					continue
+				// scan delta
+				for idx, item := range t.inserts {
+					// check for deletion
+					if _, ok := t.deletions[t.main_count + uint(idx)]; ok {
+						continue
+					}
+					// scan
+					newcol.scan(i, item[col])
+					i++
 				}
-				// scan
-				newcol.scan(i, item[col])
-				i++
+				newcol2 := newcol.proposeCompression()
+				if newcol2 == nil {
+					break // we found the optimal storage format
+				} else {
+					// redo scan phase with compression
+					//fmt.Printf("Compression with %T\n", newcol2)
+					newcol = newcol2
+				}
 			}
 			// build phase
 			newcol.init(i)
 			i = 0
 			// build main
-			for idx := 0; idx < t.main_count; idx++ {
+			for idx := uint(0); idx < t.main_count; idx++ {
 				// check for deletion
 				if _, ok := t.deletions[idx]; ok {
 					continue
@@ -87,7 +104,7 @@ func (t *table) rebuild() *table {
 			// build delta
 			for idx, item := range t.inserts {
 				// check for deletion
-				if _, ok := t.deletions[t.main_count + idx]; ok {
+				if _, ok := t.deletions[t.main_count + uint(idx)]; ok {
 					continue
 				}
 				// build
@@ -127,7 +144,7 @@ func (t *table) scan(condition scmer, callback scmer) string {
 		mcols[i] = t.columns[string(k.(symbol))] // find storage
 	}
 	// iterate over items
-	for idx := 0; idx < t.main_count; idx++ {
+	for idx := uint(0); idx < t.main_count; idx++ {
 		if _, ok := t.deletions[idx]; ok {
 			continue // item is on delete list
 		}
@@ -148,7 +165,7 @@ func (t *table) scan(condition scmer, callback scmer) string {
 
 	// delta storage
 	for idx, item := range t.inserts { // iterate over table
-		if _, ok := t.deletions[t.main_count + idx]; ok {
+		if _, ok := t.deletions[t.main_count + uint(idx)]; ok {
 			continue // item is in delete list
 		}
 		// prepare&call condition function
@@ -191,7 +208,7 @@ func loadStorageFrom(filename string) {
 				t.name = s[7:]
 				tables[t.name] = t
 				t.columns = make(map[string]ColumnStorage)
-				t.deletions = make(map[int]struct{})
+				t.deletions = make(map[uint]struct{})
 			}
 		} else if s[0] == '#' {
 			// comment
@@ -211,6 +228,8 @@ func initStorageEngine(en env) {
 	// example: (scan "PLZ" (lambda () 1) (lambda (PLZ Ort) (print PLZ " - " Ort)))
 	// example: (scan "PLZ" (lambda (Ort) (equal? Ort "Neugersdorf")) (lambda (PLZ Ort) (print PLZ " - " Ort)))
 	// example: (scan "PLZ" (lambda (Ort) (equal? Ort "Dresden")) (lambda (PLZ Ort) (print PLZ " - " Ort)))
+	// example: (scan "manufacturer" (lambda () 1) (lambda (ID) (print ID)))
+	// example: (scan "referrer" (lambda () 1) (lambda (ID) (print ID)))
 	en.vars["scan"] = func (a ...scmer) scmer {
 		// params: table, condition, map, reduce, reduceSeed
 		t := tables[a[0].(string)]
