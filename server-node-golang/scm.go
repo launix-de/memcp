@@ -203,7 +203,7 @@ func init() {
 				return reflect.DeepEqual(a[0], a[1])
 			},
 			"cons": func(a ...scmer) scmer {
-				// cons a b: prepend item a to tuple b
+				// cons a b: prepend item a to list b (construct list from item + tail)
 				switch car := a[0]; cdr := a[1].(type) {
 				case []scmer:
 					return append([]scmer{car}, cdr...)

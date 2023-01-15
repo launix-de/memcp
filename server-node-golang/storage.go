@@ -2,14 +2,174 @@ package main
 
 import "os"
 import "bufio"
-//import "fmt"
+import "time"
+import "fmt"
+import "runtime"
 import "encoding/json"
+
+type ColumnStorage interface {
+	getValue(int) scmer // read function
+	// buildup functions 1) scan, 2) init, 3) build; all values are passed through twice
+	scan(int, scmer)
+	init(int)
+	build(int, scmer)
+}
 
 // todo: enhance table datatype
 type dataset map[string]scmer
-type table []dataset
+type table struct {
+	name string
+	// main storage
+	main_count int // size of main storage
+	columns map[string]ColumnStorage
+	// delta storage
+	inserts []dataset // items added to storage
+	deletions map[int]struct{} // items removed from main or inserts (based on main_count + i)
+}
 
-var tables map[string]table = make(map[string]table)
+func (t *table) insert(d dataset) {
+	t.inserts = append(t.inserts, d) // append to delta storage
+	// check columns for some to add
+	for c, _ := range d {
+		if _, ok := t.columns[c]; !ok {
+			// create column with dummy storage for next rebuild
+			t.columns[c] = new(StorageSCMER)
+		}
+	}
+}
+
+// rebuild main storage from main+delta
+func (t *table) rebuild() *table {
+	result := new(table)
+	result.name = t.name
+	if len(t.inserts) > 0 || len(t.deletions) > 0 {
+		fmt.Println("rebuilding table", t.name)
+		result.columns = make(map[string]ColumnStorage)
+		result.deletions = make(map[int]struct{})
+		// copy column data in two phases: scan, build (if delta is non-empty)
+		for col, c := range t.columns {
+			newcol := new(StorageSCMER) // currently only scmer-storages
+			// scan phase
+			i := 0
+			// scan main
+			for idx := 0; idx < t.main_count; idx++ {
+				// check for deletion
+				if _, ok := t.deletions[idx]; ok {
+					continue
+				}
+				// scan
+				newcol.scan(i, c.getValue(idx))
+				i++
+			}
+			// scan delta
+			for idx, item := range t.inserts {
+				// check for deletion
+				if _, ok := t.deletions[t.main_count + idx]; ok {
+					continue
+				}
+				// scan
+				newcol.scan(i, item[col])
+				i++
+			}
+			// build phase
+			newcol.init(i)
+			i = 0
+			// build main
+			for idx := 0; idx < t.main_count; idx++ {
+				// check for deletion
+				if _, ok := t.deletions[idx]; ok {
+					continue
+				}
+				// build
+				newcol.build(i, c.getValue(idx))
+				i++
+			}
+			// build delta
+			for idx, item := range t.inserts {
+				// check for deletion
+				if _, ok := t.deletions[t.main_count + idx]; ok {
+					continue
+				}
+				// build
+				newcol.build(i, item[col])
+				i++
+			}
+			result.columns[col] = newcol
+			result.main_count = i
+		}
+	} else {
+		// otherwise: table stays the same
+		result.columns = t.columns
+		result.main_count = t.main_count
+		result.inserts = t.inserts
+		result.deletions = t.deletions
+	}
+	return result
+}
+
+func (t *table) scan(condition scmer, callback scmer) string {
+	start := time.Now() // time measurement
+
+	cargs := condition.(proc).params.([]scmer) // list of arguments condition
+	margs := callback.(proc).params.([]scmer) // list of arguments map
+	cdataset := make([]scmer, len(cargs))
+	mdataset := make([]scmer, len(margs))
+
+	// TODO: analyze condition and find indexes
+
+	// main storage
+	ccols := make([]ColumnStorage, len(cargs))
+	mcols := make([]ColumnStorage, len(margs))
+	for i, k := range cargs { // iterate over columns
+		ccols[i] = t.columns[string(k.(symbol))] // find storage
+	}
+	for i, k := range margs { // iterate over columns
+		mcols[i] = t.columns[string(k.(symbol))] // find storage
+	}
+	// iterate over items
+	for idx := 0; idx < t.main_count; idx++ {
+		if _, ok := t.deletions[idx]; ok {
+			continue // item is on delete list
+		}
+		// check condition
+		for i, k := range ccols { // iterate over columns
+			cdataset[i] = k.getValue(idx)
+		}
+		if (!toBool(apply(condition, cdataset))) {
+			continue // condition did not match
+		}
+
+		// call map function
+		for i, k := range mcols { // iterate over columns
+			mdataset[i] = k.getValue(idx)
+		}
+		apply(callback, mdataset) // TODO: output monad
+	}
+
+	// delta storage
+	for idx, item := range t.inserts { // iterate over table
+		if _, ok := t.deletions[t.main_count + idx]; ok {
+			continue // item is in delete list
+		}
+		// prepare&call condition function
+		for i, k := range cargs { // iterate over columns
+			cdataset[i] = item[string(k.(symbol))] // fill value
+		}
+		// check condition
+		if (!toBool(apply(condition, cdataset))) {
+			continue // condition did not match
+		}
+
+		// prepare&call map function
+		for i, k := range margs { // iterate over columns
+			mdataset[i] = item[string(k.(symbol))] // fill value
+		}
+		apply(callback, mdataset) // TODO: output monad
+	}
+	return fmt.Sprint(time.Since(start))
+}
+
+var tables map[string]*table = make(map[string]*table)
 
 func loadStorageFrom(filename string) {
 	f, _ := os.Open(filename)
@@ -17,20 +177,32 @@ func loadStorageFrom(filename string) {
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
 
-	var t string
+	var t *table
 	for scanner.Scan() {
 		s := scanner.Text()
 		if s == "" {
 			// ignore
 		} else if s[0:7] == "#table " {
-			// new table
-			t = s[7:]
+			var ok bool
+			t, ok = tables[s[7:]]
+			if !ok {
+				// new table
+				t = new(table)
+				t.name = s[7:]
+				tables[t.name] = t
+				t.columns = make(map[string]ColumnStorage)
+				t.deletions = make(map[int]struct{})
+			}
 		} else if s[0] == '#' {
 			// comment
 		} else {
-			var x dataset
-			json.Unmarshal([]byte(s), &x) // parse JSON
-			tables[t] = append(tables[t], x) // put into table
+			if t == nil {
+				panic("no table set")
+			} else {
+				var x dataset
+				json.Unmarshal([]byte(s), &x) // parse JSON
+				t.insert(x) // put into table
+			}
 		}
 	}
 }
@@ -42,26 +214,30 @@ func initStorageEngine(en env) {
 	en.vars["scan"] = func (a ...scmer) scmer {
 		// params: table, condition, map, reduce, reduceSeed
 		t := tables[a[0].(string)]
-		cargs := a[1].(proc).params.([]scmer) // list of arguments condition
-		margs := a[2].(proc).params.([]scmer) // list of arguments map
-		cdataset := make([]scmer, len(cargs))
-		mdataset := make([]scmer, len(margs))
-
-		// TODO: analyze condition and find indexes
-
-		for _, item := range t { // iterate over table
-			for i, k := range cargs { // iterate over columns
-				cdataset[i] = item[string(k.(symbol))] // fill value
-			}
-			// check condition
-			if (toBool(apply(a[1], cdataset))) {
-				// call map function
-				for i, k := range margs { // iterate over columns
-					mdataset[i] = item[string(k.(symbol))] // fill value
-				}
-				apply(a[2], mdataset) // todo: output monad
-			}
-		}
-		return "ok"
+		return t.scan(a[1], a[2])
 	}
+	en.vars["stat"] = func (a ...scmer) scmer {
+		return PrintMemUsage()
+	}
+	en.vars["rebuild"] = func (a ...scmer) scmer {
+		start := time.Now()
+
+		for k, t := range tables {
+			tables[k] = t.rebuild()
+		}
+
+		return fmt.Sprint(time.Since(start))
+	}
+}
+
+func PrintMemUsage() string {
+	runtime.GC()
+        var m runtime.MemStats
+        runtime.ReadMemStats(&m)
+        // For info on each, see: https://golang.org/pkg/runtime/#MemStats
+        return fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC)
+}
+
+func bToMb(b uint64) uint64 {
+    return b / 1024 / 1024
 }
