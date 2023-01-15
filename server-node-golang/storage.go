@@ -31,6 +31,8 @@ type table struct {
 	// delta storage
 	inserts []dataset // items added to storage
 	deletions map[uint]struct{} // items removed from main or inserts (based on main_count + i)
+	// indexes
+	indexes []StorageIndex
 }
 
 func (t *table) insert(d dataset) {
