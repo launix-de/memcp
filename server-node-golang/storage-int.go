@@ -9,7 +9,28 @@ type StorageInt struct {
 	hasNegative bool
 }
 
+func toInt(x scmer) int64 {
+	switch v := x.(type) {
+		case number:
+			return int64(v)
+		case float64:
+			return int64(v)
+		case int64:
+			return v
+		default:
+			return 0
+	}
+}
+
 func (s *StorageInt) getValue(i uint) scmer {
+	if (s.hasNegative) {
+		return number(s.getValueInt(i))
+	} else {
+		return number(s.getValueUInt(i))
+	}
+}
+
+func (s *StorageInt) getValueInt(i uint) int64 {
 	bitpos := i * uint(s.bitsize)
 
 	v := s.chunk[bitpos / 64] << (bitpos % 64) // align to leftmost position
@@ -17,11 +38,18 @@ func (s *StorageInt) getValue(i uint) scmer {
 		v = v | s.chunk[bitpos / 64 + 1] >> (64 - bitpos % 64)
 	}
 
-	if (s.hasNegative) {
-		return number(int64(v) >> (64 - uint(s.bitsize))) // shift right preserving sign
-	} else {
-		return number(uint64(v) >> (64 - uint(s.bitsize))) // shift right without sign
+	return int64(v) >> (64 - uint(s.bitsize)) // shift right preserving sign
+}
+
+func (s *StorageInt) getValueUInt(i uint) uint64 {
+	bitpos := i * uint(s.bitsize)
+
+	v := s.chunk[bitpos / 64] << (bitpos % 64) // align to leftmost position
+	if bitpos % 64 + uint(s.bitsize) > 64 {
+		v = v | s.chunk[bitpos / 64 + 1] >> (64 - bitpos % 64)
 	}
+
+	return uint64(v) >> (64 - uint(s.bitsize)) // shift right without sign
 }
 
 func (s *StorageInt) prepare() {
@@ -31,7 +59,7 @@ func (s *StorageInt) prepare() {
 }
 func (s *StorageInt) scan(i uint, value scmer) {
 	// storage is so simple, dont need scan
-	v := int64(value.(float64))
+	v := toInt(value)
 	if v < 0 {
 		s.hasNegative = true
 		v = -v
@@ -55,11 +83,13 @@ func (s *StorageInt) init(i uint) {
 func (s *StorageInt) build(i uint, value scmer) {
 	// store
 	bitpos := i * uint(s.bitsize)
-	v := uint64(int64(value.(float64)) << (64 - uint(s.bitsize))) // shift value to the leftmost position of 64bit int
+	v := uint64(toInt(value)) << (64 - uint(s.bitsize)) // shift value to the leftmost position of 64bit int
 	s.chunk[bitpos / 64] = s.chunk[bitpos / 64] | (v >> (bitpos % 64)) // first chunk
 	if (bitpos % 64 + uint(s.bitsize) > 64) {
 		s.chunk[bitpos / 64 + 1] = s.chunk[bitpos / 64 + 1] | v << (64 - bitpos % 64) // second chunk
 	}
+}
+func (s *StorageInt) finish() {
 }
 func (s *StorageInt) proposeCompression() ColumnStorage {
 	// dont't propose another pass

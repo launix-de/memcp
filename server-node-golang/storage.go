@@ -18,6 +18,7 @@ type ColumnStorage interface {
 	// store
 	init(uint)
 	build(uint, scmer)
+	finish()
 }
 
 // todo: enhance table datatype
@@ -79,6 +80,7 @@ func (t *table) rebuild() *table {
 					newcol.scan(i, item[col])
 					i++
 				}
+				newcol.finish()
 				newcol2 := newcol.proposeCompression()
 				if newcol2 == nil {
 					break // we found the optimal storage format

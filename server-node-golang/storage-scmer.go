@@ -41,6 +41,8 @@ func (s *StorageSCMER) build(i uint, value scmer) {
 	// store
 	s.values[i] = value
 }
+func (s *StorageSCMER) finish() {
+}
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression() ColumnStorage {
