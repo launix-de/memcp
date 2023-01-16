@@ -82,7 +82,6 @@ func (t *table) rebuild() *table {
 					newcol.scan(i, item[col])
 					i++
 				}
-				newcol.finish()
 				newcol2 := newcol.proposeCompression()
 				if newcol2 == nil {
 					break // we found the optimal storage format
@@ -115,6 +114,7 @@ func (t *table) rebuild() *table {
 				newcol.build(i, item[col])
 				i++
 			}
+			newcol.finish()
 			result.columns[col] = newcol
 			result.main_count = i
 		}
@@ -246,6 +246,7 @@ func initStorageEngine(en env) {
 		start := time.Now()
 
 		for k, t := range tables {
+			// todo: parallel??
 			tables[k] = t.rebuild()
 		}
 

@@ -17,6 +17,7 @@ func (t *table) findOrCreateIndexFor(condition scmer, sort bool) *StorageIndex {
 	// find an index that has at least the columns in that order we're searching for
 	// if the index is inactive, use the other one
 	// if sort, we must build the index anyways
+	return nil
 }
 
 func rebuildIndexes(t1 *table, t2 *table) {
@@ -31,7 +32,6 @@ func rebuildIndexes(t1 *table, t2 *table) {
 // iterate over index
 func (s *StorageIndex) iterate(lower []scmer, upperLast scmer) chan uint {
 	result := make(chan uint, 64)
-	return result
 
 	savings_threshold := 0.2 // TODO: global value
 	go func() {
@@ -42,7 +42,7 @@ func (s *StorageIndex) iterate(lower []scmer, upperLast scmer) chan uint {
 				for i := uint(0); i < s.main_count; i++ {
 					result <- i
 				}
-				result.close()
+				close(result)
 				return
 			} else {
 				// TODO: rebuild index
@@ -54,8 +54,9 @@ func (s *StorageIndex) iterate(lower []scmer, upperLast scmer) chan uint {
 		}
 		// TODO tree traversal result <- index
 		// TODO: find lower
-		uint i = main_count / 2
+		//i := s.main_count / 2
 		// TODO: iterate until upperLast or lower[high-1] differs
-		result.close()
-	}
+		close(result)
+	}()
+	return result
 }
