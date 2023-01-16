@@ -232,6 +232,9 @@ func init() {
 			"list": eval(read(
 				"(lambda z z)"),
 				&globalenv),
+			"Y": eval(read(
+				"(lambda (g) (g (Y g)))"), // TODO: so lazy evaluieren, dass (Y (lambda (self) 1)) keinen stack overflow auslöst
+				&globalenv),
 		},
 		nil}
 }
