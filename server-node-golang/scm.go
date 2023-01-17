@@ -67,7 +67,7 @@ func eval(expression scmer, en *env) (value scmer) {
 			}
 			en.vars[v] = eval(e[2], en)
 			value = "ok"*/
-		case "define", "set": // set only works in innermost env
+		case "define", "set", "def": // set only works in innermost env
 			en.vars[e[1].(symbol)] = eval(e[2], en)
 			value = "ok"
 		case "lambda":
@@ -84,7 +84,7 @@ func eval(expression scmer, en *env) (value scmer) {
 			for i, x := range operands {
 				values[i] = eval(x, en)
 			}
-			value = apply(eval(e[0], en), values)
+			return apply(eval(e[0], en), values)
 		}
 	default:
 		log.Println("Unknown expression type - EVAL", e)
@@ -95,7 +95,7 @@ func eval(expression scmer, en *env) (value scmer) {
 func apply(procedure scmer, args []scmer) (value scmer) {
 	switch p := procedure.(type) {
 	case func(...scmer) scmer:
-		value = p(args...)
+		return p(args...)
 	case proc:
 		en := &env{make(vars), p.en}
 		switch params := p.params.(type) {
@@ -106,7 +106,7 @@ func apply(procedure scmer, args []scmer) (value scmer) {
 		default:
 			en.vars[params.(symbol)] = args
 		}
-		value = eval(p.body, en)
+		return eval(p.body, en)
 	default:
 		log.Println("Unknown procedure type - APPLY", p)
 	}
