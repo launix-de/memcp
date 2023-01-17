@@ -73,8 +73,10 @@ func eval(expression scmer, en *env) (value scmer) {
 		case "lambda":
 			value = proc{e[1], e[2], en}
 		case "begin":
+			// execute begin.. in own environment
+			en2 := env{make(vars), en}
 			for _, i := range e[1:] {
-				value = eval(i, en)
+				value = eval(i, &en2)
 			}
 		default:
 			operands := e[1:]
