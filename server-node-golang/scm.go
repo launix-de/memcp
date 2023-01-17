@@ -412,6 +412,20 @@ func String(v scmer) string {
 	}
 }
 func Serialize(b *bytes.Buffer, v scmer, en *env) {
+	if en != &globalenv {
+		b.WriteString("(begin ")
+		for k, v := range en.vars {
+			// if symbol is defined in a lambda, print the real value
+			b.WriteString("(define ")
+			b.WriteString(string(k)) // what if k contains spaces?? can it?
+			b.WriteString(" ")
+			Serialize(b, v, en.outer)
+			b.WriteString(") ")
+		}
+		Serialize(b, v, en.outer)
+		b.WriteString(")")
+		return
+	}
 	switch v := v.(type) {
 	case []scmer:
 		b.WriteByte('(')
@@ -440,20 +454,12 @@ func Serialize(b *bytes.Buffer, v scmer, en *env) {
 		b.WriteString("[unserializable native func]")
 	case proc:
 		b.WriteString("(lambda ")
-		Serialize(b, v.params, v.en)
+		Serialize(b, v.params, &globalenv)
 		b.WriteByte(' ')
 		Serialize(b, v.body, v.en)
 		b.WriteByte(')')
 	case symbol:
-		for en != nil && en != &globalenv {
-			if v, ok := en.vars[v]; ok {
-				// if symbol is defined in a lambda, print the real value
-				Serialize(b, v, en)
-				return
-			}
-			en = en.outer
-		}
-		// otherwise print as symbol
+		// print as symbol (because we already used a begin-block for defining our env)
 		b.WriteString(fmt.Sprint(v))
 	case string:
 		b.WriteByte('"')
