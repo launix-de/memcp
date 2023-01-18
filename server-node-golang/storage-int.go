@@ -31,6 +31,8 @@ func toInt(x scmer) int64 {
 			return int64(v)
 		case float64:
 			return int64(v)
+		case uint:
+			return int64(v)
 		case int64:
 			return v
 		default:

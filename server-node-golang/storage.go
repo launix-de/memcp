@@ -47,7 +47,7 @@ type table struct {
 	inserts []dataset // items added to storage
 	deletions map[uint]struct{} // items removed from main or inserts (based on main_count + i)
 	// indexes
-	indexes []StorageIndex
+	indexes []*StorageIndex
 }
 
 func (t *table) insert(d dataset) {
@@ -133,12 +133,14 @@ func (t *table) rebuild() *table {
 			result.columns[col] = newcol
 			result.main_count = i
 		}
+		rebuildIndexes(t, result)
 	} else {
 		// otherwise: table stays the same
 		result.columns = t.columns
 		result.main_count = t.main_count
 		result.inserts = t.inserts
 		result.deletions = t.deletions
+		result.indexes = t.indexes
 	}
 	return result
 }
@@ -162,8 +164,8 @@ func (t *table) scan(condition scmer, callback scmer) string {
 	for i, k := range margs { // iterate over columns
 		mcols[i] = t.columns[string(k.(symbol))] // find storage
 	}
-	// iterate over items
-	for idx := uint(0); idx < t.main_count; idx++ {
+	// iterate over items (indexed)
+	for idx := range t.iterateIndex(condition) {
 		if _, ok := t.deletions[idx]; ok {
 			continue // item is on delete list
 		}
@@ -182,7 +184,7 @@ func (t *table) scan(condition scmer, callback scmer) string {
 		apply(callback, mdataset) // TODO: output monad
 	}
 
-	// delta storage
+	// delta storage (unindexed)
 	for idx, item := range t.inserts { // iterate over table
 		if _, ok := t.deletions[t.main_count + uint(idx)]; ok {
 			continue // item is in delete list
