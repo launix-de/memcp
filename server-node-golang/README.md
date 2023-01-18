@@ -12,3 +12,8 @@ Features:
 - High performance
 - Scalable
 
+# Further Reading
+
+- https://launix.de/launix/how-to-balance-a-database-between-olap-and-oltp-workflows/
+- https://launix.de/launix/designing-a-programming-language-for-distributed-systems-and-highly-parallel-algorithms/
+- https://launix.de/launix/on-designing-an-interface-for-columnar-in-memory-storage-in-golang/

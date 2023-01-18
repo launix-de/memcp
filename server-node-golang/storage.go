@@ -37,7 +37,6 @@ type ColumnStorage interface {
 	finish()
 }
 
-// todo: enhance table datatype
 type dataset map[string]scmer
 type table struct {
 	name string
