@@ -110,7 +110,6 @@ func (t *table) iterateIndex(condition scmer) chan uint {
 		index.inactive = true // tell the engine that index has to be built first
 		index.t = t
 		t.indexes = append(t.indexes, index)
-		fmt.Println("building index on", t.name, "over", index.cols)
 		return index.iterate(lower, upperLast)
 	}
 
@@ -171,6 +170,7 @@ func (s *StorageIndex) iterate(lower []scmer, upperLast scmer) chan uint {
 				return
 			} else {
 				// rebuild index
+				fmt.Println("building index on", s.t.name, "over", s.cols)
 				tmp := make([]uint, s.t.main_count)
 				for i := uint(0); i < s.t.main_count; i++ {
 					tmp[i] = i // fill with natural order
