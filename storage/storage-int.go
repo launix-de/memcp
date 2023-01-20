@@ -44,7 +44,11 @@ func toInt(x scm.Scmer) int64 {
 }
 
 func (s *StorageInt) String() string {
-	return fmt.Sprintf("int[%d]", s.bitsize)
+	if s.hasNull {
+		return fmt.Sprintf("int[%d]NULL", s.bitsize)
+	} else {
+		return fmt.Sprintf("int[%d]", s.bitsize)
+	}
 }
 
 func (s *StorageInt) getValue(i uint) scm.Scmer {
