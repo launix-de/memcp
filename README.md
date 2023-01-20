@@ -18,3 +18,4 @@ Features:
 - https://launix.de/launix/designing-a-programming-language-for-distributed-systems-and-highly-parallel-algorithms/
 - https://launix.de/launix/on-designing-an-interface-for-columnar-in-memory-storage-in-golang/
 - https://launix.de/launix/how-in-memory-compression-affects-performance/
+- https://launix.de/launix/memory-efficient-indices-for-in-memory-storages/
