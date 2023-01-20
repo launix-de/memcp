@@ -3,3 +3,5 @@ Makefile
 *.o
 tools/Makefile
 cpdb-logo.png
+test.jsonl
+cpdb

@@ -14,10 +14,11 @@ Copyright (C) 2023  Carl-Philip Hänsch
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-package main
+package storage
 
 //import "fmt"
 import "strings"
+import "github.com/launix-de/cpdb/scm"
 
 type StorageString struct {
 	dictionary string
@@ -29,7 +30,7 @@ type StorageString struct {
 	reverseMap map[string]uint
 }
 
-func (s *StorageString) getValue(i uint) scmer {
+func (s *StorageString) getValue(i uint) scm.Scmer {
 	return s.dictionary[s.starts.getValueUInt(i):s.ends.getValueUInt(i)]
 }
 
@@ -39,7 +40,7 @@ func (s *StorageString) prepare() {
 	s.ends.prepare()
 	s.reverseMap = make(map[string]uint)
 }
-func (s *StorageString) scan(i uint, value scmer) {
+func (s *StorageString) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
 	var v string
 	switch v_ := value.(type) {
@@ -57,8 +58,8 @@ func (s *StorageString) scan(i uint, value scmer) {
 		s.sb.WriteString(v)
 		s.reverseMap[v] = start
 	}
-	s.starts.scan(i, number(start))
-	s.ends.scan(i, number(start + uint(len(v))))
+	s.starts.scan(i, scm.Number(start))
+	s.ends.scan(i, scm.Number(start + uint(len(v))))
 }
 func (s *StorageString) init(i uint) {
 	// allocate
@@ -68,7 +69,7 @@ func (s *StorageString) init(i uint) {
 	s.starts.init(i)
 	s.ends.init(i)
 }
-func (s *StorageString) build(i uint, value scmer) {
+func (s *StorageString) build(i uint, value scm.Scmer) {
 	// store
 	var v string
 	switch v_ := value.(type) {
@@ -79,8 +80,8 @@ func (s *StorageString) build(i uint, value scmer) {
 	}
 	start := s.reverseMap[v]
 	// write start+end into sub storage maps
-	s.starts.build(i, number(start))
-	s.ends.build(i, number(start + uint(len(v))))
+	s.starts.build(i, scm.Number(start))
+	s.ends.build(i, scm.Number(start + uint(len(v))))
 }
 func (s *StorageString) finish() {
 	s.reverseMap = make(map[string]uint) // free memory for reverse

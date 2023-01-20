@@ -15,11 +15,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-package main
+package storage
 
 import "fmt"
 import "sort"
 import "reflect"
+import "github.com/launix-de/cpdb/scm"
 
 type StorageIndex struct {
 	cols []string // sort equal-cols alphabetically, so similar conditions are canonical
@@ -31,19 +32,19 @@ type StorageIndex struct {
 
 type columnboundaries struct{
 	col string
-	lower scmer
-	upper scmer
+	lower scm.Scmer
+	upper scm.Scmer
 }
 
-func (t *table) iterateIndex(condition scmer) chan uint {
+func (t *table) iterateIndex(condition scm.Scmer) chan uint {
 	cols := make([]columnboundaries, 0, 4)
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
-	traverseCondition := func (condition scmer) {
-		switch v := condition.(proc).body.(type) {
-			case []scmer:
-				if v[0] == symbol("equal?") {
+	traverseCondition := func (condition scm.Scmer) {
+		switch v := condition.(scm.Proc).Body.(type) {
+			case []scm.Scmer:
+				if v[0] == scm.Symbol("equal?") {
 					switch v1 := v[1].(type) {
-						case symbol:
+						case scm.Symbol:
 							switch v2 := v[2].(type) {
 								case float64, string:
 									// equals column vs. constant
@@ -78,7 +79,7 @@ func (t *table) iterateIndex(condition scmer) chan uint {
 			}
 		}
 		// find out boundaries
-		lower := make([]scmer, len(cols))
+		lower := make([]scm.Scmer, len(cols))
 		for i, v := range cols {
 			lower[i] = v.lower
 		}
@@ -134,7 +135,7 @@ func rebuildIndexes(t1 *table, t2 *table) {
 }
 
 // sort function for scmer
-func scmerLess(a, b scmer) bool {
+func scmerLess(a, b scm.Scmer) bool {
 	// TODO: 2D check if NULL etc.
 	switch a.(type) {
 		case float64:
@@ -147,7 +148,7 @@ func scmerLess(a, b scmer) bool {
 }
 
 // iterate over index
-func (s *StorageIndex) iterate(lower []scmer, upperLast scmer) chan uint {
+func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint {
 	result := make(chan uint, 64)
 
 	// find columns in storage

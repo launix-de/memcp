@@ -23,7 +23,7 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
  * Pieter Kelchtermans 2013
  * LICENSE: WTFPL 2.0
  */
-package main
+package scm
 
 import (
 	"bufio"
@@ -36,18 +36,18 @@ import (
 	"bytes"
 )
 
-func toBool(v scmer) bool {
+func ToBool(v Scmer) bool {
 	switch v.(type) {
 		case nil:
 			return false
 		case string:
 			return v != ""
-		case number:
+		case Number:
 			return v != 0
 		case bool:
 			return v != false
 		default:
-			// []scmer, native function, lambdas
+			// []Scmer, native function, lambdas
 			return true
 	}
 }
@@ -56,52 +56,52 @@ func toBool(v scmer) bool {
  Eval / Apply
 */
 
-func eval(expression scmer, en *env) (value scmer) {
+func Eval(expression Scmer, en *Env) (value Scmer) {
 	switch e := expression.(type) {
 	case string:
 		value = e
-	case number:
+	case Number:
 		value = e
-	case symbol:
-		value = en.FindRead(e).vars[e]
-	case []scmer:
-		switch car, _ := e[0].(symbol); car {
+	case Symbol:
+		value = en.FindRead(e).Vars[e]
+	case []Scmer:
+		switch car, _ := e[0].(Symbol); car {
 		case "quote":
 			value = e[1]
 		case "if":
-			if toBool(eval(e[1], en)) {
-				value = eval(e[2], en)
+			if ToBool(Eval(e[1], en)) {
+				value = Eval(e[2], en)
 			} else {
-				value = eval(e[3], en)
+				value = Eval(e[3], en)
 			}
 		/* set! is forbidden due to side effects
 		case "set!":
-			v := e[1].(symbol)
+			v := e[1].(Symbol)
 			en2 := en.FindWrite(v)
 			if en2 == nil {
 				// not yet defined: set in innermost env
 				en2 = en
 			}
-			en.vars[v] = eval(e[2], en)
+			en.Vars[v] = Eval(e[2], en)
 			value = "ok"*/
 		case "define", "set", "def": // set only works in innermost env
-			en.vars[e[1].(symbol)] = eval(e[2], en)
+			en.Vars[e[1].(Symbol)] = Eval(e[2], en)
 			value = "ok"
 		case "lambda":
-			value = proc{e[1], e[2], en}
+			value = Proc{e[1], e[2], en}
 		case "begin":
 			// execute begin.. in own environment
-			en2 := env{make(vars), en}
+			en2 := Env{make(Vars), en}
 			for _, i := range e[1:] {
-				value = eval(i, &en2)
+				value = Eval(i, &en2)
 			}
 		default:
 			operands := e[1:]
-			values := make([]scmer, len(operands))
+			values := make([]Scmer, len(operands))
 			for i, x := range operands {
-				values[i] = eval(x, en)
+				values[i] = Eval(x, en)
 			}
-			return apply(eval(e[0], en), values)
+			return Apply(Eval(e[0], en), values)
 		}
 	default:
 		log.Println("Unknown expression type - EVAL", e)
@@ -109,21 +109,21 @@ func eval(expression scmer, en *env) (value scmer) {
 	return
 }
 
-func apply(procedure scmer, args []scmer) (value scmer) {
+func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 	switch p := procedure.(type) {
-	case func(...scmer) scmer:
+	case func(...Scmer) Scmer:
 		return p(args...)
-	case proc:
-		en := &env{make(vars), p.en}
-		switch params := p.params.(type) {
-		case []scmer:
+	case Proc:
+		en := &Env{make(Vars), p.En}
+		switch params := p.Params.(type) {
+		case []Scmer:
 			for i, param := range params {
-				en.vars[param.(symbol)] = args[i]
+				en.Vars[param.(Symbol)] = args[i]
 			}
 		default:
-			en.vars[params.(symbol)] = args
+			en.Vars[params.(Symbol)] = args
 		}
-		return eval(p.body, en)
+		return Eval(p.Body, en)
 	default:
 		log.Println("Unknown procedure type - APPLY", p)
 	}
@@ -132,40 +132,40 @@ func apply(procedure scmer, args []scmer) (value scmer) {
 
 // TODO: func optimize für parzielle lambda-Ausdrücke und JIT
 
-type proc struct {
-	params, body scmer
-	en           *env
+type Proc struct {
+	Params, Body Scmer
+	En           *Env
 }
 
 /*
  Environments
 */
 
-type vars map[symbol]scmer
-type env struct {
-	vars
-	outer *env
+type Vars map[Symbol]Scmer
+type Env struct {
+	Vars
+	Outer *Env
 }
 
-func (e *env) FindRead(s symbol) *env {
-	if _, ok := e.vars[s]; ok {
+func (e *Env) FindRead(s Symbol) *Env {
+	if _, ok := e.Vars[s]; ok {
 		return e
 	} else {
-		if e.outer == nil {
+		if e.Outer == nil {
 			return e
 		}
-		return e.outer.FindRead(s)
+		return e.Outer.FindRead(s)
 	}
 }
 
-func (e *env) FindWrite(s symbol) *env {
-	if _, ok := e.vars[s]; ok {
+func (e *Env) FindWrite(s Symbol) *Env {
+	if _, ok := e.Vars[s]; ok {
 		return e
 	} else {
-		if e.outer == nil {
+		if e.Outer == nil {
 			return nil
 		}
-		return e.outer.FindWrite(s)
+		return e.Outer.FindWrite(s)
 	}
 }
 
@@ -173,72 +173,72 @@ func (e *env) FindWrite(s symbol) *env {
  Primitives
 */
 
-var globalenv env
+var Globalenv Env
 
 func init() {
-	globalenv = env{
-		vars{ //aka an incomplete set of compiled-in functions
-			"+": func(a ...scmer) scmer {
-				v := a[0].(number)
+	Globalenv = Env{
+		Vars{ //aka an incomplete set of compiled-in functions
+			"+": func(a ...Scmer) Scmer {
+				v := a[0].(Number)
 				for _, i := range a[1:] {
-					v += i.(number)
+					v += i.(Number)
 				}
 				return v
 			},
-			"-": func(a ...scmer) scmer {
-				v := a[0].(number)
+			"-": func(a ...Scmer) Scmer {
+				v := a[0].(Number)
 				for _, i := range a[1:] {
-					v -= i.(number)
+					v -= i.(Number)
 				}
 				return v
 			},
-			"*": func(a ...scmer) scmer {
-				v := a[0].(number)
+			"*": func(a ...Scmer) Scmer {
+				v := a[0].(Number)
 				for _, i := range a[1:] {
-					v *= i.(number)
+					v *= i.(Number)
 				}
 				return v
 			},
-			"/": func(a ...scmer) scmer {
-				v := a[0].(number)
+			"/": func(a ...Scmer) Scmer {
+				v := a[0].(Number)
 				for _, i := range a[1:] {
-					v /= i.(number)
+					v /= i.(Number)
 				}
 				return v
 			},
-			"<=": func(a ...scmer) scmer {
-				return a[0].(number) <= a[1].(number)
+			"<=": func(a ...Scmer) Scmer {
+				return a[0].(Number) <= a[1].(Number)
 			},
-			"<": func(a ...scmer) scmer {
-				return a[0].(number) < a[1].(number)
+			"<": func(a ...Scmer) Scmer {
+				return a[0].(Number) < a[1].(Number)
 			},
-			">": func(a ...scmer) scmer {
-				return a[0].(number) > a[1].(number)
+			">": func(a ...Scmer) Scmer {
+				return a[0].(Number) > a[1].(Number)
 			},
-			">=": func(a ...scmer) scmer {
-				return a[0].(number) >= a[1].(number)
+			">=": func(a ...Scmer) Scmer {
+				return a[0].(Number) >= a[1].(Number)
 			},
-			"equal?": func(a ...scmer) scmer {
+			"equal?": func(a ...Scmer) Scmer {
 				return reflect.DeepEqual(a[0], a[1])
 			},
-			"cons": func(a ...scmer) scmer {
+			"cons": func(a ...Scmer) Scmer {
 				// cons a b: prepend item a to list b (construct list from item + tail)
 				switch car := a[0]; cdr := a[1].(type) {
-				case []scmer:
-					return append([]scmer{car}, cdr...)
+				case []Scmer:
+					return append([]Scmer{car}, cdr...)
 				default:
-					return []scmer{car, cdr}
+					return []Scmer{car, cdr}
 				}
 			},
-			"car": func(a ...scmer) scmer {
+			"car": func(a ...Scmer) Scmer {
 				// head of tuple
-				return a[0].([]scmer)[0]
+				return a[0].([]Scmer)[0]
 			},
-			"cdr": func(a ...scmer) scmer {
+			"cdr": func(a ...Scmer) Scmer {
 				// rest of tuple
-				return a[0].([]scmer)[1:]
+				return a[0].([]Scmer)[1:]
 			},
-			"concat": func(a ...scmer) scmer {
+			"concat": func(a ...Scmer) Scmer {
 				// concat strings
 				var b bytes.Buffer
 				for _, s := range a {
@@ -248,12 +248,12 @@ func init() {
 			},
 			"true": true,
 			"false": false,
-			"list": eval(read(
+			"list": Eval(Read(
 				"(lambda z z)"),
-				&globalenv),
-			"Y": eval(read(
+				&Globalenv),
+			"Y": Eval(Read(
 				"(lambda (g) (g (Y g)))"), // TODO: so lazy evaluieren, dass (Y (lambda (self) 1)) keinen stack overflow auslöst
-				&globalenv),
+				&Globalenv),
 		},
 		nil}
 }
@@ -271,38 +271,38 @@ integer?, rational?, real?, complex?, number?
  Parsing
 */
 
-//symbols, numbers, expressions, procedures, lists, ... all implement this interface, which enables passing them along in the interpreter
-type scmer interface{}
+//Symbols, numbers, expressions, procedures, lists, ... all implement this interface, which enables passing them along in the interpreter
+type Scmer interface{}
 
-type symbol string  //symbols are represented by strings
-type number float64 //numbers by float64
+type Symbol string  //Symbols are represented by strings
+type Number float64 //Numbers by float64
 
-func read(s string) (expression scmer) {
+func Read(s string) (expression Scmer) {
 	tokens := tokenize(s)
 	return readFrom(&tokens)
 }
 
 //Syntactic Analysis
-func readFrom(tokens *[]scmer) (expression scmer) {
+func readFrom(tokens *[]Scmer) (expression Scmer) {
 	//pop first element from tokens
 	token := (*tokens)[0]
 	*tokens = (*tokens)[1:]
 	switch token.(type) {
-		case symbol:
-			if token == symbol("(") {
-				L := make([]scmer, 0)
-				for (*tokens)[0] != symbol(")") {
+		case Symbol:
+			if token == Symbol("(") {
+				L := make([]Scmer, 0)
+				for (*tokens)[0] != Symbol(")") {
 					L = append(L, readFrom(tokens))
 				}
 				*tokens = (*tokens)[1:]
 				return L
-			} else if token == symbol("'") && len(*tokens) > 0 {
-				if (*tokens)[0] == symbol("(") {
+			} else if token == Symbol("'") && len(*tokens) > 0 {
+				if (*tokens)[0] == Symbol("(") {
 					*tokens = (*tokens)[1:]
 					// list literal
-					L := make([]scmer, 1)
-					L[0] = symbol("list")
-					for (*tokens)[0] != symbol(")") {
+					L := make([]Scmer, 1)
+					L[0] = Symbol("list")
+					for (*tokens)[0] != Symbol(")") {
 						L = append(L, readFrom(tokens))
 					}
 					*tokens = (*tokens)[1:]
@@ -314,31 +314,31 @@ func readFrom(tokens *[]scmer) (expression scmer) {
 				return token
 			}
 		default:
-			// string, number
+			// string, Number
 			return token
 	}
 }
 
 //Lexical Analysis
-func tokenize(s string) []scmer {
+func tokenize(s string) []Scmer {
 	/* tokenizer state machine:
 		0 = expecting next item
-		1 = inside number
-		2 = inside symbol
+		1 = inside Number
+		2 = inside Symbol
 		3 = inside string
 		4 = inside escaping sequence of string
 	
-	tokens are either number, symbol, string or symbol('(') or symbol(')')
+	tokens are either Number, Symbol, string or Symbol('(') or Symbol(')')
 	*/
 	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t")
 	state := 0
 	startToken := 0
-	result := make([]scmer, 0)
+	result := make([]Scmer, 0)
 	for i, ch := range s {
 		if state == 1 && (ch == '.' || ch >= '0' && ch <= '9') {
-			// another character added to number
+			// another character added to Number
 		} else if state == 2 && ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t' && ch != ')' && ch != '(' {
-			// another character added to symbol
+			// another character added to Symbol
 		} else if state == 3 && ch != '"' && ch != '\\' {
 			// another character added to string
 		} else if state == 3 && ch == '\\' {
@@ -353,57 +353,57 @@ func tokenize(s string) []scmer {
 		} else {
 			// otherwise: state change!
 			if state == 1 {
-				// finish number
+				// finish Number
 				if f, err := strconv.ParseFloat(s[startToken:i], 64); err == nil {
-					result = append(result, number(f))
+					result = append(result, Number(f))
 				} else if s[startToken:i] == "-" {
-					result = append(result, symbol("-"))
+					result = append(result, Symbol("-"))
 				} else {
-					result = append(result, symbol("NaN"))
+					result = append(result, Symbol("NaN"))
 				}
 			}
 			if state == 2 {
-				// finish symbol
-				result = append(result, symbol(s[startToken:i]))
+				// finish Symbol
+				result = append(result, Symbol(s[startToken:i]))
 			}
 			// now detect what to parse next
 			startToken = i
 			if ch == '(' {
-				result = append(result, symbol("("))
+				result = append(result, Symbol("("))
 				state = 0
 			} else if ch == ')' {
-				result = append(result, symbol(")"))
+				result = append(result, Symbol(")"))
 				state = 0
 			} else if ch == '"' {
 				// start string
 				state = 3
 			} else if ch >= '0' && ch <= '9' || ch == '-' {
-				// start number
+				// start Number
 				state = 1
 			} else if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
 				// white space
 				state = 0
 			} else {
-				// everything else is a symbol! (symbols only are stopped by ' ()')
+				// everything else is a Symbol! (Symbols only are stopped by ' ()')
 				state = 2
 			}
 
 		}
 	}
-	// in the end: finish unfinished symbols and numbers
+	// in the end: finish unfinished Symbols and Numbers
 	if state == 1 {
-		// finish number
+		// finish Number
 		if f, err := strconv.ParseFloat(s[startToken:], 64); err == nil {
-			result = append(result, number(f))
+			result = append(result, Number(f))
 		} else if s[startToken:] == "-" {
-			result = append(result, symbol("-"))
+			result = append(result, Symbol("-"))
 		} else {
-			result = append(result, symbol("NaN"))
+			result = append(result, Symbol("NaN"))
 		}
 	}
 	if state == 2 {
-		// finish symbol
-		result = append(result, symbol(s[startToken:]))
+		// finish Symbol
+		result = append(result, Symbol(s[startToken:]))
 	}
 	return result
 }
@@ -412,39 +412,39 @@ func tokenize(s string) []scmer {
  Interactivity
 */
 
-func String(v scmer) string {
+func String(v Scmer) string {
 	switch v := v.(type) {
-	case []scmer:
+	case []Scmer:
 		l := make([]string, len(v))
 		for i, x := range v {
 			l[i] = String(x)
 		}
 		return "(" + strings.Join(l, " ") + ")"
-	case proc:
+	case Proc:
 		return "[func]"
-	case func(...scmer) scmer:
+	case func(...Scmer) Scmer:
 		return "[native func]"
 	default:
 		return fmt.Sprint(v)
 	}
 }
-func Serialize(b *bytes.Buffer, v scmer, en *env) {
-	if en != &globalenv {
+func Serialize(b *bytes.Buffer, v Scmer, en *Env) {
+	if en != &Globalenv {
 		b.WriteString("(begin ")
-		for k, v := range en.vars {
-			// if symbol is defined in a lambda, print the real value
+		for k, v := range en.Vars {
+			// if Symbol is defined in a lambda, print the real value
 			b.WriteString("(define ")
 			b.WriteString(string(k)) // what if k contains spaces?? can it?
 			b.WriteString(" ")
-			Serialize(b, v, en.outer)
+			Serialize(b, v, en.Outer)
 			b.WriteString(") ")
 		}
-		Serialize(b, v, en.outer)
+		Serialize(b, v, en.Outer)
 		b.WriteString(")")
 		return
 	}
 	switch v := v.(type) {
-	case []scmer:
+	case []Scmer:
 		b.WriteByte('(')
 		for i, x := range v {
 			if i != 0 {
@@ -453,12 +453,12 @@ func Serialize(b *bytes.Buffer, v scmer, en *env) {
 			Serialize(b, x, en)
 		}
 		b.WriteByte(')')
-	case func(...scmer) scmer:
+	case func(...Scmer) Scmer:
 		// native func serialization is the hardest; reverse the env!
 		// when later functional JIT is done, this must also handle deoptimization
 		en2 := en
 		for en2 != nil {
-			for k, v2 := range en2.vars {
+			for k, v2 := range en2.Vars {
 				// compare function pointers (hacky but golang dosent give another opt)
 				if fmt.Sprint(v) == fmt.Sprint(v2) {
 					// found the right global function
@@ -466,17 +466,17 @@ func Serialize(b *bytes.Buffer, v scmer, en *env) {
 					return
 				}
 			}
-			en2 = en2.outer
+			en2 = en2.Outer
 		}
 		b.WriteString("[unserializable native func]")
-	case proc:
+	case Proc:
 		b.WriteString("(lambda ")
-		Serialize(b, v.params, &globalenv)
+		Serialize(b, v.Params, &Globalenv)
 		b.WriteByte(' ')
-		Serialize(b, v.body, v.en)
+		Serialize(b, v.Body, v.En)
 		b.WriteByte(')')
-	case symbol:
-		// print as symbol (because we already used a begin-block for defining our env)
+	case Symbol:
+		// print as Symbol (because we already used a begin-block for defining our env)
 		b.WriteString(fmt.Sprint(v))
 	case string:
 		b.WriteByte('"')
@@ -491,7 +491,7 @@ func Repl() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for fmt.Print("> "); scanner.Scan(); fmt.Print("> ") {
 		var b bytes.Buffer
-		Serialize(&b, eval(read(scanner.Text()), &globalenv), &globalenv)
+		Serialize(&b, Eval(Read(scanner.Text()), &Globalenv), &Globalenv)
 		fmt.Println("==>", b.String())
 	}
 }

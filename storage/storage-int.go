@@ -14,9 +14,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-package main
+package storage
 
 import "math/bits"
+import "github.com/launix-de/cpdb/scm"
 //import "fmt"
 
 type StorageInt struct {
@@ -25,9 +26,9 @@ type StorageInt struct {
 	hasNegative bool
 }
 
-func toInt(x scmer) int64 {
+func toInt(x scm.Scmer) int64 {
 	switch v := x.(type) {
-		case number:
+		case scm.Number:
 			return int64(v)
 		case float64:
 			return int64(v)
@@ -40,11 +41,11 @@ func toInt(x scmer) int64 {
 	}
 }
 
-func (s *StorageInt) getValue(i uint) scmer {
+func (s *StorageInt) getValue(i uint) scm.Scmer {
 	if (s.hasNegative) {
-		return number(s.getValueInt(i))
+		return scm.Number(s.getValueInt(i))
 	} else {
-		return number(s.getValueUInt(i))
+		return scm.Number(s.getValueUInt(i))
 	}
 }
 
@@ -75,7 +76,7 @@ func (s *StorageInt) prepare() {
 	s.bitsize = 0
 	s.hasNegative = false
 }
-func (s *StorageInt) scan(i uint, value scmer) {
+func (s *StorageInt) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
 	v := toInt(value)
 	if v < 0 {
@@ -98,7 +99,7 @@ func (s *StorageInt) init(i uint) {
 	s.chunk = make([]uint64, (i * uint(s.bitsize) + 63) / 64)
 	//fmt.Println("Allocate bitsize", s.bitsize)
 }
-func (s *StorageInt) build(i uint, value scmer) {
+func (s *StorageInt) build(i uint, value scm.Scmer) {
 	// store
 	bitpos := i * uint(s.bitsize)
 	v := uint64(toInt(value)) << (64 - uint(s.bitsize)) // shift value to the leftmost position of 64bit int

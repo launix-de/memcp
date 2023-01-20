@@ -23,6 +23,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package main
 
 import "fmt"
+import "github.com/launix-de/cpdb/scm"
+import "github.com/launix-de/cpdb/storage"
 
 func main() {
 	fmt.Print(`cpdb Copyright (C) 2023   Carl-Philip Hänsch
@@ -31,14 +33,14 @@ func main() {
     under certain conditions;
 `)
 	// define user specific functions
-	globalenv.vars["print"] = func (a ...scmer) scmer {
+	scm.Globalenv.Vars["print"] = func (a ...scm.Scmer) scm.Scmer {
 		for _, s := range a {
-			fmt.Print(String(s))
+			fmt.Print(scm.String(s))
 		}
 		fmt.Println()
 		return "ok"
 	}
-	initStorageEngine(globalenv)
-	loadStorageFrom("test.jsonl")
-	Repl()
+	storage.Init(scm.Globalenv)
+	storage.LoadJSON("test.jsonl")
+	scm.Repl()
 }

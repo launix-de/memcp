@@ -14,23 +14,24 @@ Copyright (C) 2023  Carl-Philip Hänsch
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-package main
+package storage
 
 import "math"
+import "github.com/launix-de/cpdb/scm"
 
 type StorageSCMER struct {
-	values []scmer
+	values []scm.Scmer
 	onlyInt bool
 	hasString bool
 }
 
-func (s *StorageSCMER) getValue(i uint) scmer {
+func (s *StorageSCMER) getValue(i uint) scm.Scmer {
 	return s.values[i]
 }
 
-func (s *StorageSCMER) scan(i uint, value scmer) {
+func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 	switch v := value.(type) {
-		case number:
+		case scm.Number:
 			if _, f := math.Modf(float64(v)); f != 0.0 {
 				s.onlyInt = false
 			}
@@ -51,9 +52,9 @@ func (s *StorageSCMER) prepare() {
 }
 func (s *StorageSCMER) init(i uint) {
 	// allocate
-	s.values = make([]scmer, i)
+	s.values = make([]scm.Scmer, i)
 }
-func (s *StorageSCMER) build(i uint, value scmer) {
+func (s *StorageSCMER) build(i uint, value scm.Scmer) {
 	// store
 	s.values[i] = value
 }

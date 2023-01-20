@@ -14,7 +14,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-package main
+package storage
 
 import "os"
 import "bufio"
@@ -22,22 +22,23 @@ import "time"
 import "fmt"
 import "runtime"
 import "encoding/json"
+import "github.com/launix-de/cpdb/scm"
 
 type ColumnStorage interface {
-	getValue(uint) scmer // read function
+	getValue(uint) scm.Scmer // read function
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
 	// analyze
 	prepare()
-	scan(uint, scmer)
+	scan(uint, scm.Scmer)
 	proposeCompression() ColumnStorage
 
 	// store
 	init(uint)
-	build(uint, scmer)
+	build(uint, scm.Scmer)
 	finish()
 }
 
-type dataset map[string]scmer
+type dataset map[string]scm.Scmer
 type table struct {
 	name string
 	// main storage
@@ -145,13 +146,13 @@ func (t *table) rebuild() *table {
 	return result
 }
 
-func (t *table) scan(condition scmer, callback scmer) string {
+func (t *table) scan(condition scm.Scmer, callback scm.Scmer) string {
 	start := time.Now() // time measurement
 
-	cargs := condition.(proc).params.([]scmer) // list of arguments condition
-	margs := callback.(proc).params.([]scmer) // list of arguments map
-	cdataset := make([]scmer, len(cargs))
-	mdataset := make([]scmer, len(margs))
+	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
+	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
+	cdataset := make([]scm.Scmer, len(cargs))
+	mdataset := make([]scm.Scmer, len(margs))
 
 	// TODO: analyze condition and find indexes
 
@@ -159,10 +160,10 @@ func (t *table) scan(condition scmer, callback scmer) string {
 	ccols := make([]ColumnStorage, len(cargs))
 	mcols := make([]ColumnStorage, len(margs))
 	for i, k := range cargs { // iterate over columns
-		ccols[i] = t.columns[string(k.(symbol))] // find storage
+		ccols[i] = t.columns[string(k.(scm.Symbol))] // find storage
 	}
 	for i, k := range margs { // iterate over columns
-		mcols[i] = t.columns[string(k.(symbol))] // find storage
+		mcols[i] = t.columns[string(k.(scm.Symbol))] // find storage
 	}
 	// iterate over items (indexed)
 	for idx := range t.iterateIndex(condition) {
@@ -173,7 +174,7 @@ func (t *table) scan(condition scmer, callback scmer) string {
 		for i, k := range ccols { // iterate over columns
 			cdataset[i] = k.getValue(idx)
 		}
-		if (!toBool(apply(condition, cdataset))) {
+		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
 			continue // condition did not match
 		}
 
@@ -181,7 +182,7 @@ func (t *table) scan(condition scmer, callback scmer) string {
 		for i, k := range mcols { // iterate over columns
 			mdataset[i] = k.getValue(idx)
 		}
-		apply(callback, mdataset) // TODO: output monad
+		scm.Apply(callback, mdataset) // TODO: output monad
 	}
 
 	// delta storage (unindexed)
@@ -191,25 +192,25 @@ func (t *table) scan(condition scmer, callback scmer) string {
 		}
 		// prepare&call condition function
 		for i, k := range cargs { // iterate over columns
-			cdataset[i] = item[string(k.(symbol))] // fill value
+			cdataset[i] = item[string(k.(scm.Symbol))] // fill value
 		}
 		// check condition
-		if (!toBool(apply(condition, cdataset))) {
+		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
 			continue // condition did not match
 		}
 
 		// prepare&call map function
 		for i, k := range margs { // iterate over columns
-			mdataset[i] = item[string(k.(symbol))] // fill value
+			mdataset[i] = item[string(k.(scm.Symbol))] // fill value
 		}
-		apply(callback, mdataset) // TODO: output monad
+		scm.Apply(callback, mdataset) // TODO: output monad
 	}
 	return fmt.Sprint(time.Since(start))
 }
 
 var tables map[string]*table = make(map[string]*table)
 
-func loadStorageFrom(filename string) {
+func LoadJSON(filename string) {
 	f, _ := os.Open(filename)
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -245,21 +246,21 @@ func loadStorageFrom(filename string) {
 	}
 }
 
-func initStorageEngine(en env) {
+func Init(en scm.Env) {
 	// example: (scan "PLZ" (lambda () 1) (lambda (PLZ Ort) (print PLZ " - " Ort)))
 	// example: (scan "PLZ" (lambda (Ort) (equal? Ort "Neugersdorf")) (lambda (PLZ Ort) (print PLZ " - " Ort)))
 	// example: (scan "PLZ" (lambda (Ort) (equal? Ort "Dresden")) (lambda (PLZ Ort) (print PLZ " - " Ort)))
 	// example: (scan "manufacturer" (lambda () 1) (lambda (ID) (print ID)))
 	// example: (scan "referrer" (lambda () 1) (lambda (ID) (print ID)))
-	en.vars["scan"] = func (a ...scmer) scmer {
+	en.Vars["scan"] = func (a ...scm.Scmer) scm.Scmer {
 		// params: table, condition, map, reduce, reduceSeed
 		t := tables[a[0].(string)]
 		return t.scan(a[1], a[2])
 	}
-	en.vars["stat"] = func (a ...scmer) scmer {
+	en.Vars["stat"] = func (a ...scm.Scmer) scm.Scmer {
 		return PrintMemUsage()
 	}
-	en.vars["rebuild"] = func (a ...scmer) scmer {
+	en.Vars["rebuild"] = func (a ...scm.Scmer) scm.Scmer {
 		start := time.Now()
 
 		for k, t := range tables {
