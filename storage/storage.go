@@ -149,7 +149,8 @@ func (t *table) rebuild() *table {
 			result.columns[col] = newcol
 			result.main_count = i
 		}
-		b.WriteString(")")
+		b.WriteString(") -> ")
+		b.WriteString(fmt.Sprint(result.main_count))
 		fmt.Println(b.String())
 		rebuildIndexes(t, result)
 	} else {
