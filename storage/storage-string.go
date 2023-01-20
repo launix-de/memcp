@@ -35,7 +35,12 @@ func (s *StorageString) String() string {
 }
 
 func (s *StorageString) getValue(i uint) scm.Scmer {
-	return s.dictionary[s.starts.getValueUInt(i):s.ends.getValueUInt(i)]
+	a := s.starts.getValueUInt(i)
+	b := s.ends.getValueUInt(i)
+	if a == 1 && b == 1 {
+		return nil // NULL representation
+	}
+	return s.dictionary[a:b] // string slice
 }
 
 func (s *StorageString) prepare() {
@@ -51,7 +56,16 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 		case string:
 			v = v_
 		default:
-			v = "NULL" // TODO: proper null representation
+			// NULL
+			s.starts.scan(i, 1)
+			s.ends.scan(i, 1)
+			return
+	}
+	if v == "" {
+		// empty string = 0 0
+		s.starts.scan(i, 0)
+		s.ends.scan(i, 0)
+		return
 	}
 	start, ok := s.reverseMap[v]
 	if ok {
@@ -62,8 +76,8 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 		s.sb.WriteString(v)
 		s.reverseMap[v] = start
 	}
-	s.starts.scan(i, scm.Number(start))
-	s.ends.scan(i, scm.Number(start + uint(len(v))))
+	s.starts.scan(i, float64(start))
+	s.ends.scan(i, float64(start + uint(len(v))))
 }
 func (s *StorageString) init(i uint) {
 	// allocate
@@ -80,12 +94,21 @@ func (s *StorageString) build(i uint, value scm.Scmer) {
 		case string:
 			v = v_
 		default:
-			v = "NULL" // TODO: proper null representation
+			// NULL = 1 1
+			s.starts.build(i, 1)
+			s.ends.build(i, 1)
+			return
+	}
+	if v == "" {
+		// empty string = 0 0
+		s.starts.build(i, 0)
+		s.ends.build(i, 0)
+		return
 	}
 	start := s.reverseMap[v]
 	// write start+end into sub storage maps
-	s.starts.build(i, scm.Number(start))
-	s.ends.build(i, scm.Number(start + uint(len(v))))
+	s.starts.build(i, float64(start))
+	s.ends.build(i, float64(start + uint(len(v))))
 }
 func (s *StorageString) finish() {
 	s.reverseMap = make(map[string]uint) // free memory for reverse

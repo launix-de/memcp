@@ -30,8 +30,6 @@ type StorageInt struct {
 
 func toInt(x scm.Scmer) int64 {
 	switch v := x.(type) {
-		case scm.Number:
-			return int64(v)
 		case float64:
 			return int64(v)
 		case uint:
@@ -57,13 +55,13 @@ func (s *StorageInt) getValue(i uint) scm.Scmer {
 		if s.hasNull && uint64(v) == s.null {
 			return nil
 		}
-		return scm.Number(v)
+		return float64(v)
 	} else { // without sign expansion
 		v := s.getValueUInt(i)
 		if s.hasNull && v == s.null {
 			return nil
 		}
-		return scm.Number(v)
+		return float64(v)
 	}
 }
 

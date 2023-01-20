@@ -42,7 +42,7 @@ func ToBool(v Scmer) bool {
 			return false
 		case string:
 			return v != ""
-		case Number:
+		case float64:
 			return v != 0
 		case bool:
 			return v != false
@@ -60,7 +60,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 	switch e := expression.(type) {
 	case string:
 		value = e
-	case Number:
+	case float64:
 		value = e
 	case Symbol:
 		value = en.FindRead(e).Vars[e]
@@ -179,44 +179,44 @@ func init() {
 	Globalenv = Env{
 		Vars{ //aka an incomplete set of compiled-in functions
 			"+": func(a ...Scmer) Scmer {
-				v := a[0].(Number)
+				v := a[0].(float64)
 				for _, i := range a[1:] {
-					v += i.(Number)
+					v += i.(float64)
 				}
 				return v
 			},
 			"-": func(a ...Scmer) Scmer {
-				v := a[0].(Number)
+				v := a[0].(float64)
 				for _, i := range a[1:] {
-					v -= i.(Number)
+					v -= i.(float64)
 				}
 				return v
 			},
 			"*": func(a ...Scmer) Scmer {
-				v := a[0].(Number)
+				v := a[0].(float64)
 				for _, i := range a[1:] {
-					v *= i.(Number)
+					v *= i.(float64)
 				}
 				return v
 			},
 			"/": func(a ...Scmer) Scmer {
-				v := a[0].(Number)
+				v := a[0].(float64)
 				for _, i := range a[1:] {
-					v /= i.(Number)
+					v /= i.(float64)
 				}
 				return v
 			},
 			"<=": func(a ...Scmer) Scmer {
-				return a[0].(Number) <= a[1].(Number)
+				return a[0].(float64) <= a[1].(float64)
 			},
 			"<": func(a ...Scmer) Scmer {
-				return a[0].(Number) < a[1].(Number)
+				return a[0].(float64) < a[1].(float64)
 			},
 			">": func(a ...Scmer) Scmer {
-				return a[0].(Number) > a[1].(Number)
+				return a[0].(float64) > a[1].(float64)
 			},
 			">=": func(a ...Scmer) Scmer {
-				return a[0].(Number) >= a[1].(Number)
+				return a[0].(float64) >= a[1].(float64)
 			},
 			"equal?": func(a ...Scmer) Scmer {
 				return reflect.DeepEqual(a[0], a[1])
@@ -275,7 +275,7 @@ integer?, rational?, real?, complex?, number?
 type Scmer interface{}
 
 type Symbol string  //Symbols are represented by strings
-type Number float64 //Numbers by float64
+//Numbers by float64 (but no extra type)
 
 func Read(s string) (expression Scmer) {
 	tokens := tokenize(s)
@@ -355,7 +355,7 @@ func tokenize(s string) []Scmer {
 			if state == 1 {
 				// finish Number
 				if f, err := strconv.ParseFloat(s[startToken:i], 64); err == nil {
-					result = append(result, Number(f))
+					result = append(result, float64(f))
 				} else if s[startToken:i] == "-" {
 					result = append(result, Symbol("-"))
 				} else {
@@ -394,7 +394,7 @@ func tokenize(s string) []Scmer {
 	if state == 1 {
 		// finish Number
 		if f, err := strconv.ParseFloat(s[startToken:], 64); err == nil {
-			result = append(result, Number(f))
+			result = append(result, float64(f))
 		} else if s[startToken:] == "-" {
 			result = append(result, Symbol("-"))
 		} else {

@@ -38,10 +38,6 @@ func (s *StorageSCMER) getValue(i uint) scm.Scmer {
 func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 	s.count = s.count + 1
 	switch v := value.(type) {
-		case scm.Number:
-			if _, f := math.Modf(float64(v)); f != 0.0 {
-				s.onlyInt = false
-			}
 		case float64:
 			if _, f := math.Modf(v); f != 0.0 {
 				s.onlyInt = false
