@@ -121,7 +121,7 @@ func (t *table) rebuild() *table {
 			}
 			b.WriteString(col) // colname
 			b.WriteString(" ")
-			b.WriteString(reflect.TypeOf(newcol).String()) // storage type
+			b.WriteString(reflect.TypeOf(newcol).String()[16:]) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
 			// build phase
 			newcol.init(i)
 			i = 0
