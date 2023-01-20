@@ -51,7 +51,7 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 			s.hasString = true
 		case nil:
 			s.null = s.null + 1 // count NULL
-			s.onlyInt = false
+			// storageInt can also handle null
 		default:
 			s.onlyInt = false
 	}
@@ -73,7 +73,6 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression() ColumnStorage {
-	// TODO: NULL-Proxy
 	if s.null * 13 > s.count * 100 {
 		// sparse payoff against bitcompressed is at ~13%
 		return new(StorageSparse)
