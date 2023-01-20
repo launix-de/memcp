@@ -21,8 +21,10 @@ import "bufio"
 import "time"
 import "fmt"
 import "runtime"
+import "strings"
 import "encoding/json"
 import "github.com/launix-de/cpdb/scm"
+import "github.com/lrita/numa"
 
 type ColumnStorage interface {
 	getValue(uint) scm.Scmer // read function
@@ -277,7 +279,19 @@ func PrintMemUsage() string {
         var m runtime.MemStats
         runtime.ReadMemStats(&m)
         // For info on each, see: https://golang.org/pkg/runtime/#MemStats
-        return fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC)
+	var b strings.Builder
+        b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v\tNUMA nodes = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC, numa.NodeCount()))
+	for i := 0; i < numa.NodeCount(); i++ {
+		b.WriteString("\n")
+		total, free, err := numa.NodeMemSize64(i)
+		if err == nil {
+			b.WriteString(fmt.Sprintf("Node %v:\tTotal = %v MiB\tFree = %v MiB", i, bToMb(uint64(total)), bToMb(uint64(free))))
+		} else {
+			panic(err)
+		}
+		// TODO: bigger storages: numa.RunOnNode(i) on each call
+	}
+	return b.String()
 }
 
 func bToMb(b uint64) uint64 {

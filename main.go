@@ -25,6 +25,7 @@ package main
 import "fmt"
 import "github.com/launix-de/cpdb/scm"
 import "github.com/launix-de/cpdb/storage"
+import "github.com/lrita/numa"
 
 func main() {
 	fmt.Print(`cpdb Copyright (C) 2023   Carl-Philip Hänsch
@@ -32,6 +33,9 @@ func main() {
     This is free software, and you are welcome to redistribute it
     under certain conditions;
 `)
+	// print some info
+	fmt.Println("NUMA support:", numa.Available())
+
 	// define user specific functions
 	scm.Globalenv.Vars["print"] = func (a ...scm.Scmer) scm.Scmer {
 		for _, s := range a {
