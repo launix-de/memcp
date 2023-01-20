@@ -22,13 +22,13 @@ import "time"
 import "fmt"
 import "runtime"
 import "strings"
-import "reflect"
 import "encoding/json"
 import "github.com/launix-de/cpdb/scm"
 import "github.com/lrita/numa"
 
 type ColumnStorage interface {
 	getValue(uint) scm.Scmer // read function
+	String() string // self-description
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
 	// analyze
 	prepare()
@@ -121,7 +121,7 @@ func (t *table) rebuild() *table {
 			}
 			b.WriteString(col) // colname
 			b.WriteString(" ")
-			b.WriteString(reflect.TypeOf(newcol).String()[16:]) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
+			b.WriteString(newcol.String()) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
 			// build phase
 			newcol.init(i)
 			i = 0

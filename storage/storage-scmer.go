@@ -27,6 +27,10 @@ type StorageSCMER struct {
 	null uint
 }
 
+func (s *StorageSCMER) String() string {
+	return "SCMER"
+}
+
 func (s *StorageSCMER) getValue(i uint) scm.Scmer {
 	return s.values[i]
 }
@@ -69,6 +73,7 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression() ColumnStorage {
+	// TODO: NULL-Proxy
 	if s.null * 13 > s.count * 100 {
 		// sparse payoff against bitcompressed is at ~13%
 		return new(StorageSparse)

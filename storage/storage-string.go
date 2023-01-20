@@ -30,6 +30,10 @@ type StorageString struct {
 	reverseMap map[string]uint
 }
 
+func (s *StorageString) String() string {
+	return "string-dict"
+}
+
 func (s *StorageString) getValue(i uint) scm.Scmer {
 	return s.dictionary[s.starts.getValueUInt(i):s.ends.getValueUInt(i)]
 }

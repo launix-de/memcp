@@ -22,6 +22,10 @@ type StorageSparse struct {
 	values map[uint]scm.Scmer
 }
 
+func (s *StorageSparse) String() string {
+	return "SCMER-sparse"
+}
+
 func (s *StorageSparse) getValue(i uint) scm.Scmer {
 	return s.values[i]
 }

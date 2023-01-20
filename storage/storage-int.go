@@ -18,7 +18,7 @@ package storage
 
 import "math/bits"
 import "github.com/launix-de/cpdb/scm"
-//import "fmt"
+import "fmt"
 
 type StorageInt struct {
 	chunk []uint64
@@ -39,6 +39,10 @@ func toInt(x scm.Scmer) int64 {
 		default:
 			return 0
 	}
+}
+
+func (s *StorageInt) String() string {
+	return fmt.Sprintf("int[%d]", s.bitsize)
 }
 
 func (s *StorageInt) getValue(i uint) scm.Scmer {
