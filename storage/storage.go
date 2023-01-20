@@ -22,6 +22,7 @@ import "time"
 import "fmt"
 import "runtime"
 import "strings"
+import "reflect"
 import "encoding/json"
 import "github.com/launix-de/cpdb/scm"
 import "github.com/lrita/numa"
@@ -69,11 +70,20 @@ func (t *table) rebuild() *table {
 	result := new(table)
 	result.name = t.name
 	if len(t.inserts) > 0 || len(t.deletions) > 0 {
-		fmt.Println("rebuilding table", t.name)
+		var b strings.Builder
+		b.WriteString("rebuilding table ")
+		b.WriteString(t.name)
+		b.WriteString("(")
 		result.columns = make(map[string]ColumnStorage)
 		result.deletions = make(map[uint]struct{})
 		// copy column data in two phases: scan, build (if delta is non-empty)
+		isFirst := true
 		for col, c := range t.columns {
+			if isFirst {
+				isFirst = false
+			} else {
+				b.WriteString(", ")
+			}
 			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages
 			var i uint
 			for {
@@ -109,6 +119,9 @@ func (t *table) rebuild() *table {
 					newcol = newcol2
 				}
 			}
+			b.WriteString(col) // colname
+			b.WriteString(" ")
+			b.WriteString(reflect.TypeOf(newcol).String()) // storage type
 			// build phase
 			newcol.init(i)
 			i = 0
@@ -136,6 +149,8 @@ func (t *table) rebuild() *table {
 			result.columns[col] = newcol
 			result.main_count = i
 		}
+		b.WriteString(")")
+		fmt.Println(b.String())
 		rebuildIndexes(t, result)
 	} else {
 		// otherwise: table stays the same

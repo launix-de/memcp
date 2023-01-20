@@ -23,6 +23,8 @@ type StorageSCMER struct {
 	values []scm.Scmer
 	onlyInt bool
 	hasString bool
+	count uint
+	null uint
 }
 
 func (s *StorageSCMER) getValue(i uint) scm.Scmer {
@@ -30,6 +32,7 @@ func (s *StorageSCMER) getValue(i uint) scm.Scmer {
 }
 
 func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
+	s.count = s.count + 1
 	switch v := value.(type) {
 		case scm.Number:
 			if _, f := math.Modf(float64(v)); f != 0.0 {
@@ -42,6 +45,9 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 		case string:
 			s.onlyInt = false
 			s.hasString = true
+		case nil:
+			s.null = s.null + 1 // count NULL
+			s.onlyInt = false
 		default:
 			s.onlyInt = false
 	}
@@ -63,11 +69,19 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression() ColumnStorage {
+	if s.null * 13 > s.count * 100 {
+		// sparse payoff against bitcompressed is at ~13%
+		return new(StorageSparse)
+	}
 	if s.hasString {
 		return new(StorageString)
 	}
 	if s.onlyInt {
 		return new(StorageInt)
+	}
+	if s.null * 50 > s.count * 100 {
+		// sparse payoff against StorageSCMER is at 2.1
+		return new(StorageSparse)
 	}
 	// dont't propose another pass
 	return nil
