@@ -36,6 +36,11 @@ import (
 	"bytes"
 )
 
+// TODO: (unquote string) -> symbol
+// lexer defs: (set rules (list)); (set rules (cons new_rule rules))
+// pattern matching (match value pattern ifmatch pattern ifmatch else)
+// -> (eval (cons (quote match) (cons value rules)))
+
 func ToBool(v Scmer) bool {
 	switch v.(type) {
 		case nil:
@@ -68,6 +73,8 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		switch car, _ := e[0].(Symbol); car {
 		case "quote":
 			value = e[1]
+		case "eval":
+			value = Eval(e[1], en)
 		case "if":
 			if ToBool(Eval(e[1], en)) {
 				value = Eval(e[2], en)
@@ -248,11 +255,11 @@ func init() {
 			},
 			"true": true,
 			"false": false,
+			"symbol": func (a ...Scmer) Scmer {
+				return Symbol(a[0].(string))
+			},
 			"list": Eval(Read(
 				"(lambda z z)"),
-				&Globalenv),
-			"Y": Eval(Read(
-				"(lambda (g) (g (Y g)))"), // TODO: so lazy evaluieren, dass (Y (lambda (self) 1)) keinen stack overflow auslöst
 				&Globalenv),
 		},
 		nil}
