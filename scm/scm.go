@@ -38,8 +38,16 @@ import (
 
 // TODO: (unquote string) -> symbol
 // lexer defs: (set rules (list)); (set rules (cons new_rule rules))
-// pattern matching (match value pattern ifmatch pattern ifmatch else)
+// pattern matching (match pattern ifmatch pattern ifmatch else) -> function!
+// -> pattern = string; pattern = regex
 // -> (eval (cons (quote match) (cons value rules)))
+// lexer = func (string, ruleset) -> nextfunc
+// nextfunc = () -> (token, line, nextfunc)
+// parser: func (token, state) -> state
+// some kind of dictionary is needed
+// (dict key value key value key value)
+// (dict key value rest_dict)
+// dict acts like a function; apply to a dict will yield the value
 
 func ToBool(v Scmer) bool {
 	switch v.(type) {
@@ -48,7 +56,7 @@ func ToBool(v Scmer) bool {
 		case string:
 			return v != ""
 		case float64:
-			return v != 0
+			return v != 0.0
 		case bool:
 			return v != false
 		default:
@@ -62,6 +70,7 @@ func ToBool(v Scmer) bool {
 */
 
 func Eval(expression Scmer, en *Env) (value Scmer) {
+	restart: // goto label because golang is lacking tail recursion, so just overwrite params and goto restart
 	switch e := expression.(type) {
 	case string:
 		value = e
@@ -74,12 +83,16 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		case "quote":
 			value = e[1]
 		case "eval":
-			value = Eval(e[1], en)
+			// tail call optimized version
+			expression = e[1]
+			goto restart
 		case "if":
 			if ToBool(Eval(e[1], en)) {
-				value = Eval(e[2], en)
+				expression = e[2]
+				goto restart
 			} else {
-				value = Eval(e[3], en)
+				expression = e[3]
+				goto restart
 			}
 		/* set! is forbidden due to side effects
 		case "set!":
@@ -99,16 +112,40 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		case "begin":
 			// execute begin.. in own environment
 			en2 := Env{make(Vars), en}
-			for _, i := range e[1:] {
-				value = Eval(i, &en2)
+			for _, i := range e[1:len(e)-1] {
+				Eval(i, &en2)
 			}
+			// tail call optimized version: last begin part will be tailed
+			expression = e[len(e)-1]
+			en = &en2
+			goto restart
 		default:
+			// apply
 			operands := e[1:]
-			values := make([]Scmer, len(operands))
+			args := make([]Scmer, len(operands))
 			for i, x := range operands {
-				values[i] = Eval(x, en)
+				args[i] = Eval(x, en)
 			}
-			return Apply(Eval(e[0], en), values)
+			procedure := Eval(e[0], en)
+			switch p := procedure.(type) {
+			case func(...Scmer) Scmer:
+				return p(args...)
+			case Proc:
+				en2 := Env{make(Vars), p.En}
+				switch params := p.Params.(type) {
+				case []Scmer:
+					for i, param := range params {
+						en2.Vars[param.(Symbol)] = args[i]
+					}
+				default:
+					en2.Vars[params.(Symbol)] = args
+				}
+				en = &en2
+				expression = p.Body
+				goto restart // tail call optimized
+			default:
+				log.Println("Unknown procedure type - APPLY", p)
+			}
 		}
 	default:
 		log.Println("Unknown expression type - EVAL", e)
@@ -116,6 +153,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 	return
 }
 
+// helper function; Eval uses a code duplicate to get the tail recursion done right
 func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 	switch p := procedure.(type) {
 	case func(...Scmer) Scmer:
