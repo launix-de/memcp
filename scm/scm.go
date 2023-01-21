@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"bytes"
+	"runtime/debug"
 )
 
 // TODO: (unquote string) -> symbol
@@ -535,8 +536,16 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env) {
 func Repl() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for fmt.Print("> "); scanner.Scan(); fmt.Print("> ") {
-		var b bytes.Buffer
-		Serialize(&b, Eval(Read(scanner.Text()), &Globalenv), &Globalenv)
-		fmt.Println("==>", b.String())
+		// anti-panic func
+		func () {
+			defer func () {
+				if r := recover(); r != nil {
+					fmt.Println("panic:", r, string(debug.Stack()))
+				}
+			}()
+			var b bytes.Buffer
+			Serialize(&b, Eval(Read(scanner.Text()), &Globalenv), &Globalenv)
+			fmt.Println("==>", b.String())
+		}()
 	}
 }
