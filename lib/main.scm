@@ -19,3 +19,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 (import "test.scm")
 
+(print "listening on http://localhost:4321")
+(serve 4321 (lambda (req res) (begin
+	/* prototype req is a simple string, res is a func(string) */
+	(print "new request: " req)
+	(res "Hello World")
+)))

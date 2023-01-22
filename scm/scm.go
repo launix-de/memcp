@@ -351,11 +351,18 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 		case Symbol:
 			if token == Symbol("(") {
 				L := make([]Scmer, 0)
-				for (*tokens)[0] != Symbol(")") {
+				for { // read params until )
+					if len(*tokens) == 0 {
+						panic("expecting matching )")
+					}
+					if (*tokens)[0] == Symbol(")") {
+						// eat )
+						*tokens = (*tokens)[1:]
+						return L // finish read process
+					}
+					// add param
 					L = append(L, readFrom(tokens))
 				}
-				*tokens = (*tokens)[1:]
-				return L
 			} else if token == Symbol("'") && len(*tokens) > 0 {
 				if (*tokens)[0] == Symbol("(") {
 					*tokens = (*tokens)[1:]
