@@ -43,12 +43,13 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 					"import": getImport(filepath.Dir(filename)),
 				},
 				&IOEnv,
+				true,
 			}
 			bytes, err := ioutil.ReadFile(filename)
 			if err != nil {
 				panic(err)
 			}
-			return scm.Eval(scm.Read(string(bytes)), &otherPath)
+			return scm.EvalAll(string(bytes), &otherPath)
 		}
 }
 
@@ -75,6 +76,7 @@ func main() {
 			"import": getImport(wd),
 		},
 		&scm.Globalenv,
+		true, // other defines go into Globalenv
 	}
 	// storage initialization
 	storage.Init(scm.Globalenv)

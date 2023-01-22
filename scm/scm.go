@@ -106,13 +106,17 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			en.Vars[v] = Eval(e[2], en)
 			value = "ok"*/
 		case "define", "set", "def": // set only works in innermost env
+			for en.Nodefine {
+				// skip nodefine envs so that imports write to the global env
+				en = en.Outer
+			}
 			en.Vars[e[1].(Symbol)] = Eval(e[2], en)
 			value = "ok"
 		case "lambda":
 			value = Proc{e[1], e[2], en}
 		case "begin":
 			// execute begin.. in own environment
-			en2 := Env{make(Vars), en}
+			en2 := Env{make(Vars), en, false}
 			for _, i := range e[1:len(e)-1] {
 				Eval(i, &en2)
 			}
@@ -132,7 +136,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			case func(...Scmer) Scmer:
 				return p(args...)
 			case Proc:
-				en2 := Env{make(Vars), p.En}
+				en2 := Env{make(Vars), p.En, false}
 				switch params := p.Params.(type) {
 				case []Scmer:
 					for i, param := range params {
@@ -160,7 +164,7 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 	case func(...Scmer) Scmer:
 		return p(args...)
 	case Proc:
-		en := &Env{make(Vars), p.En}
+		en := &Env{make(Vars), p.En, false}
 		switch params := p.Params.(type) {
 		case []Scmer:
 			for i, param := range params {
@@ -191,6 +195,7 @@ type Vars map[Symbol]Scmer
 type Env struct {
 	Vars
 	Outer *Env
+	Nodefine bool // define will write to Outer
 }
 
 func (e *Env) FindRead(s Symbol) *Env {
@@ -301,7 +306,8 @@ func init() {
 				"(lambda z z)"),
 				&Globalenv),
 		},
-		nil}
+		nil,
+		false}
 }
 
 /* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt
@@ -326,6 +332,14 @@ type Symbol string  //Symbols are represented by strings
 func Read(s string) (expression Scmer) {
 	tokens := tokenize(s)
 	return readFrom(&tokens)
+}
+
+func EvalAll(s string, en *Env) (expression Scmer) {
+	tokens := tokenize(s)
+	for len(tokens) > 0 {
+		expression = Eval(readFrom(&tokens), en)
+	}
+	return
 }
 
 //Syntactic Analysis
