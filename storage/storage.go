@@ -16,13 +16,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
-import "bufio"
 import "time"
 import "fmt"
 import "runtime"
 import "strings"
-import "encoding/json"
 import "github.com/launix-de/cpdb/scm"
 import "github.com/lrita/numa"
 
@@ -172,7 +169,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer) string {
 	cdataset := make([]scm.Scmer, len(cargs))
 	mdataset := make([]scm.Scmer, len(margs))
 
-	// TODO: analyze condition and find indexes
+	// TODO: implement a proxy for scripts that routes the scan between nodes first
 
 	// main storage
 	ccols := make([]ColumnStorage, len(cargs))
@@ -227,42 +224,6 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer) string {
 }
 
 var tables map[string]*table = make(map[string]*table)
-
-func LoadJSON(filename string) {
-	f, _ := os.Open(filename)
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Split(bufio.ScanLines)
-
-	var t *table
-	for scanner.Scan() {
-		s := scanner.Text()
-		if s == "" {
-			// ignore
-		} else if s[0:7] == "#table " {
-			var ok bool
-			t, ok = tables[s[7:]]
-			if !ok {
-				// new table
-				t = new(table)
-				t.name = s[7:]
-				tables[t.name] = t
-				t.columns = make(map[string]ColumnStorage)
-				t.deletions = make(map[uint]struct{})
-			}
-		} else if s[0] == '#' {
-			// comment
-		} else {
-			if t == nil {
-				panic("no table set")
-			} else {
-				var x dataset
-				json.Unmarshal([]byte(s), &x) // parse JSON
-				t.insert(x) // put into table
-			}
-		}
-	}
-}
 
 func Init(en scm.Env) {
 	// example: (scan "PLZ" (lambda () 1) (lambda (PLZ Ort) (print PLZ " - " Ort)))
