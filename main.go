@@ -44,7 +44,9 @@ func main() {
 		fmt.Println()
 		return "ok"
 	}
+	// storage initialization
 	storage.Init(scm.Globalenv)
-	storage.LoadJSON("test.jsonl")
+	// scripts initialization
+	scm.Eval(scm.Read("(print \"loaded test data in: \" (loadJSON \"test.jsonl\"))"), &scm.Globalenv)
 	scm.Repl()
 }

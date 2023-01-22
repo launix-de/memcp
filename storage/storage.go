@@ -291,6 +291,13 @@ func Init(en scm.Env) {
 
 		return fmt.Sprint(time.Since(start))
 	}
+	en.Vars["loadJSON"] = func (a ...scm.Scmer) scm.Scmer {
+		start := time.Now()
+
+		LoadJSON(a[0].(string))
+
+		return fmt.Sprint(time.Since(start))
+	}
 }
 
 func PrintMemUsage() string {
