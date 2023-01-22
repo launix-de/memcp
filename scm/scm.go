@@ -373,6 +373,8 @@ func tokenize(s string) []Scmer {
 		2 = inside Symbol
 		3 = inside string
 		4 = inside escaping sequence of string
+		5 = inside comment
+		6 = comment ending * from * /
 	
 	tokens are either Number, Symbol, string or Symbol('(') or Symbol(')')
 	*/
@@ -383,6 +385,20 @@ func tokenize(s string) []Scmer {
 	for i, ch := range s {
 		if state == 1 && (ch == '.' || ch >= '0' && ch <= '9') {
 			// another character added to Number
+		} else if state == 2 && ch == '*' && s[startToken:i] == "/" {
+			// begin of comment
+			state = 5
+		} else if state == 5 && ch == '*' {
+			// comment seems to end
+			state = 6
+		} else if state == 5 {
+			// consume another character in comment (TODO: nested comment counting??)
+		} else if state == 6 && ch == '/' {
+			// end comment
+			state = 0
+		} else if state == 6 {
+			// continue comment
+			state = 5
 		} else if state == 2 && ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t' && ch != ')' && ch != '(' {
 			// another character added to Symbol
 		} else if state == 3 && ch != '"' && ch != '\\' {
@@ -533,7 +549,7 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env) {
 	}
 }
 
-func Repl() {
+func Repl(en *Env) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for fmt.Print("> "); scanner.Scan(); fmt.Print("> ") {
 		// anti-panic func
@@ -544,7 +560,7 @@ func Repl() {
 				}
 			}()
 			var b bytes.Buffer
-			Serialize(&b, Eval(Read(scanner.Text()), &Globalenv), &Globalenv)
+			Serialize(&b, Eval(Read(scanner.Text()), en), &Globalenv)
 			fmt.Println("==>", b.String())
 		}()
 	}

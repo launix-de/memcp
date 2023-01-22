@@ -23,9 +23,34 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package main
 
 import "fmt"
+import "os"
+import "io/ioutil"
+import "path/filepath"
 import "github.com/launix-de/cpdb/scm"
 import "github.com/launix-de/cpdb/storage"
 import "github.com/lrita/numa"
+
+var IOEnv scm.Env
+
+func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
+	return func (a ...scm.Scmer) scm.Scmer {
+			filename := path + "/" + a[0].(string)
+			// TODO: filepath.Walk for wildcards
+			otherPath := scm.Env {
+				scm.Vars {
+					"__DIR__": path,
+					"__FILE__": filename,
+					"import": getImport(filepath.Dir(filename)),
+				},
+				&IOEnv,
+			}
+			bytes, err := ioutil.ReadFile(filename)
+			if err != nil {
+				panic(err)
+			}
+			return scm.Eval(scm.Read(string(bytes)), &otherPath)
+		}
+}
 
 func main() {
 	fmt.Print(`cpdb Copyright (C) 2023   Carl-Philip Hänsch
@@ -36,17 +61,24 @@ func main() {
 	// print some info
 	fmt.Println("NUMA support:", numa.Available())
 
-	// define user specific functions
-	scm.Globalenv.Vars["print"] = func (a ...scm.Scmer) scm.Scmer {
-		for _, s := range a {
-			fmt.Print(scm.String(s))
-		}
-		fmt.Println()
-		return "ok"
+	// define some IO functions (scm will not provide them since it is sandboxable)
+	wd, _ := os.Getwd() // libraries are relative to working directory... is that right?
+	IOEnv = scm.Env {
+		scm.Vars {
+			"print": func (a ...scm.Scmer) scm.Scmer {
+					for _, s := range a {
+						fmt.Print(scm.String(s))
+					}
+					fmt.Println()
+					return "ok"
+				},
+			"import": getImport(wd),
+		},
+		&scm.Globalenv,
 	}
 	// storage initialization
 	storage.Init(scm.Globalenv)
 	// scripts initialization
-	scm.Eval(scm.Read("(print \"loaded test data in: \" (loadJSON \"test.jsonl\"))"), &scm.Globalenv)
-	scm.Repl()
+	scm.Eval(scm.Read("(import \"lib/main.scm\")"), &IOEnv)
+	scm.Repl(&IOEnv)
 }
