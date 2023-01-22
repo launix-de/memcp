@@ -28,7 +28,6 @@ import "io/ioutil"
 import "path/filepath"
 import "github.com/launix-de/cpdb/scm"
 import "github.com/launix-de/cpdb/storage"
-import "github.com/lrita/numa"
 
 var IOEnv scm.Env
 
@@ -59,8 +58,6 @@ func main() {
     This is free software, and you are welcome to redistribute it
     under certain conditions;
 `)
-	// print some info
-	fmt.Println("NUMA support:", numa.Available())
 
 	// define some IO functions (scm will not provide them since it is sandboxable)
 	wd, _ := os.Getwd() // libraries are relative to working directory... is that right?
