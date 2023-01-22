@@ -18,6 +18,7 @@ package storage
 
 import "time"
 import "fmt"
+import "sync"
 import "runtime"
 import "strings"
 import "github.com/launix-de/cpdb/scm"
@@ -47,11 +48,13 @@ type table struct {
 	// delta storage
 	inserts []dataset // items added to storage
 	deletions map[uint]struct{} // items removed from main or inserts (based on main_count + i)
+	mu sync.Mutex // delta write lock
 	// indexes
 	indexes []*StorageIndex
 }
 
-func (t *table) insert(d dataset) {
+func (t *table) Insert(d dataset) {
+	t.mu.Lock()
 	t.inserts = append(t.inserts, d) // append to delta storage
 	// check columns for some to add
 	for c, _ := range d {
@@ -60,10 +63,12 @@ func (t *table) insert(d dataset) {
 			t.columns[c] = new(StorageSCMER)
 		}
 	}
+	t.mu.Unlock()
 }
 
 // rebuild main storage from main+delta
 func (t *table) rebuild() *table {
+	// TODO: concurrency! when rebuild is run in background, inserts and deletions into and from old delta storage must be duplicated to the ongoing process
 	result := new(table)
 	result.name = t.name
 	if len(t.inserts) > 0 || len(t.deletions) > 0 {

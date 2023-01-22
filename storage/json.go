@@ -38,9 +38,17 @@ func LoadJSON(filename string) {
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
 
+	lines := make(chan string, 64)
+
+	go func () {
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+		close(lines)
+	}()
+
 	var t *table
-	for scanner.Scan() {
-		s := scanner.Text()
+	for s := range(lines) {
 		if s == "" {
 			// ignore
 		} else if s[0:7] == "#table " {
@@ -60,9 +68,11 @@ func LoadJSON(filename string) {
 			if t == nil {
 				panic("no table set")
 			} else {
-				var x dataset
-				json.Unmarshal([]byte(s), &x) // parse JSON
-				t.insert(x) // put into table
+				go func (t *table, s string) {
+					var x dataset
+					json.Unmarshal([]byte(s), &x) // parse JSON
+					t.Insert(x) // put into table
+				}(t, s)
 			}
 		}
 	}
