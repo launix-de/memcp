@@ -148,5 +148,6 @@ func (s *StorageInt) finish() {
 }
 func (s *StorageInt) proposeCompression() ColumnStorage {
 	// dont't propose another pass
+	// TODO: propose sequence compression in the form (recordid, startvalue, length) using binary search on recordid for reading
 	return nil
 }
