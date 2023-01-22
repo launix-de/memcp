@@ -34,7 +34,7 @@ var IOEnv scm.Env
 
 func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 	return func (a ...scm.Scmer) scm.Scmer {
-			filename := path + "/" + a[0].(string)
+			filename := path + "/" + scm.String(a[0])
 			// TODO: filepath.Walk for wildcards
 			otherPath := scm.Env {
 				scm.Vars {

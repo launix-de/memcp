@@ -106,12 +106,13 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			en.Vars[v] = Eval(e[2], en)
 			value = "ok"*/
 		case "define", "set", "def": // set only works in innermost env
+			// define will return itself back
+			value = Eval(e[2], en)
 			for en.Nodefine {
 				// skip nodefine envs so that imports write to the global env
 				en = en.Outer
 			}
-			en.Vars[e[1].(Symbol)] = Eval(e[2], en)
-			value = "ok"
+			en.Vars[e[1].(Symbol)] = value
 		case "lambda":
 			value = Proc{e[1], e[2], en}
 		case "begin":
@@ -511,18 +512,21 @@ func String(v Scmer) string {
 		return fmt.Sprint(v)
 	}
 }
-func Serialize(b *bytes.Buffer, v Scmer, en *Env) {
-	if en != &Globalenv {
+func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
+	if en != glob {
 		b.WriteString("(begin ")
 		for k, v := range en.Vars {
 			// if Symbol is defined in a lambda, print the real value
-			b.WriteString("(define ")
-			b.WriteString(string(k)) // what if k contains spaces?? can it?
-			b.WriteString(" ")
-			Serialize(b, v, en.Outer)
-			b.WriteString(") ")
+			// filter out redefinition of global functions
+			if fmt.Sprint(glob.Vars[Symbol(k)]) != fmt.Sprint(v) {
+				b.WriteString("(define ")
+				b.WriteString(string(k)) // what if k contains spaces?? can it?
+				b.WriteString(" ")
+				Serialize(b, v, en.Outer, glob)
+				b.WriteString(") ")
+			}
 		}
-		Serialize(b, v, en.Outer)
+		Serialize(b, v, en.Outer, glob)
 		b.WriteString(")")
 		return
 	}
@@ -533,7 +537,7 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env) {
 			if i != 0 {
 				b.WriteByte(' ')
 			}
-			Serialize(b, x, en)
+			Serialize(b, x, en, glob)
 		}
 		b.WriteByte(')')
 	case func(...Scmer) Scmer:
@@ -554,9 +558,9 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env) {
 		b.WriteString("[unserializable native func]")
 	case Proc:
 		b.WriteString("(lambda ")
-		Serialize(b, v.Params, &Globalenv)
+		Serialize(b, v.Params, glob, glob)
 		b.WriteByte(' ')
-		Serialize(b, v.Body, v.En)
+		Serialize(b, v.Body, v.En, glob)
 		b.WriteByte(')')
 	case Symbol:
 		// print as Symbol (because we already used a begin-block for defining our env)
@@ -581,7 +585,7 @@ func Repl(en *Env) {
 				}
 			}()
 			var b bytes.Buffer
-			Serialize(&b, Eval(Read(scanner.Text()), en), &Globalenv)
+			Serialize(&b, Eval(Read(scanner.Text()), en), en, en)
 			fmt.Println("==>", b.String())
 		}()
 	}

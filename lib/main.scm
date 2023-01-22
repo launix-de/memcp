@@ -17,11 +17,13 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 (print "Welcome to cpdb")
 
-(import "test.scm")
-
-(print "listening on http://localhost:4321")
-(serve 4321 (lambda (req res) (begin
+/* this can be overhooked */
+(define http_handler (lambda (req res) (begin
 	/* prototype req is a simple string, res is a func(string) */
 	(print "new request: " req)
 	(res "Hello World")
 )))
+
+/* read  http_handler fresh from the environment */
+(serve 4321 (lambda (req res) (http_handler req res)))
+(print "listening on http://localhost:4321")

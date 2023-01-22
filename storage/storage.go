@@ -231,14 +231,6 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer) string {
 var tables map[string]*table = make(map[string]*table)
 
 func Init(en scm.Env) {
-	// example: (scan "PLZ" (lambda () 1) (lambda (PLZ Ort) (print PLZ " - " Ort)))
-	// example: (scan "PLZ" (lambda (Ort) (equal? Ort "Neugersdorf")) (lambda (PLZ Ort) (print PLZ " - " Ort)))
-	// example: (scan "PLZ" (lambda (Ort) (equal? Ort "Dresden")) (lambda (PLZ Ort) (print PLZ " - " Ort)))
-	// example: (scan "manufacturer" (lambda () 1) (lambda (ID) (print ID)))
-	// example: (scan "referrer" (lambda () 1) (lambda (ID) (print ID)))
-	// example: (scan "bestellung" (lambda () 1) (lambda (ID paidAt) (print ID ", " paidAt)))
-	// example: (scan "bestellungElement" (lambda () 1) (lambda (ID einzelpreis menge) (print ID ", " (* menge einzelpreis))))
-
 	en.Vars["scan"] = func (a ...scm.Scmer) scm.Scmer {
 		// params: table, condition, map, reduce, reduceSeed
 		t := tables[a[0].(string)]

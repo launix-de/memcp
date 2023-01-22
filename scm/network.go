@@ -24,7 +24,7 @@ import "fmt"
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
 	// HTTP endpoint; params: (port, handler)
-	port := a[0]
+	port := String(a[0])
 	handler := new(HttpServer)
 	handler.callback = a[1] // lambda(req, res)
 	server := &http.Server {
@@ -50,7 +50,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		req.URL.Path, // TODO: change to associative array with all possible request info
 		func (a ...Scmer) Scmer {
 			// result-print-function (TODO: better interface with headers, JSON support etc.)
-			io.WriteString(res, a[0].(string))
+			io.WriteString(res, String(a[0]))
 			return "ok"
 		},
 	})
