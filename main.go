@@ -24,8 +24,11 @@ package main
 
 import "fmt"
 import "os"
+import "io"
+import "time"
 import "io/ioutil"
 import "path/filepath"
+import "net/http"
 import "github.com/launix-de/cpdb/scm"
 import "github.com/launix-de/cpdb/storage"
 import "github.com/lrita/numa"
@@ -51,6 +54,28 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 			}
 			return scm.EvalAll(string(bytes), &otherPath)
 		}
+}
+
+func httpHandler(res http.ResponseWriter, req *http.Request) {
+	res.Header().Set("Content-Type", "text/plain")
+	io.WriteString(res, "Method = ")
+	io.WriteString(res, req.Method)
+	io.WriteString(res, "\n")
+	io.WriteString(res, "Path = ")
+	io.WriteString(res, req.URL.Path) // or: RawPath
+	io.WriteString(res, "\n")
+	io.WriteString(res, "Params = ")
+	io.WriteString(res, fmt.Sprint(req.URL.Query())) // map[string][]string
+	io.WriteString(res, "\n")
+	io.WriteString(res, "Header = ")
+	io.WriteString(res, fmt.Sprint(req.Header))
+	io.WriteString(res, "\n")
+	// TODO: req.Body io.ReadCloser
+	// req.URL.User.Username()
+	// req.URL.User.Password()
+	// req.ContentLength == -1 or >= 0
+	// req.Host -> multiple hostnames according to DNS system
+	// req.RemoteAddr -> IP
 }
 
 func main() {
@@ -82,5 +107,19 @@ func main() {
 	storage.Init(scm.Globalenv)
 	// scripts initialization
 	scm.Eval(scm.Read("(import \"lib/main.scm\")"), &IOEnv)
+
+	// HTTP endpoint (TODO: move into scheme helper library)
+	server := &http.Server {
+		Addr: ":4321",
+		Handler: http.HandlerFunc(httpHandler),
+		ReadTimeout: 10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+	}
+	go server.ListenAndServe()
+	fmt.Println("HTTP server active on http://localhost:4321")
+	// TODO: ListenAndServeTLS
+
+	// REPL shell
 	scm.Repl(&IOEnv)
 }
