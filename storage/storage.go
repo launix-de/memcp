@@ -263,7 +263,7 @@ func PrintMemUsage() string {
         runtime.ReadMemStats(&m)
         // For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
-        b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v\tNUMA nodes = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC))
+        b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC))
 	return b.String()
 }
 
