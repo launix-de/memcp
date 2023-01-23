@@ -601,16 +601,18 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 func Repl(en *Env) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for fmt.Print("> "); scanner.Scan(); fmt.Print("> ") {
-		// anti-panic func
-		func () {
-			defer func () {
-				if r := recover(); r != nil {
-					fmt.Println("panic:", r, string(debug.Stack()))
-				}
+		if scanner.Text() != "" {
+			// anti-panic func
+			func () {
+				defer func () {
+					if r := recover(); r != nil {
+						fmt.Println("panic:", r, string(debug.Stack()))
+					}
+				}()
+				var b bytes.Buffer
+				Serialize(&b, Eval(Read(scanner.Text()), en), en, en)
+				fmt.Println("==>", b.String())
 			}()
-			var b bytes.Buffer
-			Serialize(&b, Eval(Read(scanner.Text()), en), en, en)
-			fmt.Println("==>", b.String())
-		}()
+		}
 	}
 }
