@@ -21,6 +21,7 @@ import "fmt"
 import "time"
 import "strconv"
 import "net/http"
+import "runtime/debug"
 
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
@@ -95,6 +96,15 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			return "ok"
 		},
 	}
+	// catch panics and print out 500 Internal Server Error
+	defer func () {
+		if r := recover(); r != nil {
+			fmt.Println("request failed:", req_scm, r, string(debug.Stack()))
+			res.Header().Set("Content-Type", "text/plain")
+			res.WriteHeader(500)
+			io.WriteString(res, "500 Internal Server Error.")
+		}
+	}()
 	Apply(s.callback, []Scmer{req_scm, res_scm})
 	// TODO: req.Body io.ReadCloser
 }
