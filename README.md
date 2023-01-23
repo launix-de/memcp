@@ -1,8 +1,10 @@
 # memcp In-Memory Database
 
-cpdb is an open source in-memory SQL database released under the GPLv3 License. It is an open source alternative to proprietary columnar in-memory databases, providing a powerful, reliable, and fast database solution for applications that require high performance and scalability.
+![memcp >](memcp-logo.svg?raw=true)
 
-cpdb is written in golang and is designed to be portable and extensible, allowing developers to embed the database into their applications with ease. It is also designed with a focus on scalability and performance, making it a suitable choice for distributed applications.
+memcp is an open source in-memory SQL database released under the GPLv3 License. It is an open source alternative to proprietary columnar in-memory databases, providing a powerful, reliable, and fast database solution for applications that require high performance and scalability.
+
+memcp is written in golang and is designed to be portable and extensible, allowing developers to embed the database into their applications with ease. It is also designed with a focus on scalability and performance, making it a suitable choice for distributed applications.
 
 Features:
 - SQL query language support
