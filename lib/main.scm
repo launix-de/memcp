@@ -21,7 +21,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (define http_handler (lambda (req res) (begin
 	/* prototype req is a simple string, res is a func(string) */
 	(print "new request: " req)
-	(res "Hello World")
+	((res "header") "Content-Type" "text/plain")
+	((res "status") 404)
+	((res "println") "404 not found")
 )))
 
 /* read  http_handler fresh from the environment */

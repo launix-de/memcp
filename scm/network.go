@@ -17,9 +17,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package scm
 
 import "io"
-import "time"
-import "net/http"
 import "fmt"
+import "time"
+import "strconv"
+import "net/http"
 
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
@@ -46,32 +47,54 @@ type HttpServer struct {
 
 func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	res.Header().Set("Content-Type", "text/plain")
-	Apply(s.callback, []Scmer{
-		req.URL.Path, // TODO: change to associative array with all possible request info
-		func (a ...Scmer) Scmer {
-			// result-print-function (TODO: better interface with headers, JSON support etc.)
-			io.WriteString(res, String(a[0]))
+	query_scm := make([]Scmer, 0)
+	for k, v := range req.URL.Query() {
+		for _, v2 := range v {
+			query_scm = append(query_scm, k, v2)
+		}
+	}
+	header_scm := make([]Scmer, 0)
+	for k, v := range req.Header {
+		for _, v2 := range v {
+			header_scm = append(header_scm, k, v2)
+		}
+	}
+	// helper
+	pwtostring := func (s string, isset bool) Scmer {
+		if isset {
+			return s
+		} else {
+			return nil
+		}
+	}
+	req_scm := []Scmer {
+		"method", req.Method,
+		"host", req.Host,
+		"path", req.URL.Path,
+		"query", query_scm,
+		"header", header_scm,
+		"username", req.URL.User.Username(),
+		"password", pwtostring(req.URL.User.Password()),
+		"ip", req.RemoteAddr,
+		// TODO: req.Body io.ReadCloser
+	}
+	res_scm := []Scmer {
+		"header", func (a ...Scmer) Scmer {
+			res.Header().Set(String(a[0]), String(a[1]))
 			return "ok"
 		},
-	})
-	/* TODO: put the following into a data structure
-	io.WriteString(res, "Method = ")
-	io.WriteString(res, req.Method)
-	io.WriteString(res, "\n")
-	io.WriteString(res, "Path = ")
-	io.WriteString(res, req.URL.Path) // or: RawPath
-	io.WriteString(res, "\n")
-	io.WriteString(res, "Params = ")
-	io.WriteString(res, fmt.Sprint(req.URL.Query())) // map[string][]string
-	io.WriteString(res, "\n")
-	io.WriteString(res, "Header = ")
-	io.WriteString(res, fmt.Sprint(req.Header))
-	io.WriteString(res, "\n")
-	*/
+		"status", func (a ...Scmer) Scmer {
+			// status after header!
+			status, _ := strconv.Atoi(String(a[0]))
+			res.WriteHeader(status)
+			return "ok"
+		},
+		"println", func (a ...Scmer) Scmer {
+			// result-print-function (TODO: better interface with headers, JSON support etc.)
+			io.WriteString(res, String(a[0]) + "\n")
+			return "ok"
+		},
+	}
+	Apply(s.callback, []Scmer{req_scm, res_scm})
 	// TODO: req.Body io.ReadCloser
-	// req.URL.User.Username()
-	// req.URL.User.Password()
-	// req.ContentLength == -1 or >= 0
-	// req.Host -> multiple hostnames according to DNS system
-	// req.RemoteAddr -> IP
 }
