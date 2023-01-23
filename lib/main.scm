@@ -15,7 +15,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-(print "Welcome to cpdb")
+(print "Welcome to memcp")
 
 /* this can be overhooked */
 (define http_handler (lambda (req res) (begin

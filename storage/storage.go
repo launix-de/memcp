@@ -21,7 +21,7 @@ import "fmt"
 import "sync"
 import "runtime"
 import "strings"
-import "github.com/launix-de/cpdb/scm"
+import "github.com/launix-de/memcp/scm"
 
 type ColumnStorage interface {
 	getValue(uint) scm.Scmer // read function

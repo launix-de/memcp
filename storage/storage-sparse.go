@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "github.com/launix-de/cpdb/scm"
+import "github.com/launix-de/memcp/scm"
 
 type StorageSparse struct {
 	values map[uint]scm.Scmer

@@ -20,7 +20,7 @@ package storage
 import "fmt"
 import "sort"
 import "reflect"
-import "github.com/launix-de/cpdb/scm"
+import "github.com/launix-de/memcp/scm"
 
 type StorageIndex struct {
 	cols []string // sort equal-cols alphabetically, so similar conditions are canonical

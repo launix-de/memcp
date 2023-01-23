@@ -1,4 +1,4 @@
-# cpdb
+# memcp In-Memory Database
 
 cpdb is an open source in-memory SQL database released under the GPLv3 License. It is an open source alternative to proprietary columnar in-memory databases, providing a powerful, reliable, and fast database solution for applications that require high performance and scalability.
 

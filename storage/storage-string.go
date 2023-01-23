@@ -18,7 +18,7 @@ package storage
 
 //import "fmt"
 import "strings"
-import "github.com/launix-de/cpdb/scm"
+import "github.com/launix-de/memcp/scm"
 
 type StorageString struct {
 	dictionary string

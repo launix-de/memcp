@@ -15,7 +15,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 /*
-	cpdb smart clusterable distributed database working best on nvme
+	memcp smart clusterable distributed database working best on nvme
 
 	https://pkelchte.wordpress.com/2013/12/31/scm-go/
 
@@ -26,8 +26,8 @@ import "fmt"
 import "os"
 import "io/ioutil"
 import "path/filepath"
-import "github.com/launix-de/cpdb/scm"
-import "github.com/launix-de/cpdb/storage"
+import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage"
 
 var IOEnv scm.Env
 
@@ -53,7 +53,7 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 }
 
 func main() {
-	fmt.Print(`cpdb Copyright (C) 2023   Carl-Philip Hänsch
+	fmt.Print(`memcp Copyright (C) 2023   Carl-Philip Hänsch
     This program comes with ABSOLUTELY NO WARRANTY;
     This is free software, and you are welcome to redistribute it
     under certain conditions;

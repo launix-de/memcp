@@ -2,6 +2,6 @@ Makefile
 *.sw*
 *.o
 tools/Makefile
-cpdb-logo.png
+memcp-logo.png
 test.jsonl
-cpdb
+memcp

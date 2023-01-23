@@ -17,7 +17,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package storage
 
 import "math/bits"
-import "github.com/launix-de/cpdb/scm"
+import "github.com/launix-de/memcp/scm"
 import "fmt"
 
 type StorageInt struct {
