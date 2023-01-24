@@ -5,3 +5,4 @@ tools/Makefile
 memcp-logo.png
 test.jsonl
 memcp
+.memcp-history.tmp
