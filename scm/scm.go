@@ -92,9 +92,9 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				goto restart
 			}
 		case "match": // (match <value> <pattern> <result> <pattern> <result> <pattern> <result> [<default>])
-			val := e[1]
+			val := Eval(e[1], en)
 			i := 2
-			en2 := Env{Vars{}, en, true}
+			en2 := Env{make(Vars), en, true}
 			for i < len(e)-1 {
 				if match(val, e[i], &en2) {
 					// pattern has matched
@@ -242,8 +242,66 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	switch p := pattern.(type) {
 		case float64, string:
 			return reflect.DeepEqual(val, p)
+		case Symbol:
+			en.Vars[p] = val
+			return true
+		case []Scmer:
+			switch p[0] {
+				case Symbol("list"):
+					// list matching
+					switch v := val.(type) {
+						case []Scmer:
+							// only list and list will match
+							if len(v) != len(p) {
+								return false
+							}
+							for i, p_item := range p {
+								if !match(v[i], p_item, en) {
+									return false
+								}
+							}
+							return true
+						default:
+							return false
+					}
+				case Symbol("concat"):
+					switch v := val.(type) {
+						case string: // only allowed for strings
+							// examine the pattern
+							if len(p) == 3 {
+								switch p1 := p[1].(type) {
+									case string:
+										switch p2 := p[2].(type) {
+											case Symbol:
+												// string Symbol
+												if strings.HasPrefix(v, p1) {
+													// extract postfix and match
+													en.Vars[p2] = v[len(p1):]
+													return true
+												}
+												// else
+												return false
+											default:
+												// panic
+										}
+									default:
+										// panic
+								}
+								// TODO: Symbol string
+							}
+							panic("unknown concat pattern: " + fmt.Sprint(p))
+						default:
+							return false // non-strings are not matching
+					}
+				case Symbol("cons"):
+					panic("TODO: cons matching")
+				case Symbol("regex"):
+					panic("TODO: regex matching")
+				default:
+					panic("unknown match pattern: " + fmt.Sprint(p))
+			}
 		default:
-			return false
+			panic("unknown match pattern: " + fmt.Sprint(p))
 	}
 }
 
