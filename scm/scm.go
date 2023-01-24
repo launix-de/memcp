@@ -95,6 +95,27 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				expression = e[3]
 				goto restart
 			}
+		case "match": // (match <value> <pattern> <result> <pattern> <result> <pattern> <result> [<default>])
+			val := e[1]
+			i := 2
+			en2 := Env{Vars{}, en, true}
+			for i < len(e)-1 {
+				if match(val, e[i], &en2) {
+					// pattern has matched
+					en = &en2
+					expression = e[i+1]
+					goto restart
+				}
+				i += 2
+			}
+			if i < len(e) {
+				// default: nothing matched
+				expression = e[i]
+				goto restart // tail call
+			} else {
+				// otherwise: nil
+				value = nil
+			}
 		/* set! is forbidden due to side effects
 		case "set!":
 			v := e[1].(Symbol)
@@ -203,6 +224,29 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 		panic("Unknown procedure type - APPLY" + fmt.Sprint(p))
 	}
 	return
+}
+
+// pattern matching
+func match(val Scmer, pattern Scmer, en *Env) bool {
+	/* our custom implementation of match consisting of:
+	(match value pattern result pattern result pattern result [default])
+	where pattern may be string, number, Symbol or list or applications
+	 - string and float64 will match on equality
+	 - Symbol will read the value into a variable
+	 - list will unify the list contents ([]scmer{"list", ...})
+	 - _ is dontcare
+	 - (concat string Symbol) will split prefix
+	 - (concat Symbol string Symbol) will split infix
+	 - (concat Symbol string) will split postfix
+	 - (cons x y) will split a list (x and y will be unified)
+	 - (regex "(.*)=(.*)" _ Symbol Symbol) will parse regex
+	*/
+	switch p := pattern.(type) {
+		case float64, string:
+			return reflect.DeepEqual(val, p)
+		default:
+			return false
+	}
 }
 
 // TODO: func optimize für parzielle lambda-Ausdrücke und JIT
