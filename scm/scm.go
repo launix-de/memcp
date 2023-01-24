@@ -26,14 +26,11 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import (
-	"io"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 	"bytes"
-	"runtime/debug"
-	"github.com/chzyer/readline"
 )
 
 // TODO: (unquote string) -> symbol
@@ -643,67 +640,5 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 		b.WriteByte('"')
 	default:
 		b.WriteString(fmt.Sprint(v))
-	}
-}
-
-const newprompt  = "\033[32m>\033[0m "
-const contprompt = "\033[32m.\033[0m "
-const resultprompt = "\033[31m=\033[0m "
-
-func Repl(en *Env) {
-	l, err := readline.NewEx(&readline.Config {
-		Prompt: newprompt,
-		HistoryFile: ".memcp-history.tmp",
-		InterruptPrompt: "^C",
-		EOFPrompt: "exit",
-		HistorySearchFold: true,
-	})
-	if err != nil {
-		panic(err)
-	}
-	defer l.Close()
-	l.CaptureExitSignal()
-
-	oldline := ""
-	for {
-		line, err := l.Readline()
-		line = oldline + line
-		if err == readline.ErrInterrupt {
-			if len(line) == 0 {
-				break
-			} else {
-				continue
-			}
-		} else if err == io.EOF {
-			break
-		} else if err != nil {
-			panic(err)
-		}
-		if line == "" {
-			continue
-		}
-
-		// anti-panic func
-		func () {
-			defer func () {
-				if r := recover(); r != nil {
-					if r == "expecting matching )" {
-						// keep oldline
-						oldline = line + "\n"
-						l.SetPrompt(contprompt)
-						return
-					}
-					fmt.Println("panic:", r, string(debug.Stack()))
-					oldline = ""
-					l.SetPrompt(newprompt)
-				}
-			}()
-			var b bytes.Buffer
-			Serialize(&b, Eval(Read(line), en), en, en)
-			fmt.Print(resultprompt)
-			fmt.Println(b.String())
-			oldline = ""
-			l.SetPrompt(newprompt)
-		}()
 	}
 }
