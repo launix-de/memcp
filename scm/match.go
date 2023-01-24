@@ -19,6 +19,7 @@ package scm
 
 import (
 	"fmt"
+	"regexp"
 	"reflect"
 	"strings"
 )
@@ -95,7 +96,39 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 				case Symbol("cons"):
 					panic("TODO: cons matching")
 				case Symbol("regex"):
-					panic("TODO: regex matching")
+					// syntax: (match "v=5" (regex "^v=(.*)" _ v) (print "v is " v))
+					// for multiline parsing, use (?ms:<REGEXP>)
+					// for additional info, see https://github.com/google/re2/wiki/Syntax
+					switch v := val.(type) {
+						case string: // only allowed for strings
+							switch p1 := p[1].(type) {
+								case string:
+									re, err := regexp.Compile(p1)
+									if err != nil {
+										panic(err)
+									}
+									if re.NumSubexp() != len(p) - 3 {
+										panic("regex " + p1 + " contains " + fmt.Sprint(re.NumSubexp()) + " subexpressions, found " + fmt.Sprint(len(p)))
+									}
+									match := re.FindStringSubmatch(v)
+									if match != nil {
+										for i := 0; i <= re.NumSubexp(); i++ {
+											if p[i+2] != Symbol("_") {
+												en.Vars[p[i+2].(Symbol)] = match[i]
+											}
+										}
+										return true
+									} else {
+										return false
+									}
+								case *regexp.Regexp:
+									panic("TODO: precompiled regexp from optimize()")
+								default:
+									panic("regex expects string")
+							}
+						default:
+							return false // non-strings are not matching regex
+					}
 				default:
 					panic("unknown match pattern: " + fmt.Sprint(p))
 			}
