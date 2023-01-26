@@ -72,6 +72,7 @@ func main() {
 				},
 			"import": getImport(wd),
 			"serve": scm.HTTPServe,
+			"mysql": scm.MySQLServe,
 		},
 		&scm.Globalenv,
 		true, // other defines go into Globalenv
