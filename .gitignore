@@ -1,4 +1,3 @@
-Makefile
 *.sw*
 *.o
 tools/Makefile

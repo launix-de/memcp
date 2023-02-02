@@ -24,6 +24,8 @@ package main
 
 import "fmt"
 import "os"
+import "io"
+import "bufio"
 import "io/ioutil"
 import "path/filepath"
 import "github.com/launix-de/memcp/scm"
@@ -35,11 +37,13 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 	return func (a ...scm.Scmer) scm.Scmer {
 			filename := path + "/" + scm.String(a[0])
 			// TODO: filepath.Walk for wildcards
+			wd := filepath.Dir(filename)
 			otherPath := scm.Env {
 				scm.Vars {
 					"__DIR__": path,
 					"__FILE__": filename,
-					"import": getImport(filepath.Dir(filename)),
+					"import": getImport(wd),
+					"load": getLoad(wd),
 				},
 				&IOEnv,
 				true,
@@ -49,6 +53,48 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 				panic(err)
 			}
 			return scm.EvalAll(string(bytes), &otherPath)
+		}
+}
+
+func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
+	return func (a ...scm.Scmer) scm.Scmer {
+			filename := path + "/" + scm.String(a[0])
+			if len(a) > 2 {
+				// TODO: splitter reader
+				file, err := os.Open(filename)
+				if err != nil {
+					panic(err)
+				}
+				splitter := bufio.NewReader(file)
+				delimiter := scm.String(a[2])
+				if len(delimiter) != 1 {
+					panic("load delimiter must be 1 byte long")
+				}
+				for {
+					str, err := splitter.ReadString(delimiter[0])
+					if err == io.EOF {
+						break // file is finished
+					}
+					if err != nil {
+						panic(err)
+					}
+					go scm.Apply(a[1], []scm.Scmer{str});
+				}
+				panic("TODO splitter reader")
+				//split := scm.String(a[2])
+			} else {
+				// read in whole
+				bytes, err := ioutil.ReadFile(filename)
+				if err != nil {
+					panic(err)
+				}
+				if len(a) > 1 {
+					go scm.Apply(a[1], []scm.Scmer{string(bytes)});
+				} else {
+					return string(bytes)
+				}
+			}
+			return "ok"
 		}
 }
 
@@ -71,6 +117,7 @@ func main() {
 					return "ok"
 				},
 			"import": getImport(wd),
+			"load": getLoad(wd),
 			"serve": scm.HTTPServe,
 			"mysql": scm.MySQLServe,
 		},
