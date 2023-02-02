@@ -341,6 +341,9 @@ func init() {
 			},
 			"true": true,
 			"false": false,
+			"error": func (a ...Scmer) Scmer {
+				panic(a[0])
+			},
 			"symbol": func (a ...Scmer) Scmer {
 				return Symbol(a[0].(string))
 			},

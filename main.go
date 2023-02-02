@@ -60,7 +60,6 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 	return func (a ...scm.Scmer) scm.Scmer {
 			filename := path + "/" + scm.String(a[0])
 			if len(a) > 2 {
-				// TODO: splitter reader
 				file, err := os.Open(filename)
 				if err != nil {
 					panic(err)
@@ -78,9 +77,9 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 					if err != nil {
 						panic(err)
 					}
-					go scm.Apply(a[1], []scm.Scmer{str});
+					// go??
+					scm.Apply(a[1], []scm.Scmer{str});
 				}
-				panic("TODO splitter reader")
 				//split := scm.String(a[2])
 			} else {
 				// read in whole

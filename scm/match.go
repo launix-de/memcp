@@ -51,6 +51,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					// list matching
 					switch v := val.(type) {
 						case []Scmer:
+							p = p[1:] // extract rest of list
 							// only list and list will match
 							if len(v) != len(p) {
 								return false
