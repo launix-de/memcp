@@ -232,8 +232,22 @@ var tables map[string]*table = make(map[string]*table)
 func Init(en scm.Env) {
 	en.Vars["scan"] = func (a ...scm.Scmer) scm.Scmer {
 		// params: table, condition, map, reduce, reduceSeed
-		t := tables[a[0].(string)]
+		t := tables[scm.String(a[0])]
 		return t.scan(a[1], a[2])
+	}
+	en.Vars["createtable"] = func (a ...scm.Scmer) scm.Scmer {
+		// params: tablename, (columndefs) mit (name, typ)
+		t := new(table)
+		t.name = scm.String(a[0])
+		tables[t.name] = t
+		t.columns = make(map[string]ColumnStorage)
+		t.deletions = make(map[uint]struct{})
+		for _, coldef := range(a[1].([]scm.Scmer)) {
+			colname := scm.String(coldef.([]scm.Scmer)[0])
+			// todo: type, not null flags usw
+			t.columns[colname] = new(StorageSCMER)
+		}
+		return "ok"
 	}
 	en.Vars["stat"] = func (a ...scm.Scmer) scm.Scmer {
 		return PrintMemUsage()
@@ -248,10 +262,22 @@ func Init(en scm.Env) {
 
 		return fmt.Sprint(time.Since(start))
 	}
+	en.Vars["loadCSV"] = func (a ...scm.Scmer) scm.Scmer {
+		// table, filename, delimiter
+		start := time.Now()
+
+		delimiter := ";"
+		if len(a) > 2 {
+			delimiter = scm.String(a[2])
+		}
+		LoadCSV(scm.String(a[0]), scm.String(a[1]), delimiter)
+
+		return fmt.Sprint(time.Since(start))
+	}
 	en.Vars["loadJSON"] = func (a ...scm.Scmer) scm.Scmer {
 		start := time.Now()
 
-		LoadJSON(a[0].(string))
+		LoadJSON(scm.String(a[0]))
 
 		return fmt.Sprint(time.Since(start))
 	}

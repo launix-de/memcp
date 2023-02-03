@@ -23,6 +23,13 @@ import (
 	"strconv"
 )
 
+func Simplify(s string) Scmer {
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f
+	}
+	return s
+}
+
 func Read(s string) (expression Scmer) {
 	tokens := tokenize(s)
 	return readFrom(&tokens)

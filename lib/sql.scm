@@ -34,7 +34,7 @@
 		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql rest)
 		(concat "\n" rest) (parse_sql rest)
 		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql rest)
-		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) (concat "tablecreate " id ", decl: " (tabledecl (parenthesis rest))) (error "expected identifier"))
+		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '(createtable id (tabledecl (parenthesis rest))) (error "expected identifier"))
 		(error (concat "unknown SQL syntax: " s))
 	)
 )))
