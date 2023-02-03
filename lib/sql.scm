@@ -17,8 +17,13 @@
 		rest (match (identifier rest)
 			'(colname rest) (match (identifier rest)
 				'(typename rest) (match rest
-					(regex "(?s)([^,]*),(.*)" _ typeparams rest) (cons '(colname typename typeparams) (tabledecl rest))
-					(regex "(?s)([^,]*)\)(.*)" _ typeparams rest) '('(colname typename typeparams)) /* TODO: rest */
+					/* todo: allow white spaces in dimension */
+					(regex "(?s)\\(([0-9]+),([0-9]+)\\)([^,]*),(.*)" _ dim1 dim2 typeparams rest) (cons '(colname typename '(dim1 dim2) typeparams) (tabledecl rest))
+					(regex "(?s)\\(([0-9]+),([0-9]+)\\)([^,]*)\)(.*)" _ dim1 dim2 typeparams rest) '('(colname typename '(dim1 dim2) typeparams)) /* TODO: rest */
+					(regex "(?s)\\(([0-9]+)\\)([^,]*),(.*)" _ dim1 typeparams rest) (cons '(colname typename '(dim1) typeparams) (tabledecl rest))
+					(regex "(?s)\\(([0-9]+)\\)([^,]*)\)(.*)" _ dim1 typeparams rest) '('(colname typename '(dim1) typeparams)) /* TODO: rest */
+					(regex "(?s)([^,]*),(.*)" _ typeparams rest) (cons '(colname typename '() typeparams) (tabledecl rest))
+					(regex "(?s)([^,]*)\)(.*)" _ typeparams rest) '('(colname typename '() typeparams)) /* TODO: rest */
 					(error (concat "expected , or ) but found " rest))
 				)
 			)
