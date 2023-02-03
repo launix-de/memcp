@@ -314,6 +314,10 @@ func init() {
 			"equal?": func(a ...Scmer) Scmer {
 				return reflect.DeepEqual(a[0], a[1])
 			},
+			"append": func(a ...Scmer) Scmer {
+				// cons a b: prepend item a to list b (construct list from item + tail)
+				return append([]Scmer{a[0]}, a[1:]...)
+			},
 			"cons": func(a ...Scmer) Scmer {
 				// cons a b: prepend item a to list b (construct list from item + tail)
 				switch car := a[0]; cdr := a[1].(type) {

@@ -2,16 +2,34 @@
 (define parse_sql (lambda (s) (begin
 
 	(define identifier (lambda (s) (match s
-		(regex "(?is)^`(.*)`(.*)" _ id rest) '(id rest)
-		(regex "(?is)^([a-zA-Z_][a-zA-Z_0-9]*)(.*)" _ id rest) '(id rest)
+		(regex "(?is)^(?:\\s|\\n)*`(.*)`(.*)" _ id rest) '(id rest)
+		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(.*)" _ id rest) '(id rest)
 		(error (concat "expected identifier, found " s))
+	)))
+
+	(define parenthesis (lambda (s) (match s
+		(regex "(?is)^(?:\\s|\\n)*\((?:\\s|\\n)*(.*)" _ rest) rest
+		(error (concat "expected (, found " s))
+	)))
+
+	(define tabledecl (lambda (s) (match s
+		(concat ")" rest) '() /* TODO: rest??? */
+		rest (match (identifier rest)
+			'(colname rest) (match (identifier rest)
+				'(typename rest) (match rest
+					(regex "(?s)([^,]*),(.*)" _ typeparams rest) (cons '(colname typename typeparams) (tabledecl rest))
+					(regex "(?s)([^,]*)\)(.*)" _ typeparams rest) '('(colname typename typeparams)) /* TODO: rest */
+					(error (concat "expected , or ) but found " rest))
+				)
+			)
+		)
 	)))
 
 	(match s
 		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql rest)
 		(concat "\n" rest) (parse_sql rest)
 		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql rest)
-		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) (concat "tablecreate " id ", decl: " rest) (error "expected identifier"))
+		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) (concat "tablecreate " id ", decl: " (tabledecl (parenthesis rest))) (error "expected identifier"))
 		(error (concat "unknown SQL syntax: " s))
 	)
 )))
