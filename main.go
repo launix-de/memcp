@@ -80,7 +80,6 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 					// go??
 					scm.Apply(a[1], []scm.Scmer{str});
 				}
-				//split := scm.String(a[2])
 			} else {
 				// read in whole
 				bytes, err := ioutil.ReadFile(filename)
@@ -88,7 +87,7 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 					panic(err)
 				}
 				if len(a) > 1 {
-					go scm.Apply(a[1], []scm.Scmer{string(bytes)});
+					scm.Apply(a[1], []scm.Scmer{string(bytes)});
 				} else {
 					return string(bytes)
 				}
