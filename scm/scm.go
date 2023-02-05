@@ -27,8 +27,9 @@ package scm
 
 import (
 	"fmt"
-	"reflect"
 	"bytes"
+	"strconv"
+	"reflect"
 )
 
 // TODO: (unquote string) -> symbol
@@ -57,6 +58,26 @@ func ToBool(v Scmer) bool {
 		default:
 			// []Scmer, native function, lambdas
 			return true
+	}
+}
+func ToInt(v Scmer) int {
+	switch vv := v.(type) {
+		case nil:
+			return 0
+		case string:
+			x, _ := strconv.Atoi(vv)
+			return x
+		case float64:
+			return int(vv)
+		case bool:
+			if vv {
+				return 1
+			} else {
+				return 0
+			}
+		default:
+			// []Scmer, native function, lambdas
+			return 1
 	}
 }
 

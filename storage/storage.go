@@ -53,7 +53,7 @@ func Init(en scm.Env) {
 			dimensions_ := coldef.([]scm.Scmer)[2].([]scm.Scmer)
 			dimensions := make([]int, len(dimensions_))
 			for i, d := range dimensions_ {
-				dimensions[i] = int(d.(float64))
+				dimensions[i] = scm.ToInt(d)
 			}
 			typeparams := scm.String(coldef.([]scm.Scmer)[3])
 			t.CreateColumn(colname, typename, dimensions, typeparams)
