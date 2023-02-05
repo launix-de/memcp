@@ -26,7 +26,7 @@ type StorageIndex struct {
 	cols []string // sort equal-cols alphabetically, so similar conditions are canonical
 	savings float64 // store the amount of time savings here -> add selectivity (outputted / size) on each
 	sortedItems StorageInt // we can do binary searches here
-	t *table
+	t *storageShard
 	inactive bool
 }
 
@@ -36,7 +36,7 @@ type columnboundaries struct{
 	upper scm.Scmer
 }
 
-func (t *table) iterateIndex(condition scm.Scmer) chan uint {
+func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
 	cols := make([]columnboundaries, 0, 4)
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	traverseCondition := func (condition scm.Scmer) {
@@ -125,13 +125,14 @@ func (t *table) iterateIndex(condition scm.Scmer) chan uint {
 	return result
 }
 
-func rebuildIndexes(t1 *table, t2 *table) {
+func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 	// TODO rebuild index in database rebuild
 	// check if indexes share same prefix -> leave out the shorter one
 	// savings = 0.9 * savings (decrease)
 	// according to memory pressure -> threshold for discard savings
 	// -> mark inactive if we can don't want to store this index
 	// if two indexes are prefixed, give up the shorter one and add to savings
+	// (also consider incremental indexes??)
 }
 
 // sort function for scmer
@@ -171,7 +172,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 				return
 			} else {
 				// rebuild index
-				fmt.Println("building index on", s.t.name, "over", s.cols)
+				fmt.Println("building index on", s.t.t.name, "over", s.cols)
 				tmp := make([]uint, s.t.main_count)
 				for i := uint(0); i < s.t.main_count; i++ {
 					tmp[i] = i // fill with natural order

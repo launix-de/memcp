@@ -56,11 +56,7 @@ func LoadJSON(filename string) {
 			t, ok = tables[s[7:]]
 			if !ok {
 				// new table
-				t = new(table)
-				t.name = s[7:]
-				tables[t.name] = t
-				t.columns = make(map[string]ColumnStorage)
-				t.deletions = make(map[uint]struct{})
+				t = CreateTable(s[7:])
 			}
 		} else if s[0] == '#' {
 			// comment
@@ -68,6 +64,15 @@ func LoadJSON(filename string) {
 			if t == nil {
 				panic("no table set")
 			} else {
+				if len(t.columns) == 0 {
+					// JSON with an unknown table format -> create dummy cols
+					var x dataset
+					json.Unmarshal([]byte(s), &x) // parse JSON
+					for c, _ := range x {
+						// create column with dummy storage for next rebuild
+						t.CreateColumn(c, "ANY", []int{}, "AUTO CREATED")
+					}
+				}
 				go func (t *table, s string) {
 					var x dataset
 					json.Unmarshal([]byte(s), &x) // parse JSON
