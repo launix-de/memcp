@@ -101,7 +101,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		case "eval":
 			// argument is a list with already evaluated values that we put into apply
 			arr := Eval(e[1], en).([]Scmer)
-			value = Apply(arr[0], arr[1:])
+			value = Eval(arr, en)
 		case "if":
 			if ToBool(Eval(e[1], en)) {
 				expression = e[2]
@@ -198,7 +198,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				}
 				return nil // no default value
 			default:
-				panic("Unknown procedure type - APPLY" + fmt.Sprint(p))
+				panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 			}
 		}
 	case nil:
@@ -238,7 +238,7 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 		}
 		return nil // no default value
 	default:
-		panic("Unknown procedure type - APPLY" + fmt.Sprint(p))
+		panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 	}
 	return
 }

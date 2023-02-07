@@ -18,25 +18,27 @@
 			'(colname rest) (match (identifier rest)
 				'(typename rest) (match rest
 					/* todo: allow white spaces in dimension */
-					(regex "^(?s)\\(([0-9]+),([0-9]+)\\)([^,]*),(.*)" _ dim1 dim2 typeparams rest) (cons '(colname typename '(dim1 dim2) typeparams) (tabledecl rest))
-					(regex "^(?s)\\(([0-9]+),([0-9]+)\\)([^,]*)\)(.*)" _ dim1 dim2 typeparams rest) '('(colname typename '(dim1 dim2) typeparams)) /* TODO: rest */
-					(regex "^(?s)\\(([0-9]+)\\)([^,]*),(.*)" _ dim1 typeparams rest) (cons '(colname typename '(dim1) typeparams) (tabledecl rest))
-					(regex "^(?s)\\(([0-9]+)\\)([^,]*)\)(.*)" _ dim1 typeparams rest) '('(colname typename '(dim1) typeparams)) /* TODO: rest */
-					(regex "^(?s)([^,]*),(.*)" _ typeparams rest) (cons '(colname typename '() typeparams) (tabledecl rest))
-					(regex "^(?s)([^,]*)\)(.*)" _ typeparams rest) '('(colname typename '() typeparams)) /* TODO: rest */
+					(regex "^(?s)\\(([0-9]+),([0-9]+)\\)([^,]*),(.*)" _ dim1 dim2 typeparams rest) (cons '((symbol "list") colname typename '((symbol "list") dim1 dim2) typeparams) (tabledecl rest))
+					(regex "^(?s)\\(([0-9]+),([0-9]+)\\)([^,]*)\)(.*)" _ dim1 dim2 typeparams rest) '('((symbol "list") colname typename '((symbol "list") dim1 dim2) typeparams)) /* TODO: rest */
+					(regex "^(?s)\\(([0-9]+)\\)([^,]*),(.*)" _ dim1 typeparams rest) (cons '((symbol "list") colname typename '((symbol "list") dim1) typeparams) (tabledecl rest))
+					(regex "^(?s)\\(([0-9]+)\\)([^,]*)\)(.*)" _ dim1 typeparams rest) '('((symbol "list") colname typename '((symbol "list") dim1) typeparams)) /* TODO: rest */
+					(regex "^(?s)([^,]*),(.*)" _ typeparams rest) (cons '((symbol "list") colname typename '((symbol "list")) typeparams) (tabledecl rest))
+					(regex "^(?s)([^,]*)\)(.*)" _ typeparams rest) '('((symbol "list") colname typename '((symbol "list")) typeparams)) /* TODO: rest */
 					(error (concat "expected , or ) but found " rest))
 				)
 			)
 		)
 	)))
 
+	/* eat a identifier from string */
 	(define expression (lambda (s) (match s
 		(regex "^([0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest)
 		(error (concat "could not parse " s))
 	)))
 
+	/* try to find other operators to add to the expression */
 	(define expression_extend (lambda (expr s) (match s
-		(regex "^([+\\-*\\/])(?:\\s|\\n)*(.*)" _ operator rest) (match (expression rest) '(expr2 rest) '('(operator expr expr2) rest))
+		(regex "^([+\\-*\\/])(?:\\s|\\n)*(.*)" _ operator rest) (match (expression rest) '(expr2 rest) '('((symbol operator) expr expr2) rest)) /* TODO: sort operator precedence */
 		'(expr s) /* no extension */
 	)))
 
@@ -44,6 +46,7 @@
 		(match (expression rest) '(expr rest) (begin
 			(print "expr=" expr)
 			(print "rest=" rest)
+			(print "result=" (eval expr))
 		))
 		(scan "test" "foo" (lambda () true) (lambda (bar) (print "bar=" bar)))
 	)))
@@ -52,7 +55,7 @@
 		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql schema rest)
 		(concat "\n" rest) (parse_sql schema rest)
 		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql schema rest)
-		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '(createtable schema id (tabledecl (parenthesis rest))) (error "expected identifier"))
+		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") schema id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
 		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest)
 		(error (concat "unknown SQL syntax: " s))
 	)
