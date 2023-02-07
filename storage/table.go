@@ -37,7 +37,7 @@ type table struct {
 }
 
 // TODO: schemas, databases
-var tables map[string]*table = make(map[string]*table)
+var tables map[string]map[string]*table = make(map[string]map[string]*table)
 
 func (d dataset) Get(key string) scm.Scmer {
 	for i := 0; i < len(d); i += 2 {
@@ -48,8 +48,19 @@ func (d dataset) Get(key string) scm.Scmer {
 	return nil
 }
 
-func CreateTable(name string) *table {
-	if _, ok := tables[name]; ok {
+func CreateDatabase(schema string) {
+	if _, ok := tables[schema]; ok {
+		panic("Database " + schema + " already exists")
+	}
+	tables[schema] = make(map[string]*table)
+}
+
+func DropDatabase(schema string) {
+	delete(tables, schema)
+}
+
+func CreateTable(schema, name string) *table {
+	if _, ok := tables[schema][name]; ok {
 		panic("Table " + name + " already exists")
 	}
 	t := new(table)
@@ -60,8 +71,13 @@ func CreateTable(name string) *table {
 	t.shards[0].t = t
 	t.shards[0].columns = make(map[string]ColumnStorage)
 	t.shards[0].deletions = make(map[uint]struct{})
-	tables[t.name] = t
+	tables[schema][t.name] = t
 	return t
+}
+
+func DropTable(schema, name string) {
+	// TODO: remove foreign keys etc.
+	delete(tables[schema], name)
 }
 
 func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo string) {

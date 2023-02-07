@@ -41,13 +41,21 @@ type ColumnStorage interface {
 func Init(en scm.Env) {
 	en.Vars["scan"] = func (a ...scm.Scmer) scm.Scmer {
 		// params: table, condition, map, reduce, reduceSeed
-		t := tables[scm.String(a[0])]
-		return t.scan(a[1], a[2])
+		t := tables[scm.String(a[0])][scm.String(a[1])]
+		return t.scan(a[2], a[3])
+	}
+	en.Vars["createdatabase"] = func (a ...scm.Scmer) scm.Scmer {
+		CreateDatabase(scm.String(a[0]))
+		return "ok"
+	}
+	en.Vars["dropdatabase"] = func (a ...scm.Scmer) scm.Scmer {
+		DropDatabase(scm.String(a[0]))
+		return "ok"
 	}
 	en.Vars["createtable"] = func (a ...scm.Scmer) scm.Scmer {
 		// params: tablename, (columndefs) mit (name, typ)
-		t := CreateTable(scm.String(a[0]))
-		for _, coldef := range(a[1].([]scm.Scmer)) {
+		t := CreateTable(scm.String(a[0]), scm.String(a[1]))
+		for _, coldef := range(a[2].([]scm.Scmer)) {
 			colname := scm.String(coldef.([]scm.Scmer)[0])
 			typename := scm.String(coldef.([]scm.Scmer)[1])
 			dimensions_ := coldef.([]scm.Scmer)[2].([]scm.Scmer)
@@ -61,19 +69,29 @@ func Init(en scm.Env) {
 		}
 		return "ok"
 	}
+	en.Vars["droptable"] = func (a ...scm.Scmer) scm.Scmer {
+		DropTable(scm.String(a[0]), scm.String(a[1]))
+		return "ok"
+	}
+	en.Vars["insert"] = func (a ...scm.Scmer) scm.Scmer {
+		tables[scm.String(a[0])][scm.String(a[1])].Insert(dataset(a[2].([]scm.Scmer)))
+		return "ok"
+	}
 	en.Vars["stat"] = func (a ...scm.Scmer) scm.Scmer {
 		return PrintMemUsage()
 	}
 	en.Vars["rebuild"] = func (a ...scm.Scmer) scm.Scmer {
 		start := time.Now()
 
-		for _, t := range tables {
-			t.mu.Lock() // schema lock
-			for i, s := range t.shards {
-				// TODO: go + chan done
-				t.shards[i] = s.rebuild()
+		for _, database := range tables {
+			for _, t := range database {
+				t.mu.Lock() // schema lock
+				for i, s := range t.shards {
+					// TODO: go + chan done
+					t.shards[i] = s.rebuild()
+				}
+				t.mu.Unlock() // TODO: do this after chan done??
 			}
-			t.mu.Unlock() // TODO: do this after chan done??
 		}
 
 		return fmt.Sprint(time.Since(start))
@@ -83,17 +101,17 @@ func Init(en scm.Env) {
 		start := time.Now()
 
 		delimiter := ";"
-		if len(a) > 2 {
-			delimiter = scm.String(a[2])
+		if len(a) > 3 {
+			delimiter = scm.String(a[3])
 		}
-		LoadCSV(scm.String(a[0]), scm.String(a[1]), delimiter)
+		LoadCSV(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]), delimiter)
 
 		return fmt.Sprint(time.Since(start))
 	}
 	en.Vars["loadJSON"] = func (a ...scm.Scmer) scm.Scmer {
 		start := time.Now()
 
-		LoadJSON(scm.String(a[0]))
+		LoadJSON(scm.String(a[0]), scm.String(a[1]))
 
 		return fmt.Sprint(time.Since(start))
 	}

@@ -21,7 +21,7 @@ import "bufio"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 
-func LoadCSV(table, filename, delimiter string) {
+func LoadCSV(schema, table, filename, delimiter string) {
 	f, _ := os.Open(filename)
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -36,7 +36,7 @@ func LoadCSV(table, filename, delimiter string) {
 		close(lines)
 	}()
 
-	t, ok := tables[table]
+	t, ok := tables[schema][table]
 	if !ok {
 		panic("table " + table + " does not exist")
 	}

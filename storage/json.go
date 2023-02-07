@@ -33,7 +33,7 @@ import "bufio"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
-func LoadJSON(filename string) {
+func LoadJSON(schema, filename string) {
 	f, _ := os.Open(filename)
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -54,10 +54,10 @@ func LoadJSON(filename string) {
 			// ignore
 		} else if s[0:7] == "#table " {
 			var ok bool
-			t, ok = tables[s[7:]]
+			t, ok = tables[schema][s[7:]]
 			if !ok {
 				// new table
-				t = CreateTable(s[7:])
+				t = CreateTable(schema, s[7:])
 			}
 		} else if s[0] == '#' {
 			// comment

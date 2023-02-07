@@ -1,5 +1,5 @@
 
-(define parse_sql (lambda (s) (begin
+(define parse_sql (lambda (schema s) (begin
 
 	(define identifier (lambda (s) (match s
 		(regex "(?is)^(?:\\s|\\n)*`(.*)`(.*)" _ id rest) '(id rest)
@@ -31,13 +31,17 @@
 	)))
 
 	(match s
-		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql rest)
-		(concat "\n" rest) (parse_sql rest)
-		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql rest)
-		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '(createtable id (tabledecl (parenthesis rest))) (error "expected identifier"))
+		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql schema rest)
+		(concat "\n" rest) (parse_sql schema rest)
+		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql schema rest)
+		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '(createtable schema id (tabledecl (parenthesis rest))) (error "expected identifier"))
 		(error (concat "unknown SQL syntax: " s))
 	)
 )))
+
+/* TODO: session state handling -> which schema */
+(createdatabase "test")
+(set schema "test")
 
 /* http hook for handling SQL */
 (define http_handler (begin
@@ -48,7 +52,7 @@
 			(concat "/sql/" rest) (begin
 				((res "status") 200)
 				((res "header") "Content-Type" "text/plain")
-				(print (parse_sql rest))
+				(print (parse_sql schema rest))
 				((res "println") (concat "TODO: query " rest))
 			)
 			/* default */
@@ -62,7 +66,7 @@
 	(lambda (schema) true) /* switch schema */
 	(lambda (sql) (begin /* sql */
 		(print "received query: " sql)
-		(print (parse_sql sql))
+		(print (parse_sql schema sql))
 		"TODO: execute"
 	))
 )
