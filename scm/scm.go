@@ -364,6 +364,10 @@ func init() {
 				}
 				return b.String()
 			},
+			"simplify": func(a ...Scmer) Scmer {
+				// turn string to number or so
+				return Simplify(String(a[0]))
+			},
 			"true": true,
 			"false": false,
 			"error": func (a ...Scmer) Scmer {

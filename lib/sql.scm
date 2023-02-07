@@ -30,17 +30,38 @@
 		)
 	)))
 
+	(define expression (lambda (s) (match s
+		(regex "^([0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest)
+		(error (concat "could not parse " s))
+	)))
+
+	(define expression_extend (lambda (expr s) (match s
+		(regex "^([+\\-*\\/])(?:\\s|\\n)*(.*)" _ operator rest) (match (expression rest) '(expr2 rest) '('(operator expr expr2) rest))
+		'(expr s) /* no extension */
+	)))
+
+	(define select (lambda (rest) (begin
+		(match (expression rest) '(expr rest) (begin
+			(print "expr=" expr)
+			(print "rest=" rest)
+		))
+		(scan "test" "foo" (lambda () true) (lambda (bar) (print "bar=" bar)))
+	)))
+
 	(match s
 		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql schema rest)
 		(concat "\n" rest) (parse_sql schema rest)
 		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql schema rest)
 		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '(createtable schema id (tabledecl (parenthesis rest))) (error "expected identifier"))
+		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest)
 		(error (concat "unknown SQL syntax: " s))
 	)
 )))
 
 /* TODO: session state handling -> which schema */
 (createdatabase "test")
+(createtable "test" "foo" '('("bar" "int" '() "")))
+(insert "test" "foo" '("bar" 12))
 (set schema "test")
 
 /* http hook for handling SQL */
