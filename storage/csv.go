@@ -45,10 +45,11 @@ func LoadCSV(table, filename, delimiter string) {
 			// ignore
 		} else {
 			arr := strings.Split(s, delimiter)
-			x := make(map[string]scm.Scmer)
+			x := make([]scm.Scmer, 2*len(t.columns))
 			for i, col := range t.columns {
+				x[2*i] = col.name
 				if i < len(arr) {
-					x[col.name] = scm.Simplify(arr[i])
+					x[2*i+1] = scm.Simplify(arr[i])
 				}
 			}
 			t.Insert(x)

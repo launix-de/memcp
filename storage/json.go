@@ -31,6 +31,7 @@ JSON storage on disk for persistence:
 import "os"
 import "bufio"
 import "encoding/json"
+import "github.com/launix-de/memcp/scm"
 
 func LoadJSON(filename string) {
 	f, _ := os.Open(filename)
@@ -66,7 +67,7 @@ func LoadJSON(filename string) {
 			} else {
 				if len(t.columns) == 0 {
 					// JSON with an unknown table format -> create dummy cols
-					var x dataset
+					var x map[string]scm.Scmer
 					json.Unmarshal([]byte(s), &x) // parse JSON
 					for c, _ := range x {
 						// create column with dummy storage for next rebuild
@@ -74,8 +75,15 @@ func LoadJSON(filename string) {
 					}
 				}
 				go func (t *table, s string) {
-					var x dataset
-					json.Unmarshal([]byte(s), &x) // parse JSON
+					var y map[string]scm.Scmer
+					json.Unmarshal([]byte(s), &y) // parse JSON
+					x := make([]scm.Scmer, 2*len(y))
+					i := 0
+					for k, v := range y {
+						x[i] = k
+						x[i+1] = v
+						i += 2
+					}
 					t.Insert(x) // put into table
 				}(t, s)
 			}

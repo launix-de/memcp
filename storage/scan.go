@@ -81,7 +81,7 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer) string {
 		}
 		// prepare&call condition function
 		for i, k := range cargs { // iterate over columns
-			cdataset[i] = item[string(k.(scm.Symbol))] // fill value
+			cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
 		}
 		// check condition
 		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
@@ -90,7 +90,7 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer) string {
 
 		// prepare&call map function
 		for i, k := range margs { // iterate over columns
-			mdataset[i] = item[string(k.(scm.Symbol))] // fill value
+			mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
 		}
 		scm.Apply(callback, mdataset) // TODO: output monad
 	}

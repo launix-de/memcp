@@ -19,7 +19,7 @@ package storage
 import "sync"
 import "github.com/launix-de/memcp/scm"
 
-type dataset map[string]scm.Scmer
+type dataset []scm.Scmer
 type column struct {
 	name string
 	typ string
@@ -38,6 +38,15 @@ type table struct {
 
 // TODO: schemas, databases
 var tables map[string]*table = make(map[string]*table)
+
+func (d dataset) Get(key string) scm.Scmer {
+	for i := 0; i < len(d); i += 2 {
+		if d[i] == key {
+			return d[i+1]
+		}
+	}
+	return nil
+}
 
 func CreateTable(name string) *table {
 	if _, ok := tables[name]; ok {

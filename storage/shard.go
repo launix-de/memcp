@@ -94,7 +94,7 @@ func (t *storageShard) rebuild() *storageShard {
 						continue
 					}
 					// scan
-					newcol.scan(i, t.inserts[idx][col])
+					newcol.scan(i, t.inserts[idx].Get(col))
 					i++
 				}
 				newcol2 := newcol.proposeCompression()
@@ -129,7 +129,7 @@ func (t *storageShard) rebuild() *storageShard {
 					continue
 				}
 				// build
-				newcol.build(i, item[col])
+				newcol.build(i, item.Get(col))
 				i++
 			}
 			newcol.finish()
