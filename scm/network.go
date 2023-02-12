@@ -92,6 +92,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		},
 		"println", func (a ...Scmer) Scmer {
 			// result-print-function (TODO: better interface with headers, JSON support etc.)
+			// TODO: if a[0] is []Scmer -> build JSON object
 			io.WriteString(res, String(a[0]) + "\n")
 			return "ok"
 		},

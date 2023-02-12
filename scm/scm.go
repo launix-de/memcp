@@ -374,7 +374,7 @@ func init() {
 				panic(a[0])
 			},
 			"symbol": func (a ...Scmer) Scmer {
-				return Symbol(a[0].(string))
+				return Symbol(String(a[0]))
 			},
 			"list": Eval(Read(
 				"(lambda z z)"),

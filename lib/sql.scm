@@ -1,5 +1,5 @@
 
-(define parse_sql (lambda (schema s) (begin
+(define parse_sql (lambda (s) (begin
 
 	(define identifier (lambda (s) (match s
 		(regex "(?is)^(?:\\s|\\n)*`(.*)`(.*)" _ id rest) '(id rest)
@@ -42,14 +42,27 @@
 		'(expr s) /* no extension */
 	)))
 
-	/* return value: '("SELECT" '('(tblalias schema table) ...) '(alias expr ...)) */
-	/* (eval expr) -> führt aus */
+	/* build queryplan from parsed query */
+	(define build_queryplan (lambda (tables fields) (begin
+		(define collect_columns (lambda (columns)
+			(match columns
+				(cons colid (cons colvalue rest)) (cons colid (cons colvalue (collect_columns rest)))
+				'()
+			)
+		))
+		(match tables
+			'('("1x1" "system" "1x1")) '((symbol "resultrow") (cons (symbol "list") (collect_columns fields)))
+			/* else: scan tables and join */
+			'((quote resultrow) '((quote list) "TODO" "FROM"))
+		)
+	)))
+	/* compile select */
 	(define select (lambda (rest fields) (begin
 		(define parse_afterexpr (lambda (expr id rest) (match rest
-			/* no FROM */ "" '("SELECT" '('("1x1" "system" "1x1")) (append fields id expr))
+			/* no FROM */ "" (build_queryplan '('("1x1" "system" "1x1")) (append fields id expr))
 			/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest (append fields id expr))
 			/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
-			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (error (concat "TODO: FROM " rest))
+			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (error (concat "TODO: FROM " rest)) /* TODO: FROM, WHERE, GROUP usw. */
 			/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
 		)))
 
@@ -60,10 +73,10 @@
 	)))
 
 	(match s
-		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql schema rest)
-		(concat "\n" rest) (parse_sql schema rest)
-		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql schema rest)
-		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") schema id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
+		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql rest)
+		(concat "\n" rest) (parse_sql rest)
+		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql rest)
+		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") (quote schema) id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
 		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest '())
 		(error (concat "unknown SQL syntax: " s))
 	)
@@ -84,11 +97,10 @@
 			(concat "/sql/" rest) (begin
 				((res "status") 200)
 				((res "header") "Content-Type" "text/plain")
-				(define formula (parse_sql schema rest))
+				(define formula (parse_sql rest))
 				(define resultrow (res "println"))
-				/* TODO: (eval formula) */
-				(print "sql=" formula)
-				((res "println") (concat "TODO: query " rest))
+				(print "received query: " rest)
+				(eval formula)
 			)
 			/* default */
 			(old_handler req res))
@@ -101,10 +113,9 @@
 	(lambda (schema) true) /* switch schema */
 	(lambda (sql resultrow_sql) (begin /* sql */
 		(print "received query: " sql)
-		(define formula (parse_sql schema sql))
+		(define formula (parse_sql sql))
 		(define resultrow resultrow_sql)
-		/*(eval formula)*/
-		(resultrow '("sql=" formula))
+		(eval formula)
 	))
 )
 (print "MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)")

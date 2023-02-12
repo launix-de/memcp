@@ -1,8 +1,9 @@
 package scm
 
 import "fmt"
-import "runtime"
 import "errors"
+import "runtime"
+import "runtime/debug"
 import "github.com/launix-de/go-mysqlstack/driver"
 import "github.com/launix-de/go-mysqlstack/xlog"
 import "github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
@@ -104,6 +105,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		defer func () {
 			if r := recover(); r != nil {
 				myerr = fmt.Errorf("%v", r) // transmit r for error
+				debug.PrintStack()
 			}
 		}()
 		Apply(m.querycallback, []Scmer{query, func (a... Scmer) Scmer {
