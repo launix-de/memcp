@@ -95,7 +95,15 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 							return false // non-strings are not matching
 					}
 				case Symbol("cons"):
-					panic("TODO: cons matching")
+					switch v := val.(type) {
+						case []Scmer: // only matches on arrays
+							if len(v) == 0 {
+								return false // empty list does not match cons
+							}
+							return match(v[0], p[1], en) && match(v[1:], p[2], en)
+						default:
+							return false
+					}
 				case Symbol("regex"):
 					// syntax: (match "v=5" (regex "^v=(.*)" _ v) (print "v is " v))
 					// for multiline parsing, use (?ms:<REGEXP>)
