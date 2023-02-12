@@ -138,6 +138,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			return "ok"
 		},})
 	}()
+	if myerr != nil {
+		return myerr
+	}
 	// flush the rest
 	if result.State == sqltypes.RStateFields {
 		result.State = sqltypes.RStateNone // full send
