@@ -82,6 +82,7 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 	return nil
 }
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) error {
+	var myerr error = nil
 	if query == "select @@version_comment limit 1" {
 		callback(&sqltypes.Result {
 			Fields: []*querypb.Field {
@@ -93,16 +94,61 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		})
 		return nil
 	}
+	colmap := make(map[string]int)
+	// TODO: sqltypes.RStateNone for INSERTs
+	var result sqltypes.Result
+	result.State = sqltypes.RStateFields
+	result.Rows = make([][]sqltypes.Value, 0, 1024)
 	// result from scheme
-	result := Apply(m.querycallback, []Scmer{query,}).(string)
-	callback(&sqltypes.Result {
-		Fields: []*querypb.Field {
-			{ Name: "ok", Type: querypb.Type_BIT },
-		},
-		Rows: [][]sqltypes.Value {
-			{ sqltypes.MakeTrusted(querypb.Type_BIT, []byte(result)) },
-		},
-	})
-	return nil
+	func () {
+		defer func () {
+			if r := recover(); r != nil {
+				myerr = fmt.Errorf("%v", r) // transmit r for error
+			}
+		}()
+		Apply(m.querycallback, []Scmer{query, func (a... Scmer) Scmer {
+			// function resultrow(item)
+			item := a[0].([]Scmer)
+			newitem := make([]sqltypes.Value, len(result.Fields))
+			for i := 0; i < len(item); i += 2 {
+				colname := String(item[i])
+				colid, ok := colmap[colname]
+				if ok {
+					newitem[colid] = sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(String(item[i+1])))
+				} else {
+					// add row to result
+					colmap[colname] = len(result.Fields)
+					newcol := new(querypb.Field)
+					newcol.Name = colname
+					newcol.Type = querypb.Type_TEXT
+					result.Fields = append(result.Fields, newcol)
+					newitem = append(newitem, sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(String(item[i+1]))))
+				}
+			}
+			if len(result.Rows) == cap(result.Rows) {
+				// flush
+				callback(&result)
+				if result.State == sqltypes.RStateFields {
+					result.State = sqltypes.RStateRows
+					callback(&result)
+				}
+				result.Rows = result.Rows[0:0] // slice off rest of buffer to restart
+			}
+			result.Rows = append(result.Rows, newitem)
+			return "ok"
+		},})
+	}()
+	// flush the rest
+	if result.State == sqltypes.RStateFields {
+		result.State = sqltypes.RStateNone // full send
+		// TODO: result.InsertID, result.RowsAffected,
+		callback(&result)
+	} else {
+		// rest + finish
+		callback(&result)
+		result.State = sqltypes.RStateFinished
+		callback(&result)
+	}
+	return myerr
 }
 

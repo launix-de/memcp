@@ -84,7 +84,10 @@
 			(concat "/sql/" rest) (begin
 				((res "status") 200)
 				((res "header") "Content-Type" "text/plain")
-				(print (parse_sql schema rest))
+				(define formula (parse_sql schema rest))
+				(define resultrow (res "println"))
+				/* TODO: (eval formula) */
+				(print "sql=" formula)
 				((res "println") (concat "TODO: query " rest))
 			)
 			/* default */
@@ -96,10 +99,12 @@
 (mysql 3307
 	(lambda (username) "TODO: return pwhash") /* auth */
 	(lambda (schema) true) /* switch schema */
-	(lambda (sql) (begin /* sql */
+	(lambda (sql resultrow_sql) (begin /* sql */
 		(print "received query: " sql)
-		(print (parse_sql schema sql))
-		"TODO: execute"
+		(define formula (parse_sql schema sql))
+		(define resultrow resultrow_sql)
+		/*(eval formula)*/
+		(resultrow '("sql=" formula))
 	))
 )
 (print "MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)")
