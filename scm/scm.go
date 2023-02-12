@@ -336,8 +336,8 @@ func init() {
 				return reflect.DeepEqual(a[0], a[1])
 			},
 			"append": func(a ...Scmer) Scmer {
-				// cons a b: prepend item a to list b (construct list from item + tail)
-				return append([]Scmer{a[0]}, a[1:]...)
+				// append a b ...: append item b to list a (construct list from item + tail)
+				return append(a[0].([]Scmer), a[1:]...)
 			},
 			"cons": func(a ...Scmer) Scmer {
 				// cons a b: prepend item a to list b (construct list from item + tail)

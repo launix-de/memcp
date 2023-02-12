@@ -42,13 +42,21 @@
 		'(expr s) /* no extension */
 	)))
 
-	(define select (lambda (rest) (begin
-		(match (expression rest) '(expr rest) (begin
-			(print "expr=" expr)
-			(print "rest=" rest)
-			(print "result=" (eval expr))
-		))
-		(scan "test" "foo" (lambda () true) (lambda (bar) (print "bar=" bar)))
+	/* return value: '("SELECT" '('(tblalias schema table) ...) '(alias expr ...)) */
+	/* (eval expr) -> führt aus */
+	(define select (lambda (rest fields) (begin
+		(define parse_afterexpr (lambda (expr id rest) (match rest
+			/* no FROM */ "" '("SELECT" '('("1x1" "system" "1x1")) (append fields id expr))
+			/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest (append fields id expr))
+			/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
+			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (error (concat "TODO: FROM " rest))
+			/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
+		)))
+
+		/* after select, there must be an expression */
+		(match
+			(expression rest) '(expr rest) (parse_afterexpr expr (concat expr) rest)
+			(error (concat "expected expression, found " rest)))
 	)))
 
 	(match s
@@ -56,7 +64,7 @@
 		(concat "\n" rest) (parse_sql schema rest)
 		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql schema rest)
 		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") schema id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
-		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest)
+		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest '())
 		(error (concat "unknown SQL syntax: " s))
 	)
 )))
