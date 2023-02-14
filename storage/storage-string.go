@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-//import "fmt"
+import "fmt"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 
@@ -31,7 +31,7 @@ type StorageString struct {
 }
 
 func (s *StorageString) String() string {
-	return "string-dict"
+	return fmt.Sprintf("string-dict[%d]", len(s.dictionary))
 }
 
 func (s *StorageString) getValue(i uint) scm.Scmer {

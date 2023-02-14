@@ -106,9 +106,6 @@ func (t *storageShard) rebuild() *storageShard {
 					newcol = newcol2
 				}
 			}
-			b.WriteString(col) // colname
-			b.WriteString(" ")
-			b.WriteString(newcol.String()) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
 			// build phase
 			newcol.init(i)
 			i = 0
@@ -135,6 +132,11 @@ func (t *storageShard) rebuild() *storageShard {
 			newcol.finish()
 			result.columns[col] = newcol
 			result.main_count = i
+
+			// write statistics
+			b.WriteString(col) // colname
+			b.WriteString(" ")
+			b.WriteString(newcol.String()) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
 		}
 		b.WriteString(") -> ")
 		b.WriteString(fmt.Sprint(result.main_count))
