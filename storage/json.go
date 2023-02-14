@@ -74,7 +74,7 @@ func LoadJSON(schema, filename string) {
 						t.CreateColumn(c, "ANY", []int{}, "AUTO CREATED")
 					}
 				}
-				go func (t *table, s string) {
+				func (t *table, s string) {
 					var y map[string]scm.Scmer
 					json.Unmarshal([]byte(s), &y) // parse JSON
 					x := make([]scm.Scmer, 2*len(y))

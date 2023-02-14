@@ -16,9 +16,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "math/bits"
 import "github.com/launix-de/memcp/scm"
-import "fmt"
 
 type StorageInt struct {
 	chunk []uint64
@@ -148,6 +148,5 @@ func (s *StorageInt) finish() {
 }
 func (s *StorageInt) proposeCompression() ColumnStorage {
 	// dont't propose another pass
-	// TODO: propose sequence compression in the form (recordid, startvalue, length) using binary search on recordid for reading
 	return nil
 }

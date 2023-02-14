@@ -19,12 +19,15 @@ package storage
 import "math"
 import "github.com/launix-de/memcp/scm"
 
+// main type for storage: can store any value, is inefficient but does type analysis how to optimize
 type StorageSCMER struct {
 	values []scm.Scmer
 	onlyInt bool
 	hasString bool
 	count uint
-	null uint
+	null uint // amount of NULL values (sparse map!)
+	numSeq uint // sequence statistics
+	last1, last2 int64 // sequence statistics
 }
 
 func (s *StorageSCMER) String() string {
@@ -41,6 +44,15 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 		case float64:
 			if _, f := math.Modf(v); f != 0.0 {
 				s.onlyInt = false
+			} else {
+				v := toInt(value)
+				// analyze whether there is a sequence
+				if v - s.last1 == s.last1 - s.last2 {
+					s.numSeq = s.numSeq + 1 // count as sequencable
+				}
+				// push sequence detector
+				s.last2 = s.last1
+				s.last1 = v
 			}
 		case string:
 			s.onlyInt = false
@@ -77,6 +89,10 @@ func (s *StorageSCMER) proposeCompression() ColumnStorage {
 		return new(StorageString)
 	}
 	if s.onlyInt {
+		// propose sequence compression in the form (recordid, startvalue, length, stride) using binary search on recordid for reading
+		if s.count > 5 && 2 * (s.count - s.numSeq) < s.count {
+			return new(StorageSeq)
+		}
 		return new(StorageInt)
 	}
 	if s.null * 50 > s.count * 100 {
