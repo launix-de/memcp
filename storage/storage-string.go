@@ -31,20 +31,34 @@ type StorageString struct {
 	sb strings.Builder
 	reverseMap map[string][3]uint
 	count uint
+	allsize int
+	nodict bool // disable values array
 }
 
 func (s *StorageString) String() string {
+	if s.nodict {
+		return fmt.Sprintf("string-buffer[%d]", len(s.dictionary))
+	}
 	return fmt.Sprintf("string-dict[%d]", s.count)
 }
 
 func (s *StorageString) getValue(i uint) scm.Scmer {
-	idx := s.values.getValueUInt(i)
-	if s.values.hasNull && idx == s.values.null {
-		return nil
+	if s.nodict {
+		start := s.starts.getValueUInt(i)
+		if s.starts.hasNull && start == s.starts.null {
+			return nil
+		}
+		len_ := s.lens.getValueUInt(i)
+		return s.dictionary[start:start+len_]
+	} else {
+		idx := uint(s.values.getValueUInt(i))
+		if s.values.hasNull && idx == uint(s.values.null) {
+			return nil
+		}
+		start := s.starts.getValueUInt(idx)
+		len_ := s.lens.getValueUInt(idx)
+		return s.dictionary[start:start+len_]
 	}
-	start := s.starts.getValueUInt(uint(idx))
-	len_ := s.lens.getValueUInt(uint(idx))
-	return s.dictionary[start:start+len_]
 }
 
 func (s *StorageString) prepare() {
@@ -62,38 +76,62 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 			v = v_
 		default:
 			// NULL
-			s.values.scan(i, nil)
+			if !s.nodict {
+				s.values.scan(i, nil)
+			}
 			return
 	}
-	start, ok := s.reverseMap[v]
-	if ok {
-		// reuse of string
-	} else {
-		// learn
-		start[0] = s.count
-		start[1] = uint(s.sb.Len())
-		start[2] = uint(len(v))
-		s.sb.WriteString(v)
-		s.starts.scan(start[0], start[1])
-		s.lens.scan(start[0], start[2])
-		s.reverseMap[v] = start
-		s.count = s.count + 1
+	if i == 100 && len(s.reverseMap) > 99 {
+		// nearly no repetition in the first 100 items: save the time to build reversemap
+		s.nodict = true
+		s.reverseMap = nil
+		s.sb.Reset()
+		if s.values.hasNull {
+			s.starts.scan(0, nil) // learn NULL
+		}
+		// build will fill our stringbuffer
 	}
-	s.values.scan(i, start[0])
+	s.allsize = s.allsize + len(v)
+	if s.nodict {
+		s.starts.scan(i, s.allsize)
+		s.lens.scan(i, len(v))
+	} else {
+		start, ok := s.reverseMap[v]
+		if ok {
+			// reuse of string
+		} else {
+			// learn
+			start[0] = s.count
+			start[1] = uint(s.sb.Len())
+			start[2] = uint(len(v))
+			s.sb.WriteString(v)
+			s.starts.scan(start[0], start[1])
+			s.lens.scan(start[0], start[2])
+			s.reverseMap[v] = start
+			s.count = s.count + 1
+		}
+		s.values.scan(i, start[0])
+	}
 }
 func (s *StorageString) init(i uint) {
-	// allocate
-	s.dictionary = s.sb.String() // extract one big slice with all strings (no extra memory structure)
-	s.sb.Reset() // free the memory
-	// prefixed strings are not accounted with that, but maybe this could be checked later??
-	s.values.init(i)
-	s.starts.init(s.count)
-	s.lens.init(s.count)
-	// take over dictionary
-	for _, start := range s.reverseMap {
-		// we read the value from dictionary, so we can free up all the single-strings
-		s.starts.build(start[0], start[1])
-		s.lens.build(start[0], start[2])
+	if s.nodict {
+		// do not init values, sb andsoon
+		s.starts.init(i)
+		s.lens.init(i)
+	} else {
+		// allocate
+		s.dictionary = s.sb.String() // extract one big slice with all strings (no extra memory structure)
+		s.sb.Reset() // free the memory
+		// prefixed strings are not accounted with that, but maybe this could be checked later??
+		s.values.init(i)
+		// take over dictionary
+		s.starts.init(s.count)
+		s.lens.init(s.count)
+		for _, start := range s.reverseMap {
+			// we read the value from dictionary, so we can free up all the single-strings
+			s.starts.build(start[0], start[1])
+			s.lens.build(start[0], start[2])
+		}
 	}
 }
 func (s *StorageString) build(i uint, value scm.Scmer) {
@@ -104,16 +142,31 @@ func (s *StorageString) build(i uint, value scm.Scmer) {
 			v = v_
 		default:
 			// NULL = 1 1
-			s.values.build(i, nil)
+			if s.nodict {
+				s.starts.build(i, nil)
+			} else {
+				s.values.build(i, nil)
+			}
 			return
 	}
-	start := s.reverseMap[v]
-	// write start+end into sub storage maps
-	s.values.build(i, start[0])
+	if s.nodict {
+		s.starts.build(i, s.sb.Len())
+		s.lens.build(i, len(v))
+		s.sb.WriteString(v)
+	} else {
+		start := s.reverseMap[v]
+		// write start+end into sub storage maps
+		s.values.build(i, start[0])
+	}
 }
 func (s *StorageString) finish() {
-	s.reverseMap = nil
-	s.values.finish()
+	if s.nodict {
+		s.dictionary = s.sb.String()
+		s.sb.Reset()
+	} else {
+		s.reverseMap = nil
+		s.values.finish()
+	}
 	s.starts.finish()
 	s.lens.finish()
 }
