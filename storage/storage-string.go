@@ -21,33 +21,38 @@ import "strings"
 import "github.com/launix-de/memcp/scm"
 
 type StorageString struct {
-	dictionary string
 	// StorageInt for dictionary entries
+	values StorageInt
+	// the dictionary: bitcompress all start+end markers; use one big string for all values that is sliced of from
+	dictionary string
 	starts StorageInt
-	ends StorageInt
+	lens StorageInt
 	// helpers
 	sb strings.Builder
-	reverseMap map[string]uint
+	reverseMap map[string][3]uint
+	count uint
 }
 
 func (s *StorageString) String() string {
-	return fmt.Sprintf("string-dict[%d]", len(s.dictionary))
+	return fmt.Sprintf("string-dict[%d]", s.count)
 }
 
 func (s *StorageString) getValue(i uint) scm.Scmer {
-	a := s.starts.getValueUInt(i)
-	b := s.ends.getValueUInt(i)
-	if a == 1 && b == 1 {
-		return nil // NULL representation
+	idx := s.values.getValueUInt(i)
+	if s.values.hasNull && idx == s.values.null {
+		return nil
 	}
-	return s.dictionary[a:b] // string slice
+	start := s.starts.getValueUInt(uint(idx))
+	len_ := s.lens.getValueUInt(uint(idx))
+	return s.dictionary[start:start+len_]
 }
 
 func (s *StorageString) prepare() {
 	// set up scan
 	s.starts.prepare()
-	s.ends.prepare()
-	s.reverseMap = make(map[string]uint)
+	s.lens.prepare()
+	s.values.prepare()
+	s.reverseMap = make(map[string][3]uint)
 }
 func (s *StorageString) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
@@ -57,35 +62,39 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 			v = v_
 		default:
 			// NULL
-			s.starts.scan(i, 1)
-			s.ends.scan(i, 1)
+			s.values.scan(i, nil)
 			return
-	}
-	if v == "" {
-		// empty string = 0 0
-		s.starts.scan(i, 0)
-		s.ends.scan(i, 0)
-		return
 	}
 	start, ok := s.reverseMap[v]
 	if ok {
 		// reuse of string
 	} else {
 		// learn
-		start = uint(s.sb.Len())
+		start[0] = s.count
+		start[1] = uint(s.sb.Len())
+		start[2] = uint(len(v))
 		s.sb.WriteString(v)
+		s.starts.scan(start[0], start[1])
+		s.lens.scan(start[0], start[2])
 		s.reverseMap[v] = start
+		s.count = s.count + 1
 	}
-	s.starts.scan(i, float64(start))
-	s.ends.scan(i, float64(start + uint(len(v))))
+	s.values.scan(i, start[0])
 }
 func (s *StorageString) init(i uint) {
 	// allocate
-	s.dictionary = s.sb.String() // extract string from stringbuilder
+	s.dictionary = s.sb.String() // extract one big slice with all strings (no extra memory structure)
 	s.sb.Reset() // free the memory
 	// prefixed strings are not accounted with that, but maybe this could be checked later??
-	s.starts.init(i)
-	s.ends.init(i)
+	s.values.init(i)
+	s.starts.init(s.count)
+	s.lens.init(s.count)
+	// take over dictionary
+	for _, start := range s.reverseMap {
+		// we read the value from dictionary, so we can free up all the single-strings
+		s.starts.build(start[0], start[1])
+		s.lens.build(start[0], start[2])
+	}
 }
 func (s *StorageString) build(i uint, value scm.Scmer) {
 	// store
@@ -95,25 +104,18 @@ func (s *StorageString) build(i uint, value scm.Scmer) {
 			v = v_
 		default:
 			// NULL = 1 1
-			s.starts.build(i, 1)
-			s.ends.build(i, 1)
+			s.values.build(i, nil)
 			return
-	}
-	if v == "" {
-		// empty string = 0 0
-		s.starts.build(i, 0)
-		s.ends.build(i, 0)
-		return
 	}
 	start := s.reverseMap[v]
 	// write start+end into sub storage maps
-	s.starts.build(i, float64(start))
-	s.ends.build(i, float64(start + uint(len(v))))
+	s.values.build(i, start[0])
 }
 func (s *StorageString) finish() {
-	s.reverseMap = make(map[string]uint) // free memory for reverse
+	s.reverseMap = nil
+	s.values.finish()
 	s.starts.finish()
-	s.ends.finish()
+	s.lens.finish()
 }
 func (s *StorageString) proposeCompression() ColumnStorage {
 	// dont't propose another pass
