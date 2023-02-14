@@ -32,10 +32,15 @@ func toInt(x scm.Scmer) int64 {
 	switch v := x.(type) {
 		case float64:
 			return int64(v)
+		case int:
+			return int64(v)
 		case uint:
+			return int64(v)
+		case uint64:
 			return int64(v)
 		case int64:
 			return v
+		// TODO: 8 bit, 16 bit, 32 bit
 		default:
 			return 0
 	}
