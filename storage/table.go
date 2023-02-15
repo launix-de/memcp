@@ -16,6 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "sync"
 import "github.com/launix-de/memcp/scm"
 
@@ -35,6 +36,8 @@ type table struct {
 	// storage
 	shards []*storageShard
 }
+
+const max_shardsize = 65536 // dont overload the shards to get a responsive parallel full table scan
 
 // TODO: schemas, databases
 var tables map[string]map[string]*table = make(map[string]map[string]*table)
@@ -66,11 +69,7 @@ func CreateTable(schema, name string) *table {
 	t := new(table)
 	t.name = name
 	t.shards = make([]*storageShard, 1)
-	// TODO: refactor CreateShard
-	t.shards[0] = new(storageShard)
-	t.shards[0].t = t
-	t.shards[0].columns = make(map[string]ColumnStorage)
-	t.shards[0].deletions = make(map[uint]struct{})
+	t.shards[0] = NewShard(t)
 	tables[schema][t.name] = t
 	return t
 }
@@ -90,6 +89,25 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 }
 
 func (t *table) Insert(d dataset) {
+	// load balance: if bucket is full, create new one
+	shard := t.shards[len(t.shards)-1]
+	if shard.Count() >= max_shardsize {
+		t.mu.Lock()
+		// reload shard after lock to avoid race conditions
+		shard = t.shards[len(t.shards)-1]
+		if shard.Count() >= max_shardsize {
+			/*
+			go func(i int) {
+				// rebuild full shards in background
+				t.shards[i] = t.shards[i].rebuild()
+			}(len(t.shards)-1)
+			*/
+			shard = NewShard(t)
+			fmt.Println("started new shard for table", t.name)
+			t.shards = append(t.shards, shard)
+		}
+		t.mu.Unlock()
+	}
 	// physically insert
-	t.shards[0].Insert(d) // TODO: load balance
+	shard.Insert(d)
 }

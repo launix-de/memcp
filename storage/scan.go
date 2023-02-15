@@ -25,17 +25,37 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 	/* analyze query */
 	// TODO: move from storageShard.scan
 
-	akkumulator := neutral
+	values := make(chan scm.Scmer, 4)
+	rest := 0
 	for _, s := range t.shards {
-		// TODO: go + chan scm.Scmer
-		intermediate := s.scan(condition, callback, aggregate, neutral)
-		if aggregate != nil {
-			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
-		}
+		// parallel scan over shards
+		go func(s *storageShard) {
+			values <- s.scan(condition, callback, aggregate, neutral)
+		}(s)
+		rest = rest + 1
 		// TODO: measure scan balance
 	}
-
-	return akkumulator
+	// collect values from parallel scan
+	akkumulator := neutral
+	if aggregate != nil {
+		for {
+			if rest == 0 {
+				return akkumulator
+			}
+			// eat value
+			intermediate := <- values
+			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
+			rest = rest - 1
+		}
+	} else {
+		for {
+			if rest == 0 {
+				return akkumulator
+			}
+			<- values // eat up values and forget
+			rest = rest - 1
+		}
+	}
 	// fmt.Sprint(time.Since(start))
 }
 

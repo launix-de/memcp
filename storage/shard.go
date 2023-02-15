@@ -34,6 +34,21 @@ type storageShard struct {
 	indexes []*StorageIndex
 }
 
+func NewShard(t *table) *storageShard {
+	result := new(storageShard)
+	result.t = t
+	result.columns = make(map[string]ColumnStorage)
+	result.deletions = make(map[uint]struct{})
+	for _, column := range t.columns {
+		result.columns[column.name] = new (StorageSCMER)
+	}
+	return result
+}
+
+func (t *storageShard) Count() uint {
+	return uint(int(t.main_count) + len(t.inserts) - len(t.deletions))
+}
+
 func (t *storageShard) Insert(d dataset) {
 	t.mu.Lock()
 	t.inserts = append(t.inserts, d) // append to delta storage
@@ -58,7 +73,7 @@ func (t *storageShard) rebuild() *storageShard {
 	// from now on, we can rebuild with no hurry
 	if maxInsertIndex > 0 || len(t.deletions) > 0 {
 		var b strings.Builder
-		b.WriteString("rebuilding table ")
+		b.WriteString("rebuilding shard for table ")
 		b.WriteString(t.t.name)
 		b.WriteString("(")
 		result.columns = make(map[string]ColumnStorage)
