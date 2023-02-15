@@ -74,7 +74,7 @@ func (s *StorageInt) getValueInt(i uint) int64 {
 	bitpos := i * uint(s.bitsize)
 
 	v := s.chunk[bitpos / 64] << (bitpos % 64) // align to leftmost position
-	if bitpos % 64 + uint(s.bitsize) >= 64 {
+	if bitpos % 64 + uint(s.bitsize) > 64 {
 		v = v | s.chunk[bitpos / 64 + 1] >> (64 - bitpos % 64)
 	}
 
@@ -85,7 +85,7 @@ func (s *StorageInt) getValueUInt(i uint) uint64 {
 	bitpos := i * uint(s.bitsize)
 
 	v := s.chunk[bitpos / 64] << (bitpos % 64) // align to leftmost position
-	if bitpos % 64 + uint(s.bitsize) >= 64 {
+	if bitpos % 64 + uint(s.bitsize) > 64 {
 		v = v | s.chunk[bitpos / 64 + 1] >> (64 - bitpos % 64)
 	}
 
