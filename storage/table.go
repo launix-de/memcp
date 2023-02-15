@@ -96,12 +96,10 @@ func (t *table) Insert(d dataset) {
 		// reload shard after lock to avoid race conditions
 		shard = t.shards[len(t.shards)-1]
 		if shard.Count() >= max_shardsize {
-			/*
 			go func(i int) {
 				// rebuild full shards in background
 				t.shards[i] = t.shards[i].rebuild()
 			}(len(t.shards)-1)
-			*/
 			shard = NewShard(t)
 			fmt.Println("started new shard for table", t.name)
 			t.shards = append(t.shards, shard)
