@@ -23,6 +23,7 @@ import "github.com/launix-de/memcp/scm"
 type StorageSCMER struct {
 	values []scm.Scmer
 	onlyInt bool
+	onlyFloat bool
 	hasString bool
 	count uint
 	null uint // amount of NULL values (sparse map!)
@@ -56,16 +57,19 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 			}
 		case string:
 			s.onlyInt = false
+			s.onlyFloat = false
 			s.hasString = true
 		case nil:
 			s.null = s.null + 1 // count NULL
 			// storageInt can also handle null
 		default:
 			s.onlyInt = false
+			s.onlyFloat = false
 	}
 }
 func (s *StorageSCMER) prepare() {
 	s.onlyInt = true
+	s.onlyFloat = true
 	s.hasString = false
 }
 func (s *StorageSCMER) init(i uint) {
@@ -94,6 +98,10 @@ func (s *StorageSCMER) proposeCompression() ColumnStorage {
 			return new(StorageSeq)
 		}
 		return new(StorageInt)
+	}
+	if s.onlyFloat {
+		// tight float packing
+		return new(StorageFloat)
 	}
 	if s.null * 50 > s.count * 100 {
 		// sparse payoff against StorageSCMER is at 2.1
