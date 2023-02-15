@@ -40,9 +40,21 @@ type ColumnStorage interface {
 
 func Init(en scm.Env) {
 	en.Vars["scan"] = func (a ...scm.Scmer) scm.Scmer {
+		start := time.Now() // time measurement
+
 		// params: table, condition, map, reduce, reduceSeed
 		t := tables[scm.String(a[0])][scm.String(a[1])]
-		return t.scan(a[2], a[3])
+		var aggregate scm.Scmer
+		var neutral scm.Scmer
+		if len(a) > 4 {
+			aggregate = a[4]
+		}
+		if len(a) > 5 {
+			neutral = a[5]
+		}
+		result := t.scan(a[2], a[3], aggregate, neutral)
+		fmt.Println("scan", time.Since(start))
+		return result
 	}
 	en.Vars["createdatabase"] = func (a ...scm.Scmer) scm.Scmer {
 		CreateDatabase(scm.String(a[0]))

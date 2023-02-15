@@ -16,27 +16,32 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "fmt"
-import "time"
 import "github.com/launix-de/memcp/scm"
 
-func (t *table) scan(condition scm.Scmer, callback scm.Scmer) string {
-	start := time.Now() // time measurement
+// map reduce implementation based on scheme scripts
+func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+	//start := time.Now() // time measurement
 
 	/* analyze query */
 	// TODO: move from storageShard.scan
 
+	akkumulator := neutral
 	for _, s := range t.shards {
-		// TODO: go + chan done
-		s.scan(condition, callback)
+		// TODO: go + chan scm.Scmer
+		intermediate := s.scan(condition, callback, aggregate, neutral)
+		if aggregate != nil {
+			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
+		}
 		// TODO: measure scan balance
 	}
 
-	return fmt.Sprint(time.Since(start))
+	return akkumulator
+	// fmt.Sprint(time.Since(start))
 }
 
-func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer) string {
-	start := time.Now() // time measurement
+func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+	//start := time.Now() // time measurement
+	akkumulator := neutral
 
 	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
 	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
@@ -71,7 +76,10 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer) string {
 		for i, k := range mcols { // iterate over columns
 			mdataset[i] = k.getValue(idx)
 		}
-		scm.Apply(callback, mdataset) // TODO: output monad
+		intermediate := scm.Apply(callback, mdataset)
+		if aggregate != nil {
+			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
+		}
 	}
 
 	// delta storage (unindexed)
@@ -92,7 +100,11 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer) string {
 		for i, k := range margs { // iterate over columns
 			mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
 		}
-		scm.Apply(callback, mdataset) // TODO: output monad
+		intermediate := scm.Apply(callback, mdataset)
+		if aggregate != nil {
+			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
+		}
 	}
-	return fmt.Sprint(time.Since(start))
+	//return fmt.Sprint(time.Since(start))
+	return akkumulator
 }
