@@ -32,13 +32,23 @@
 
 	/* eat a identifier from string */
 	(define expression (lambda (s) (match s
-		(regex "^([0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest)
+		(regex "^(-?[0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest)
 		(error (concat "could not parse " s))
 	)))
 
 	/* try to find other operators to add to the expression */
 	(define expression_extend (lambda (expr s) (match s
-		(regex "^([+\\-*\\/])(?:\\s|\\n)*(.*)" _ operator rest) (match (expression rest) '(expr2 rest) '('((symbol operator) expr expr2) rest)) /* TODO: sort operator precedence */
+		/* + - */
+		(regex "^([+\\-])(?:\\s|\\n)*(.*)" _ operator rest)
+			(match (expression rest) '(expr2 rest) '('((symbol operator) expr expr2) rest))
+		/* * / */
+		(regex "^([*\\/])(?:\\s|\\n)*(.*)" _ operator rest)
+			(match (expression rest) '(expr2 rest)
+				(match expr2
+					/* shift down * and / before + and - */
+					'(+ a b) '('((quote +) '((symbol operator) expr a) b) rest)
+					'(- a b) '('((quote -) '((symbol operator) expr a) b) rest)
+					'('((symbol operator) expr expr2) rest)))
 		'(expr s) /* no extension */
 	)))
 
