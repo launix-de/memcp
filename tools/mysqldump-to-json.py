@@ -1,4 +1,4 @@
-#!/bin/env python
+#!/usr/bin/env python3
 
 import mysql.connector
 import simplejson as json
