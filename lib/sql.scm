@@ -61,10 +61,11 @@
 				'()
 			)
 		))
+		/* TODO: sort tables according to join plan */
 		(match tables
 			'('("1x1" "system" "1x1")) '((symbol "resultrow") (cons (symbol "list") (collect_columns fields)))
-			/* else: scan tables and join */
-			'((quote resultrow) '((quote list) "TODO" "FROM"))
+			(cons '(alias schema tbl) tables) /* outer scan */ '((quote scan) schema tbl '((quote lambda) '() (quote true)) '((quote lambda) '(/* todo columns*/) (build_queryplan tables fields)))
+			'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (collect_columns fields)))
 		)
 	)))
 	/* compile select */
@@ -73,7 +74,10 @@
 			/* no FROM */ "" (build_queryplan '('("1x1" "system" "1x1")) (append fields id expr))
 			/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest (append fields id expr))
 			/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
-			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (error (concat "TODO: FROM " rest)) /* TODO: FROM, WHERE, GROUP usw. */
+			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
+				'(id rest) (build_queryplan '('(id (quote schema) id)) (append fields id expr))
+				/* TODO: FROM () AS tbl | tbl | tbl as alias ... */
+			) /* TODO: FROM, WHERE, GROUP usw. */
 			/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
 		)))
 
@@ -97,6 +101,7 @@
 (createdatabase "test")
 (createtable "test" "foo" '('("bar" "int" '() "")))
 (insert "test" "foo" '("bar" 12))
+(insert "test" "foo" '("bar" 44))
 (set schema "test")
 
 /* http hook for handling SQL */

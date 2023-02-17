@@ -18,6 +18,10 @@ package storage
 
 import "github.com/launix-de/memcp/scm"
 
+type scanError struct {
+	r interface{}
+}
+
 // map reduce implementation based on scheme scripts
 func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 	//start := time.Now() // time measurement
@@ -30,6 +34,12 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 	for _, s := range t.shards {
 		// parallel scan over shards
 		go func(s *storageShard) {
+			defer func () {
+				if r := recover(); r != nil {
+					//fmt.Println("panic during scan:", r, string(debug.Stack()))
+					values <- scanError{r}
+				}
+			}()
 			values <- s.scan(condition, callback, aggregate, neutral)
 		}(s)
 		rest = rest + 1
@@ -44,7 +54,12 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 			}
 			// eat value
 			intermediate := <- values
-			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
+			switch x := intermediate.(type) {
+				case scanError:
+					panic(x.r) // cascade panic
+				default:
+					akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
+			}
 			rest = rest - 1
 		}
 	} else {
@@ -52,7 +67,10 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 			if rest == 0 {
 				return akkumulator
 			}
-			<- values // eat up values and forget
+			switch x := (<- values).(type) { // eat up values and forget
+				case scanError:
+					panic(x.r) // cascade panic
+			}
 			rest = rest - 1
 		}
 	}
