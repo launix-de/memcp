@@ -33,6 +33,7 @@
 	/* eat a identifier from string */
 	(define expression (lambda (s) (match s
 		(regex "^(-?[0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest)
+		(concat "(" rest) (match (expression rest) '(expr (concat ")" rest)) '('((quote begin) expr) rest) (error (concat "expected expression found " rest)))
 		(error (concat "could not parse " s))
 	)))
 
