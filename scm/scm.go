@@ -186,17 +186,35 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				expression = p.Body
 				goto restart // tail call optimized
 			case []Scmer: // associative list
-				i := 0
-				for i < len(p)-1 {
-					if reflect.DeepEqual(args[0], p[i]) {
-						return p[i+1]
+				if len(p) == 0 {
+					return nil
+				} else {
+					switch p[0].(type) {
+						case []Scmer:
+							// format: ((key values ...) (key values ...) ...)
+							i := 0
+							for i < len(p) {
+								if reflect.DeepEqual(args[0], p[i].([]Scmer)[0]) {
+									return p[i]
+								}
+								i++
+							}
+							return nil // no default value
+						default:
+							// format: (key value key value ... default)
+							i := 0
+							for i < len(p)-1 {
+								if reflect.DeepEqual(args[0], p[i]) {
+									return p[i+1]
+								}
+								i += 2
+							}
+							if i < len(p) {
+								return p[i] // default value on n+1
+							}
+							return nil // no default value
 					}
-					i += 2
 				}
-				if i < len(p) {
-					return p[i] // default value on n+1
-				}
-				return nil // no default value
 			default:
 				panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 			}
@@ -226,17 +244,35 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 		}
 		return Eval(p.Body, en)
 	case []Scmer: // associative list
-		i := 0
-		for i < len(p)-1 {
-			if reflect.DeepEqual(args[0], p[i]) {
-				return p[i+1]
+		if len(p) == 0 {
+			return nil
+		} else {
+			switch p[0].(type) {
+				case []Scmer:
+					// format: ((key values ...) (key values ...) ...)
+					i := 0
+					for i < len(p) {
+						if reflect.DeepEqual(args[0], p[i].([]Scmer)[0]) {
+							return p[i]
+						}
+						i++
+					}
+					return nil // no default value
+				default:
+					// format: (key value key value ... default)
+					i := 0
+					for i < len(p)-1 {
+						if reflect.DeepEqual(args[0], p[i]) {
+							return p[i+1]
+						}
+						i += 2
+					}
+					if i < len(p) {
+						return p[i] // default value on n+1
+					}
+					return nil // no default value
 			}
-			i += 2
 		}
-		if i < len(p) {
-			return p[i] // default value on n+1
-		}
-		return nil // no default value
 	default:
 		panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 	}
