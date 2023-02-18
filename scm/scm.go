@@ -99,9 +99,9 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		case "quote":
 			value = e[1]
 		case "eval":
-			// argument is a list with already evaluated values that we put into apply
-			arr := Eval(e[1], en).([]Scmer)
-			value = Eval(arr, en)
+			// ...
+			expression = Eval(e[1], en)
+			goto restart
 		case "if":
 			if ToBool(Eval(e[1], en)) {
 				expression = e[2]
