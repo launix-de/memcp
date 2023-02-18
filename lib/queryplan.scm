@@ -38,6 +38,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 	/* columns: '('(tblalias colname) ...) */
 	(set columns (merge (extract_assoc fields extract_columns)))
+	/* TODO: expand fields if it contains '(tblalias "*") or '("*" "*") */
 
 	/* TODO: sort tables according to join plan */
 	(define build_scan (lambda (tables)

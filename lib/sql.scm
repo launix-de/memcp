@@ -50,7 +50,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				((res "status") 200)
 				((res "header") "Content-Type" "text/plain")
 				(define formula (parse_sql rest))
-				(define resultrow (res "println"))
+				(define resultrow (res "println")) /* TODO: to JSON */
 				(print "received query: " rest)
 				(eval formula)
 			)

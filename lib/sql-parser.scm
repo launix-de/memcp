@@ -18,8 +18,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (define parse_sql (lambda (s) (begin
 	/* lots of small parsers that can be combined */
 	(define identifier (lambda (s) (match s
-		(regex "(?is)^(?:\\s|\\n)*`(.*)`(.*)" _ id rest) '(id rest)
-		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(.*)" _ id rest) '(id rest)
+		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) '(id rest)
+		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) '(id rest)
 		(error (concat "expected identifier, found " s))
 	)))
 
