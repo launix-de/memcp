@@ -42,7 +42,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* TODO: sort tables according to join plan */
 	(define build_scan (lambda (tables)
 		(match tables
-			'('("1x1" "system" "1x1")) '((symbol "resultrow") (cons (symbol "list") fields))
 			(cons '(alias schema tbl) tables) /* outer scan */
 				'((quote scan) schema tbl
 					'((quote lambda) '() (quote true)) /* TODO: filter */

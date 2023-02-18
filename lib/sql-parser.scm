@@ -85,7 +85,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* compile select */
 	(define select (lambda (rest fields) (begin
 		(define parse_afterexpr (lambda (expr id rest) (match rest
-			/* no FROM */ "" (build_queryplan '('("1x1" "system" "1x1")) (append fields id expr))
+			/* no FROM */ "" (build_queryplan '() (append fields id expr))
 			/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest (append fields id expr))
 			/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
 			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
