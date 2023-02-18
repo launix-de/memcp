@@ -32,7 +32,12 @@
 
 	/* eat a identifier from string */
 	(define expression (lambda (s) (match s
+		/* constant */
 		(regex "^(-?[0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest)
+		/* identifier (TODO: wrapper to associate with schema) */
+		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) (expression_extend (symbol id) rest)
+		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) (expression_extend (symbol id) rest)
+		/* parenthesis */
 		(concat "(" rest) (match (expression rest) '(expr (concat ")" rest)) '('((quote begin) expr) rest) (error (concat "expected expression found " rest)))
 		(error (concat "could not parse " s))
 	)))
@@ -64,7 +69,7 @@
 		/* TODO: sort tables according to join plan */
 		(match tables
 			'('("1x1" "system" "1x1")) '((symbol "resultrow") (cons (symbol "list") (collect_columns fields)))
-			(cons '(alias schema tbl) tables) /* outer scan */ '((quote scan) schema tbl '((quote lambda) '() (quote true)) '((quote lambda) '(/* todo columns*/) (build_queryplan tables fields)))
+			(cons '(alias schema tbl) tables) /* outer scan */ '((quote scan) schema tbl '((quote lambda) '() (quote true)) '((quote lambda) '(/* todo columns*/ (symbol "bar")) (build_queryplan tables fields)))
 			'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (collect_columns fields)))
 		)
 	)))
@@ -76,7 +81,7 @@
 			/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
 			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
 				'(id rest) (build_queryplan '('(id (quote schema) id)) (append fields id expr))
-				/* TODO: FROM () AS tbl | tbl | tbl as alias ... */
+				/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
 			) /* TODO: FROM, WHERE, GROUP usw. */
 			/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
 		)))
