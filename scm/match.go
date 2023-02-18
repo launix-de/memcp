@@ -65,6 +65,14 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 						default:
 							return false
 					}
+				case Symbol("symbol"):
+					// symbol literal
+					switch v := val.(type) {
+						case Symbol:
+							return p[1].(Symbol) == v
+						default:
+							return false
+					}
 				case Symbol("concat"):
 					switch v := val.(type) {
 						case string: // only allowed for strings

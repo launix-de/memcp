@@ -1,4 +1,3 @@
-
 (define parse_sql (lambda (s) (begin
 
 	(define identifier (lambda (s) (match s
@@ -34,9 +33,9 @@
 	(define expression (lambda (s) (match s
 		/* constant */
 		(regex "^(-?[0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest)
-		/* identifier (TODO: wrapper to associate with schema) */
-		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) (expression_extend (symbol id) rest)
-		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) (expression_extend (symbol id) rest)
+		/* identifier (TODO: tblalias.identifier) */
+		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
+		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
 		/* parenthesis */
 		(concat "(" rest) (match (expression rest) '(expr (concat ")" rest)) '('((quote begin) expr) rest) (error (concat "expected expression found " rest)))
 		(error (concat "could not parse " s))
@@ -60,18 +59,57 @@
 
 	/* build queryplan from parsed query */
 	(define build_queryplan (lambda (tables fields) (begin
-		(define collect_columns (lambda (columns)
+		/* parse_sql will compile (get_column tblvar col) into the formulas. we have to replace it with the correct variable */
+		/* tables: '('(alias schema tbl) ...) */
+		/* fields: '(colname expr ...) */
+
+		/* returns a list of '(tblvar col) */
+		(define extract_columns (lambda (expr) (match expr
+			'((symbol get_column) tblvar col) '('(tblvar col))
+			(cons sym args) /* function call */ (merge (map args extract_columns)) /* TODO: use collector */
+			'()
+		)))
+
+		(define map_assoc (lambda (columns fn)
 			(match columns
-				(cons colid (cons colvalue rest)) (cons colid (cons colvalue (collect_columns rest)))
+				(cons colid (cons colvalue rest)) (cons colid (cons (fn colvalue) (map_assoc rest fn)))
 				'()
 			)
 		))
+
+		(define extract_assoc (lambda (columns fn)
+			(match columns
+				(cons colid (cons colvalue rest)) (cons (fn colvalue) (extract_assoc rest fn))
+				'()
+			)
+		))
+
+		/* changes (get_column tblvar col) into its counterpart */
+		(define replace_columns (lambda (expr) (match expr
+			'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
+			(cons sym args) /* function call */ (cons sym (map args replace_columns))
+			expr /* literals */
+		)))
+
+		/* columns: '('(tblalias colname) ...) */
+		(set columns (merge (extract_assoc fields extract_columns)))
+		(print "cols=" columns)
+		(print (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))))
+
 		/* TODO: sort tables according to join plan */
-		(match tables
-			'('("1x1" "system" "1x1")) '((symbol "resultrow") (cons (symbol "list") (collect_columns fields)))
-			(cons '(alias schema tbl) tables) /* outer scan */ '((quote scan) schema tbl '((quote lambda) '() (quote true)) '((quote lambda) '(/* todo columns*/ (symbol "bar")) (build_queryplan tables fields)))
-			'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (collect_columns fields)))
-		)
+		(define build_scan (lambda (tables)
+			(match tables
+				'('("1x1" "system" "1x1")) '((symbol "resultrow") (cons (symbol "list") fields))
+				(cons '(alias schema tbl) tables) /* outer scan */
+					'((quote scan) schema tbl
+						'((quote lambda) '() (quote true)) /* TODO: filter */
+						/* todo filter columns for alias */
+						'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
+						/* TODO: reduce+neutral */)
+				'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))
+			)
+		))
+		(build_scan tables)
 	)))
 	/* compile select */
 	(define select (lambda (rest fields) (begin

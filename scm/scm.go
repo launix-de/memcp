@@ -244,6 +244,7 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 }
 
 // TODO: func optimize für parzielle lambda-Ausdrücke und JIT
+// TODO: Proc2 for an optimized Env based on arrays rather than maps
 
 type Proc struct {
 	Params, Body Scmer
@@ -364,9 +365,41 @@ func init() {
 				}
 				return b.String()
 			},
+			"merge": func (a ...Scmer) Scmer {
+				// merge arrays into one
+				size := 0
+				for _, v := range a[0].([]Scmer) {
+					size = size + len(v.([]Scmer))
+				}
+				result := make([]Scmer, size)
+				pos := 0
+				for _, v := range a[0].([]Scmer) {
+					inner := v.([]Scmer)
+					copy(result[pos:pos+len(inner)], inner)
+					pos = pos + len(inner)
+				}
+				return result
+			},
 			"simplify": func(a ...Scmer) Scmer {
 				// turn string to number or so
 				return Simplify(String(a[0]))
+			},
+			"map": func(a ...Scmer) Scmer {
+				list := a[0].([]Scmer)
+				result := make([]Scmer, len(list))
+				for i, v := range list {
+					result[i] = Apply(a[1], []Scmer{v,})
+				}
+				return result
+			},
+			"filter": func(a ...Scmer) Scmer {
+				result := make([]Scmer, 0)
+				for _, v := range a[0].([]Scmer) {
+					if ToBool(Apply(a[1], []Scmer{v,})) {
+						result = append(result, v)
+					}
+				}
+				return result
 			},
 			"true": true,
 			"false": false,
