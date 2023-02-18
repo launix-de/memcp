@@ -1,5 +1,20 @@
-(define parse_sql (lambda (s) (begin
+/* helper functions to work with maps */
+(define map_assoc (lambda (columns fn)
+	(match columns
+		(cons colid (cons colvalue rest)) (cons colid (cons (fn colvalue) (map_assoc rest fn)))
+		'()
+	)
+))
 
+(define extract_assoc (lambda (columns fn)
+	(match columns
+		(cons colid (cons colvalue rest)) (cons (fn colvalue) (extract_assoc rest fn))
+		'()
+	)
+))
+
+(define parse_sql (lambda (s) (begin
+	/* lots of small parsers that can be combined */
 	(define identifier (lambda (s) (match s
 		(regex "(?is)^(?:\\s|\\n)*`(.*)`(.*)" _ id rest) '(id rest)
 		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(.*)" _ id rest) '(id rest)
@@ -57,6 +72,14 @@
 		'(expr s) /* no extension */
 	)))
 
+	/* derive the description of a column from its expression */
+	(define extract_title (lambda (expr) (match expr
+		'((symbol get_column) "*" col) col
+		'((symbol get_column) tblvar col) (concat tblvar "." col)
+		(cons sym args) /* function call */ (concat (cons sym (map args extract_title)))
+		(concat expr)
+	)))
+
 	/* build queryplan from parsed query */
 	(define build_queryplan (lambda (tables fields) (begin
 		/* parse_sql will compile (get_column tblvar col) into the formulas. we have to replace it with the correct variable */
@@ -70,20 +93,6 @@
 			'()
 		)))
 
-		(define map_assoc (lambda (columns fn)
-			(match columns
-				(cons colid (cons colvalue rest)) (cons colid (cons (fn colvalue) (map_assoc rest fn)))
-				'()
-			)
-		))
-
-		(define extract_assoc (lambda (columns fn)
-			(match columns
-				(cons colid (cons colvalue rest)) (cons (fn colvalue) (extract_assoc rest fn))
-				'()
-			)
-		))
-
 		/* changes (get_column tblvar col) into its counterpart */
 		(define replace_columns (lambda (expr) (match expr
 			'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
@@ -93,8 +102,7 @@
 
 		/* columns: '('(tblalias colname) ...) */
 		(set columns (merge (extract_assoc fields extract_columns)))
-		(print "cols=" columns)
-		(print (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))))
+		(print "cols=" fields)
 
 		/* TODO: sort tables according to join plan */
 		(define build_scan (lambda (tables)
@@ -118,7 +126,7 @@
 			/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest (append fields id expr))
 			/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
 			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
-				'(id rest) (build_queryplan '('(id (quote schema) id)) (append fields id expr))
+				'(tblid rest) (build_queryplan '('(tblid (quote schema) tblid)) (append fields id expr))
 				/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
 			) /* TODO: FROM, WHERE, GROUP usw. */
 			/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
@@ -126,7 +134,7 @@
 
 		/* after select, there must be an expression */
 		(match
-			(expression rest) '(expr rest) (parse_afterexpr expr (concat expr) rest)
+			(expression rest) '(expr rest) (parse_afterexpr expr (extract_title expr) rest)
 			(error (concat "expected expression, found " rest)))
 	)))
 
