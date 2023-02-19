@@ -22,6 +22,17 @@ type scanError struct {
 	r interface{}
 }
 
+/* TODO:
+
+ - LEFT JOIN handling -> emit a NULL line on certain conditions
+ - ORDER: tell a list of columns to sort (for delta storage: temporaryly sort; merge with main)
+ - LIMIT: scan-side limiters
+ - ORDER+LIMIT: sync before executing map OR make map side-effect free
+ - separate group/collect/sort nodes to add values to (maybe this is the way to do ORDER??)
+ - group/collect/sort nodes -> (create sortfn equalfn mergefn offset limit) (add item); (scan mapfn) -> implements a sorted window
+
+*/
+
 // map reduce implementation based on scheme scripts
 func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 	//start := time.Now() // time measurement
