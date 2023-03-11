@@ -47,6 +47,6 @@ func (s *StorageSparse) finish() {
 }
 
 // soley to StorageSparse
-func (s *StorageSparse) proposeCompression() ColumnStorage {
+func (s *StorageSparse) proposeCompression(i uint) ColumnStorage {
 	return nil
 }

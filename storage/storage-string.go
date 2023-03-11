@@ -27,12 +27,16 @@ type StorageString struct {
 	dictionary string
 	starts StorageInt
 	lens StorageInt
+
 	// helpers
 	sb strings.Builder
 	reverseMap map[string][3]uint
 	count uint
 	allsize int
 	nodict bool // disable values array
+	// prefix statistics
+	prefixstat map[string]int
+	laststr string
 }
 
 func (s *StorageString) String() string {
@@ -67,6 +71,7 @@ func (s *StorageString) prepare() {
 	s.lens.prepare()
 	s.values.prepare()
 	s.reverseMap = make(map[string][3]uint)
+	s.prefixstat = make(map[string]int)
 }
 func (s *StorageString) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
@@ -81,6 +86,20 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 			}
 			return
 	}
+
+	// check if we have common prefix (but ignore duplicates because they are compressed by dictionary)
+	if s.laststr != v {
+		commonlen := 0
+		for commonlen < len(s.laststr) && commonlen < len(v) && s.laststr[commonlen] == v[commonlen] {
+			s.prefixstat[v[0:commonlen]] = s.prefixstat[v[0:commonlen]] + 1
+			commonlen++
+		}
+		if v != "" {
+			s.laststr = v
+		}
+	}
+
+	// check for dictionary
 	if i == 100 && len(s.reverseMap) > 99 {
 		// nearly no repetition in the first 100 items: save the time to build reversemap
 		s.nodict = true
@@ -114,6 +133,7 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 	}
 }
 func (s *StorageString) init(i uint) {
+	s.prefixstat = nil // free memory
 	if s.nodict {
 		// do not init values, sb andsoon
 		s.starts.init(i)
@@ -170,7 +190,22 @@ func (s *StorageString) finish() {
 	s.starts.finish()
 	s.lens.finish()
 }
-func (s *StorageString) proposeCompression() ColumnStorage {
+func (s *StorageString) proposeCompression(i uint) ColumnStorage {
+	// build prefix map
+	mostprefixscore := 0
+	mostprefix := ""
+	for k, v := range s.prefixstat {
+		if len(k) * v > mostprefixscore {
+			mostprefix = k
+			mostprefixscore = len(k) * v // cost saving of prefix = len(prefix) * occurance
+		}
+	}
+	if uint(mostprefixscore) > i / 8 + 100 {
+		// built a 1-bit prefix (TODO: maybe later more)
+		stor := new(StoragePrefix)
+		stor.prefixdictionary = []string{"", mostprefix}
+		return stor
+	}
 	// dont't propose another pass
 	return nil
 }

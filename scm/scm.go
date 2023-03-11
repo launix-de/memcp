@@ -45,6 +45,7 @@ import (
 // (dict key value rest_dict)
 // dict acts like a function; apply to a dict will yield the value
 
+//go:inline
 func ToBool(v Scmer) bool {
 	switch v.(type) {
 		case nil:
@@ -60,6 +61,7 @@ func ToBool(v Scmer) bool {
 			return true
 	}
 }
+//go:inline
 func ToInt(v Scmer) int {
 	switch vv := v.(type) {
 		case nil:
@@ -78,6 +80,25 @@ func ToInt(v Scmer) int {
 		default:
 			// []Scmer, native function, lambdas
 			return 1
+	}
+}
+//go:inline
+func ToFloat(v Scmer) float64 {
+	switch vv := v.(type) {
+		case string:
+			x, _ := strconv.ParseFloat(vv, 64)
+			return x
+		case float64:
+			return vv
+		case bool:
+			if vv {
+				return 1.0
+			} else {
+				return 0.0
+			}
+		default:
+			// nil, []Scmer, native function, lambdas
+			return 0.0
 	}
 }
 
@@ -330,34 +351,35 @@ func init() {
 	Globalenv = Env{
 		Vars{ //aka an incomplete set of compiled-in functions
 			"+": func(a ...Scmer) Scmer {
-				v := a[0].(float64)
+				v := ToFloat(a[0])
 				for _, i := range a[1:] {
-					v += i.(float64)
+					v += ToFloat(i)
 				}
 				return v
 			},
 			"-": func(a ...Scmer) Scmer {
-				v := a[0].(float64)
+				v := ToFloat(a[0])
 				for _, i := range a[1:] {
-					v -= i.(float64)
+					v -= ToFloat(i)
 				}
 				return v
 			},
 			"*": func(a ...Scmer) Scmer {
-				v := a[0].(float64)
+				v := ToFloat(a[0])
 				for _, i := range a[1:] {
-					v *= i.(float64)
+					v *= ToFloat(i)
 				}
 				return v
 			},
 			"/": func(a ...Scmer) Scmer {
-				v := a[0].(float64)
+				v := ToFloat(a[0])
 				for _, i := range a[1:] {
-					v /= i.(float64)
+					v /= ToFloat(i)
 				}
 				return v
 			},
 			"<=": func(a ...Scmer) Scmer {
+				// TODO: string vs. float
 				return a[0].(float64) <= a[1].(float64)
 			},
 			"<": func(a ...Scmer) Scmer {

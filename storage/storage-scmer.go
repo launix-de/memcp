@@ -25,7 +25,6 @@ type StorageSCMER struct {
 	onlyInt bool
 	onlyFloat bool
 	hasString bool
-	count uint
 	null uint // amount of NULL values (sparse map!)
 	numSeq uint // sequence statistics
 	last1, last2 int64 // sequence statistics
@@ -40,7 +39,6 @@ func (s *StorageSCMER) getValue(i uint) scm.Scmer {
 }
 
 func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
-	s.count = s.count + 1
 	switch v := value.(type) {
 		case float64:
 			if _, f := math.Modf(v); f != 0.0 {
@@ -84,8 +82,8 @@ func (s *StorageSCMER) finish() {
 }
 
 // soley to StorageSCMER
-func (s *StorageSCMER) proposeCompression() ColumnStorage {
-	if s.null * 13 > s.count * 100 {
+func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
+	if s.null * 13 > i * 100 {
 		// sparse payoff against bitcompressed is at ~13%
 		return new(StorageSparse)
 	}
@@ -94,7 +92,7 @@ func (s *StorageSCMER) proposeCompression() ColumnStorage {
 	}
 	if s.onlyInt {
 		// propose sequence compression in the form (recordid, startvalue, length, stride) using binary search on recordid for reading
-		if s.count > 5 && 2 * (s.count - s.numSeq) < s.count {
+		if i > 5 && 2 * (i - s.numSeq) < i {
 			return new(StorageSeq)
 		}
 		return new(StorageInt)
@@ -103,7 +101,7 @@ func (s *StorageSCMER) proposeCompression() ColumnStorage {
 		// tight float packing
 		return new(StorageFloat)
 	}
-	if s.null * 50 > s.count * 100 {
+	if s.null * 50 > i * 100 {
 		// sparse payoff against StorageSCMER is at 2.1
 		return new(StorageSparse)
 	}

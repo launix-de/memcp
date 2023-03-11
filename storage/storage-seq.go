@@ -171,7 +171,7 @@ func (s *StorageSeq) finish() {
 		fmt.Println(s.recordId.getValue(i),":",s.start.getValue(i),":",s.stride.getValue(i))
 	}*/
 }
-func (s *StorageSeq) proposeCompression() ColumnStorage {
+func (s *StorageSeq) proposeCompression(i uint) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }

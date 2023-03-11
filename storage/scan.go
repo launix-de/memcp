@@ -29,7 +29,7 @@ type scanError struct {
  - LIMIT: scan-side limiters
  - ORDER+LIMIT: sync before executing map OR make map side-effect free
  - separate group/collect/sort nodes to add values to (maybe this is the way to do ORDER??)
- - group/collect/sort nodes -> (create sortfn equalfn mergefn offset limit) (add item); (scan mapfn) -> implements a sorted window
+ - group/collect/sort nodes -> (create sortfn equalfn mergefn offset limit) (add item); (scan mapfn) (merge othersortwindow) -> implements a sorted window; use merge as aggregator, create as neutral element
 
 */
 

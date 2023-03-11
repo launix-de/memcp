@@ -151,7 +151,7 @@ func (s *StorageInt) build(i uint, value scm.Scmer) {
 }
 func (s *StorageInt) finish() {
 }
-func (s *StorageInt) proposeCompression() ColumnStorage {
+func (s *StorageInt) proposeCompression(i uint) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }

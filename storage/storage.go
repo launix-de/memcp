@@ -30,7 +30,7 @@ type ColumnStorage interface {
 	// analyze
 	prepare()
 	scan(uint, scm.Scmer)
-	proposeCompression() ColumnStorage
+	proposeCompression(i uint) ColumnStorage
 
 	// store
 	init(uint)

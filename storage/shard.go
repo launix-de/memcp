@@ -112,7 +112,7 @@ func (t *storageShard) rebuild() *storageShard {
 					newcol.scan(i, t.inserts[idx].Get(col))
 					i++
 				}
-				newcol2 := newcol.proposeCompression()
+				newcol2 := newcol.proposeCompression(i)
 				if newcol2 == nil {
 					break // we found the optimal storage format
 				} else {
