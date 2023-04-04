@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MemCP performance</title>
+    <style type="text/css">
+    	.gauge {
+		background: url(gauge.png);
+		background-size: contain;
+		background-repeat: no-repeat;
+		width: 268px; /*537px;*/
+		height: 335px; /*670px;*/
+	}
+	.gauge::before {
+		display: block;
+		content: ' ';
+		width: 100%;
+		height: 100%;
+		background: url(gauge-needle.png);
+		background-size: contain;
+		background-repeat: no-repeat;
+		transform-origin: center center;
+		transform: rotate(var(--from)); /* 0..270 */
+		animation-name: shake;
+		animation-duration: 100ms;
+		animation-direction: alternate;
+		animation-timing-function: ease;
+		animation-iteration-count: infinite;
+	}
+	@keyframes shake {
+		from { transform: rotate(var(--from)); }
+		to { transform: rotate(var(--to)); }
+	}
+
+	.container {
+		display: flex;
+		flex-direction: row;
+	}
+	body {
+		font-family: Lato, sans-serif;
+	}
+    </style>
+  </head>
+  <body>
+	<img src="memcp-logo.svg" style="float: right;">
+	<h1>Klassische Datenbank</h1>
+	<div class="container">
+		<div>
+			<div class="gauge" style="--from: 125deg; --to: 146deg;"></div>
+			<h2>RAM</h2>
+		</div>
+		<div>
+			<div class="gauge" style="--from: 45deg; --to: 66deg;"></div>
+			<h2>Festplatte</h2>
+		</div>
+		<div>
+			<div class="gauge" style="--from: 25deg; --to: 36deg;"></div>
+			<h2>Performance</h2>
+		</div>
+		<div>
+			<ul>
+				<li>Speicherung auf Festplatte</li>
+				<li>Single-Core Performance</li>
+				<li>Keine Komprimierung</li>
+				<li>Hoher Bedarf an HDD- und RAM-Bandbreite</li>
+				<li>IO-Bottleneck bei TCP-Verbindung</li>
+				<li>Verbreitet bei Datenbanken</li>
+			</ul>
+		</div>
+	</div>
+	<h1>In-Memory-Datenbank</h1>
+	<div class="container">
+		<div>
+			<div class="gauge" style="--from: 85deg; --to: 90deg;"></div>
+			<h2>RAM</h2>
+		</div>
+		<div>
+			<div class="gauge" style="--from: 25deg; --to: 31deg;"></div>
+			<h2>Festplatte</h2>
+		</div>
+		<div>
+			<div class="gauge" style="--from: 260deg; --to: 266deg;"></div>
+			<h2>Performance</h2>
+		</div>
+		<div>
+			<ul>
+				<li>Speicherung im RAM, Backup auf Festplatte</li>
+				<li>Multi-Core Performance Faktor x12</li>
+				<li>In-Memory Komprimierung Faktor 5:1</li>
+				<li>Optimale Nutzung von HDD- und RAM-Bandbreite</li>
+				<li>REST APIs, KI usw. direkt im Adressraum der Datenbank</li>
+				<li>Ideal für Statistiken</li>
+			</ul>
+		</div>
+	</div>
+
+  </body>
+</html>

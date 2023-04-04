@@ -44,7 +44,7 @@ SELECT * FROM foo
 SELECT SUM(amount) FROM foo
 ```
 
-# Constributing
+# Contributing
 
 We welcome contributions to memcp. If you would like to contribute, please follow these steps:
 
