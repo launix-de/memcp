@@ -1,6 +1,6 @@
 # memcp: A High-Performance, Open-Source Columnar In-Memory Database
 
-![memcp >](memcp-logo.svg?raw=true)
+![memcp >](assets/memcp-logo.svg?raw=true)
 
 memcp is an open-source, high-performance, columnar in-memory database that can handle both OLAP and OLTP workloads. It provides an alternative to proprietary analytical databases and aims to bring the benefits of columnar storage to the open-source world.
 
