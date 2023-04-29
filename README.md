@@ -61,3 +61,11 @@ Before submitting a pull request, please make sure that your changes pass the ex
 - https://launix.de/launix/on-designing-an-interface-for-columnar-in-memory-storage-in-golang/
 - https://launix.de/launix/how-in-memory-compression-affects-performance/
 - https://launix.de/launix/memory-efficient-indices-for-in-memory-storages/
+- https://launix.de/launix/on-compressing-null-values-in-bit-compressed-integer-storages/
+- https://launix.de/launix/when-the-benchmark-is-too-slow-golang-http-server-performance/
+- https://launix.de/launix/how-to-benchmark-a-sql-database/
+- https://launix.de/launix/writing-a-sql-parser-in-scheme/
+- https://launix.de/launix/accessing-memcp-via-scheme/
+- https://launix.de/launix/memcp-first-sql-query-is-correctly-executed/
+- https://launix.de/launix/sequence-compression-in-in-memory-database-yields-99-memory-savings-and-a-total-of-13/
+- https://launix.de/launix/storing-a-bit-smaller-than-in-one-bit/
