@@ -100,3 +100,14 @@ Heterogeneous Sorage Engine
  - Selten benutzte oder häufig NULL enthaltene Spalten werden vom Haupt-Satz abgespalten und in einen Extra Columnstore gelegt (ab 100 Sätzen)
  - der handler wird auch nach benutzten Spalten durchsucht
  - die Storage Engine soll später auch um JIT erweitert werden (häufige handler parameterisieren) - sollte aber unnötig sein, wenn pro Speicher genügend CPU bereitgestellt wird
+
+Storage Backup und Transactions
+-------------------------------
+jeder Datensatz im Delta Storage hat eine 64bit txn-nummer anhängig
+jede Löschmarkierung im Delta Storage hat eine 64bit txn-nummer anhängig
+jeder Datensatz hat eine 64bit hdd-nr. anhängig
+damit derselbe storage benutzt werden kann, sind txn-nummern >= 1<<63
+jeder insert und delete-befehl, sowie scan braucht die Angabe einer txn-Nr.
+scan scannt nur die Zeilen, die in der aktuellen txn gültig sind
+commit(txn) wandelt alle records in hdd-IDs um
+
