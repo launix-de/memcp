@@ -101,6 +101,35 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(error (concat "expected expression, found " rest)))
 	)))
 
+	/* compile insert */
+	(define parse_insert (lambda (rest) (match (identifier rest)
+		'(tbl rest) (begin
+			(define columnlist (lambda(cols rest)(begin
+				(match (identifier rest)
+					'(col rest) (match rest
+						(concat "," rest) (columnlist (append cols col) rest)
+						(concat ")" rest) (match rest
+							(regex "(?is)^(?:\\s|\\n)*VALUES(?:\\s|\\n)+(.*)" _ rest) '(tbl (append cols col) rest)
+							(regex "(?is)^(?:\\s|\\n)*SELECT(?:\\s|\\n)+(.*)" _ rest) (error "TODO: implement INSERT INTO SELECT")
+							(error (concat "expected VALUES or SELECT but found " rest))
+						)
+						(error (concat "expected , or ) in column list but found " rest))
+					)
+					(error (concat "expected identifier found " rest))
+				)
+			)))
+			(match rest
+				(concat "(" rest) (columnlist '() rest)
+				(error (concat "expected ( but found " rest))
+			)
+			/*
+			(print "TODO INSERT " tbl)
+			'((quote insert) schema tbl '((quote list) "bar" 551))
+			*/
+		)
+		(error (concat "expected table name, found " rest))
+	)))
+
 	/* main compile function -> decide which kind of SQL query it is */
 	(match s
 		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql rest)
@@ -108,6 +137,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql rest)
 		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") (quote schema) id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
 		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest '())
+		(regex "(?is)^INSERT(?:\\s|\\n)+INTO(?:\\s|\\n)+(.*)" _ rest) (parse_insert rest)
 		(error (concat "unknown SQL syntax: " s))
 	)
 )))
