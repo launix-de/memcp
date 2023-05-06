@@ -104,6 +104,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* compile insert */
 	(define parse_insert (lambda (rest) (match (identifier rest)
 		'(tbl rest) (begin
+			(define zip_cols (lambda(cols tuple) (match cols
+				(cons col cols) (cons col (cons (car tuple) (zip_cols cols (cdr tuple))))
+				'()
+			)))
 			(define tuplelist (lambda(tuples tuple rest)(begin
 				(match (expression rest)
 					'(value rest) (match rest
@@ -121,7 +125,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 						(concat "," rest) (columnlist (append cols col) rest)
 						(concat ")" rest) (match rest
 							(regex "(?is)^(?:\\s|\\n)*VALUES(?:\\s|\\n)+\\((.*)" _ rest) (match (tuplelist '() '() rest)
-								'(tuples rest) '(tbl (append cols col) tuples rest) /* TODO: compile into (insert ...) */
+								'(tuples rest) (begin
+									(define cols (append cols col))
+									'((merge '('((quote begin)) (map tuples (lambda (tuple) '((quote insert) (quote schema) tbl (cons (quote list) (zip_cols cols tuple))))))) rest)
+								)
 								(error (concat "expected tuple list but found " rest))
 							)
 							(regex "(?is)^(?:\\s|\\n)*SELECT(?:\\s|\\n)+(.*)" _ rest) (error "TODO: implement INSERT INTO SELECT")
