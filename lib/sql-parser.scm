@@ -104,12 +104,26 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* compile insert */
 	(define parse_insert (lambda (rest) (match (identifier rest)
 		'(tbl rest) (begin
+			(define tuplelist (lambda(tuples tuple rest)(begin
+				(match (expression rest)
+					'(value rest) (match rest
+						(regex "(?is)^,(?:\\s|\\n)*(.*)" _ rest) (tuplelist tuples (append tuple value) rest) /* append value to tuple */
+						(regex "(?is)^\\)(?:\\s|\\n)*,(?:\\s|\\n)*\\((.*)" _ rest) (tuplelist (append tuples (append tuple value)) '() rest) /* move on to next tuple */
+						(concat ")" rest) '((append tuples (append tuple value)) rest) /* finished -> return list of tuples */
+						(error (concat "expected , or ) in column list but found " rest))
+					)
+					(error (concat "expected expression found " rest))
+				)
+			)))
 			(define columnlist (lambda(cols rest)(begin
 				(match (identifier rest)
 					'(col rest) (match rest
 						(concat "," rest) (columnlist (append cols col) rest)
 						(concat ")" rest) (match rest
-							(regex "(?is)^(?:\\s|\\n)*VALUES(?:\\s|\\n)+(.*)" _ rest) '(tbl (append cols col) rest)
+							(regex "(?is)^(?:\\s|\\n)*VALUES(?:\\s|\\n)+\\((.*)" _ rest) (match (tuplelist '() '() rest)
+								'(tuples rest) '(tbl (append cols col) tuples rest) /* TODO: compile into (insert ...) */
+								(error (concat "expected tuple list but found " rest))
+							)
 							(regex "(?is)^(?:\\s|\\n)*SELECT(?:\\s|\\n)+(.*)" _ rest) (error "TODO: implement INSERT INTO SELECT")
 							(error (concat "expected VALUES or SELECT but found " rest))
 						)
