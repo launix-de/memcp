@@ -127,7 +127,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 							(regex "(?is)^(?:\\s|\\n)*VALUES(?:\\s|\\n)+\\((.*)" _ rest) (match (tuplelist '() '() rest)
 								'(tuples rest) (begin
 									(define cols (append cols col))
-									'((merge '('((quote begin)) (map tuples (lambda (tuple) '((quote insert) (quote schema) tbl (cons (quote list) (zip_cols cols tuple))))))) rest)
+									(merge '('((quote begin)) (map tuples (lambda (tuple) '((quote insert) (quote schema) tbl (cons (quote list) (zip_cols cols tuple))))))) /* TODO: what if something is left in rest??? */
 								)
 								(error (concat "expected tuple list but found " rest))
 							)
