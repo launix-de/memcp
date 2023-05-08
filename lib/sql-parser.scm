@@ -49,7 +49,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* eat a identifier from string */
 	(define expression (lambda (s) (match s
 		/* constant */
-		(regex "^(-?[0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest)
+		(regex "^(-?[0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest) /* int constant */
+		(regex "^'([^']*)'(?:\\s|\\n)*(.*)" _ str rest) (expression_extend (concat str) rest) /* string constant; TODO: instead of concat, use a strip-escape helper function */
+		(regex "(?is)^NULL\\b(?:\\s|\\n)*(.*)" _ rest) (expression_extend null rest) /* NULL */
 		/* identifier (TODO: tblalias.identifier) */
 		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
 		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
