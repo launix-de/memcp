@@ -44,19 +44,11 @@ func (s *StorageSeq) getValue(i uint) scm.Scmer {
 		return uint64(i) < recid // return true as long as we are bigger than searched index
 	}) - 1
 	var value, stride int64
-	if s.start.hasNegative {
-		value = s.start.getValueInt(uint(idx))
-	} else {
-		value = int64(s.start.getValueUInt(uint(idx)))
-	}
+	value = s.start.getValueInt(uint(idx)) + s.start.offset
 	if s.start.hasNull && value == int64(s.start.null) {
 		return nil
 	}
-	if s.stride.hasNegative {
-		stride = s.stride.getValueInt(uint(idx))
-	} else {
-		stride = int64(s.stride.getValueUInt(uint(idx)))
-	}
+	stride = s.stride.getValueInt(uint(idx)) + s.stride.offset
 	recid := s.recordId.getValueUInt(uint(idx))
 	return float64(value + int64(uint64(i) - recid) * stride)
 

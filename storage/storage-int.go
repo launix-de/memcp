@@ -23,7 +23,8 @@ import "github.com/launix-de/memcp/scm"
 type StorageInt struct {
 	chunk []uint64
 	bitsize uint8
-	hasNegative bool
+	offset int64
+	max int64
 	hasNull bool
 	null uint64 // which value is null
 }
@@ -55,19 +56,11 @@ func (s *StorageInt) String() string {
 }
 
 func (s *StorageInt) getValue(i uint) scm.Scmer {
-	if (s.hasNegative) { // with sign expansion
-		v := s.getValueInt(i)
-		if s.hasNull && uint64(v) == s.null {
-			return nil
-		}
-		return float64(v)
-	} else { // without sign expansion
-		v := s.getValueUInt(i)
-		if s.hasNull && v == s.null {
-			return nil
-		}
-		return float64(v)
+	v := s.getValueUInt(i)
+	if s.hasNull && v == s.null {
+		return nil
 	}
+	return float64(int64(v) + s.offset)
 }
 
 func (s *StorageInt) getValueInt(i uint) int64 {
@@ -95,7 +88,8 @@ func (s *StorageInt) getValueUInt(i uint) uint64 {
 func (s *StorageInt) prepare() {
 	// set up scan
 	s.bitsize = 0
-	s.hasNegative = false
+	s.offset = int64(1 << 63 - 1)
+	s.max = -s.offset - 1
 }
 func (s *StorageInt) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
@@ -104,30 +98,27 @@ func (s *StorageInt) scan(i uint, value scm.Scmer) {
 		return
 	}
 	v := toInt(value)
-	if v >= int64(s.null) {
-		// mark 1+highest value as null
-		s.null = uint64(v) + 1
+	if v < s.offset {
+		s.offset = v
 	}
-	if v < 0 {
-		s.hasNegative = true
-		v = -v
-	}
-	l := uint8(bits.Len64(uint64(v)))
-	if l > s.bitsize {
-		s.bitsize = l
+	if v > s.max {
+		s.max = v
 	}
 }
 func (s *StorageInt) init(i uint) {
+	v := s.max - s.offset
 	if s.hasNull {
-		// need an extra bit because of null??
-		l := uint8(bits.Len64(uint64(s.null)))
-		if l > s.bitsize {
-			s.bitsize = l
-		}
+		// store the value
+		s.null = uint64(v)
+		v = v + 1
 	}
-	if s.hasNegative {
-		s.bitsize = s.bitsize + 1
+	if v == -1 {
+		// no values at all
+		v = 0
+		s.offset = 0
+		s.null = 0
 	}
+	s.bitsize = uint8(bits.Len64(uint64(v)))
 	if s.bitsize == 0 {
 		s.bitsize = 1
 	}
@@ -142,6 +133,7 @@ func (s *StorageInt) build(i uint, value scm.Scmer) {
 		// null value
 		vi = int64(s.null)
 	}
+	vi = vi - s.offset
 	bitpos := i * uint(s.bitsize)
 	v := uint64(vi) << (64 - uint(s.bitsize)) // shift value to the leftmost position of 64bit int
 	s.chunk[bitpos / 64] = s.chunk[bitpos / 64] | (v >> (bitpos % 64)) // first chunk
