@@ -86,21 +86,40 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 	/* compile select */
 	(define select (lambda (rest fields) (begin
-		(define parse_afterexpr (lambda (expr id rest) (match rest
-			/* no FROM */ "" (build_queryplan '() (append fields id expr))
-			/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest (append fields id expr))
-			/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
-			/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
-				'(tblid rest) (build_queryplan '('(tblid (quote schema) tblid)) (append fields id expr))
-				/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
-			) /* TODO: FROM, WHERE, GROUP usw. */
-			/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
+		(define parse_afterexpr (lambda (expr id rest) (begin
+			(define fields (append fields id expr))
+			(match rest
+				/* no FROM */ "" (build_queryplan '() fields)
+				/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest fields)
+				/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
+				/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
+					'(tblid rest) (build_queryplan '('(tblid (quote schema) tblid)) fields)
+					/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
+				) /* TODO: FROM, WHERE, GROUP usw. */
+				/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
+			)
 		)))
 
-		/* after select, there must be an expression */
-		(match
-			(expression rest) '(expr rest) (parse_afterexpr expr (extract_title expr) rest)
-			(error (concat "expected expression, found " rest)))
+		/* after select, there must be an expression or star */
+		(match rest
+			/* select * */
+			(regex "^\\*(?:\\s|\\n)*(.*)" _ rest) (begin
+				(define fields (append fields "a" 1 "b" 2 "c" 3)) /* TODO: gather field list */
+				(match rest
+					/* no FROM */ "" (build_queryplan '() fields)
+					/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest fields)
+					/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
+						'(tblid rest) (build_queryplan '('(tblid (quote schema) tblid)) fields)
+						/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
+					) /* TODO: FROM, WHERE, GROUP usw. */
+					/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
+				)
+			)
+			/* normal expression */
+			(match (expression rest)
+				'(expr rest) (parse_afterexpr expr (extract_title expr) rest)
+				(error (concat "expected expression, found " rest)))
+		)
 	)))
 
 	/* compile insert */

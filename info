@@ -111,3 +111,8 @@ jeder insert und delete-befehl, sowie scan braucht die Angabe einer txn-Nr.
 scan scannt nur die Zeilen, die in der aktuellen txn gültig sind
 commit(txn) wandelt alle records in hdd-IDs um
 
+
+Compression
+-----------
+strings:
+https://www.vldb.org/pvldb/vol13/p2649-boncz.pdf

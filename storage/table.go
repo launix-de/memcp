@@ -24,7 +24,7 @@ type dataset []scm.Scmer
 type column struct {
 	name string
 	typ string
-	typdimensions []int
+	typdimensions []int // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	extrainfo string // TODO: further diversify into NOT NULL, AUTOINCREMENT etc.
 }
 type table struct {
