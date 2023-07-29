@@ -116,3 +116,33 @@ Compression
 -----------
 strings:
 https://www.vldb.org/pvldb/vol13/p2649-boncz.pdf
+
+MMap
+----
+import "https://github.com/edsrzf/mmap-go/blob/main/mmap.go"
+mmap.Map(file, RDWR, 0) // oder RDONLY
+// available functions: Flush, Unmap
+// ist dann ein byte[]
+
+Persistenz
+----------
+FAT-16-ähnlicher Storage
+1 Speicher-Block => [uint64 lastblocksize] [uint64 thisblocksize] [block]
+am Anfang ist der Rootblock
+1 Verzeichnisnode -> verkettete Liste
+[uint64 nextblock] [uint64 lastblock] [uint64 parentdirectory] entries<[uint16 flags [directory]] [int16 filenamesize] [uint64 block]>
+
+Serialize:
+01. Größe Ermitteln (SerializeSize ()->uint64)
+02. Speicher holen
+03. Speicher schreiben (SerializeWrite (bytes[]))
+
+Deserialize:
+01. Klasse ermitteln (Factory)
+02. Klasse erstellen (Create-Methode der Factory)
+02. De
+
+Schemen & co per JSON serialisieren
+ - Je DB ein Ordner mit schema.json JSON-Datei mit allen Schema-Infs (Tabellen, Spalten usw.)
+ - In JSON: Je Tabelle Liste der Shards als Binär-Dateien (.shard)
+ - .shard-Datei enthält den Delta Storage + je Spalte Verweise auf die columnstorage-dateien

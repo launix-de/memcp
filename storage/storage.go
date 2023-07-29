@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "time"
+import "reflect"
 import "runtime"
 import "strings"
 import "github.com/launix-de/memcp/scm"
@@ -36,6 +37,20 @@ type ColumnStorage interface {
 	init(uint)
 	build(uint, scm.Scmer)
 	finish()
+
+	// persistency (the callee is responsible for closing the file handle in the end) TODO
+	// serialize(os.File) // write content to file (and maybe swap the old content out of ram) (must set finalizer if file is kept open)
+	// deserialize(os.File) // read from file (or swap in)
+}
+
+var storages = map[int]reflect.Type {
+	 1: reflect.TypeOf(StorageSCMER{}),
+	 2: reflect.TypeOf(StorageSparse{}),
+	10: reflect.TypeOf(StorageInt{}),
+	11: reflect.TypeOf(StorageSeq{}),
+	12: reflect.TypeOf(StorageFloat{}),
+	20: reflect.TypeOf(StorageString{}),
+	21: reflect.TypeOf(StoragePrefix{}),
 }
 
 func Init(en scm.Env) {
