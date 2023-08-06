@@ -28,7 +28,7 @@ type column struct {
 	Extrainfo string // TODO: further diversify into NOT NULL, AUTOINCREMENT etc.
 }
 type table struct {
-	// schema
+	schema *database
 	Name string
 	Columns []column
 	mu sync.Mutex // schema lock
@@ -54,6 +54,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 	for i := range t.Shards {
 		t.Shards[i].columns[name] = new (StorageSCMER)
 	}
+	t.db.save()
 	t.mu.Unlock()
 }
 
@@ -68,6 +69,8 @@ func (t *table) Insert(d dataset) {
 			go func(i int) {
 				// rebuild full shards in background
 				t.Shards[i] = t.Shards[i].rebuild()
+				// write new uuids to disk
+				t.db.save()
 			}(len(t.Shards)-1)
 			shard = NewShard(t)
 			fmt.Println("started new shard for table", t.Name)

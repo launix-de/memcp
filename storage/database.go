@@ -28,6 +28,29 @@ var databases map[string]*database = make(map[string]*database)
 var databaselock sync.Mutex
 var basepath string = "data"
 
+func (d *database) save() {
+	os.MkdirAll(db.path, 0750)
+	f, err := os.Create(db.path + "schema.json")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	f.Write(jsonbytes)
+	// shards are written while rebuild
+}
+
+func (d *database) rebuild() {
+	for _, t := range db.Tables {
+		t.mu.Lock() // table lock
+		for i, s := range t.Shards {
+			// TODO: go + chan done
+			t.Shards[i] = s.rebuild()
+		}
+		t.mu.Unlock() // TODO: do this after chan done??
+	}
+}
+
 func CreateDatabase(schema string) {
 	databaselock.Lock()
 	if _, ok := databases[schema]; ok {
@@ -39,12 +62,14 @@ func CreateDatabase(schema string) {
 	db.Tables = make(map[string]*table)
 	databases[schema] = db
 	databaselock.Unlock()
+	db.save()
 }
 
 func DropDatabase(schema string) {
 	databaselock.Lock()
 	delete(databases, schema)
 	databaselock.Unlock()
+	// TODO: remove folder of that database
 }
 
 func CreateTable(schema, name string) *table {
@@ -57,10 +82,12 @@ func CreateTable(schema, name string) *table {
 		panic("Table " + name + " already exists")
 	}
 	t := new(table)
+	t.schema = db
 	t.Name = name
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	db.Tables[t.Name] = t
+	db.save()
 	db.schemalock.Unlock()
 	return t
 }
@@ -73,6 +100,7 @@ func DropTable(schema, name string) {
 	}
 	db.schemalock.Lock()
 	delete(db.Tables, name)
+	db.save()
 	db.schemalock.Unlock()
 }
 

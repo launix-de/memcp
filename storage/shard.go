@@ -16,6 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
 import "sync"
 import "strings"
@@ -162,6 +163,18 @@ func (t *storageShard) rebuild() *storageShard {
 			b.WriteString(col) // colname
 			b.WriteString(" ")
 			b.WriteString(newcol.String()) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
+
+			// write to disc
+			go func() {
+				for colname, col := range result.columns {
+					f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + colname)
+					if err != nil {
+						panic(err)
+					}
+					// TODO: don't cast; use the interface
+					col.(*StorageSCMER).Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
+				}
+			}()
 		}
 		b.WriteString(") -> ")
 		b.WriteString(fmt.Sprint(result.main_count))

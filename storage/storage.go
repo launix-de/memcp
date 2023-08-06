@@ -111,15 +111,7 @@ func Init(en scm.Env) {
 	}
 	en.Vars["save"] = func (a ...scm.Scmer) scm.Scmer {
 		for _, db := range databases {
-			os.MkdirAll(db.path, 0750)
-			f, err := os.Create(db.path + "schema.json")
-			if err != nil {
-				panic(err)
-			}
-			defer f.Close()
-			jsonbytes, _ := json.MarshalIndent(db, "", "  ")
-			f.Write(jsonbytes)
-			// TODO: write down the shards
+			db.save()
 		}
 		return "ok"
 	}
@@ -127,14 +119,7 @@ func Init(en scm.Env) {
 		start := time.Now()
 
 		for _, db := range databases {
-			for _, t := range db.Tables {
-				t.mu.Lock() // table lock
-				for i, s := range t.Shards {
-					// TODO: go + chan done
-					t.Shards[i] = s.rebuild()
-				}
-				t.mu.Unlock() // TODO: do this after chan done??
-			}
+			db.rebuild()
 		}
 
 		return fmt.Sprint(time.Since(start))
