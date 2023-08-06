@@ -34,10 +34,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (import "queryplan.scm")
 
 /* TODO: session state handling -> which schema */
+/*
 (createdatabase "test")
 (createtable "test" "foo" '('("bar" "int" '() "")))
 (insert "test" "foo" '("bar" 12))
 (insert "test" "foo" '("bar" 44))
+*/
 (set schema "test")
 
 /* http hook for handling SQL */

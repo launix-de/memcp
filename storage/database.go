@@ -16,7 +16,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "sync"
+import "encoding/json"
 
 type database struct {
 	Name string `json:"name"`
@@ -26,9 +28,32 @@ type database struct {
 }
 var databases map[string]*database = make(map[string]*database)
 var databaselock sync.Mutex
-var basepath string = "data"
+var Basepath string = "data"
 
-func (d *database) save() {
+func LoadDatabases() {
+	databaselock.Lock()
+	entries, _ := os.ReadDir(Basepath)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// load database from hdd
+			db := new(database)
+			db.path = Basepath + "/" + entry.Name() + "/"
+			jsonbytes, _ := os.ReadFile(db.path + "schema.json")
+			json.Unmarshal(jsonbytes, db) // json import
+			databases[db.Name] = db
+			// restore back references of the tables
+			for _, t := range db.Tables {
+				t.schema = db // restore schema reference
+				for _, s := range t.Shards {
+					s.load(t)
+				}
+			}
+		}
+	}
+	databaselock.Unlock()
+}
+
+func (db *database) save() {
 	os.MkdirAll(db.path, 0750)
 	f, err := os.Create(db.path + "schema.json")
 	if err != nil {
@@ -40,7 +65,7 @@ func (d *database) save() {
 	// shards are written while rebuild
 }
 
-func (d *database) rebuild() {
+func (db *database) rebuild() {
 	for _, t := range db.Tables {
 		t.mu.Lock() // table lock
 		for i, s := range t.Shards {
@@ -58,7 +83,7 @@ func CreateDatabase(schema string) {
 	}
 	db := new(database)
 	db.Name = schema
-	db.path = basepath + "/" + schema + "/" // TODO: alternative save paths
+	db.path = Basepath + "/" + schema + "/" // TODO: alternative save paths
 	db.Tables = make(map[string]*table)
 	databases[schema] = db
 	databaselock.Unlock()

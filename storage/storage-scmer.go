@@ -18,6 +18,7 @@ package storage
 
 import "os"
 import "math"
+import "bufio"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
@@ -46,8 +47,18 @@ func (s *StorageSCMER) Serialize(f *os.File) {
 		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
 	}
 }
-func (s *StorageSCMER) Deserialize(f *os.File) {
+func (s *StorageSCMER) Deserialize(f *os.File) uint {
 	defer f.Close()
+	var l uint64
+	binary.Read(f, binary.LittleEndian, &l)
+	s.values = make([]scm.Scmer, l)
+	scanner := bufio.NewScanner(f)
+	for i := uint64(0); i < l; i++ {
+		if scanner.Scan() {
+			json.Unmarshal(scanner.Bytes(), &s.values[i])
+		}
+	}
+	return uint(l)
 }
 
 func (s *StorageSCMER) String() string {

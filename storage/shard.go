@@ -20,7 +20,9 @@ import "os"
 import "fmt"
 import "sync"
 import "strings"
+import "reflect"
 import "encoding/json"
+import "encoding/binary"
 import "github.com/google/uuid"
 
 type storageShard struct {
@@ -40,6 +42,31 @@ type storageShard struct {
 
 func (u *storageShard) MarshalJSON() ([]byte, error) {
 	return json.Marshal(u.uuid.String())
+}
+func (u *storageShard) UnmarshalJSON(data []byte) error {
+	u.uuid.UnmarshalText(data)
+	u.columns = make(map[string]ColumnStorage)
+	u.deletions = make(map[uint]struct{})
+	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
+	return nil
+}
+func (u *storageShard) load(t *table) {
+	u.t = t
+	// load the columns
+	//fmt.Println("TODO: load "+u.t.Name+" from "+u.uuid.String())
+	for _, col := range u.t.Columns {
+		// read column from file
+		f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + col.Name)
+		if err != nil {
+			panic(err) // this is fatal, but we might be more graceful if some data is missing??
+		}
+		var magicbyte uint8 // type of that column
+		binary.Read(f, binary.LittleEndian, &magicbyte)
+		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
+		// TODO: remove StorageSCMER typecast as soon as all storage types have a serialization option
+		u.main_count = columnstorage.(*StorageSCMER).Deserialize(f) // read; ownership of f goes to Deserialize, so they will free the handle
+		u.columns[col.Name] = columnstorage
+	}
 }
 
 func NewShard(t *table) *storageShard {

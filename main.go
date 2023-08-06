@@ -129,6 +129,8 @@ func main() {
 	}
 	// storage initialization
 	storage.Init(scm.Globalenv)
+	storage.Basepath = "data" // TODO: make overwritable per settings
+	storage.LoadDatabases()
 	// scripts initialization
 	scm.Eval(scm.Read("(import \"lib/main.scm\")"), &IOEnv)
 

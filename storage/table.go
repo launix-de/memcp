@@ -54,7 +54,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 	for i := range t.Shards {
 		t.Shards[i].columns[name] = new (StorageSCMER)
 	}
-	t.db.save()
+	t.schema.save()
 	t.mu.Unlock()
 }
 
@@ -70,7 +70,7 @@ func (t *table) Insert(d dataset) {
 				// rebuild full shards in background
 				t.Shards[i] = t.Shards[i].rebuild()
 				// write new uuids to disk
-				t.db.save()
+				t.schema.save()
 			}(len(t.Shards)-1)
 			shard = NewShard(t)
 			fmt.Println("started new shard for table", t.Name)

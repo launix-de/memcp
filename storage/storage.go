@@ -16,13 +16,11 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
 import "fmt"
 import "time"
 import "reflect"
 import "runtime"
 import "strings"
-import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 // THE basic storage pattern
@@ -42,10 +40,10 @@ type ColumnStorage interface {
 
 	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
 	//Serialize(*os.File) // write content to file (and maybe swap the old content out of ram) (must set finalizer if file is kept open)
-	//Deserialize(*os.File) // read from file (or swap in) (note that first byte is already read)
+	//Deserialize(*os.File) uint // read from file (or swap in) (note that first byte is already read)
 }
 
-var storages = map[int]reflect.Type {
+var storages = map[uint8]reflect.Type {
 	 1: reflect.TypeOf(StorageSCMER{}),
 	 2: reflect.TypeOf(StorageSparse{}),
 	10: reflect.TypeOf(StorageInt{}),
