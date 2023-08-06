@@ -36,7 +36,7 @@ func LoadCSV(schema, table, filename, delimiter string) {
 		close(lines)
 	}()
 
-	t, ok := tables[schema][table]
+	t, ok := databases[schema].Tables[table]
 	if !ok {
 		panic("table " + table + " does not exist")
 	}
@@ -45,9 +45,9 @@ func LoadCSV(schema, table, filename, delimiter string) {
 			// ignore
 		} else {
 			arr := strings.Split(s, delimiter)
-			x := make([]scm.Scmer, 2*len(t.columns))
-			for i, col := range t.columns {
-				x[2*i] = col.name
+			x := make([]scm.Scmer, 2*len(t.Columns))
+			for i, col := range t.Columns {
+				x[2*i] = col.Name
 				if i < len(arr) {
 					x[2*i+1] = scm.Simplify(arr[i])
 				}

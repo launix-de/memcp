@@ -172,7 +172,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 				return
 			} else {
 				// rebuild index
-				fmt.Println("building index on", s.t.t.name, "over", s.cols)
+				fmt.Println("building index on", s.t.t.Name, "over", s.cols)
 				tmp := make([]uint, s.t.main_count)
 				for i := uint(0); i < s.t.main_count; i++ {
 					tmp[i] = i // fill with natural order

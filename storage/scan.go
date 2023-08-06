@@ -42,7 +42,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 
 	values := make(chan scm.Scmer, 4)
 	rest := 0
-	for _, s := range t.shards {
+	for _, s := range t.Shards {
 		// parallel scan over shards
 		go func(s *storageShard) {
 			defer func () {

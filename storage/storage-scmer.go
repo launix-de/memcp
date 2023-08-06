@@ -16,7 +16,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "math"
+import "encoding/json"
+import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
@@ -28,6 +31,23 @@ type StorageSCMER struct {
 	null uint // amount of NULL values (sparse map!)
 	numSeq uint // sequence statistics
 	last1, last2 int64 // sequence statistics
+}
+
+func (s *StorageSCMER) Serialize(f *os.File) {
+	defer f.Close()
+	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
+	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
+	for i := 0; i < len(s.values); i++ {
+		v, err := json.Marshal(s.values[i])
+		if err != nil {
+			panic(err)
+		}
+		f.Write(v)
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
+	}
+}
+func (s *StorageSCMER) Deserialize(f *os.File) {
+	defer f.Close()
 }
 
 func (s *StorageSCMER) String() string {
@@ -83,6 +103,7 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
+	return nil // for testing purposes of the storage serialization
 	if s.null * 13 > i * 100 {
 		// sparse payoff against bitcompressed is at ~13%
 		return new(StorageSparse)

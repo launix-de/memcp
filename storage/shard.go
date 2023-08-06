@@ -19,9 +19,12 @@ package storage
 import "fmt"
 import "sync"
 import "strings"
+import "encoding/json"
+import "github.com/google/uuid"
 
 type storageShard struct {
 	t *table
+	uuid uuid.UUID // uuid.String()
 	// main storage
 	main_count uint // size of main storage
 	columns map[string]ColumnStorage
@@ -34,13 +37,18 @@ type storageShard struct {
 	indexes []*StorageIndex
 }
 
+func (u *storageShard) MarshalJSON() ([]byte, error) {
+	return json.Marshal(u.uuid.String())
+}
+
 func NewShard(t *table) *storageShard {
 	result := new(storageShard)
+	result.uuid, _ = uuid.NewRandom()
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
 	result.deletions = make(map[uint]struct{})
-	for _, column := range t.columns {
-		result.columns[column.name] = new (StorageSCMER)
+	for _, column := range t.Columns {
+		result.columns[column.Name] = new (StorageSCMER)
 	}
 	return result
 }
@@ -72,9 +80,11 @@ func (t *storageShard) rebuild() *storageShard {
 	t.mu.Unlock()
 	// from now on, we can rebuild with no hurry
 	if maxInsertIndex > 0 || len(t.deletions) > 0 {
+		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
+		// TODO: SetFinalizer to old shard to delete files from disk
 		var b strings.Builder
 		b.WriteString("rebuilding shard for table ")
-		b.WriteString(t.t.name)
+		b.WriteString(t.t.Name)
 		b.WriteString("(")
 		result.columns = make(map[string]ColumnStorage)
 		result.deletions = make(map[uint]struct{})
@@ -159,6 +169,7 @@ func (t *storageShard) rebuild() *storageShard {
 		rebuildIndexes(t, result)
 	} else {
 		// otherwise: table stays the same
+		result.uuid = t.uuid // copy uuid in case nothing changes
 		result.columns = t.columns
 		result.main_count = t.main_count
 		result.inserts = t.inserts

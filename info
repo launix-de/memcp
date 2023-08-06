@@ -124,6 +124,8 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 // available functions: Flush, Unmap
 // ist dann ein byte[]
 
+runtime.SetFinalizer(obj, finalizer(obj))
+
 Persistenz
 ----------
 FAT-16-ähnlicher Storage

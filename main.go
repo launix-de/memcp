@@ -27,7 +27,9 @@ import "os"
 import "io"
 import "bufio"
 import "io/ioutil"
+import "crypto/rand"
 import "path/filepath"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage"
 
@@ -102,6 +104,9 @@ func main() {
     This is free software, and you are welcome to redistribute it
     under certain conditions;
 `)
+
+	// init random generator for UUIDs
+	uuid.SetRand(rand.Reader)
 
 	// define some IO functions (scm will not provide them since it is sandboxable)
 	wd, _ := os.Getwd() // libraries are relative to working directory... is that right?

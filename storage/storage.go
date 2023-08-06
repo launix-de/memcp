@@ -16,11 +16,13 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
 import "time"
 import "reflect"
 import "runtime"
 import "strings"
+import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 // THE basic storage pattern
@@ -38,9 +40,9 @@ type ColumnStorage interface {
 	build(uint, scm.Scmer)
 	finish()
 
-	// persistency (the callee is responsible for closing the file handle in the end) TODO
-	// serialize(os.File) // write content to file (and maybe swap the old content out of ram) (must set finalizer if file is kept open)
-	// deserialize(os.File) // read from file (or swap in)
+	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
+	//Serialize(*os.File) // write content to file (and maybe swap the old content out of ram) (must set finalizer if file is kept open)
+	//Deserialize(*os.File) // read from file (or swap in) (note that first byte is already read)
 }
 
 var storages = map[int]reflect.Type {
@@ -58,7 +60,7 @@ func Init(en scm.Env) {
 		start := time.Now() // time measurement
 
 		// params: table, condition, map, reduce, reduceSeed
-		t := tables[scm.String(a[0])][scm.String(a[1])]
+		t := databases[scm.String(a[0])].Tables[scm.String(a[1])]
 		var aggregate scm.Scmer
 		var neutral scm.Scmer
 		if len(a) > 4 {
@@ -101,21 +103,35 @@ func Init(en scm.Env) {
 		return "ok"
 	}
 	en.Vars["insert"] = func (a ...scm.Scmer) scm.Scmer {
-		tables[scm.String(a[0])][scm.String(a[1])].Insert(dataset(a[2].([]scm.Scmer)))
+		databases[scm.String(a[0])].Tables[scm.String(a[1])].Insert(dataset(a[2].([]scm.Scmer)))
 		return "ok"
 	}
 	en.Vars["stat"] = func (a ...scm.Scmer) scm.Scmer {
 		return PrintMemUsage()
 	}
+	en.Vars["save"] = func (a ...scm.Scmer) scm.Scmer {
+		for _, db := range databases {
+			os.MkdirAll(db.path, 0750)
+			f, err := os.Create(db.path + "schema.json")
+			if err != nil {
+				panic(err)
+			}
+			defer f.Close()
+			jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+			f.Write(jsonbytes)
+			// TODO: write down the shards
+		}
+		return "ok"
+	}
 	en.Vars["rebuild"] = func (a ...scm.Scmer) scm.Scmer {
 		start := time.Now()
 
-		for _, database := range tables {
-			for _, t := range database {
-				t.mu.Lock() // schema lock
-				for i, s := range t.shards {
+		for _, db := range databases {
+			for _, t := range db.Tables {
+				t.mu.Lock() // table lock
+				for i, s := range t.Shards {
 					// TODO: go + chan done
-					t.shards[i] = s.rebuild()
+					t.Shards[i] = s.rebuild()
 				}
 				t.mu.Unlock() // TODO: do this after chan done??
 			}

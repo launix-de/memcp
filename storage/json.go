@@ -54,7 +54,7 @@ func LoadJSON(schema, filename string) {
 			// ignore
 		} else if s[0:7] == "#table " {
 			var ok bool
-			t, ok = tables[schema][s[7:]]
+			t, ok = databases[schema].Tables[s[7:]]
 			if !ok {
 				// new table
 				t = CreateTable(schema, s[7:])
@@ -65,7 +65,7 @@ func LoadJSON(schema, filename string) {
 			if t == nil {
 				panic("no table set")
 			} else {
-				if len(t.columns) == 0 {
+				if len(t.Columns) == 0 {
 					// JSON with an unknown table format -> create dummy cols
 					var x map[string]scm.Scmer
 					json.Unmarshal([]byte(s), &x) // parse JSON
