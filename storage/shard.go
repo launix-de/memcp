@@ -57,7 +57,9 @@ func (u *storageShard) load(t *table) {
 		// read column from file
 		f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + col.Name)
 		if err != nil {
-			panic(err) // this is fatal, but we might be more graceful if some data is missing??
+			// file does not exist -> no data available
+			u.columns[col.Name] = new(StorageSCMER)
+			continue
 		}
 		var magicbyte uint8 // type of that column
 		err = binary.Read(f, binary.LittleEndian, &magicbyte)
@@ -198,18 +200,17 @@ func (t *storageShard) rebuild() *storageShard {
 			b.WriteString(newcol.String()) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
 
 			// write to disc
-			go func() {
-				f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + col)
-				if err != nil {
-					panic(err)
-				}
-				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
-			}()
+			f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + col)
+			if err != nil {
+				panic(err)
+			}
+			newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 		}
 		b.WriteString(") -> ")
 		b.WriteString(fmt.Sprint(result.main_count))
 		fmt.Println(b.String())
 		rebuildIndexes(t, result)
+		result.t.schema.save()
 	} else {
 		// otherwise: table stays the same
 		result.uuid = t.uuid // copy uuid in case nothing changes
