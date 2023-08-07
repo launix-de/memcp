@@ -199,13 +199,11 @@ func (t *storageShard) rebuild() *storageShard {
 
 			// write to disc
 			go func() {
-				for colname, col := range result.columns {
-					f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + colname)
-					if err != nil {
-						panic(err)
-					}
-					col.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
+				f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + col)
+				if err != nil {
+					panic(err)
 				}
+				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 			}()
 		}
 		b.WriteString(") -> ")
