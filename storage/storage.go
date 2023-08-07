@@ -16,6 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
 import "time"
 import "reflect"
@@ -39,8 +40,8 @@ type ColumnStorage interface {
 	finish()
 
 	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
-	//Serialize(*os.File) // write content to file (and maybe swap the old content out of ram) (must set finalizer if file is kept open)
-	//Deserialize(*os.File) uint // read from file (or swap in) (note that first byte is already read)
+	Serialize(*os.File) // write content to file (and maybe swap the old content out of ram) (must set finalizer if file is kept open)
+	Deserialize(*os.File) uint // read from file (or swap in) (note that first byte is already read)
 }
 
 var storages = map[uint8]reflect.Type {
@@ -118,6 +119,7 @@ func Init(en scm.Env) {
 
 		for _, db := range databases {
 			db.rebuild()
+			db.save()
 		}
 
 		return fmt.Sprint(time.Since(start))

@@ -16,8 +16,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
 import "sort"
+import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 type StorageSeq struct {
@@ -35,6 +37,30 @@ type StorageSeq struct {
 
 func (s *StorageSeq) String() string {
 	return fmt.Sprintf("seq[%dx %s/%s]", s.seqCount, s.start.String(), s.stride.String())
+}
+
+func (s *StorageSeq) Serialize(f *os.File) {
+	defer f.Close()
+	binary.Write(f, binary.LittleEndian, uint8(11)) // 11 = StorageSeq
+	f.WriteString("1234567") // dummy
+	binary.Write(f, binary.LittleEndian, uint64(s.start.count))
+	binary.Write(f, binary.LittleEndian, uint64(s.seqCount))
+	s.recordId.SerializeToFile(f)
+	s.start.SerializeToFile(f)
+	s.stride.SerializeToFile(f)
+}
+
+func (s *StorageSeq) Deserialize(f *os.File) uint {
+	defer f.Close()
+	var dummy [7]byte
+	f.Read(dummy[:])
+	var l uint64
+	binary.Read(f, binary.LittleEndian, &l)
+	binary.Read(f, binary.LittleEndian, &s.seqCount)
+	s.recordId.DeserializeFromFile(f, true)
+	s.start.DeserializeFromFile(f, true)
+	s.stride.DeserializeFromFile(f, true)
+	return uint(l)
 }
 
 func (s *StorageSeq) getValue(i uint) scm.Scmer {

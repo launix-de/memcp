@@ -53,7 +53,6 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 func (u *storageShard) load(t *table) {
 	u.t = t
 	// load the columns
-	//fmt.Println("TODO: load "+u.t.Name+" from "+u.uuid.String())
 	for _, col := range u.t.Columns {
 		// read column from file
 		f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + col.Name)
@@ -61,10 +60,17 @@ func (u *storageShard) load(t *table) {
 			panic(err) // this is fatal, but we might be more graceful if some data is missing??
 		}
 		var magicbyte uint8 // type of that column
-		binary.Read(f, binary.LittleEndian, &magicbyte)
+		err = binary.Read(f, binary.LittleEndian, &magicbyte)
+		if err != nil {
+			// empty storage
+			u.columns[col.Name] = new(StorageSCMER)
+			continue
+		}
+
+		fmt.Println("loading storage "+u.t.schema.path + u.uuid.String() + "-" + col.Name+" of type", magicbyte)
+
 		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
-		// TODO: remove StorageSCMER typecast as soon as all storage types have a serialization option
-		u.main_count = columnstorage.(*StorageSCMER).Deserialize(f) // read; ownership of f goes to Deserialize, so they will free the handle
+		u.main_count = columnstorage.Deserialize(f) // read; ownership of f goes to Deserialize, so they will free the handle
 		u.columns[col.Name] = columnstorage
 	}
 }
@@ -198,8 +204,7 @@ func (t *storageShard) rebuild() *storageShard {
 					if err != nil {
 						panic(err)
 					}
-					// TODO: don't cast; use the interface
-					col.(*StorageSCMER).Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
+					col.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 				}
 			}()
 		}

@@ -1,6 +1,6 @@
 module github.com/launix-de/memcp
 
-go 1.18
+go 1.20
 
 require (
 	github.com/chzyer/readline v1.5.1

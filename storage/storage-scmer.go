@@ -34,6 +34,10 @@ type StorageSCMER struct {
 	last1, last2 int64 // sequence statistics
 }
 
+func (s *StorageSCMER) String() string {
+	return "SCMER"
+}
+
 func (s *StorageSCMER) Serialize(f *os.File) {
 	defer f.Close()
 	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
@@ -59,10 +63,6 @@ func (s *StorageSCMER) Deserialize(f *os.File) uint {
 		}
 	}
 	return uint(l)
-}
-
-func (s *StorageSCMER) String() string {
-	return "SCMER"
 }
 
 func (s *StorageSCMER) getValue(i uint) scm.Scmer {
@@ -114,7 +114,6 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
-	return nil // for testing purposes of the storage serialization
 	if s.null * 13 > i * 100 {
 		// sparse payoff against bitcompressed is at ~13%
 		return new(StorageSparse)

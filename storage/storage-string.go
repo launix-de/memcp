@@ -16,8 +16,11 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
+import "unsafe"
 import "strings"
+import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 type StorageString struct {
@@ -44,6 +47,37 @@ func (s *StorageString) String() string {
 		return fmt.Sprintf("string-buffer[%d]", len(s.dictionary))
 	}
 	return fmt.Sprintf("string-dict[%d]", s.count)
+}
+
+func (s *StorageString) Serialize(f *os.File) {
+	defer f.Close()
+	binary.Write(f, binary.LittleEndian, uint8(20)) // 20 = StorageString
+	f.WriteString("1234567") // dummy
+	binary.Write(f, binary.LittleEndian, uint64(s.values.count))
+	s.values.SerializeToFile(f)
+	s.starts.SerializeToFile(f)
+	s.lens.SerializeToFile(f)
+	binary.Write(f, binary.LittleEndian, uint64(len(s.dictionary)))
+	f.WriteString(s.dictionary)
+}
+
+func (s *StorageString) Deserialize(f *os.File) uint {
+	defer f.Close()
+	var dummy [7]byte
+	f.Read(dummy[:])
+	var l uint64
+	binary.Read(f, binary.LittleEndian, &l)
+	s.values.DeserializeFromFile(f, true)
+	s.starts.DeserializeFromFile(f, true)
+	s.lens.DeserializeFromFile(f, true)
+	var dictionarylength uint64
+	binary.Read(f, binary.LittleEndian, &dictionarylength)
+	if dictionarylength > 0 {
+		rawdata := make([]byte, dictionarylength)
+		f.Read(rawdata)
+		s.dictionary = unsafe.String(&rawdata[0], dictionarylength)
+	}
+	return uint(l)
 }
 
 func (s *StorageString) getValue(i uint) scm.Scmer {
@@ -192,6 +226,7 @@ func (s *StorageString) finish() {
 }
 func (s *StorageString) proposeCompression(i uint) ColumnStorage {
 	// build prefix map
+	/* TODO: reactivate as soon as StoragePrefix has a proper implementation for Serialize/Deserialize
 	mostprefixscore := 0
 	mostprefix := ""
 	for k, v := range s.prefixstat {
@@ -206,6 +241,7 @@ func (s *StorageString) proposeCompression(i uint) ColumnStorage {
 		stor.prefixdictionary = []string{"", mostprefix}
 		return stor
 	}
+	*/
 	// dont't propose another pass
 	return nil
 }

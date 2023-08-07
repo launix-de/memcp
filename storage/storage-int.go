@@ -16,17 +16,73 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
+import "unsafe"
 import "math/bits"
+import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 type StorageInt struct {
 	chunk []uint64
 	bitsize uint8
 	offset int64
-	max int64
+	max int64 // only of statistic use
+	count uint // only stored for serialization purposes
 	hasNull bool
 	null uint64 // which value is null
+}
+
+func (s *StorageInt) Serialize(f *os.File) {
+	defer f.Close()
+	s.SerializeToFile(f)
+}
+
+func (s *StorageInt) SerializeToFile(f *os.File) {
+	var hasNull uint8
+	if s.hasNull {
+		hasNull = 1
+	}
+	binary.Write(f, binary.LittleEndian, uint8(10)) // 10 = StorageInt
+	binary.Write(f, binary.LittleEndian, uint8(s.bitsize)) // len=2
+	binary.Write(f, binary.LittleEndian, uint8(hasNull)) // len=3
+	binary.Write(f, binary.LittleEndian, uint8(0)) // len=4
+	binary.Write(f, binary.LittleEndian, uint32(0)) // len=8
+	binary.Write(f, binary.LittleEndian, uint64(len(s.chunk))) // chunk size so we know how many data is left
+	binary.Write(f, binary.LittleEndian, uint64(s.count))
+	binary.Write(f, binary.LittleEndian, uint64(s.offset))
+	binary.Write(f, binary.LittleEndian, uint64(s.null))
+	if len(s.chunk) > 0 {
+		f.Write(unsafe.Slice((*byte)(unsafe.Pointer(&s.chunk[0])), 8 * len(s.chunk)))
+	}
+}
+func (s *StorageInt) Deserialize(f *os.File) uint {
+	defer f.Close()
+	return s.DeserializeFromFile(f, false)
+}
+func (s *StorageInt) DeserializeFromFile(f *os.File, readMagicbyte bool) uint {
+	var dummy8 uint8
+	var dummy32 uint32
+	if readMagicbyte {
+		binary.Read(f, binary.LittleEndian, &dummy8)
+	}
+	binary.Read(f, binary.LittleEndian, &s.bitsize)
+	var hasNull uint8
+	binary.Read(f, binary.LittleEndian, &hasNull)
+	s.hasNull = hasNull != 0
+	binary.Read(f, binary.LittleEndian, &dummy8)
+	binary.Read(f, binary.LittleEndian, &dummy32)
+	var chunkcount uint64
+	binary.Read(f, binary.LittleEndian, &chunkcount)
+	binary.Read(f, binary.LittleEndian, &s.count)
+	binary.Read(f, binary.LittleEndian, &s.offset)
+	binary.Read(f, binary.LittleEndian, &s.null)
+	if chunkcount > 0 {
+		rawdata := make([]byte, chunkcount * 8)
+		f.Read(rawdata)
+		s.chunk = unsafe.Slice((*uint64)(unsafe.Pointer(&rawdata[0])), chunkcount)
+	}
+	return s.count
 }
 
 func toInt(x scm.Scmer) int64 {
@@ -124,6 +180,7 @@ func (s *StorageInt) init(i uint) {
 	}
 	// allocate
 	s.chunk = make([]uint64, (i * uint(s.bitsize) + 63) / 64)
+	s.count = i
 	//fmt.Println("Allocate bitsize", s.bitsize)
 }
 func (s *StorageInt) build(i uint, value scm.Scmer) {

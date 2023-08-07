@@ -16,7 +16,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "math"
+import "unsafe"
+import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
@@ -26,6 +29,35 @@ type StorageFloat struct {
 
 func (s *StorageFloat) String() string {
 	return "float64"
+}
+
+func (s *StorageFloat) Serialize(f *os.File) {
+	defer f.Close()
+	binary.Write(f, binary.LittleEndian, uint8(12)) // 12 = StorageFloat
+	f.WriteString("1234567") // fill up to 64 bit alignment
+	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
+	// now at offset 16 begin data
+	rawdata := unsafe.Slice((*byte)(unsafe.Pointer(&s.values[0])), 8 * len(s.values))
+	f.Write(rawdata)
+	// free allocated memory and mmap
+	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) {f.Close()})
+	newrawdata = mmap.Map(f, RDWR, 0)
+	s.values = unsafe.Slice((*float64)&newrawdata[16], len(s.values))
+	*/
+}
+func (s *StorageFloat) Deserialize(f *os.File) uint {
+	defer f.Close()
+	var dummy [7]byte
+	f.Read(dummy[:])
+	var l uint64
+	binary.Read(f, binary.LittleEndian, &l)
+	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) { f.Close() })
+	rawdata := mmap.Map(f, RDWR, 0)
+	*/
+	rawdata := make([]byte, 8 * l)
+	f.Read(rawdata)
+	s.values = unsafe.Slice((*float64)(unsafe.Pointer(&rawdata[16])), l)
+	return uint(l)
 }
 
 func (s *StorageFloat) getValue(i uint) scm.Scmer {

@@ -16,6 +16,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
+import "bufio"
+import "encoding/json"
+import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 type StorageSparse struct {
@@ -24,6 +28,38 @@ type StorageSparse struct {
 
 func (s *StorageSparse) String() string {
 	return "SCMER-sparse"
+}
+func (s *StorageSparse) Serialize(f *os.File) {
+	defer f.Close()
+	binary.Write(f, binary.LittleEndian, uint8(2)) // 2 = StorageSparse
+	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
+	for k, v := range s.values {
+		binary.Write(f, binary.LittleEndian, uint64(k))
+		vbytes, err := json.Marshal(v)
+		if err != nil {
+			panic(err)
+		}
+		f.Write(vbytes)
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
+	}
+}
+func (s *StorageSparse) Deserialize(f *os.File) uint {
+	defer f.Close()
+	var l uint64
+	binary.Read(f, binary.LittleEndian, &l)
+	s.values = make(map[uint]scm.Scmer)
+	scanner := bufio.NewScanner(f)
+	for {
+		var k uint64
+		err := binary.Read(f, binary.LittleEndian, &k)
+		if err != nil || !scanner.Scan() {
+			break
+		}
+		var v scm.Scmer
+		json.Unmarshal(scanner.Bytes(), &v)
+		s.values[uint(k)] = v
+	}
+	return uint(l)
 }
 
 func (s *StorageSparse) getValue(i uint) scm.Scmer {
