@@ -122,17 +122,6 @@ func (s *StorageInt) getValue(i uint) scm.Scmer {
 	return float64(int64(v) + s.offset)
 }
 
-func (s *StorageInt) getValueInt(i uint) int64 {
-	bitpos := i * uint(s.bitsize)
-
-	v := s.chunk[bitpos / 64] << (bitpos % 64) // align to leftmost position
-	if bitpos % 64 + uint(s.bitsize) > 64 {
-		v = v | s.chunk[bitpos / 64 + 1] >> (64 - bitpos % 64)
-	}
-
-	return int64(v) >> (64 - uint(s.bitsize)) // shift right preserving sign
-}
-
 func (s *StorageInt) getValueUInt(i uint) uint64 {
 	bitpos := i * uint(s.bitsize)
 

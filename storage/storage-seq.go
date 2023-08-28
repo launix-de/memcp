@@ -27,6 +27,7 @@ type StorageSeq struct {
 	recordId,
 	start,
 	stride StorageInt
+	count uint // number of values
 	seqCount uint // number of sequences
 
 	// analysis
@@ -43,7 +44,7 @@ func (s *StorageSeq) Serialize(f *os.File) {
 	defer f.Close()
 	binary.Write(f, binary.LittleEndian, uint8(11)) // 11 = StorageSeq
 	f.WriteString("1234567") // dummy
-	binary.Write(f, binary.LittleEndian, uint64(s.start.count))
+	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(s.seqCount))
 	s.recordId.SerializeToFile(f)
 	s.start.SerializeToFile(f)
@@ -55,22 +56,11 @@ func (s *StorageSeq) Deserialize(f *os.File) uint {
 	var dummy [7]byte
 	f.Read(dummy[:])
 	var l uint64
-	{
-		pos, _ := f.Seek(0, os.SEEK_CUR)
-		fmt.Println("pos = %d", pos)
-	}
 	binary.Read(f, binary.LittleEndian, &l)
-	{
-		pos, _ := f.Seek(0, os.SEEK_CUR)
-		fmt.Println("pos = %d", pos)
-	}
+	s.count = uint(l)
 	var sc uint64
 	binary.Read(f, binary.LittleEndian, &sc)
 	s.seqCount = uint(sc)
-	{
-		pos, _ := f.Seek(0, os.SEEK_CUR)
-		fmt.Println("pos2 = %d", pos)
-	}
 	s.recordId.DeserializeFromFile(f, true)
 	s.start.DeserializeFromFile(f, true)
 	s.stride.DeserializeFromFile(f, true)
@@ -84,11 +74,11 @@ func (s *StorageSeq) getValue(i uint) scm.Scmer {
 		return uint64(i) < recid // return true as long as we are bigger than searched index
 	}) - 1
 	var value, stride int64
-	value = s.start.getValueInt(uint(idx)) + s.start.offset
+	value = int64(s.start.getValueUInt(uint(idx))) + s.start.offset
 	if s.start.hasNull && value == int64(s.start.null) {
 		return nil
 	}
-	stride = s.stride.getValueInt(uint(idx)) + s.stride.offset
+	stride = int64(s.stride.getValueUInt(uint(idx))) + s.stride.offset
 	recid := s.recordId.getValueUInt(uint(idx))
 	return float64(value + int64(uint64(i) - recid) * stride)
 
@@ -148,6 +138,7 @@ func (s *StorageSeq) init(i uint) {
 	s.stride.init(s.seqCount)
 	s.lastValueNil = false
 	s.lastValueFirst = false
+	s.count = i
 	s.seqCount = 0
 }
 func (s *StorageSeq) build(i uint, value scm.Scmer) {

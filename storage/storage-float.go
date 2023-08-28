@@ -56,7 +56,7 @@ func (s *StorageFloat) Deserialize(f *os.File) uint {
 	*/
 	rawdata := make([]byte, 8 * l)
 	f.Read(rawdata)
-	s.values = unsafe.Slice((*float64)(unsafe.Pointer(&rawdata[16])), l)
+	s.values = unsafe.Slice((*float64)(unsafe.Pointer(&rawdata[0])), l)
 	return uint(l)
 }
 
