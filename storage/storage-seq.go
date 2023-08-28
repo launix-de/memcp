@@ -70,8 +70,8 @@ func (s *StorageSeq) Deserialize(f *os.File) uint {
 func (s *StorageSeq) getValue(i uint) scm.Scmer {
 	// bisect to the correct index where to find (lowest idx to find our sequence)
 	idx := sort.Search(int(s.seqCount), func (idx int) bool {
-		recid := s.recordId.getValueUInt(uint(idx))
-		return uint64(i) < recid // return true as long as we are bigger than searched index
+		recid := int64(s.recordId.getValueUInt(uint(idx))) + s.recordId.offset
+		return int64(i) < recid // return true as long as we are bigger than searched index
 	}) - 1
 	var value, stride int64
 	value = int64(s.start.getValueUInt(uint(idx))) + s.start.offset
@@ -79,8 +79,8 @@ func (s *StorageSeq) getValue(i uint) scm.Scmer {
 		return nil
 	}
 	stride = int64(s.stride.getValueUInt(uint(idx))) + s.stride.offset
-	recid := s.recordId.getValueUInt(uint(idx))
-	return float64(value + int64(uint64(i) - recid) * stride)
+	recid := int64(s.recordId.getValueUInt(uint(idx))) + s.recordId.offset
+	return float64(value + int64(int64(i) - recid) * stride)
 
 }
 

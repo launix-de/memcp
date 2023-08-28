@@ -82,19 +82,19 @@ func (s *StorageString) Deserialize(f *os.File) uint {
 
 func (s *StorageString) getValue(i uint) scm.Scmer {
 	if s.nodict {
-		start := s.starts.getValueUInt(i)
+		start := uint64(int64(s.starts.getValueUInt(i)) + s.starts.offset)
 		if s.starts.hasNull && start == s.starts.null {
 			return nil
 		}
-		len_ := s.lens.getValueUInt(i)
+		len_ := uint64(int64(s.lens.getValueUInt(i)) + s.lens.offset)
 		return s.dictionary[start:start+len_]
 	} else {
-		idx := uint(s.values.getValueUInt(i))
+		idx := uint(int64(s.values.getValueUInt(i)) + s.values.offset)
 		if s.values.hasNull && idx == uint(s.values.null) {
 			return nil
 		}
-		start := s.starts.getValueUInt(idx)
-		len_ := s.lens.getValueUInt(idx)
+		start := int64(s.starts.getValueUInt(idx)) + s.starts.offset
+		len_ := int64(s.lens.getValueUInt(idx)) + s.lens.offset
 		return s.dictionary[start:start+len_]
 	}
 }

@@ -35,7 +35,7 @@ func (s *StoragePrefix) getValue(i uint) scm.Scmer {
 	innerval := s.values.getValue(i)
 	switch v := innerval.(type) {
 		case string:
-			return s.prefixdictionary[s.prefixes.getValueUInt(i)] + v // append prefix
+			return s.prefixdictionary[int64(s.prefixes.getValueUInt(i)) + s.prefixes.offset] + v // append prefix
 		case nil:
 			return nil
 		default:

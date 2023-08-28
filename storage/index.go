@@ -221,7 +221,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 		*/
 		// bisect where the lower bound is found
 		idx := sort.Search(int(s.t.main_count), func (idx int) bool {
-			idx2 := s.sortedItems.getValueUInt(uint(idx))
+			idx2 := uint(int64(s.sortedItems.getValueUInt(uint(idx))) + s.sortedItems.offset)
 			for i, c := range cols {
 				a := lower[i]
 				b := c.getValue(uint(idx2))
@@ -241,7 +241,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 			if uint(idx) >= s.t.main_count {
 				break
 			}
-			idx2 := s.sortedItems.getValueUInt(uint(idx))
+			idx2 := uint(int64(s.sortedItems.getValueUInt(uint(idx))) + s.sortedItems.offset)
 			// check for index bounds
 			for i, c := range cols {
 				a := c.getValue(uint(idx2))
