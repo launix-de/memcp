@@ -28,7 +28,7 @@ type StorageInt struct {
 	bitsize uint8
 	offset int64
 	max int64 // only of statistic use
-	count uint // only stored for serialization purposes
+	count uint64 // only stored for serialization purposes
 	hasNull bool
 	null uint64 // which value is null
 }
@@ -65,6 +65,9 @@ func (s *StorageInt) DeserializeFromFile(f *os.File, readMagicbyte bool) uint {
 	var dummy32 uint32
 	if readMagicbyte {
 		binary.Read(f, binary.LittleEndian, &dummy8)
+		if dummy8 != 10 {
+			panic(fmt.Sprintf("Tried to deserialize StorageInt(10) from file but found %d", dummy8))
+		}
 	}
 	binary.Read(f, binary.LittleEndian, &s.bitsize)
 	var hasNull uint8
@@ -82,7 +85,7 @@ func (s *StorageInt) DeserializeFromFile(f *os.File, readMagicbyte bool) uint {
 		f.Read(rawdata)
 		s.chunk = unsafe.Slice((*uint64)(unsafe.Pointer(&rawdata[0])), chunkcount)
 	}
-	return s.count
+	return uint(s.count)
 }
 
 func toInt(x scm.Scmer) int64 {
@@ -180,7 +183,7 @@ func (s *StorageInt) init(i uint) {
 	}
 	// allocate
 	s.chunk = make([]uint64, (i * uint(s.bitsize) + 63) / 64)
-	s.count = i
+	s.count = uint64(i)
 	//fmt.Println("Allocate bitsize", s.bitsize)
 }
 func (s *StorageInt) build(i uint, value scm.Scmer) {

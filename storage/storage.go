@@ -108,6 +108,16 @@ func Init(en scm.Env) {
 	en.Vars["stat"] = func (a ...scm.Scmer) scm.Scmer {
 		return PrintMemUsage()
 	}
+	en.Vars["show"] = func (a ...scm.Scmer) scm.Scmer {
+		result := make([]scm.Scmer, 2*len(databases))
+		i := 0
+		for k, v := range databases {
+			result[i+0] = k
+			result[i+1] = v.ShowTables()
+			i = i + 2
+		}
+		return result
+	}
 	en.Vars["save"] = func (a ...scm.Scmer) scm.Scmer {
 		for _, db := range databases {
 			db.save()

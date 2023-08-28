@@ -55,8 +55,22 @@ func (s *StorageSeq) Deserialize(f *os.File) uint {
 	var dummy [7]byte
 	f.Read(dummy[:])
 	var l uint64
+	{
+		pos, _ := f.Seek(0, os.SEEK_CUR)
+		fmt.Println("pos = %d", pos)
+	}
 	binary.Read(f, binary.LittleEndian, &l)
-	binary.Read(f, binary.LittleEndian, &s.seqCount)
+	{
+		pos, _ := f.Seek(0, os.SEEK_CUR)
+		fmt.Println("pos = %d", pos)
+	}
+	var sc uint64
+	binary.Read(f, binary.LittleEndian, &sc)
+	s.seqCount = uint(sc)
+	{
+		pos, _ := f.Seek(0, os.SEEK_CUR)
+		fmt.Println("pos2 = %d", pos)
+	}
 	s.recordId.DeserializeFromFile(f, true)
 	s.start.DeserializeFromFile(f, true)
 	s.stride.DeserializeFromFile(f, true)

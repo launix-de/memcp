@@ -65,6 +65,16 @@ func (db *database) save() {
 	// shards are written while rebuild
 }
 
+func (db *database) ShowTables() []string {
+	result := make([]string, len(db.Tables))
+	i := 0
+	for k, _ := range db.Tables {
+		result[i] = k
+		i = i + 1
+	}
+	return result
+}
+
 func (db *database) rebuild() {
 	for _, t := range db.Tables {
 		t.mu.Lock() // table lock
