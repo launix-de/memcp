@@ -30,13 +30,13 @@ type StorageString struct {
 	dictionary string
 	starts StorageInt
 	lens StorageInt
+	nodict bool // disable values array
 
 	// helpers
 	sb strings.Builder
 	reverseMap map[string][3]uint
 	count uint
 	allsize int
-	nodict bool // disable values array
 	// prefix statistics
 	prefixstat map[string]int
 	laststr string
@@ -52,7 +52,12 @@ func (s *StorageString) String() string {
 func (s *StorageString) Serialize(f *os.File) {
 	defer f.Close()
 	binary.Write(f, binary.LittleEndian, uint8(20)) // 20 = StorageString
-	f.WriteString("1234567") // dummy
+	var nodict uint8 = 0
+	if s.nodict {
+		nodict = 1
+	}
+	binary.Write(f, binary.LittleEndian, uint8(nodict))
+	f.WriteString("123456") // dummy
 	binary.Write(f, binary.LittleEndian, uint64(s.values.count))
 	s.values.SerializeToFile(f)
 	s.starts.SerializeToFile(f)
@@ -63,7 +68,12 @@ func (s *StorageString) Serialize(f *os.File) {
 
 func (s *StorageString) Deserialize(f *os.File) uint {
 	defer f.Close()
-	var dummy [7]byte
+	var nodict uint8
+	binary.Read(f, binary.LittleEndian, &nodict)
+	if nodict == 1 {
+		s.nodict = true
+	}
+	var dummy [6]byte
 	f.Read(dummy[:])
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
