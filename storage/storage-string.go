@@ -58,7 +58,11 @@ func (s *StorageString) Serialize(f *os.File) {
 	}
 	binary.Write(f, binary.LittleEndian, uint8(nodict))
 	f.WriteString("123456") // dummy
-	binary.Write(f, binary.LittleEndian, uint64(s.values.count))
+	if s.nodict {
+		binary.Write(f, binary.LittleEndian, uint64(s.starts.count))
+	} else {
+		binary.Write(f, binary.LittleEndian, uint64(s.values.count))
+	}
 	s.values.SerializeToFile(f)
 	s.starts.SerializeToFile(f)
 	s.lens.SerializeToFile(f)
