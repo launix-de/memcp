@@ -109,14 +109,27 @@ func Init(en scm.Env) {
 		return PrintMemUsage()
 	}
 	en.Vars["show"] = func (a ...scm.Scmer) scm.Scmer {
-		result := make([]scm.Scmer, 2*len(databases))
-		i := 0
-		for k, v := range databases {
-			result[i+0] = k
-			result[i+1] = v.ShowTables()
-			i = i + 2
+		// (show) will list all databases
+		// (show schema) will list all tables
+		// (show schema tbl) will list all columns
+		if len(a) == 0 {
+			// show databases
+			result := make([]scm.Scmer, len(databases))
+			i := 0
+			for k, _ := range databases {
+				result[i] = k
+				i = i + 1
+			}
+			return result
+		} else if len(a) == 1 {
+			// show tables
+			return databases[scm.String(a[0])].ShowTables()
+		} else if len(a) == 2 {
+			// show columns
+			return databases[scm.String(a[0])].Tables[scm.String(a[1])].ShowColumns()
+		} else {
+			panic("unknown signature provided to (show)")
 		}
-		return result
 	}
 	en.Vars["save"] = func (a ...scm.Scmer) scm.Scmer {
 		for _, db := range databases {

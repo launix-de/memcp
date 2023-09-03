@@ -39,6 +39,18 @@ type table struct {
 
 const max_shardsize = 65536 // dont overload the shards to get a responsive parallel full table scan
 
+func (t *table) ShowColumns() scm.Scmer {
+	result := make([]scm.Scmer, len(t.Columns))
+	for i, v := range t.Columns {
+		result[i] = v.Show()
+	}
+	return result
+}
+
+func (c *column) Show() scm.Scmer {
+	return []scm.Scmer{"name", c.Name, "type", c.Typ} // TODO: dimensions etc.
+}
+
 func (d dataset) Get(key string) scm.Scmer {
 	for i := 0; i < len(d); i += 2 {
 		if d[i] == key {

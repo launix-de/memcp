@@ -19,6 +19,7 @@ package storage
 import "os"
 import "sync"
 import "encoding/json"
+import "github.com/launix-de/memcp/scm"
 
 type database struct {
 	Name string `json:"name"`
@@ -65,8 +66,8 @@ func (db *database) save() {
 	// shards are written while rebuild
 }
 
-func (db *database) ShowTables() []string {
-	result := make([]string, len(db.Tables))
+func (db *database) ShowTables() scm.Scmer {
+	result := make([]scm.Scmer, len(db.Tables))
 	i := 0
 	for k, _ := range db.Tables {
 		result[i] = k
