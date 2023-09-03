@@ -55,6 +55,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		/* identifier (TODO: tblalias.identifier) */
 		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
 		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
+		/* TODO: function call */
 		/* parenthesis */
 		(concat "(" rest) (match (expression rest) '(expr (concat ")" rest)) '('((quote begin) expr) rest) (error (concat "expected expression found " rest)))
 		(error (concat "could not parse " s))
@@ -180,6 +181,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") schema id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
 		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest '())
 		(regex "(?is)^INSERT(?:\\s|\\n)+INTO(?:\\s|\\n)+(.*)" _ rest) (parse_insert rest)
+		(regex "(?is)^SHOW(?:\\s|\\n)+DATABASES(.*)" _ rest) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema)))))
+		(regex "(?is)^SHOW(?:\\s|\\n)+TABLES(.*)" _ rest) '((quote map) '((quote show) schema) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Table" (quote schema)))))
 		(error (concat "unknown SQL syntax: " s))
 	)
 )))

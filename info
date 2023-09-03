@@ -152,8 +152,6 @@ Schemen & co per JSON serialisieren
 TODO
 ----
  - SELECT DATABASE()
- - show databases -> Database(string)
- - show tables -> Tables_in_[dbname](string)
  - session-local storage for mysql session state (variables, current schema)
  - per-table persistency settings
  - JSON printing
