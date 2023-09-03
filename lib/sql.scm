@@ -40,7 +40,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (insert "test" "foo" '("bar" 12))
 (insert "test" "foo" '("bar" 44))
 */
-(set schema "test")
+(set schema "test") /* variable definition for console */
 
 /* http hook for handling SQL */
 (define http_handler (begin
@@ -48,12 +48,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
 		(match (req "path")
-			(concat "/sql/" rest) (begin
+			(regex "^/sql/([^/]+)/(.*)$" url schema query) (begin
 				((res "status") 200)
 				((res "header") "Content-Type" "text/plain")
-				(define formula (parse_sql rest))
+				(define formula (parse_sql query))
 				(define resultrow (res "println")) /* TODO: to JSON */
-				(print "received query: " rest)
+				(print "received query: " query)
 				(eval formula)
 			)
 			/* default */

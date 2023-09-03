@@ -19,6 +19,7 @@ package scm
 import "io"
 import "fmt"
 import "time"
+import "sync"
 import "strconv"
 import "net/http"
 import "runtime/debug"
@@ -79,21 +80,28 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		"ip", req.RemoteAddr,
 		// TODO: req.Body io.ReadCloser
 	}
+	var res_lock sync.Mutex
 	res_scm := []Scmer {
 		"header", func (a ...Scmer) Scmer {
+			res_lock.Lock()
 			res.Header().Set(String(a[0]), String(a[1]))
+			res_lock.Unlock();
 			return "ok"
 		},
 		"status", func (a ...Scmer) Scmer {
 			// status after header!
+			res_lock.Lock()
 			status, _ := strconv.Atoi(String(a[0]))
 			res.WriteHeader(status)
+			res_lock.Unlock();
 			return "ok"
 		},
 		"println", func (a ...Scmer) Scmer {
 			// result-print-function (TODO: better interface with headers, JSON support etc.)
 			// TODO: if a[0] is []Scmer -> build JSON object
+			res_lock.Lock()
 			io.WriteString(res, String(a[0]) + "\n")
+			res_lock.Unlock();
 			return "ok"
 		},
 	}

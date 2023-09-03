@@ -166,7 +166,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			)
 			/*
 			(print "TODO INSERT " tbl)
-			'((quote insert) schema tbl '((quote list) "bar" 551))
+			'((quote insert) (quote schema) tbl '((quote list) "bar" 551))
 			*/
 		)
 		(error (concat "expected table name, found " rest))

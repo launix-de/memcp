@@ -1,6 +1,7 @@
 package scm
 
 import "fmt"
+import "sync"
 import "errors"
 import "runtime"
 import "runtime/debug"
@@ -98,6 +99,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	colmap := make(map[string]int)
 	// TODO: sqltypes.RStateNone for INSERTs
 	var result sqltypes.Result
+	var resultlock sync.Mutex
 	result.State = sqltypes.RStateFields
 	result.Rows = make([][]sqltypes.Value, 0, 1024)
 	// result from scheme
@@ -127,6 +129,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 					newitem = append(newitem, sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(String(item[i+1]))))
 				}
 			}
+			resultlock.Lock()
 			if len(result.Rows) == cap(result.Rows) {
 				// flush
 				callback(&result)
@@ -137,6 +140,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				result.Rows = result.Rows[0:0] // slice off rest of buffer to restart
 			}
 			result.Rows = append(result.Rows, newitem)
+			resultlock.Unlock()
 			return "ok"
 		},})
 	}()
