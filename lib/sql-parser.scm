@@ -102,9 +102,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 		/* after select, there must be an expression or star */
 		(match rest
-			/* select * */
+			/* select * (TODO: select tbl.*) */
 			(regex "^\\*(?:\\s|\\n)*(.*)" _ rest) (begin
-				(define fields (append fields "a" 1 "b" 2 "c" 3)) /* TODO: gather field list */
+				(define fields (append fields "*" '((quote get_column_all)))) /* just mark the * so we can replace it later */
 				(match rest
 					/* no FROM */ "" (build_queryplan schema '() fields)
 					/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest fields)

@@ -18,27 +18,38 @@ Copyright (C) 2023  Carl-Philip Hänsch
 /* build queryplan from parsed query */
 (define build_queryplan (lambda (schema tables fields) (begin
 	/* tables: '('(alias schema tbl) ...) */
-	/* fields: '(colname expr ...) */
+	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* TODO: WHERE, GROUP, HAVING, ORDER, LIMIT */
 	/* expressions will use (get_column tblvar col) for reading from columns. we have to replace it with the correct variable */
 
 	/* returns a list of '(tblvar col) */
-	(define extract_columns (lambda (expr) (match expr
+	(define extract_columns (lambda (col expr) (match expr
 		'((symbol get_column) tblvar col) '('(tblvar col))
 		(cons sym args) /* function call */ (merge (map args extract_columns)) /* TODO: use collector */
 		'()
 	)))
 
 	/* changes (get_column tblvar col) into its counterpart */
-	(define replace_columns (lambda (expr) (match expr
+	(define replace_columns (lambda (col expr) (match expr
 		'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
 		(cons sym args) /* function call */ (cons sym (map args replace_columns))
 		expr /* literals */
 	)))
 
+	/* expand *-columns */
+	(set fields (merge (extract_assoc fields (lambda (col expr) (match col
+		"*" (merge (map tables (lambda (t) (match t '(alias schema tbl) /* all FROM-tables*/
+			(merge (map (show schema tbl) (lambda (coldesc) /* all columns of each table */
+				'((coldesc "name") '((quote get_column) alias (coldesc "name")))
+			)))
+		))))
+		'(col expr)
+	)))))
+
 	/* columns: '('(tblalias colname) ...) */
 	(set columns (merge (extract_assoc fields extract_columns)))
 	/* TODO: expand fields if it contains '(tblalias "*") or '("*" "*") */
+		'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (show schema tbl) (lambda (col) '(tblvar (col "name"))))))))
 
 	/* TODO: sort tables according to join plan */
 	(define build_scan (lambda (tables)

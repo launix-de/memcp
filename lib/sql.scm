@@ -15,21 +15,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-/* helper functions to work with maps */
-(define map_assoc (lambda (columns fn)
-	(match columns
-		(cons colid (cons colvalue rest)) (cons colid (cons (fn colvalue) (map_assoc rest fn)))
-		'()
-	)
-))
-
-(define extract_assoc (lambda (columns fn)
-	(match columns
-		(cons colid (cons colvalue rest)) (cons (fn colvalue) (extract_assoc rest fn))
-		'()
-	)
-))
-
 (import "sql-parser.scm")
 (import "queryplan.scm")
 

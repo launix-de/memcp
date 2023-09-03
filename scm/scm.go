@@ -197,6 +197,9 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				en2 := Env{make(Vars), p.En, false}
 				switch params := p.Params.(type) {
 				case []Scmer:
+					if len(params) > len(args) {
+						panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
+					}
 					for i, param := range params {
 						en2.Vars[param.(Symbol)] = args[i]
 					}
@@ -257,6 +260,9 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 		en := &Env{make(Vars), p.En, false}
 		switch params := p.Params.(type) {
 		case []Scmer:
+			if len(params) > len(args) {
+				panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
+			}
 			for i, param := range params {
 				en.Vars[param.(Symbol)] = args[i]
 			}
@@ -450,6 +456,40 @@ func init() {
 				}
 				return result
 			},
+			"map_assoc": func(a ...Scmer) Scmer {
+				// apply fn(key value) to each assoc item and return mapped dict
+				list := a[0].([]Scmer)
+				result := make([]Scmer, len(list))
+				var k Scmer
+				for i, v := range list {
+					if i % 2 == 0 {
+						// key -> remain
+						result[i] = v
+						k = v
+					} else {
+						// value -> map fn(key, value)
+						result[i] = Apply(a[1], []Scmer{k, v,})
+					}
+				}
+				return result
+			},
+			"extract_assoc": func(a ...Scmer) Scmer {
+				// apply fn(key value) to each assoc item and return results as array
+				list := a[0].([]Scmer)
+				result := make([]Scmer, len(list) / 2)
+				var k Scmer
+				for i, v := range list {
+					if i % 2 == 0 {
+						// key -> remain
+						k = v
+					} else {
+						// value -> map fn(key, value)
+						result[i / 2] = Apply(a[1], []Scmer{k, v,})
+					}
+				}
+				return result
+			},
+
 			"filter": func(a ...Scmer) Scmer {
 				result := make([]Scmer, 0)
 				for _, v := range a[0].([]Scmer) {
