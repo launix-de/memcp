@@ -14,7 +14,8 @@ Features
 - OLAP and OLTP support: Can handle both online analytical processing (OLAP) and online transaction processing (OLTP) workloads.
 - Bit-packing and dictionary encoding: Uses bit-packing and dictionary encoding to achieve higher compression ratios for integer and string data types, respectively.
 - Delta storage: Maintains a separate delta storage for updates and deletes, which allows for more efficient handling of OLTP workloads.
-- Scalability: Designed to scale horizontally across multiple nodes to handle large data volumes and high query throughput.
+- Scalability: Designed to scale on a single node with huge NUMA memory
+- Adjustable persistency: Decide whether you want to persist a table or not or to just keep snapshots of a period of time
 
 # Getting Started
 
@@ -38,6 +39,8 @@ mysql -u root -p -P 3307 # password is 'admin'
 
 You can try queries like:
 ```
+SHOW DATABASES
+SHOW TABLES
 CREATE TABLE foo(bar string, amount int)
 INSERT INTO foo(bar, amount) VALUES ('Man', 4), ('Horse', 6)
 SELECT * FROM foo
