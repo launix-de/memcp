@@ -154,3 +154,7 @@ TODO
  - SELECT DATABASE()
  - show databases -> Database(string)
  - show tables -> Tables_in_[dbname](string)
+ - session-local storage for mysql session state (variables, current schema)
+ - per-table persistency settings
+ - rework parse_sql and build_queryplan such that schema is given as a parameter -> expand select *
+ - JSON printing
