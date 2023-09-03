@@ -148,3 +148,9 @@ Schemen & co per JSON serialisieren
  - Je DB ein Ordner mit schema.json JSON-Datei mit allen Schema-Infs (Tabellen, Spalten usw.)
  - In JSON: Je Tabelle Liste der Shards als Binär-Dateien (.shard)
  - .shard-Datei enthält den Delta Storage + je Spalte Verweise auf die columnstorage-dateien
+
+TODO
+----
+ - SELECT DATABASE()
+ - show databases -> Database(string)
+ - show tables -> Tables_in_[dbname](string)
