@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 
 /* build queryplan from parsed query */
-(define build_queryplan (lambda (tables fields) (begin
+(define build_queryplan (lambda (schema tables fields) (begin
 	/* tables: '('(alias schema tbl) ...) */
 	/* fields: '(colname expr ...) */
 	/* TODO: WHERE, GROUP, HAVING, ORDER, LIMIT */

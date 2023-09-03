@@ -15,7 +15,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-(define parse_sql (lambda (s) (begin
+(define parse_sql (lambda (schema s) (begin
 	/* lots of small parsers that can be combined */
 	(define identifier (lambda (s) (match s
 		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) '(id rest)
@@ -89,11 +89,11 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(define parse_afterexpr (lambda (expr id rest) (begin
 			(define fields (append fields id expr))
 			(match rest
-				/* no FROM */ "" (build_queryplan '() fields)
+				/* no FROM */ "" (build_queryplan schema '() fields)
 				/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest fields)
 				/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
 				/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
-					'(tblid rest) (build_queryplan '('(tblid (quote schema) tblid)) fields)
+					'(tblid rest) (build_queryplan schema '('(tblid schema tblid)) fields)
 					/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
 				) /* TODO: FROM, WHERE, GROUP usw. */
 				/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
@@ -106,10 +106,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(regex "^\\*(?:\\s|\\n)*(.*)" _ rest) (begin
 				(define fields (append fields "a" 1 "b" 2 "c" 3)) /* TODO: gather field list */
 				(match rest
-					/* no FROM */ "" (build_queryplan '() fields)
+					/* no FROM */ "" (build_queryplan schema '() fields)
 					/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest fields)
 					/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
-						'(tblid rest) (build_queryplan '('(tblid (quote schema) tblid)) fields)
+						'(tblid rest) (build_queryplan schema '('(tblid schema tblid)) fields)
 						/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
 					) /* TODO: FROM, WHERE, GROUP usw. */
 					/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
@@ -148,7 +148,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 							(regex "(?is)^(?:\\s|\\n)*VALUES(?:\\s|\\n)+\\((.*)" _ rest) (match (tuplelist '() '() rest)
 								'(tuples rest) (begin
 									(define cols (append cols col))
-									(merge '('((quote begin)) (map tuples (lambda (tuple) '((quote insert) (quote schema) tbl (cons (quote list) (zip_cols cols tuple))))))) /* TODO: what if something is left in rest??? */
+									(merge '('((quote begin)) (map tuples (lambda (tuple) '((quote insert) schema tbl (cons (quote list) (zip_cols cols tuple))))))) /* TODO: what if something is left in rest??? */
 								)
 								(error (concat "expected tuple list but found " rest))
 							)
@@ -166,7 +166,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			)
 			/*
 			(print "TODO INSERT " tbl)
-			'((quote insert) (quote schema) tbl '((quote list) "bar" 551))
+			'((quote insert) schema tbl '((quote list) "bar" 551))
 			*/
 		)
 		(error (concat "expected table name, found " rest))
@@ -174,10 +174,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 	/* main compile function -> decide which kind of SQL query it is */
 	(match s
-		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql rest)
-		(concat "\n" rest) (parse_sql rest)
-		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql rest)
-		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") (quote schema) id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
+		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql schema rest)
+		(concat "\n" rest) (parse_sql schema rest)
+		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql schema rest)
+		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") schema id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
 		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest '())
 		(regex "(?is)^INSERT(?:\\s|\\n)+INTO(?:\\s|\\n)+(.*)" _ rest) (parse_insert rest)
 		(error (concat "unknown SQL syntax: " s))

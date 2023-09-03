@@ -51,7 +51,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(regex "^/sql/([^/]+)/(.*)$" url schema query) (begin
 				((res "status") 200)
 				((res "header") "Content-Type" "text/plain")
-				(define formula (parse_sql query))
+				(define formula (parse_sql schema query))
 				(define resultrow (res "println")) /* TODO: to JSON */
 				(print "received query: " query)
 				(eval formula)
@@ -67,7 +67,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(lambda (schema) true) /* switch schema */
 	(lambda (sql resultrow_sql) (begin /* sql */
 		(print "received query: " sql)
-		(define formula (parse_sql sql))
+		(define formula (parse_sql schema sql))
 		(define resultrow resultrow_sql)
 		(eval formula)
 	))
