@@ -28,6 +28,7 @@ package scm
 import (
 	"fmt"
 	"bytes"
+	"strings"
 	"strconv"
 	"reflect"
 )
@@ -447,6 +448,38 @@ func init() {
 			"simplify": func(a ...Scmer) Scmer {
 				// turn string to number or so
 				return Simplify(String(a[0]))
+			},
+			"split": func(a ...Scmer) Scmer {
+				// string, sep
+				split := " "
+				if len(a) > 1 {
+					split = String(a[1])
+				}
+				ar := strings.Split(String(a[0]), split)
+				result := make([]Scmer, len(ar))
+				for i, v := range ar {
+					result[i] = v
+				}
+				return result
+			},
+			"reduce": func(a ...Scmer) Scmer {
+				// arr, reducefn, [neutral]
+				list := a[0].([]Scmer)
+				var result Scmer = nil
+				i := 0
+				if len(a) > 2 {
+					result = a[2]
+				} else {
+					if len(list) > 0 {
+						result = list[0]
+						i = i + 1
+					}
+				}
+				for i < len(list) {
+					result = Apply(a[1], []Scmer{result, list[i],})
+					i = i + 1
+				}
+				return result
 			},
 			"map": func(a ...Scmer) Scmer {
 				list := a[0].([]Scmer)
