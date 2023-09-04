@@ -1,122 +1,3 @@
-Master Node
------------
- - speichert alle databases (name, sizemb), user(username, password), grant(user, username, db_wildcard)
- - speichert alle server (ip, port, auslastung) und unterliste von shards je Server (dbname, idx, count, querypersec)
- - sendet 2 Befehle: server->take(dbname, idx, count) und server->forget(dbname, idx, count) und koordiniert damit das Sharding
- - sagt Clients wenn sie sich in eine DB einloggt
-
-Server Node
------------
- - speichert datenbanken (name) und sammelt statistikdaten
- - hat mehrere Storages (siehe unten)
- - nimmt queries entgegen
- - parst die Query, baut Ablaufplan
- - sendet Nachrichten und sammelt Ergebnisse ein
-
-Client
-------
- - loggt sich in x-beliebigen server ein (username, password, database), zur not die master node
- - evtl. kommt ein REJECT mit einer alternativen ip+port
- - client muss sich ip+port cachen, um schneller vorwärts zu kommen
-
-
-Storage-Arbeitsweise
--------
- - verschiedenste Storage-Typen haben verschiedene Performance-Charakteristiken
- - eine Tabelle kann aus mehreren Storages gemergt sein (delta: Flex-Row, main: fix-row, indizes und gesonderte Spalten, AUTO_INCREMENT => nächste ID, NEXT_RECORDID => nächste Satznummer)
- - Ein Datensatz hat eine interne Satznummer, um aus gemergten Storages die Datensätze wiederzuerkennen
- - In der lmdb werden die einzelnen Blöcke unter table/satztyp/identifier abgelegt
- - Es gibt Einzel-Records und Ergänzungs-Spalten
- - Einzel-Records sind unter table/record/recordId abgelegt
- - Spalten sind unter table/column/columnId abgelegt
- - Lösch-Markierungen sind unter table/deletion/recordId abgelegt
- - Iterations-Nummer: Wird bei jedem Merge von delta->main erhöht; eine Transaktion gehört immer zu einer Iterations-Nr.
- - Sharding passiert über das Modulo des Primary Key oder eines Fremdschlüssel
- - Ein Delta-Main-Merge geschieht im Rahmen eines Query Plans, wenn sich dadurch ein Geschwindigkeitsvorteil ergibt
- - Queries erzeugen zusätzliche Storage-Varianten
- - Jeder Storage-Typ hat Nutzungsstatistiken (gleitende Workload)
- - In Maintainence-Tasks können zusätzliche Delta-Main-Merges passieren oder selten benutzte Indizes aufgelöst/gelöscht werden
-
-Storage-Typen
---------
- - Flex-Row: BSON-ähnliche Datenstruktur (liste von datasets) -> z.B. DELTA Storage, key = satznummer, data=BSON-Daten
- - Fix-Row: 1 Header-Deklaration, feste Sätze, Strings sind Pointer auf String-Storage, keys: cols=>Datenbeschreibung, data=>Sätze hintereinander (evtl. mehrere mit präfix data??)
- - Intcolumn (format=>Bitsize, ZIP-Format usw., data=>Binärdaten)
- - Intcolumn+Dictionary für strings (format=bitsize, data=Binärdaten, str_idx=String-Entsprechung)
- - Prefixtree (reverse String->recordid)
- - Index (reverse int)
-
-
-Query Plans mit Logikprogrammierung
------------------------------------
- - SQL-Query wird in FOP-Fakten übersetzt
- - Storages sind als FOP-Fakten verfügbar
- - nichtdeterministische Zustandsmaschine, um den besten QP zu bauen
- - evtl. ein Algo, um die Codegenerierung zu spezialisieren
- - Operationen: Flex-Row-Search, Fix-Row-Search, Intcol-search, Index-Search
- - Kosten von Indexerstellung usw. werden gegeneinander ausgewogen (jeder QP hat ein Gewicht)
- - OR-Schlüsselwort in FOP erlaubt alternative Query-Pläne
- - Es werden Query-Pläne für ALLE Storage-Typen mittels OR-Schlüsselwort erzeugt; bei nicht existierenden Storages/Indizes werden dann einfach aus existieren Storages erzeugt
-
-Pläne für den Fall C++
-----------------------
- - Leichtgewichtiger HTTP Server mit max. 1-2 HEADER-Zeilen
- - JSON interfaces / eigentlich beliebige LISP-Endpunkte
- - LISP/SCHEME processor
- - LLVM-JIT
-
-NUMA Communication Protocol
----------------------------
- - Architekturunabhängig: Uns ist es egal, ob der Empfänger auf einem NUMA-Knoten oder im Netzwerk ist
- - --> Nutzung einer Stream-Klasse; atomares Schreiben in den Stream (1 RAM-Kopiervorgang)
- - jeder kann Stream Handles öffnen; ein Stream Handle besteht aus (node, handleid)
- - Streams müssen nach Beendigung geschlossen werden (close-nachricht = länge 0)
- - Streams haben Open-Counter; ein Close-Befehl senkt den Open-Counter um 1
- - Der Haupt-Query-Stream schließt sich nie (auf C++ stdin??? und Golang übernimmt dann nur den HTTP[s]-Part??)
- - Jeder Schreibvorgang ist atomar und hat eine Chunk-Länge (große Nachrichten darf es nicht geben; diese werden auf mehrere Chunks aufgeteilt)
- - Jeder Chunk ist idealerweise 1 Ergebnis
- - Jeder Chunk steht zusammenhängend im Speicher
-
-Heterogeneous Sorage Engine
----------------------------
- - Die Storage Engine beherrscht mehrere Storage-Formate:
-   * JSON-line basierte Dateispeicher
-   * Satzbasierte Speicher (auch von Teilmengen der Spalten)
-   * Columnstore-Dateien (auch komprimiert)
-   * Delta-Storages (Lösch, INSERT und UPDATE-Markierungen)
-   * Indizes
-   * Dictionaries
- - Die Storage Engine fragt man folgendermaßen an:
- - scan(tableid, condition, inizializer, handler, closer)
- - condition wird LISP-technisch analysiert; darum kümmert sich jeder Sub-Storage selbst
- - initializer ist vom Schema ()->(state), handler ist (state,tuple)->(state,messages), closer ist (state)->(messages)
- - die Storage-Engine kümmert sich um die einzelnen Storage-Fragmente
- - die Storage-Engine kann ein Storage-Fragment mit scan(condition, initializer, handler, closer) anfragen
- - die Storage-Engine setzt die einzelnen Storages (z.B. Satzbasierter + Delta) wieder zu einem Gesamtstorage zusammen
- - die Storage-Engine sammelt Statistiken zu den Workloads (z.B. häufigste conditions und ob man indizes bilden sollte)
- - die Storage-Engine kümmert sich auch ums Sharding (z.B. dass der Delta-Storage überall verfügbar ist, aber die Storage-Fragmente entlang eines Key gebildet werden)
- - Erste Idee: Man beginnt mit einem JSON-line-Storage; bei mehr als 10 Einträgen wird geupgradet
- - Dann beginnt man mit satzbasierten Speichern, d.h. alle Werte werden als fixed width in der Satzdatei abgelegt; Strings werden in Dictionaries gedumpt
- - Selten benutzte oder häufig NULL enthaltene Spalten werden vom Haupt-Satz abgespalten und in einen Extra Columnstore gelegt (ab 100 Sätzen)
- - der handler wird auch nach benutzten Spalten durchsucht
- - die Storage Engine soll später auch um JIT erweitert werden (häufige handler parameterisieren) - sollte aber unnötig sein, wenn pro Speicher genügend CPU bereitgestellt wird
-
-Storage Backup und Transactions
--------------------------------
-jeder Datensatz im Delta Storage hat eine 64bit txn-nummer anhängig
-jede Löschmarkierung im Delta Storage hat eine 64bit txn-nummer anhängig
-jeder Datensatz hat eine 64bit hdd-nr. anhängig
-damit derselbe storage benutzt werden kann, sind txn-nummern >= 1<<63
-jeder insert und delete-befehl, sowie scan braucht die Angabe einer txn-Nr.
-scan scannt nur die Zeilen, die in der aktuellen txn gültig sind
-commit(txn) wandelt alle records in hdd-IDs um
-
-
-Compression
------------
-strings:
-https://www.vldb.org/pvldb/vol13/p2649-boncz.pdf
-
 MMap
 ----
 import "https://github.com/edsrzf/mmap-go/blob/main/mmap.go"
@@ -126,32 +7,30 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 
 runtime.SetFinalizer(obj, finalizer(obj))
 
-Persistenz
-----------
-FAT-16-ähnlicher Storage
-1 Speicher-Block => [uint64 lastblocksize] [uint64 thisblocksize] [block]
-am Anfang ist der Rootblock
-1 Verzeichnisnode -> verkettete Liste
-[uint64 nextblock] [uint64 lastblock] [uint64 parentdirectory] entries<[uint16 flags [directory]] [int16 filenamesize] [uint64 block]>
-
-Serialize:
-01. Größe Ermitteln (SerializeSize ()->uint64)
-02. Speicher holen
-03. Speicher schreiben (SerializeWrite (bytes[]))
-
-Deserialize:
-01. Klasse ermitteln (Factory)
-02. Klasse erstellen (Create-Methode der Factory)
-02. De
-
-Schemen & co per JSON serialisieren
- - Je DB ein Ordner mit schema.json JSON-Datei mit allen Schema-Infs (Tabellen, Spalten usw.)
- - In JSON: Je Tabelle Liste der Shards als Binär-Dateien (.shard)
- - .shard-Datei enthält den Delta Storage + je Spalte Verweise auf die columnstorage-dateien
-
 TODO
 ----
  - SELECT DATABASE()
  - session-local storage for mysql session state (variables, current schema)
  - per-table persistency settings
  - JSON printing
+ - (scan db tbl condition map reduce neutral) -> aggregates, unordered fetches
+ - (ordered_scan db tbl condition map reduce neutral order limit offset) -> items are sorted before given to map; reduce is not parallelized
+   algorithm:
+   	1. parallel select on each shard
+	2. every selected recordId is pushed to a shard-local heap-stack (with orderfunction)
+	3. create a global heap-stack; push the least item of each shard onto that stack
+	4. while items are left on the global stack:
+		* pull from the global stack (and remember from which shard it was)
+		* if !offset--: agg = reduce(agg, map(item))
+		* push the next item that was popped from that shard
+		* if limit is reached, return item
+	--> possibility to optimize by parallelizing map (but limited to limit+offset)
+ - (grouped_scan db tbl condition groupfn map reduce null reduce2 null2) -> temp-table
+ - temptable -> createtemptable(columns)
+ - queryplan builder:
+ 	-> turn all subqueries into LEFT JOINs
+	-> merge all join'd tables with the same condition
+	-> join order
+	-> scan generation
+ - joint-scans (equi-joins with cached last-index positions)
+ - scan -> only "go" those shards that have the value range within (in an optimized data structure because there can be thousands of shards)

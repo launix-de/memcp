@@ -57,8 +57,34 @@ We welcome contributions to memcp. If you would like to contribute, please follo
 
 Before submitting a pull request, please make sure that your changes pass the existing tests and add new tests if necessary.
 
+# How it works
+
+- MemCP supports multiple databases that can have multiple tables
+- Every table has multiple columns and multiple data shards
+- Every data shard has ~64,000 items and is ment to be processed in ~100ms
+- Parallelization is done over shards
+- every shard consists of two parts: main storage and delta storage
+- main storage is column-based, fixed-size and is compressed
+- delta storage is a list of row-based insertions and deletions that is overlaid over a main storage
+- (rebuild) will merge all main+delta storages into new compressed main storages with empty delta storages
+- every dataset has a shard-local so-called recordId
+
+# Available column compression formats
+
+- uncompressed
+- bit-size reduced integer storage with offset
+- integer sequences (based on 3x integer storage)
+- string-storage
+- string-dictionary (based on integers)
+- float storage
+- sparse storage (efficient with lots of NULL values)
+- prefix storage (optimizes strings that start with the same substring over and over)
+
 # Further Reading
 
+- https://www.vldb.org/pvldb/vol13/p2649-boncz.pdf
+- https://cs.emis.de/LNI/Proceedings/Proceedings241/383.pdf
+- https://wwwdb.inf.tu-dresden.de/wp-content/uploads/T_2014_Master_Patrick_Damme.pdf
 - https://launix.de/launix/how-to-balance-a-database-between-olap-and-oltp-workflows/
 - https://launix.de/launix/designing-a-programming-language-for-distributed-systems-and-highly-parallel-algorithms/
 - https://launix.de/launix/on-designing-an-interface-for-columnar-in-memory-storage-in-golang/
