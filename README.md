@@ -47,6 +47,14 @@ SELECT * FROM foo
 SELECT SUM(amount) FROM foo
 ```
 
+# Example REST API app
+
+```
+./memcp apps/bayesian.scm
+```
+
+now you can use the bayesian classifier under http://localhost:4321/bayes/ as a REST service
+
 # Contributing
 
 We welcome contributions to memcp. If you would like to contribute, please follow these steps:

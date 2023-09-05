@@ -22,9 +22,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package main
 
-import "fmt"
 import "os"
 import "io"
+import "fmt"
+import "flag"
 import "bufio"
 import "io/ioutil"
 import "crypto/rand"
@@ -98,6 +99,18 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 		}
 }
 
+// workaround for flags package to allow multiple values
+type arrayFlags []string
+
+func (i *arrayFlags) String() string {
+    return "dummy"
+}
+
+func (i *arrayFlags) Set(value string) error {
+    *i = append(*i, value)
+    return nil
+}
+
 func main() {
 	fmt.Print(`memcp Copyright (C) 2023   Carl-Philip Hänsch
     This program comes with ABSOLUTELY NO WARRANTY;
@@ -107,6 +120,12 @@ func main() {
 
 	// init random generator for UUIDs
 	uuid.SetRand(rand.Reader)
+
+	// parse command line options
+	var commands arrayFlags
+	flag.Var(&commands, "c", "Execute scm command")
+	flag.Parse()
+	imports := flag.Args()
 
 	// define some IO functions (scm will not provide them since it is sandboxable)
 	wd, _ := os.Getwd() // libraries are relative to working directory... is that right?
@@ -133,6 +152,15 @@ func main() {
 	storage.LoadDatabases()
 	// scripts initialization
 	scm.Eval(scm.Read("(import \"lib/main.scm\")"), &IOEnv)
+	// command line initialization
+	for _, filename := range imports {
+		fmt.Println("Loading " + filename + " ...")
+		scm.Eval(scm.Read("(import \"" + filename + "\")"), &IOEnv)
+	}
+	for _, command := range commands {
+		fmt.Println("Executing " + command + " ...")
+		scm.Eval(scm.Read(command), &IOEnv)
+	}
 
 	// REPL shell
 	scm.Repl(&IOEnv)
