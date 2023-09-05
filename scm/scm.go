@@ -462,6 +462,16 @@ func init() {
 				}
 				return result
 			},
+			"has?": func(a ...Scmer) Scmer {
+				// arr, element
+				list := a[0].([]Scmer)
+				for _, v := range list {
+					if a[1] == v {
+						return true
+					}
+				}
+				return false
+			},
 			"reduce": func(a ...Scmer) Scmer {
 				// arr, reducefn, [neutral]
 				list := a[0].([]Scmer)

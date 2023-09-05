@@ -48,7 +48,11 @@ func (t *table) ShowColumns() scm.Scmer {
 }
 
 func (c *column) Show() scm.Scmer {
-	return []scm.Scmer{"name", c.Name, "type", c.Typ} // TODO: dimensions etc.
+	dims := make([]scm.Scmer, len(c.Typdimensions))
+	for i, v := range c.Typdimensions {
+		dims[i] = v
+	}
+	return []scm.Scmer{"name", c.Name, "type", c.Typ, "dimensions", dims}
 }
 
 func (d dataset) Get(key string) scm.Scmer {

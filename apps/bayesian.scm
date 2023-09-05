@@ -1,3 +1,13 @@
+/* create schema */
+(print "Loading Bayesian Classifier app")
+(if (has? (show) "bayes") true (begin
+	(print "creating database")
+	(createdatabase "bayes")
+))
+(if (has? (show "bayes") "wordclasses") true (begin
+	(print "creating tables")
+	(eval (parse_sql "bayes" "CREATE TABLE wordclasses(partition int, word text, category text, class int, count int)"))
+))
 
 (define http_handler (begin
 	(set old_handler http_handler)
@@ -7,7 +17,7 @@
 			(regex "^/bayes/(.*)$" url text) (begin
 				((res "status") 200)
 				((res "header") "Content-Type" "text/plain")
-				((res "println") "Hello World")
+				((res "println") (concat "Hello World " text))
 				/*
 				TODO: two endpoints -> get, learn
 				get -> returns class for category
