@@ -37,7 +37,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				((res "status") 200)
 				((res "header") "Content-Type" "text/plain")
 				(define formula (parse_sql schema query))
-				(define resultrow (res "println")) /* TODO: to JSON */
+				(define resultrow (res "jsonl"))
 				(print "received query: " query)
 				(eval formula)
 			)

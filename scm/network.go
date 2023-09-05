@@ -23,6 +23,7 @@ import "sync"
 import "strconv"
 import "net/http"
 import "runtime/debug"
+import "encoding/json"
 
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
@@ -96,11 +97,44 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			res_lock.Unlock();
 			return "ok"
 		},
+		"print", func (a ...Scmer) Scmer {
+			// naive output
+			res_lock.Lock()
+			io.WriteString(res, String(a[0]))
+			res_lock.Unlock();
+			return "ok"
+		},
 		"println", func (a ...Scmer) Scmer {
-			// result-print-function (TODO: better interface with headers, JSON support etc.)
-			// TODO: if a[0] is []Scmer -> build JSON object
+			// naive output
 			res_lock.Lock()
 			io.WriteString(res, String(a[0]) + "\n")
+			res_lock.Unlock();
+			return "ok"
+		},
+		"jsonl", func (a ...Scmer) Scmer {
+			// print json line (only assoc)
+			res_lock.Lock()
+			io.WriteString(res, "{")
+			dict := a[0].([]Scmer)
+			for i, v := range dict {
+				if i % 2 == 0 {
+					// key
+					//io.WriteString(res, String(a[0]) + "\n")
+					bytes, _ := json.Marshal(String(v))
+					res.Write(bytes)
+					io.WriteString(res, ": ")
+				} else {
+					bytes, err := json.Marshal(v)
+					if err != nil {
+						panic(err)
+					}
+					res.Write(bytes)
+					if i < len(dict)-1 {
+						io.WriteString(res, ", ")
+					}
+				}
+			}
+			io.WriteString(res, "}\n")
 			res_lock.Unlock();
 			return "ok"
 		},

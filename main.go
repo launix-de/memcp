@@ -124,6 +124,8 @@ func main() {
 	// parse command line options
 	var commands arrayFlags
 	flag.Var(&commands, "c", "Execute scm command")
+	basepath := "data"
+	flag.StringVar(&basepath, "data", "data", "Data folder for persistence")
 	flag.Parse()
 	imports := flag.Args()
 
@@ -148,7 +150,7 @@ func main() {
 	}
 	// storage initialization
 	storage.Init(scm.Globalenv)
-	storage.Basepath = "data" // TODO: make overwritable per settings
+	storage.Basepath = basepath
 	storage.LoadDatabases()
 	// scripts initialization
 	scm.Eval(scm.Read("(import \"lib/main.scm\")"), &IOEnv)
