@@ -178,6 +178,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql schema rest)
 		(concat "\n" rest) (parse_sql schema rest)
 		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql schema rest)
+		(regex "(?is)^CREATE(?:\\s|\\n)+DATABASE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createdatabase") id) (error "expected identifier"))
 		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") schema id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
 		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest '())
 		(regex "(?is)^INSERT(?:\\s|\\n)+INTO(?:\\s|\\n)+(.*)" _ rest) (parse_insert rest)
