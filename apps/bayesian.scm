@@ -33,16 +33,16 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(match (req "path")
 			(regex "^/bayes/(.*)$" url text) (begin
 				(print req)
-				(if (has? (req query) "classify") (begin
+				(if (has? (req "query") "classify") (begin
 					/* classify algo */
 					((res "status") 200)
 					((res "header") "Content-Type" "text/plain")
-					((res "println") (concat "TODO: classify " text " for " ((req query) "classify"))))
+					((res "println") (concat "TODO: classify " text " for " ((req "query") "classify")))
 				) (begin
 					/* learn algo */
 					((res "status") 200)
 					((res "header") "Content-Type" "text/plain")
-					((res "println") (concat "TODO: learn " text " for classes " (req query)))
+					((res "println") (concat "TODO: learn " text " for classes " (req "query")))
 				))
 				/*
 				TODO: two endpoints -> get, learn

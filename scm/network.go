@@ -119,7 +119,6 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			for i, v := range dict {
 				if i % 2 == 0 {
 					// key
-					//io.WriteString(res, String(a[0]) + "\n")
 					bytes, _ := json.Marshal(String(v))
 					res.Write(bytes)
 					io.WriteString(res, ": ")
