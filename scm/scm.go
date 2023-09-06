@@ -129,9 +129,27 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				expression = e[2]
 				goto restart
 			} else {
-				expression = e[3]
-				goto restart
+				if len(e) > 3 {
+					expression = e[3]
+					goto restart
+				} else {
+					return nil
+				}
 			}
+		case "and":
+			for i, x := range e {
+				if i > 0 && !ToBool(Eval(x, en)) {
+					return false
+				}
+			}
+			return true
+		case "or":
+			for i, x := range e {
+				if i > 0 && ToBool(Eval(x, en)) {
+					return true
+				}
+			}
+			return false
 		case "match": // (match <value> <pattern> <result> <pattern> <result> <pattern> <result> [<default>])
 			val := Eval(e[1], en)
 			i := 2
@@ -398,6 +416,12 @@ func init() {
 			">=": func(a ...Scmer) Scmer {
 				return a[0].(float64) >= a[1].(float64)
 			},
+			"!": func(a ...Scmer) Scmer {
+				return !ToBool(a[0]);
+			},
+			"not": func(a ...Scmer) Scmer {
+				return !ToBool(a[0]);
+			},
 			"equal?": func(a ...Scmer) Scmer {
 				return reflect.DeepEqual(a[0], a[1])
 			},
@@ -448,6 +472,18 @@ func init() {
 			"simplify": func(a ...Scmer) Scmer {
 				// turn string to number or so
 				return Simplify(String(a[0]))
+			},
+			"strlen": func(a ...Scmer) Scmer {
+				// string
+				return float64(len(String(a[0])))
+			},
+			"toLower": func(a ...Scmer) Scmer {
+				// string
+				return strings.ToLower(String(a[0]))
+			},
+			"toUpper": func(a ...Scmer) Scmer {
+				// string
+				return strings.ToUpper(String(a[0]))
 			},
 			"split": func(a ...Scmer) Scmer {
 				// string, sep

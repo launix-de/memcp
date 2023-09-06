@@ -26,6 +26,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(eval (parse_sql "bayes" "CREATE TABLE wordclasses(partition int, word text, category text, class int, count int)"))
 ))
 
+(define ignore_words (split "bin die der und in zu den das nicht von sie ist des sich mit dem dass er es ein ich auf so eine auch als an nach wie im für man aber aus durch wenn nur war noch werden bei hat wir was wird sein einen welche sind oder zur um haben einer mir über ihm diese einem ihr uns da zum kann doch vor dieser mich ihn du hatte seine mehr am denn nun unter sehr selbst schon hier bis habe ihre dann ihnen seiner alle wieder meine the at there some my of be use her than and this an would first a have each make to from which like been in or she him is one do into who you had how time that by their has its it word if now he but will two find was no up more long for what other on all about go are were did as we many get with when then no come his your them they can these could may I" " "))
+
 (define http_handler (begin
 	(set old_handler http_handler)
 	(lambda (req res) (begin
@@ -33,16 +35,33 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(match (req "path")
 			(regex "^/bayes/(.*)$" url text) (begin
 				(print req)
+				(set words (filter (split (toLower text)) (lambda (word) (! (has? ignore_words word)))))
 				(if (has? (req "query") "classify") (begin
 					/* classify algo */
 					((res "status") 200)
 					((res "header") "Content-Type" "text/plain")
-					((res "println") (concat "TODO: classify " text " for " ((req "query") "classify")))
+					((res "println") (concat "TODO: classify " words " for " ((req "query") "classify")))
+					/*
+					(scan "bayes" "wordclasses" (lambda (partition word) (and (?equal partition 1) (has? words word))) (lambda (category class count) (begin
+						((res "println") (concat "consider " category " " class " +" count))
+					)))
+					*/
+					(scan "bayes" "wordclasses" (lambda () true) (lambda (word category class count) (begin
+						(if (has? words word)
+							((res "println") (concat "consider " word " " category " " class " +" count))
+						)
+					)))
 				) (begin
 					/* learn algo */
 					((res "status") 200)
 					((res "header") "Content-Type" "text/plain")
-					((res "println") (concat "TODO: learn " text " for classes " (req "query")))
+					(map words (lambda (word) (begin
+						(map_assoc (req "query") (lambda (category class) (begin
+							/* TODO: on duplicate key (partition word category class) update count = count + 1 */
+							(insert "bayes" "wordclasses" '("partition" 1 "word" word "category" category "class" class "count" 1))
+						)))
+					)))
+					((res "println") "learn ok")
 				))
 				/*
 				TODO: two endpoints -> get, learn
