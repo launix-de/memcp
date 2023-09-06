@@ -38,19 +38,18 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(set words (filter (split (toLower text)) (lambda (word) (! (has? ignore_words word)))))
 				(if (has? (req "query") "classify") (begin
 					/* classify algo */
+					(set category_ ((req "query") "classify"))
 					((res "status") 200)
 					((res "header") "Content-Type" "text/plain")
 					((res "println") (concat "TODO: classify " words " for " ((req "query") "classify")))
-					/*
-					(scan "bayes" "wordclasses" (lambda (partition word) (and (?equal partition 1) (has? words word))) (lambda (category class count) (begin
-						((res "println") (concat "consider " category " " class " +" count))
-					)))
-					*/
-					(scan "bayes" "wordclasses" (lambda () true) (lambda (word category class count) (begin
-						(if (has? words word)
-							((res "println") (concat "consider " word " " category " " class " +" count))
-						)
-					)))
+					(set agg (scan "bayes" "wordclasses" (lambda (partition word category) (and (equal? partition 1) (has? words word) (equal? category category_))) (lambda (class count) (begin
+						((res "jsonl") '(class count))
+						'(class count) /* dict with count */
+					)) (lambda (a b) (begin
+						/* TODO: merge */
+						'(a b)
+					) '())))
+					((res "jsonl") agg)
 				) (begin
 					/* learn algo */
 					((res "status") 200)
