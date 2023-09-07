@@ -27,7 +27,9 @@ import "io"
 import "fmt"
 import "flag"
 import "bufio"
+import "syscall"
 import "io/ioutil"
+import "os/signal"
 import "crypto/rand"
 import "path/filepath"
 import "github.com/google/uuid"
@@ -164,6 +166,25 @@ func main() {
 		scm.Eval(scm.Read(command), &IOEnv)
 	}
 
+	// install exit handler
+	cancelChan := make(chan os.Signal, 1)
+	signal.Notify(cancelChan, syscall.SIGTERM, syscall.SIGINT)
+	go (func () {
+		<-cancelChan
+		exitroutine()
+		os.Exit(1)
+	})()
+
 	// REPL shell
 	scm.Repl(&IOEnv)
+
+	// normal shutdown
+	exitroutine()
+}
+
+func exitroutine() {
+	fmt.Println("Exit procedure... syncing to disk")
+	fmt.Println("table compression done in ", scm.Globalenv.Vars["rebuild"].(func(...scm.Scmer) scm.Scmer)())
+	fmt.Println("dump done in ", scm.Globalenv.Vars["save"].(func(...scm.Scmer) scm.Scmer)())
+	fmt.Println("Exit procedure finished")
 }

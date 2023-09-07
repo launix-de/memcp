@@ -199,7 +199,7 @@ func (t *storageShard) rebuild() *storageShard {
 			b.WriteString(" ")
 			b.WriteString(newcol.String()) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
 
-			// write to disc
+			// write to disc (TODO: only if required)
 			f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + col)
 			if err != nil {
 				panic(err)

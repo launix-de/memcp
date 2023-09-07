@@ -132,10 +132,13 @@ func Init(en scm.Env) {
 		}
 	}
 	en.Vars["save"] = func (a ...scm.Scmer) scm.Scmer {
+		start := time.Now()
+
 		for _, db := range databases {
 			db.save()
 		}
-		return "ok"
+
+		return fmt.Sprint(time.Since(start))
 	}
 	en.Vars["rebuild"] = func (a ...scm.Scmer) scm.Scmer {
 		start := time.Now()
