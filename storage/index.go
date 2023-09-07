@@ -39,10 +39,12 @@ type columnboundaries struct{
 func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
 	cols := make([]columnboundaries, 0, 4)
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
-	traverseCondition := func (condition scm.Scmer) {
+	var traverseCondition func(scm.Scmer)
+	traverseCondition = func (condition scm.Scmer) {
 		switch v := condition.(scm.Proc).Body.(type) {
 			case []scm.Scmer:
 				if v[0] == scm.Symbol("equal?") {
+					// equi
 					switch v1 := v[1].(type) {
 						case scm.Symbol:
 							switch v2 := v[2].(type) {
@@ -52,9 +54,15 @@ func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
 							}
 						// TODO: equals constant vs. column
 					}
+				} else if v[0] == scm.Symbol("and") {
+					// AND -> recursive traverse
+					for i := 1; i < len(v); i++ {
+						traverseCondition(v[i])
+					}
 				}
-				// TODO: AND -> recursive traverse
+				// TODO: <, >, <=, >=
 				// TODO: OR -> merge multiple
+				// TODO: variable expressions that can be expanded
 		}
 	}
 	traverseCondition(condition) // recursive analysis over condition
