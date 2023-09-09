@@ -502,7 +502,7 @@ func init() {
 				// arr, element
 				list := a[0].([]Scmer)
 				for _, v := range list {
-					if a[1] == v {
+					if reflect.DeepEqual(a[1], v) {
 						return true
 					}
 				}

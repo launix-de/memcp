@@ -41,7 +41,7 @@ func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	var traverseCondition func(scm.Scmer)
 	traverseCondition = func (condition scm.Scmer) {
-		switch v := condition.(scm.Proc).Body.(type) {
+		switch v := condition.(type) {
 			case []scm.Scmer:
 				if v[0] == scm.Symbol("equal?") {
 					// equi
@@ -65,7 +65,7 @@ func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
 				// TODO: variable expressions that can be expanded
 		}
 	}
-	traverseCondition(condition) // recursive analysis over condition
+	traverseCondition(condition.(scm.Proc).Body) // recursive analysis over condition
 
 	// check if we found conditions
 	if len(cols) > 0 {

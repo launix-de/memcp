@@ -34,9 +34,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		/* hooked our additional paths to it */
 		(match (req "path")
 			(regex "^/bayes/(.*)$" url text) (begin
-				(print req)
 				(set words (filter (split (toLower text)) (lambda (word) (! (has? ignore_words word)))))
-				(if (has? (req "query") "classify") (begin
+				(if (has? (req "query") "classify" /* TODO: has? is not safe here*/) (begin
 					/* classify algo */
 					(set category_ ((req "query") "classify"))
 					((res "status") 200)
@@ -48,7 +47,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					)) (lambda (a b) (begin
 						/* TODO: merge */
 						'(a b)
-					) '())))
+					)) '()))
 					((res "jsonl") agg)
 				) (begin
 					/* learn algo */
