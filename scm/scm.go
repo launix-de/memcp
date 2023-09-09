@@ -568,6 +568,27 @@ func init() {
 				}
 				return result
 			},
+			"set_assoc": func(a ...Scmer) Scmer {
+				// may eventually destroy the original list; use in aggregations
+				// params: dict, key, new_value, [merge_func]
+				// return: dict
+				list := a[0].([]Scmer)
+				for i := 0; i < len(list); i += 2 {
+					if reflect.DeepEqual(list[i], a[1]) {
+						// overwrite
+						if len(a) > 3 {
+							// overwrite with merge function
+							list[i + 1] = Apply(a[3], []Scmer{list[i + 1], a[2],})
+						} else {
+							// overwrite naive
+							list[i + 1] = a[2]
+						}
+						return list // return changed list (this violates immutability for performance)
+					}
+				}
+				// else: append
+				return append(list, a[1], a[2])
+			},
 
 			"filter": func(a ...Scmer) Scmer {
 				result := make([]Scmer, 0)

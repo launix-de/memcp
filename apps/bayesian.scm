@@ -42,13 +42,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					((res "header") "Content-Type" "text/plain")
 					((res "println") (concat "TODO: classify " words " for " ((req "query") "classify")))
 					(set agg (scan "bayes" "wordclasses" (lambda (partition word category) (and (equal? partition 1) (has? words word) (equal? category category_))) (lambda (class count) (begin
-						((res "jsonl") '(class count))
 						'(class count) /* dict with count */
-					)) (lambda (a b) (begin
-						/* TODO: merge */
-						'(a b)
+					)) (lambda (a b) (match b '(class count)
+						(set_assoc a class count +) /* add class count to result dict */
 					)) '()))
 					((res "jsonl") agg)
+					/* TODO: select the one with highest key and calculate confidence */
 				) (begin
 					/* learn algo */
 					((res "status") 200)
