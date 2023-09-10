@@ -62,24 +62,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					)))
 					((res "println") "learn ok")
 				))
-				/*
-				TODO: two endpoints -> get, learn
-				get -> returns class for category
-				learn -> learns multiple categories+classes
-
-				datascheme: bayes(partition, word, category, class, count)
-
-				get: for each word: select class, count from bayes where category=, word=, partition=; normalize count/(sum(count) + 1); summarize weights over all words; choose highest weight, return class+weight
-
-				learn: for each word: for each category: upsert(partition, word, category, class, count+1)
-
-				TODO: string.split, scan->get recordId, delete, :sqlvariables
-
-				(define formula (parse_sql schema query))
-				(define resultrow (res "println"))
-				(print "received query: " query)
-				(eval formula)
-				*/
 			)
 			/* default */
 			(old_handler req res))
