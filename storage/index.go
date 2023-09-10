@@ -40,8 +40,8 @@ func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
 	cols := make([]columnboundaries, 0, 4)
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	var traverseCondition func(scm.Scmer)
-	traverseCondition = func (condition scm.Scmer) {
-		switch v := condition.(type) {
+	traverseCondition = func (node scm.Scmer) {
+		switch v := node.(type) {
 			case []scm.Scmer:
 				if v[0] == scm.Symbol("equal?") {
 					// equi
@@ -51,6 +51,15 @@ func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
 								case float64, string:
 									// equals column vs. constant
 									cols = append(cols, columnboundaries{string(v1), v2, v2})
+								case scm.Symbol:
+									if val, ok := condition.(scm.Proc).En.Vars[v2]; ok {
+										switch v2 := val.(type) {
+											// bound constant
+											case float64, string:
+												// equals column vs. constant
+												cols = append(cols, columnboundaries{string(v1), v2, v2})
+										}
+									}
 							}
 						// TODO: equals constant vs. column
 					}
@@ -69,6 +78,7 @@ func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
 
 	// check if we found conditions
 	if len(cols) > 0 {
+		//fmt.Println("conditions:", cols)
 		// sort columns -> at first, the lower==upper alphabetically; then one lower!=upper according to best selectivity; discard the rest
 		sort.Slice(cols, func (i, j int) bool {
 			if cols[i].lower == cols[i].upper && cols[j].lower != cols[j].upper {
