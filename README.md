@@ -107,3 +107,4 @@ Before submitting a pull request, please make sure that your changes pass the ex
 - https://launix.de/launix/sequence-compression-in-in-memory-database-yields-99-memory-savings-and-a-total-of-13/
 - https://launix.de/launix/storing-a-bit-smaller-than-in-one-bit/
 - https://launix.de/launix/announcement-memcp-gets-adaptible-consistency-layer/
+- https://www.youtube.com/watch?v=DWg4nx4KVLo
