@@ -26,7 +26,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(eval (parse_sql "bayes" "CREATE TABLE wordclasses(partition int, word text, category text, class int, count int)"))
 ))
 
-(define ignore_words (split "bin die der und in zu den das nicht von sie ist des sich mit dem dass er es ein ich auf so eine auch als an nach wie im für man aber aus durch wenn nur war noch werden bei hat wir was wird sein einen welche sind oder zur um haben einer mir über ihm diese einem ihr uns da zum kann doch vor dieser mich ihn du hatte seine mehr am denn nun unter sehr selbst schon hier bis habe ihre dann ihnen seiner alle wieder meine the at there some my of be use her than and this an would first a have each make to from which like been in or she him is one do into who you had how time that by their has its it word if now he but will two find was no up more long for what other on all about go are were did as we many get with when then no come his your them they can these could may I" " "))
+(define ignore_words (split "bin die der und in zu den das nicht von sie ist des sich mit dem dass er es ein ich auf so eine auch als an nach wie im für man aber aus durch wenn nur war noch werden bei hat wir was wird sein einen welche sind oder zur um haben einer mir über ihm diese einem ihr uns da zum kann doch vor dieser mich ihn du hatte seine mehr am denn nun unter sehr selbst schon hier bis habe ihre dann ihnen seiner alle wieder meine the at there some my of be use her than and this an would first a have each make to from which like been in or she him is one do into who you had how time that by their has its it word if now he but will two find was no up more long for what other on all about go are were did as we many get with when then no come his your them they can these could may i" " "))
 
 (define http_handler (begin
 	(set old_handler http_handler)
@@ -39,7 +39,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					/* classify algo */
 					(set category_ ((req "query") "classify"))
 					((res "status") 200)
-					((res "header") "Content-Type" "text/plain")
+					((res "header") "Content-Type" "application/json")
 					(set agg (scan "bayes" "wordclasses" (lambda (partition word category) (and (equal? partition 1) (has? words word) (equal? category category_))) (lambda (class count) (begin
 						'(class count) /* dict with count */
 					)) (lambda (a b)
@@ -49,7 +49,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 						(if (> value bestscore) '(key value (+ total value)) '(best bestscore (+ total value)))
 					)) '("unknown" 0 1)))
 					((res "jsonl") (match result '(best bestscore total) '("class" best "confidentiality" (/ bestscore total))))
-					/* TODO: select the one with highest key and calculate confidence */
 				) (begin
 					/* learn algo */
 					((res "status") 200)
