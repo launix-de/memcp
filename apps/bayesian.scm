@@ -40,13 +40,15 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					(set category_ ((req "query") "classify"))
 					((res "status") 200)
 					((res "header") "Content-Type" "text/plain")
-					((res "println") (concat "TODO: classify " words " for " ((req "query") "classify")))
 					(set agg (scan "bayes" "wordclasses" (lambda (partition word category) (and (equal? partition 1) (has? words word) (equal? category category_))) (lambda (class count) (begin
 						'(class count) /* dict with count */
 					)) (lambda (a b)
 						(merge_assoc a b +) /* add class count to result dict */
 					) '()))
-					((res "jsonl") agg)
+					(set result (reduce_assoc agg (lambda (a key value) (match a '(best bestscore total)
+						(if (> value bestscore) '(key value (+ total value)) '(best bestscore (+ total value)))
+					)) '("unknown" 0 1)))
+					((res "jsonl") (match result '(best bestscore total) '("class" best "confidentiality" (/ bestscore total))))
 					/* TODO: select the one with highest key and calculate confidence */
 				) (begin
 					/* learn algo */

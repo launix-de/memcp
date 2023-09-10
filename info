@@ -34,3 +34,6 @@ TODO
 	-> scan generation
  - joint-scans (equi-joins with cached last-index positions)
  - scan -> only "go" those shards that have the value range within (in an optimized data structure because there can be thousands of shards)
+ - scm.Verify(expr) -> static code analyzer: exact number of parameters, minimum number of parameters, parameter types (function, dict, string)
+ - line numbers and filenames -> wrapper for []Scmer that has to run .Verify??? SYMBOL [debug]
+ - documentation (-> structured data from Verify)

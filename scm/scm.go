@@ -509,7 +509,7 @@ func init() {
 				return false
 			},
 			"reduce": func(a ...Scmer) Scmer {
-				// arr, reducefn, [neutral]
+				// arr, reducefn(a, b), [neutral]
 				list := a[0].([]Scmer)
 				var result Scmer = nil
 				i := 0
@@ -524,6 +524,15 @@ func init() {
 				for i < len(list) {
 					result = Apply(a[1], []Scmer{result, list[i],})
 					i = i + 1
+				}
+				return result
+			},
+			"reduce_assoc": func(a ...Scmer) Scmer {
+				// dict, reducefn(a, key, value), neutral
+				list := a[0].([]Scmer)
+				result := a[2]
+				for i := 0; i < len(list); i += 2 {
+					result = Apply(a[1], []Scmer{result, list[i], list[i+1],})
 				}
 				return result
 			},
