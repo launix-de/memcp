@@ -43,9 +43,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					((res "println") (concat "TODO: classify " words " for " ((req "query") "classify")))
 					(set agg (scan "bayes" "wordclasses" (lambda (partition word category) (and (equal? partition 1) (has? words word) (equal? category category_))) (lambda (class count) (begin
 						'(class count) /* dict with count */
-					)) (lambda (a b) (match b '(class count)
-						(set_assoc a class count +) /* add class count to result dict */
-					)) '()))
+					)) (lambda (a b)
+						(merge_assoc a b +) /* add class count to result dict */
+					) '()))
 					((res "jsonl") agg)
 					/* TODO: select the one with highest key and calculate confidence */
 				) (begin

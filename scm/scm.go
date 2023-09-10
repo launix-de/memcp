@@ -589,6 +589,23 @@ func init() {
 				// else: append
 				return append(list, a[1], a[2])
 			},
+			"merge_assoc": func(a ...Scmer) Scmer {
+				// params: dict1, dict2, [merge_func]
+				// naive implementation, bad performance
+				set_assoc := Globalenv.Vars["set_assoc"].(func(...Scmer) Scmer)
+				list := a[0]
+				dict := a[1].([]Scmer)
+				if len(a) > 2 {
+					for i := 0; i < len(dict); i += 2 {
+						list = set_assoc(list, dict[i], dict[i+1], a[2])
+					}
+				} else {
+					for i := 0; i < len(dict); i += 2 {
+						list = set_assoc(list, dict[i], dict[i+1])
+					}
+				}
+				return list
+			},
 
 			"filter": func(a ...Scmer) Scmer {
 				result := make([]Scmer, 0)
