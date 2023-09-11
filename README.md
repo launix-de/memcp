@@ -2,6 +2,15 @@
 
 <div align="center">
 
+![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)  ![JavaScript](https://img.shields.io/badge/javascript-%23323330.svg?style=for-the-badge&logo=javascript&logoColor=%23F7DF1E)  ![HTML5](https://img.shields.io/badge/html5-%23E34F26.svg?style=for-the-badge&logo=html5&logoColor=white)
+![HTML5](https://img.shields.io/badge/html5-%23E34F26.svg?style=for-the-badge&logo=html5&logoColor=white)  ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
+
+
+
+
+
+<br>
+
 ![memcp >](assets/memcp-logo.svg?raw=true)
 
 memcp is an open-source, high-performance, columnar in-memory database that can handle both OLAP and OLTP workloads. It provides an alternative to proprietary analytical databases and aims to bring the benefits of columnar storage to the open-source world.
@@ -23,18 +32,21 @@ Features
 
 <hr>
 
-<h1 align="center"> Screenshots </h1>
+![GS (1)](https://github.com/rohankishore/memcp/assets/109947257/c2b0add5-e793-424b-a816-53e285e025b4)
+
 
 <div align="center">
 
-![image](https://github.com/rohankishore/memcp/assets/109947257/f72c68a8-2694-410f-a993-f6fc885776e8)
+
+![image](https://github.com/rohankishore/memcp/assets/109947257/71a27a9b-b61c-49a4-a469-9769aa371667)
 
 
 </div>
 
 <hr>
 
-<h1 align="center"> Getting Started </h1>
+![ACCF](https://github.com/rohankishore/memcp/assets/109947257/88618979-ba8f-4841-871e-858f72e5ef8e)
+
 
 Compile the project with
 
@@ -65,7 +77,7 @@ SELECT SUM(amount) FROM foo
 ```
 <hr>
 
-<h1 align="center"> Example REST API app </h1>
+![HIW](https://github.com/rohankishore/memcp/assets/109947257/0be61dda-f4a8-44db-b654-6955e8806491)
 
 ```
 ./memcp apps/bayesian.scm
@@ -75,7 +87,7 @@ now you can use the bayesian classifier under http://localhost:4321/bayes/ as a 
 
 <hr>
 
-<h1 align="center"> Contributing </h1>
+![Contr](https://github.com/rohankishore/memcp/assets/109947257/21a1c09e-9baf-4762-84f6-7056a9fd2865)
 
 <p align="center"> We welcome contributions to memcp. If you would like to contribute, please follow these steps:, </p>
 
@@ -87,7 +99,7 @@ now you can use the bayesian classifier under http://localhost:4321/bayes/ as a 
 
 <hr>
 
-<h1 align="center"> How it works </h1>
+![Eg REST](https://github.com/rohankishore/memcp/assets/109947257/1e1b4a35-4371-49de-9a86-e8ea71195e3e)
 
 - MemCP supports multiple databases that can have multiple tables
 - Every table has multiple columns and multiple data shards
@@ -97,9 +109,10 @@ now you can use the bayesian classifier under http://localhost:4321/bayes/ as a 
 - main storage is column-based, fixed-size and is compressed
 - delta storage is a list of row-based insertions and deletions that is overlaid over a main storage
 - (rebuild) will merge all main+delta storages into new compressed main storages with empty delta storages
-- every dataset has a shard-local so-called recordId
+- every dataset has a shard-local so-called recorded
 
-<h1 align="center"> Available column compression formats </h1>
+
+![GS](https://github.com/rohankishore/memcp/assets/109947257/069222df-1d6e-41d7-a975-58c9914595fd)
 
 - uncompressed
 - bit-size reduced integer storage with offset
@@ -113,7 +126,7 @@ now you can use the bayesian classifier under http://localhost:4321/bayes/ as a 
 <hr>
 
 
-# Further Reading
+![GS](https://github.com/rohankishore/memcp/assets/109947257/51470e39-4d7c-4bdc-a257-78592c9c2d40)
 
 - https://www.vldb.org/pvldb/vol13/p2649-boncz.pdf
 - https://cs.emis.de/LNI/Proceedings/Proceedings241/383.pdf
