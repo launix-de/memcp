@@ -6,9 +6,6 @@
 ![HTML5](https://img.shields.io/badge/html5-%23E34F26.svg?style=for-the-badge&logo=html5&logoColor=white)  ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
 
 
-
-
-
 <br>
 
 ![memcp >](assets/memcp-logo.svg?raw=true)
@@ -32,8 +29,7 @@ Features
 
 <hr>
 
-![GS (1)](https://github.com/rohankishore/memcp/assets/109947257/c2b0add5-e793-424b-a816-53e285e025b4)
-
+<img src="https://i.ibb.co/m52mZPT/Screenshots.png" alt="Screenshots" border="0">
 
 <div align="center">
 
@@ -77,7 +73,7 @@ SELECT SUM(amount) FROM foo
 ```
 <hr>
 
-![HIW](https://github.com/rohankishore/memcp/assets/109947257/0be61dda-f4a8-44db-b654-6955e8806491)
+<img src="https://i.ibb.co/BZ9YVsc/EX-REST.png" alt="EX-REST" border="0">
 
 ```
 ./memcp apps/bayesian.scm
@@ -87,7 +83,7 @@ now you can use the bayesian classifier under http://localhost:4321/bayes/ as a 
 
 <hr>
 
-![Contr](https://github.com/rohankishore/memcp/assets/109947257/21a1c09e-9baf-4762-84f6-7056a9fd2865)
+<img src="https://i.ibb.co/DbRVCgz/Contr.png" alt="Contr" border="0">
 
 <p align="center"> We welcome contributions to memcp. If you would like to contribute, please follow these steps:, </p>
 
@@ -99,7 +95,7 @@ now you can use the bayesian classifier under http://localhost:4321/bayes/ as a 
 
 <hr>
 
-![Eg REST](https://github.com/rohankishore/memcp/assets/109947257/1e1b4a35-4371-49de-9a86-e8ea71195e3e)
+<img src="https://i.ibb.co/PNKy3rb/HIW-2.png" alt="HIW-2" border="0">
 
 - MemCP supports multiple databases that can have multiple tables
 - Every table has multiple columns and multiple data shards
@@ -112,7 +108,7 @@ now you can use the bayesian classifier under http://localhost:4321/bayes/ as a 
 - every dataset has a shard-local so-called recorded
 
 
-![GS](https://github.com/rohankishore/memcp/assets/109947257/069222df-1d6e-41d7-a975-58c9914595fd)
+<img src="https://i.ibb.co/hZTyc1S/ACCF.png" alt="ACCF" border="0">
 
 - uncompressed
 - bit-size reduced integer storage with offset
@@ -126,7 +122,7 @@ now you can use the bayesian classifier under http://localhost:4321/bayes/ as a 
 <hr>
 
 
-![GS](https://github.com/rohankishore/memcp/assets/109947257/51470e39-4d7c-4bdc-a257-78592c9c2d40)
+<img src="https://i.ibb.co/rcBJmyy/Further-Reading.png" alt="Further-Reading" border="0">
 
 - https://www.vldb.org/pvldb/vol13/p2649-boncz.pdf
 - https://cs.emis.de/LNI/Proceedings/Proceedings241/383.pdf
