@@ -1,4 +1,6 @@
-# memcp: A High-Performance, Open-Source Columnar In-Memory Database
+<h1 align="center">memcp: A High-Performance, Open-Source Columnar In-Memory Database </h1>
+
+<div align="center">
 
 ![memcp >](assets/memcp-logo.svg?raw=true)
 
@@ -7,6 +9,8 @@ memcp is an open-source, high-performance, columnar in-memory database that can 
 memcp is open source and released under the GPLv3 License. It is an open source alternative to proprietary columnar in-memory databases, providing a powerful, reliable, and fast database solution for applications that require high performance and scalability.
 
 memcp is written in golang and is designed to be portable and extensible, allowing developers to embed the database into their applications with ease. It is also designed with a focus on scalability and performance, making it a suitable choice for distributed applications.
+
+</div>
 
 Features
 - Columnar storage: Stores data column-wise instead of row-wise, which allows for better compression, faster query execution, and more efficient use of memory.
@@ -17,7 +21,20 @@ Features
 - Scalability: Designed to scale on a single node with huge NUMA memory
 - Adjustable persistency: Decide whether you want to persist a table or not or to just keep snapshots of a period of time
 
-# Getting Started
+<hr>
+
+<h1 align="center"> Screenshots </h1>
+
+<div align="center">
+
+![image](https://github.com/rohankishore/memcp/assets/109947257/f72c68a8-2694-410f-a993-f6fc885776e8)
+
+
+</div>
+
+<hr>
+
+<h1 align="center"> Getting Started </h1>
 
 Compile the project with
 
@@ -46,8 +63,9 @@ INSERT INTO foo(bar, amount) VALUES ('Man', 4), ('Horse', 6)
 SELECT * FROM foo
 SELECT SUM(amount) FROM foo
 ```
+<hr>
 
-# Example REST API app
+<h1 align="center"> Example REST API app </h1>
 
 ```
 ./memcp apps/bayesian.scm
@@ -55,17 +73,21 @@ SELECT SUM(amount) FROM foo
 
 now you can use the bayesian classifier under http://localhost:4321/bayes/ as a REST service
 
-# Contributing
+<hr>
 
-We welcome contributions to memcp. If you would like to contribute, please follow these steps:
+<h1 align="center"> Contributing </h1>
+
+<p align="center"> We welcome contributions to memcp. If you would like to contribute, please follow these steps:, </p>
 
 - Fork the repository and create a new branch for your changes.
 - Make your changes and commit them to your branch.
 - Push your branch to your fork and create a pull request.
 
-Before submitting a pull request, please make sure that your changes pass the existing tests and add new tests if necessary.
+<p align="center"> Before submitting a pull request, please make sure that your changes pass the existing tests and add new tests if necessary. </p>
 
-# How it works
+<hr>
+
+<h1 align="center"> How it works </h1>
 
 - MemCP supports multiple databases that can have multiple tables
 - Every table has multiple columns and multiple data shards
@@ -77,7 +99,7 @@ Before submitting a pull request, please make sure that your changes pass the ex
 - (rebuild) will merge all main+delta storages into new compressed main storages with empty delta storages
 - every dataset has a shard-local so-called recordId
 
-# Available column compression formats
+<h1 align="center"> Available column compression formats </h1>
 
 - uncompressed
 - bit-size reduced integer storage with offset
@@ -87,6 +109,9 @@ Before submitting a pull request, please make sure that your changes pass the ex
 - float storage
 - sparse storage (efficient with lots of NULL values)
 - prefix storage (optimizes strings that start with the same substring over and over)
+
+<hr>
+
 
 # Further Reading
 
