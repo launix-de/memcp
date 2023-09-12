@@ -28,15 +28,14 @@ memcp is written in Golang and is designed to be portable and extensible, allowi
 
 ### Features
 - <b>fast:</b> MemCP is built with parallelization in mind. The parallelization pattern is made for minimal overhead.
-- <b>efficient:</b> Compression is 1:5 (80% memory saving) compared to MySQL/MariaDB
+- <b>efficient:</b> The average compression ratio is 1:5 (80% memory saving) compared to MySQL/MariaDB
 - <b>modern:</b> MemCP is built for modern hardware with caches, NUMA memory, multicore CPUs, NVMe SSDs
 - <b>versatile:</b> Use it in big mainframes to gain analytical performance, use it in embedded systems to conserve flash lifetime
 - Columnar storage: Stores data column-wise instead of row-wise, which allows for better compression, faster query execution, and more efficient use of memory.
 - In-memory database: Stores all data in memory, which allows for extremely fast query execution.
 - Build fast REST APIs directly in the database (they are faster because there is no network connection / SQL layer in between)
 - OLAP and OLTP support: Can handle both online analytical processing (OLAP) and online transaction processing (OLTP) workloads.
-- Bit-packing and dictionary encoding: Uses bit-packing and dictionary encoding to achieve higher compression ratios for integer and string data types, respectively.
-- Delta storage: Maintains separate delta storage for updates and deletes, which allows for more efficient handling of OLTP workloads.
+- Compression: Lots of compression formats are supported like bit-packing and dictionary encoding
 - Scalability: Designed to scale on a single node with huge NUMA memory
 - Adjustable persistency: Decide whether you want to persist a table or not or to just keep snapshots of a period of time
 
@@ -158,11 +157,15 @@ Also, columnar storages are better fit for analytical queries where only few out
 ### Can in-memory databases be used for my web project?
 Yes. MemCP is ment as a drop-in replacement for MySQL and will make your application run faster.
 
-### Why does MemCPu consume less RAM than MySQL even though MySQL is a hard disk based database
+### Why does MemCP consume less RAM than MySQL even though MySQL is a hard disk based database
 In order to run fast, MySQL already has to cache all data in RAM. However, MySQL is not capable of compression, so it will consume about 5x the amount of RAM compared to MemCP for the same size of data cache.
 
 ### Isn't it dangerous to keep all data in RAM? What happens during a crash?
 MemCP of course supports some kind of hard disk persistency. The difference to a hard-disk based database is that in MemCP you can choose who much IO bandwith you want to sacrifice to achieve full crash-safety. In other words: Your accounting data can still be secured with per-transaction write barriers while you can increase the write performance for sensor data by loosening persistency guarantees.
+
+### What happens if memory is full?
+Usually, the net amount of data in databases is very low. You will be amazed, how much data fits into your RAM when properly compressed. If that still exceeds the memory of your machine, no problem. Simply upgrade your RAM. Some VMs allow for live upgrades, but you can also reboot if necessary.
+
 
 ### What's the current development status of MemCP?
 We are still in the early alpha phase. MemCP already supports some basic SQL statements but it is not production-ready yet. The best way to use MemCP in a productive environment is over the internal scheme scripting language where you can hand-craft efficient query plans. Contribution to the SQL compiler is of course welcome.
