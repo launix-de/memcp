@@ -27,10 +27,13 @@ memcp is written in Golang and is designed to be portable and extensible, allowi
 <br>
 
 ### Features
+- <b>fast:</b> MemCP is built with parallelization in mind. The parallelization pattern is made for minimal overhead.
+- <b>efficient:</b> Compression is 1:5 (80% memory saving) compared to MySQL/MariaDB
+- <b>modern:</b> MemCP is built for modern hardware with caches, NUMA memory, multicore CPUs, NVMe SSDs
+- <b>versatile:</b> Use it in big mainframes to gain analytical performance, use it in embedded systems to conserve flash lifetime
 - Columnar storage: Stores data column-wise instead of row-wise, which allows for better compression, faster query execution, and more efficient use of memory.
 - In-memory database: Stores all data in memory, which allows for extremely fast query execution.
 - Build fast REST APIs directly in the database (they are faster because there is no network connection / SQL layer in between)
-- Compression is 1:5 (80% memory saving) compared to MySQL/MariaDB
 - OLAP and OLTP support: Can handle both online analytical processing (OLAP) and online transaction processing (OLTP) workloads.
 - Bit-packing and dictionary encoding: Uses bit-packing and dictionary encoding to achieve higher compression ratios for integer and string data types, respectively.
 - Delta storage: Maintains separate delta storage for updates and deletes, which allows for more efficient handling of OLTP workloads.
@@ -91,7 +94,12 @@ SELECT SUM(amount) FROM foo
 ./memcp apps/bayesian.scm
 ```
 
-now you can use the Bayesian classifier under http://localhost:4321/bayes/ as a REST service
+now you can use the Bayesian text classifier under http://localhost:4321/bayes/ as a REST service
+
+```
+curl 'http://localhost:4321/bayes/i am a booking text?account=4001' # will learn the text to be account=4001
+curl 'http://localhost:4321/bayes/i am a booking text?classify=account' # will return 4001
+```
 
 <hr>
 
@@ -109,27 +117,28 @@ now you can use the Bayesian classifier under http://localhost:4321/bayes/ as a 
 
 <h1 align="center">How it Works? ❓</h1>
 
-- MemCP supports multiple databases that can have multiple tables
+- MemCP structures its data into databases and tables
 - Every table has multiple columns and multiple data shards
-- Every data shard has ~64,000 items and is meant to be processed in ~100ms
+- Every data shard stores ~64,000 items and is meant to be processed in ~100ms
 - Parallelization is done over shards
 - Every shard consists of two parts: main storage and delta storage
 - main storage is column-based, fixed-size and is compressed
 - Delta storage is a list of row-based insertions and deletions that is overlaid over a main storage
-- (rebuild) will merge all main+delta storages into new compressed main storages with empty delta storages
-- every dataset has a shard-local so-called recorded
+- `(rebuild)` will merge all main+delta storages into new compressed main storages with empty delta storages
+- every dataset has a shard-local so-called `recordId` to re-identify a dataset
 
 
 <h1 align="center">Available column compression formats 📃</h1>
 
-- uncompressed
-- bit-size reduced integer storage with offset
-- integer sequences (based on 3x integer storage)
-- string-storage
-- string-dictionary (based on integers)
+- uncompressed & untyped: versatile storage with JSON-esque freedom
+- bit-size reduced integer storage with offset: savings of 80% and more for small integers
+- integer sequences: >99% compression ratio possible with ascending IDs
+- string-storage: more compact than C strings, cache-friendly 
+- string-dictionary: >90% memory savings for repeating strings like (male, female, male, male, male)
 - float storage
-- sparse storage (efficient with lots of NULL values)
-- prefix storage (optimizes strings that start with the same substring over and over)
+- sparse storage: efficient with lots of NULL values
+
+the best suitable compression technique for a column is detected for a column <b>automatically</b>
 
 <hr>
 
@@ -141,8 +150,25 @@ Unlike traditional databases, which store data on disks, in-memory databases (IM
 ### Why it is used?
 An in-memory database (IMDB) stores and retrieves data primarily in a computer's RAM, enabling exceptionally fast data processing and retrieval, making it suitable for real-time applications requiring rapid access to data.
 
-### Can in-memory databases be used in distributed or cloud environments?
-Yes, many in-memory databases are designed to work in distributed and cloud environments, offering scalability and fault tolerance. However, their configuration and deployment may vary depending on the specific database system.
+### What are the benefits of columnar storage?
+With columnar storage, data is much more homogeneous than in a row-based storage. This enables a technique called "column compression" where compression ratios of around 1:5 (i.e. 80% savings) can be achieved just by a different data representation. This reduces the amount of cache lines that have to be transferred from main memory to CPU and thus increases performance, reduce power consumption and decreases latency.
+
+Also, columnar storages are better fit for analytical queries where only few out of possibly hundrets of columns are processed in the SQL query. An example for a analytical query is calculating the sum of revenue over a timespan from a lots of datapoints.
+
+### Can in-memory databases be used for my web project?
+Yes. MemCP is ment as a drop-in replacement for MySQL and will make your application run faster.
+
+### Why does MemCPu consume less RAM than MySQL even though MySQL is a hard disk based database
+In order to run fast, MySQL already has to cache all data in RAM. However, MySQL is not capable of compression, so it will consume about 5x the amount of RAM compared to MemCP for the same size of data cache.
+
+### Isn't it dangerous to keep all data in RAM? What happens during a crash?
+MemCP of course supports some kind of hard disk persistency. The difference to a hard-disk based database is that in MemCP you can choose who much IO bandwith you want to sacrifice to achieve full crash-safety. In other words: Your accounting data can still be secured with per-transaction write barriers while you can increase the write performance for sensor data by loosening persistency guarantees.
+
+### What's the current development status of MemCP?
+We are still in the early alpha phase. MemCP already supports some basic SQL statements but it is not production-ready yet. The best way to use MemCP in a productive environment is over the internal scheme scripting language where you can hand-craft efficient query plans. Contribution to the SQL compiler is of course welcome.
+
+### What are MemCP REST services?
+Normally, REST applications are implemented in any programming language, make a connection to a SQL server and do their queries. This induces IO overhead for that additional network layer between application and database and for the string-print-send-receive-parse pipeline. With MemCP, you can script MemCP to open a REST server and offer your REST routes directly in the process space of the database. You can prepare SQL statements which can be directly invoked inside the database. And don't be afraid of crashes: a crash in MemCPs scheme scripts will never bring down the whole database process.
 
 <hr>
 
