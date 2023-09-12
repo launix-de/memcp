@@ -1,5 +1,5 @@
 <h1 align="center">memcp: A High-Performance, Open-Source Columnar In-Memory Database </h1>
-<h6 align="center">Protocol compatible drop-in replacement for MySQL</h6>
+<h4 align="center">Protocol compatible drop-in replacement for MySQL</h4>
 
 <div align="center">
 
@@ -25,11 +25,28 @@ memcp is written in Golang and is designed to be portable and extensible, allowi
 ### Features
 - Columnar storage: Stores data column-wise instead of row-wise, which allows for better compression, faster query execution, and more efficient use of memory.
 - In-memory database: Stores all data in memory, which allows for extremely fast query execution.
+- Build fast REST APIs directly in the database (they are faster because there is no network connection / SQL layer in between)
+- Compression is 1:5 (80% memory saving) compared to MySQL/MariaDB
 - OLAP and OLTP support: Can handle both online analytical processing (OLAP) and online transaction processing (OLTP) workloads.
 - Bit-packing and dictionary encoding: Uses bit-packing and dictionary encoding to achieve higher compression ratios for integer and string data types, respectively.
 - Delta storage: Maintains separate delta storage for updates and deletes, which allows for more efficient handling of OLTP workloads.
 - Scalability: Designed to scale on a single node with huge NUMA memory
 - Adjustable persistency: Decide whether you want to persist a table or not or to just keep snapshots of a period of time
+
+<hr>
+
+<h1 align="center"> Screenshots </h1>
+
+
+<div align="center">
+
+<img src="https://i.ibb.co/fCWvndp/Add-a-subheading.png" alt="Benchmark" border="0">
+
+<br>
+
+<img src="https://i.ibb.co/s9npgmq/Add-a-subheading-1.png" alt="mysql client connecting to memcp" border="0">
+
+</div>
 
 <hr>
 
@@ -112,7 +129,7 @@ now you can use the Bayesian classifier under http://localhost:4321/bayes/ as a 
 
 <hr>
 
-<h1 align="center">Common Queries 🤔</h1>
+<h1 align="center">Frequently Asked Questions 🤔</h1>
 
 ### What is an in-memory database?
 Unlike traditional databases, which store data on disks, in-memory databases (IMDBs) keep data in RAM. This results in much faster access times.
