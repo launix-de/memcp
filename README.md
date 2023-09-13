@@ -48,11 +48,11 @@ memcp is written in Golang and is designed to be portable and extensible, allowi
 
 <div align="center">
 
-<img src="https://i.ibb.co/fCWvndp/Add-a-subheading.png" alt="Benchmark" border="0">
+<img src="assets/shot1.png" alt="Benchmark" border="0">
 
 <br>
 
-<img src="https://i.ibb.co/s9npgmq/Add-a-subheading-1.png" alt="mysql client connecting to memcp" border="0">
+<img src="assets/shot2.png" alt="mysql client connecting to memcp" border="0">
 
 </div>
 
