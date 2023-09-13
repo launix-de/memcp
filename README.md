@@ -16,7 +16,7 @@
 
 <h1 align="center">Introduction</h1>
 
-<b>In modern server and mainframe hardware, the memory bandwith between CPU and RAM has become the new bottleneck. In-RAM compression will be a mayor contribution towards solving that issue.</b>
+<b>In modern server and mainframe hardware, the memory bandwidth between CPU and RAM has become the new bottleneck. In-RAM compression will be a mayor contribution towards solving that issue.</b>
 
 ### What is memcp?
 memcp is an open-source, high-performance, columnar in-memory database that can handle both OLAP and OLTP workloads. It provides an alternative to proprietary analytical databases and aims to bring the benefits of columnar storage to the open-source world.
@@ -152,28 +152,28 @@ Unlike traditional databases, which store data on disks, in-memory databases (IM
 An in-memory database (IMDB) stores and retrieves data primarily in a computer's RAM, enabling exceptionally fast data processing and retrieval, making it suitable for real-time applications requiring rapid access to data.
 
 ### What are the benefits of columnar storage?
-With columnar storage, data is much more homogeneous than in a row-based storage. This enables a technique called "column compression" where compression ratios of around 1:5 (i.e. 80% savings) can be achieved just by a different data representation. This reduces the amount of cache lines that have to be transferred from main memory to CPU and thus increases performance, reduce power consumption and decreases latency.
+With columnar storage, data is much more homogeneous than in row-based storage. This enables a technique called "column compression" where compression ratios of around 1:5 (i.e. 80% savings) can be achieved just by a different data representation. This reduces the amount of cache lines that must be transferred from main memory to CPU and thus increases performance, reduces power consumption and decreases latency.
 
-Also, columnar storages are better fit for analytical queries where only few out of possibly hundrets of columns are processed in the SQL query. An example for a analytical query is calculating the sum of revenue over a timespan from a lots of datapoints.
+Also, columnar storages are a better fit for analytical queries where only a few out of possibly hundreds of columns are processed in the SQL query. An example of an analytical query is calculating the sum of revenue over a timespan from a lot of data points.
 
 ### Can in-memory databases be used for my web project?
-Yes. MemCP is ment as a drop-in replacement for MySQL and will make your application run faster.
+Yes. MemCP is meant as a drop-in replacement for MySQL and will make your application run faster.
 
-### Why does MemCP consume less RAM than MySQL even though MySQL is a hard disk based database
+### Why does MemCP consume less RAM than MySQL even though MySQL is a hard disk-based database
 In order to run fast, MySQL already has to cache all data in RAM. However, MySQL is not capable of compression, so it will consume about 5x the amount of RAM compared to MemCP for the same size of data cache.
 
 ### Isn't it dangerous to keep all data in RAM? What happens during a crash?
-MemCP of course supports some kind of hard disk persistency. The difference to a hard-disk based database is that in MemCP you can choose who much IO bandwith you want to sacrifice to achieve full crash-safety. In other words: Your accounting data can still be secured with per-transaction write barriers while you can increase the write performance for sensor data by loosening persistency guarantees.
+MemCP of course supports some kind of hard disk persistency. The difference to a hard-disk-based database is that in MemCP you can choose how much IO bandwidth you want to sacrifice to achieve full crash safety. In other words: Your accounting data can still be secured with per-transaction write barriers while you can increase the write performance for sensor data by loosening persistency guarantees.
 
 ### What happens if memory is full?
-Usually, the net amount of data in databases is very low. You will be amazed, how much data fits into your RAM when properly compressed. If that still exceeds the memory of your machine, just remember how slow it would be on hard disk. Just upgrade your RAM if you don't want to end up on your swap partition.
+Usually, the net amount of data in databases is very low. You will be amazed, at how much data fits into your RAM when properly compressed. If that still exceeds the memory of your machine, just remember how slow it would be on the hard disk. Upgrade your RAM if you don't want to be on your swap partition.
 
 
 ### What's the current development status of MemCP?
 We are still in the early alpha phase. MemCP already supports some basic SQL statements but it is not production-ready yet. The best way to use MemCP in a productive environment is over the internal scheme scripting language where you can hand-craft efficient query plans. Contribution to the SQL compiler is of course welcome.
 
 ### What are MemCP REST services?
-Normally, REST applications are implemented in any programming language, make a connection to a SQL server and do their queries. This induces IO overhead for that additional network layer between application and database and for the string-print-send-receive-parse pipeline. With MemCP, you can script MemCP to open a REST server and offer your REST routes directly in the process space of the database. You can prepare SQL statements which can be directly invoked inside the database. And don't be afraid of crashes: a crash in MemCPs scheme scripts will never bring down the whole database process.
+Normally, REST applications are implemented in any programming language, make a connection to an SQL server and do their queries. This induces IO overhead for that additional network layer between application and database and for the string-print-send-receive-parse pipeline. With MemCP, you can script MemCP to open a REST server and offer your REST routes directly in the process space of the database. You can prepare SQL statements which can be directly invoked inside the database. And don't be afraid of crashes: a crash in MemCPs scheme scripts will never bring down the whole database process.
 
 <hr>
 
