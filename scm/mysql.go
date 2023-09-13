@@ -110,7 +110,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				debug.PrintStack()
 			}
 		}()
-		Apply(m.querycallback, []Scmer{query, func (a... Scmer) Scmer {
+		Apply(m.querycallback, []Scmer{session.Schema(), query, func (a... Scmer) Scmer {
 			// function resultrow(item)
 			item := a[0].([]Scmer)
 			newitem := make([]sqltypes.Value, len(result.Fields))

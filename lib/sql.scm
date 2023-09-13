@@ -50,7 +50,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (mysql 3307
 	(lambda (username) "TODO: return pwhash") /* auth */
 	(lambda (schema) true) /* switch schema */
-	(lambda (sql resultrow_sql) (begin /* sql */
+	(lambda (schema sql resultrow_sql) (begin /* sql */
 		(print "received query: " sql)
 		(define formula (parse_sql schema sql))
 		(define resultrow resultrow_sql)
