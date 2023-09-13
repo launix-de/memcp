@@ -16,6 +16,8 @@
 
 <h1 align="center">Introduction</h1>
 
+<b>In modern server and mainframe hardware, the memory bandwith between CPU and RAM has become the new bottleneck. In-RAM compression will be a mayor contribution towards solving that issue.</b>
+
 ### What is memcp?
 memcp is an open-source, high-performance, columnar in-memory database that can handle both OLAP and OLTP workloads. It provides an alternative to proprietary analytical databases and aims to bring the benefits of columnar storage to the open-source world.
 
