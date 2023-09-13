@@ -166,7 +166,7 @@ In order to run fast, MySQL already has to cache all data in RAM. However, MySQL
 MemCP of course supports some kind of hard disk persistency. The difference to a hard-disk based database is that in MemCP you can choose who much IO bandwith you want to sacrifice to achieve full crash-safety. In other words: Your accounting data can still be secured with per-transaction write barriers while you can increase the write performance for sensor data by loosening persistency guarantees.
 
 ### What happens if memory is full?
-Usually, the net amount of data in databases is very low. You will be amazed, how much data fits into your RAM when properly compressed. If that still exceeds the memory of your machine, no problem. Simply upgrade your RAM. Some VMs allow for live upgrades, but you can also reboot if necessary.
+Usually, the net amount of data in databases is very low. You will be amazed, how much data fits into your RAM when properly compressed. If that still exceeds the memory of your machine, just remember how slow it would be on hard disk. Just upgrade your RAM if you don't want to end up on your swap partition.
 
 
 ### What's the current development status of MemCP?
