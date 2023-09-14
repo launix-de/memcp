@@ -35,7 +35,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(match (req "path")
 			(regex "^/bayes/(.*)$" url text) (begin
 				(set words (filter (split (toLower text)) (lambda (word) (! (has? ignore_words word)))))
-				(if (has? (req "query") "classify" /* TODO: has? is not safe here*/) (begin
+				(if (has_assoc? (req "query") "classify") (begin
 					/* classify algo */
 					(set category_ ((req "query") "classify"))
 					((res "status") 200)

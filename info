@@ -40,3 +40,4 @@ TODO
  - docker + docker hub
  - mysql importer
  - plugin concept e.g. for AIs (they will declare new scheme functions)
+ - user management tables (users, grants)

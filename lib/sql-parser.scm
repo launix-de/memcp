@@ -19,7 +19,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* lots of small parsers that can be combined */
 	(define identifier (lambda (s) (match s
 		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) '(id rest)
-		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) '(id rest)
+		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) '((toLower id) rest)
 		(error (concat "expected identifier, found " s))
 	)))
 
@@ -184,6 +184,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(regex "(?is)^INSERT(?:\\s|\\n)+INTO(?:\\s|\\n)+(.*)" _ rest) (parse_insert rest)
 		(regex "(?is)^SHOW(?:\\s|\\n)+DATABASES(.*)" _ rest) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema)))))
 		(regex "(?is)^SHOW(?:\\s|\\n)+TABLES(.*)" _ rest) '((quote map) '((quote show) schema) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Table" (quote schema)))))
+		/* TODO: drop database, table */
 		(error (concat "unknown SQL syntax: " s))
 	)
 )))
