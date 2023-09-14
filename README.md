@@ -123,6 +123,25 @@ INSERT INTO foo(bar, amount) VALUES ('Man', 4), ('Horse', 6)
 SELECT * FROM foo
 SELECT SUM(amount) FROM foo
 ```
+
+If you want to import whole databases from your old MySQL or MariaDB database, do the following:
+```
+$ ./tools/mysqldump-to-json.py -H localhost -u [user] -p [password] [database] > dump.jsonl
+$ ./memcp
+memcp Copyright (C) 2023   Carl-Philip Hänsch
+    This program comes with ABSOLUTELY NO WARRANTY;
+    This is free software, and you are welcome to redistribute it
+    under certain conditions;
+Welcome to memcp
+Hello World
+MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)
+listening on http://localhost:4321
+<span style="color: #26A269">&gt;</span> (createdatabase "my_database")
+"ok"
+<span style="color: #26A269">&gt;</span> (loadJSON "my_database" "dump.jsonl")
+"1.454ms"
+```
+
 <hr>
 
 <h1 align="center">Example REST API App 📕</h1>
