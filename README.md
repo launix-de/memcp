@@ -127,6 +127,12 @@ SELECT SUM(amount) FROM foo
 
 <h1 align="center">Example REST API App 📕</h1>
 
+You can host your own REST APIs directly from the database. You can plug your services into the database as scheme modules. They will offer REST endpoints on the database's builtin HTTP server.
+
+We made an example application that hosts a bayesian text classifier. You can use that app to do spam detection, AI-enhanced automated accounting and much more. A bayesian text classifier learns from example and then applies statistical correlations to generalize and classify unknown texts as well.
+
+To test it, just type:
+
 ```
 ./memcp apps/bayesian.scm
 ```

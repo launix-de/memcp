@@ -10,9 +10,9 @@ runtime.SetFinalizer(obj, finalizer(obj))
 TODO
 ----
  - SELECT DATABASE()
+ - UPDATE & DELETE parsing
  - session-local storage for mysql session state (variables, current schema)
  - per-table persistency settings
- - JSON printing
  - (scan db tbl condition map reduce neutral) -> aggregates, unordered fetches
  - (ordered_scan db tbl condition map reduce neutral order limit offset) -> items are sorted before given to map; reduce is not parallelized
    algorithm:
@@ -37,4 +37,6 @@ TODO
  - scm.Verify(expr) -> static code analyzer: exact number of parameters, minimum number of parameters, parameter types (function, dict, string)
  - line numbers and filenames -> wrapper for []Scmer that has to run .Verify??? SYMBOL [debug]
  - documentation (-> structured data from Verify)
- - update/delete -> (delete shard recordId) -> _shard, _recordId in scan; (update shard recordId '(fields...))
+ - docker + docker hub
+ - mysql importer
+ - plugin concept e.g. for AIs (they will declare new scheme functions)
