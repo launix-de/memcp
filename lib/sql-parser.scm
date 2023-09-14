@@ -54,7 +54,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(regex "(?is)^NULL\\b(?:\\s|\\n)*(.*)" _ rest) (expression_extend null rest) /* NULL */
 		/* identifier (TODO: tblalias.identifier) */
 		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
-		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
+		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" (toLower id)) rest)
 		/* TODO: function call */
 		/* parenthesis */
 		(concat "(" rest) (match (expression rest) '(expr (concat ")" rest)) '('((quote begin) expr) rest) (error (concat "expected expression found " rest)))

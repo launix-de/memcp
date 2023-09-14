@@ -103,13 +103,21 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer, aggregate s
 	ccols := make([]ColumnStorage, len(cargs))
 	mcols := make([]ColumnStorage, len(margs))
 	for i, k := range cargs { // iterate over columns
-		ccols[i] = t.columns[string(k.(scm.Symbol))] // find storage
+		var ok bool
+		ccols[i], ok = t.columns[string(k.(scm.Symbol))] // find storage
+		if !ok {
+			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + string(k.(scm.Symbol)) + "`")
+		}
 	}
 	for i, k := range margs { // iterate over columns
 		if string(k.(scm.Symbol)) == "$update" {
 			mcols[i] = nil
 		} else {
-			mcols[i] = t.columns[string(k.(scm.Symbol))] // find storage
+			var ok bool
+			mcols[i], ok = t.columns[string(k.(scm.Symbol))] // find storage
+			if !ok {
+				panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + string(k.(scm.Symbol)) + "`")
+			}
 		}
 	}
 	// remember current insert status (so don't scan things that are inserted during map)
