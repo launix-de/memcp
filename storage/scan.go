@@ -106,8 +106,14 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer, aggregate s
 		ccols[i] = t.columns[string(k.(scm.Symbol))] // find storage
 	}
 	for i, k := range margs { // iterate over columns
-		mcols[i] = t.columns[string(k.(scm.Symbol))] // find storage
+		if string(k.(scm.Symbol)) == "$update" {
+			mcols[i] = nil
+		} else {
+			mcols[i] = t.columns[string(k.(scm.Symbol))] // find storage
+		}
 	}
+	// remember current insert status (so don't scan things that are inserted during map)
+	maxInsertIndex := len(t.inserts)
 	// iterate over items (indexed)
 	for idx := range t.iterateIndex(condition) {
 		if _, ok := t.deletions[idx]; ok {
@@ -123,7 +129,12 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer, aggregate s
 
 		// call map function
 		for i, k := range mcols { // iterate over columns
-			mdataset[i] = k.getValue(idx)
+			if k == nil {
+				// update/delete function
+				mdataset[i] = t.UpdateFunction(idx, true)
+			} else {
+				mdataset[i] = k.getValue(idx)
+			}
 		}
 		intermediate := scm.Apply(callback, mdataset)
 		if aggregate != nil {
@@ -132,7 +143,8 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer, aggregate s
 	}
 
 	// delta storage (unindexed)
-	for idx, item := range t.inserts { // iterate over table
+	for idx := 0; idx < maxInsertIndex; idx++ { // iterate over table
+		item := t.inserts[idx]
 		if _, ok := t.deletions[t.main_count + uint(idx)]; ok {
 			continue // item is in delete list
 		}
@@ -147,7 +159,11 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer, aggregate s
 
 		// prepare&call map function
 		for i, k := range margs { // iterate over columns
-			mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+			if string(k.(scm.Symbol)) == "$update" {
+				mdataset[i] = t.UpdateFunction(t.main_count + uint(idx), true)
+			} else {
+				mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+			}
 		}
 		intermediate := scm.Apply(callback, mdataset)
 		if aggregate != nil {

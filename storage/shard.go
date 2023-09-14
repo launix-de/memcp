@@ -24,6 +24,7 @@ import "reflect"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
 
 type storageShard struct {
 	t *table
@@ -93,6 +94,56 @@ func (t *storageShard) Count() uint {
 	return uint(int(t.main_count) + len(t.inserts) - len(t.deletions))
 }
 
+func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Scmer) scm.Scmer {
+	// returns a callback with which you can delete or update an item
+	return func(a ...scm.Scmer) scm.Scmer {
+		fmt.Println("update/delete", a)
+		t.mu.Lock()
+		t.deletions[idx] = struct{}{} // mark as deleted
+		if len(a) > 0 {
+			// update statement -> also perform an insert
+			changes := a[0].([]scm.Scmer)
+			// build the whole dataset from storage
+			d := make(dataset, 2 * len(t.columns))
+			i := 0
+			for k, v := range t.columns {
+				d[i] = k
+				for j := 0; j < len(changes); j += 2 {
+					if k == changes[j] {
+						d[i+1] = changes[j+1]
+						goto skip_set
+					}
+				}
+				d[i+1] = v.getValue(idx)
+				skip_set:
+				i += 2
+			}
+			t.inserts = append(t.inserts, d) // append to delta storage
+			if withTrigger {
+				// TODO: before/after update trigger
+			}
+		} else {
+			// delete
+			if withTrigger {
+				// TODO: before/after delete trigger
+			}
+		}
+		if t.next != nil {
+			// also change in next storage
+			// idx translation (subtract the amount of deletions from that idx)
+			idx2 := idx
+			for k, _ := range t.deletions {
+				if k < idx {
+					idx2--
+				}
+			}
+			t.next.UpdateFunction(idx2, false)(a...) // propagate to succeeding shard
+		}
+		t.mu.Unlock()
+		return "ok" // maybe instead return UpdateFunction for newly inserted item??
+	}
+}
+
 func (t *storageShard) Insert(d dataset) {
 	t.mu.Lock()
 	t.inserts = append(t.inserts, d) // append to delta storage
@@ -101,6 +152,7 @@ func (t *storageShard) Insert(d dataset) {
 		t.next.Insert(d)
 	}
 	t.mu.Unlock()
+	// TODO: before/after insert trigger
 }
 
 /* TODO: Delete; Delete must also lock next OR translate delete indexes */
@@ -114,7 +166,7 @@ func (t *storageShard) rebuild() *storageShard {
 	t.next = result
 	maxInsertIndex := len(t.inserts)
 	t.mu.Unlock()
-	// from now on, we can rebuild with no hurry
+	// from now on, we can rebuild with no hurry; inserts and update/deletes on the previous shard will propagate to us, too
 	if maxInsertIndex > 0 || len(t.deletions) > 0 {
 		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
 		// TODO: SetFinalizer to old shard to delete files from disk
