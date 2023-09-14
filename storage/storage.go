@@ -131,15 +131,6 @@ func Init(en scm.Env) {
 			panic("unknown signature provided to (show)")
 		}
 	}
-	en.Vars["save"] = func (a ...scm.Scmer) scm.Scmer {
-		start := time.Now()
-
-		for _, db := range databases {
-			db.save()
-		}
-
-		return fmt.Sprint(time.Since(start))
-	}
 	en.Vars["rebuild"] = func (a ...scm.Scmer) scm.Scmer {
 		start := time.Now()
 
@@ -151,7 +142,7 @@ func Init(en scm.Env) {
 		return fmt.Sprint(time.Since(start))
 	}
 	en.Vars["loadCSV"] = func (a ...scm.Scmer) scm.Scmer {
-		// table, filename, delimiter
+		// schema, table, filename, delimiter
 		start := time.Now()
 
 		delimiter := ";"
@@ -163,6 +154,7 @@ func Init(en scm.Env) {
 		return fmt.Sprint(time.Since(start))
 	}
 	en.Vars["loadJSON"] = func (a ...scm.Scmer) scm.Scmer {
+		// schema, filename
 		start := time.Now()
 
 		LoadJSON(scm.String(a[0]), scm.String(a[1]))

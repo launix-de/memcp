@@ -60,10 +60,12 @@ memcp is written in Golang and is designed to be portable and extensible, allowi
 
 <h1 align="center">Getting Started 🚶</h1>
 
+Make sure, `go` is installed on your computer.
+
 Compile the project with
 
 ```
-make
+make # executes go build
 ```
 
 Run the engine with
@@ -71,6 +73,40 @@ Run the engine with
 ```
 ./memcp
 ```
+
+It will drop you at the scheme shell:
+
+<pre><font color="#12488B"><b>~/memcp</b></font>$ ./memcp
+memcp Copyright (C) 2023   Carl-Philip Hänsch
+    This program comes with ABSOLUTELY NO WARRANTY;
+    This is free software, and you are welcome to redistribute it
+    under certain conditions;
+Welcome to memcp
+Hello World
+MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)
+listening on http://localhost:4321
+<font color="#26A269">&gt;</font>  
+</pre>
+
+now you can do experiments like:
+
+<pre><font color="#26A269">&gt;</font> (+ 1 2)
+<font color="#C01C28">=</font> 3
+<font color="#26A269">&gt;</font> (\* 4 5)
+<font color="#C01C28">=</font> 20
+<font color="#26A269">&gt;</font> (show) /* shows all databases */
+<font color="#C01C28">=</font> ()
+<font color="#26A269">&gt;</font> (createdatabase &quot;yo&quot;)
+<font color="#C01C28">=</font> &quot;ok&quot;
+<font color="#26A269">&gt;</font> (show) /* shows all databases */
+<font color="#C01C28">=</font> (&quot;yo&quot;)
+<font color="#26A269">&gt;</font> (show &quot;yo&quot;) /* shows all tables */
+<font color="#C01C28">=</font> ()
+<font color="#26A269">&gt;</font> (rebuild) /* optimizes memory layout */
+<font color="#C01C28">=</font> &quot;124.503µs&quot;
+<font color="#26A269">&gt;</font> (stat) /* memory usage statistics */
+<font color="#C01C28">=</font> &quot;Alloc = 0 MiB	TotalAlloc = 1 MiB	Sys = 16 MiB	NumGC = 1&quot;
+<font color="#26A269">&gt;</font> (loadCSV &quot;yo&quot; &quot;customers&quot; &quot;customers.csv&quot; &quot;;&quot;) /* loads CSV */</pre>
 
 connect to it via
 
