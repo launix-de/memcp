@@ -136,9 +136,9 @@ Welcome to memcp
 Hello World
 MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)
 listening on http://localhost:4321
-<span style="color: #26A269">&gt;</span> (createdatabase "my_database")
+> (createdatabase "my_database")
 "ok"
-<span style="color: #26A269">&gt;</span> (loadJSON "my_database" "dump.jsonl")
+> (loadJSON "my_database" "dump.jsonl")
 "1.454ms"
 ```
 
