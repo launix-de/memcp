@@ -88,7 +88,7 @@ listening on http://localhost:4321
 <span style="color: #26A269">&gt;</span>  
 </pre>
 
-now you can do experiments like:
+now you can type any scheme expression like:
 
 <pre><span style="color: #26A269">&gt;</span> (+ 1 2)
 <span style="color: #C01C28">=</span> 3
