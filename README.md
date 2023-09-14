@@ -76,7 +76,7 @@ Run the engine with
 
 It will drop you at the scheme shell:
 
-<pre><font color="#12488B"><b>~/memcp</b></font>$ ./memcp
+<pre><span style="color: #12488B"><b>~/memcp</b></span>$ ./memcp
 memcp Copyright (C) 2023   Carl-Philip Hänsch
     This program comes with ABSOLUTELY NO WARRANTY;
     This is free software, and you are welcome to redistribute it
@@ -85,28 +85,28 @@ Welcome to memcp
 Hello World
 MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)
 listening on http://localhost:4321
-<font color="#26A269">&gt;</font>  
+<span style="color: #26A269">&gt;</span>  
 </pre>
 
 now you can do experiments like:
 
-<pre><font color="#26A269">&gt;</font> (+ 1 2)
-<font color="#C01C28">=</font> 3
-<font color="#26A269">&gt;</font> (\* 4 5)
-<font color="#C01C28">=</font> 20
-<font color="#26A269">&gt;</font> (show) /* shows all databases */
-<font color="#C01C28">=</font> ()
-<font color="#26A269">&gt;</font> (createdatabase &quot;yo&quot;)
-<font color="#C01C28">=</font> &quot;ok&quot;
-<font color="#26A269">&gt;</font> (show) /* shows all databases */
-<font color="#C01C28">=</font> (&quot;yo&quot;)
-<font color="#26A269">&gt;</font> (show &quot;yo&quot;) /* shows all tables */
-<font color="#C01C28">=</font> ()
-<font color="#26A269">&gt;</font> (rebuild) /* optimizes memory layout */
-<font color="#C01C28">=</font> &quot;124.503µs&quot;
-<font color="#26A269">&gt;</font> (stat) /* memory usage statistics */
-<font color="#C01C28">=</font> &quot;Alloc = 0 MiB	TotalAlloc = 1 MiB	Sys = 16 MiB	NumGC = 1&quot;
-<font color="#26A269">&gt;</font> (loadCSV &quot;yo&quot; &quot;customers&quot; &quot;customers.csv&quot; &quot;;&quot;) /* loads CSV */</pre>
+<pre><span style="color: #26A269">&gt;</span> (+ 1 2)
+<span style="color: #C01C28">=</span> 3
+<span style="color: #26A269">&gt;</span> (&#42; 4 5)
+<span style="color: #C01C28">=</span> 20
+<span style="color: #26A269">&gt;</span> (show) /* shows all databases */
+<span style="color: #C01C28">=</span> ()
+<span style="color: #26A269">&gt;</span> (createdatabase &quot;yo&quot;)
+<span style="color: #C01C28">=</span> &quot;ok&quot;
+<span style="color: #26A269">&gt;</span> (show) /* shows all databases */
+<span style="color: #C01C28">=</span> (&quot;yo&quot;)
+<span style="color: #26A269">&gt;</span> (show &quot;yo&quot;) /* shows all tables */
+<span style="color: #C01C28">=</span> ()
+<span style="color: #26A269">&gt;</span> (rebuild) /* optimizes memory layout */
+<span style="color: #C01C28">=</span> &quot;124.503µs&quot;
+<span style="color: #26A269">&gt;</span> (stat) /* memory usage statistics */
+<span style="color: #C01C28">=</span> &quot;Alloc = 0 MiB	TotalAlloc = 1 MiB	Sys = 16 MiB	NumGC = 1&quot;
+<span style="color: #26A269">&gt;</span> (loadCSV &quot;yo&quot; &quot;customers&quot; &quot;customers.csv&quot; &quot;;&quot;) /* loads CSV */</pre>
 
 connect to it via
 
