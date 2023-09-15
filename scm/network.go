@@ -20,10 +20,12 @@ import "io"
 import "fmt"
 import "time"
 import "sync"
+import "strings"
 import "strconv"
 import "net/http"
 import "runtime/debug"
 import "encoding/json"
+import "encoding/base64"
 
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
@@ -57,9 +59,20 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}
 	}
 	header_scm := make([]Scmer, 0)
+	basic_auth := []string{}
 	for k, v := range req.Header {
 		for _, v2 := range v {
 			header_scm = append(header_scm, k, v2)
+			if k == "Authorization" && strings.HasPrefix(v2, "Basic ") {
+				// Basic auth parsing
+				b, _ := base64.StdEncoding.DecodeString(v2[6:])
+				str := string(b)
+				pos := strings.Index(str, ":")
+				if pos != -1 {
+					basic_auth = []string{str[:pos], str[pos+1:]}
+				}
+
+			}
 		}
 	}
 	// helper
@@ -76,10 +89,15 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		"path", req.URL.Path,
 		"query", query_scm,
 		"header", header_scm,
-		"username", req.URL.User.Username(),
-		"password", pwtostring(req.URL.User.Password()),
+		/* 10: */ "username", req.URL.User.Username(),
+		/* 12: */ "password", pwtostring(req.URL.User.Password()),
 		"ip", req.RemoteAddr,
 		// TODO: req.Body io.ReadCloser
+	}
+	if len(basic_auth) == 2 {
+		// set username/password from Basic auth string
+		req_scm[11] = basic_auth[0]
+		req_scm[13] = basic_auth[1]
 	}
 	var res_lock sync.Mutex
 	res_scm := []Scmer {

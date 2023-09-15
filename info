@@ -40,4 +40,6 @@ TODO
  - docker + docker hub
  - mysql importer
  - plugin concept e.g. for AIs (they will declare new scheme functions)
- - user management tables (users, grants)
+ - transactions: every delete+insert has a optional txid (or 0 if committed); rebuild only rebuilds up to the last committed insert-item; scans are relative to a txid where items with a non-matching txid are ignored
+ - primary key generator
+ - system.grant, system.user.all -> allow access for some databases

@@ -15,7 +15,6 @@ func MySQLServe(a ...Scmer) Scmer {
 	// params: port, authcallback, schemacallback, querycallback
 	port := String(a[0])
 
-	fmt.Println("Hallo World")
 	log := xlog.NewStdLog(xlog.Level(xlog.INFO))
 	var handler MySQLWrapper
 	handler.log = log
@@ -34,7 +33,10 @@ func MySQLServe(a ...Scmer) Scmer {
 	return "ok"
 }
 
-// TODO: driver.CreatePassword helper function
+// driver.CreatePassword helper function
+func MySQLPassword(a ...Scmer) Scmer {
+	return string(driver.CreatePassword(String(a[0])))
+}
 
 type MySQLWrapper struct {
 	log *xlog.Log
@@ -68,10 +70,13 @@ func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 
 func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	m.log.Info("Auth Check with " + session.User())
-	// TODO: load password stored from database
-	// m.authcallback(user) -> password or nil
-	stored := driver.CreatePassword("admin")
-	if !session.TestPassword(stored) {
+	// callback should load password from database
+	password := Apply(m.authcallback, []Scmer{session.User(),})
+	if password == nil {
+		// user does not exist
+		return errors.New("Auth failed")
+	}
+	if !session.TestPassword([]byte(String(password))) {
 		return errors.New("Auth failed")
 	}
 	return nil

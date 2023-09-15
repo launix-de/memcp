@@ -1,3 +1,10 @@
+0.1.1
+=====
+
+- IO functions: password
+- user table for mysql auth
+- mysql and REST API check for username/password
+
 0.1.0
 =====
 

@@ -146,6 +146,7 @@ func main() {
 			"load": getLoad(wd),
 			"serve": scm.HTTPServe,
 			"mysql": scm.MySQLServe,
+			"password": scm.MySQLPassword,
 		},
 		&scm.Globalenv,
 		true, // other defines go into Globalenv

@@ -18,14 +18,17 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (import "sql-parser.scm")
 (import "queryplan.scm")
 
-/* TODO: session state handling -> which schema */
-/*
-(createdatabase "test")
-(createtable "test" "foo" '('("bar" "int" '() "")))
-(insert "test" "foo" '("bar" 12))
-(insert "test" "foo" '("bar" 44))
-*/
-(set schema "test") /* variable definition for console */
+/* create user tables */
+(print "Initializing SQL frontend")
+(if (has? (show) "system") true (begin
+	(print "creating database system")
+	(createdatabase "system")
+))
+(if (has? (show "system") "user") true (begin
+	(print "creating table system.user")
+	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text)"))
+	(insert "system" "user" '("id" 1 "username" "root" "password" (password "admin")))
+))
 
 /* http hook for handling SQL */
 (define http_handler (begin
@@ -34,12 +37,21 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		/* hooked our additional paths to it */
 		(match (req "path")
 			(regex "^/sql/([^/]+)/(.*)$" url schema query) (begin
-				((res "status") 200)
-				((res "header") "Content-Type" "text/plain")
-				(define formula (parse_sql schema query))
-				(define resultrow (res "jsonl"))
-				(print "received query: " query)
-				(eval formula)
+				/* check for password */
+				(set pw (scan "system" "user" (lambda (username) (equal? username (req "username"))) (lambda (password) password) (lambda (a b) b) nil))
+				(if (and pw (equal? pw (password (req "password")))) (begin
+					((res "header") "Content-Type" "text/plain")
+					((res "status") 200)
+					(define formula (parse_sql schema query))
+					(define resultrow (res "jsonl"))
+					(print "received query: " query)
+					(eval formula)
+				) (begin
+					((res "header") "Content-Type" "text/plain")
+					((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+					((res "status") 401)
+					((res "print") "Unauthorized")
+				))
 			)
 			/* default */
 			(old_handler req res))
@@ -48,7 +60,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 /* dedicated mysql protocol listening at port 3307 */
 (mysql 3307
-	(lambda (username) "TODO: return pwhash") /* auth */
+	(lambda (username_) (scan "system" "user" (lambda (username) (equal? username username_)) (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
 	(lambda (schema) true) /* switch schema */
 	(lambda (schema sql resultrow_sql) (begin /* sql */
 		(print "received query: " sql)
@@ -57,4 +69,4 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(eval formula)
 	))
 )
-(print "MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)")
+(print "MySQL server listening on port 3307 (connect with `mysql -P 3307 -u root -p` using password 'admin')")
