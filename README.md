@@ -145,10 +145,12 @@ listening on http://localhost:4321
 <hr>
 <h1 align="center">Securing the database from external access 🔒</h1>
 The standard username/password is root/admin. To change that, type the following into scheme console:
+
 ```
 (scan "system" "user" (lambda () true) (lambda ($update) ($update))) /* delete all users */
 (insert "system" "user" '("id" 1 "username" "new_username" "password" (password "new_password"))) /* insert new_username/new_password */
 ```
+
 <hr>
 
 <h1 align="center">Example REST API App 📕</h1>
