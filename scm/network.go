@@ -66,12 +66,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			if k == "Authorization" && strings.HasPrefix(v2, "Basic ") {
 				// Basic auth parsing
 				b, _ := base64.StdEncoding.DecodeString(v2[6:])
-				str := string(b)
-				pos := strings.Index(str, ":")
-				if pos != -1 {
-					basic_auth = []string{str[:pos], str[pos+1:]}
-				}
-
+				basic_auth = strings.SplitN(string(b), ":", 2)
 			}
 		}
 	}
