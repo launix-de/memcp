@@ -26,6 +26,7 @@ import "net/http"
 import "runtime/debug"
 import "encoding/json"
 import "encoding/base64"
+import "github.com/gorilla/websocket"
 
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
@@ -149,6 +150,39 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			io.WriteString(res, "}\n")
 			res_lock.Unlock();
 			return "ok"
+		},
+		"websocket", func (a ...Scmer) Scmer {
+			// upgrade to a websocket
+			var upgrader = websocket.Upgrader{
+				ReadBufferSize:  1024,
+				WriteBufferSize: 1024,
+			}
+			upgrader.CheckOrigin = func(r *http.Request) bool { return true }
+			ws, err := upgrader.Upgrade(res, req, nil)
+			if err != nil {
+				panic(err)
+			}
+			go func() {
+				for {
+					// websocket read loop
+					messageType, msg, err := ws.ReadMessage()
+					if err != nil {
+						panic(err)
+					}
+					// TODO: messageType 1 = text, 2 = binary?
+					if messageType == 1 {
+						Apply(a[0], []Scmer{string(msg)}) // 1st parameter is callback to receive message
+					}
+				}
+			}()
+			// return send callback
+			return func(a ...Scmer) Scmer {
+				err := ws.WriteMessage(ToInt(a[0]), []byte(String(a[1])))
+				if err != nil {
+					panic(err)
+				}
+				return "ok"
+			}
 		},
 	}
 	// catch panics and print out 500 Internal Server Error
