@@ -73,7 +73,7 @@ docker run -it -p 4321:4321 -p 3307:3307 memcp
 docker run -it -p 4321:4321 -p 3307:3307 memcp ./memcp apps/bayesian.scm
 
 # run for productive use
-docker run -di -p 4321:4321 -p 3307:3307 memcp
+docker run -di -p 4321:4321 -p 3307:3307 --restart unless-stopped memcp
 
 
 ```
