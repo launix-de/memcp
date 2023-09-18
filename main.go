@@ -186,6 +186,5 @@ func main() {
 func exitroutine() {
 	fmt.Println("Exit procedure... syncing to disk")
 	fmt.Println("table compression done in ", scm.Globalenv.Vars["rebuild"].(func(...scm.Scmer) scm.Scmer)())
-	fmt.Println("dump done in ", scm.Globalenv.Vars["save"].(func(...scm.Scmer) scm.Scmer)())
 	fmt.Println("Exit procedure finished")
 }
