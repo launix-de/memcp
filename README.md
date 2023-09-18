@@ -169,7 +169,9 @@ listening on http://localhost:4321
 <h2>REST API</h2>
 
 ```bash
-curl 'http://localhost:4321/sql/test/SHOW DATABASES'
+curl --user root:admin 'http://localhost:4321/sql/system/SHOW%20DATABASES'
+curl --user root:admin 'http://localhost:4321/sql/system/SHOW%20TABLES'
+curl --user root:admin 'http://localhost:4321/sql/system/SELECT%20*%20FROM%20user'
 ```
 
 <hr>
