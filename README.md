@@ -134,7 +134,7 @@ now you can type any scheme expression like:
 
 connect to it via
 
-```
+```bash
 mysql -u root -p -P 3307 # password is 'admin'
 ```
 
@@ -168,7 +168,7 @@ listening on http://localhost:4321
 
 <h2>REST API</h2>
 
-```
+```bash
 curl 'http://localhost:4321/sql/test/SHOW DATABASES'
 ```
 
