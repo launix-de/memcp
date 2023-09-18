@@ -167,6 +167,7 @@ listening on http://localhost:4321
 ```
 
 <h2>REST API</h2>
+
 ```
 curl 'http://localhost:4321/sql/test/SHOW DATABASES'
 ```
