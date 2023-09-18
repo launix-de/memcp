@@ -60,6 +60,26 @@ memcp is written in Golang and is designed to be portable and extensible, allowi
 
 <h1 align="center">Getting Started 🚶</h1>
 
+<h2>Using Docker</h2>
+
+```
+# first time: build the image
+docker build -t memcp
+
+# run with the interactive scheme shell for debugging and development
+docker run -it -p 4321:4321 -p 3307:3307 memcp
+
+# run a specific application
+docker run -it -p 4321:4321 -p 3307:3307 memcp ./memcp apps/bayesian.scm
+
+# run for productive use
+docker run -di -p 4321:4321 -p 3307:3307 memcp
+
+
+```
+
+<h2>Compile From Source</h2>
+
 Make sure, `go` is installed on your computer.
 
 Compile the project with
@@ -73,6 +93,8 @@ Run the engine with
 ```
 ./memcp
 ```
+
+<h2>MemCP Scheme Shell</h2>
 
 It will drop you at the scheme shell:
 
@@ -108,6 +130,8 @@ now you can type any scheme expression like:
 <span style="color: #C01C28">=</span> &quot;Alloc = 0 MiB	TotalAlloc = 1 MiB	Sys = 16 MiB	NumGC = 1&quot;
 <span style="color: #26A269">&gt;</span> (loadCSV &quot;yo&quot; &quot;customers&quot; &quot;customers.csv&quot; &quot;;&quot;) /* loads CSV */</pre>
 
+<h2>MySQL Connection</h2>
+
 connect to it via
 
 ```
@@ -140,6 +164,11 @@ listening on http://localhost:4321
 "ok"
 > (loadJSON "my_database" "dump.jsonl")
 "1.454ms"
+```
+
+<h2>REST API</h2>
+```
+curl 'http://localhost:4321/sql/test/SHOW DATABASES'
 ```
 
 <hr>
