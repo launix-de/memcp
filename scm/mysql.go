@@ -83,9 +83,11 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
 	m.log.Info("db "+database)
+	allowed := Apply(m.schemacallback, []Scmer{session.User(), database})
+	if (!ToBool(allowed)) {
+		return errors.New("access denied for database " + database)
+	}
 	session.SetSchema(database)
-	// TODO: check access rights, reject if necessary
-	// m.schemacallback
 	return nil
 }
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) error {

@@ -25,13 +25,13 @@ type Declaration struct {
 	MinParameter int
 	MaxParameter int
 	Params []DeclarationParameter
-	Returns string // any | string | number | bool | func | list | symbol
+	Returns string // any | string | number | bool | func | list | symbol | nil
 	Fn func(...Scmer) Scmer
 }
 
 type DeclarationParameter struct {
 	Name string
-	Type string // any | string | number | bool | func | list | symbol
+	Type string // any | string | number | bool | func | list | symbol | nil
 	Desc string
 }
 
@@ -49,12 +49,18 @@ func Declare(env *Env, def *Declaration) {
 // panics if the code is bad (returns possible datatype, at least "any")
 func Validate(source string, val Scmer) string {
 	switch v := val.(type) {
+		case nil:
+			return "nil"
 		case string:
 			return "string"
 		case float64:
 			return "number"
 		case bool:
 			return "bool"
+		case Proc:
+			return "func"
+		case func(...Scmer) Scmer:
+			return "func"
 		case []Scmer:
 			if len(v) > 0 {
 				// function with head
@@ -86,6 +92,8 @@ func Validate(source string, val Scmer) string {
 							j = len(def.Params) - 1
 						}
 						// check parameter type
+						// TODO: both types could also be lists separated by |
+						// TODO: signature of lambda types??
 						if typ != "any" && def.Params[j].Type != "any" && typ != def.Params[j].Type {
 							panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source, def.Name, i, typ, def.Params[j].Type))
 						}
@@ -101,8 +109,8 @@ func Optimize(val Scmer, env *Env) Scmer {
 	return val
 }
 
-func Help(fn string) {
-	if fn == "" {
+func Help(fn Scmer) {
+	if fn == nil {
 		fmt.Println("Available scm functions:")
 		fmt.Println("")
 		for fname, def := range declarations {
@@ -111,7 +119,20 @@ func Help(fn string) {
 		fmt.Println("")
 		fmt.Println("get further information by typing (help \"functionname\") to get more info")
 	} else {
-		if def, ok := declarations[fn]; ok {
+		var def *Declaration
+		if s, ok := fn.(string); ok {
+			if def2, ok := declarations[s]; ok {
+				def = def2
+			} else {
+				panic("function not found: " + s)
+			}
+		} else if f, ok := fn.(func(...Scmer) Scmer); ok {
+			if def2, ok := declarations_hash[fmt.Sprintf("%p", f)]; ok {
+				def = def2
+			}
+		}
+
+		if def != nil {
 			fmt.Println("Help for: " + def.Name)
 			fmt.Println("===")
 			fmt.Println("")
@@ -124,7 +145,7 @@ func Help(fn string) {
 			}
 			fmt.Println("")
 		} else {
-			panic("function not found: " + fn)
+			panic("function not found: " + fmt.Sprint(fn))
 		}
 	}
 }

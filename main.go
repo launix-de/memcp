@@ -137,13 +137,7 @@ func main() {
 	// define some IO functions (scm will not provide them since it is sandboxable)
 	wd, _ := os.Getwd() // libraries are relative to working directory... is that right?
 	IOEnv = scm.Env {
-		scm.Vars {
-			"import": getImport(wd),
-			"load": getLoad(wd),
-			"serve": scm.HTTPServe,
-			"mysql": scm.MySQLServe,
-			"password": scm.MySQLPassword,
-		},
+		scm.Vars {},
 		&scm.Globalenv,
 		true, // other defines go into Globalenv
 	}
@@ -169,12 +163,56 @@ func main() {
 		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
-				scm.Help("")
+				scm.Help(nil)
 			} else {
-				scm.Help(scm.String(a[0]))
+				scm.Help(a[0])
 			}
 			return "ok"
 		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"import", "Imports a file .scm file into current namespace",
+		1, 1,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
+		}, "any",
+		(func(...scm.Scmer) scm.Scmer)(getImport(wd)),
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"load", "Loads a file and returns the string",
+		1, 1,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
+		}, "string",
+		(func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"serve", "Opens a HTTP server at a given port",
+		2, 2,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"port", "number", "port number for HTTP server"},
+			scm.DeclarationParameter{"handler", "func", "handler: lambda(req res) that handles the http request (TODO: detailed documentation)"},
+		}, "string",
+		scm.HTTPServe,
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"mysql", "Imports a file .scm file into current namespace",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"port", "number", "port number for MySQL server"},
+			scm.DeclarationParameter{"getPassword", "func", "lambda(username string) string|nil has to return the password for a user or nil to deny login"},
+			scm.DeclarationParameter{"schemacallback", "func", "lambda(username schema) bool handler check whether user is allowed to schem (string) - you should check access rights here"},
+			scm.DeclarationParameter{"handler", "func", "lambda(schema sql resultrow) handler to process sql query (string) in schema (string). resultrow is a lambda(list)"},
+		}, "any",
+		scm.MySQLServe,
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"password", "Hashes a password with sha1 (for mysql user authentication)",
+		1, 1,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"password", "string", "plain text password to hash"},
+		}, "string",
+		scm.MySQLPassword,
 	})
 	// storage initialization
 	storage.Init(scm.Globalenv)
