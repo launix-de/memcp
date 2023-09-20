@@ -25,12 +25,13 @@ type Declaration struct {
 	MinParameter int
 	MaxParameter int
 	Params []DeclarationParameter
+	Returns string // any | string | number | bool | func | list | symbol
 	Fn func(...Scmer) Scmer
 }
 
 type DeclarationParameter struct {
 	Name string
-	Type string // any | string | number | func | list | symbol
+	Type string // any | string | number | bool | func | list | symbol
 	Desc string
 }
 
@@ -45,8 +46,61 @@ func Declare(env *Env, def *Declaration) {
 	}
 }
 
-// TODO: func Validate(val Scmer)
-// TODO: func Optimize(val Scmer)
+// panics if the code is bad (returns possible datatype, at least "any")
+func Validate(source string, val Scmer) string {
+	switch v := val.(type) {
+		case string:
+			return "string"
+		case float64:
+			return "number"
+		case bool:
+			return "bool"
+		case []Scmer:
+			if len(v) > 0 {
+				// function with head
+				var def *Declaration
+				switch head := v[0].(type) {
+					case Symbol:
+						if def2, ok := declarations[string(head)]; ok {
+							def = def2
+						}
+					case func(...Scmer) Scmer:
+						if def2, ok := declarations[fmt.Sprintf("%p", head)]; ok {
+							def = def2
+						}
+				}
+				if def != nil {
+					if len(v)-1 < def.MinParameter {
+						panic(source + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParameter) + " parameters")
+					}
+					if len(v)-1 > def.MaxParameter {
+						panic(source + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParameter) + " parameters")
+					}
+				}
+				// validate params (TODO: exceptions like match??)
+				for i := 1; i < len(v); i++ {
+					typ := Validate(source, v[i])
+					if def != nil {
+						j := i-1 // parameter help
+						if i-1 >= len(def.Params) {
+							j = len(def.Params) - 1
+						}
+						// check parameter type
+						if typ != "any" && def.Params[j].Type != "any" && typ != def.Params[j].Type {
+							panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source, def.Name, i, typ, def.Params[j].Type))
+						}
+					}
+				}
+			}
+	}
+	return "any"
+}
+
+// do preprocessing and optimization
+func Optimize(val Scmer, env *Env) Scmer {
+	return val
+}
+
 func Help(fn string) {
 	if fn == "" {
 		fmt.Println("Available scm functions:")

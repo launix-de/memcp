@@ -35,10 +35,13 @@ func Read(s string) (expression Scmer) {
 	return readFrom(&tokens)
 }
 
-func EvalAll(s string, en *Env) (expression Scmer) {
+func EvalAll(source, s string, en *Env) (expression Scmer) {
 	tokens := tokenize(s)
 	for len(tokens) > 0 {
-		expression = Eval(readFrom(&tokens), en)
+		code := readFrom(&tokens)
+		Validate(source, code)
+		code = Optimize(source, en)
+		expression = Eval(code, en)
 	}
 	return
 }

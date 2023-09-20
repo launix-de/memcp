@@ -57,7 +57,7 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 			if err != nil {
 				panic(err)
 			}
-			return scm.EvalAll(string(bytes), &otherPath)
+			return scm.EvalAll(filename, string(bytes), &otherPath)
 		}
 }
 
@@ -152,7 +152,7 @@ func main() {
 		1, 1000,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"value...", "any", "values to print"},
-		},
+		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
 			for _, s := range a {
 				fmt.Print(scm.String(s))
@@ -166,7 +166,7 @@ func main() {
 		0, 1,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"topic", "string", "function to print help about"},
-		},
+		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				scm.Help("")
@@ -189,7 +189,10 @@ func main() {
 	}
 	for _, command := range commands {
 		fmt.Println("Executing " + command + " ...")
-		scm.Eval(scm.Read(command), &IOEnv)
+		code := scm.Read(command)
+		scm.Validate("command line parameter", code)
+		code = scm.Optimize(code, &IOEnv)
+		scm.Eval(code, &IOEnv)
 	}
 
 	// install exit handler

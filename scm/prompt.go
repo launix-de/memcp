@@ -79,7 +79,11 @@ func Repl(en *Env) {
 				}
 			}()
 			var b bytes.Buffer
-			Serialize(&b, Eval(Read(line), en), en, en)
+			code := Read(line)
+			Validate("prompt", code)
+			code = Optimize(code, en)
+			result := Eval(code, en)
+			Serialize(&b, result, en, en)
 			fmt.Print(resultprompt)
 			fmt.Println(b.String())
 			oldline = ""
