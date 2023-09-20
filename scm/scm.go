@@ -339,7 +339,7 @@ type Proc struct {
 
 type Vars map[Symbol]Scmer
 type Env struct {
-	Vars
+	Vars Vars
 	Outer *Env
 	Nodefine bool // define will write to Outer
 }

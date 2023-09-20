@@ -118,6 +118,9 @@ func main() {
     This program comes with ABSOLUTELY NO WARRANTY;
     This is free software, and you are welcome to redistribute it
     under certain conditions;
+
+    Type (help) to show help
+
 `)
 
 	// init random generator for UUIDs
@@ -135,13 +138,6 @@ func main() {
 	wd, _ := os.Getwd() // libraries are relative to working directory... is that right?
 	IOEnv = scm.Env {
 		scm.Vars {
-			"print": func (a ...scm.Scmer) scm.Scmer {
-					for _, s := range a {
-						fmt.Print(scm.String(s))
-					}
-					fmt.Println()
-					return "ok"
-				},
 			"import": getImport(wd),
 			"load": getLoad(wd),
 			"serve": scm.HTTPServe,
@@ -151,6 +147,35 @@ func main() {
 		&scm.Globalenv,
 		true, // other defines go into Globalenv
 	}
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"print", "Prints values to stdout (only in IO environment)",
+		1, 1000,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"value...", "any", "values to print"},
+		},
+		func (a ...scm.Scmer) scm.Scmer {
+			for _, s := range a {
+				fmt.Print(scm.String(s))
+			}
+			fmt.Println()
+			return "ok"
+		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"help", "Lists all functions or print help for a specific function",
+		0, 1,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"topic", "string", "function to print help about"},
+		},
+		func (a ...scm.Scmer) scm.Scmer {
+			if len(a) == 0 {
+				scm.Help("")
+			} else {
+				scm.Help(scm.String(a[0]))
+			}
+			return "ok"
+		},
+	})
 	// storage initialization
 	storage.Init(scm.Globalenv)
 	storage.Basepath = basepath
