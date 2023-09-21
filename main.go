@@ -213,6 +213,7 @@ func main() {
 		}, "string",
 		scm.MySQLPassword,
 	})
+
 	// storage initialization
 	storage.Init(scm.Globalenv)
 	storage.Basepath = basepath

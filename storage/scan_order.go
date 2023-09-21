@@ -16,81 +16,93 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "github.com/launix-de/memcp/scm"
-
-type scanError struct {
-	r interface{}
-}
 
 /* TODO:
 
  - LEFT JOIN handling -> emit a NULL line on certain conditions
+ - ORDER: tell a list of columns to sort (for delta storage: temporaryly sort; merge with main)
+ - LIMIT: scan-side limiters
+ - ORDER+LIMIT: sync before executing map OR make map side-effect free
+ - separate group/collect/sort nodes to add values to (maybe this is the way to do ORDER??)
+ - group/collect/sort nodes -> (create sortfn equalfn mergefn offset limit) (add item); (scan mapfn) (merge othersortwindow) -> implements a sorted window; use merge as aggregator, create as neutral element
 
 */
 
+type shardqueue struct {
+	shard *storageShard
+	items []uint // TODO: refactor to chan, so we can block generating too much entries
+	// TODO: maybe instead of []uint, store a func->Scmer?
+	err scanError
+}
+
+// TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
+
 // map reduce implementation based on scheme scripts
-func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int, limit int, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+
 	/* analyze query */
 	boundaries := extractBoundaries(condition)
 
-	values := make(chan scm.Scmer, 4)
+	total_limit := -1
+	if limit >= 0 {
+		total_limit = offset + limit
+	}
+
+	q := make([]shardqueue, 0)
+	q_ := make(chan shardqueue)
 	rest := 0
 	for _, s := range t.Shards { // TODO: replace for loop with a more efficient algo that takes column boundaries to only pick the few of possibly thousands of shards that are within the min-max bounds
 		// parallel scan over shards
 		go func(s *storageShard) {
 			defer func () {
 				if r := recover(); r != nil {
-					//fmt.Println("panic during scan:", r, string(debug.Stack()))
-					values <- scanError{r}
+					// fmt.Println("panic during scan:", r, string(debug.Stack()))
+					q_ <- shardqueue{s, nil, scanError{r}}
 				}
 			}()
-			values <- s.scan(boundaries, condition, callback, aggregate, neutral)
+			q_ <- s.scan_order(boundaries, condition, sortcols, total_limit)
 		}(s)
 		rest = rest + 1
-		// TODO: measure scan balance
 	}
+	// collect all subchans
+	for i := 0; i < rest; i++ {
+		qe := <- q_
+		if qe.err.r != nil {
+			panic(qe) // propagate errors that occur inside inner scan
+		}
+		q = append(q, qe) // TODO: heap sink
+	}
+
 	// collect values from parallel scan
 	akkumulator := neutral
-	if aggregate != nil {
-		for {
-			if rest == 0 {
-				return akkumulator
+	// TODO: do queue polling instead of this naive testing code
+	for _, qx := range q {
+		for _, idx := range qx.items {
+			fmt.Println("index",idx)
+			// TODO: margs implementation here -> callback
+			var value scm.Scmer
+			value = float64(idx)
+
+			// aggregate
+			if aggregate != nil {
+				akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, value,})
 			}
-			// eat value
-			intermediate := <- values
-			switch x := intermediate.(type) {
-				case scanError:
-					panic(x.r) // cascade panic
-				default:
-					akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
-			}
-			rest = rest - 1
-		}
-	} else {
-		for {
-			if rest == 0 {
-				return akkumulator
-			}
-			switch x := (<- values).(type) { // eat up values and forget
-				case scanError:
-					panic(x.r) // cascade panic
-			}
-			rest = rest - 1
 		}
 	}
+	return akkumulator
 }
 
-func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
-	akkumulator := neutral
+func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, sortcols []scm.Scmer, limit int) (result shardqueue) {
+	result.shard = t
+	// TODO: mergesort sink
 
 	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
-	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 	cdataset := make([]scm.Scmer, len(cargs))
-	mdataset := make([]scm.Scmer, len(margs))
 
 	// main storage
 	ccols := make([]ColumnStorage, len(cargs))
-	mcols := make([]ColumnStorage, len(margs))
 	for i, k := range cargs { // iterate over columns
 		var ok bool
 		ccols[i], ok = t.columns[string(k.(scm.Symbol))] // find storage
@@ -98,21 +110,10 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + string(k.(scm.Symbol)) + "`")
 		}
 	}
-	for i, k := range margs { // iterate over columns
-		if string(k.(scm.Symbol)) == "$update" {
-			mcols[i] = nil
-		} else {
-			var ok bool
-			mcols[i], ok = t.columns[string(k.(scm.Symbol))] // find storage
-			if !ok {
-				panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + string(k.(scm.Symbol)) + "`")
-			}
-		}
-	}
 	// remember current insert status (so don't scan things that are inserted during map)
 	maxInsertIndex := len(t.inserts)
 	// iterate over items (indexed)
-	for idx := range t.iterateIndex(boundaries) {
+	for idx := range t.iterateIndex(boundaries) { // TODO: iterateIndex sort criteria! (and then we can break after limit iterations)
 		if _, ok := t.deletions[idx]; ok {
 			continue // item is on delete list
 		}
@@ -124,19 +125,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			continue // condition did not match
 		}
 
-		// call map function
-		for i, k := range mcols { // iterate over columns
-			if k == nil {
-				// update/delete function
-				mdataset[i] = t.UpdateFunction(idx, true)
-			} else {
-				mdataset[i] = k.getValue(idx)
-			}
-		}
-		intermediate := scm.Apply(callback, mdataset)
-		if aggregate != nil {
-			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
-		}
+		result.items = append(result.items, idx)
 	}
 
 	// delta storage (unindexed)
@@ -154,18 +143,10 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			continue // condition did not match
 		}
 
-		// prepare&call map function
-		for i, k := range margs { // iterate over columns
-			if string(k.(scm.Symbol)) == "$update" {
-				mdataset[i] = t.UpdateFunction(t.main_count + uint(idx), true)
-			} else {
-				mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
-			}
-		}
-		intermediate := scm.Apply(callback, mdataset)
-		if aggregate != nil {
-			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
-		}
+		result.items = append(result.items, t.main_count + uint(idx))
 	}
-	return akkumulator
+
+	// and now sort result!
+	return
 }
+

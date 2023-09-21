@@ -56,6 +56,7 @@ var storages = map[uint8]reflect.Type {
 
 func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
+
 	scm.Declare(&en, &scm.Declaration{
 		"scan", "does an unordered parallel filer-map-reduce pass on a single table and returns the reduced result",
 		4, 6,
@@ -68,8 +69,6 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
-			start := time.Now() // time measurement
-
 			// params: table, condition, map, reduce, reduceSeed
 			t := databases[scm.String(a[0])].Tables[scm.String(a[1])]
 			var aggregate scm.Scmer
@@ -81,11 +80,39 @@ func Init(en scm.Env) {
 				neutral = a[5]
 			}
 			result := t.scan(a[2], a[3], aggregate, neutral)
-			fmt.Println("scan", time.Since(start))
 			return result
 		},
 	})
 	// TODO: scan_order -> schema table filter sortcols(list of lambda|string) offset limit map reduce neutral; has only one reduce phase
+	scm.Declare(&en, &scm.Declaration{
+		"scan_order", "does an unordered parallel filer-map-reduce pass on a single table and returns the reduced result",
+		7, 9,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "database where the table is located"},
+			scm.DeclarationParameter{"table", "string", "name of the table to scan"},
+			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
+			scm.DeclarationParameter{"sortcols", "list", "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"},
+			scm.DeclarationParameter{"offset", "number", "number of items to skip before the first one is fed into map"},
+			scm.DeclarationParameter{"limit", "number", "max number of items to read"},
+			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
+			scm.DeclarationParameter{"reduce", "func", "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass."},
+			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
+		}, "any",
+		func (a ...scm.Scmer) scm.Scmer {
+			// params: table, condition, map, reduce, reduceSeed
+			t := databases[scm.String(a[0])].Tables[scm.String(a[1])]
+			var aggregate scm.Scmer
+			var neutral scm.Scmer
+			if len(a) > 7 {
+				aggregate = a[7]
+			}
+			if len(a) > 8 {
+				neutral = a[8]
+			}
+			result := t.scan_order(a[2], a[3].([]scm.Scmer), scm.ToInt(a[4]), scm.ToInt(a[5]), a[6], aggregate, neutral)
+			return result
+		},
+	})
 	scm.Declare(&en, &scm.Declaration{
 		"createdatabase", "creates a new database",
 		1, 1,

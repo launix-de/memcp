@@ -27,6 +27,7 @@ package scm
 
 import (
 	"fmt"
+	"time"
 	"reflect"
 )
 
@@ -65,6 +66,12 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			// ...
 			expression = Eval(e[1], en)
 			goto restart
+		case "time":
+			// similar to eval
+			start := time.Now() // time measurement
+			value = Eval(e[1], en)
+			fmt.Println(time.Since(start))
+			return
 		case "if":
 			if ToBool(Eval(e[1], en)) {
 				expression = e[2]
