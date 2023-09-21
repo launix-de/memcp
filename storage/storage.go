@@ -168,12 +168,12 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"show", "show databases/tables/columns\n\n(show) will list all databases\n(show schema) will list all tables\n(show schema tbl) will list all columns",
+		"show", "show databases/tables/columns\n\n(show) will list all databases as a list of strings\n(show schema) will list all tables as a list of strings\n(show schema tbl) will list all columns as a list of dictionaries with the keys (name type dimensions)",
 		0, 2,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "(optional) name of the database if you want to list tables or columns"},
 			scm.DeclarationParameter{"table", "string", "(optional) name of the table if you want to list columns"},
-		}, "bool",
+		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				// show databases

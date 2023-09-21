@@ -316,246 +316,8 @@ var Globalenv Env
 func init() {
 	Globalenv = Env{
 		Vars{ //aka an incomplete set of compiled-in functions
-			// arithmetic / logic
-			"+": func(a ...Scmer) Scmer {
-				v := ToFloat(a[0])
-				for _, i := range a[1:] {
-					v += ToFloat(i)
-				}
-				return v
-			},
-			"-": func(a ...Scmer) Scmer {
-				v := ToFloat(a[0])
-				for _, i := range a[1:] {
-					v -= ToFloat(i)
-				}
-				return v
-			},
-			"*": func(a ...Scmer) Scmer {
-				v := ToFloat(a[0])
-				for _, i := range a[1:] {
-					v *= ToFloat(i)
-				}
-				return v
-			},
-			"/": func(a ...Scmer) Scmer {
-				v := ToFloat(a[0])
-				for _, i := range a[1:] {
-					v /= ToFloat(i)
-				}
-				return v
-			},
-			"<=": func(a ...Scmer) Scmer {
-				// TODO: string vs. float
-				return a[0].(float64) <= a[1].(float64)
-			},
-			"<": func(a ...Scmer) Scmer {
-				return a[0].(float64) < a[1].(float64)
-			},
-			">": func(a ...Scmer) Scmer {
-				return a[0].(float64) > a[1].(float64)
-			},
-			">=": func(a ...Scmer) Scmer {
-				return a[0].(float64) >= a[1].(float64)
-			},
-			"equal?": func(a ...Scmer) Scmer {
-				return reflect.DeepEqual(a[0], a[1])
-			},
-			"!": func(a ...Scmer) Scmer {
-				return !ToBool(a[0]);
-			},
-			"not": func(a ...Scmer) Scmer {
-				return !ToBool(a[0]);
-			},
 			"true": true,
 			"false": false,
-
-			// list functions
-			"append": func(a ...Scmer) Scmer {
-				// append a b ...: append item b to list a (construct list from item + tail)
-				return append(a[0].([]Scmer), a[1:]...)
-			},
-			"cons": func(a ...Scmer) Scmer {
-				// cons a b: prepend item a to list b (construct list from item + tail)
-				switch car := a[0]; cdr := a[1].(type) {
-				case []Scmer:
-					return append([]Scmer{car}, cdr...)
-				default:
-					return []Scmer{car, cdr}
-				}
-			},
-			"car": func(a ...Scmer) Scmer {
-				// head of tuple
-				return a[0].([]Scmer)[0]
-			},
-			"cdr": func(a ...Scmer) Scmer {
-				// rest of tuple
-				return a[0].([]Scmer)[1:]
-			},
-			"merge": func (a ...Scmer) Scmer {
-				// merge arrays into one
-				size := 0
-				for _, v := range a[0].([]Scmer) {
-					size = size + len(v.([]Scmer))
-				}
-				result := make([]Scmer, size)
-				pos := 0
-				for _, v := range a[0].([]Scmer) {
-					inner := v.([]Scmer)
-					copy(result[pos:pos+len(inner)], inner)
-					pos = pos + len(inner)
-				}
-				return result
-			},
-			"has?": func(a ...Scmer) Scmer {
-				// arr, element
-				list := a[0].([]Scmer)
-				for _, v := range list {
-					if reflect.DeepEqual(a[1], v) {
-						return true
-					}
-				}
-				return false
-			},
-			"filter": func(a ...Scmer) Scmer {
-				result := make([]Scmer, 0)
-				for _, v := range a[0].([]Scmer) {
-					if ToBool(Apply(a[1], []Scmer{v,})) {
-						result = append(result, v)
-					}
-				}
-				return result
-			},
-			"map": func(a ...Scmer) Scmer {
-				list := a[0].([]Scmer)
-				result := make([]Scmer, len(list))
-				for i, v := range list {
-					result[i] = Apply(a[1], []Scmer{v,})
-				}
-				return result
-			},
-			"reduce": func(a ...Scmer) Scmer {
-				// arr, reducefn(a, b), [neutral]
-				list := a[0].([]Scmer)
-				var result Scmer = nil
-				i := 0
-				if len(a) > 2 {
-					result = a[2]
-				} else {
-					if len(list) > 0 {
-						result = list[0]
-						i = i + 1
-					}
-				}
-				for i < len(list) {
-					result = Apply(a[1], []Scmer{result, list[i],})
-					i = i + 1
-				}
-				return result
-			},
-
-			// dictionary functions
-			"filter_assoc": func(a ...Scmer) Scmer {
-				// list, fn(key, value)
-				list := a[0].([]Scmer)
-				result := make([]Scmer, 0)
-				for i := 0; i < len(list); i += 2 {
-					if ToBool(Apply(a[1], []Scmer{list[i], list[i+1]})) {
-						result = append(result, list[i], list[i+1])
-					}
-				}
-				return result
-			},
-			"map_assoc": func(a ...Scmer) Scmer {
-				// apply fn(key value) to each assoc item and return mapped dict
-				list := a[0].([]Scmer)
-				result := make([]Scmer, len(list))
-				var k Scmer
-				for i, v := range list {
-					if i % 2 == 0 {
-						// key -> remain
-						result[i] = v
-						k = v
-					} else {
-						// value -> map fn(key, value)
-						result[i] = Apply(a[1], []Scmer{k, v,})
-					}
-				}
-				return result
-			},
-			"reduce_assoc": func(a ...Scmer) Scmer {
-				// dict, reducefn(a, key, value), neutral
-				list := a[0].([]Scmer)
-				result := a[2]
-				for i := 0; i < len(list); i += 2 {
-					result = Apply(a[1], []Scmer{result, list[i], list[i+1],})
-				}
-				return result
-			},
-			"has_assoc?": func(a ...Scmer) Scmer {
-				// dict, element
-				list := a[0].([]Scmer)
-				for i := 0; i < len(list); i += 2 {
-					if reflect.DeepEqual(list[i], a[1]) {
-						return true
-					}
-				}
-				return false
-			},
-			"extract_assoc": func(a ...Scmer) Scmer {
-				// apply fn(key value) to each assoc item and return results as array
-				list := a[0].([]Scmer)
-				result := make([]Scmer, len(list) / 2)
-				var k Scmer
-				for i, v := range list {
-					if i % 2 == 0 {
-						// key -> remain
-						k = v
-					} else {
-						// value -> map fn(key, value)
-						result[i / 2] = Apply(a[1], []Scmer{k, v,})
-					}
-				}
-				return result
-			},
-			"set_assoc": func(a ...Scmer) Scmer {
-				// may eventually destroy the original list; use in aggregations
-				// params: dict, key, new_value, [merge_func]
-				// return: dict
-				list := a[0].([]Scmer)
-				for i := 0; i < len(list); i += 2 {
-					if reflect.DeepEqual(list[i], a[1]) {
-						// overwrite
-						if len(a) > 3 {
-							// overwrite with merge function
-							list[i + 1] = Apply(a[3], []Scmer{list[i + 1], a[2],})
-						} else {
-							// overwrite naive
-							list[i + 1] = a[2]
-						}
-						return list // return changed list (this violates immutability for performance)
-					}
-				}
-				// else: append
-				return append(list, a[1], a[2])
-			},
-			"merge_assoc": func(a ...Scmer) Scmer {
-				// params: dict1, dict2, [merge_func]
-				// naive implementation, bad performance
-				set_assoc := Globalenv.Vars["set_assoc"].(func(...Scmer) Scmer)
-				list := a[0]
-				dict := a[1].([]Scmer)
-				if len(a) > 2 {
-					for i := 0; i < len(dict); i += 2 {
-						list = set_assoc(list, dict[i], dict[i+1], a[2])
-					}
-				} else {
-					for i := 0; i < len(dict); i += 2 {
-						list = set_assoc(list, dict[i], dict[i+1])
-					}
-				}
-				return list
-			},
 
 			// basic
 			"list": Eval(Read("(lambda z z)"), &Globalenv),
@@ -600,8 +362,8 @@ func init() {
 		"or", "returns true if at least one condition evaluates to true",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"condition", "bool", "condition to evaluate"},
-		}, "bool", nil,
+			DeclarationParameter{"condition", "any", "condition to evaluate"},
+		}, "any", nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"define", "defines or sets a variable in the current environment",
@@ -688,7 +450,9 @@ Patterns can be any of:
 		nil,
 	})
 
+	init_alu()
 	init_strings()
+	init_list()
 }
 
 /* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt
