@@ -58,7 +58,7 @@ func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
 	scm.Declare(&en, &scm.Declaration{
-		"scan", "does an unordered parallel filer-map-reduce pass on a single table and returns the reduced result",
+		"scan", "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
 		4, 6,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "database where the table is located"},
@@ -85,7 +85,7 @@ func Init(en scm.Env) {
 	})
 	// TODO: scan_order -> schema table filter sortcols(list of lambda|string) offset limit map reduce neutral; has only one reduce phase
 	scm.Declare(&en, &scm.Declaration{
-		"scan_order", "does an unordered parallel filer-map-reduce pass on a single table and returns the reduced result",
+		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
 		7, 9,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "database where the table is located"},

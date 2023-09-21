@@ -144,6 +144,26 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 	}
 }
 
+func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
+	cstorage, ok := t.columns[col]
+	if !ok {
+		panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + col + "`")
+	}
+	return func(idx uint) scm.Scmer {
+		if idx < t.main_count {
+			return cstorage.getValue(idx)
+		} else {
+			item := t.inserts[idx - t.main_count]
+			for i := 0; i < len(item); i += 2 {
+				if item[i] == col {
+					return item[i+1]
+				}
+			}
+			return nil
+		}
+	}
+}
+
 func (t *storageShard) Insert(d dataset) {
 	t.mu.Lock()
 	t.inserts = append(t.inserts, d) // append to delta storage
