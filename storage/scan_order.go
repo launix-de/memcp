@@ -16,7 +16,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "fmt"
 import "github.com/launix-de/memcp/scm"
 
 /* TODO:
@@ -35,6 +34,7 @@ type shardqueue struct {
 	items []uint // TODO: refactor to chan, so we can block generating too much entries
 	// TODO: maybe instead of []uint, store a func->Scmer?
 	err scanError
+	mcols []func(uint) scm.Scmer // map column reader
 }
 
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
@@ -59,18 +59,32 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int
 			defer func () {
 				if r := recover(); r != nil {
 					// fmt.Println("panic during scan:", r, string(debug.Stack()))
-					q_ <- shardqueue{s, nil, scanError{r}}
+					q_ <- shardqueue{s, nil, scanError{r}, nil}
 				}
 			}()
 			q_ <- s.scan_order(boundaries, condition, sortcols, total_limit)
 		}(s)
 		rest = rest + 1
 	}
+	// prepare map phase (map has to occur late and ordered)
+	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 	// collect all subchans
 	for i := 0; i < rest; i++ {
 		qe := <- q_
 		if qe.err.r != nil {
 			panic(qe) // propagate errors that occur inside inner scan
+		}
+
+		// prepare map columns
+		qe.mcols = make([]func(uint) scm.Scmer, len(margs))
+		for i, arg := range margs {
+			if string(arg.(scm.Symbol)) == "$update" {
+				qe.mcols[i] = func(idx uint) scm.Scmer {
+					return qe.shard.UpdateFunction(idx, true)
+				}
+			} else {
+				qe.mcols[i] = qe.shard.ColumnReader(string(arg.(scm.Symbol)))
+			}
 		}
 		q = append(q, qe) // TODO: heap sink
 	}
@@ -80,10 +94,13 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int
 	// TODO: do queue polling instead of this naive testing code
 	for _, qx := range q {
 		for _, idx := range qx.items {
-			fmt.Println("index",idx)
-			// TODO: margs implementation here -> callback
-			var value scm.Scmer
-			value = float64(idx)
+			// prepare args for map function
+			mapargs := make([]scm.Scmer, len(margs))
+			for i, reader := range qx.mcols {
+				mapargs[i] = reader(idx) // read column value into map argument
+			}
+			// call map function
+			value := scm.Apply(callback, mapargs)
 
 			// aggregate
 			if aggregate != nil {
