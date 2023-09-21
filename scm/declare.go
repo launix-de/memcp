@@ -106,17 +106,19 @@ func Validate(source string, val Scmer) string {
 				}
 				// validate params (TODO: exceptions like match??)
 				for i := 1; i < len(v); i++ {
-					typ := Validate(source, v[i])
-					if def != nil {
-						j := i-1 // parameter help
-						if i-1 >= len(def.Params) {
-							j = len(def.Params) - 1
-						}
-						// check parameter type
-						// TODO: both types could also be lists separated by |
-						// TODO: signature of lambda types??
-						if !types_match(typ, def.Params[j].Type) {
-							panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source, def.Name, i, typ, def.Params[j].Type))
+					if i != 1 || v[0] != Symbol("lambda") {
+						typ := Validate(source, v[i])
+						if def != nil {
+							j := i-1 // parameter help
+							if i-1 >= len(def.Params) {
+								j = len(def.Params) - 1
+							}
+							// check parameter type
+							// TODO: both types could also be lists separated by |
+							// TODO: signature of lambda types??
+							if !types_match(typ, def.Params[j].Type) {
+								panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source, def.Name, i, def.Params[j].Type, typ))
+							}
 						}
 					}
 				}

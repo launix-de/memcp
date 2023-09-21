@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"bytes"
 	"strings"
-	"strconv"
 	"reflect"
 )
 
@@ -46,62 +45,6 @@ import (
 // (dict key value rest_dict)
 // dict acts like a function; apply to a dict will yield the value
 
-//go:inline
-func ToBool(v Scmer) bool {
-	switch v.(type) {
-		case nil:
-			return false
-		case string:
-			return v != ""
-		case float64:
-			return v != 0.0
-		case bool:
-			return v != false
-		default:
-			// []Scmer, native function, lambdas
-			return true
-	}
-}
-//go:inline
-func ToInt(v Scmer) int {
-	switch vv := v.(type) {
-		case nil:
-			return 0
-		case string:
-			x, _ := strconv.Atoi(vv)
-			return x
-		case float64:
-			return int(vv)
-		case bool:
-			if vv {
-				return 1
-			} else {
-				return 0
-			}
-		default:
-			// []Scmer, native function, lambdas
-			return 1
-	}
-}
-//go:inline
-func ToFloat(v Scmer) float64 {
-	switch vv := v.(type) {
-		case string:
-			x, _ := strconv.ParseFloat(vv, 64)
-			return x
-		case float64:
-			return vv
-		case bool:
-			if vv {
-				return 1.0
-			} else {
-				return 0.0
-			}
-		default:
-			// nil, []Scmer, native function, lambdas
-			return 0.0
-	}
-}
 
 /*
  Eval / Apply
@@ -181,7 +124,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			}
 			en.Vars[v] = Eval(e[2], en)
 			value = "ok"*/
-		case "define", "set", "def": // set only works in innermost env
+		case "define", "set": // set only works in innermost env
 			// define will return itself back
 			value = Eval(e[2], en)
 			for en.Nodefine {
@@ -656,19 +599,134 @@ func init() {
 			},
 
 			// basic
-			"error": func (a ...Scmer) Scmer {
-				panic(a[0])
-			},
-			// TODO: validate(source val)
-			"symbol": func (a ...Scmer) Scmer {
-				return Symbol(String(a[0]))
-			},
-			"list": Eval(Read(
-				"(lambda z z)"),
-				&Globalenv),
+			"list": Eval(Read("(lambda z z)"), &Globalenv),
 		},
 		nil,
-		false}
+		false,
+	}
+
+	// system
+	Declare(&Globalenv, &Declaration{
+		"quote", "returns a symbol or list without evaluating it",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"symbol", "symbol", "symbol to quote"},
+		}, "symbol", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"eval", "executes the given scheme program in the current environment",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"code", "list", "list with head and optional parameters"},
+		}, "any", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"if", "checks a condition and then conditionally evaluates code branches",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"condition", "bool", "condition to evaluate"},
+			DeclarationParameter{"true-branch", "any", "code to evaluate if condition is true"},
+			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false"},
+		}, "any", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"and", "returns true if all conditions evaluate to true",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"condition", "bool", "condition to evaluate"},
+		}, "bool", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"or", "returns true if at least one condition evaluates to true",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"condition", "bool", "condition to evaluate"},
+		}, "bool", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"define", "defines or sets a variable in the current environment",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"variable", "symbol", "variable to set"},
+			DeclarationParameter{"value", "any", "value to set the variable to"},
+		}, "bool", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"set", "defines or sets a variable in the current environment",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"variable", "symbol", "variable to set"},
+			DeclarationParameter{"value", "any", "value to set the variable to"},
+		}, "bool", nil,
+	})
+
+	// basic
+	Declare(&Globalenv, &Declaration{
+		"error", "halts the whole execution thread and throws an error message",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value or message to throw"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			panic(a[0])
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"symbol", "returns a symbol built from that string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string value that will be converted into a symbol"},
+		}, "symbol",
+		func (a ...Scmer) Scmer {
+			return Symbol(String(a[0]))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"list", "returns a list containing the parameters as alements",
+		0, 10000,
+		[]DeclarationParameter{
+			DeclarationParameter{"value...", "any", "value for the list"},
+		}, "list",
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"match", `takes a value evaluates the branch that first matches the given pattern
+Patterns can be any of:
+ - symbol matches any value and stores is into a variable
+ - "string" (matches only this string)
+ - number (matches only this value)
+ - (symbol "something") will only match the symbol 'something'
+ - '(subpattern subpattern...) matches a list with exactly these subpatterns
+ - (concat str1 str2 str3) will decompose a string into one of the following patterns: "prefix" variable, variable "postfix", variable "infix" variable
+ - (cons a b) will reverse the cons function, so it will match the head of the list with a and the rest with b
+ - (regex "pattern" text var1 var2...) will match the given regex pattern, store the whole string into text and all capture groups into var1, var2...
+`,
+		3, 10000,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value to evaluate"},
+			DeclarationParameter{"pattern...", "any", "pattern"},
+			DeclarationParameter{"result...", "any", "result value when the pattern matches; this code can use the variables matched in the pattern"},
+			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches"},
+		}, "any",
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"lambda", "returns a function (func) constructed from the given code",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"parameters", "symbol|list", "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"},
+			DeclarationParameter{"code", "any", "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"},
+		}, "func",
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"begin", "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
+		0, 10000,
+		[]DeclarationParameter{
+			DeclarationParameter{"expression...", "any", "expressions to evaluate"},
+		}, "any",
+		nil,
+	})
 }
 
 /* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt

@@ -195,7 +195,7 @@ func main() {
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"mysql", "Imports a file .scm file into current namespace",
-		3, 3,
+		4, 4,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"port", "number", "port number for MySQL server"},
 			scm.DeclarationParameter{"getPassword", "func", "lambda(username string) string|nil has to return the password for a user or nil to deny login"},

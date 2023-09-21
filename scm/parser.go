@@ -39,8 +39,8 @@ func EvalAll(source, s string, en *Env) (expression Scmer) {
 	tokens := tokenize(s)
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
-		Validate(source, code)
-		code = Optimize(source, en)
+		Validate(source, code) // TODO: add some extra line number info to source??
+		code = Optimize(code, en)
 		expression = Eval(code, en)
 	}
 	return
