@@ -27,8 +27,6 @@ package scm
 
 import (
 	"fmt"
-	"bytes"
-	"strings"
 	"reflect"
 )
 
@@ -372,45 +370,6 @@ func init() {
 			"true": true,
 			"false": false,
 
-			// string functions
-			"concat": func(a ...Scmer) Scmer {
-				// concat strings
-				var b bytes.Buffer
-				for _, s := range a {
-					b.WriteString(String(s))
-				}
-				return b.String()
-			},
-			"simplify": func(a ...Scmer) Scmer {
-				// turn string to number or so
-				return Simplify(String(a[0]))
-			},
-			"strlen": func(a ...Scmer) Scmer {
-				// string
-				return float64(len(String(a[0])))
-			},
-			"toLower": func(a ...Scmer) Scmer {
-				// string
-				return strings.ToLower(String(a[0]))
-			},
-			"toUpper": func(a ...Scmer) Scmer {
-				// string
-				return strings.ToUpper(String(a[0]))
-			},
-			"split": func(a ...Scmer) Scmer {
-				// string, sep
-				split := " "
-				if len(a) > 1 {
-					split = String(a[1])
-				}
-				ar := strings.Split(String(a[0]), split)
-				result := make([]Scmer, len(ar))
-				for i, v := range ar {
-					result[i] = v
-				}
-				return result
-			},
-
 			// list functions
 			"append": func(a ...Scmer) Scmer {
 				// append a b ...: append item b to list a (construct list from item + tail)
@@ -606,6 +565,7 @@ func init() {
 	}
 
 	// system
+	DeclareTitle("SCM Builtins")
 	Declare(&Globalenv, &Declaration{
 		"quote", "returns a symbol or list without evaluating it",
 		1, 1,
@@ -727,6 +687,8 @@ Patterns can be any of:
 		}, "any",
 		nil,
 	})
+
+	init_strings()
 }
 
 /* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt

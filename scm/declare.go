@@ -35,10 +35,16 @@ type DeclarationParameter struct {
 	Desc string
 }
 
+var declaration_titles []string
 var declarations map[string]*Declaration = make(map[string]*Declaration)
 var declarations_hash map[string]*Declaration = make(map[string]*Declaration)
 
+func DeclareTitle(title string) {
+	declaration_titles = append(declaration_titles, "#" + title)
+}
+
 func Declare(env *Env, def *Declaration) {
+	declaration_titles = append(declaration_titles, def.Name)
 	declarations[def.Name] = def
 	if def.Fn != nil {
 		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
@@ -138,9 +144,13 @@ func Optimize(val Scmer, env *Env) Scmer {
 func Help(fn Scmer) {
 	if fn == nil {
 		fmt.Println("Available scm functions:")
-		fmt.Println("")
-		for fname, def := range declarations {
-			fmt.Println("  " + fname + ": " + strings.Split(def.Desc, "\n")[0])
+		for _, title := range declaration_titles {
+			if title[0] == '#' {
+				fmt.Println("")
+				fmt.Println("-- " + title[1:] + " --")
+			} else {
+				fmt.Println("  " + title + ": " + strings.Split(declarations[title].Desc, "\n")[0])
+			}
 		}
 		fmt.Println("")
 		fmt.Println("get further information by typing (help \"functionname\") to get more info")

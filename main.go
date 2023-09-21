@@ -139,6 +139,7 @@ func main() {
 		&scm.Globalenv,
 		true, // other defines go into Globalenv
 	}
+	scm.DeclareTitle("IO")
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"print", "Prints values to stdout (only in IO environment)",
 		1, 1000,

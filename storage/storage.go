@@ -55,6 +55,7 @@ var storages = map[uint8]reflect.Type {
 }
 
 func Init(en scm.Env) {
+	scm.DeclareTitle("Storage")
 	scm.Declare(&en, &scm.Declaration{
 		"scan", "does an unordered parallel filer-map-reduce pass on a single table and returns the reduced result",
 		4, 6,
