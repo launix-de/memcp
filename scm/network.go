@@ -43,7 +43,7 @@ func HTTPServe(a ...Scmer) Scmer {
 	}
 	go server.ListenAndServe()
 	// TODO: ListenAndServeTLS
-	return "ok"
+	return true
 }
 
 // HTTP handler with a scheme script underneath

@@ -659,6 +659,7 @@ func init() {
 			"error": func (a ...Scmer) Scmer {
 				panic(a[0])
 			},
+			// TODO: validate(source val)
 			"symbol": func (a ...Scmer) Scmer {
 				return Symbol(String(a[0]))
 			},

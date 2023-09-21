@@ -46,6 +46,27 @@ func Declare(env *Env, def *Declaration) {
 	}
 }
 
+func types_match(given string, required string) bool {
+	if given == "any" {
+		return true // be graceful, we can't check it
+	}
+	if required == "any" {
+		return true // this is always allowed
+	}
+	required_ := strings.Split(required, "|")
+	given_ := strings.Split(given, "|")
+	for _, r := range required_ {
+		for _, g := range given_ {
+			// TODO: in case of func: compare signatures??
+			// TODO: list(subtype)
+			if r == g {
+				return true // if any given fits any required, the value is allowed
+			}
+		}
+	}
+	return false // not a single match
+}
+
 // panics if the code is bad (returns possible datatype, at least "any")
 func Validate(source string, val Scmer) string {
 	switch v := val.(type) {
@@ -94,10 +115,13 @@ func Validate(source string, val Scmer) string {
 						// check parameter type
 						// TODO: both types could also be lists separated by |
 						// TODO: signature of lambda types??
-						if typ != "any" && def.Params[j].Type != "any" && typ != def.Params[j].Type {
+						if !types_match(typ, def.Params[j].Type) {
 							panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source, def.Name, i, typ, def.Params[j].Type))
 						}
 					}
+				}
+				if def != nil {
+					return def.Returns
 				}
 			}
 	}

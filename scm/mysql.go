@@ -30,7 +30,7 @@ func MySQLServe(a ...Scmer) Scmer {
 		defer mysql.Close()
 		mysql.Accept()
 	}()
-	return "ok"
+	return true
 }
 
 // driver.CreatePassword helper function

@@ -140,7 +140,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			t.next.UpdateFunction(idx2, false)(a...) // propagate to succeeding shard
 		}
 		t.mu.Unlock()
-		return "ok" // maybe instead return UpdateFunction for newly inserted item??
+		return true // maybe instead return UpdateFunction for newly inserted item??
 	}
 }
 

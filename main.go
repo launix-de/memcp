@@ -119,8 +119,6 @@ func main() {
     This is free software, and you are welcome to redistribute it
     under certain conditions;
 
-    Type (help) to show help
-
 `)
 
 	// init random generator for UUIDs
@@ -146,13 +144,13 @@ func main() {
 		1, 1000,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"value...", "any", "values to print"},
-		}, "string",
+		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
 			for _, s := range a {
 				fmt.Print(scm.String(s))
 			}
 			fmt.Println()
-			return "ok"
+			return true
 		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -160,14 +158,14 @@ func main() {
 		0, 1,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"topic", "string", "function to print help about"},
-		}, "string",
+		}, "nil",
 		func (a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				scm.Help(nil)
 			} else {
 				scm.Help(a[0])
 			}
-			return "ok"
+			return nil
 		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -192,7 +190,7 @@ func main() {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"port", "number", "port number for HTTP server"},
 			scm.DeclarationParameter{"handler", "func", "handler: lambda(req res) that handles the http request (TODO: detailed documentation)"},
-		}, "string",
+		}, "bool",
 		scm.HTTPServe,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -203,7 +201,7 @@ func main() {
 			scm.DeclarationParameter{"getPassword", "func", "lambda(username string) string|nil has to return the password for a user or nil to deny login"},
 			scm.DeclarationParameter{"schemacallback", "func", "lambda(username schema) bool handler check whether user is allowed to schem (string) - you should check access rights here"},
 			scm.DeclarationParameter{"handler", "func", "lambda(schema sql resultrow) handler to process sql query (string) in schema (string). resultrow is a lambda(list)"},
-		}, "any",
+		}, "bool",
 		scm.MySQLServe,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -242,6 +240,11 @@ func main() {
 		os.Exit(1)
 	})()
 
+	fmt.Print(`
+
+    Type (help) to show help
+
+`)
 	// REPL shell
 	scm.Repl(&IOEnv)
 

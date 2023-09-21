@@ -2,6 +2,7 @@
 =====
 
 - added Dockerfile
+- added function help
 
 0.1.1
 =====
