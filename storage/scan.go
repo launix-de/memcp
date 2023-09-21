@@ -38,11 +38,11 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 	//start := time.Now() // time measurement
 
 	/* analyze query */
-	// TODO: move from storageShard.scan
+	boundaries := extractBoundaries(condition)
 
 	values := make(chan scm.Scmer, 4)
 	rest := 0
-	for _, s := range t.Shards {
+	for _, s := range t.Shards { // TODO: replace for loop with a more efficient algo that takes column boundaries to only pick the few of possibly thousands of shards that are within the min-max bounds
 		// parallel scan over shards
 		go func(s *storageShard) {
 			defer func () {
@@ -51,7 +51,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 					values <- scanError{r}
 				}
 			}()
-			values <- s.scan(condition, callback, aggregate, neutral)
+			values <- s.scan(boundaries, condition, callback, aggregate, neutral)
 		}(s)
 		rest = rest + 1
 		// TODO: measure scan balance
@@ -88,7 +88,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 	// fmt.Sprint(time.Since(start))
 }
 
-func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 	//start := time.Now() // time measurement
 	akkumulator := neutral
 
@@ -123,7 +123,7 @@ func (t *storageShard) scan(condition scm.Scmer, callback scm.Scmer, aggregate s
 	// remember current insert status (so don't scan things that are inserted during map)
 	maxInsertIndex := len(t.inserts)
 	// iterate over items (indexed)
-	for idx := range t.iterateIndex(condition) {
+	for idx := range t.iterateIndex(boundaries) {
 		if _, ok := t.deletions[idx]; ok {
 			continue // item is on delete list
 		}

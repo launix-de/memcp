@@ -30,58 +30,8 @@ type StorageIndex struct {
 	inactive bool
 }
 
-type columnboundaries struct{
-	col string
-	lower scm.Scmer
-	upper scm.Scmer
-}
-
-func (t *storageShard) iterateIndex(condition scm.Scmer) chan uint {
-	cols := make([]columnboundaries, 0, 4)
-	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
-	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
-		switch val := v.(type) {
-			case float64, string:
-				// equals column vs. constant
-				return val, true
-			case scm.Symbol:
-				if val2, ok := condition.(scm.Proc).En.Vars[val]; ok {
-					switch val3 := val2.(type) {
-						// bound constant
-						case float64, string:
-							// equals column vs. constant
-							return val3, true
-					}
-				}
-		}
-		return nil, false
-	}
-	var traverseCondition func(scm.Scmer)
-	traverseCondition = func (node scm.Scmer) {
-		switch v := node.(type) {
-			case []scm.Scmer:
-				if v[0] == scm.Symbol("equal?") {
-					// equi
-					switch v1 := v[1].(type) {
-						case scm.Symbol: // TODO: check if v1 is part of condition.(scm.Proc).Params
-							if v2, ok := extractConstant(v[2]); ok {
-								// ?equal var const
-								cols = append(cols, columnboundaries{string(v1), v2, v2})
-							}
-						// TODO: equals constant vs. column
-					}
-				} else if v[0] == scm.Symbol("and") {
-					// AND -> recursive traverse
-					for i := 1; i < len(v); i++ {
-						traverseCondition(v[i])
-					}
-				}
-				// TODO: <, >, <=, >=
-				// TODO: OR -> merge multiple
-				// TODO: variable expressions that can be expanded
-		}
-	}
-	traverseCondition(condition.(scm.Proc).Body) // recursive analysis over condition
+// iterates over items
+func (t *storageShard) iterateIndex(cols boundaries) chan uint {
 
 	// check if we found conditions
 	if len(cols) > 0 {
