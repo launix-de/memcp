@@ -81,6 +81,7 @@ func (s *globalqueue) Push(x_ any) {
 }
 func (s *globalqueue) Pop() any {
 	result := s.q[len(s.q)-1]
+	s.q[len(s.q)-1] = nil // already free the memory, so GC can also run during an uncompleted ordered scan
 	s.q = s.q[0:len(s.q)-1]
 	return result
 }
