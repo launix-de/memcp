@@ -77,7 +77,7 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 		total_limit = offset + limit
 	}
 
-	// TODO: index scan??
+	// TODO: index scan?? (this could stop at the limit!)
 
 	q := make([]*shardqueue, 0)
 	q_ := make(chan *shardqueue)
@@ -117,17 +117,29 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 			idx := qx.items[0] // draw the smallest element from shard
 			qx.items = qx.items[1:]
 
-			// prepare args for map function
-			mapargs := make([]scm.Scmer, len(margs))
-			for i, reader := range qx.mcols {
-				mapargs[i] = reader(idx) // read column value into map argument
-			}
-			// call map function
-			value := scm.Apply(callback, mapargs)
+			if offset > 0 {
+				// skip offset
+				offset--
+			} else {
+				if limit == 0 {
+					return akkumulator
+				}
+				if limit > 0 {
+					limit--
+				}
 
-			// aggregate
-			if aggregate != nil {
-				akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, value,})
+				// prepare args for map function
+				mapargs := make([]scm.Scmer, len(margs))
+				for i, reader := range qx.mcols {
+					mapargs[i] = reader(idx) // read column value into map argument
+				}
+				// call map function
+				value := scm.Apply(callback, mapargs)
+
+				// aggregate
+				if aggregate != nil {
+					akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, value,})
+				}
 			}
 		} else {
 			// sub-queue is empty -> remove
