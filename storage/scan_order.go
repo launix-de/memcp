@@ -20,17 +20,6 @@ import "fmt"
 import "sort"
 import "github.com/launix-de/memcp/scm"
 
-/* TODO:
-
- - LEFT JOIN handling -> emit a NULL line on certain conditions
- - ORDER: tell a list of columns to sort (for delta storage: temporaryly sort; merge with main)
- - LIMIT: scan-side limiters
- - ORDER+LIMIT: sync before executing map OR make map side-effect free
- - separate group/collect/sort nodes to add values to (maybe this is the way to do ORDER??)
- - group/collect/sort nodes -> (create sortfn equalfn mergefn offset limit) (add item); (scan mapfn) (merge othersortwindow) -> implements a sorted window; use merge as aggregator, create as neutral element
-
-*/
-
 type shardqueue struct {
 	shard *storageShard
 	items []uint // TODO: refactor to chan, so we can block generating too much entries
@@ -40,7 +29,7 @@ type shardqueue struct {
 	sortdirs []bool
 }
 
-// sort interface for shardqueue (local)
+// sort interface for shardqueue (local) (TODO: heap could be more efficient because early-out will be cheaper)
 func (s *shardqueue) Len() int {
 	return len(s.items)
 }
@@ -68,16 +57,16 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 
 	/* analyze condition query */
 	boundaries := extractBoundaries(condition)
+	// TODO: append sortcols to boundaries
 
 	// prepare map phase (map has to occur late and ordered)
 	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 
+	// total_limit helps the shard-scanners to early-out
 	total_limit := -1
 	if limit >= 0 {
 		total_limit = offset + limit
 	}
-
-	// TODO: index scan?? (this could stop at the limit!)
 
 	q := make([]*shardqueue, 0)
 	q_ := make(chan *shardqueue)
@@ -128,7 +117,7 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 					limit--
 				}
 
-				// prepare args for map function
+				// prepare args for map function (map is guaranteed to run in order)
 				mapargs := make([]scm.Scmer, len(margs))
 				for i, reader := range qx.mcols {
 					mapargs[i] = reader(idx) // read column value into map argument
@@ -152,13 +141,13 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, limit int, margs []scm.Scmer) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
-	// TODO: mergesort sink
+	// TODO: mergesort sink instead of list-append-sort would allow early-out
 
 	// prepare filter function
 	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
 	cdataset := make([]scm.Scmer, len(cargs))
 
-	// prepare sort criteria
+	// prepare sort criteria so they can be queried easily
 	result.scols = make([]func(uint) scm.Scmer, len(sortcols))
 	for i, scol := range sortcols {
 		if colname, ok := scol.(string); ok {
@@ -184,7 +173,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 		}
 	}
 
-	// prepare map columns
+	// prepare map columns (but only caller will use them)
 	result.mcols = make([]func(uint) scm.Scmer, len(margs))
 	for i, arg := range margs {
 		if string(arg.(scm.Symbol)) == "$update" {
@@ -208,7 +197,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	// remember current insert status (so don't scan things that are inserted during map)
 	maxInsertIndex := len(t.inserts)
 	// iterate over items (indexed)
-	for idx := range t.iterateIndex(boundaries) { // TODO: iterateIndex sort criteria! (and then we can break after limit iterations)
+	for idx := range t.iterateIndex(boundaries) {
 		if _, ok := t.deletions[idx]; ok {
 			continue // item is on delete list
 		}
@@ -243,7 +232,10 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 
 	// and now sort result!
 	result.sortdirs = sortdirs
-	sort.Sort(result)
+	// TODO: find conditions when exactly we don't need to sort anymore (fully covered indexes, no inserts); the same condition could be used to exit early during iterateIndex
+	if maxInsertIndex > 0 || true {
+		sort.Sort(result)
+	}
 	return
 }
 
