@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "sort"
+import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
 type shardqueue struct {
@@ -50,6 +51,41 @@ func (s *shardqueue) Swap(i, j int) {
 	s.items[i], s.items[j] = s.items[j], s.items[i]
 }
 
+type globalqueue struct {
+	q []*shardqueue
+}
+
+// sort interface for global shard-queue
+func (s *globalqueue) Len() int {
+	return len(s.q)
+}
+func (s *globalqueue) Less(i, j int) bool {
+	for c := 0; c < len(s.q[i].scols); c++ {
+		comparison := scm.Compare(s.q[i].scols[c](s.q[i].items[0]), s.q[j].scols[c](s.q[j].items[0]))
+		if (comparison < 0) != s.q[i].sortdirs[c] {
+			return true
+		}
+		if (comparison > 0) != s.q[i].sortdirs[c] {
+			return false
+		}
+		// otherwise: move on to c++
+	}
+	return false // equal is not less
+}
+func (s *globalqueue) Swap(i, j int) {
+	s.q[i], s.q[j] = s.q[j], s.q[i]
+}
+func (s *globalqueue) Push(x_ any) {
+	x := x_.(*shardqueue)
+	s.q = append(s.q, x)
+}
+func (s *globalqueue) Pop() any {
+	result := s.q[len(s.q)-1]
+	s.q = s.q[0:len(s.q)-1]
+	return result
+}
+
+
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
@@ -68,8 +104,8 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 		total_limit = offset + limit
 	}
 
-	q := make([]*shardqueue, 0)
-	q_ := make(chan *shardqueue)
+	var q globalqueue
+	q_ := make(chan *shardqueue, 1)
 	rest := 0
 	for _, s := range t.Shards { // TODO: replace for loop with a more efficient algo that takes column boundaries to only pick the few of possibly thousands of shards that are within the min-max bounds
 		// parallel scan over shards
@@ -90,49 +126,55 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 		if qe.err.r != nil {
 			panic(qe) // propagate errors that occur inside inner scan
 		}
-		q = append(q, qe) // TODO: heap sink
-	}
-
-	if len(q) > 1 {
-		panic("TODO: unimplemented scan_order of multi-shard tables")
+		if len(qe.items) > 0 {
+			heap.Push(&q, qe) // add to heap
+		}
 	}
 
 	// collect values from parallel scan
 	akkumulator := neutral
 	// TODO: do queue polling instead of this naive testing code
-	for len(q) > 0 {
-		qx := q[0] // draw a random queue element
-		if len(qx.items) > 0 {
-			idx := qx.items[0] // draw the smallest element from shard
-			qx.items = qx.items[1:]
+	for len(q.q) > 0 {
+		qx := q.q[0] // draw a random queue element
 
-			if offset > 0 {
-				// skip offset
-				offset--
-			} else {
-				if limit == 0 {
-					return akkumulator
-				}
-				if limit > 0 {
-					limit--
-				}
+		if len(qx.items) == 0 {
+			heap.Pop(&q) // remove empty element from stack
+			continue
+		}
 
-				// prepare args for map function (map is guaranteed to run in order)
-				mapargs := make([]scm.Scmer, len(margs))
-				for i, reader := range qx.mcols {
-					mapargs[i] = reader(idx) // read column value into map argument
-				}
-				// call map function
-				value := scm.Apply(callback, mapargs)
+		idx := qx.items[0] // draw the smallest element from shard
+		qx.items = qx.items[1:]
 
-				// aggregate
-				if aggregate != nil {
-					akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, value,})
-				}
+		if offset > 0 {
+			// skip offset
+			offset--
+		} else {
+			if limit == 0 {
+				return akkumulator
 			}
+			if limit > 0 {
+				limit--
+			}
+
+			// prepare args for map function (map is guaranteed to run in order)
+			mapargs := make([]scm.Scmer, len(margs))
+			for i, reader := range qx.mcols {
+				mapargs[i] = reader(idx) // read column value into map argument
+			}
+			// call map function
+			value := scm.Apply(callback, mapargs)
+
+			// aggregate
+			if aggregate != nil {
+				akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, value,})
+			}
+		}
+
+		if len(qx.items) > 0 {
+			heap.Fix(&q, 0) // sink up since we have the next value
 		} else {
 			// sub-queue is empty -> remove
-			q = q[1:] // drop queue (TODO: heap-remove instead)
+			heap.Pop(&q)
 		}
 	}
 	return akkumulator

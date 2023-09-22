@@ -3,6 +3,7 @@
 
 - added Dockerfile
 - added function help
+- storage function: scan_order
 
 0.1.1
 =====
