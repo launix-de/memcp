@@ -86,12 +86,13 @@ func Init(en scm.Env) {
 	// TODO: scan_order -> schema table filter sortcols(list of lambda|string) offset limit map reduce neutral; has only one reduce phase
 	scm.Declare(&en, &scm.Declaration{
 		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
-		7, 9,
+		8, 10,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "database where the table is located"},
 			scm.DeclarationParameter{"table", "string", "name of the table to scan"},
 			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
 			scm.DeclarationParameter{"sortcols", "list", "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"},
+			scm.DeclarationParameter{"sortdirs", "list", "list of column directions to sort. Must be same length as sortcols. false means ASC, true means DESC"},
 			scm.DeclarationParameter{"offset", "number", "number of items to skip before the first one is fed into map"},
 			scm.DeclarationParameter{"limit", "number", "max number of items to read"},
 			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
@@ -103,13 +104,18 @@ func Init(en scm.Env) {
 			t := databases[scm.String(a[0])].Tables[scm.String(a[1])]
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
-			if len(a) > 7 {
-				aggregate = a[7]
-			}
 			if len(a) > 8 {
-				neutral = a[8]
+				aggregate = a[8]
 			}
-			result := t.scan_order(a[2], a[3].([]scm.Scmer), scm.ToInt(a[4]), scm.ToInt(a[5]), a[6], aggregate, neutral)
+			if len(a) > 9 {
+				neutral = a[9]
+			}
+			sortcols := a[3].([]scm.Scmer)
+			sortdirs := make([]bool, len(sortcols))
+			for i, dir := range a[4].([]scm.Scmer) {
+				sortdirs[i] = scm.ToBool(dir)
+			}
+			result := t.scan_order(a[2], sortcols, sortdirs, scm.ToInt(a[5]), scm.ToInt(a[6]), a[7], aggregate, neutral)
 			return result
 		},
 	})

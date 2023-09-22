@@ -16,6 +16,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
+import "sort"
 import "github.com/launix-de/memcp/scm"
 
 /* TODO:
@@ -35,12 +37,34 @@ type shardqueue struct {
 	err scanError
 	mcols []func(uint) scm.Scmer // map column reader
 	scols []func(uint) scm.Scmer // sort criteria column reader
+	sortdirs []bool
+}
+
+// sort interface for shardqueue (local)
+func (s *shardqueue) Len() int {
+	return len(s.items)
+}
+func (s *shardqueue) Less(i, j int) bool {
+	for c := 0; c < len(s.scols); c++ {
+		comparison := scm.Compare(s.scols[c](s.items[i]), s.scols[c](s.items[j]))
+		if (comparison < 0) != s.sortdirs[c] {
+			return true
+		}
+		if (comparison > 0) != s.sortdirs[c] {
+			return false
+		}
+		// otherwise: move on to c++
+	}
+	return false // equal is not less
+}
+func (s *shardqueue) Swap(i, j int) {
+	s.items[i], s.items[j] = s.items[j], s.items[i]
 }
 
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int, limit int, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, offset int, limit int, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 
 	/* analyze condition query */
 	boundaries := extractBoundaries(condition)
@@ -53,6 +77,8 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int
 		total_limit = offset + limit
 	}
 
+	// TODO: index scan??
+
 	q := make([]*shardqueue, 0)
 	q_ := make(chan *shardqueue)
 	rest := 0
@@ -62,10 +88,10 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int
 			defer func () {
 				if r := recover(); r != nil {
 					// fmt.Println("panic during scan:", r, string(debug.Stack()))
-					q_ <- &shardqueue{s, nil, scanError{r}, nil, nil}
+					q_ <- &shardqueue{s, nil, scanError{r}, nil, nil, nil}
 				}
 			}()
-			q_ <- s.scan_order(boundaries, condition, sortcols, total_limit, margs)
+			q_ <- s.scan_order(boundaries, condition, sortcols, sortdirs, total_limit, margs)
 		}(s)
 		rest = rest + 1
 	}
@@ -111,7 +137,7 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int
 	return akkumulator
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, sortcols []scm.Scmer, limit int, margs []scm.Scmer) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, limit int, margs []scm.Scmer) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	// TODO: mergesort sink
@@ -121,6 +147,30 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	cdataset := make([]scm.Scmer, len(cargs))
 
 	// prepare sort criteria
+	result.scols = make([]func(uint) scm.Scmer, len(sortcols))
+	for i, scol := range sortcols {
+		if colname, ok := scol.(string); ok {
+			// naive column sort
+			result.scols[i] = t.ColumnReader(colname)
+		} else if proc, ok := scol.(scm.Proc); ok {
+			// complex lambda columns
+			largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer)))
+			for j, param := range proc.Params.([]scm.Scmer) {
+				largs[j] = t.ColumnReader(string(param.(scm.Symbol)))
+			}
+			result.scols[i] = func(idx uint) scm.Scmer {
+				largs_ := make([]scm.Scmer, len(largs))
+				for i, getter := range largs {
+					// fetch columns used for getter
+					largs_[i] = getter(idx)
+				}
+				// execute getter
+				return scm.Apply(proc, largs_)
+			}
+		} else {
+			panic("unknown sort criteria: " + fmt.Sprint(scol))
+		}
+	}
 
 	// prepare map columns
 	result.mcols = make([]func(uint) scm.Scmer, len(margs))
@@ -180,6 +230,8 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	}
 
 	// and now sort result!
+	result.sortdirs = sortdirs
+	sort.Sort(result)
 	return
 }
 
