@@ -9,23 +9,11 @@ runtime.SetFinalizer(obj, finalizer(obj))
 
 TODO
 ----
+ - parsec parser/scanner
  - SELECT DATABASE()
  - UPDATE & DELETE parsing
  - session-local storage for mysql session state (variables, current schema)
  - per-table persistency settings
- - (scan db tbl condition map reduce neutral) -> aggregates, unordered fetches
- - (ordered_scan db tbl condition map reduce neutral order limit offset) -> items are sorted before given to map; reduce is not parallelized
-   algorithm:
-   	1. parallel select on each shard
-	2. every selected recordId is pushed to a shard-local heap-stack (with orderfunction)
-	3. create a global heap-stack; push the least item of each shard onto that stack
-	4. while items are left on the global stack:
-		* pull from the global stack (and remember from which shard it was)
-		* if !offset--: agg = reduce(agg, map(item))
-		* push the next item that was popped from that shard
-		* if limit is reached, return item
-	--> possibility to optimize by parallelizing map (but limited to limit+offset)
- - (grouped_scan db tbl condition groupfn map reduce null reduce2 null2) -> temp-table
  - temptable -> createtemptable(columns)
  - queryplan builder:
  	-> turn all subqueries into LEFT JOINs
@@ -34,12 +22,11 @@ TODO
 	-> scan generation
  - joint-scans (equi-joins with cached last-index positions)
  - scan -> only "go" those shards that have the value range within (in an optimized data structure because there can be thousands of shards)
- - scm.Verify(expr) -> static code analyzer: exact number of parameters, minimum number of parameters, parameter types (function, dict, string)
  - line numbers and filenames -> wrapper for []Scmer that has to run .Verify??? SYMBOL [debug]
- - documentation (-> structured data from Verify)
- - docker + docker hub
+ - docker hub upload
  - mysql importer
  - plugin concept e.g. for AIs (they will declare new scheme functions)
  - transactions: every delete+insert has a optional txid (or 0 if committed); rebuild only rebuilds up to the last committed insert-item; scans are relative to a txid where items with a non-matching txid are ignored
  - primary key generator
  - system.grant, system.user.all -> allow access for some databases
+ - tables stored in a table?
