@@ -32,9 +32,9 @@ import "github.com/launix-de/memcp/scm"
 type shardqueue struct {
 	shard *storageShard
 	items []uint // TODO: refactor to chan, so we can block generating too much entries
-	// TODO: maybe instead of []uint, store a func->Scmer?
 	err scanError
 	mcols []func(uint) scm.Scmer // map column reader
+	scols []func(uint) scm.Scmer // sort criteria column reader
 }
 
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
@@ -42,16 +42,19 @@ type shardqueue struct {
 // map reduce implementation based on scheme scripts
 func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int, limit int, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 
-	/* analyze query */
+	/* analyze condition query */
 	boundaries := extractBoundaries(condition)
+
+	// prepare map phase (map has to occur late and ordered)
+	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 
 	total_limit := -1
 	if limit >= 0 {
 		total_limit = offset + limit
 	}
 
-	q := make([]shardqueue, 0)
-	q_ := make(chan shardqueue)
+	q := make([]*shardqueue, 0)
+	q_ := make(chan *shardqueue)
 	rest := 0
 	for _, s := range t.Shards { // TODO: replace for loop with a more efficient algo that takes column boundaries to only pick the few of possibly thousands of shards that are within the min-max bounds
 		// parallel scan over shards
@@ -59,41 +62,35 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int
 			defer func () {
 				if r := recover(); r != nil {
 					// fmt.Println("panic during scan:", r, string(debug.Stack()))
-					q_ <- shardqueue{s, nil, scanError{r}, nil}
+					q_ <- &shardqueue{s, nil, scanError{r}, nil, nil}
 				}
 			}()
-			q_ <- s.scan_order(boundaries, condition, sortcols, total_limit)
+			q_ <- s.scan_order(boundaries, condition, sortcols, total_limit, margs)
 		}(s)
 		rest = rest + 1
 	}
-	// prepare map phase (map has to occur late and ordered)
-	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 	// collect all subchans
 	for i := 0; i < rest; i++ {
 		qe := <- q_
 		if qe.err.r != nil {
 			panic(qe) // propagate errors that occur inside inner scan
 		}
-
-		// prepare map columns
-		qe.mcols = make([]func(uint) scm.Scmer, len(margs))
-		for i, arg := range margs {
-			if string(arg.(scm.Symbol)) == "$update" {
-				qe.mcols[i] = func(idx uint) scm.Scmer {
-					return qe.shard.UpdateFunction(idx, true)
-				}
-			} else {
-				qe.mcols[i] = qe.shard.ColumnReader(string(arg.(scm.Symbol)))
-			}
-		}
 		q = append(q, qe) // TODO: heap sink
+	}
+
+	if len(q) > 1 {
+		panic("TODO: unimplemented scan_order of multi-shard tables")
 	}
 
 	// collect values from parallel scan
 	akkumulator := neutral
 	// TODO: do queue polling instead of this naive testing code
-	for _, qx := range q {
-		for _, idx := range qx.items {
+	for len(q) > 0 {
+		qx := q[0] // draw a random queue element
+		if len(qx.items) > 0 {
+			idx := qx.items[0] // draw the smallest element from shard
+			qx.items = qx.items[1:]
+
 			// prepare args for map function
 			mapargs := make([]scm.Scmer, len(margs))
 			for i, reader := range qx.mcols {
@@ -106,17 +103,36 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, offset int
 			if aggregate != nil {
 				akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, value,})
 			}
+		} else {
+			// sub-queue is empty -> remove
+			q = q[1:] // drop queue (TODO: heap-remove instead)
 		}
 	}
 	return akkumulator
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, sortcols []scm.Scmer, limit int) (result shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, sortcols []scm.Scmer, limit int, margs []scm.Scmer) (result *shardqueue) {
+	result = new(shardqueue)
 	result.shard = t
 	// TODO: mergesort sink
 
+	// prepare filter function
 	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
 	cdataset := make([]scm.Scmer, len(cargs))
+
+	// prepare sort criteria
+
+	// prepare map columns
+	result.mcols = make([]func(uint) scm.Scmer, len(margs))
+	for i, arg := range margs {
+		if string(arg.(scm.Symbol)) == "$update" {
+			result.mcols[i] = func(idx uint) scm.Scmer {
+				return t.UpdateFunction(idx, true)
+			}
+		} else {
+			result.mcols[i] = t.ColumnReader(string(arg.(scm.Symbol)))
+		}
+	}
 
 	// main storage
 	ccols := make([]ColumnStorage, len(cargs))
