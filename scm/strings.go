@@ -83,6 +83,19 @@ func init_strings() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		"replace", "replaces all occurances in a string with another string",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"s", "string", "input string"},
+			DeclarationParameter{"find", "string", "search string"},
+			DeclarationParameter{"replace", "string", "replace string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			// string
+			return strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2]))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"split", "splits a string using a separator or space",
 		1, 2,
 		[]DeclarationParameter{

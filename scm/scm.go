@@ -138,7 +138,11 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			}
 			en.Vars[e[1].(Symbol)] = value
 		case "parser": // special form of lambda function
-			value = NewParser(e[1], e[2], en)
+			if len(e) > 2 {
+				value = NewParser(e[1], e[2], en)
+			} else {
+				value = NewParser(e[1], nil, en)
+			}
 		case "lambda":
 			value = Proc{e[1], e[2], en}
 		case "begin":

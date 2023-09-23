@@ -15,6 +15,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+(define sql_single_identifier (parser (or
+	(parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`")) /* with backtick */
+	(parser (define id (regex "[a-zA-Z_][a-zA-Z0-9_]+")) (toLower id)) /* raw -> toLower */
+)))
+
+
 (define parse_sql (lambda (schema s) (begin
 	/* lots of small parsers that can be combined */
 	(define identifier (lambda (s) (match s

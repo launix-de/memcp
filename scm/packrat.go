@@ -37,7 +37,10 @@ func (b *ScmParser) String() string {
 
 func (b *ScmParser) Match(s *packrat.Scanner) *packrat.Node {
 	m := b.Root.Match(s)
-	return &packrat.Node{m.Matched, b, []*packrat.Node{m}}
+	if m == nil {
+		return nil
+	}
+	return &packrat.Node{m.Matched, m.Start, b, []*packrat.Node{m}}
 }
 
 func findVarNodes(node *packrat.Node, en *Env) {
@@ -55,13 +58,19 @@ func findVarNodes(node *packrat.Node, en *Env) {
 func ExtractScmer(n *packrat.Node, en *Env) Scmer {
 	switch parser := n.Parser.(type) {
 		case *ScmParser:
-			// call generator
-			var en2 Env
-			en2.Vars = make(map[Symbol]Scmer)
-			en2.Outer = en
-			en2.Nodefine = true
-			findVarNodes(n.Children[0], &en2)
-			return Eval(parser.Generator, &en2)
+			if parser.Generator == nil {
+				return ExtractScmer(n.Children[0], en)
+			} else {
+				// call generator
+				var en2 Env
+				en2.Vars = make(map[Symbol]Scmer)
+				en2.Outer = en
+				en2.Nodefine = true
+				findVarNodes(n.Children[0], &en2)
+				return Eval(parser.Generator, &en2)
+			}
+		case *packrat.OrParser:
+			return ExtractScmer(n.Children[0], en)
 		case *packrat.KleeneParser:
 			// build list from n.Children
 			result := make([]Scmer, 0, len(n.Children)/2+1)
@@ -97,7 +106,10 @@ func (b *ScmParser) Execute(str string, en *Env) Scmer {
 
 func (b *ScmParserVariable) Match(s *packrat.Scanner) *packrat.Node {
 	m := b.Parser.Match(s)
-	return &packrat.Node{m.Matched, b, []*packrat.Node{m}}
+	if m == nil {
+		return nil
+	}
+	return &packrat.Node{m.Matched, m.Start, b, []*packrat.Node{m}}
 }
 
 
@@ -225,10 +237,10 @@ symbol -> use other parser defined in env
 
 for further details on packrat parsers, take a look at https://github.com/launix-de/go-packrat
 `,
-		2, 2,
+		1, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"syntax", "any", "syntax of the grammar (see docs)"},
-			DeclarationParameter{"generator", "any", "expressions to evaluate. All captured variables are available in the scope."},
+			DeclarationParameter{"generator", "any", "(optional) expressions to evaluate. All captured variables are available in the scope."},
 		}, "func",
 		nil,
 	})
