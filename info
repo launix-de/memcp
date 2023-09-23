@@ -20,7 +20,7 @@ TODO
 	-> merge all join'd tables with the same condition
 	-> join order
 	-> scan generation
- - joint-scans (equi-joins with cached last-index positions)
+ - scan_star (schema table-list join-column-list filter-list map-list map reduce neutral (equi-joins with cached last-index positions)
  - scan -> only "go" those shards that have the value range within (in an optimized data structure because there can be thousands of shards)
  - line numbers and filenames -> wrapper for []Scmer that has to run .Verify??? SYMBOL [debug]
  - docker hub upload
@@ -29,4 +29,4 @@ TODO
  - transactions: every delete+insert has a optional txid (or 0 if committed); rebuild only rebuilds up to the last committed insert-item; scans are relative to a txid where items with a non-matching txid are ignored
  - primary key generator
  - system.grant, system.user.all -> allow access for some databases
- - tables stored in a table?
+ - tables stored in a table? (StorageSCMER)

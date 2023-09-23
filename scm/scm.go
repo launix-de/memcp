@@ -137,6 +137,8 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				en = en.Outer
 			}
 			en.Vars[e[1].(Symbol)] = value
+		case "parser": // special form of lambda function
+			value = NewParser(e[1], e[2], en)
 		case "lambda":
 			value = Proc{e[1], e[2], en}
 		case "begin":
@@ -160,6 +162,8 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			switch p := procedure.(type) {
 			case func(...Scmer) Scmer:
 				return p(args...)
+			case *ScmParser:
+				return p.Execute(String(e[1]), en)
 			case Proc:
 				en2 := Env{make(Vars), p.En, false}
 				switch params := p.Params.(type) {
@@ -223,6 +227,8 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 	switch p := procedure.(type) {
 	case func(...Scmer) Scmer:
 		return p(args...)
+	case *ScmParser:
+		return p.Execute(String(args[0]), &Globalenv)
 	case Proc:
 		en := &Env{make(Vars), p.En, false}
 		switch params := p.Params.(type) {
@@ -460,6 +466,7 @@ Patterns can be any of:
 	init_alu()
 	init_strings()
 	init_list()
+	init_parser()
 }
 
 /* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt

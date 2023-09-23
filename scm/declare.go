@@ -112,7 +112,7 @@ func Validate(source string, val Scmer) string {
 				}
 				// validate params (TODO: exceptions like match??)
 				for i := 1; i < len(v); i++ {
-					if i != 1 || v[0] != Symbol("lambda") {
+					if i != 1 || (v[0] != Symbol("lambda") && v[0] != Symbol("parser")) {
 						typ := Validate(source, v[i])
 						if def != nil {
 							j := i-1 // parameter help

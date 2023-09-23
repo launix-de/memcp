@@ -7,6 +7,7 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/gorilla/websocket v1.5.0
 	github.com/launix-de/go-mysqlstack v0.0.0-20230126065738-28daf61fbef8
+	github.com/launix-de/go-packrat v0.0.0-20201209011859-e85d2ff315e8
 )
 
 require (

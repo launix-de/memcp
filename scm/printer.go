@@ -84,6 +84,12 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 			en2 = en2.Outer
 		}
 		b.WriteString("[unserializable native func]")
+	case *ScmParser:
+		b.WriteString("(parser ")
+		Serialize(b, v.Syntax, glob, glob)
+		b.WriteByte(' ')
+		Serialize(b, v.Generator, en, glob)
+		b.WriteByte(')')
 	case Proc:
 		b.WriteString("(lambda ")
 		Serialize(b, v.Params, glob, glob)
