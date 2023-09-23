@@ -49,11 +49,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
+		(parser '((atom "DATABASE" true) "(" ")") schema)
+		/* TODO: function call */
 		(parser (atom "NULL" true) nil)
 		sql_int
 		sql_string
 		sql_column
-		/* TODO: function call */
 	)))
 
 	(define sql_select (parser '(

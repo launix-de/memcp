@@ -9,8 +9,6 @@ runtime.SetFinalizer(obj, finalizer(obj))
 
 TODO
 ----
- - parsec parser/scanner
- - SELECT DATABASE()
  - UPDATE & DELETE parsing
  - session-local storage for mysql session state (variables, current schema)
  - per-table persistency settings
