@@ -147,7 +147,7 @@ func Init(en scm.Env) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
-			scm.DeclarationParameter{"cols", "list", "list of columns, each '(colname typename dimensions) where dimensions is a list of 0-2 numeric items"},
+			scm.DeclarationParameter{"cols", "list", "list of columns, each '(colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
 			t := CreateTable(scm.String(a[0]), scm.String(a[1]))
@@ -167,7 +167,7 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"createtable", "creates a new database",
+		"droptable", "removes a table",
 		2, 2,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
