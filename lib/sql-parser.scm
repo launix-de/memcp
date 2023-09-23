@@ -49,11 +49,11 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
-		(parser '((define a sql_expression1) (atom "OR" true) (define b sql_expression)) '((quote or) a b))
+		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (cons a b)))
 		sql_expression1
 	)))
 	(define sql_expression1 (parser (or
-		(parser '((define a sql_expression2) (atom "AND" true) (define b sql_expression1)) '((quote and) a b))
+		(parser '((define a sql_expression2) (atom "AND" true) (define b (+ sql_expression2 (atom "AND" true)))) (cons (quote and) (cons a b)))
 		sql_expression2
 	)))
 
