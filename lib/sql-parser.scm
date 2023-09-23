@@ -75,7 +75,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			","))
 			/* TODO: WHERE, GROUP, HAVING, ORDER BY, LIMIT */
 		))
-	) (build_queryplan schema from (merge cols))))
+	) (build_queryplan schema (if (nil? from) '() from) (merge cols))))
 
 	(define sql_insert_into (parser '(
 		(atom "INSERT" true)
