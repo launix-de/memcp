@@ -49,12 +49,37 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
-		(parser '((define a sql_expression) "=" (define b sql_expression)) '((quote equal?) a b))
-		(parser '((define a sql_expression) "+" (define b sql_expression)) '((quote +) a b))
-		(parser '((define a sql_expression) "-" (define b sql_expression)) '((quote -) a b))
-		(parser '((define a sql_expression) "*" (define b sql_expression)) '((quote *) a b))
-		(parser '((define a sql_expression) "/" (define b sql_expression)) '((quote /) a b))
+		(parser '((define a sql_expression1) (atom "OR" true) (define b sql_expression)) '((quote or) a b))
+		sql_expression1
+	)))
+	(define sql_expression1 (parser (or
+		(parser '((define a sql_expression2) (atom "AND" true) (define b sql_expression1)) '((quote and) a b))
+		sql_expression2
+	)))
 
+	(define sql_expression2 (parser (or
+		(parser '((define a sql_expression3) "=" (define b sql_expression2)) '((quote equal?) a b))
+		(parser '((define a sql_expression3) "<=" (define b sql_expression2)) '((quote <=) a b))
+		(parser '((define a sql_expression3) ">=" (define b sql_expression2)) '((quote >=) a b))
+		(parser '((define a sql_expression3) "<" (define b sql_expression2)) '((quote <) a b))
+		(parser '((define a sql_expression3) ">" (define b sql_expression2)) '((quote >) a b))
+		sql_expression3
+	)))
+
+	(define sql_expression3 (parser (or
+		(parser '((define a sql_expression4) "+" (define b sql_expression3)) '((quote +) a b))
+		(parser '((define a sql_expression4) "-" (define b sql_expression3)) '((quote -) a b))
+		sql_expression4
+	)))
+
+	(define sql_expression4 (parser (or
+		(parser '((define a sql_expression5) "*" (define b sql_expression4)) '((quote *) a b))
+		(parser '((define a sql_expression5) "/" (define b sql_expression4)) '((quote /) a b))
+		sql_expression5
+	)))
+
+	(define sql_expression5 (parser (or
+		(parser '("(" (define a sql_expression) ")") a)
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		/* TODO: function call */
 		(parser (atom "NULL" true) nil)
