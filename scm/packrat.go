@@ -96,7 +96,7 @@ func ExtractScmer(n *packrat.Node, en *Env) Scmer {
 }
 
 func (b *ScmParser) Execute(str string, en *Env) Scmer {
-	scanner := packrat.NewScanner(str, true) // TODO: skipWhitespace customizable to skip comments, too
+	scanner := packrat.NewScanner(str, packrat.SkipWhitespaceAndCommentsRegex) // also skip C-style comments as whitespaces (TODO: configurable)
 	node, err := packrat.Parse(b, scanner)
 	if err != nil {
 		panic(err)
