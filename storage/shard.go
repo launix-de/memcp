@@ -97,7 +97,7 @@ func (t *storageShard) Count() uint {
 func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Scmer) scm.Scmer {
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
-		fmt.Println("update/delete", a)
+		//fmt.Println("update/delete", a)
 		t.mu.Lock()
 		t.deletions[idx] = struct{}{} // mark as deleted
 		if len(a) > 0 {

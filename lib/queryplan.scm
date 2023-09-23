@@ -30,7 +30,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 /* condition for update/delete */
 (define build_condition (lambda (schema table condition) (if
 	(nil? condition)
-	'((quote lambda) '() true)
+	'((quote lambda) '() (quote true))
 	(begin
 		(set cols (extract_columns_from_expr condition))
 		(set cols (map cols (lambda (x) (match x '(tblvar col) (symbol col))))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
@@ -50,14 +50,14 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* returns a list of '(tblvar col) */
 	(define extract_columns (lambda (col expr) (match expr
 		'((symbol get_column) tblvar col) '('(tblvar col))
-		(cons sym args) /* function call */ (merge (map args extract_columns)) /* TODO: use collector */
+		(cons sym args) /* function call */ (merge (map args extract_columns_from_expr)) /* TODO: use collector */
 		'()
 	)))
 
 	/* changes (get_column tblvar col) into its counterpart */
 	(define replace_columns (lambda (col expr) (match expr
 		'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
-		(cons sym args) /* function call */ (cons sym (map args replace_columns))
+		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 		expr /* literals */
 	)))
 

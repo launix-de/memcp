@@ -9,7 +9,6 @@ runtime.SetFinalizer(obj, finalizer(obj))
 
 TODO
 ----
- - UPDATE & DELETE parsing
  - session-local storage for mysql session state (variables, current schema)
  - per-table persistency settings
  - temptable -> createtemptable(columns)
@@ -28,3 +27,6 @@ TODO
  - primary key generator
  - system.grant, system.user.all -> allow access for some databases
  - tables stored in a table? (StorageSCMER)
+ - periodic (rebuild)
+ - drop database -> remove files
+ - rebuild shard -> remove old files

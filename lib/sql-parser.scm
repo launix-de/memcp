@@ -50,6 +50,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
 		(parser '((define a sql_expression) "=" (define b sql_expression)) '((quote equal?) a b))
+		(parser '((define a sql_expression) "+" (define b sql_expression)) '((quote +) a b))
+		(parser '((define a sql_expression) "-" (define b sql_expression)) '((quote -) a b))
+		(parser '((define a sql_expression) "*" (define b sql_expression)) '((quote *) a b))
+		(parser '((define a sql_expression) "/" (define b sql_expression)) '((quote /) a b))
 
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		/* TODO: function call */
@@ -79,6 +83,32 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			/* TODO: WHERE, GROUP, HAVING, ORDER BY, LIMIT */
 		))
 	) (build_queryplan schema (if (nil? from) '() from) (merge cols))))
+
+	(define sql_update (parser '(
+		(atom "UPDATE" true)
+		/* TODO: UPDATE tbl FROM tbl, tbl, tbl */
+		(define tbl sql_identifier)
+		(atom "SET" true)
+		(define cols (+ (or
+			/* TODO: tbl.identifier */
+			(parser '((define title sql_identifier) "=" (define e sql_expression)) '(title e))
+		) ","))
+		(? '(
+			(atom "WHERE" true)
+			(define condition sql_expression)
+		))
+	) (begin
+	(set cols (merge cols))
+	'((quote scan)
+		schema
+		tbl
+		(build_condition schema tbl condition)
+		'((quote lambda)
+			(cons (quote $update) (merge (extract_assoc cols (lambda (col expr) (map (extract_columns_from_expr expr) (lambda (x) (match x '(tblvar col) (symbol col))))))))
+			'((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr)))))
+		)
+	)
+	)))
 
 	(define sql_delete (parser '(
 		(atom "DELETE" true)
@@ -131,6 +161,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		sql_select
 		sql_insert_into
 		sql_create_table
+		sql_update
 		sql_delete
 
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote createdatabase) id))
