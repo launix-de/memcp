@@ -31,6 +31,24 @@ type ScmParserVariable struct {
 	Variable Symbol
 }
 
+type UndefinedParser struct { // a parser with forward declaration
+	Parser packrat.Parser // if we finally found
+	En *Env
+	Sym Symbol
+}
+
+func (b *UndefinedParser) Match(s *packrat.Scanner) *packrat.Node {
+	if b.Parser == nil {
+		en2 := b.En.FindRead(b.Sym)
+		val, ok := en2.Vars[b.Sym]
+		if !ok {
+			panic("error parsing parser: variable does not contain a valid parser: " + string(b.Sym))
+		}
+		b.Parser = val.(packrat.Parser)
+	}
+	return b.Parser.Match(s)
+}
+
 func (b *ScmParser) String() string {
 	return "(parser ...)" // fallback generator
 }
@@ -129,7 +147,7 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 				panic("error parsing parser: variable not defined: " + string(n))
 			}
 			if result, ok := en2.Vars[n].(*ScmParser); !ok {
-				panic("error parsing parser: variable does not contain a valid parser: " + string(n))
+				return &UndefinedParser{nil, en, n}
 			} else {
 				return result
 			}

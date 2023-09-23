@@ -49,6 +49,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
+		(parser '((define a sql_expression) "=" (define b sql_expression)) '((quote equal?) a b))
+
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		/* TODO: function call */
 		(parser (atom "NULL" true) nil)
@@ -77,6 +79,17 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			/* TODO: WHERE, GROUP, HAVING, ORDER BY, LIMIT */
 		))
 	) (build_queryplan schema (if (nil? from) '() from) (merge cols))))
+
+	(define sql_delete (parser '(
+		(atom "DELETE" true)
+		(atom "FROM" true)
+		/* TODO: DELETE tbl FROM tbl, tbl, tbl */
+		(define tbl sql_identifier)
+		(? '(
+			(atom "WHERE" true)
+			(define condition sql_expression)
+		))
+	) '((quote scan) schema tbl (build_condition schema tbl condition) '((quote lambda) '((quote $update)) '((quote $update))))))
 
 	(define sql_insert_into (parser '(
 		(atom "INSERT" true)
@@ -118,6 +131,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		sql_select
 		sql_insert_into
 		sql_create_table
+		sql_delete
 
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote createdatabase) id))
 

@@ -15,6 +15,31 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+(define extract_columns_from_expr (lambda (expr) (match expr
+	'((symbol get_column) tblvar col) '('(tblvar col))
+	(cons sym args) /* function call */ (merge (map args extract_columns_from_expr))
+	'()
+)))
+
+(define replace_columns_from_expr (lambda (expr) (match expr
+	'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
+	(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
+	expr /* literals */
+)))
+
+/* condition for update/delete */
+(define build_condition (lambda (schema table condition) (if
+	(nil? condition)
+	'((quote lambda) '() true)
+	(begin
+		(set cols (extract_columns_from_expr condition))
+		(set cols (map cols (lambda (x) (match x '(tblvar col) (symbol col))))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
+
+		/* return lambda for tbl condition */
+		'((quote lambda) cols (replace_columns_from_expr condition))
+	)
+)))
+
 /* build queryplan from parsed query */
 (define build_queryplan (lambda (schema tables fields) (begin
 	/* tables: '('(alias tbl) ...) */
