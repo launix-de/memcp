@@ -60,6 +60,10 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 	}
 	switch v := v.(type) {
 	case []Scmer:
+		if len(v) > 0 && v[0] == Symbol("list") {
+			b.WriteByte('\'')
+			v = v[1:]
+		}
 		b.WriteByte('(')
 		for i, x := range v {
 			if i != 0 {

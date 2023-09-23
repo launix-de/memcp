@@ -39,6 +39,8 @@ func ToBool(v Scmer) bool {
 			return v != 0.0
 		case bool:
 			return v != false
+		case Symbol:
+			return v != Symbol("false") && v != Symbol("nil")
 		default:
 			// []Scmer, native function, lambdas
 			return true
@@ -217,4 +219,15 @@ func init_alu() {
 			return !ToBool(a[0]);
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		"nil?", "returns true if value is nil",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			return a[0] == nil;
+		},
+	})
+	// TODO: number? string? func?
 }

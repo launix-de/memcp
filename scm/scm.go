@@ -167,7 +167,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			case func(...Scmer) Scmer:
 				return p(args...)
 			case *ScmParser:
-				return p.Execute(String(e[1]), en)
+				return p.Execute(String(Eval(e[1], en)), en)
 			case Proc:
 				en2 := Env{make(Vars), p.En, false}
 				switch params := p.Params.(type) {

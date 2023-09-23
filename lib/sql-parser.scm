@@ -15,183 +15,116 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-(define sql_single_identifier (parser (or
+(define sql_identifier_unquoted (parser (define id (regex "[a-zA-Z_][a-zA-Z0-9_]*")) (toLower id))) /* raw -> toLower */
+(define sql_identifier (parser (or
 	(parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`")) /* with backtick */
-	(parser (define id (regex "[a-zA-Z_][a-zA-Z0-9_]+")) (toLower id)) /* raw -> toLower */
+	sql_identifier_unquoted
 )))
 
+(define sql_column (parser (or
+	(parser '((define tbl sql_identifier) "." (define col sql_identifier)) '((quote get_column) tbl col))
+	(parser (define col sql_identifier) '((quote get_column) nil col))
+)))
+
+(define sql_int (parser (define x (regex "[0-9]+")) (simplify x)))
+
+(define sql_string (parser '( "'" (define x (regex "(\\\\'|[^'])*" false false)) "'") (replace x "\'" "'")))
 
 (define parse_sql (lambda (schema s) (begin
-	/* lots of small parsers that can be combined */
-	(define identifier (lambda (s) (match s
-		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) '(id rest)
-		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) '((toLower id) rest)
-		(error (concat "expected identifier, found " s))
-	)))
 
-	(define parenthesis (lambda (s) (match s
-		(regex "(?is)^(?:\\s|\\n)*\((?:\\s|\\n)*(.*)" _ rest) rest
-		(error (concat "expected (, found " s))
-	)))
-
-	(define tabledecl (lambda (s) (match s
-		(concat ")" rest) '() /* TODO: rest??? */
-		rest (match (identifier rest)
-			'(colname rest) (match (identifier rest)
-				'(typename rest) (match rest
-					/* todo: allow white spaces in dimension */
-					(regex "^(?s)\\(([0-9]+),([0-9]+)\\)([^,]*),(.*)" _ dim1 dim2 typeparams rest) (cons '((symbol "list") colname typename '((symbol "list") dim1 dim2) typeparams) (tabledecl rest))
-					(regex "^(?s)\\(([0-9]+),([0-9]+)\\)([^,]*)\)(.*)" _ dim1 dim2 typeparams rest) '('((symbol "list") colname typename '((symbol "list") dim1 dim2) typeparams)) /* TODO: rest */
-					(regex "^(?s)\\(([0-9]+)\\)([^,]*),(.*)" _ dim1 typeparams rest) (cons '((symbol "list") colname typename '((symbol "list") dim1) typeparams) (tabledecl rest))
-					(regex "^(?s)\\(([0-9]+)\\)([^,]*)\)(.*)" _ dim1 typeparams rest) '('((symbol "list") colname typename '((symbol "list") dim1) typeparams)) /* TODO: rest */
-					(regex "^(?s)([^,]*),(.*)" _ typeparams rest) (cons '((symbol "list") colname typename '((symbol "list")) typeparams) (tabledecl rest))
-					(regex "^(?s)([^,]*)\)(.*)" _ typeparams rest) '('((symbol "list") colname typename '((symbol "list")) typeparams)) /* TODO: rest */
-					(error (concat "expected , or ) but found " rest))
-				)
-			)
-		)
-	)))
-
-	/* eat a identifier from string */
-	(define expression (lambda (s) (match s
-		/* constant */
-		(regex "^(-?[0-9]+(?:\\.[0-9*])?)(?:\\s|\\n)*($|[^0-9].*)" _ num rest) (expression_extend (simplify num) rest) /* int constant */
-		(regex "^'([^']*)'(?:\\s|\\n)*(.*)" _ str rest) (expression_extend (concat str) rest) /* string constant; TODO: instead of concat, use a strip-escape helper function */
-		(regex "(?is)^NULL\\b(?:\\s|\\n)*(.*)" _ rest) (expression_extend null rest) /* NULL */
-		/* identifier (TODO: tblalias.identifier) */
-		(regex "(?is)^(?:\\s|\\n)*`(.*)`(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" id) rest)
-		(regex "(?is)^(?:\\s|\\n)*([a-zA-Z_][a-zA-Z_0-9]*)(?:\\s|\\n)*(.*)" _ id rest) (expression_extend '((quote get_column) "*" (toLower id)) rest)
-		/* TODO: function call */
-		/* parenthesis */
-		(concat "(" rest) (match (expression rest) '(expr (concat ")" rest)) '('((quote begin) expr) rest) (error (concat "expected expression found " rest)))
-		(error (concat "could not parse " s))
-	)))
-
-	/* try to find other operators to add to the expression */
-	(define expression_extend (lambda (expr s) (match s
-		/* + - */
-		(regex "^([+\\-])(?:\\s|\\n)*(.*)" _ operator rest)
-			(match (expression rest) '(expr2 rest) '('((symbol operator) expr expr2) rest))
-		/* * / */
-		(regex "^([*\\/])(?:\\s|\\n)*(.*)" _ operator rest)
-			(match (expression rest) '(expr2 rest)
-				(match expr2
-					/* shift down * and / before + and - */
-					'(+ a b) '('((quote +) '((symbol operator) expr a) b) rest)
-					'(- a b) '('((quote -) '((symbol operator) expr a) b) rest)
-					'('((symbol operator) expr expr2) rest)))
-		'(expr s) /* no extension */
-	)))
 
 	/* derive the description of a column from its expression */
 	(define extract_title (lambda (expr) (match expr
-		'((symbol get_column) "*" col) col
+		'((symbol get_column) nil col) col
 		'((symbol get_column) tblvar col) (concat tblvar "." col)
 		(cons sym args) /* function call */ (concat (cons sym (map args extract_title)))
 		(concat expr)
 	)))
 
-	/* compile select */
-	(define select (lambda (rest fields) (begin
-		(define parse_afterexpr (lambda (expr id rest) (begin
-			(define fields (append fields id expr))
-			(match rest
-				/* no FROM */ "" (build_queryplan schema '() fields)
-				/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest fields)
-				/* followed by AS: */ (regex "^(?is)AS(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest) '(id rest) (parse_afterexpr expr id rest) (error (concat "expected identifier after AS, found: " rest)))
-				/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
-					'(tblid rest) (build_queryplan schema '('(tblid schema tblid)) fields)
-					/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
-				) /* TODO: FROM, WHERE, GROUP usw. */
-				/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
-			)
-		)))
-
-		/* after select, there must be an expression or star */
-		(match rest
-			/* select * (TODO: select tbl.*) */
-			(regex "^\\*(?:\\s|\\n)*(.*)" _ rest) (begin
-				(define fields (append fields "*" '((quote get_column_all)))) /* just mark the * so we can replace it later */
-				(match rest
-					/* no FROM */ "" (build_queryplan schema '() fields)
-					/* followed by comma: */ (regex "^(?s),(?:\\s|\\n)*(.*)" _ rest) (select rest fields)
-					/* followed by FROM: */ (regex "^(?is)FROM(?:\\s|\\n)*(.*)" _ rest) (match (identifier rest)
-						'(tblid rest) (build_queryplan schema '('(tblid schema tblid)) fields)
-						/* TODO: FROM () AS tbl | tbl | tbl as alias ... | comma tablelist */
-					) /* TODO: FROM, WHERE, GROUP usw. */
-					/* otherwise */ (error (concat "expected , AS or FROM but found: " rest))
-				)
-			)
-			/* normal expression */
-			(match (expression rest)
-				'(expr rest) (parse_afterexpr expr (extract_title expr) rest)
-				(error (concat "expected expression, found " rest)))
-		)
+	/* merge two arrays into a dict */
+	(define zip_cols (lambda(cols tuple) (match cols
+		(cons col cols) (cons col (cons (car tuple) (zip_cols cols (cdr tuple))))
+		'()
+	)))
+	
+	/* TODO: (expr), a + b, a - b, a * b, a / b */
+	(define sql_expression (parser (or
+		(parser (atom "NULL" true) nil)
+		sql_int
+		sql_string
+		sql_column
+		/* TODO: function call */
 	)))
 
-	/* compile insert */
-	(define parse_insert (lambda (rest) (match (identifier rest)
-		'(tbl rest) (begin
-			(define zip_cols (lambda(cols tuple) (match cols
-				(cons col cols) (cons col (cons (car tuple) (zip_cols cols (cdr tuple))))
-				'()
-			)))
-			(define tuplelist (lambda(tuples tuple rest)(begin
-				(match (expression rest)
-					'(value rest) (match rest
-						(regex "(?is)^,(?:\\s|\\n)*(.*)" _ rest) (tuplelist tuples (append tuple value) rest) /* append value to tuple */
-						(regex "(?is)^\\)(?:\\s|\\n)*,(?:\\s|\\n)*\\((.*)" _ rest) (tuplelist (append tuples (append tuple value)) '() rest) /* move on to next tuple */
-						(concat ")" rest) '((append tuples (append tuple value)) rest) /* finished -> return list of tuples */
-						(error (concat "expected , or ) in column list but found " rest))
-					)
-					(error (concat "expected expression found " rest))
+	(define sql_select (parser '(
+		(atom "SELECT" true)
+		(define cols (+ (or
+			(parser "*" '("*" '((quote get_column) nil "*")))
+			(parser '((define tbl sql_identifier) "." "*") '("*" '((quote get_column) tbl "*")))
+			(parser '((define e sql_expression) (atom "AS" true) (define title sql_identifier)) '(title e))
+			(parser (define e sql_expression) '((extract_title e) e))
+		) ","))
+		(? '(
+			(atom "FROM" true)
+			(define from (+
+				(or
+					/* TODO: inner select as from */
+					(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id tbl))
+					(parser '((define tbl sql_identifier)) '(tbl tbl))
 				)
-			)))
-			(define columnlist (lambda(cols rest)(begin
-				(match (identifier rest)
-					'(col rest) (match rest
-						(concat "," rest) (columnlist (append cols col) rest)
-						(concat ")" rest) (match rest
-							(regex "(?is)^(?:\\s|\\n)*VALUES(?:\\s|\\n)+\\((.*)" _ rest) (match (tuplelist '() '() rest)
-								'(tuples rest) (begin
-									(define cols (append cols col))
-									(merge '('((quote begin)) (map tuples (lambda (tuple) '((quote insert) schema tbl (cons (quote list) (zip_cols cols tuple))))))) /* TODO: what if something is left in rest??? */
-								)
-								(error (concat "expected tuple list but found " rest))
-							)
-							(regex "(?is)^(?:\\s|\\n)*SELECT(?:\\s|\\n)+(.*)" _ rest) (error "TODO: implement INSERT INTO SELECT")
-							(error (concat "expected VALUES or SELECT but found " rest))
-						)
-						(error (concat "expected , or ) in column list but found " rest))
-					)
-					(error (concat "expected identifier found " rest))
-				)
-			)))
-			(match rest
-				(concat "(" rest) (columnlist '() rest)
-				(error (concat "expected ( but found " rest))
-			)
-			/*
-			(print "TODO INSERT " tbl)
-			'((quote insert) schema tbl '((quote list) "bar" 551))
-			*/
-		)
-		(error (concat "expected table name, found " rest))
-	)))
+			","))
+			/* TODO: WHERE, GROUP, HAVING, ORDER BY, LIMIT */
+		))
+	) (build_queryplan schema from (merge cols))))
 
-	/* main compile function -> decide which kind of SQL query it is */
-	(match s
-		(regex "(?s)^\\s*(?m:--.*?$)(.*)" _ rest) /* comment */ (parse_sql schema rest)
-		(concat "\n" rest) (parse_sql schema rest)
-		(regex "(?is)^\\s+(.*)" _ rest) (parse_sql schema rest)
-		(regex "(?is)^CREATE(?:\\s|\\n)+DATABASE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createdatabase") id) (error "expected identifier"))
-		(regex "(?is)^CREATE(?:\\s|\\n)+TABLE(?:\\s|\\n)+(.*)" _ rest) (match (identifier rest) '(id rest) '((symbol "createtable") schema id (cons (symbol "list") (tabledecl (parenthesis rest)))) (error "expected identifier"))
-		(regex "(?is)^SELECT(?:\\s|\\n)+(.*)" _ rest) (select rest '())
-		(regex "(?is)^INSERT(?:\\s|\\n)+INTO(?:\\s|\\n)+(.*)" _ rest) (parse_insert rest)
-		(regex "(?is)^SHOW(?:\\s|\\n)+DATABASES(.*)" _ rest) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema)))))
-		(regex "(?is)^SHOW(?:\\s|\\n)+TABLES(.*)" _ rest) '((quote map) '((quote show) schema) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Table" (quote schema)))))
-		/* TODO: drop database, table */
-		(error (concat "unknown SQL syntax: " s))
-	)
+	(define sql_insert_into (parser '(
+		(atom "INSERT" true)
+		(atom "INTO" true)
+		(define tbl sql_identifier)
+		"("
+		(define coldesc (*
+			sql_identifier
+		","))
+		")"
+		(atom "VALUES" true)
+		(define datasets (* (parser '(
+			"("
+			(define dataset (* sql_expression ","))
+			")"
+		) dataset) ","))
+	) (cons (quote begin) (map (map datasets (lambda (dataset) (zip_cols coldesc dataset))) (lambda (dataset) '((quote insert) schema tbl (cons (quote list) dataset)))))))
+
+	(define sql_create_table (parser '(
+		(atom "CREATE" true)
+		(atom "TABLE" true)
+		(define id sql_identifier)
+		"("
+		(define cols (* (parser '(
+			(define col sql_identifier)
+			(define type sql_identifier)
+			(define dimensions (or
+				(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
+				(parser '("(" (define a sql_int) ")") '((quote list) a))
+				(parser empty '((quote list)))
+			))
+			(define typeparams (regex ".*?")) /* TODO: rest */
+		) '((quote list) col type dimensions typeparams)) ","))
+		")"
+	) '((quote createtable) schema id (cons (quote list) cols))))
+
+	/* TODO: ignore comments wherever they occur */
+	((parser (or
+		sql_select
+		sql_insert_into
+		sql_create_table
+
+		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote createdatabase) id))
+
+		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
+		(parser '((atom "SHOW" true) (atom "TABLES" true)) '((quote map) '((quote show) schema) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Table" (quote schema))))))
+
+		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define id sql_identifier)) '((quote droptable) schema id))
+	)) s)
 )))
 
