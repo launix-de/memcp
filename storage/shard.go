@@ -21,6 +21,7 @@ import "fmt"
 import "sync"
 import "strings"
 import "reflect"
+import "runtime"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
@@ -200,7 +201,14 @@ func (t *storageShard) rebuild() *storageShard {
 
 	if maxInsertIndex > 0 || len(deletions) > 0 {
 		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
-		// TODO: SetFinalizer to old shard to delete files from disk
+		// SetFinalizer to old shard to delete files from disk
+		runtime.SetFinalizer(t, func (t *storageShard) {
+			for _, col := range t.t.Columns {
+				// delete column from file
+				os.Remove(t.t.schema.path + t.uuid.String() + "-" + col.Name)
+			}
+		})
+
 		var b strings.Builder
 		b.WriteString("rebuilding shard for table ")
 		b.WriteString(t.t.Name)

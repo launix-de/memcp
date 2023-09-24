@@ -5,8 +5,6 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 // available functions: Flush, Unmap
 // ist dann ein byte[]
 
-runtime.SetFinalizer(obj, finalizer(obj))
-
 TODO
 ----
  - session-local storage for mysql session state (variables, current schema)
@@ -29,4 +27,3 @@ TODO
  - tables stored in a table? (StorageSCMER)
  - periodic (rebuild)
  - drop database -> remove files
- - rebuild shard -> remove old files
