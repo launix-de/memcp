@@ -16,10 +16,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "runtime/debug"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
 	r interface{}
+	stack string
 }
 
 /* TODO:
@@ -41,7 +43,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 			defer func () {
 				if r := recover(); r != nil {
 					//fmt.Println("panic during scan:", r, string(debug.Stack()))
-					values <- scanError{r}
+					values <- scanError{r, string(debug.Stack())}
 				}
 			}()
 			values <- s.scan(boundaries, condition, callback, aggregate, neutral)
@@ -60,7 +62,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 			intermediate := <- values
 			switch x := intermediate.(type) {
 				case scanError:
-					panic(x.r) // cascade panic
+					panic(x) // cascade panic
 				default:
 					akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
 			}
@@ -73,7 +75,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 			}
 			switch x := (<- values).(type) { // eat up values and forget
 				case scanError:
-					panic(x.r) // cascade panic
+					panic(x) // cascade panic
 			}
 			rest = rest - 1
 		}

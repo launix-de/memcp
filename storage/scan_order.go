@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "sort"
+import "runtime/debug"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
@@ -114,7 +115,7 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 			defer func () {
 				if r := recover(); r != nil {
 					// fmt.Println("panic during scan:", r, string(debug.Stack()))
-					q_ <- &shardqueue{s, nil, scanError{r}, nil, nil, nil}
+					q_ <- &shardqueue{s, nil, scanError{r, string(debug.Stack())}, nil, nil, nil}
 				}
 			}()
 			q_ <- s.scan_order(boundaries, condition, sortcols, sortdirs, total_limit, margs)
@@ -125,7 +126,7 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 	for i := 0; i < rest; i++ {
 		qe := <- q_
 		if qe.err.r != nil {
-			panic(qe) // propagate errors that occur inside inner scan
+			panic(qe.err) // propagate errors that occur inside inner scan
 		}
 		if len(qe.items) > 0 {
 			heap.Push(&q, qe) // add to heap
