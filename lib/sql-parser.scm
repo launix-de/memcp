@@ -105,9 +105,13 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					(parser '((define tbl sql_identifier)) '(tbl tbl))
 				)
 			","))
-			/* TODO: WHERE, GROUP, HAVING, ORDER BY, LIMIT */
+			(? '(
+				(atom "WHERE" true)
+				(define condition sql_expression)
+			))
+			/* TODO: GROUP, HAVING, ORDER BY, LIMIT */
 		))
-	) (build_queryplan schema (if (nil? from) '() from) (merge cols))))
+	) (build_queryplan schema (if (nil? from) '() from) (merge cols) condition)))
 
 	(define sql_update (parser '(
 		(atom "UPDATE" true)

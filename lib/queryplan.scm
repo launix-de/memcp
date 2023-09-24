@@ -41,7 +41,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 )))
 
 /* build queryplan from parsed query */
-(define build_queryplan (lambda (schema tables fields) (begin
+(define build_queryplan (lambda (schema tables fields condition) (begin
 	/* tables: '('(alias tbl) ...) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* TODO: WHERE, GROUP, HAVING, ORDER, LIMIT */
@@ -81,7 +81,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(match tables
 			(cons '(alias tbl) tables) /* outer scan */
 				'((quote scan) schema tbl
-					'((quote lambda) '() (quote true)) /* TODO: filter */
+					(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 					/* todo filter columns for alias */
 					'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
 					/* TODO: reduce+neutral */)
