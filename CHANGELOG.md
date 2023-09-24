@@ -2,6 +2,7 @@
 =====
 
 - Parsec parsers
+- implement SELECT, UPDATE, DELETE with WHERE
 
 0.1.2
 =====
