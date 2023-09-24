@@ -161,7 +161,7 @@ func init_list() {
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list that has to be reduced"},
 			DeclarationParameter{"reduce", "func", "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item"},
-			DeclarationParameter{"neutral", "func", "(optional) initial value of the accumulator, defaults to nil"},
+			DeclarationParameter{"neutral", "any", "(optional) initial value of the accumulator, defaults to nil"},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			// arr, reducefn(a, b), [neutral]
