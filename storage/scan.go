@@ -112,7 +112,9 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 		}
 	}
 	// remember current insert status (so don't scan things that are inserted during map)
+	t.mu.RLock() // lock whole shard for reading since we frequently read deletions
 	maxInsertIndex := len(t.inserts)
+
 	// iterate over items (indexed)
 	for idx := range t.iterateIndex(boundaries) {
 		if _, ok := t.deletions[idx]; ok {
@@ -135,10 +137,12 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 				mdataset[i] = k.getValue(idx)
 			}
 		}
+		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating
 		intermediate := scm.Apply(callback, mdataset)
 		if aggregate != nil {
 			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
 		}
+		t.mu.RLock()
 	}
 
 	// delta storage (unindexed)
@@ -169,5 +173,6 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
 		}
 	}
+	t.mu.RUnlock() // finished reading
 	return akkumulator
 }

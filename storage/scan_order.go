@@ -239,7 +239,9 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 		}
 	}
 	// remember current insert status (so don't scan things that are inserted during map)
+	t.mu.RLock() // lock whole shard for reading since we frequently read deletions
 	maxInsertIndex := len(t.inserts)
+
 	// iterate over items (indexed)
 	for idx := range t.iterateIndex(boundaries) {
 		if _, ok := t.deletions[idx]; ok {
@@ -273,6 +275,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 
 		result.items = append(result.items, t.main_count + uint(idx))
 	}
+	t.mu.RUnlock() // finished reading
 
 	// and now sort result!
 	result.sortdirs = sortdirs

@@ -35,7 +35,7 @@ type storageShard struct {
 	// delta storage
 	inserts []dataset // items added to storage
 	deletions map[uint]struct{} // items removed from main or inserts (based on main_count + i)
-	mu sync.Mutex // delta write lock
+	mu sync.RWMutex // delta write lock (working on main storage is lock free)
 	next *storageShard
 	// indexes
 	indexes []*StorageIndex
@@ -98,7 +98,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
-		t.mu.Lock()
+		t.mu.Lock() // write lock
 		t.deletions[idx] = struct{}{} // mark as deleted
 		if len(a) > 0 {
 			// update statement -> also perform an insert
@@ -117,13 +117,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				if idx < t.main_count {
 					d[i+1] = v.getValue(idx)
 				} else {
-					row := t.inserts[idx - t.main_count]
-					d[i+1] = nil
-					for j := 0; j < len(row); j += 2 {
-						if row[j] == k { // matching column name in insert dict
-							d[i+1] = row[j+1]
-						}
-					}
+					d[i+1] = t.inserts[idx - t.main_count].Get(k)
 				}
 				skip_set:
 				i += 2
@@ -189,15 +183,22 @@ func (t *storageShard) Insert(d dataset) {
 
 // rebuild main storage from main+delta
 func (t *storageShard) rebuild() *storageShard {
+
 	// concurrency! when rebuild is run in background, inserts and deletions into and from old delta storage must be duplicated to the ongoing process
-	t.mu.Lock()
+	t.mu.RLock()
 	result := new(storageShard)
 	result.t = t.t
 	t.next = result
 	maxInsertIndex := len(t.inserts)
-	t.mu.Unlock()
+	// copy-freeze deletions so we don't have to lock anything
+	deletions := make(map[uint]struct{})
+	for k, v := range t.deletions {
+		deletions[k] = v
+	}
+	t.mu.RUnlock()
 	// from now on, we can rebuild with no hurry; inserts and update/deletes on the previous shard will propagate to us, too
-	if maxInsertIndex > 0 || len(t.deletions) > 0 {
+
+	if maxInsertIndex > 0 || len(deletions) > 0 {
 		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
 		// TODO: SetFinalizer to old shard to delete files from disk
 		var b strings.Builder
@@ -223,7 +224,7 @@ func (t *storageShard) rebuild() *storageShard {
 				// scan main
 				for idx := uint(0); idx < t.main_count; idx++ {
 					// check for deletion
-					if _, ok := t.deletions[idx]; ok {
+					if _, ok := deletions[idx]; ok {
 						continue
 					}
 					// scan
@@ -233,7 +234,7 @@ func (t *storageShard) rebuild() *storageShard {
 				// scan delta
 				for idx := 0; idx < maxInsertIndex; idx++ {
 					// check for deletion
-					if _, ok := t.deletions[t.main_count + uint(idx)]; ok {
+					if _, ok := deletions[t.main_count + uint(idx)]; ok {
 						continue
 					}
 					// scan
@@ -255,7 +256,7 @@ func (t *storageShard) rebuild() *storageShard {
 			// build main
 			for idx := uint(0); idx < t.main_count; idx++ {
 				// check for deletion
-				if _, ok := t.deletions[idx]; ok {
+				if _, ok := deletions[idx]; ok {
 					continue
 				}
 				// build
@@ -265,7 +266,7 @@ func (t *storageShard) rebuild() *storageShard {
 			// build delta
 			for idx, item := range t.inserts {
 				// check for deletion
-				if _, ok := t.deletions[t.main_count + uint(idx)]; ok {
+				if _, ok := deletions[t.main_count + uint(idx)]; ok {
 					continue
 				}
 				// build
@@ -299,7 +300,7 @@ func (t *storageShard) rebuild() *storageShard {
 		result.columns = t.columns
 		result.main_count = t.main_count
 		result.inserts = t.inserts
-		result.deletions = t.deletions
+		result.deletions = deletions
 		result.indexes = t.indexes
 	}
 	return result
