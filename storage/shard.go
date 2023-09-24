@@ -114,7 +114,17 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 						goto skip_set
 					}
 				}
-				d[i+1] = v.getValue(idx)
+				if idx < t.main_count {
+					d[i+1] = v.getValue(idx)
+				} else {
+					row := t.inserts[idx - t.main_count]
+					d[i+1] = nil
+					for j := 0; j < len(row); j += 2 {
+						if row[j] == k { // matching column name in insert dict
+							d[i+1] = row[j+1]
+						}
+					}
+				}
 				skip_set:
 				i += 2
 			}
