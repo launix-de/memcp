@@ -90,6 +90,7 @@ func (db *database) rebuild() {
 func CreateDatabase(schema string) {
 	databaselock.Lock()
 	if _, ok := databases[schema]; ok {
+		databaselock.Unlock()
 		panic("Database " + schema + " already exists")
 	}
 	db := new(database)
@@ -102,10 +103,15 @@ func CreateDatabase(schema string) {
 }
 
 func DropDatabase(schema string) {
+	db, ok := databases[schema]
+	if !ok {
+		panic("Database " + schema + " does not exist")
+	}
 	databaselock.Lock()
 	delete(databases, schema)
 	databaselock.Unlock()
-	// TODO: remove folder of that database
+	// remove folder of that database
+	os.RemoveAll(db.path)
 }
 
 func CreateTable(schema, name string) *table {
@@ -129,14 +135,22 @@ func CreateTable(schema, name string) *table {
 }
 
 func DropTable(schema, name string) {
-	// TODO: remove foreign keys etc.
 	db, ok := databases[schema]
 	if !ok {
 		panic("Database " + schema + " does not exist")
+	}
+	t, ok := db.Tables[name]
+	if !ok {
+		panic("Table " + schema + "." + name + " does not exist")
 	}
 	db.schemalock.Lock()
 	delete(db.Tables, name)
 	db.save()
 	db.schemalock.Unlock()
+
+	// delete shard files from disk
+	for _, s := range t.Shards {
+		s.RemoveFromDisk()
+	}
 }
 

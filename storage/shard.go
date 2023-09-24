@@ -180,7 +180,12 @@ func (t *storageShard) Insert(d dataset) {
 	// TODO: before/after insert trigger
 }
 
-/* TODO: Delete; Delete must also lock next OR translate delete indexes */
+func (t *storageShard) RemoveFromDisk() {
+	for _, col := range t.t.Columns {
+		// delete column from file
+		os.Remove(t.t.schema.path + t.uuid.String() + "-" + col.Name)
+	}
+}
 
 // rebuild main storage from main+delta
 func (t *storageShard) rebuild() *storageShard {
@@ -203,10 +208,7 @@ func (t *storageShard) rebuild() *storageShard {
 		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
 		// SetFinalizer to old shard to delete files from disk
 		runtime.SetFinalizer(t, func (t *storageShard) {
-			for _, col := range t.t.Columns {
-				// delete column from file
-				os.Remove(t.t.schema.path + t.uuid.String() + "-" + col.Name)
-			}
+			t.RemoveFromDisk()
 		})
 
 		var b strings.Builder
