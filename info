@@ -26,3 +26,4 @@ TODO
  - system.grant, system.user.all -> allow access for some databases
  - tables stored in a table? (StorageSCMER)
  - periodic (rebuild)
+ - plugins: go build --buildmode shared -linkshared std in a subfolder

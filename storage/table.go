@@ -35,6 +35,15 @@ type table struct {
 
 	// storage
 	Shards []*storageShard
+	// TODO: data structure to per-column value-based shard map
+	// every shard has a min-value and a max-value
+	// problem: naive approach needs len(Shards)² complexity
+	// solution: two shard lists: one sorted by min-value, one sorted by max-value; also every shard remembers its max-index in the min-list and min-index in max list
+	// where x > value -> peek value from shard list, iterate shardlist upwards
+	// where x = value -> only peek the range
+	// TODO: move rows between shards when values get too widespread; triggered on equi-joins
+	// the rebalance algorithm is run on a list of shards (mostly the range of shards on a equi-join; goal is to minimize the range to 1)
+	// rebalance sorts all values of a column in an index (sharnr+recordid), then moves all items that would change shardid via delete+insert command
 }
 
 const max_shardsize = 65536 // dont overload the shards to get a responsive parallel full table scan
