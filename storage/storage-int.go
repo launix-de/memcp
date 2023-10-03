@@ -106,6 +106,10 @@ func toInt(x scm.Scmer) int64 {
 	}
 }
 
+func (s *StorageInt) Size() uint {
+	return 8 * uint(len(s.chunk)) + 64 // management overhead
+}
+
 func (s *StorageInt) String() string {
 	if s.hasNull {
 		return fmt.Sprintf("int[%d]NULL", s.bitsize)
@@ -114,15 +118,15 @@ func (s *StorageInt) String() string {
 	}
 }
 
-func (s *StorageInt) getValue(i uint) scm.Scmer {
-	v := s.getValueUInt(i)
+func (s *StorageInt) GetValue(i uint) scm.Scmer {
+	v := s.GetValueUInt(i)
 	if s.hasNull && v == s.null {
 		return nil
 	}
 	return float64(int64(v) + s.offset)
 }
 
-func (s *StorageInt) getValueUInt(i uint) uint64 {
+func (s *StorageInt) GetValueUInt(i uint) uint64 {
 	bitpos := i * uint(s.bitsize)
 
 	v := s.chunk[bitpos / 64] << (bitpos % 64) // align to leftmost position

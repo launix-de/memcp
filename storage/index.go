@@ -157,8 +157,8 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 				// sort indexes
 				sort.Slice(tmp, func (i, j int) bool {
 					for _, c := range cols {
-						a := c.getValue(tmp[i])
-						b := c.getValue(tmp[j])
+						a := c.GetValue(tmp[i])
+						b := c.GetValue(tmp[j])
 						if scmerLess(a, b) {
 							return true // less
 						} else if !reflect.DeepEqual(a, b) {
@@ -185,7 +185,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 		i, found := sort.Find(s.t.main_count, func (idx int) int {
 			for i, c := range cols {
 				a := lower[i]
-				b := c.getValue(uint(idx))
+				b := c.GetValue(uint(idx))
 				if scmerLess(a, b) {
 					return -1 // less
 				} else if !reflect.DeepEqual(a, b) {
@@ -198,10 +198,10 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 		*/
 		// bisect where the lower bound is found
 		idx := sort.Search(int(s.t.main_count), func (idx int) bool {
-			idx2 := uint(int64(s.sortedItems.getValueUInt(uint(idx))) + s.sortedItems.offset)
+			idx2 := uint(int64(s.sortedItems.GetValueUInt(uint(idx))) + s.sortedItems.offset)
 			for i, c := range cols {
 				a := lower[i]
-				b := c.getValue(uint(idx2))
+				b := c.GetValue(uint(idx2))
 				if scmerLess(a, b) {
 					return true // less
 				} else if !reflect.DeepEqual(a, b) {
@@ -218,10 +218,10 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 			if uint(idx) >= s.t.main_count {
 				break
 			}
-			idx2 := uint(int64(s.sortedItems.getValueUInt(uint(idx))) + s.sortedItems.offset)
+			idx2 := uint(int64(s.sortedItems.GetValueUInt(uint(idx))) + s.sortedItems.offset)
 			// check for index bounds
 			for i, c := range cols {
-				a := c.getValue(uint(idx2))
+				a := c.GetValue(uint(idx2))
 				if i == len(cols) - 1 {
 					if scmerLess(upperLast, a) {
 						break iteration // stop traversing when we exceed the < part of last col

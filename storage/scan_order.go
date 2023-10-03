@@ -249,7 +249,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 		}
 		// check condition
 		for i, k := range ccols { // iterate over columns
-			cdataset[i] = k.getValue(idx)
+			cdataset[i] = k.GetValue(idx)
 		}
 		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
 			continue // condition did not match

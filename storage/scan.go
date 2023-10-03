@@ -122,7 +122,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 		}
 		// check condition
 		for i, k := range ccols { // iterate over columns
-			cdataset[i] = k.getValue(idx)
+			cdataset[i] = k.GetValue(idx)
 		}
 		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
 			continue // condition did not match
@@ -134,7 +134,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 				// update/delete function
 				mdataset[i] = t.UpdateFunction(idx, true)
 			} else {
-				mdataset[i] = k.getValue(idx)
+				mdataset[i] = k.GetValue(idx)
 			}
 		}
 		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating

@@ -42,6 +42,10 @@ type StorageString struct {
 	laststr string
 }
 
+func (s *StorageString) Size() uint {
+	return s.values.Size() + 8 + uint(len(s.dictionary)) + 24 + s.starts.Size() + s.lens.Size() + 8*6
+}
+
 func (s *StorageString) String() string {
 	if s.nodict {
 		return fmt.Sprintf("string-buffer[%d]", len(s.dictionary))
@@ -94,21 +98,21 @@ func (s *StorageString) Deserialize(f *os.File) uint {
 	return uint(l)
 }
 
-func (s *StorageString) getValue(i uint) scm.Scmer {
+func (s *StorageString) GetValue(i uint) scm.Scmer {
 	if s.nodict {
-		start := uint64(int64(s.starts.getValueUInt(i)) + s.starts.offset)
+		start := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
 		if s.starts.hasNull && start == s.starts.null {
 			return nil
 		}
-		len_ := uint64(int64(s.lens.getValueUInt(i)) + s.lens.offset)
+		len_ := uint64(int64(s.lens.GetValueUInt(i)) + s.lens.offset)
 		return s.dictionary[start:start+len_]
 	} else {
-		idx := uint(int64(s.values.getValueUInt(i)) + s.values.offset)
+		idx := uint(int64(s.values.GetValueUInt(i)) + s.values.offset)
 		if s.values.hasNull && idx == uint(s.values.null) {
 			return nil
 		}
-		start := int64(s.starts.getValueUInt(idx)) + s.starts.offset
-		len_ := int64(s.lens.getValueUInt(idx)) + s.lens.offset
+		start := int64(s.starts.GetValueUInt(idx)) + s.starts.offset
+		len_ := int64(s.lens.GetValueUInt(idx)) + s.lens.offset
 		return s.dictionary[start:start+len_]
 	}
 }

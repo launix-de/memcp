@@ -26,14 +26,16 @@ import "github.com/launix-de/memcp/scm"
 
 // THE basic storage pattern
 type ColumnStorage interface {
-	getValue(uint) scm.Scmer // read function
+	// info
+	GetValue(uint) scm.Scmer // read function
 	String() string // self-description
+	Size() uint // stat
+
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
 	// analyze
 	prepare()
 	scan(uint, scm.Scmer)
 	proposeCompression(i uint) ColumnStorage
-
 	// store
 	init(uint)
 	build(uint, scm.Scmer)
@@ -291,6 +293,22 @@ func PrintMemUsage() string {
         // For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
         b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC))
+
+	databaselock.RLock()
+	for _, db := range databases {
+		var dsize uint
+		b.WriteString("\n\n" + db.Name + "\n======\nTable                    \tColumns\tShards\tSize/Bytes")
+		for _, t := range db.Tables {
+			var size uint = 10*8 + 32 * uint(len(t.Columns))
+			for _, s := range t.Shards {
+				size += s.Size()
+			}
+			b.WriteString(fmt.Sprintf("\n%-25s\t%d\t%d\t%d", t.Name, len(t.Columns), len(t.Shards), size));
+			dsize += size
+		}
+		b.WriteString(fmt.Sprintf("\n= %d bytes", dsize));
+	}
+	databaselock.RUnlock()
 	return b.String()
 }
 

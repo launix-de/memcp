@@ -25,10 +25,10 @@ type database struct {
 	Name string `json:"name"`
 	path string `json:"-"`
 	Tables map[string]*table `json:"tables"`
-	schemalock sync.Mutex `json:"-"`
+	schemalock sync.RWMutex `json:"-"` // TODO: rw-locks for schemalock
 }
 var databases map[string]*database = make(map[string]*database)
-var databaselock sync.Mutex
+var databaselock sync.RWMutex
 var Basepath string = "data"
 
 func LoadDatabases() {
@@ -103,11 +103,12 @@ func CreateDatabase(schema string) {
 }
 
 func DropDatabase(schema string) {
+	databaselock.Lock()
 	db, ok := databases[schema]
 	if !ok {
+		databaselock.Unlock()
 		panic("Database " + schema + " does not exist")
 	}
-	databaselock.Lock()
 	delete(databases, schema)
 	databaselock.Unlock()
 	// remove folder of that database

@@ -34,6 +34,11 @@ type StorageSCMER struct {
 	last1, last2 int64 // sequence statistics
 }
 
+func (s *StorageSCMER) Size() uint {
+	// ! size of Scmer values is not considered
+	return uint(len(s.values)) * 16 + 6*8
+}
+
 func (s *StorageSCMER) String() string {
 	return "SCMER"
 }
@@ -65,7 +70,7 @@ func (s *StorageSCMER) Deserialize(f *os.File) uint {
 	return uint(l)
 }
 
-func (s *StorageSCMER) getValue(i uint) scm.Scmer {
+func (s *StorageSCMER) GetValue(i uint) scm.Scmer {
 	return s.values[i]
 }
 

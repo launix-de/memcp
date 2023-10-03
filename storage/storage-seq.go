@@ -36,6 +36,10 @@ type StorageSeq struct {
 	lastValueFirst bool
 }
 
+func (s *StorageSeq) Size() uint {
+	return s.recordId.Size() + s.start.Size() + s.stride.Size() + 4*8
+}
+
 func (s *StorageSeq) String() string {
 	return fmt.Sprintf("seq[%dx %s/%s]", s.seqCount, s.start.String(), s.stride.String())
 }
@@ -67,19 +71,19 @@ func (s *StorageSeq) Deserialize(f *os.File) uint {
 	return uint(l)
 }
 
-func (s *StorageSeq) getValue(i uint) scm.Scmer {
+func (s *StorageSeq) GetValue(i uint) scm.Scmer {
 	// bisect to the correct index where to find (lowest idx to find our sequence)
 	idx := sort.Search(int(s.seqCount), func (idx int) bool {
-		recid := int64(s.recordId.getValueUInt(uint(idx))) + s.recordId.offset
+		recid := int64(s.recordId.GetValueUInt(uint(idx))) + s.recordId.offset
 		return int64(i) < recid // return true as long as we are bigger than searched index
 	}) - 1
 	var value, stride int64
-	value = int64(s.start.getValueUInt(uint(idx))) + s.start.offset
+	value = int64(s.start.GetValueUInt(uint(idx))) + s.start.offset
 	if s.start.hasNull && value == int64(s.start.null) {
 		return nil
 	}
-	stride = int64(s.stride.getValueUInt(uint(idx))) + s.stride.offset
-	recid := int64(s.recordId.getValueUInt(uint(idx))) + s.recordId.offset
+	stride = int64(s.stride.GetValueUInt(uint(idx))) + s.stride.offset
+	recid := int64(s.recordId.GetValueUInt(uint(idx))) + s.recordId.offset
 	return float64(value + int64(int64(i) - recid) * stride)
 
 }
@@ -191,7 +195,7 @@ func (s *StorageSeq) finish() {
 
 	/* debug output of the sequence:
 	for i := uint(0); i < s.seqCount; i++ {
-		fmt.Println(s.recordId.getValue(i),":",s.start.getValue(i),":",s.stride.getValue(i))
+		fmt.Println(s.recordId.GetValue(i),":",s.start.GetValue(i),":",s.stride.GetValue(i))
 	}*/
 }
 func (s *StorageSeq) proposeCompression(i uint) ColumnStorage {

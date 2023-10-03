@@ -42,6 +42,18 @@ type storageShard struct {
 	indexes []*StorageIndex
 }
 
+func (s *storageShard) Size() uint {
+	var result uint = 14*8
+	s.mu.RLock()
+	for _, c := range s.columns {
+		result += c.Size()
+	}
+	s.mu.RUnlock()
+	result += uint(len(s.deletions)) * 8 // approximation of delete map
+	result += uint(len(s.inserts)) * 128 // heuristic
+	return result
+}
+
 func (u *storageShard) MarshalJSON() ([]byte, error) {
 	return json.Marshal(u.uuid.String())
 }
@@ -116,7 +128,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					}
 				}
 				if idx < t.main_count {
-					d[i+1] = v.getValue(idx)
+					d[i+1] = v.GetValue(idx)
 				} else {
 					d[i+1] = t.inserts[idx - t.main_count].Get(k)
 				}
@@ -156,7 +168,7 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 	}
 	return func(idx uint) scm.Scmer {
 		if idx < t.main_count {
-			return cstorage.getValue(idx)
+			return cstorage.GetValue(idx)
 		} else {
 			item := t.inserts[idx - t.main_count]
 			for i := 0; i < len(item); i += 2 {
@@ -238,7 +250,7 @@ func (t *storageShard) rebuild() *storageShard {
 						continue
 					}
 					// scan
-					newcol.scan(i, c.getValue(idx))
+					newcol.scan(i, c.GetValue(idx))
 					i++
 				}
 				// scan delta
@@ -270,7 +282,7 @@ func (t *storageShard) rebuild() *storageShard {
 					continue
 				}
 				// build
-				newcol.build(i, c.getValue(idx))
+				newcol.build(i, c.GetValue(idx))
 				i++
 			}
 			// build delta

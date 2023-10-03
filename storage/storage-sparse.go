@@ -26,6 +26,10 @@ type StorageSparse struct {
 	values map[uint]scm.Scmer
 }
 
+func (s *StorageSparse) Size() uint {
+	return 8 + 24 * uint(len(s.values)) // heuristic
+}
+
 func (s *StorageSparse) String() string {
 	return "SCMER-sparse"
 }
@@ -62,7 +66,7 @@ func (s *StorageSparse) Deserialize(f *os.File) uint {
 	return uint(l)
 }
 
-func (s *StorageSparse) getValue(i uint) scm.Scmer {
+func (s *StorageSparse) GetValue(i uint) scm.Scmer {
 	return s.values[i]
 }
 

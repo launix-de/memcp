@@ -26,16 +26,19 @@ type StoragePrefix struct {
 	prefixdictionary []string // pref
 	values StorageString // only one depth (but can be cascaded!)
 }
+func (s *StoragePrefix) Size() uint {
+	return s.prefixes.Size() + 24 + s.values.Size()
+}
 
 func (s *StoragePrefix) String() string {
 	return fmt.Sprintf("prefix[%s]-%s", s.prefixdictionary[1], s.values.String())
 }
 
-func (s *StoragePrefix) getValue(i uint) scm.Scmer {
-	innerval := s.values.getValue(i)
+func (s *StoragePrefix) GetValue(i uint) scm.Scmer {
+	innerval := s.values.GetValue(i)
 	switch v := innerval.(type) {
 		case string:
-			return s.prefixdictionary[int64(s.prefixes.getValueUInt(i)) + s.prefixes.offset] + v // append prefix
+			return s.prefixdictionary[int64(s.prefixes.GetValueUInt(i)) + s.prefixes.offset] + v // append prefix
 		case nil:
 			return nil
 		default:

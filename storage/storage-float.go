@@ -27,6 +27,10 @@ type StorageFloat struct {
 	values []float64
 }
 
+func (s *StorageFloat) Size() uint {
+	return 8 * uint(len(s.values)) + 24 /* a slice */
+}
+
 func (s *StorageFloat) String() string {
 	return "float64"
 }
@@ -60,7 +64,7 @@ func (s *StorageFloat) Deserialize(f *os.File) uint {
 	return uint(l)
 }
 
-func (s *StorageFloat) getValue(i uint) scm.Scmer {
+func (s *StorageFloat) GetValue(i uint) scm.Scmer {
 	// NULL is encoded as NaN in SQL
 	if math.IsNaN(s.values[i]) {
 		return nil
