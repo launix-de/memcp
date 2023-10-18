@@ -40,6 +40,11 @@ func String(v Scmer) string {
 		return fmt.Sprint(v)
 	}
 }
+func SerializeToString(v Scmer, en *Env, glob *Env) string {
+	var b bytes.Buffer
+	Serialize(&b, v, en, glob)
+	return b.String()
+}
 func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 	if en != glob {
 		b.WriteString("(begin ")
