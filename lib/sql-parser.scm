@@ -81,6 +81,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(define sql_expression5 (parser (or
 		(parser '("(" (define a sql_expression) ")") a)
 		(parser '((atom "DATABASE" true) "(" ")") schema)
+		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '((quote password) p))
 		/* TODO: function call */
 		(parser (atom "NULL" true) nil)
 		sql_int
