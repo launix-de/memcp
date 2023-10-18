@@ -1,3 +1,8 @@
+0.1.4
+=====
+
+- PASSWORD(str) for password hashes
+
 0.1.3
 =====
 
