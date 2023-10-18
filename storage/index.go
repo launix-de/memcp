@@ -113,12 +113,14 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 // sort function for scmer
 func scmerLess(a, b scm.Scmer) bool {
 	// TODO: 2D check if NULL etc.
-	switch a.(type) {
+	switch a_ := a.(type) {
 		case float64:
-			return a.(float64) < b.(float64)
+			return a_ < scm.ToFloat(b)
 		case string:
-			return a.(string) < b.(string)
+			return a_ < scm.String(b)
 		// are there any other types??
+		default:
+			panic("unknown type comparison")
 	}
 	return false
 }
