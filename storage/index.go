@@ -117,10 +117,17 @@ func scmerLess(a, b scm.Scmer) bool {
 		case float64:
 			return a_ < scm.ToFloat(b)
 		case string:
-			return a_ < scm.String(b)
+			switch b_ := b.(type) {
+				case float64:
+					return scm.ToFloat(a) < b_
+				case string:
+					return a_ < b_
+				default:
+					panic("unknown type combo in comparison")
+			}
 		// are there any other types??
 		default:
-			panic("unknown type comparison")
+			panic("unknown type combo in comparison")
 	}
 	return false
 }
