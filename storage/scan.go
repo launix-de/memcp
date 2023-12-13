@@ -168,10 +168,12 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 				mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
 			}
 		}
+		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating
 		intermediate := scm.Apply(callback, mdataset)
 		if aggregate != nil {
 			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
 		}
+		t.mu.RLock()
 	}
 	t.mu.RUnlock() // finished reading
 	return akkumulator
