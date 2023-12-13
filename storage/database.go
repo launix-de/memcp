@@ -27,6 +27,7 @@ type database struct {
 	Tables map[string]*table `json:"tables"`
 	schemalock sync.RWMutex `json:"-"` // TODO: rw-locks for schemalock
 }
+// TODO: replace databases map everytime something changes, so we don't run into read-while-write
 var databases map[string]*database = make(map[string]*database)
 var databaselock sync.RWMutex
 var Basepath string = "data"

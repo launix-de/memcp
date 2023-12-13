@@ -1,3 +1,5 @@
+byobu ctrl+f2 split, f7 scroll back
+
 MMap
 ----
 import "https://github.com/edsrzf/mmap-go/blob/main/mmap.go"

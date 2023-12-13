@@ -15,7 +15,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-(define sql_identifier_unquoted (parser (define id (regex "[a-zA-Z_][a-zA-Z0-9_]*")) (toLower id))) /* raw -> toLower */
+/* TODO: make lower_identifiers settable */
+(define sql_identifier_unquoted (parser (define id (regex "[a-zA-Z_][a-zA-Z0-9_]*")) (if lower_identifiers (toLower id) id))) /* raw -> toLower */
 (define sql_identifier (parser (or
 	(parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`")) /* with backtick */
 	sql_identifier_unquoted
@@ -110,8 +111,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(atom "WHERE" true)
 				(define condition sql_expression)
 			))
-			/* TODO: GROUP, HAVING, ORDER BY, LIMIT */
 		))
+		/* TODO: GROUP BY + HAVING */
+		/* TODO: ORDER BY + LIMIT */
 	) (build_queryplan schema (if (nil? from) '() from) (merge cols) condition)))
 
 	(define sql_update (parser '(

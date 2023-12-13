@@ -112,7 +112,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
 		t.mu.Lock() // write lock
-		t.deletions[idx] = struct{}{} // mark as deleted
+		result := false
 		if len(a) > 0 {
 			// update statement -> also perform an insert
 			changes := a[0].([]scm.Scmer)
@@ -121,31 +121,39 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			i := 0
 			for k, v := range t.columns {
 				d[i] = k
-				for j := 0; j < len(changes); j += 2 {
-					if k == changes[j] {
-						d[i+1] = changes[j+1]
-						goto skip_set
-					}
-				}
 				if idx < t.main_count {
 					d[i+1] = v.GetValue(idx)
 				} else {
 					d[i+1] = t.inserts[idx - t.main_count].Get(k)
 				}
+				for j := 0; j < len(changes); j += 2 {
+					if k == changes[j] {
+						if d[i+1] != changes[j+1] {
+							d[i+1] = changes[j+1]
+							result = true // something changed, so return true
+						}
+						goto skip_set
+					}
+				}
 				skip_set:
 				i += 2
 			}
-			t.inserts = append(t.inserts, d) // append to delta storage
-			if withTrigger {
-				// TODO: before/after update trigger
+			if result { // only do a write if something changed
+				t.deletions[idx] = struct{}{} // mark as deleted
+				t.inserts = append(t.inserts, d) // append to delta storage
+				if withTrigger {
+					// TODO: before/after update trigger
+				}
 			}
 		} else {
 			// delete
+			t.deletions[idx] = struct{}{} // mark as deleted
+			result = true
 			if withTrigger {
 				// TODO: before/after delete trigger
 			}
 		}
-		if t.next != nil {
+		if result && t.next != nil {
 			// also change in next storage
 			// idx translation (subtract the amount of deletions from that idx)
 			idx2 := idx
@@ -157,7 +165,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			t.next.UpdateFunction(idx2, false)(a...) // propagate to succeeding shard
 		}
 		t.mu.Unlock()
-		return true // maybe instead return UpdateFunction for newly inserted item??
+		return result // maybe instead return UpdateFunction for newly inserted item??
 	}
 }
 

@@ -80,7 +80,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(define build_scan (lambda (tables)
 		(match tables
 			(cons '(alias tbl) tables) /* outer scan */
-				'((quote scan) schema tbl
+				'((quote scan) schema tbl /* TODO: scan vs scan_order when order or limit is present */
 					(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 					/* todo filter columns for alias */
 					'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
