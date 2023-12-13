@@ -137,8 +137,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(build_condition schema tbl condition)
 		'((quote lambda)
 			(cons (quote $update) (merge (extract_assoc cols (lambda (col expr) (map (extract_columns_from_expr expr) (lambda (x) (match x '(tblvar col) (symbol col))))))))
-			'((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr)))))
+			'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
 		)
+		(quote +)
+		0
 	)
 	)))
 

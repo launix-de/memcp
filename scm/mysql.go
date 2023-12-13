@@ -110,14 +110,14 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	result.State = sqltypes.RStateFields
 	result.Rows = make([][]sqltypes.Value, 0, 1024)
 	// result from scheme
-	func () {
+	rowcount := func () Scmer {
 		defer func () {
 			if r := recover(); r != nil {
 				myerr = fmt.Errorf("%v", r) // transmit r for error
 				debug.PrintStack()
 			}
 		}()
-		Apply(m.querycallback, []Scmer{session.Schema(), query, func (a... Scmer) Scmer {
+		return Apply(m.querycallback, []Scmer{session.Schema(), query, func (a... Scmer) Scmer {
 			// function resultrow(item)
 			item := a[0].([]Scmer)
 			newitem := make([]sqltypes.Value, len(result.Fields))
@@ -148,16 +148,20 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			}
 			result.Rows = append(result.Rows, newitem)
 			resultlock.Unlock()
-			return "ok"
+			return true
 		},})
 	}()
 	if myerr != nil {
 		return myerr
 	}
+	// TODO: also set result.InsertID (maybe as a callback as 4th parameter to m.querycallback?)
+	switch rowcount_ := rowcount.(type) {
+		case float64:
+			result.RowsAffected = uint64(rowcount_)
+	}
 	// flush the rest
 	if result.State == sqltypes.RStateFields {
 		result.State = sqltypes.RStateNone // full send
-		// TODO: result.InsertID, result.RowsAffected,
 		callback(&result)
 	} else {
 		// rest + finish
