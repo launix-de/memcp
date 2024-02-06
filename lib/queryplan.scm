@@ -46,6 +46,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* TODO: WHERE, GROUP, HAVING, ORDER, LIMIT */
 	/* expressions will use (get_column tblvar col) for reading from columns. we have to replace it with the correct variable */
+	/* TODO: unnest arbitrary queries -> turn them into a big schema+tables+fields+condition */
 
 	/* returns a list of '(tblvar col) */
 	(define extract_columns (lambda (col expr) (match expr

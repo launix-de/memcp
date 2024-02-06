@@ -18,6 +18,8 @@ package storage
 
 import "fmt"
 import "sync"
+import "errors"
+import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 type dataset []scm.Scmer
@@ -27,10 +29,17 @@ type column struct {
 	Typdimensions []int // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	Extrainfo string // TODO: further diversify into NOT NULL, AUTOINCREMENT etc.
 }
+type PersistencyMode uint8
+const (
+	Safe PersistencyMode = 0
+	Sloppy
+	Memory
+)
 type table struct {
 	schema *database
 	Name string
 	Columns []column
+	PersistencyMode PersistencyMode /* 0 = safe (default), 1 = sloppy, 2 = memory */
 	mu sync.Mutex // schema lock
 
 	// storage
@@ -47,6 +56,40 @@ type table struct {
 }
 
 const max_shardsize = 65536 // dont overload the shards to get a responsive parallel full table scan
+
+func (m *PersistencyMode) MarshalJSON() ([]byte, error) {
+	if (*m == Memory) {
+		return []byte("\"memory\""), nil
+	}
+	if (*m == Sloppy) {
+		return []byte("\"sloppy\""), nil
+	}
+	if (*m == Safe) {
+		return []byte("\"safe\""), nil
+	}
+	return nil, errors.New("unknown persistency mode")
+}
+
+func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
+	var str string
+	err := json.Unmarshal(data, &str)
+	if err != nil {
+		return err
+	}
+	if (str == "memory") {
+		*m = Memory
+		return nil
+	}
+	if (str == "sloppy") {
+		*m = Sloppy
+		return nil
+	}
+	if (str == "safe") {
+		*m = Safe
+		return nil
+	}
+	return errors.New("unknown persistency mode: " + str)
+}
 
 func (t *table) ShowColumns() scm.Scmer {
 	result := make([]scm.Scmer, len(t.Columns))

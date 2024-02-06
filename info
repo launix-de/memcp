@@ -29,3 +29,22 @@ TODO
  - tables stored in a table? (StorageSCMER)
  - periodic (rebuild)
  - plugins: go build --buildmode shared -linkshared std in a subfolder
+
+
+Cache strategy
+--------------
+ - Cache objects: parent list, identifier (concurrent map!), created-at, last-used, size
+ - delete-list ordered by age*size -> delete those items with highest number first
+
+LISP processor Mach 2
+---------------------
+every value consists of two uint64
+a) descriptor (8 bit self type descriptor, 8 bit payload type descriptor, 8 bit env-depth of next, 32 bit next-index)
+b) payload value: uint64, int64, double, listidx, functionptr
+types: empty list, list-head
+
+also, there is an execution environment (each exenv is a heapsize, heap[heapsize]value, parent *exenv)
+the env-depth tells the interpreter to look up next-values from the parent env
+when the heap is full, a new heap is opened
+every thread runs in its own exec-env; a thread can pre-allocate a fixed size heap for fast access
+heaps are removed in whole pieces

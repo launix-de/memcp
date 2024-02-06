@@ -185,12 +185,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(parser '("(" (define a sql_int) ")") '((quote list) a))
 				(parser empty '((quote list)))
 			))
-			(define typeparams (regex ".*?")) /* TODO: rest */
+			(define typeparams (regex "[^,)]*")) /* TODO: rest */
 		) '((quote list) col type dimensions typeparams)) ","))
 		")"
 	) '((quote createtable) schema id (cons (quote list) cols))))
 
-	/* TODO: ignore comments wherever they occur */
+	/* TODO: ignore comments wherever they occur --> Lexer */
 	((parser (or
 		sql_select
 		sql_insert_into

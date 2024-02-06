@@ -180,9 +180,11 @@ func main() {
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"load", "Loads a file and returns the string",
-		1, 1,
+		1, 3,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
+			scm.DeclarationParameter{"linehandler", "func", "handler that reads each line"},
+			scm.DeclarationParameter{"delimiter", "string", "delimiter to extract"},
 		}, "string",
 		(func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
 	})
