@@ -19,6 +19,7 @@ package storage
 import "os"
 import "fmt"
 import "sync"
+import "bufio"
 import "strings"
 import "reflect"
 import "runtime"
@@ -36,6 +37,7 @@ type storageShard struct {
 	// delta storage
 	inserts []dataset // items added to storage
 	deletions map[uint]struct{} // items removed from main or inserts (based on main_count + i)
+	logfile *os.File // only in safe mode
 	mu sync.RWMutex // delta write lock (working on main storage is lock free)
 	next *storageShard
 	// indexes
@@ -68,26 +70,58 @@ func (u *storageShard) load(t *table) {
 	u.t = t
 	// load the columns
 	for _, col := range u.t.Columns {
-		// read column from file
-		f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + col.Name)
-		if err != nil {
-			// file does not exist -> no data available
+		if t.PersistencyMode == Memory {
+			// recreate the shards empty (because in memory-mode we forget all data)
 			u.columns[col.Name] = new(StorageSCMER)
-			continue
+		} else {
+			// read column from file
+			f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + col.Name)
+			if err != nil {
+				// file does not exist -> no data available
+				u.columns[col.Name] = new(StorageSCMER)
+				continue
+			}
+			var magicbyte uint8 // type of that column
+			err = binary.Read(f, binary.LittleEndian, &magicbyte)
+			if err != nil {
+				// empty storage
+				u.columns[col.Name] = new(StorageSCMER)
+				continue
+			}
+
+			fmt.Println("loading storage "+u.t.schema.path + u.uuid.String() + "-" + col.Name+" of type", magicbyte)
+
+			columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
+			u.main_count = columnstorage.Deserialize(f) // read; ownership of f goes to Deserialize, so they will free the handle
+			u.columns[col.Name] = columnstorage
 		}
-		var magicbyte uint8 // type of that column
-		err = binary.Read(f, binary.LittleEndian, &magicbyte)
+	}
+
+	if t.PersistencyMode == Safe {
+		f, err := os.OpenFile(u.t.schema.path + u.uuid.String() + ".log", os.O_RDWR|os.O_CREATE, 0750)
 		if err != nil {
-			// empty storage
-			u.columns[col.Name] = new(StorageSCMER)
-			continue
+			panic(err)
 		}
-
-		fmt.Println("loading storage "+u.t.schema.path + u.uuid.String() + "-" + col.Name+" of type", magicbyte)
-
-		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
-		u.main_count = columnstorage.Deserialize(f) // read; ownership of f goes to Deserialize, so they will free the handle
-		u.columns[col.Name] = columnstorage
+		u.logfile = f
+		fi, _ := u.logfile.Stat()
+		if fi.Size() > 0 {
+			fmt.Println("restoring delta storage from logfile " + u.t.schema.path + u.uuid.String() + ".log")
+			scanner := bufio.NewScanner(u.logfile)
+			for scanner.Scan() {
+				b := scanner.Bytes()
+				if string(b[0:7]) == "delete " {
+					var idx uint
+					json.Unmarshal(b[7:], &idx)
+					u.deletions[idx] = struct{}{} // mark deletion
+				} else if string(b[0:7]) == "insert " {
+					var d dataset
+					json.Unmarshal(b[7:], &d)
+					u.inserts = append(u.inserts, d) // insert
+				} else {
+					panic("unknown log sequence: " + string(b))
+				}
+			}
+		}
 	}
 }
 
@@ -141,6 +175,15 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			if result { // only do a write if something changed
 				t.deletions[idx] = struct{}{} // mark as deleted
 				t.inserts = append(t.inserts, d) // append to delta storage
+				if t.t.PersistencyMode == Safe {
+					t.logfile.Write([]byte("delete "))
+					tmp, _ := json.Marshal(idx)
+					t.logfile.Write(tmp)
+					t.logfile.Write([]byte("\ninsert "))
+					tmp, _ = json.Marshal(d)
+					t.logfile.Write(tmp)
+					t.logfile.Write([]byte("\n"))
+				}
 				if withTrigger {
 					// TODO: before/after update trigger
 				}
@@ -148,6 +191,12 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 		} else {
 			// delete
 			t.deletions[idx] = struct{}{} // mark as deleted
+			if t.t.PersistencyMode == Safe {
+				t.logfile.Write([]byte("delete "))
+				tmp, _ := json.Marshal(idx)
+				t.logfile.Write(tmp)
+				t.logfile.Write([]byte("\n"))
+			}
 			result = true
 			if withTrigger {
 				// TODO: before/after delete trigger
@@ -192,6 +241,12 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 func (t *storageShard) Insert(d dataset) {
 	t.mu.Lock()
 	t.inserts = append(t.inserts, d) // append to delta storage
+	if t.t.PersistencyMode == Safe {
+		t.logfile.Write([]byte("insert "))
+		tmp, _ := json.Marshal(d)
+		t.logfile.Write(tmp)
+		t.logfile.Write([]byte("\n"))
+	}
 	if t.next != nil {
 		// also insert into next storage
 		t.next.Insert(d)
@@ -201,10 +256,15 @@ func (t *storageShard) Insert(d dataset) {
 }
 
 func (t *storageShard) RemoveFromDisk() {
+	// close logfile
+	if t.t.PersistencyMode == Safe {
+		t.logfile.Close()
+	}
 	for _, col := range t.t.Columns {
 		// delete column from file
 		os.Remove(t.t.schema.path + t.uuid.String() + "-" + col.Name)
 	}
+	os.Remove(t.t.schema.path + t.uuid.String() + ".log")
 }
 
 // rebuild main storage from main+delta
@@ -235,8 +295,19 @@ func (t *storageShard) rebuild() *storageShard {
 		b.WriteString("rebuilding shard for table ")
 		b.WriteString(t.t.Name)
 		b.WriteString("(")
+
+		// prepare delta storage
 		result.columns = make(map[string]ColumnStorage)
 		result.deletions = make(map[uint]struct{})
+		if t.t.PersistencyMode == Safe {
+			// safe mode: also write all deltas to disk
+			f, err := os.Create(result.t.schema.path + result.uuid.String() + ".log")
+			if err != nil {
+				panic(err)
+			}
+			t.logfile = f
+		}
+
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		isFirst := true
 		for col, c := range t.columns {
@@ -312,12 +383,14 @@ func (t *storageShard) rebuild() *storageShard {
 			b.WriteString(" ")
 			b.WriteString(newcol.String()) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
 
-			// write to disc (TODO: only if required)
-			f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + col)
-			if err != nil {
-				panic(err)
+			// write to disc (only if required)
+			if t.t.PersistencyMode != Memory {
+				f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + col)
+				if err != nil {
+					panic(err)
+				}
+				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 			}
-			newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 		}
 		b.WriteString(") -> ")
 		b.WriteString(fmt.Sprint(result.main_count))
