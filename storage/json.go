@@ -57,7 +57,7 @@ func LoadJSON(schema, filename string) {
 			t, ok = databases[schema].Tables[s[7:]]
 			if !ok {
 				// new table
-				t = CreateTable(schema, s[7:])
+				t = CreateTable(schema, s[7:], Safe)
 			}
 		} else if s[0] == '#' {
 			// comment

@@ -116,7 +116,7 @@ func DropDatabase(schema string) {
 	os.RemoveAll(db.path)
 }
 
-func CreateTable(schema, name string) *table {
+func CreateTable(schema, name string, pm PersistencyMode) *table {
 	db, ok := databases[schema]
 	if !ok {
 		panic("Database " + schema + " does not exist")
@@ -128,6 +128,7 @@ func CreateTable(schema, name string) *table {
 	t := new(table)
 	t.schema = db
 	t.Name = name
+	t.PersistencyMode = pm
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	db.Tables[t.Name] = t

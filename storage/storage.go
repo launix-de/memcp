@@ -145,14 +145,35 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createtable", "creates a new database",
-		3, 3,
+		4, 4,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
 			scm.DeclarationParameter{"cols", "list", "list of columns, each '(colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items"},
+			scm.DeclarationParameter{"options", "list", "further options like engine=safe|sloppy|memory"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
-			t := CreateTable(scm.String(a[0]), scm.String(a[1]))
+			// parse options
+			var pm PersistencyMode = Safe
+			options := a[3].([]scm.Scmer)
+			for i := 0; i < len(options); i += 2 {
+				if options[i] == "engine" {
+					if options[i+1] == "memory" {
+						pm = Memory
+					} else if options[i+1] == "sloppy" {
+						pm = Sloppy
+					} else if options[i+1] == "safe" {
+						pm = Safe
+					} else {
+						panic("unknown engine: " + scm.String(options[i+1]))
+					}
+				} else {
+					panic("unknown option: " + scm.String(options[i]))
+				}
+			}
+
+			// create table
+			t := CreateTable(scm.String(a[0]), scm.String(a[1]), pm)
 			for _, coldef := range(a[2].([]scm.Scmer)) {
 				colname := scm.String(coldef.([]scm.Scmer)[0])
 				typename := scm.String(coldef.([]scm.Scmer)[1])

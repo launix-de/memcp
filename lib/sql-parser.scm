@@ -188,7 +188,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(define typeparams (regex "[^,)]*")) /* TODO: rest */
 		) '((quote list) col type dimensions typeparams)) ","))
 		")"
-	) '((quote createtable) schema id (cons (quote list) cols))))
+		(define options (* (or
+			(parser '((atom "ENGINE" true) (atom "=" false) (atom "MEMORY" true)) '("engine" "memory"))
+			(parser '((atom "ENGINE" true) (atom "=" false) (atom "SLOPPY" true)) '("engine" "sloppy"))
+			(parser '((atom "ENGINE" true) (atom "=" false) (atom "SAFE" true)) '("engine" "safe"))
+		)))
+	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)))))
 
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or

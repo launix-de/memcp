@@ -134,6 +134,10 @@ func NewShard(t *table) *storageShard {
 	for _, column := range t.Columns {
 		result.columns[column.Name] = new (StorageSCMER)
 	}
+	if t.PersistencyMode == Safe {
+		f, _ := os.Create(result.t.schema.path + result.uuid.String() + ".log")
+		result.logfile = f
+	}
 	return result
 }
 
