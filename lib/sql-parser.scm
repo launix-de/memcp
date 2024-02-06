@@ -191,7 +191,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	) '((quote createtable) schema id (cons (quote list) cols))))
 
 	/* TODO: ignore comments wherever they occur --> Lexer */
-	((parser (or
+	(define p (parser (or
 		sql_select
 		sql_insert_into
 		sql_create_table
@@ -205,6 +205,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define id sql_identifier)) '((quote droptable) schema id))
-	)) s)
+		empty
+	))) 
+	/* TODO: DELIMITER commands */
+	(cons (quote begin) ((parser (+ p ";")) s))
 )))
 

@@ -32,8 +32,8 @@ type column struct {
 type PersistencyMode uint8
 const (
 	Safe PersistencyMode = 0
-	Sloppy
-	Memory
+	Sloppy = 1
+	Memory = 2
 )
 type table struct {
 	schema *database
