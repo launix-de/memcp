@@ -207,6 +207,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true)) '((quote map) '((quote show) schema) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Table" (quote schema))))))
+		(parser '((atom "DESCRIBE" true) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
+
 
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define id sql_identifier)) '((quote droptable) schema id))
