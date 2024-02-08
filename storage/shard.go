@@ -278,12 +278,17 @@ func (t *storageShard) rebuild() *storageShard {
 	t.mu.Lock()
 	if t.next != nil {
 		t.mu.Unlock()
+		// lock+unlock the next shard so we don't return too early (sync hazards)
+		t.next.mu.Lock()
+		t.next.mu.Unlock()
 		return t.next // already rebuilding (happens on parallel inserts)
 		// possible problem: this call may return the t.next shard faster than the competing rebuild() call that actually rebuilds; maybe use a additional lock on t.next??
 	}
 	result := new(storageShard)
 	result.t = t.t
 	t.next = result
+	result.mu.Lock() // interlock so no one will rebuild the shard twice
+	defer result.mu.Unlock()
 	t.mu.Unlock()
 
 	// now read out deletion list
