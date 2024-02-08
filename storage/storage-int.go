@@ -142,6 +142,7 @@ func (s *StorageInt) prepare() {
 	s.bitsize = 0
 	s.offset = int64(1 << 63 - 1)
 	s.max = -s.offset - 1
+	s.hasNull = false
 }
 func (s *StorageInt) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
@@ -161,8 +162,8 @@ func (s *StorageInt) init(i uint) {
 	v := s.max - s.offset
 	if s.hasNull {
 		// store the value
-		s.null = uint64(v)
 		v = v + 1
+		s.null = uint64(v)
 	}
 	if v == -1 {
 		// no values at all
@@ -177,7 +178,7 @@ func (s *StorageInt) init(i uint) {
 	// allocate
 	s.chunk = make([]uint64, (i * uint(s.bitsize) + 63) / 64)
 	s.count = uint64(i)
-	//fmt.Println("Allocate bitsize", s.bitsize)
+	fmt.Println("storing bitsize", s.bitsize,"null",s.null,"offset",s.offset)
 }
 func (s *StorageInt) build(i uint, value scm.Scmer) {
 	// store
@@ -185,8 +186,9 @@ func (s *StorageInt) build(i uint, value scm.Scmer) {
 	if value == nil {
 		// null value
 		vi = int64(s.null)
+	} else {
+		vi = vi - s.offset
 	}
-	vi = vi - s.offset
 	bitpos := i * uint(s.bitsize)
 	v := uint64(vi) << (64 - uint(s.bitsize)) // shift value to the leftmost position of 64bit int
 	s.chunk[bitpos / 64] = s.chunk[bitpos / 64] | (v >> (bitpos % 64)) // first chunk
