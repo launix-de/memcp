@@ -275,10 +275,19 @@ func (t *storageShard) RemoveFromDisk() {
 func (t *storageShard) rebuild() *storageShard {
 
 	// concurrency! when rebuild is run in background, inserts and deletions into and from old delta storage must be duplicated to the ongoing process
-	t.mu.RLock()
+	t.mu.Lock()
+	if t.next != nil {
+		t.mu.Unlock()
+		return t.next // already rebuilding (happens on parallel inserts)
+		// possible problem: this call may return the t.next shard faster than the competing rebuild() call that actually rebuilds; maybe use a additional lock on t.next??
+	}
 	result := new(storageShard)
 	result.t = t.t
 	t.next = result
+	t.mu.Unlock()
+
+	// now read out deletion list
+	t.mu.RLock()
 	maxInsertIndex := len(t.inserts)
 	// copy-freeze deletions so we don't have to lock anything
 	deletions := make(map[uint]struct{})
