@@ -178,7 +178,7 @@ func (s *StorageInt) init(i uint) {
 	// allocate
 	s.chunk = make([]uint64, (i * uint(s.bitsize) + 63) / 64)
 	s.count = uint64(i)
-	fmt.Println("storing bitsize", s.bitsize,"null",s.null,"offset",s.offset)
+	// fmt.Println("storing bitsize", s.bitsize,"null",s.null,"offset",s.offset)
 }
 func (s *StorageInt) build(i uint, value scm.Scmer) {
 	// store
