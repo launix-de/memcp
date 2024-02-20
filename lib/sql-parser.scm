@@ -220,6 +220,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define id sql_identifier)) '((quote droptable) schema id))
+		(parser '((atom "SET" true) (atom "SESSION" true) (define vars (* (parser '((? (atom "@" true)) (define key sql_identifier) (atom "=" true) (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
 		empty
 	))) 
 	/* TODO: DELIMITER commands */
