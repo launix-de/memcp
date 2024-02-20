@@ -50,6 +50,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
+		(parser '((atom "@" true) (define var sql_identifier) (atom ":=" true) (define value sql_expression)) '((quote session) var value))
 		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (cons a b)))
 		sql_expression1
 	)))
@@ -85,6 +86,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '((quote password) p))
 		/* TODO: function call */
 		(parser (atom "NULL" true) nil)
+		(parser '((atom "@" true) (define var sql_identifier)) '((quote session) var))
 		sql_int
 		sql_string
 		sql_column

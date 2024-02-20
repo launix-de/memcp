@@ -204,9 +204,16 @@ func main() {
 			scm.DeclarationParameter{"port", "number", "port number for MySQL server"},
 			scm.DeclarationParameter{"getPassword", "func", "lambda(username string) string|nil has to return the password for a user or nil to deny login"},
 			scm.DeclarationParameter{"schemacallback", "func", "lambda(username schema) bool handler check whether user is allowed to schem (string) - you should check access rights here"},
-			scm.DeclarationParameter{"handler", "func", "lambda(schema sql resultrow) handler to process sql query (string) in schema (string). resultrow is a lambda(list)"},
+			scm.DeclarationParameter{"handler", "func", "lambda(schema sql resultrow session) handler to process sql query (string) in schema (string). resultrow is a lambda(list)"},
 		}, "bool",
 		scm.MySQLServe,
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"newsession", "Creates a new session which is itself a function either a getter (session key) or setter (session key value)",
+		0, 0,
+		[]scm.DeclarationParameter{
+		}, "list",
+		scm.NewSession,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"password", "Hashes a password with sha1 (for mysql user authentication)",

@@ -1,3 +1,20 @@
+/*
+Copyright (C) 2023, 2024  Carl-Philip Hänsch
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
 package scm
 
 import "fmt"
@@ -45,6 +62,9 @@ type MySQLWrapper struct {
 	querycallback Scmer
 }
 
+/* session storage -> map from session id to SCM session object */
+var mysqlsessions sync.Map
+
 func (m *MySQLWrapper) ServerVersion() string {
 	return "MemCP"
 }
@@ -53,6 +73,7 @@ func (m *MySQLWrapper) SetServerVersion() {
 func (m *MySQLWrapper) NewSession(session *driver.Session) {
 	m.log.Info("New Session from " + session.Addr())
 	// initialize something??
+	mysqlsessions.Store(session.ID(), NewSession([]Scmer{}))
 }
 func (m *MySQLWrapper) SessionInc(session *driver.Session) {
 	// I think we can skip session counting
@@ -62,6 +83,7 @@ func (m *MySQLWrapper) SessionDec(session *driver.Session) {
 }
 func (m *MySQLWrapper) SessionClosed(session *driver.Session) {
 	m.log.Info("Closed Session " + session.User() + " from " + session.Addr())
+	mysqlsessions.Delete(session.ID())
 }
 func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 	// we could reject clients here when server load is too full
@@ -109,6 +131,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	var resultlock sync.Mutex
 	result.State = sqltypes.RStateFields
 	result.Rows = make([][]sqltypes.Value, 0, 1024)
+	// load scm session object
+	scmSession, _ := mysqlsessions.Load(session.ID())
 	// result from scheme
 	rowcount := func () Scmer {
 		defer func () {
@@ -149,7 +173,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			result.Rows = append(result.Rows, newitem)
 			resultlock.Unlock()
 			return true
-		},})
+		},
+		scmSession,
+		})
 	}()
 	if myerr != nil {
 		return myerr

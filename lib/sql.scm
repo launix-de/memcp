@@ -45,6 +45,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					(define formula (parse_sql schema query))
 					(define resultrow (res "jsonl"))
 					(print "received query: " query)
+					(define session (newsession))
 					(eval formula)
 				) (begin
 					((res "header") "Content-Type" "text/plain")
@@ -62,7 +63,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (mysql 3307
 	(lambda (username_) (scan "system" "user" (lambda (username) (equal? username username_)) (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
 	(lambda (schema) true) /* switch schema */
-	(lambda (schema sql resultrow_sql) (begin /* sql */
+	(lambda (schema sql resultrow_sql session) (begin /* sql */
 		(print "received query: " sql)
 		(define formula (parse_sql schema sql))
 		(define resultrow resultrow_sql)
