@@ -37,7 +37,7 @@ func NewSession(a ...Scmer) Scmer {
 			sess.Mu.Lock()
 			sess.Map[String(a[0])] = a[1]
 			sess.Mu.Unlock()
-			return true
+			return a[1] // reflect the value as of mysql semantics
 		} else if len(a) == 1 {
 			// get
 			sess.Mu.RLock()
