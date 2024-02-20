@@ -179,8 +179,8 @@ curl --user root:admin 'http://localhost:4321/sql/system/SELECT%20*%20FROM%20use
 The standard username/password is root/admin. To change that, type the following into scheme console:
 
 ```
-(scan "system" "user" (lambda () true) (lambda ($update) ($update))) /* delete all users */
-(insert "system" "user" '("id" 1 "username" "new_username" "password" (password "new_password"))) /* insert new_username/new_password */
+(eval (parse_sql "" "ALTER USER root IDENTIFIED BY 'new_password'"))
+(eval (parse_sql "" "CREATE USER user2 IDENTIFIED BY 'new_password'"))
 ```
 
 <hr>

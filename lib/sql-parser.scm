@@ -204,6 +204,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		sql_delete
 
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote createdatabase) id))
+		(parser '((atom "CREATE" true) (atom "USER" true) (define username sql_identifier)
+			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
+			'((quote insert) "system" "user" '((quote list) "username" username "password" '((quote password) password))))
+		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_identifier)
+			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
+			'((quote scan) "system" "user" '((quote lambda) '((quote username)) '((quote equal?) (quote username) username)) '((quote lambda) '((quote $update)) '((quote $update) '((quote list) "password" '((quote password) password))))))
 
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true)) '((quote map) '((quote show) schema) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Table" (quote schema))))))
