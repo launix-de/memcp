@@ -242,7 +242,11 @@ func Init(en scm.Env) {
 				return result
 			} else if len(a) == 1 {
 				// show tables
-				return databases[scm.String(a[0])].ShowTables()
+				db := databases[scm.String(a[0])]
+				if db == nil {
+					return nil // use this to check if a database exists
+				}
+				return db.ShowTables()
 			} else if len(a) == 2 {
 				// show columns
 				return databases[scm.String(a[0])].Tables[scm.String(a[1])].ShowColumns()
