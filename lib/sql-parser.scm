@@ -214,13 +214,16 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			'((quote scan) "system" "user" '((quote lambda) '((quote username)) '((quote equal?) (quote username) username)) '((quote lambda) '((quote $update)) '((quote $update) '((quote list) "password" '((quote password) password))))))
 
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
-		(parser '((atom "SHOW" true) (atom "TABLES" true)) '((quote map) '((quote show) schema) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Table" (quote schema))))))
+		(parser '((atom "SHOW" true) (atom "TABLES" true) (? (atom "FROM" true) (define schema sql_identifier))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '((quote resultrow) '((quote list) "Table" (quote tbl))))))
 		(parser '((atom "DESCRIBE" true) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
+
+		(parser '((atom "SHOW" true) (atom "VARIABLES" true)) '((quote map_assoc) '((quote list) "version" "0.9") '((quote lambda) '((quote key) (quote value)) '((quote resultrow) '((quote list) "Variable_name" (quote key) "Value" (quote value))))))
+		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression)) (quote true)) /* ignore */
 
 
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define id sql_identifier)) '((quote droptable) schema id))
-		(parser '((atom "SET" true) (atom "SESSION" true) (define vars (* (parser '((? (atom "@" true)) (define key sql_identifier) (atom "=" true) (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? (atom "@" true)) (define key sql_identifier) (atom "=" true) (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
 		empty
 	))) 
 	/* TODO: DELIMITER commands */

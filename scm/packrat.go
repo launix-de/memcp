@@ -210,8 +210,18 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 					}
 					return packrat.NewKleeneParser(subparser, sepparser)
 				case Symbol("?"):
-					subparser := parseSyntax(n[1], en)
-					return packrat.NewMaybeParser(subparser)
+					if len(n) == 2 {
+						// single element
+						subparser := parseSyntax(n[1], en)
+						return packrat.NewMaybeParser(subparser)
+					} else {
+						// maybe with a list
+						subparser := make([]packrat.Parser, len(n)-1)
+						for i := 1; i < len(n); i++ {
+							subparser[i-1] = parseSyntax(n[i], en)
+						}
+						return packrat.NewMaybeParser(packrat.NewAndParser(subparser...))
+					}
 				case Symbol("define"):
 					result := new(ScmParserVariable)
 					result.Variable = n[1].(Symbol)
