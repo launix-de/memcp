@@ -411,6 +411,17 @@ func init() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		"apply", "runs the function with its arguments",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"function", "func", "function to execute"},
+			DeclarationParameter{"arguments", "list", "list of arguments to apply"},
+		}, "symbol",
+		func (a ...Scmer) Scmer {
+			return Apply(a[0], a[1].([]Scmer))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
 		1, 1,
 		[]DeclarationParameter{
