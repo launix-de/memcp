@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -115,7 +115,7 @@ func (i *arrayFlags) Set(value string) error {
 }
 
 func main() {
-	fmt.Print(`memcp Copyright (C) 2023   Carl-Philip Hänsch
+	fmt.Print(`memcp Copyright (C) 2023, 2024   Carl-Philip Hänsch
     This program comes with ABSOLUTELY NO WARRANTY;
     This is free software, and you are welcome to redistribute it
     under certain conditions;
