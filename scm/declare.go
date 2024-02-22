@@ -138,6 +138,8 @@ func Validate(source string, val Scmer) string {
 
 // do preprocessing and optimization
 func Optimize(val Scmer, env *Env) Scmer {
+	// TODO: strip source code information (source, line, col)
+	// TODO: static code analysis like escape analysis + replace memory-safe functions with in-place memory manipulating versions (e.g. in set_assoc)
 	return val
 }
 

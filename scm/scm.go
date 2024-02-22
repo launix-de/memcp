@@ -337,7 +337,7 @@ func init() {
 			"false": false,
 
 			// basic
-			"list": Eval(Read("(lambda z z)"), &Globalenv),
+			"list": Eval(Optimize(Read("internal", "(lambda z z)"), &Globalenv), &Globalenv),
 		},
 		nil,
 		false,

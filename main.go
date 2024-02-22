@@ -229,15 +229,15 @@ func main() {
 	storage.Basepath = basepath
 	storage.LoadDatabases()
 	// scripts initialization
-	scm.Eval(scm.Read("(import \"lib/main.scm\")"), &IOEnv)
+	scm.Eval(scm.Read("init", "(import \"lib/main.scm\")"), &IOEnv)
 	// command line initialization
 	for _, filename := range imports {
 		fmt.Println("Loading " + filename + " ...")
-		scm.Eval(scm.Read("(import \"" + filename + "\")"), &IOEnv)
+		scm.Eval(scm.Read("command line", "(import \"" + filename + "\")"), &IOEnv)
 	}
 	for _, command := range commands {
 		fmt.Println("Executing " + command + " ...")
-		code := scm.Read(command)
+		code := scm.Read("command line", command)
 		scm.Validate("command line parameter", code)
 		code = scm.Optimize(code, &IOEnv)
 		scm.Eval(code, &IOEnv)

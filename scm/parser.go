@@ -30,28 +30,28 @@ func Simplify(s string) Scmer {
 	return s
 }
 
-func Read(s string) (expression Scmer) {
-	tokens := tokenize(s)
+func Read(source, s string) (expression Scmer) {
+	tokens := tokenize(source, s)
 	return readFrom(&tokens)
 }
 
 func EvalAll(source, s string, en *Env) (expression Scmer) {
-	tokens := tokenize(s)
+	tokens := tokenize(source, s)
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
-		Validate(source, code) // TODO: add some extra line number info to source??
+		Validate(source, code) // TODO: remove parameter source cuz' it's encoded in the tokens
 		code = Optimize(code, en)
 		expression = Eval(code, en)
 	}
 	return
 }
 
-//Syntactic Analysis
+// Syntactic Analysis
 func readFrom(tokens *[]Scmer) (expression Scmer) {
 	if len(*tokens) == 0 {
 		return nil
 	}
-	//pop first element from tokens
+	// pop first element from tokens
 	token := (*tokens)[0]
 	*tokens = (*tokens)[1:]
 	switch token.(type) {
@@ -94,7 +94,7 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 }
 
 //Lexical Analysis
-func tokenize(s string) []Scmer {
+func tokenize(source, s string) []Scmer {
 	/* tokenizer state machine:
 		0 = expecting next item
 		1 = inside Number
@@ -105,6 +105,11 @@ func tokenize(s string) []Scmer {
 		6 = comment ending * from * /
 	
 	tokens are either Number, Symbol, string or Symbol('(') or Symbol(')')
+	*/
+
+	/* TODO:
+	 - count lines, track line+col
+	 - for certain symbols (mostly only '(') store a position object in the token array (consisting of source, line, col)
 	*/
 	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t")
 	state := 0
