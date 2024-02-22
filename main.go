@@ -238,7 +238,7 @@ func main() {
 	for _, command := range commands {
 		fmt.Println("Executing " + command + " ...")
 		code := scm.Read("command line", command)
-		scm.Validate("command line parameter", code)
+		scm.Validate(code)
 		code = scm.Optimize(code, &IOEnv)
 		scm.Eval(code, &IOEnv)
 	}

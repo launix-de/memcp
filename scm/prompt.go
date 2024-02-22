@@ -80,7 +80,7 @@ func Repl(en *Env) {
 			}()
 			var b bytes.Buffer
 			code := Read("user prompt", line)
-			Validate("prompt", code)
+			Validate(code)
 			code = Optimize(code, en)
 			result := Eval(code, en)
 			Serialize(&b, result, en, en)

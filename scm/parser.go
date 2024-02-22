@@ -19,9 +19,21 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import (
+	"fmt"
 	"strings"
 	"strconv"
 )
+
+type SourceInfo struct {
+	source string
+	line int
+	col int
+	value Scmer
+}
+
+func (source_info SourceInfo) String() string {
+	return fmt.Sprintf("%s:%d:%d", source_info.source, source_info.line, source_info.col)
+}
 
 func Simplify(s string) Scmer {
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
@@ -39,7 +51,7 @@ func EvalAll(source, s string, en *Env) (expression Scmer) {
 	tokens := tokenize(source, s)
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
-		Validate(source, code) // TODO: remove parameter source cuz' it's encoded in the tokens
+		Validate(code)
 		code = Optimize(code, en)
 		expression = Eval(code, en)
 	}
@@ -51,12 +63,18 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 	if len(*tokens) == 0 {
 		return nil
 	}
+	var source_info SourceInfo
 	// pop first element from tokens
 	token := (*tokens)[0]
 	*tokens = (*tokens)[1:]
-	switch token.(type) {
+	switch t := token.(type) {
+		case SourceInfo:
+			source_info = t
+			token = t.value
+	}
+	switch t := token.(type) {
 		case Symbol:
-			if token == Symbol("(") {
+			if t == Symbol("(") {
 				L := make([]Scmer, 0)
 				for { // read params until )
 					if len(*tokens) == 0 {
@@ -65,13 +83,21 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 					if (*tokens)[0] == Symbol(")") {
 						// eat )
 						*tokens = (*tokens)[1:]
-						return L // finish read process
+						// return L // finish read process
+						source_info.value = L // append to source info
+						return source_info
 					}
 					// add param
 					L = append(L, readFrom(tokens))
 				}
-			} else if token == Symbol("'") && len(*tokens) > 0 {
-				if (*tokens)[0] == Symbol("(") {
+			} else if t == Symbol("'") && len(*tokens) > 0 {
+				token = (*tokens)[0]
+				switch t := token.(type) {
+					case SourceInfo:
+						source_info = t
+						token = t.value
+				}
+				if token == Symbol("(") {
 					*tokens = (*tokens)[1:]
 					// list literal
 					L := make([]Scmer, 1)
@@ -80,7 +106,9 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 						L = append(L, readFrom(tokens))
 					}
 					*tokens = (*tokens)[1:]
-					return L
+					// return L
+					source_info.value = L // append to source info
+					return source_info
 				} else {
 					return token
 				}
@@ -111,11 +139,22 @@ func tokenize(source, s string) []Scmer {
 	 - count lines, track line+col
 	 - for certain symbols (mostly only '(') store a position object in the token array (consisting of source, line, col)
 	*/
+	line := 1
+	col := 0
+
 	stringreplacer := strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t")
 	state := 0
 	startToken := 0
 	result := make([]Scmer, 0)
 	for i, ch := range s {
+		// line counting
+		if ch == '\n' {
+			line++
+			col = 1
+		} else {
+			col++
+		}
+
 		if state == 1 && (ch == '.' || ch >= '0' && ch <= '9') {
 			// another character added to Number
 		} else if state == 2 && ch == '*' && s[startToken:i] == "/" {
@@ -164,7 +203,8 @@ func tokenize(source, s string) []Scmer {
 			// now detect what to parse next
 			startToken = i
 			if ch == '(' {
-				result = append(result, Symbol("("))
+				//result = append(result, Symbol("("))
+				result = append(result, SourceInfo{source, line, col, Symbol("(")})
 				state = 0
 			} else if ch == ')' {
 				result = append(result, Symbol(")"))

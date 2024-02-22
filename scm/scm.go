@@ -52,6 +52,10 @@ import (
 func Eval(expression Scmer, en *Env) (value Scmer) {
 	restart: // goto label because golang is lacking tail recursion, so just overwrite params and goto restart
 	switch e := expression.(type) {
+	case SourceInfo:
+		// omit source info
+		expression = e.value
+		goto restart
 	case string:
 		value = e
 	case float64:
@@ -144,6 +148,11 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				value = NewParser(e[1], nil, en)
 			}
 		case "lambda":
+			switch si := e[1].(type) {
+				case SourceInfo:
+					// strip SourceInfo from lambda declarations
+					e[1] = si.value
+			}
 			value = Proc{e[1], e[2], en}
 		case "begin":
 			// execute begin.. in own environment

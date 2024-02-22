@@ -133,6 +133,8 @@ func (b *ScmParserVariable) Match(s *packrat.Scanner) *packrat.Node {
 
 func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 	switch n := syntax.(type) {
+		case SourceInfo:
+			return parseSyntax(n.value, en)
 		case string:
 			return packrat.NewAtomParser(n, false, true)
 		case Symbol:
@@ -157,7 +159,7 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 			}
 			switch n[0] {
 				case Symbol("parser"): // inner anonymous parser
-					Validate("anonymous inner parser", n[2])
+					Validate(n[2])
 					return NewParser(n[1], n[2], en)
 				case Symbol("atom"):
 					caseinsensitive := false

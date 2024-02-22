@@ -74,7 +74,13 @@ func types_match(given string, required string) bool {
 }
 
 // panics if the code is bad (returns possible datatype, at least "any")
-func Validate(source string, val Scmer) string {
+func Validate(val Scmer) string {
+	var source_info SourceInfo
+	switch v := val.(type) {
+		case SourceInfo:
+			source_info = v
+			val = v.value
+	}
 	switch v := val.(type) {
 		case nil:
 			return "nil"
@@ -104,16 +110,16 @@ func Validate(source string, val Scmer) string {
 				}
 				if def != nil {
 					if len(v)-1 < def.MinParameter {
-						panic(source + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParameter) + " parameters")
+						panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParameter) + " parameters")
 					}
 					if len(v)-1 > def.MaxParameter {
-						panic(source + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParameter) + " parameters")
+						panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParameter) + " parameters")
 					}
 				}
 				// validate params (TODO: exceptions like match??)
 				for i := 1; i < len(v); i++ {
 					if i != 1 || (v[0] != Symbol("lambda") && v[0] != Symbol("parser")) {
-						typ := Validate(source, v[i])
+						typ := Validate(v[i])
 						if def != nil {
 							j := i-1 // parameter help
 							if i-1 >= len(def.Params) {
@@ -123,7 +129,7 @@ func Validate(source string, val Scmer) string {
 							// TODO: both types could also be lists separated by |
 							// TODO: signature of lambda types??
 							if !types_match(typ, def.Params[j].Type) {
-								panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source, def.Name, i, def.Params[j].Type, typ))
+								panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source_info.String(), def.Name, i, def.Params[j].Type, typ))
 							}
 						}
 					}

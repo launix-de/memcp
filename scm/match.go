@@ -40,6 +40,8 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	 - (regex "(.*)=(.*)" _ Symbol Symbol) will parse regex
 	*/
 	switch p := pattern.(type) {
+		case SourceInfo:
+			return match(val, p.value, en) // omit sourceinfo
 		case float64, string:
 			return reflect.DeepEqual(val, p)
 		case Symbol:
