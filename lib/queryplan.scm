@@ -41,10 +41,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 )))
 
 /* build queryplan from parsed query */
-(define build_queryplan (lambda (schema tables fields condition) (begin
+(define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
 	/* tables: '('(alias schema tbl) ...) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
-	/* TODO: WHERE, GROUP, HAVING, ORDER, LIMIT */
+	/* TODO: GROUP, HAVING, ORDER, LIMIT, OFFSET */
 	/* expressions will use (get_column tblvar col) for reading from columns. we have to replace it with the correct variable */
 	/* TODO: unnest arbitrary queries -> turn them into a big schema+tables+fields+condition */
 
@@ -78,6 +78,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (show schema tbl) (lambda (col) '(tblvar (col "name"))))))))
 
 	/* TODO: sort tables according to join plan */
+	/* TODO: match tbl to inner query vs string */
 	(define build_scan (lambda (tables)
 		(match tables
 			(cons '(alias schema tbl) tables) /* outer scan */

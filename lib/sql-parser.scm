@@ -92,6 +92,14 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		sql_column
 	)))
 
+	/* bring those variables into a defined state */
+	(define from nil)
+	(define condition nil)
+	(define group nil)
+	(define having nil)
+	(define order nil)
+	(define limit nil)
+	(define offset nil)
 	(define sql_select (parser '(
 		(atom "SELECT" true)
 		(define cols (+ (or
@@ -100,25 +108,57 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_identifier)) '(title e))
 			(parser (define e sql_expression) '((extract_title e) e))
 		) ","))
-		(? '(
+		(?
 			(atom "FROM" true)
 			(define from (+
 				(or
-					/* TODO: inner select as from */
+					(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query)) /* inner select as from */
 					(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl))
 					(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '(tbl schema tbl))
 					(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl))
 					(parser '((define tbl sql_identifier)) '(tbl schema tbl))
 				)
 			","))
-			(? '(
+			(?
 				(atom "WHERE" true)
 				(define condition sql_expression)
+			)
+		)
+		/* GROUP BY + HAVING */
+		(?
+			(atom "GROUP" true)
+			(atom "BY" true)
+			(define group (+
+				sql_expression
+				(atom "," true)
 			))
-		))
-		/* TODO: GROUP BY + HAVING */
-		/* TODO: ORDER BY + LIMIT */
-	) (build_queryplan schema (if (nil? from) '() from) (merge cols) condition)))
+		)
+		(?
+			(atom "HAVING" true)
+			(define having sql_expression)
+		)
+		/* ORDER BY + LIMIT */
+		(?
+			(atom "ORDER" true)
+			(atom "BY" true)
+			(define order (+
+				(parser '((define col sql_expression) (define direction_desc (or
+					(parser (atom "DESC" true) true)
+					(parser(atom "ASC" true) false)
+					(parser empty false)
+				))) '(col direction_desc))
+				(atom "," true)
+			))
+		)
+		(?
+			(atom "LIMIT" true)
+			(or
+				'((define limit sql_expression))
+				'((define offset sql_expression) (atom "," true) (define limit sql_expression))
+				'((define limit sql_expression) (atom "OFFSET" true) (define offset sql_expression))
+			)
+		)
+	) '(schema (if (nil? from) '() from) (merge cols) condition group having order limit offset)))
 
 	(define sql_update (parser '(
 		(atom "UPDATE" true)
@@ -201,7 +241,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
-		sql_select
+		(parser (define query sql_select) (apply build_queryplan query))
 		sql_insert_into
 		sql_create_table
 		sql_update
