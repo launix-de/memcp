@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -13,6 +13,21 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+/*
+
+How MemCPs query plan builder works
+-----------------------------------
+
+MemCP will not implement any filtering or ordering on scheme lists directly since this will be very costly.
+Instead, the storage engine is used to do these operations. The storage engine will automatically analyze a
+lambda expression for filtering/ordering and will eventually create and use indexes.
+
+Every filter and sort will be executed on a base table. Therefore, in GROUP BY clauses, a temporary table
+has to be created. Also for cross joins (joins that either have no equality condition between the tables or
+the equality is not on a unique column), there has to be a temporary cross-table.
+
 */
 
 (define extract_columns_from_expr (lambda (expr) (match expr

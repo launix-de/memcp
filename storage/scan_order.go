@@ -97,6 +97,9 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 	boundaries := extractBoundaries(condition)
 	// TODO: append sortcols to boundaries
 
+	// TODO: sortcols that are not just simple columns but complex lambda expressions could be temporarily materialized to trade memory for execution time
+	// --> sortcols can then be rewritten to strings
+
 	// prepare map phase (map has to occur late and ordered)
 	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 
@@ -256,6 +259,8 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 		}
 
 		result.items = append(result.items, idx)
+
+		// TODO: early cutoff if limit > 0 and iterateIndex fits the sort criteria
 	}
 
 	// delta storage (unindexed)
