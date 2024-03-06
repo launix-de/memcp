@@ -18,12 +18,14 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package scm
 
 import "fmt"
+import "regexp"
 import packrat "github.com/launix-de/go-packrat"
 
 type ScmParser struct {
 	Root packrat.Parser // wrapper for parser
 	Syntax Scmer // keep syntax for deserializer
 	Generator Scmer
+	Skipper *regexp.Regexp
 }
 
 type ScmParserVariable struct {
@@ -114,7 +116,11 @@ func ExtractScmer(n *packrat.Node, en *Env) Scmer {
 }
 
 func (b *ScmParser) Execute(str string, en *Env) Scmer {
-	scanner := packrat.NewScanner(str, packrat.SkipWhitespaceAndCommentsRegex) // also skip C-style comments as whitespaces (TODO: configurable)
+	var skipper *regexp.Regexp = b.Skipper
+	if skipper == nil {
+		skipper = packrat.SkipWhitespaceAndCommentsRegex // also skip C-style comments as whitespaces
+	}
+	scanner := packrat.NewScanner(str, skipper)
 	node, err := packrat.Parse(b, scanner)
 	if err != nil {
 		panic(err)
@@ -160,7 +166,12 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 			switch n[0] {
 				case Symbol("parser"): // inner anonymous parser
 					Validate(n[2])
-					return NewParser(n[1], n[2], en)
+					var skipper Scmer = nil
+					if len(n) > 3 {
+						Validate(n[3])
+						skipper = n[3]
+					}
+					return NewParser(n[1], n[2], skipper, en)
 				case Symbol("atom"):
 					caseinsensitive := false
 					if len(n) > 2 {
@@ -234,11 +245,15 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 	panic("Unknown syntax: " + fmt.Sprint(syntax))
 }
 
-func NewParser(syntax, generator Scmer, en *Env) *ScmParser {
+func NewParser(syntax, generator, whitespace Scmer, en *Env) *ScmParser {
 	result := new(ScmParser)
 	result.Root = parseSyntax(syntax, en)
 	result.Syntax = syntax // for serialization purposes
 	result.Generator = generator
+	if whitespace != nil {
+		result.Skipper = regexp.MustCompile(String(whitespace))
+		// "^(?:/\\*.*?\\*/|[\r\n\t ]+)+"
+	}
 	return result
 }
 
@@ -252,6 +267,7 @@ Scm parsers work this way:
 
 syntax can be one of:
 (parser syntax scmerresult) will execute scmerresult after parsing syntax
+(parser syntax scmerresult "skipper") will add a different whitespace skipper regex to the root parser
 (define var syntax) valid inside (parser...), stores the result of syntax into var for use in scmerresult
 "str" AtomParser
 (atom "str" caseinsensitive skipws) AtomParser
@@ -267,10 +283,11 @@ symbol -> use other parser defined in env
 
 for further details on packrat parsers, take a look at https://github.com/launix-de/go-packrat
 `,
-		1, 2,
+		1, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"syntax", "any", "syntax of the grammar (see docs)"},
 			DeclarationParameter{"generator", "any", "(optional) expressions to evaluate. All captured variables are available in the scope."},
+			DeclarationParameter{"skipper", "string", "(optional) string that defines the skip mechanism for whitespaces as regexp"},
 		}, "func",
 		nil,
 	})
