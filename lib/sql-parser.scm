@@ -236,6 +236,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "ENGINE" true) (atom "=" false) (atom "MEMORY" true)) '("engine" "memory"))
 			(parser '((atom "ENGINE" true) (atom "=" false) (atom "SLOPPY" true)) '("engine" "sloppy"))
 			(parser '((atom "ENGINE" true) (atom "=" false) (atom "SAFE" true)) '("engine" "safe"))
+			(parser '((atom "ENGINE" true) (atom "=" false) (atom "MyISAM" true)) '("engine" "safe"))
+			(parser '((atom "ENGINE" true) (atom "=" false) (atom "InnoDB" true)) '("engine" "safe"))
+			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) (atom "=" true) sql_identifier) '())
 		)))
 	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)))))
 
@@ -264,7 +267,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (define id sql_identifier)) '((quote droptable) schema id))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (? (atom "IF" true) (atom "EXISTS" true) /* TODO */) (define id sql_identifier)) '((quote droptable) schema id))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? (atom "@" true)) (define key sql_identifier) (atom "=" true) (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
 		empty
 	))) 
