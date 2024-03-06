@@ -142,10 +142,12 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			}
 			en.Vars[e[1].(Symbol)] = value
 		case "parser": // special form of lambda function
-			if len(e) > 2 {
-				value = NewParser(e[1], e[2], en)
+			if len(e) > 3 {
+				value = NewParser(e[1], e[2], e[3], en)
+			} else if len(e) > 2 {
+				value = NewParser(e[1], e[2], nil, en)
 			} else {
-				value = NewParser(e[1], nil, en)
+				value = NewParser(e[1], nil, nil, en)
 			}
 		case "lambda":
 			switch si := e[1].(type) {

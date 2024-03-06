@@ -269,6 +269,6 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		empty
 	))) 
 	/* TODO: DELIMITER commands */
-	(cons (quote begin) ((parser (+ p ";")) s))
+	(cons (quote begin) ((parser (define commands (+ p ";")) commands "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s))
 )))
 
