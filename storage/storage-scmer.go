@@ -119,7 +119,7 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
-	if s.null * 13 > i * 100 {
+	if s.null * 100 > i * 13 {
 		// sparse payoff against bitcompressed is at ~13%
 		return new(StorageSparse)
 	}
@@ -137,7 +137,7 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 		// tight float packing
 		return new(StorageFloat)
 	}
-	if s.null * 50 > i * 100 {
+	if s.null * 2 > i {
 		// sparse payoff against StorageSCMER is at 2.1
 		return new(StorageSparse)
 	}
