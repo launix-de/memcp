@@ -48,3 +48,5 @@ the env-depth tells the interpreter to look up next-values from the parent env
 when the heap is full, a new heap is opened
 every thread runs in its own exec-env; a thread can pre-allocate a fixed size heap for fast access
 heaps are removed in whole pieces
+
+max integer storable in doubles: 9007199254740992 (9 Peta)
