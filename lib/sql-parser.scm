@@ -222,10 +222,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(define id sql_identifier)
 		"("
 		(define cols (* (or
-			'((atom "PRIMARY" true) (atom "KEY" true) "(" (+ sql_identifier ",") ")")
-			'((atom "UNIQUE" true) (atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")")
-			'((atom "FOREIGN" true) (atom "KEY" true) "(" (+ sql_identifier ",") ")" (atom "REFERENCES" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))))
-			'((atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")")
+			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" (cons (quote list) cols)))
+			(parser '((atom "UNIQUE" true) (atom "KEY" true) sql_identifier "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" (cons (quote list) cols)))
+			(parser '((atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
+			(parser '((atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")") '((quote list))) /* ignore index definitions */
 			(parser '(
 				(define col sql_identifier)
 				(define type sql_identifier)
@@ -235,7 +235,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 					(parser empty '((quote list)))
 				))
 				(define typeparams (regex "[^,)]*")) /* TODO: rest */
-			) '((quote list) col type dimensions typeparams))
+			) '((quote list) "column" col type dimensions typeparams))
 		) ","))
 		")"
 		(define options (* (or
