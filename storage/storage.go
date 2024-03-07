@@ -176,14 +176,33 @@ func Init(en scm.Env) {
 			t := CreateTable(scm.String(a[0]), scm.String(a[1]), pm)
 			for _, coldef := range(a[2].([]scm.Scmer)) {
 				def := coldef.([]scm.Scmer)
-				if def[0] == "primary" {
-					// TODO
-				} else
+				if len(def) == 0 {
+					continue
+				}
 				if def[0] == "unique" {
-					// TODO
+					// id cols
+					cols := make([]string, len(def[2].([]scm.Scmer)))
+					for i, v := range def[2].([]scm.Scmer) {
+						cols[i] = scm.String(v)
+					}
+					t.Unique = append(t.Unique, uniqueKey{scm.String(def[1]), cols})
 				} else
 				if def[0] == "foreign" {
-					// TODO
+					// id cols tbl cols2
+					cols1 := make([]string, len(def[2].([]scm.Scmer)))
+					for i, v := range def[2].([]scm.Scmer) {
+						cols1[i] = scm.String(v)
+					}
+					cols2 := make([]string, len(def[4].([]scm.Scmer)))
+					for i, v := range def[4].([]scm.Scmer) {
+						cols2[i] = scm.String(v)
+					}
+					t2, ok := t.schema.Tables[scm.String(def[3])]
+					if !ok {
+						panic("Table in foreign key does not exist: " + scm.String(def[3]))
+					}
+					t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
+					t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
 				} else
 				if def[0] == "column" {
 					// normal column
@@ -196,8 +215,12 @@ func Init(en scm.Env) {
 					}
 					typeparams := scm.String(def[4])
 					t.CreateColumn(colname, typename, dimensions, typeparams)
+					// todo: not null flags, PRIMARY KEY flag usw.
+					if strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
+						// append unique key
+						t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
+					}
 				}
-				// todo: not null flags usw
 			}
 			return true
 		},
