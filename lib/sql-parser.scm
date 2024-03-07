@@ -221,24 +221,30 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "TABLE" true)
 		(define id sql_identifier)
 		"("
-		(define cols (* (parser '(
-			(define col sql_identifier)
-			(define type sql_identifier)
-			(define dimensions (or
-				(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
-				(parser '("(" (define a sql_int) ")") '((quote list) a))
-				(parser empty '((quote list)))
-			))
-			(define typeparams (regex "[^,)]*")) /* TODO: rest */
-		) '((quote list) col type dimensions typeparams)) ","))
+		(define cols (* (or
+			'((atom "PRIMARY" true) (atom "KEY" true) "(" (+ sql_identifier ",") ")")
+			'((atom "UNIQUE" true) (atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")")
+			'((atom "FOREIGN" true) (atom "KEY" true) "(" (+ sql_identifier ",") ")" (atom "REFERENCES" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))))
+			'((atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")")
+			(parser '(
+				(define col sql_identifier)
+				(define type sql_identifier)
+				(define dimensions (or
+					(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
+					(parser '("(" (define a sql_int) ")") '((quote list) a))
+					(parser empty '((quote list)))
+				))
+				(define typeparams (regex "[^,)]*")) /* TODO: rest */
+			) '((quote list) col type dimensions typeparams))
+		) ","))
 		")"
 		(define options (* (or
-			(parser '((atom "ENGINE" true) (atom "=" false) (atom "MEMORY" true)) '("engine" "memory"))
-			(parser '((atom "ENGINE" true) (atom "=" false) (atom "SLOPPY" true)) '("engine" "sloppy"))
-			(parser '((atom "ENGINE" true) (atom "=" false) (atom "SAFE" true)) '("engine" "safe"))
-			(parser '((atom "ENGINE" true) (atom "=" false) (atom "MyISAM" true)) '("engine" "safe"))
-			(parser '((atom "ENGINE" true) (atom "=" false) (atom "InnoDB" true)) '("engine" "safe"))
-			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) (atom "=" true) sql_identifier) '())
+			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) '("engine" "memory"))
+			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) '("engine" "sloppy"))
+			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) '("engine" "safe"))
+			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) '("engine" "safe"))
+			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) '("engine" "safe"))
+			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) "=" sql_identifier) '())
 		)))
 	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)))))
 
@@ -268,7 +274,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (? (atom "IF" true) (atom "EXISTS" true) /* TODO */) (define id sql_identifier)) '((quote droptable) schema id))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? (atom "@" true)) (define key sql_identifier) (atom "=" true) (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
 		empty
 	))) 
 	/* TODO: DELIMITER commands */

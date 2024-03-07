@@ -149,7 +149,7 @@ func Init(en scm.Env) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
-			scm.DeclarationParameter{"cols", "list", "list of columns, each '(colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items"},
+			scm.DeclarationParameter{"cols", "list", "list of columns and constraints, each '(colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2)"},
 			scm.DeclarationParameter{"options", "list", "further options like engine=safe|sloppy|memory"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {

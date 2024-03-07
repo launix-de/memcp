@@ -35,10 +35,31 @@ const (
 	Sloppy = 1
 	Memory = 2
 )
+type foreignKey struct {
+	tbl1 *table
+	cols1 []string
+	tbl2 *table
+	cols2 []string
+}
+/*
+unique keys:
+	insert: check all columns of all unique keys (--> index scan!), if it is unique, deny insert
+	update: check all columns of all unique keys (--> index scan!), if it is unique, deny deletion, deny insert
+	delete: -
+
+foreign keys:
+	insert: I am tbl1 -> check all cols1 : do the values exist in tbl2.cols2? if not, deny insert
+	update: I am tbl1 -> check all cols1 (new values): do the values exist in tbl2.cols2? if not, deny insert
+	update: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE an update in tbl1, SET NULL in tbl1 or RESTRICT
+	delete: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE a delete in tbl1, SET NULL in tbl1 or RESTRICT
+
+*/
 type table struct {
 	schema *database
 	Name string
 	Columns []column
+	Unique [][]string // unique keys
+	Foreign []foreignKey
 	PersistencyMode PersistencyMode /* 0 = safe (default), 1 = sloppy, 2 = memory */
 	mu sync.Mutex // schema lock
 
