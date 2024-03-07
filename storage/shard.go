@@ -149,10 +149,12 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
+		// TODO: check unique and foreign keys
 		t.mu.Lock() // write lock
-		result := false
+		result := false // result = true when update was possible; false if there was a RESTRICT
 		if len(a) > 0 {
 			// update statement -> also perform an insert
+			// TODO: check if we can do in-place editing in the delta storage (if idx > t.main_count)
 			changes := a[0].([]scm.Scmer)
 			// build the whole dataset from storage
 			d := make(dataset, 2 * len(t.columns))
