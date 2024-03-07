@@ -35,11 +35,17 @@ const (
 	Sloppy = 1
 	Memory = 2
 )
+type uniqueKey struct {
+	Id string
+	Cols []string
+}
 type foreignKey struct {
-	tbl1 *table
-	cols1 []string
-	tbl2 *table
-	cols2 []string
+	// TODO: custom Marshal/Unmarshal functions to serialize Tbl1 and Tbl2 as id
+	Id string
+	Tbl1 *table
+	Cols1 []string
+	Tbl2 *table
+	Cols2 []string
 }
 /*
 unique keys:
@@ -58,8 +64,8 @@ type table struct {
 	schema *database
 	Name string
 	Columns []column
-	Unique [][]string // unique keys
-	Foreign []foreignKey
+	Unique []uniqueKey // unique keys
+	Foreign []foreignKey // foreign keys
 	PersistencyMode PersistencyMode /* 0 = safe (default), 1 = sloppy, 2 = memory */
 	mu sync.Mutex // schema lock
 

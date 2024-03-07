@@ -222,9 +222,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(define id sql_identifier)
 		"("
 		(define cols (* (or
-			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" (cons (quote list) cols)))
-			(parser '((atom "UNIQUE" true) (atom "KEY" true) sql_identifier "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" (cons (quote list) cols)))
-			(parser '((atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
+			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
+			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" id (cons (quote list) cols)))
+			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
 			(parser '((atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")") '((quote list))) /* ignore index definitions */
 			(parser '(
 				(define col sql_identifier)
