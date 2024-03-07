@@ -173,6 +173,9 @@ func (t *table) Insert(d dataset) {
 		}
 		t.mu.Unlock()
 	}
+
+	// TODO: check unique constraints in a thread safe manner
+
 	// physically insert
 	shard.Insert(d)
 }

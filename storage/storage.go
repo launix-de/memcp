@@ -72,7 +72,11 @@ func Init(en scm.Env) {
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
 			// params: table, condition, map, reduce, reduceSeed
-			t := databases[scm.String(a[0])].Tables[scm.String(a[1])]
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables[scm.String(a[1])]
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
 			if len(a) > 4 {
@@ -103,7 +107,11 @@ func Init(en scm.Env) {
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
 			// params: table, condition, map, reduce, reduceSeed
-			t := databases[scm.String(a[0])].Tables[scm.String(a[1])]
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables[scm.String(a[1])]
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
 			if len(a) > 8 {
@@ -246,7 +254,11 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"row", "list", "list of the pattern '(\"col1\" value1 \"col2\" value2)"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
-			databases[scm.String(a[0])].Tables[scm.String(a[1])].Insert(dataset(a[2].([]scm.Scmer)))
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			db.Tables[scm.String(a[1])].Insert(dataset(a[2].([]scm.Scmer)))
 			return true
 		},
 	})
@@ -269,23 +281,26 @@ func Init(en scm.Env) {
 		func (a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				// show databases
-				result := make([]scm.Scmer, len(databases))
-				i := 0
-				for k, _ := range databases {
-					result[i] = k
-					i = i + 1
+				dbs := databases.Load()
+				result := make([]scm.Scmer, len(*dbs))
+				for i, db := range *dbs {
+					result[i] = db.Name
 				}
 				return result
 			} else if len(a) == 1 {
 				// show tables
-				db := databases[scm.String(a[0])]
+				db := GetDatabase(scm.String(a[0]))
 				if db == nil {
 					return nil // use this to check if a database exists
 				}
 				return db.ShowTables()
 			} else if len(a) == 2 {
 				// show columns
-				return databases[scm.String(a[0])].Tables[scm.String(a[1])].ShowColumns()
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				return db.Tables[scm.String(a[1])].ShowColumns()
 			} else {
 				panic("invalid call of show")
 			}
@@ -299,7 +314,8 @@ func Init(en scm.Env) {
 		func (a ...scm.Scmer) scm.Scmer {
 			start := time.Now()
 
-			for _, db := range databases {
+			dbs := databases.Load()
+			for _, db := range *dbs {
 				db.rebuild()
 				db.save()
 			}
@@ -355,8 +371,7 @@ func PrintMemUsage() string {
 	var b strings.Builder
         b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC))
 
-	databaselock.RLock()
-	for _, db := range databases {
+	for _, db := range *databases.Load() {
 		var dsize uint
 		b.WriteString("\n\n" + db.Name + "\n======\nTable                    \tColumns\tShards\tSize/Bytes")
 		for _, t := range db.Tables {
@@ -369,7 +384,6 @@ func PrintMemUsage() string {
 		}
 		b.WriteString(fmt.Sprintf("\n= %d bytes", dsize));
 	}
-	databaselock.RUnlock()
 	return b.String()
 }
 
