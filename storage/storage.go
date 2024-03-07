@@ -149,7 +149,7 @@ func Init(en scm.Env) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
-			scm.DeclarationParameter{"cols", "list", "list of columns and constraints, each '(colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2)"},
+			scm.DeclarationParameter{"cols", "list", "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2)"},
 			scm.DeclarationParameter{"options", "list", "further options like engine=safe|sloppy|memory"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
@@ -175,15 +175,28 @@ func Init(en scm.Env) {
 			// create table
 			t := CreateTable(scm.String(a[0]), scm.String(a[1]), pm)
 			for _, coldef := range(a[2].([]scm.Scmer)) {
-				colname := scm.String(coldef.([]scm.Scmer)[0])
-				typename := scm.String(coldef.([]scm.Scmer)[1])
-				dimensions_ := coldef.([]scm.Scmer)[2].([]scm.Scmer)
-				dimensions := make([]int, len(dimensions_))
-				for i, d := range dimensions_ {
-					dimensions[i] = scm.ToInt(d)
+				def := coldef.([]scm.Scmer)
+				if def[0] == "primary" {
+					// TODO
+				} else
+				if def[0] == "unique" {
+					// TODO
+				} else
+				if def[0] == "foreign" {
+					// TODO
+				} else
+				if def[0] == "column" {
+					// normal column
+					colname := scm.String(def[1])
+					typename := scm.String(def[2])
+					dimensions_ := def[3].([]scm.Scmer)
+					dimensions := make([]int, len(dimensions_))
+					for i, d := range dimensions_ {
+						dimensions[i] = scm.ToInt(d)
+					}
+					typeparams := scm.String(def[4])
+					t.CreateColumn(colname, typename, dimensions, typeparams)
 				}
-				typeparams := scm.String(coldef.([]scm.Scmer)[3])
-				t.CreateColumn(colname, typename, dimensions, typeparams)
 				// todo: not null flags usw
 			}
 			return true
