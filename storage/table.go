@@ -144,13 +144,13 @@ func (d dataset) Get(key string) scm.Scmer {
 }
 
 func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo string) {
-	t.schemalock.Lock()
+	t.schema.schemalock.Lock()
 	t.Columns = append(t.Columns, column{name, typ, typdimensions, extrainfo})
 	for i := range t.Shards {
 		t.Shards[i].columns[name] = new (StorageSCMER)
 	}
 	t.schema.save()
-	t.schemalock.Unlock()
+	t.schema.schemalock.Unlock()
 }
 
 func (t *table) Insert(d dataset) {
