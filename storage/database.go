@@ -25,7 +25,7 @@ import "github.com/launix-de/NonLockingReadMap"
 type database struct {
 	Name string `json:"name"`
 	path string `json:"-"`
-	Tables map[string]*table `json:"tables"`
+	Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
 	schemalock sync.RWMutex `json:"-"` // TODO: rw-locks for schemalock
 }
 // TODO: replace databases map everytime something changes, so we don't run into read-while-write
@@ -49,7 +49,7 @@ func LoadDatabases() {
 			jsonbytes, _ := os.ReadFile(db.path + "schema.json")
 			json.Unmarshal(jsonbytes, db) // json import
 			// restore back references of the tables
-			for _, t := range db.Tables {
+			for _, t := range db.Tables.GetAll() {
 				t.schema = db // restore schema reference
 				for _, s := range t.Shards {
 					s.load(t)
@@ -73,17 +73,18 @@ func (db *database) save() {
 }
 
 func (db *database) ShowTables() scm.Scmer {
-	result := make([]scm.Scmer, len(db.Tables))
+	tables := db.Tables.GetAll()
+	result := make([]scm.Scmer, len(tables))
 	i := 0
-	for k, _ := range db.Tables {
-		result[i] = k
+	for _, t := range tables {
+		result[i] = t.Name
 		i = i + 1
 	}
 	return result
 }
 
 func (db *database) rebuild() {
-	for _, t := range db.Tables {
+	for _, t := range db.Tables.GetAll() {
 		t.mu.Lock() // table lock
 		for i, s := range t.Shards {
 			// TODO: go + chan done
@@ -106,7 +107,7 @@ func CreateDatabase(schema string) {
 	db = new(database)
 	db.Name = schema
 	db.path = Basepath + "/" + schema + "/" // TODO: alternative save paths
-	db.Tables = make(map[string]*table)
+	db.Tables = NonLockingReadMap.New[table, string]()
 
 	last := databases.Set(db)
 	if last != nil {
@@ -134,17 +135,23 @@ func CreateTable(schema, name string, pm PersistencyMode) *table {
 		panic("Database " + schema + " does not exist")
 	}
 	db.schemalock.Lock()
-	if _, ok := db.Tables[name]; ok {
+	t := db.Tables.Get(name)
+	if t != nil {
 		panic("Table " + name + " already exists")
 	}
-	t := new(table)
+	t = new(table)
 	t.schema = db
 	t.Name = name
 	t.PersistencyMode = pm
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
-	db.Tables[t.Name] = t
-	db.save()
+	t2 := db.Tables.Set(t)
+	if t2 != nil {
+		// concurrent create
+		panic("Table " + name + " already exists")
+	} else {
+		db.save()
+	}
 	db.schemalock.Unlock()
 	return t
 }
@@ -154,12 +161,13 @@ func DropTable(schema, name string) {
 	if db != nil {
 		panic("Database " + schema + " does not exist")
 	}
-	t, ok := db.Tables[name]
-	if !ok {
+	db.schemalock.Lock()
+	t := db.Tables.Get(name)
+	if t != nil {
+		db.schemalock.Unlock()
 		panic("Table " + schema + "." + name + " does not exist")
 	}
-	db.schemalock.Lock()
-	delete(db.Tables, name)
+	db.Tables.Remove(name)
 	db.save()
 	db.schemalock.Unlock()
 

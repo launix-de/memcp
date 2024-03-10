@@ -53,13 +53,12 @@ func LoadJSON(schema, filename string) {
 		if s == "" {
 			// ignore
 		} else if s[0:7] == "#table " {
-			var ok bool
 			db := GetDatabase(schema)
 			if db == nil {
 				panic("database " + schema + " does not exist")
 			}
-			t, ok = db.Tables[s[7:]]
-			if !ok {
+			t = db.Tables.Get(s[7:])
+			if t == nil {
 				// new table
 				t = CreateTable(schema, s[7:], Safe)
 			}

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -76,7 +76,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables[scm.String(a[1])]
+			t := db.Tables.Get(scm.String(a[1]))
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
 			if len(a) > 4 {
@@ -111,7 +111,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables[scm.String(a[1])]
+			t := db.Tables.Get(scm.String(a[1]))
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
 			if len(a) > 8 {
@@ -205,8 +205,8 @@ func Init(en scm.Env) {
 					for i, v := range def[4].([]scm.Scmer) {
 						cols2[i] = scm.String(v)
 					}
-					t2, ok := t.schema.Tables[scm.String(def[3])]
-					if !ok {
+					t2 := t.schema.Tables.Get(scm.String(def[3]))
+					if t2 == nil {
 						panic("Table in foreign key does not exist: " + scm.String(def[3]))
 					}
 					t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
@@ -258,7 +258,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			db.Tables[scm.String(a[1])].Insert(dataset(a[2].([]scm.Scmer)))
+			db.Tables.Get(scm.String(a[1])).Insert(dataset(a[2].([]scm.Scmer)))
 			return true
 		},
 	})
@@ -300,7 +300,7 @@ func Init(en scm.Env) {
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-				return db.Tables[scm.String(a[1])].ShowColumns()
+				return db.Tables.Get(scm.String(a[1])).ShowColumns()
 			} else {
 				panic("invalid call of show")
 			}
@@ -374,7 +374,7 @@ func PrintMemUsage() string {
 	for _, db := range databases.GetAll() {
 		var dsize uint
 		b.WriteString("\n\n" + db.Name + "\n======\nTable                    \tColumns\tShards\tSize/Bytes")
-		for _, t := range db.Tables {
+		for _, t := range db.Tables.GetAll() {
 			var size uint = 10*8 + 32 * uint(len(t.Columns))
 			for _, s := range t.Shards {
 				size += s.Size()

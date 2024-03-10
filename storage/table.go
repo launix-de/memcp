@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -21,7 +21,6 @@ import "sync"
 import "errors"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
-//import "github.com/launix-de/NonLockingReadMap"
 
 type dataset []scm.Scmer
 type column struct {
@@ -84,6 +83,11 @@ type table struct {
 }
 
 const max_shardsize = 65536 // dont overload the shards to get a responsive parallel full table scan
+
+/* Implement NonLockingReadMap */
+func (t table) GetKey() string {
+	return t.Name
+}
 
 func (m *PersistencyMode) MarshalJSON() ([]byte, error) {
 	if (*m == Memory) {

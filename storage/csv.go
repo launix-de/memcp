@@ -40,8 +40,8 @@ func LoadCSV(schema, table, filename, delimiter string) {
 	if db == nil {
 		panic("database " + schema + " does not exist")
 	}
-	t, ok := db.Tables[table]
-	if !ok {
+	t := db.Tables.Get(table)
+	if t == nil {
 		panic("table " + table + " does not exist")
 	}
 	for s := range(lines) {
