@@ -281,9 +281,9 @@ func Init(en scm.Env) {
 		func (a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				// show databases
-				dbs := databases.Load()
-				result := make([]scm.Scmer, len(*dbs))
-				for i, db := range *dbs {
+				dbs := databases.GetAll()
+				result := make([]scm.Scmer, len(dbs))
+				for i, db := range dbs {
 					result[i] = db.Name
 				}
 				return result
@@ -314,8 +314,8 @@ func Init(en scm.Env) {
 		func (a ...scm.Scmer) scm.Scmer {
 			start := time.Now()
 
-			dbs := databases.Load()
-			for _, db := range *dbs {
+			dbs := databases.GetAll()
+			for _, db := range dbs {
 				db.rebuild()
 				db.save()
 			}
@@ -371,7 +371,7 @@ func PrintMemUsage() string {
 	var b strings.Builder
         b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC))
 
-	for _, db := range *databases.Load() {
+	for _, db := range databases.GetAll() {
 		var dsize uint
 		b.WriteString("\n\n" + db.Name + "\n======\nTable                    \tColumns\tShards\tSize/Bytes")
 		for _, t := range db.Tables {

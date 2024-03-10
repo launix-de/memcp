@@ -28,6 +28,16 @@ Every filter and sort will be executed on a base table. Therefore, in GROUP BY c
 has to be created. Also for cross joins (joins that either have no equality condition between the tables or
 the equality is not on a unique column), there has to be a temporary cross-table.
 
+when building a queryplan, there is a parameter `tables` which contains all tables that have to be joined.
+Relevant for the iterator is now the "core". which is:
+the list of tables in tables t1 that are not connected over a join t1,t2,t1.col1=t2.col2 where there is a unique key (t2.col2)
+(helper function (unique? schema tbl col col col))
+
+if the core consists of a single table, scan this table
+if the core consists of two or more tables, create a temporary join table --> prejoins
+if there is a group function, create a temporary preaggregate table
+(helper function temptable(tbllist, collist) -> tbllist is the list of tables to be joined and collist is the list of (table, col) that will also be unique)
+
 */
 
 (define extract_columns_from_expr (lambda (expr) (match expr

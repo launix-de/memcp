@@ -21,6 +21,7 @@ import "sync"
 import "errors"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
+//import "github.com/launix-de/NonLockingReadMap"
 
 type dataset []scm.Scmer
 type column struct {

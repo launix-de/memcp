@@ -18,10 +18,9 @@ package storage
 
 import "os"
 import "sync"
-import "sort"
-import "sync/atomic"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/NonLockingReadMap"
 
 type database struct {
 	Name string `json:"name"`
@@ -31,15 +30,16 @@ type database struct {
 }
 // TODO: replace databases map everytime something changes, so we don't run into read-while-write
 // e.g. a table of databases
-var databases atomic.Pointer[[]*database]
+var databases NonLockingReadMap.NonLockingReadMap[database, string] = NonLockingReadMap.New[database, string]()
 var Basepath string = "data"
+
+/* implement NonLockingReadMap */
+func (d database) GetKey() string {
+	return d.Name
+}
 
 func LoadDatabases() {
 	// this happens before any init, so no read/write action is performed on any data yet
-	dbs := databases.Load()
-	if dbs == nil {
-		dbs = new([]*database)
-	}
 	entries, _ := os.ReadDir(Basepath)
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -48,7 +48,6 @@ func LoadDatabases() {
 			db.path = Basepath + "/" + entry.Name() + "/"
 			jsonbytes, _ := os.ReadFile(db.path + "schema.json")
 			json.Unmarshal(jsonbytes, db) // json import
-			*dbs = append(*dbs, db)
 			// restore back references of the tables
 			for _, t := range db.Tables {
 				t.schema = db // restore schema reference
@@ -56,12 +55,9 @@ func LoadDatabases() {
 					s.load(t)
 				}
 			}
+			databases.Set(db)
 		}
 	}
-	sort.Slice(*dbs, func (i, j int) bool {
-		return (*dbs)[i].Name < (*dbs)[j].Name;
-	})
-	databases.Store(dbs)
 }
 
 func (db *database) save() {
@@ -98,102 +94,38 @@ func (db *database) rebuild() {
 }
 
 func GetDatabase(schema string) *database {
-	dbs := databases.Load() // atomically work on the current database list
-	var lower int = 0
-	var upper int = len(*dbs)
-	for {
-		if lower == upper {
-			return nil // database does not exist
-		}
-		pivot := (lower + upper) / 2
-		db := (*dbs)[pivot]
-		if schema == db.Name {
-			return db // found database
-		} else if schema < db.Name {
-			upper = pivot
-		} else {
-			lower = pivot + 1
-		}
-	}
+	return databases.Get(schema)
 }
 
 func CreateDatabase(schema string) {
-	start:
-	old_dbs := databases.Load()
-	dbs := new([]*database)
-	*dbs = *old_dbs
-	// duplicate check
-	var lower int = 0
-	var upper int = len(*dbs)
-	for {
-		if lower == upper {
-			// database does not exist -> create
-			break
-		}
-		pivot := (lower + upper) / 2
-		db := (*dbs)[pivot]
-		if schema == db.Name {
-			panic("Database " + schema + " already exists")
-		} else if schema < db.Name {
-			upper = pivot
-		} else {
-			lower = pivot + 1
-		}
+	db := databases.Get(schema)
+	if db != nil {
+		panic("Database " + schema + " already exists")
 	}
 
-	db := new(database)
+	db = new(database)
 	db.Name = schema
 	db.path = Basepath + "/" + schema + "/" // TODO: alternative save paths
 	db.Tables = make(map[string]*table)
-	*dbs = make([]*database, len(*old_dbs) + 1)
-	*dbs = append(*dbs, (*old_dbs)...)
-	*dbs = append(*dbs, db)
-	sort.Slice(*dbs, func (i, j int) bool {
-		return (*dbs)[i].Name < (*dbs)[j].Name;
-	})
-	if databases.CompareAndSwap(old_dbs, dbs) {
-		db.save()
-	} else {
-		goto start
+
+	last := databases.Set(db)
+	if last != nil {
+		// two concurrent CREATE
+		databases.Set(last)
+		panic("Database " + schema + " already exists")
 	}
+
+	db.save()
 }
 
 func DropDatabase(schema string) {
-	start:
-	old_dbs := databases.Load()
-	dbs := new([]*database)
-	*dbs = *old_dbs
-	// duplicate check
-	var lower int = 0
-	var upper int = len(*dbs)
-	var pivot int
-	var db *database
-	for {
-		if lower == upper {
-			panic("Database " + schema + " does not exist")
-		}
-		pivot = (lower + upper) / 2
-		db = (*dbs)[pivot]
-		if schema == db.Name {
-			break // found, ok
-		} else if schema < db.Name {
-			upper = pivot
-		} else {
-			lower = pivot + 1
-		}
+	db := databases.Remove(schema)
+	if db == nil {
+		panic("Database " + schema + " does not exist")
 	}
 
-	(*dbs)[pivot] = (*dbs)[len(*dbs)-1]
-	*dbs = (*dbs)[0:len(*dbs)-1] // remove one element
-	sort.Slice(*dbs, func (i, j int) bool {
-		return (*dbs)[i].Name < (*dbs)[j].Name;
-	})
-	if databases.CompareAndSwap(old_dbs, dbs) {
-		os.RemoveAll(db.path)
-		db.save()
-	} else {
-		goto start
-	}
+	// remove remains of the folder structure
+	os.RemoveAll(db.path)
 }
 
 func CreateTable(schema, name string, pm PersistencyMode) *table {
