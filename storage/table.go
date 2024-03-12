@@ -180,6 +180,8 @@ func (t *table) Insert(d dataset) {
 		t.mu.Unlock()
 	}
 
+	// TODO: check foreign keys (new value of column must be present in referenced table)
+
 	// check unique constraints in a thread safe manner
 	if len(t.Unique) > 0 {
 		t.uniquelock.Lock()
@@ -199,6 +201,7 @@ func (t *table) Insert(d dataset) {
 	// TODO: Trigger after insert
 }
 
+// TODO: refactor to "has" (cols, dataset)
 func (t *table) GetUniqueErrorsFor(d dataset) scm.Scmer {
 	// check for duplicates
 	for _, uniq := range t.Unique {

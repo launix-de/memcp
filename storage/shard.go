@@ -149,7 +149,8 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
-		// TODO: check unique and foreign keys
+		// TODO: check foreign keys (new value of column must be present in referenced table)
+		// TODO: check foreign key removal (old value is referenced in another table)
 		t.mu.Lock() // write lock
 		defer t.mu.Unlock()
 
