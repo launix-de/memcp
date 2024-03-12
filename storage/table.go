@@ -68,6 +68,7 @@ type table struct {
 	Foreign []foreignKey // foreign keys
 	PersistencyMode PersistencyMode /* 0 = safe (default), 1 = sloppy, 2 = memory */
 	mu sync.Mutex // schema lock
+	uniquelock sync.Mutex // unique insert lock
 
 	// storage
 	Shards []*storageShard
@@ -158,6 +159,8 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 	t.schema.schemalock.Unlock()
 }
 
+var proc_a_or_b scm.Scmer = scm.Proc{[]scm.Scmer{scm.Symbol("a"), scm.Symbol("b")}, []scm.Scmer{scm.Symbol("or"), scm.Symbol("a"), scm.Symbol("b")}, &scm.Globalenv}
+
 func (t *table) Insert(d dataset) {
 	// load balance: if bucket is full, create new one
 	shard := t.Shards[len(t.Shards)-1]
@@ -179,8 +182,37 @@ func (t *table) Insert(d dataset) {
 		t.mu.Unlock()
 	}
 
-	// TODO: check unique constraints in a thread safe manner
-
-	// physically insert
-	shard.Insert(d)
+	// check unique constraints in a thread safe manner
+	if len(t.Unique) > 0 {
+		t.uniquelock.Lock()
+		// check for duplicates
+		for _, uniq := range t.Unique {
+			// build scan for unique check
+			cols := make([]scm.Scmer, len(uniq.Cols))
+			for i, c := range uniq.Cols {
+				cols[i] = scm.Symbol(c)
+			}
+			conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
+			conditionBody[0] = scm.Symbol("and")
+			for i, c := range uniq.Cols {
+				value := d.Get(c)
+				if value == nil {
+					conditionBody[i + 1] = true
+				} else {
+					conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.Symbol(c), d.Get(c)}
+				}
+			}
+			condition := scm.Proc {cols, conditionBody, &scm.Globalenv}
+			if t.scan(condition, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv}, proc_a_or_b, false) != false {
+				t.uniquelock.Unlock()
+				panic("Unique key constraint validated in table "+t.Name+": " + uniq.Id)
+			}
+		}
+		// physically insert
+		shard.Insert(d)
+		t.uniquelock.Unlock()
+	} else {
+		// physically insert
+		shard.Insert(d)
+	}
 }

@@ -56,6 +56,8 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		// omit source info
 		expression = e.value
 		goto restart
+	case bool:
+		value = e
 	case string:
 		value = e
 	case float64:
