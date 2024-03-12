@@ -151,6 +151,8 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 		//fmt.Println("update/delete", a)
 		// TODO: check unique and foreign keys
 		t.mu.Lock() // write lock
+		defer t.mu.Unlock()
+
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		if len(a) > 0 {
 			// update statement -> also perform an insert
@@ -179,6 +181,18 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				i += 2
 			}
 			if result { // only do a write if something changed
+				// unique constraint checking
+				if t.t.Unique != nil {
+					t.t.uniquelock.Lock()
+					t.mu.Unlock() // release write lock, so the scan can be performed
+					err := t.t.GetUniqueErrorsFor(d)
+					t.mu.Lock() // write lock
+					if err != nil {
+						t.t.uniquelock.Unlock()
+						panic(err)
+					}
+				}
+
 				t.deletions[idx] = struct{}{} // mark as deleted
 				t.inserts = append(t.inserts, d) // append to delta storage
 				if t.t.PersistencyMode == Safe {
@@ -189,6 +203,9 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					tmp, _ = json.Marshal(d)
 					t.logfile.Write(tmp)
 					t.logfile.Write([]byte("\n"))
+				}
+				if t.t.Unique != nil {
+					t.t.uniquelock.Unlock()
 				}
 				if withTrigger {
 					// TODO: before/after update trigger
@@ -219,7 +236,6 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			}
 			t.next.UpdateFunction(idx2, false)(a...) // propagate to succeeding shard
 		}
-		t.mu.Unlock()
 		return result // maybe instead return UpdateFunction for newly inserted item??
 	}
 }

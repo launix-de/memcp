@@ -159,8 +159,6 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 	t.schema.schemalock.Unlock()
 }
 
-var proc_a_or_b scm.Scmer = scm.Proc{[]scm.Scmer{scm.Symbol("a"), scm.Symbol("b")}, []scm.Scmer{scm.Symbol("or"), scm.Symbol("a"), scm.Symbol("b")}, &scm.Globalenv}
-
 func (t *table) Insert(d dataset) {
 	// load balance: if bucket is full, create new one
 	shard := t.Shards[len(t.Shards)-1]
@@ -185,34 +183,44 @@ func (t *table) Insert(d dataset) {
 	// check unique constraints in a thread safe manner
 	if len(t.Unique) > 0 {
 		t.uniquelock.Lock()
-		// check for duplicates
-		for _, uniq := range t.Unique {
-			// build scan for unique check
-			cols := make([]scm.Scmer, len(uniq.Cols))
-			for i, c := range uniq.Cols {
-				cols[i] = scm.Symbol(c)
-			}
-			conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
-			conditionBody[0] = scm.Symbol("and")
-			for i, c := range uniq.Cols {
-				value := d.Get(c)
-				if value == nil {
-					conditionBody[i + 1] = true
-				} else {
-					conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.Symbol(c), d.Get(c)}
-				}
-			}
-			condition := scm.Proc {cols, conditionBody, &scm.Globalenv}
-			if t.scan(condition, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv}, proc_a_or_b, false) != false {
-				t.uniquelock.Unlock()
-				panic("Unique key constraint validated in table "+t.Name+": " + uniq.Id)
-			}
+		err := t.GetUniqueErrorsFor(d)
+		if err != nil {
+			t.uniquelock.Unlock()
+			panic(err)
 		}
 		// physically insert
 		shard.Insert(d)
 		t.uniquelock.Unlock()
 	} else {
-		// physically insert
+		// physically insert (parallel)
 		shard.Insert(d)
 	}
+
+	// TODO: Trigger after insert
+}
+
+func (t *table) GetUniqueErrorsFor(d dataset) scm.Scmer {
+	// check for duplicates
+	for _, uniq := range t.Unique {
+		// build scan for unique check
+		cols := make([]scm.Scmer, len(uniq.Cols))
+		for i, c := range uniq.Cols {
+			cols[i] = scm.Symbol(c)
+		}
+		conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
+		conditionBody[0] = scm.Symbol("and")
+		for i, c := range uniq.Cols {
+			value := d.Get(c)
+			if value == nil {
+				conditionBody[i + 1] = false // NULL can be there multiple times
+			} else {
+				conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.Symbol(c), d.Get(c)}
+			}
+		}
+		condition := scm.Proc {cols, conditionBody, &scm.Globalenv}
+		if t.scan(condition, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false) != false {
+			return "Unique key constraint validated in table "+t.Name+": " + uniq.Id
+		}
+	}
+	return nil
 }
