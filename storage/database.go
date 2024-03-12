@@ -158,12 +158,12 @@ func CreateTable(schema, name string, pm PersistencyMode) *table {
 
 func DropTable(schema, name string) {
 	db := GetDatabase(schema)
-	if db != nil {
+	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
 	db.schemalock.Lock()
 	t := db.Tables.Get(name)
-	if t != nil {
+	if t == nil {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + name + " does not exist")
 	}
