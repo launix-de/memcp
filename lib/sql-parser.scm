@@ -277,7 +277,22 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
 		empty
 	))) 
-	/* TODO: DELIMITER commands */
-	(cons (quote begin) ((parser (define commands (+ p ";")) commands "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s))
+	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
+
+(define parse_sql_multi (lambda (schema s) (begin
+	/* TODO: DELIMITER commands, version-specific meta commands usw */
+	/* this implements a SQL preprocessor that separates multiple commands into an array and resolves SQL version macros */
+	/* TODO: work on big file streams: detect incomplete SQL queries and return them as rest, so the caller can append more lines and reparse */
+	(define delimiter (parser ";"))
+	((parser '(
+		(define commands (* (regex "(?:[^';]|'(?:''|\\'|[^'])*')*") delimiter))
+		(? (atom "DELIMITER" true) (define nextdelimiter (regex "[^ ]+")))
+	) '(commands nextdelimiter) "^(?:--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+)))
+/*
+> (parse_sql_multi "sparse" "select * from a--man\n; 'b=4' ; moms ;\nDELIMITER foo\nafterwards")
+
+
+*/
 
