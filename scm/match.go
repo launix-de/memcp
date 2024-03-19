@@ -81,6 +81,25 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 							// examine the pattern
 							if len(p) == 3 {
 								switch p1 := p[1].(type) {
+									case Symbol:
+										if val, ok := en.FindRead(p1).Vars[p1]; ok {
+											if val_str, ok := val.(string); ok {
+												// concat sym sym but left sym is assigned
+												switch p2 := p[2].(type) {
+													case Symbol:
+														// string Symbol
+														if strings.HasPrefix(v, val_str) {
+															// extract postfix and match
+															en.Vars[p2] = v[len(val_str):]
+															return true
+														}
+														// else
+														return false
+													default:
+														// panic
+												}
+											}
+										}
 									case string:
 										switch p2 := p[2].(type) {
 											case Symbol:
