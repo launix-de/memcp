@@ -9,26 +9,23 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 
 TODO
 ----
- - session-local storage for mysql session state (variables, current schema)
- - per-table persistency settings
- - temptable -> createtemptable(columns)
+ - primary key auto_increment
+ - temptable -> (createtemptable schema tbl columns)
+ - tempcol -> (createtempcol schema tbl col mapfn) -> mapfn wird examiniert und per dirty-flag invalidiert oder aktualisiert
  - queryplan builder:
  	-> turn all subqueries into LEFT JOINs
 	-> merge all join'd tables with the same condition
-	-> join order
-	-> scan generation
- - scan_star (schema table-list join-column-list filter-list map-list map reduce neutral (equi-joins with cached last-index positions)
- - scan -> only "go" those shards that have the value range within (in an optimized data structure because there can be thousands of shards)
- - line numbers and filenames -> wrapper for []Scmer that has to run .Verify??? SYMBOL [debug]
+	-> join order = put everything into a big result table (
+	-> scan generation = only scan the result table
+ - scan_star (schema maintbl filter map reduce neutral subtbl[tblalias->tblname] sub-filter sub-map sub-reduce sub-neutral filter-list map-list) -> every sub-alias will become a map column; no need for a lib function; just optimize some pivot caching
+ - scan -> only "go" those shards that have the value range within (in an optimized data structure because there can be thousands of shards) --> range-tree
  - docker hub upload
  - mysql importer
- - plugin concept e.g. for AIs (they will declare new scheme functions)
+ - plugin concept e.g. for AIs (they will declare new scheme functions) -> .so
  - transactions: every delete+insert has a optional txid (or 0 if committed); rebuild only rebuilds up to the last committed insert-item; scans are relative to a txid where items with a non-matching txid are ignored
- - primary key generator
  - system.grant, system.user.all -> allow access for some databases
  - tables stored in a table? (StorageSCMER)
  - periodic (rebuild)
- - plugins: go build --buildmode shared -linkshared std in a subfolder
 
 
 Cache strategy
@@ -50,3 +47,17 @@ every thread runs in its own exec-env; a thread can pre-allocate a fixed size he
 heaps are removed in whole pieces
 
 max integer storable in doubles: 9007199254740992 (9 Peta)
+
+Range tree
+----------
+every column with an index can have a *RangeTree
+ - min+max are atomic Scmer (cmpxchg) values
+ - shards []*Shard
+ - pivot (also atomic scmer value)
+ - left-tree []*RangeTree
+ - right-tree []*RangeTree
+every insert extends the range tree's min/max
+a pivot is chosen as the mean from all shard's min/max values (sort the list and choose the middle element)
+all shards that span across the pivot are inserted into shards[]; if they are left or right from left/right tree, they are inserted into the subtree
+if a tree's subtrees are empty, it is a leaf
+when traversing a shardlist with a boundary, the one column is chosen that has the smallest shards[] array (=highest selectivity)
