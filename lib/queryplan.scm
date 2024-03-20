@@ -100,12 +100,26 @@ if there is a group function, create a temporary preaggregate table
 	/* columns: '('(tblalias colname) ...) */
 	(set columns (merge (extract_assoc fields extract_columns)))
 	/* TODO: expand fields if it contains '(tblalias "*") or '("*" "*") */
-		'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (show schema tbl) (lambda (col) '(tblvar (col "name"))))))))
+		'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (match '(schema tbl)
+			/* special tables */
+			'("information_schema" "tables") '('("name" "table_schema") '("name" "table_name") '("name" "table_type"))
+			(show schema tbl) /* otherwise: fetch from metadata */
+		) (lambda (col) '(tblvar (col "name"))))))))
 
 	/* TODO: sort tables according to join plan */
 	/* TODO: match tbl to inner query vs string */
 	(define build_scan (lambda (tables)
 		(match tables
+			(cons '(alias "information_schema" "tables") tables) /* special table */
+				'((quote map)
+				  	'((quote filter)
+					  	'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
+						'((quote lambda) '((quote item)) '((quote apply_assoc) (build_condition schema tbl condition) (quote item)))
+					)
+					'((quote lambda) '((quote item)) '((quote apply_assoc) '((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables)) (quote item)))
+				)
+				/* todo filter columns for alias */
+				/* TODO: reduce+neutral */
 			(cons '(alias schema tbl) tables) /* outer scan */
 				'((quote scan) schema tbl /* TODO: scan vs scan_order when order or limit is present */
 					(build_condition schema tbl condition) /* TODO: conditions in multiple tables */

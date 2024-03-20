@@ -239,6 +239,28 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 	return
 }
 
+func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
+	switch p := procedure.(type) {
+	case Proc:
+		switch params := p.Params.(type) {
+		case []Scmer:
+			new_params := make([]Scmer, len(params))
+			for i, sym := range params {
+				for j := 0; j < len(args); j += 2 {
+					if args[j] == String(sym) {
+						new_params[i] = args[j+1]
+					}
+				}
+			}
+			return Apply(procedure, new_params)
+		default:
+			panic("apply_assoc cannot run on non-list parameters")
+		}
+	default:
+		panic("apply_assoc cannot run on non-lambdas")
+	}
+}
+
 // helper function; Eval uses a code duplicate to get the tail recursion done right
 func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 	switch p := procedure.(type) {
@@ -432,6 +454,17 @@ func init() {
 		}, "symbol",
 		func (a ...Scmer) Scmer {
 			return Apply(a[0], a[1].([]Scmer))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"function", "func", "function to execute (must be a lambda)"},
+			DeclarationParameter{"arguments", "list", "assoc list of arguments to apply"},
+		}, "symbol",
+		func (a ...Scmer) Scmer {
+			return ApplyAssoc(a[0], a[1].([]Scmer))
 		},
 	})
 	Declare(&Globalenv, &Declaration{
