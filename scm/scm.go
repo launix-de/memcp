@@ -44,6 +44,9 @@ import (
 // (dict key value rest_dict)
 // dict acts like a function; apply to a dict will yield the value
 
+type Applicable interface {
+	Apply(...Scmer) Scmer
+}
 
 /*
  Eval / Apply
@@ -227,6 +230,10 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 							return nil // no default value
 					}
 				}
+			case Applicable:
+				return p.Apply(args)
+			case nil:
+				panic("Unknown function: " + fmt.Sprint(e[0]))
 			default:
 				panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 			}
@@ -312,6 +319,10 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 					return nil // no default value
 			}
 		}
+	case Applicable:
+		return p.Apply(args)
+	case nil:
+		panic("Unknown function")
 	default:
 		panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 	}

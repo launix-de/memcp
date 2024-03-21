@@ -61,3 +61,33 @@ a pivot is chosen as the mean from all shard's min/max values (sort the list and
 all shards that span across the pivot are inserted into shards[]; if they are left or right from left/right tree, they are inserted into the subtree
 if a tree's subtrees are empty, it is a leaf
 when traversing a shardlist with a boundary, the one column is chosen that has the smallest shards[] array (=highest selectivity)
+
+phpmyadmin
+----------
+SELECT @@version, @@version_comment
+SET NAMES 'utf8mb4' COLLATE 'utf8mb4_general_ci'
+SELECT CURRENT_USER()
+SELECT `SCHEMA_NAME` FROM `INFORMATION_SCHEMA`.`SCHEMATA`, (SELECT DB_first_level FROM ( SELECT DISTINCT SUBSTRING_INDEX(SCHEMA_NAME, '_', 1) DB_first_level FROM INFORMATION_SCHEMA.SCHEMATA WHERE TRUE ) t ORDER BY DB_first_level ASC LIMIT 0, 100) t2 WHERE TRUE AND 1 = LOCATE(CONCAT(DB_first_level, '_'), CONCAT(SCHEMA_NAME, '_')) ORDER BY SCHEMA_NAME ASC
+SELECT COUNT(*) FROM ( SELECT DISTINCT SUBSTRING_INDEX(SCHEMA_NAME, '_', 1) DB_first_level FROM INFORMATION_SCHEMA.SCHEMATA WHERE TRUE ) t
+SELECT COUNT(*) FROM ( SELECT DISTINCT SUBSTRING_INDEX(SCHEMA_NAME, '_', 1) DB_first_level FROM INFORMATION_SCHEMA.SCHEMATA WHERE TRUE ) t
+SELECT 1 FROM mysql.user LIMIT 1
+SELECT 1 FROM (SELECT `GRANTEE`, `IS_GRANTABLE` FROM `INFORMATION_SCHEMA`.`COLUMN_PRIVILEGES` UNION SELECT `GRANTEE`, `IS_GRANTABLE` FROM `INFORMATION_SCHEMA`.`TABLE_PRIVILEGES` UNION SELECT `GRANTEE`, `IS_GRANTABLE` FROM `INFORMATION_SCHEMA`.`SCHEMA_PRIVILEGES` UNION SELECT `GRANTEE`, `IS_GRANTABLE` FROM `INFORMATION_SCHEMA`.`USER_PRIVILEGES`) t WHERE `IS_GRANTABLE` = 'YES' AND '''''@''''' LIKE `GRANTEE` LIMIT 1
+SELECT 1 FROM `INFORMATION_SCHEMA`.`USER_PRIVILEGES` WHERE `PRIVILEGE_TYPE` = 'CREATE USER' AND '''''@''''' LIKE `GRANTEE` LIMIT 1
+
+SELECT COUNT(*) as count FROM system.`user`
+SELECT table_rows as count FROM information_schema.TABLES WHERE TABLE_SCHEMA='foo' AND TABLE_NAME='bar'
+SELECT table_name as table_name,column_name as column_name,column_type as column_type FROM information_schema.columns WHERE table_schema='foo' AND table_name='bar' AND data_type='enum'
+SHOW CREATE TABLE foo.bar
+SELECT column_name as column_name FROM information_schema.statistics WHERE table_schema = 'foo' AND table_name = 'bar' AND index_name = 'PRIMARY' ORDER BY seq_in_index ASC
+
+SELECT
+data_length AS data_size,
+index_length AS index_size,
+(data_length + index_length) AS total_size,
+table_comment AS comment
+FROM
+information_schema.TABLES
+WHERE
+table_schema = "foo"
+AND table_name = "bar"
+
