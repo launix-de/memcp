@@ -22,6 +22,7 @@ import "time"
 import "reflect"
 import "runtime"
 import "strings"
+import "strconv"
 import "github.com/launix-de/memcp/scm"
 
 // THE basic storage pattern
@@ -165,6 +166,7 @@ func Init(en scm.Env) {
 			// parse options
 			var pm PersistencyMode = Safe
 			options := a[3].([]scm.Scmer)
+			var auto_increment uint64 = 0
 			for i := 0; i < len(options); i += 2 {
 				if options[i] == "engine" {
 					if options[i+1] == "memory" {
@@ -178,6 +180,8 @@ func Init(en scm.Env) {
 					}
 				} else if options[i] == "collation" {
 					// TODO: store the collation??
+				} else if options[i] == "auto_increment" {
+					auto_increment, _ = strconv.ParseUint(scm.String(options[i+1]), 0, 64)
 				} else {
 					panic("unknown option: " + scm.String(options[i]))
 				}
@@ -189,6 +193,7 @@ func Init(en scm.Env) {
 				ifnotexists = true
 			}
 			t := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
+			t.Auto_increment = auto_increment
 			for _, coldef := range(a[2].([]scm.Scmer)) {
 				def := coldef.([]scm.Scmer)
 				if len(def) == 0 {
@@ -276,11 +281,21 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"stat", "return memory statistics",
-		0, 0,
+		0, 2,
 		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database (optional: all databases)"},
+			scm.DeclarationParameter{"table", "string", "name of the table (if table is set, print the detailled storage stats)"},
 		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
-			return PrintMemUsage()
+			if len(a) == 0 {
+				return PrintMemUsage()
+			} else if len(a) == 1 {
+				return GetDatabase(scm.String(a[0])).PrintMemUsage()
+			} else if len(a) == 2 {
+				return GetDatabase(scm.String(a[0])).Tables.Get(scm.String(a[1])).PrintMemUsage()
+			} else {
+				return nil
+			}
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -384,18 +399,44 @@ func PrintMemUsage() string {
         b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC))
 
 	for _, db := range databases.GetAll() {
-		var dsize uint
-		b.WriteString("\n\n" + db.Name + "\n======\nTable                    \tColumns\tShards\tSize/Bytes")
-		for _, t := range db.Tables.GetAll() {
-			var size uint = 10*8 + 32 * uint(len(t.Columns))
-			for _, s := range t.Shards {
-				size += s.Size()
-			}
-			b.WriteString(fmt.Sprintf("\n%-25s\t%d\t%d\t%d", t.Name, len(t.Columns), len(t.Shards), size));
-			dsize += size
-		}
-		b.WriteString(fmt.Sprintf("\n= %d bytes", dsize));
+		b.WriteString("\n\n" + db.Name + "\n======\n")
+		b.WriteString(db.PrintMemUsage())
 	}
+	return b.String()
+}
+
+func (db *database) PrintMemUsage() string {
+        // For info on each, see: https://golang.org/pkg/runtime/#MemStats
+	var b strings.Builder
+	b.WriteString("Table                    \tColumns\tShards\tSize/Bytes\n")
+	var dsize uint
+	for _, t := range db.Tables.GetAll() {
+		var size uint = 10*8 + 32 * uint(len(t.Columns))
+		for _, s := range t.Shards {
+			size += s.Size()
+		}
+		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\n", t.Name, len(t.Columns), len(t.Shards), size));
+		dsize += size
+	}
+	b.WriteString(fmt.Sprintf("\ntotal size = %d\n", dsize));
+	return b.String()
+}
+
+func (t *table) PrintMemUsage() string {
+	var b strings.Builder
+	var dsize uint = 0
+	for i, s := range t.Shards {
+		var ssz uint = 0
+		b.WriteString(fmt.Sprintf("Shard %d\n---\n", i))
+		for c, v := range s.columns {
+			sz := v.Size()
+			b.WriteString(fmt.Sprintf("%s: %s, size = %d\n", c, v.String(), sz));
+			ssz += sz
+		}
+		b.WriteString(fmt.Sprintf("= total %d\n\n", ssz));
+		dsize += ssz
+	}
+	b.WriteString(fmt.Sprintf("= total %d\n\n", dsize));
 	return b.String()
 }
 

@@ -149,6 +149,7 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) *tab
 	t.PersistencyMode = pm
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
+	t.Auto_increment = 1
 	t2 := db.Tables.Set(t)
 	if t2 != nil {
 		// concurrent create

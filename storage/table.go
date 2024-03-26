@@ -69,6 +69,7 @@ type table struct {
 	PersistencyMode PersistencyMode /* 0 = safe (default), 1 = sloppy, 2 = memory */
 	mu sync.Mutex // schema lock
 	uniquelock sync.Mutex // unique insert lock
+	Auto_increment uint64 // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 
 	// storage
 	Shards []*storageShard
