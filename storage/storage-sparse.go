@@ -25,7 +25,7 @@ import "github.com/launix-de/memcp/scm"
 type StorageSparse struct {
 	i, count uint64
 	recids StorageInt
-	values []scm.Scmer // TODO: embed other formats as values
+	values []scm.Scmer // TODO: embed other formats as values (ColumnStorage with a proposeCompression loop)
 }
 
 func (s *StorageSparse) Size() uint {

@@ -49,8 +49,9 @@ func (s *StorageString) Size() uint {
 func (s *StorageString) String() string {
 	if s.nodict {
 		return fmt.Sprintf("string-buffer[%d]", len(s.dictionary))
+	} else {
+		return fmt.Sprintf("string-dict[%d]", s.count)
 	}
-	return fmt.Sprintf("string-dict[%d]", s.count)
 }
 
 func (s *StorageString) Serialize(f *os.File) {
@@ -243,7 +244,7 @@ func (s *StorageString) finish() {
 	s.lens.finish()
 }
 func (s *StorageString) proposeCompression(i uint) ColumnStorage {
-	// build prefix map
+	// build prefix map (maybe prefix trees later?)
 	/* TODO: reactivate as soon as StoragePrefix has a proper implementation for Serialize/Deserialize
 	mostprefixscore := 0
 	mostprefix := ""
