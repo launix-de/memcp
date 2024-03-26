@@ -248,7 +248,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 	case nil:
 		return nil
 	default:
-		panic("Unknown expression type - EVAL" + fmt.Sprint(e))
+		panic("Unknown expression type - EVAL " + fmt.Sprint(e))
 	}
 	return
 }
@@ -541,6 +541,25 @@ Patterns can be any of:
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any", // TODO: returntype as soon as repeat is implemented
 		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"source", "annotates the node with filename and line information for better backtraces",
+		4, 4,
+		[]DeclarationParameter{
+			DeclarationParameter{"filename", "string", "Filename of the code"},
+			DeclarationParameter{"line", "number", "Line of the code"},
+			DeclarationParameter{"column", "number", "Column of the code"},
+			DeclarationParameter{"code", "returntype", "code"},
+			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
+		}, "returntype",
+		func (a ...Scmer) Scmer {
+			return SourceInfo{
+				String(a[0]),
+				ToInt(a[1]),
+				ToInt(a[2]),
+				a[3],
+			}
+		},
 	})
 
 	init_alu()

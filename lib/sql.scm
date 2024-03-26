@@ -67,7 +67,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(print "received query: " sql)
 		(define formula (parse_sql schema sql))
 		(define resultrow resultrow_sql)
-		(eval formula)
+		(eval (source "SQL Query" 1 1 formula))
 	))
 )
 (print "MySQL server listening on port 3307 (connect with `mysql -P 3307 -u root -p` using password 'admin')")
