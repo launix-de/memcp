@@ -176,6 +176,8 @@ func Init(en scm.Env) {
 					} else {
 						panic("unknown engine: " + scm.String(options[i+1]))
 					}
+				} else if options[i] == "collation" {
+					// TODO: store the collation??
 				} else {
 					panic("unknown option: " + scm.String(options[i]))
 				}

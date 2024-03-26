@@ -246,6 +246,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) '("engine" "safe"))
 			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) "=" sql_identifier) '())
+			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 		)))
 	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists)))
 
