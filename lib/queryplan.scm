@@ -41,16 +41,25 @@ if there is a group function, create a temporary preaggregate table
 */
 
 (define extract_columns_from_expr (lambda (expr) (match expr
+	(cons (symbol aggregate) args) /* aggregates: keep unchanged */ (cons aggregate args)
 	'((symbol get_column) tblvar col) '('(tblvar col))
 	(cons sym args) /* function call */ (merge (map args extract_columns_from_expr))
 	'()
 )))
 
 (define replace_columns_from_expr (lambda (expr) (match expr
+	(cons (symbol aggregate) args) /* aggregates: keep unchanged */ (cons aggregate args)
 	'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
 	(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 	expr /* literals */
 )))
+
+(define extract_aggregates (lambda (expr) (match expr
+	(cons (symbol aggregate) args) '(args)
+	(cons sym args) /* function call */ (merge (map args extract_aggregates))
+	/* literal */ '()
+)))
+(define extract_aggregates_assoc (lambda (fields) (merge (extract_assoc fields (lambda (key expr) (extract_aggregates expr))))))
 
 /* condition for update/delete */
 (define build_condition (lambda (schema table condition) (if
@@ -98,6 +107,27 @@ if there is a group function, create a temporary preaggregate table
 		'()
 	)))
 
+	/* replace all aggregates with respected subtitutions */
+	(define expr_replace_aggregate (lambda (expr indexmap) (match expr
+		(cons (symbol aggregate) agg) (indexmap (string agg))
+		(cons sym args) /* function call */ (cons sym (map args (lambda (x) (expr_replace_aggregate x indexmap))))
+		expr
+	)))
+
+	/* returns a list of '(tblvar col) */
+	(define extract_columns (lambda (col expr) (match expr
+		'((symbol get_column) tblvar col) '('(tblvar col))
+		(cons sym args) /* function call */ (merge (map args extract_columns_from_expr)) /* TODO: use collector */
+		'()
+	)))
+
+	/* changes (get_column tblvar col) into its counterpart */
+	(define replace_columns (lambda (col expr) (match expr
+		'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
+		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
+		expr /* literals */
+	)))
+
 	(if (coalesce order limit offset) (begin
 		/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
 		(error "Ordered scan is not implemented yet")
@@ -107,49 +137,41 @@ if there is a group function, create a temporary preaggregate table
 
 		(if group (begin
 			/* TOOD: find or create preaggregate table, scan over preaggregate */
+			(define ags (extract_aggregates_assoc fields))
+			(define build_indexmap (lambda (expr ags) (match ags
+				(cons head tail) (cons (string head) (cons '((quote car) expr) (build_indexmap '((quote cdr) expr) tail)))
+				'()
+			)))
+			(define indexmap (build_indexmap (quote ags) ags))
 			(if (equal? group 1) (begin
 				/* one implemented corner case; TODO: recursively go through the scan tables */
+				(set columns (merge (extract_assoc fields extract_columns)))
+				(define build_reducer (lambda (ags) (match ags
+					(cons '(val reduce neutral) rest) '((quote match) '((quote list) (quote a) (quote b)) '((quote list) '((quote cons) (quote xa) (quote a)) '((quote cons) (quote xb) (quote b))) '((quote cons) '(reduce (quote xa) (quote xb)) (build_reducer rest)))
+					'() '((quote list))
+				)))
 				(define build_scan (lambda (tables)
 					(match tables
-						(cons '(alias "information_schema" "tables") tables) /* special table */
-							'((quote map)
-								'((quote filter)
-									'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
-									'((quote lambda) '((quote item)) '((quote apply_assoc) (build_condition schema tbl condition) (quote item)))
-								)
-								'((quote lambda) '((quote item)) '((quote apply_assoc) '((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables)) (quote item)))
-							)
-							/* todo filter columns for alias */
-							/* TODO: reduce+neutral */
 						(cons '(alias schema tbl) tables) /* outer scan */
-							'((quote scan) schema tbl /* TODO: scan vs scan_order when order or limit is present */
+							(scan_wrapper schema tbl
 								(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 								/* todo filter columns for alias */
 								'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
-								/* TODO: reduce+neutral */)
-						'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))
+								/* reduce */ '((quote lambda) '((quote a) (quote b)) (build_reducer ags))
+								/* neutral */ (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) neutral))))
+							)
+						'() /* final inner */ (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) (replace_columns nil expr)))))
 					)
 				))
-				(build_scan tables)
+				'((quote begin)
+					'((quote define) (quote ags) (build_scan tables))
+					'((quote resultrow) (cons (quote list) (map_assoc fields (lambda (key value) (expr_replace_aggregate value indexmap)))))
+				)
 			) (begin
 				(error "Grouping and aggregates are not implemented yet (Preaggregate tables)")
 			))
 		) (begin
 			/* else: normal table scan */
-
-			/* returns a list of '(tblvar col) */
-			(define extract_columns (lambda (col expr) (match expr
-				'((symbol get_column) tblvar col) '('(tblvar col))
-				(cons sym args) /* function call */ (merge (map args extract_columns_from_expr)) /* TODO: use collector */
-				'()
-			)))
-
-			/* changes (get_column tblvar col) into its counterpart */
-			(define replace_columns (lambda (col expr) (match expr
-				'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
-				(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
-				expr /* literals */
-			)))
 
 			/* expand *-columns */
 			(set fields (merge (extract_assoc fields (lambda (col expr) (match col
@@ -179,7 +201,7 @@ if there is a group function, create a temporary preaggregate table
 							(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 							/* todo filter columns for alias */
 							'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
-							/* TODO: reduce+neutral */nil nil)
+						)
 					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))
 				)
 			))

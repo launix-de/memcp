@@ -224,35 +224,18 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				expression = p.Body
 				goto restart // tail call optimized
 			case []Scmer: // associative list
-				if len(p) == 0 {
-					return nil
-				} else {
-					switch p[0].(type) {
-						case []Scmer:
-							// format: ((key values ...) (key values ...) ...)
-							i := 0
-							for i < len(p) {
-								if reflect.DeepEqual(args[0], p[i].([]Scmer)[0]) {
-									return p[i]
-								}
-								i++
-							}
-							return nil // no default value
-						default:
-							// format: (key value key value ... default)
-							i := 0
-							for i < len(p)-1 {
-								if reflect.DeepEqual(args[0], p[i]) {
-									return p[i+1]
-								}
-								i += 2
-							}
-							if i < len(p) {
-								return p[i] // default value on n+1
-							}
-							return nil // no default value
+				// format: (key value key value ... default)
+				i := 0
+				for i < len(p)-1 {
+					if reflect.DeepEqual(args[0], p[i]) {
+						return p[i+1]
 					}
+					i += 2
 				}
+				if i < len(p) {
+					return p[i] // default value on n+1
+				}
+				return nil // no default value
 			case Applicable:
 				return p.Apply(args)
 			case nil:
@@ -313,35 +296,18 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 		}
 		return Eval(p.Body, en)
 	case []Scmer: // associative list
-		if len(p) == 0 {
-			return nil
-		} else {
-			switch p[0].(type) {
-				case []Scmer:
-					// format: ((key values ...) (key values ...) ...)
-					i := 0
-					for i < len(p) {
-						if reflect.DeepEqual(args[0], p[i].([]Scmer)[0]) {
-							return p[i]
-						}
-						i++
-					}
-					return nil // no default value
-				default:
-					// format: (key value key value ... default)
-					i := 0
-					for i < len(p)-1 {
-						if reflect.DeepEqual(args[0], p[i]) {
-							return p[i+1]
-						}
-						i += 2
-					}
-					if i < len(p) {
-						return p[i] // default value on n+1
-					}
-					return nil // no default value
+		// format: (key value key value ... default)
+		i := 0
+		for i < len(p)-1 {
+			if reflect.DeepEqual(args[0], p[i]) {
+				return p[i+1]
 			}
+			i += 2
 		}
+		if i < len(p) {
+			return p[i] // default value on n+1
+		}
+		return nil // no default value
 	case Applicable:
 		return p.Apply(args)
 	case nil:
@@ -532,6 +498,16 @@ func init() {
 			DeclarationParameter{"value...", "any", "value for the list"},
 		}, "list",
 		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"string", "converts the given value into string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "any value"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			return String(a[0])
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		"match", `takes a value evaluates the branch that first matches the given pattern

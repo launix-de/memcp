@@ -26,6 +26,8 @@ import (
 
 func String(v Scmer) string {
 	switch v := v.(type) {
+	case SourceInfo:
+		return String(v.value)
 	case []Scmer:
 		l := make([]string, len(v))
 		for i, x := range v {
@@ -64,6 +66,8 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 		return
 	}
 	switch v := v.(type) {
+	case SourceInfo:
+		Serialize(b, v.value, en, glob)
 	case []Scmer:
 		if len(v) > 0 && v[0] == Symbol("list") {
 			b.WriteByte('\'')
