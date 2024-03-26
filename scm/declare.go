@@ -73,6 +73,19 @@ func types_match(given string, required string) bool {
 	return false // not a single match
 }
 
+func types_merge(given, newtype string) string {
+	if given == "" {
+		return newtype
+	}
+	if types_match(given, newtype) {
+		return given
+	}
+	if types_match(newtype, given) {
+		return newtype
+	}
+	return given + "|" + newtype
+}
+
 // panics if the code is bad (returns possible datatype, at least "any")
 func Validate(val Scmer, require string) string {
 	var source_info SourceInfo
@@ -116,10 +129,12 @@ func Validate(val Scmer, require string) string {
 						panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParameter) + " parameters")
 					}
 				}
+				returntype := ""
 				// validate params (TODO: exceptions like match??)
 				for i := 1; i < len(v); i++ {
 					if i != 1 || (v[0] != Symbol("lambda") && v[0] != Symbol("parser")) {
 						subrequired := "any"
+						isReturntype := false
 						if def != nil {
 							j := i-1 // parameter help
 							if i-1 >= len(def.Params) {
@@ -131,15 +146,25 @@ func Validate(val Scmer, require string) string {
 							subrequired = def.Params[j].Type
 							if subrequired == "returntype" {
 								subrequired = require
+								isReturntype = true
 							}
 						}
 						typ := Validate(v[i], subrequired)
 						if !types_match(typ, subrequired) {
 							panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source_info.String(), def.Name, i, subrequired, typ))
 						}
+						if isReturntype {
+							returntype = types_merge(returntype, typ)
+						}
 					}
 				}
 				if def != nil {
+					if def.Returns == "returntype" {
+						if returntype == "" {
+							panic("return returntype without returntype parameters")
+						}
+						return returntype
+					}
 					return def.Returns
 				}
 			}

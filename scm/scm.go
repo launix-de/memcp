@@ -412,7 +412,7 @@ func init() {
 			DeclarationParameter{"condition", "bool", "condition to evaluate"},
 			DeclarationParameter{"true-branch", "returntype", "code to evaluate if condition is true"},
 			DeclarationParameter{"false-branch", "returntype", "code to evaluate if condition is false"},
-		}, "any", nil,
+		}, "returntype", nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"and", "returns true if all conditions evaluate to true",
@@ -426,7 +426,7 @@ func init() {
 		1, 1000,
 		[]DeclarationParameter{
 			DeclarationParameter{"condition", "any", "condition to evaluate"},
-		}, "any", nil,
+		}, "bool", nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"define", "defines or sets a variable in the current environment",
@@ -514,7 +514,7 @@ Patterns can be any of:
 			DeclarationParameter{"pattern...", "any", "pattern"},
 			DeclarationParameter{"result...", "returntype", "result value when the pattern matches; this code can use the variables matched in the pattern"},
 			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches"}, /* TODO: turn to returntype as soon as pattern+result are properly repeaded in Validate */
-		}, "any",
+		}, "any", // TODO: returntype as soon as repead validate is implemented */
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -523,7 +523,7 @@ Patterns can be any of:
 		[]DeclarationParameter{
 			DeclarationParameter{"parameters", "symbol|list", "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"},
 			DeclarationParameter{"code", "any", "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"},
-		}, "func",
+		}, "func", // TODO: func(...)->returntype as soon as function types are implemented
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -532,7 +532,7 @@ Patterns can be any of:
 		[]DeclarationParameter{
 			DeclarationParameter{"expression...", "any", "expressions to evaluate"},
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
-		}, "any",
+		}, "any", // TODO: returntype as soon as repeat is implemented
 		nil,
 	})
 
