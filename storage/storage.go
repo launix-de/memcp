@@ -64,14 +64,34 @@ func Init(en scm.Env) {
 		"scan", "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
 		4, 6,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database where the table is located"},
-			scm.DeclarationParameter{"table", "string", "name of the table to scan"},
+			scm.DeclarationParameter{"schema", "string|nil", "database where the table is located"},
+			scm.DeclarationParameter{"table", "string|list", "name of the table to scan (or a list if you have temporary data)"},
 			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
 			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
 			scm.DeclarationParameter{"reduce", "func", "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass."},
 			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
+			if list, ok := a[1].([]scm.Scmer); ok {
+				// implementation on lists
+				var result scm.Scmer = nil
+				if len(a) > 5 {
+					result = a[5]
+				}
+				for _, val := range list {
+					// filter
+					if scm.ToBool(scm.ApplyAssoc(a[2], val.([]scm.Scmer))) {
+						// map
+						v := scm.ApplyAssoc(a[3], val.([]scm.Scmer))
+						if len(a) > 4 && a[4] != nil {
+							// reduce
+							result = scm.Apply(a[4], []scm.Scmer{result, v})
+						}
+					}
+				}
+				return result
+			}
+			// otherwise: implementation on storage
 			// params: table, condition, map, reduce, reduceSeed
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {

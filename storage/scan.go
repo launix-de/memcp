@@ -24,6 +24,8 @@ type scanError struct {
 	stack string
 }
 
+/* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
+
 /* TODO:
 
  - LEFT JOIN handling -> emit a NULL line on certain conditions

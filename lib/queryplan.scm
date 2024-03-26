@@ -65,6 +65,16 @@ if there is a group function, create a temporary preaggregate table
 	)
 )))
 
+/* emulate metadata tables */
+(define scan_wrapper (lambda (schema tbl filter map reduce neutral) (match '(schema tbl)
+	'("information_schema" "tables")
+		'((quote scan) schema 
+			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
+			filter map reduce neutral)
+	'(schema tbl) /* normal case */
+		'((quote scan) schema tbl filter map reduce neutral)
+)))
+
 /* build queryplan from parsed query */
 (define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
 	/* tables: '('(alias schema tbl) ...) */
@@ -97,7 +107,33 @@ if there is a group function, create a temporary preaggregate table
 
 		(if group (begin
 			/* TOOD: find or create preaggregate table, scan over preaggregate */
-			(error "Grouping and aggregates are not implemented yet")
+			(if (equal? group 1) (begin
+				/* one implemented corner case; TODO: recursively go through the scan tables */
+				(define build_scan (lambda (tables)
+					(match tables
+						(cons '(alias "information_schema" "tables") tables) /* special table */
+							'((quote map)
+								'((quote filter)
+									'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
+									'((quote lambda) '((quote item)) '((quote apply_assoc) (build_condition schema tbl condition) (quote item)))
+								)
+								'((quote lambda) '((quote item)) '((quote apply_assoc) '((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables)) (quote item)))
+							)
+							/* todo filter columns for alias */
+							/* TODO: reduce+neutral */
+						(cons '(alias schema tbl) tables) /* outer scan */
+							'((quote scan) schema tbl /* TODO: scan vs scan_order when order or limit is present */
+								(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
+								/* todo filter columns for alias */
+								'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
+								/* TODO: reduce+neutral */)
+						'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))
+					)
+				))
+				(build_scan tables)
+			) (begin
+				(error "Grouping and aggregates are not implemented yet (Preaggregate tables)")
+			))
 		) (begin
 			/* else: normal table scan */
 
@@ -138,22 +174,12 @@ if there is a group function, create a temporary preaggregate table
 			/* TODO: match tbl to inner query vs string */
 			(define build_scan (lambda (tables)
 				(match tables
-					(cons '(alias "information_schema" "tables") tables) /* special table */
-						'((quote map)
-							'((quote filter)
-								'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
-								'((quote lambda) '((quote item)) '((quote apply_assoc) (build_condition schema tbl condition) (quote item)))
-							)
-							'((quote lambda) '((quote item)) '((quote apply_assoc) '((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables)) (quote item)))
-						)
-						/* todo filter columns for alias */
-						/* TODO: reduce+neutral */
 					(cons '(alias schema tbl) tables) /* outer scan */
-						'((quote scan) schema tbl /* TODO: scan vs scan_order when order or limit is present */
+						(scan_wrapper schema tbl
 							(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 							/* todo filter columns for alias */
 							'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
-							/* TODO: reduce+neutral */)
+							/* TODO: reduce+neutral */nil nil)
 					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))
 				)
 			))
