@@ -51,7 +51,7 @@ func EvalAll(source, s string, en *Env) (expression Scmer) {
 	tokens := tokenize(source, s)
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
-		Validate(code)
+		Validate(code, "any")
 		code = Optimize(code, en)
 		expression = Eval(code, en)
 	}

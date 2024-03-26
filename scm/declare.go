@@ -74,7 +74,7 @@ func types_match(given string, required string) bool {
 }
 
 // panics if the code is bad (returns possible datatype, at least "any")
-func Validate(val Scmer) string {
+func Validate(val Scmer, require string) string {
 	var source_info SourceInfo
 	switch v := val.(type) {
 		case SourceInfo:
@@ -119,7 +119,7 @@ func Validate(val Scmer) string {
 				// validate params (TODO: exceptions like match??)
 				for i := 1; i < len(v); i++ {
 					if i != 1 || (v[0] != Symbol("lambda") && v[0] != Symbol("parser")) {
-						typ := Validate(v[i])
+						subrequired := "any"
 						if def != nil {
 							j := i-1 // parameter help
 							if i-1 >= len(def.Params) {
@@ -128,9 +128,14 @@ func Validate(val Scmer) string {
 							// check parameter type
 							// TODO: both types could also be lists separated by |
 							// TODO: signature of lambda types??
-							if !types_match(typ, def.Params[j].Type) {
-								panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source_info.String(), def.Name, i, def.Params[j].Type, typ))
+							subrequired = def.Params[j].Type
+							if subrequired == "returntype" {
+								subrequired = require
 							}
+						}
+						typ := Validate(v[i], subrequired)
+						if !types_match(typ, subrequired) {
+							panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source_info.String(), def.Name, i, subrequired, typ))
 						}
 					}
 				}

@@ -165,10 +165,10 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 			}
 			switch n[0] {
 				case Symbol("parser"): // inner anonymous parser
-					Validate(n[2])
+					Validate(n[2], "any")
 					var skipper Scmer = nil
 					if len(n) > 3 {
-						Validate(n[3])
+						Validate(n[3], "string")
 						skipper = n[3]
 					}
 					return NewParser(n[1], n[2], skipper, en)

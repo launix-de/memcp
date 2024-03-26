@@ -410,8 +410,8 @@ func init() {
 		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"condition", "bool", "condition to evaluate"},
-			DeclarationParameter{"true-branch", "any", "code to evaluate if condition is true"},
-			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false"},
+			DeclarationParameter{"true-branch", "returntype", "code to evaluate if condition is true"},
+			DeclarationParameter{"false-branch", "returntype", "code to evaluate if condition is false"},
 		}, "any", nil,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -433,7 +433,7 @@ func init() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"variable", "symbol", "variable to set"},
-			DeclarationParameter{"value", "any", "value to set the variable to"},
+			DeclarationParameter{"value", "returntype", "value to set the variable to"},
 		}, "bool", nil,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -441,7 +441,7 @@ func init() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"variable", "symbol", "variable to set"},
-			DeclarationParameter{"value", "any", "value to set the variable to"},
+			DeclarationParameter{"value", "returntype", "value to set the variable to"},
 		}, "bool", nil,
 	})
 
@@ -512,8 +512,8 @@ Patterns can be any of:
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value to evaluate"},
 			DeclarationParameter{"pattern...", "any", "pattern"},
-			DeclarationParameter{"result...", "any", "result value when the pattern matches; this code can use the variables matched in the pattern"},
-			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches"},
+			DeclarationParameter{"result...", "returntype", "result value when the pattern matches; this code can use the variables matched in the pattern"},
+			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches"}, /* TODO: turn to returntype as soon as pattern+result are properly repeaded in Validate */
 		}, "any",
 		nil,
 	})
@@ -531,6 +531,7 @@ Patterns can be any of:
 		0, 10000,
 		[]DeclarationParameter{
 			DeclarationParameter{"expression...", "any", "expressions to evaluate"},
+			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any",
 		nil,
 	})
