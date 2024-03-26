@@ -129,14 +129,18 @@ func DropDatabase(schema string) {
 	os.RemoveAll(db.path)
 }
 
-func CreateTable(schema, name string, pm PersistencyMode) *table {
+func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) *table {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
 	db.schemalock.Lock()
+	defer db.schemalock.Unlock()
 	t := db.Tables.Get(name)
 	if t != nil {
+		if ifnotexists {
+			return t // return the table found
+		}
 		panic("Table " + name + " already exists")
 	}
 	t = new(table)
@@ -152,7 +156,6 @@ func CreateTable(schema, name string, pm PersistencyMode) *table {
 	} else {
 		db.save()
 	}
-	db.schemalock.Unlock()
 	return t
 }
 

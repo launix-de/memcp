@@ -219,6 +219,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define sql_create_table (parser '(
 		(atom "CREATE" true)
 		(atom "TABLE" true)
+		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
 		(define id sql_identifier)
 		"("
 		(define cols (* (or
@@ -246,7 +247,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) '("engine" "safe"))
 			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) "=" sql_identifier) '())
 		)))
-	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)))))
+	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists)))
 
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or

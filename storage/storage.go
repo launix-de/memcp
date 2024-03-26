@@ -153,12 +153,13 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createtable", "creates a new database",
-		4, 4,
+		4, 5,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
 			scm.DeclarationParameter{"cols", "list", "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2)"},
 			scm.DeclarationParameter{"options", "list", "further options like engine=safe|sloppy|memory"},
+			scm.DeclarationParameter{"ifnotexists", "bool", "don't throw an error if table already exists"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
 			// parse options
@@ -181,7 +182,11 @@ func Init(en scm.Env) {
 			}
 
 			// create table
-			t := CreateTable(scm.String(a[0]), scm.String(a[1]), pm)
+			ifnotexists := false
+			if len(a) > 4 && scm.ToBool(a[4]) {
+				ifnotexists = true
+			}
+			t := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
 			for _, coldef := range(a[2].([]scm.Scmer)) {
 				def := coldef.([]scm.Scmer)
 				if len(def) == 0 {
