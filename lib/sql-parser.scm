@@ -27,7 +27,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(parser (define col sql_identifier) '((quote get_column) nil col))
 )))
 
-(define sql_int (parser (define x (regex "[0-9]+")) (simplify x)))
+(define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
 
 (define sql_string (parser '("'" (define x (regex "(\\\\'|[^'])*" false false)) "'") (replace x "\'" "'")))
 
@@ -203,18 +203,22 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "INSERT" true)
 		(atom "INTO" true)
 		(define tbl sql_identifier)
-		"("
-		(define coldesc (*
-			sql_identifier
-		","))
-		")"
+		(? "("
+			(define coldesc (*
+				sql_identifier
+			","))
+		")")
 		(atom "VALUES" true)
 		(define datasets (* (parser '(
 			"("
 			(define dataset (* sql_expression ","))
 			")"
 		) dataset) ","))
-	) (cons (quote begin) (map (map datasets (lambda (dataset) (zip_cols coldesc dataset))) (lambda (dataset) '((quote insert) schema tbl (cons (quote list) dataset)))))))
+	) (begin
+		(define coldesc (collate coldesc (map (show schema tbl) (lambda (col) (col "name")))))
+		(print coldesc)
+		(cons (quote begin) (map (map datasets (lambda (dataset) (zip_cols coldesc dataset))) (lambda (dataset) '((quote insert) schema tbl (cons (quote list) dataset)))))
+	)))
 
 	(define sql_create_table (parser '(
 		(atom "CREATE" true)

@@ -114,6 +114,22 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				}
 			}
 			return false
+		case "collate":
+			for i, x := range e {
+				x2 := Eval(x, en)
+				if i > 0 && ToBool(x2) {
+					return x2
+				}
+			}
+			return nil
+		case "collateNil":
+			for i, x := range e {
+				x2 := Eval(x, en)
+				if i > 0 && x2 != nil {
+					return x2
+				}
+			}
+			return nil
 		case "match": // (match <value> <pattern> <result> <pattern> <result> <pattern> <result> [<default>])
 			val := Eval(e[1], en)
 			i := 2
@@ -434,6 +450,20 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"condition", "any", "condition to evaluate"},
 		}, "bool", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"collate", "returns the first value that has a non-zero value",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "returntype", "value to examine"},
+		}, "returntype", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"collateNil", "returns the first value that has a non-nil value",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "returntype", "value to examine"},
+		}, "returntype", nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"define", "defines or sets a variable in the current environment",

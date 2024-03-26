@@ -30,19 +30,21 @@ import "reflect"
 
 //go:inline
 func ToBool(v Scmer) bool {
-	switch v.(type) {
+	switch v2 := v.(type) {
 		case nil:
 			return false
 		case string:
-			return v != ""
+			return v2 != ""
 		case float64:
-			return v != 0.0
+			return v2 != 0.0
 		case bool:
-			return v != false
+			return v2 != false
 		case Symbol:
-			return v != Symbol("false") && v != Symbol("nil")
+			return v2 != Symbol("false") && v2 != Symbol("nil")
+		case []Scmer:
+			return len(v2) > 0
 		default:
-			// []Scmer, native function, lambdas
+			// native function, lambdas
 			return true
 	}
 }
