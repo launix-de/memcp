@@ -273,7 +273,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (? (atom "IF" true) (atom "EXISTS" true) /* TODO */) (define id sql_identifier)) '((quote droptable) schema id))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
 		empty
 	))) 

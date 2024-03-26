@@ -235,13 +235,18 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"droptable", "removes a table",
-		2, 2,
+		2, 3,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
+			scm.DeclarationParameter{"ifexists", "bool", "if true, don't throw an error if it already exists"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
-			DropTable(scm.String(a[0]), scm.String(a[1]))
+			if len(a) > 2 {
+				DropTable(scm.String(a[0]), scm.String(a[1]), scm.ToBool(a[2]))
+			} else {
+				DropTable(scm.String(a[0]), scm.String(a[1]), false)
+			}
 			return true
 		},
 	})
