@@ -22,6 +22,7 @@ import (
 	"io"
 	"fmt"
 	"bytes"
+	"regexp"
 	"strings"
 	"runtime/debug"
 	"github.com/chzyer/readline"
@@ -31,10 +32,12 @@ const newprompt  = "\033[32m>\033[0m "
 const contprompt = "\033[32m.\033[0m "
 const resultprompt = "\033[31m=\033[0m "
 
+var lambdaExpr *regexp.Regexp = regexp.MustCompile("\\(lambda\\s*\\(([^)]+)\\)")
+
 /* implements interface readline.AutoCompleter */
 func (en *Env) Do(line []rune, pos int) (newLine [][]rune, offset int) {
 	start := len(line)
-	for start >= 1 && line[start-1] != '(' {
+	for start >= 1 && line[start-1] != '(' && line[start-1] != ')' && line[start-1] != ' ' {
 		start--
 	}
 	pfx := string(line[start:])
@@ -42,17 +45,30 @@ func (en *Env) Do(line []rune, pos int) (newLine [][]rune, offset int) {
 	// iterate documentation
 	for _, d := range declarations {
 		if strings.HasPrefix(d.Name, pfx) && en.FindRead(Symbol(d.Name)) != nil {
-			newLine = append(newLine, []rune(d.Name[len(pfx):]))
+			if d.Name == "lambda" {
+				newLine = append(newLine, []rune("lambda ("[offset:]))
+			} else {
+				newLine = append(newLine, []rune(d.Name[offset:]))
+			}
 		}
 	}
 	// iterate variables
 	for en != nil {
 		for s, _ := range en.Vars {
 			if strings.HasPrefix(string(s), pfx) {
-				newLine = append(newLine, []rune(s[len(pfx):]))
+				newLine = append(newLine, []rune(s[offset:]))
 			}
 		}
 		en = en.Outer // iterate over parent scope
+	}
+	// find lambda variables in the line
+	for _, m := range lambdaExpr.FindAllStringSubmatch(string(line), -1) {
+		// each declared parameter of the lambda is also completed
+		for _, s := range strings.Split(m[1], " ") {
+			if strings.HasPrefix(s, pfx) {
+				newLine = append(newLine, []rune(s[offset:]))
+			}
+		}
 	}
 	return
 }
