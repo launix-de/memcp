@@ -58,6 +58,13 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 	case SourceInfo:
 		// omit source info
 		expression = e.value
+		defer func() {
+			err := recover()
+			if err != nil {
+				// recursively panic a stack trace
+				panic(fmt.Sprintf("%s\nin %s:%d:%d", fmt.Sprint(err), e.source, e.line, e.col))
+			}
+		}()
 		goto restart
 	case bool:
 		value = e
