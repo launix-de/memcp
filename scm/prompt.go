@@ -22,6 +22,7 @@ import (
 	"io"
 	"fmt"
 	"bytes"
+	"strings"
 	"runtime/debug"
 	"github.com/chzyer/readline"
 )
@@ -30,10 +31,37 @@ const newprompt  = "\033[32m>\033[0m "
 const contprompt = "\033[32m.\033[0m "
 const resultprompt = "\033[31m=\033[0m "
 
+/* implements interface readline.AutoCompleter */
+func (en *Env) Do(line []rune, pos int) (newLine [][]rune, offset int) {
+	start := len(line)
+	for start >= 1 && line[start-1] != '(' {
+		start--
+	}
+	pfx := string(line[start:])
+	offset = len(pfx)
+	// iterate documentation
+	for _, d := range declarations {
+		if strings.HasPrefix(d.Name, pfx) && en.FindRead(Symbol(d.Name)) != nil {
+			newLine = append(newLine, []rune(d.Name[len(pfx):]))
+		}
+	}
+	// iterate variables
+	for en != nil {
+		for s, _ := range en.Vars {
+			if strings.HasPrefix(string(s), pfx) {
+				newLine = append(newLine, []rune(s[len(pfx):]))
+			}
+		}
+		en = en.Outer // iterate over parent scope
+	}
+	return
+}
+
 func Repl(en *Env) {
 	l, err := readline.NewEx(&readline.Config {
 		Prompt: newprompt,
 		HistoryFile: ".memcp-history.tmp",
+		AutoComplete: en,
 		InterruptPrompt: "^C",
 		EOFPrompt: "exit",
 		HistorySearchFold: true,
