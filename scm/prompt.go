@@ -36,11 +36,11 @@ var lambdaExpr *regexp.Regexp = regexp.MustCompile("\\(lambda\\s*\\(([^)]+)\\)")
 
 /* implements interface readline.AutoCompleter */
 func (en *Env) Do(line []rune, pos int) (newLine [][]rune, offset int) {
-	start := len(line)
+	start := pos
 	for start >= 1 && line[start-1] != '(' && line[start-1] != ')' && line[start-1] != ' ' {
 		start--
 	}
-	pfx := string(line[start:])
+	pfx := string(line[start:pos])
 	offset = len(pfx)
 	// iterate documentation
 	for _, d := range declarations {

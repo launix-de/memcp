@@ -69,65 +69,95 @@ if there is a group function, create a temporary preaggregate table
 (define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
 	/* tables: '('(alias schema tbl) ...) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
-	/* TODO: GROUP, HAVING, ORDER, LIMIT, OFFSET */
+	/* TODO: GROUP, HAVING,  */
 	/* expressions will use (get_column tblvar col) for reading from columns. we have to replace it with the correct variable */
 	/* TODO: unnest arbitrary queries -> turn them into a big schema+tables+fields+condition */
 
-	/* returns a list of '(tblvar col) */
-	(define extract_columns (lambda (col expr) (match expr
-		'((symbol get_column) tblvar col) '('(tblvar col))
-		(cons sym args) /* function call */ (merge (map args extract_columns_from_expr)) /* TODO: use collector */
+	/*
+		Query builder masterplan:
+		1. make sure all optimizations are done (unnesting arbitrary queries, leave just one big table list with a field list, conditions, as well as a order+limit+offset)
+		2. if order+limit+offset -> find or create all tables that have to be nestedly scanned. if two tables are clumsed together, create a prejoin. recurse over build_queryplan without the order clause.
+		3. if group stage -> find or create the preaggregate table, scan over the preaggregate
+		4. scan the rest of the tables
+
+	*/
+
+	(define expr_find_aggregate (lambda (expr) (match expr
+		'((symbol aggregate) item reduce neutral) true
+		(cons sym args) /* function call */ (merge (map args expr_find_aggregate)) /* TODO: use collector */
 		'()
 	)))
 
-	/* changes (get_column tblvar col) into its counterpart */
-	(define replace_columns (lambda (col expr) (match expr
-		'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
-		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
-		expr /* literals */
-	)))
+	(if (coalesce order limit offset) (begin
+		/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
+		(error "Ordered scan is not implemented yet")
+	) (begin
+		/* set group to 1 if fields contain aggregates even if not */
+		(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) 1 nil)))
 
-	/* expand *-columns */
-	(set fields (merge (extract_assoc fields (lambda (col expr) (match col
-		"*" (merge (map tables (lambda (t) (match t '(alias schema tbl) /* all FROM-tables*/
-			(merge (map (show schema tbl) (lambda (coldesc) /* all columns of each table */
-				'((coldesc "name") '((quote get_column) alias (coldesc "name")))
+		(if group (begin
+			/* TOOD: find or create preaggregate table, scan over preaggregate */
+			(error "Grouping and aggregates are not implemented yet")
+		) (begin
+			/* else: normal table scan */
+
+			/* returns a list of '(tblvar col) */
+			(define extract_columns (lambda (col expr) (match expr
+				'((symbol get_column) tblvar col) '('(tblvar col))
+				(cons sym args) /* function call */ (merge (map args extract_columns_from_expr)) /* TODO: use collector */
+				'()
 			)))
-		))))
-		'(col expr)
-	)))))
 
-	/* columns: '('(tblalias colname) ...) */
-	(set columns (merge (extract_assoc fields extract_columns)))
-	/* TODO: expand fields if it contains '(tblalias "*") or '("*" "*") */
-		'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (match '(schema tbl)
-			/* special tables */
-			'("information_schema" "tables") '('("name" "table_schema") '("name" "table_name") '("name" "table_type"))
-			(show schema tbl) /* otherwise: fetch from metadata */
-		) (lambda (col) '(tblvar (col "name"))))))))
+			/* changes (get_column tblvar col) into its counterpart */
+			(define replace_columns (lambda (col expr) (match expr
+				'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
+				(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
+				expr /* literals */
+			)))
 
-	/* TODO: sort tables according to join plan */
-	/* TODO: match tbl to inner query vs string */
-	(define build_scan (lambda (tables)
-		(match tables
-			(cons '(alias "information_schema" "tables") tables) /* special table */
-				'((quote map)
-				  	'((quote filter)
-					  	'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
-						'((quote lambda) '((quote item)) '((quote apply_assoc) (build_condition schema tbl condition) (quote item)))
-					)
-					'((quote lambda) '((quote item)) '((quote apply_assoc) '((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables)) (quote item)))
+			/* expand *-columns */
+			(set fields (merge (extract_assoc fields (lambda (col expr) (match col
+				"*" (merge (map tables (lambda (t) (match t '(alias schema tbl) /* all FROM-tables*/
+					(merge (map (show schema tbl) (lambda (coldesc) /* all columns of each table */
+						'((coldesc "name") '((quote get_column) alias (coldesc "name")))
+					)))
+				))))
+				'(col expr)
+			)))))
+
+			/* columns: '('(tblalias colname) ...) */
+			(set columns (merge (extract_assoc fields extract_columns)))
+			/* TODO: expand fields if it contains '(tblalias "*") or '("*" "*") */
+				'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (match '(schema tbl)
+					/* special tables */
+					'("information_schema" "tables") '('("name" "table_schema") '("name" "table_name") '("name" "table_type"))
+					(show schema tbl) /* otherwise: fetch from metadata */
+				) (lambda (col) '(tblvar (col "name"))))))))
+
+			/* TODO: sort tables according to join plan */
+			/* TODO: match tbl to inner query vs string */
+			(define build_scan (lambda (tables)
+				(match tables
+					(cons '(alias "information_schema" "tables") tables) /* special table */
+						'((quote map)
+							'((quote filter)
+								'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
+								'((quote lambda) '((quote item)) '((quote apply_assoc) (build_condition schema tbl condition) (quote item)))
+							)
+							'((quote lambda) '((quote item)) '((quote apply_assoc) '((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables)) (quote item)))
+						)
+						/* todo filter columns for alias */
+						/* TODO: reduce+neutral */
+					(cons '(alias schema tbl) tables) /* outer scan */
+						'((quote scan) schema tbl /* TODO: scan vs scan_order when order or limit is present */
+							(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
+							/* todo filter columns for alias */
+							'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
+							/* TODO: reduce+neutral */)
+					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))
 				)
-				/* todo filter columns for alias */
-				/* TODO: reduce+neutral */
-			(cons '(alias schema tbl) tables) /* outer scan */
-				'((quote scan) schema tbl /* TODO: scan vs scan_order when order or limit is present */
-					(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
-					/* todo filter columns for alias */
-					'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
-					/* TODO: reduce+neutral */)
-			'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))
-		)
+			))
+			(build_scan tables)
+		))
 	))
-	(build_scan tables)
 )))

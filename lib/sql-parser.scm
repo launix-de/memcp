@@ -82,6 +82,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	(define sql_expression5 (parser (or
 		(parser '("(" (define a sql_expression) ")") a)
+		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
+		(parser '((atom "COUNT" true) "(" sql_expression ")") '((quote aggregate) 1 (quote +) 0))
+		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") '((quote aggregate) s (quote +) 0))
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '((quote password) p))
 		/* TODO: function call */
@@ -215,7 +218,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			")"
 		) dataset) ","))
 	) (begin
-		(define coldesc (collate coldesc (map (show schema tbl) (lambda (col) (col "name")))))
+		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "name")))))
 		(print coldesc)
 		(cons (quote begin) (map (map datasets (lambda (dataset) (zip_cols coldesc dataset))) (lambda (dataset) '((quote insert) schema tbl (cons (quote list) dataset)))))
 	)))

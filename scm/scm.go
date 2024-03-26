@@ -114,7 +114,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				}
 			}
 			return false
-		case "collate":
+		case "coalesce":
 			for i, x := range e {
 				x2 := Eval(x, en)
 				if i > 0 && ToBool(x2) {
@@ -122,7 +122,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				}
 			}
 			return nil
-		case "collateNil":
+		case "coalesceNil":
 			for i, x := range e {
 				x2 := Eval(x, en)
 				if i > 0 && x2 != nil {
@@ -452,14 +452,14 @@ func init() {
 		}, "bool", nil,
 	})
 	Declare(&Globalenv, &Declaration{
-		"collate", "returns the first value that has a non-zero value",
+		"coalesce", "returns the first value that has a non-zero value",
 		1, 1000,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "returntype", "value to examine"},
 		}, "returntype", nil,
 	})
 	Declare(&Globalenv, &Declaration{
-		"collateNil", "returns the first value that has a non-nil value",
+		"coalesceNil", "returns the first value that has a non-nil value",
 		1, 1000,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "returntype", "value to examine"},
