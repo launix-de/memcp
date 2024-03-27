@@ -29,7 +29,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 (define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
 
-(define sql_string (parser '("'" (define x (regex "(\\.|[^\\'])*" false false)) "'") (replace x "\'" "'")))
+(define sql_string (parser '("'" (define x (regex "(\\\\.|[^\\'])*" false false)) "'") (replace x "\'" "'")))
 
 (define parse_sql (lambda (schema s) (begin
 
