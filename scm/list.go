@@ -214,7 +214,7 @@ func init_list() {
 			// arr, reducefn(a, b), [neutral]
 			n := ToInt(a[0])
 			result := make([]Scmer, n)
-			for i := 0; i < n-1; i++ {
+			for i := 0; i < n; i++ {
 				result[i] = i
 			}
 			return result
