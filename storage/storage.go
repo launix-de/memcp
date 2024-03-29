@@ -80,12 +80,13 @@ func Init(en scm.Env) {
 				}
 				for _, val := range list {
 					// filter
+					reduce := scm.OptimizeProcToSerialFunction(a[4], &scm.Globalenv)
 					if scm.ToBool(scm.ApplyAssoc(a[2], val.([]scm.Scmer))) {
 						// map
 						v := scm.ApplyAssoc(a[3], val.([]scm.Scmer))
 						if len(a) > 4 && a[4] != nil {
 							// reduce
-							result = scm.Apply(a[4], []scm.Scmer{result, v})
+							result = reduce(result, v)
 						}
 					}
 				}

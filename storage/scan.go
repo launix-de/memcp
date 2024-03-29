@@ -87,6 +87,12 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 	akkumulator := neutral
 
+	conditionFn := scm.OptimizeProcToSerialFunction(condition, &scm.Globalenv)
+	callbackFn := scm.OptimizeProcToSerialFunction(callback, &scm.Globalenv)
+	aggregateFn := func(...scm.Scmer) scm.Scmer {return nil}
+	if aggregate != nil {
+		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate, &scm.Globalenv)
+	}
 	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
 	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 	cdataset := make([]scm.Scmer, len(cargs))
@@ -126,7 +132,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 		for i, k := range ccols { // iterate over columns
 			cdataset[i] = k.GetValue(idx)
 		}
-		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
+		if (!scm.ToBool(conditionFn(cdataset...))) {
 			continue // condition did not match
 		}
 
@@ -140,10 +146,8 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			}
 		}
 		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating
-		intermediate := scm.Apply(callback, mdataset)
-		if aggregate != nil {
-			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
-		}
+		intermediate := callbackFn(mdataset...)
+		akkumulator = aggregateFn(akkumulator, intermediate)
 		t.mu.RLock()
 	}
 
@@ -158,7 +162,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
 		}
 		// check condition
-		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
+		if (!scm.ToBool(conditionFn(cdataset...))) {
 			continue // condition did not match
 		}
 
@@ -171,10 +175,8 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			}
 		}
 		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating
-		intermediate := scm.Apply(callback, mdataset)
-		if aggregate != nil {
-			akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
-		}
+		intermediate := callbackFn(mdataset...)
+		akkumulator = aggregateFn(akkumulator, intermediate)
 		t.mu.RLock()
 	}
 	t.mu.RUnlock() // finished reading

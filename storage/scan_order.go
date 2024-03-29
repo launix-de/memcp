@@ -100,6 +100,12 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 	// TODO: sortcols that are not just simple columns but complex lambda expressions could be temporarily materialized to trade memory for execution time
 	// --> sortcols can then be rewritten to strings
 
+	callbackFn := scm.OptimizeProcToSerialFunction(callback, &scm.Globalenv)
+	aggregateFn := func(...scm.Scmer) scm.Scmer {return nil}
+	if aggregate != nil {
+		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate, &scm.Globalenv)
+	}
+
 	// prepare map phase (map has to occur late and ordered)
 	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 
@@ -167,12 +173,10 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 				mapargs[i] = reader(idx) // read column value into map argument
 			}
 			// call map function
-			value := scm.Apply(callback, mapargs)
+			value := callbackFn(mapargs...)
 
 			// aggregate
-			if aggregate != nil {
-				akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, value,})
-			}
+			akkumulator = aggregateFn(akkumulator, value)
 		}
 
 		if len(qx.items) > 0 {
@@ -190,6 +194,8 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	result.shard = t
 	// TODO: mergesort sink instead of list-append-sort would allow early-out
 
+	conditionFn := scm.OptimizeProcToSerialFunction(condition, &scm.Globalenv)
+
 	// prepare filter function
 	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
 	cdataset := make([]scm.Scmer, len(cargs))
@@ -202,10 +208,11 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 			result.scols[i] = t.ColumnReader(colname)
 		} else if proc, ok := scol.(scm.Proc); ok {
 			// complex lambda columns
-			largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer)))
+			largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer))) // allocate only once, reuse in loop
 			for j, param := range proc.Params.([]scm.Scmer) {
 				largs[j] = t.ColumnReader(string(param.(scm.Symbol)))
 			}
+			procFn := scm.OptimizeProcToSerialFunction(proc, &scm.Globalenv)
 			result.scols[i] = func(idx uint) scm.Scmer {
 				largs_ := make([]scm.Scmer, len(largs))
 				for i, getter := range largs {
@@ -213,7 +220,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 					largs_[i] = getter(idx)
 				}
 				// execute getter
-				return scm.Apply(proc, largs_)
+				return procFn(largs_...)
 			}
 		} else {
 			panic("unknown sort criteria: " + fmt.Sprint(scol))
@@ -254,7 +261,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 		for i, k := range ccols { // iterate over columns
 			cdataset[i] = k.GetValue(idx)
 		}
-		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
+		if (!scm.ToBool(conditionFn(cdataset...))) {
 			continue // condition did not match
 		}
 
@@ -274,7 +281,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 			cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
 		}
 		// check condition
-		if (!scm.ToBool(scm.Apply(condition, cdataset))) {
+		if (!scm.ToBool(conditionFn(cdataset...))) {
 			continue // condition did not match
 		}
 

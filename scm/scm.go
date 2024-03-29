@@ -326,6 +326,9 @@ type Proc struct {
 	En           *Env
 }
 
+// helper pseudo type to optimize parameter reading from indices
+type NthLocalVar uint8 // equals to (var i)
+
 /*
  Environments
 */
