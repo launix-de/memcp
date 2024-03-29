@@ -183,6 +183,43 @@ func init_list() {
 			return result
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		"produce", "returns a list that contains produced items - it works like for(state = startstate, condition(state), state = iterator(state)) {yield state}",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"startstate", "any", "start state to begin with"},
+			DeclarationParameter{"condition", "func", "func that returns true whether the state will be inserted into the result or the loop is stopped"},
+			DeclarationParameter{"iterator", "func", "func that produces the next state"},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			// arr, reducefn(a, b), [neutral]
+			result := make([]Scmer, 0)
+			state := a[0]
+			condition := OptimizeProcToSerialFunction(a[1], &Globalenv)
+			iterator := OptimizeProcToSerialFunction(a[2], &Globalenv)
+			for ToBool(condition(state)) {
+				result = append(result, state)
+				state = iterator(state)
+			}
+			return result
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"produceN", "returns a list with numbers from 0..n-1",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"n", "number", "number of elements to produce"},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			// arr, reducefn(a, b), [neutral]
+			n := ToInt(a[0])
+			result := make([]Scmer, n)
+			for i := 0; i < n-1; i++ {
+				result[i] = i
+			}
+			return result
+		},
+	})
 
 	// dictionary functions
 	DeclareTitle("Associative Lists / Dictionaries")

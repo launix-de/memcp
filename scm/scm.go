@@ -333,6 +333,7 @@ type Proc struct {
 type Vars map[Symbol]Scmer
 type Env struct {
 	Vars Vars
+	//VarsNumbered []Scmer // <- for the optimizer
 	Outer *Env
 	Nodefine bool // define will write to Outer
 }

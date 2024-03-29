@@ -172,10 +172,58 @@ func Validate(val Scmer, require string) string {
 	return "any"
 }
 
+// to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
+func OptimizeProcToSerialFunction(val Scmer, env *Env) func (...Scmer) Scmer {
+	if result, ok := val.(func(...Scmer) Scmer); ok {
+		return result // already optimized
+	}
+	// TODO: JIT
+
+	// otherwise: precreate a lambda
+	p := val.(Proc) // precast procedure
+	en := &Env{make(Vars), p.En, false} // reusable environment
+	switch params := p.Params.(type) {
+	case []Scmer: // default case: 
+		return func (args ...Scmer) Scmer {
+			if len(params) > len(args) {
+				panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
+			}
+			for i, param := range params {
+				en.Vars[param.(Symbol)] = args[i]
+			}
+			return Eval(p.Body, en)
+		}
+	default: // otherwise: param list is stored in a single variable
+		return func (args ...Scmer) Scmer {
+			en.Vars[params.(Symbol)] = args
+			return Eval(p.Body, en)
+		}
+	}
+	panic("value is not compilable: " + String(val))
+}
+
 // do preprocessing and optimization
 func Optimize(val Scmer, env *Env) Scmer {
 	// TODO: strip source code information (source, line, col)
 	// TODO: static code analysis like escape analysis + replace memory-safe functions with in-place memory manipulating versions (e.g. in set_assoc)
+	// TODO: inline use-once
+	// TODO: inplace functions (map -> map_inplace, filter -> filter_inplace) will manipulate the first parameter instead of allocating something new
+	// TODO: pure imperative functions (map, produce_map, produceN_map) that execute code and return nothing
+	// TODO: value chaining -> produce+map+filter -> inplace append (based on pure imperative)
+	// TODO: cons/merge->append
+	switch v := val.(type) {
+		case []Scmer:
+			if len(v) > 0 {
+				if v[0] == Symbol("begin") {
+					for i := 1; i < len(v) - 1; i++ {
+						// TODO: v[i]'s return value is not used -> discard
+					}
+				}
+				for i := 1; i < len(v); i++ {
+					Optimize(v[i], env)
+				}
+			}
+	}
 	return val
 }
 

@@ -2,8 +2,6 @@ module github.com/launix-de/memcp
 
 go 1.21
 
-toolchain go1.22.0
-
 require (
 	github.com/chzyer/readline v1.5.1
 	github.com/google/uuid v1.6.0
