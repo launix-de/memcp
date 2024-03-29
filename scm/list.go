@@ -131,8 +131,9 @@ func init_list() {
 		}, "list",
 		func(a ...Scmer) Scmer {
 			result := make([]Scmer, 0)
+			fn := OptimizeProcToSerialFunction(a[1], &Globalenv)
 			for _, v := range a[0].([]Scmer) {
-				if ToBool(Apply(a[1], []Scmer{v,})) {
+				if ToBool(fn(v)) {
 					result = append(result, v)
 				}
 			}
@@ -149,8 +150,9 @@ func init_list() {
 		func(a ...Scmer) Scmer {
 			list := a[0].([]Scmer)
 			result := make([]Scmer, len(list))
+			fn := OptimizeProcToSerialFunction(a[1], &Globalenv)
 			for i, v := range list {
-				result[i] = Apply(a[1], []Scmer{v,})
+				result[i] = fn(v)
 			}
 			return result
 		},
@@ -215,7 +217,7 @@ func init_list() {
 			n := ToInt(a[0])
 			result := make([]Scmer, n)
 			for i := 0; i < n; i++ {
-				result[i] = i
+				result[i] = float64(i) // TODO: leave to integer once a flexible type system is implemented
 			}
 			return result
 		},

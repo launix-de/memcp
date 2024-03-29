@@ -28,6 +28,8 @@ func String(v Scmer) string {
 	switch v := v.(type) {
 	case SourceInfo:
 		return String(v.value)
+	case NthLocalVar:
+		return fmt.Sprintf("(var %d)", v)
 	case []Scmer:
 		l := make([]string, len(v))
 		for i, x := range v {
@@ -105,9 +107,16 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 		b.WriteByte(')')
 	case Proc:
 		b.WriteString("(lambda ")
+		if (v.NumVars > 0 && v.Params == nil) {
+			// TODO: deeoptimize
+		}
 		Serialize(b, v.Params, glob, glob)
 		b.WriteByte(' ')
 		Serialize(b, v.Body, v.En, glob)
+		b.WriteByte(')')
+	case NthLocalVar:
+		b.WriteString("(var ")
+		b.WriteString(fmt.Sprint(v))
 		b.WriteByte(')')
 	case Symbol:
 		// print as Symbol (because we already used a begin-block for defining our env)

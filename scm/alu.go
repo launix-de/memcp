@@ -158,7 +158,7 @@ func init_alu() {
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			// TODO: string vs. float
-			return a[0].(float64) <= a[1].(float64)
+			return ToFloat(a[0]) <= ToFloat(a[1])
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -168,7 +168,8 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return a[0].(float64) < a[1].(float64)
+			// TODO: string vs. float
+			return ToFloat(a[0]) < ToFloat(a[1])
 		},
 	})
 	Declare(&Globalenv, &Declaration{

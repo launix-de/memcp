@@ -72,143 +72,159 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		value = e
 	case float64:
 		value = e
+	case Proc:
+		value = e
 	case Symbol:
 		value = en.FindRead(e).Vars[e]
+	case NthLocalVar:
+		value = en.VarsNumbered[e]
 	case []Scmer:
-		switch car, _ := e[0].(Symbol); car {
-		case "quote":
-			value = e[1]
-		case "eval":
-			// ...
-			expression = Eval(e[1], en)
-			goto restart
-		case "time":
-			// similar to eval
-			start := time.Now() // time measurement
-			value = Eval(e[1], en)
-			fmt.Println(time.Since(start))
-			return
-		case "if":
-			if ToBool(Eval(e[1], en)) {
-				expression = e[2]
+		if car, ok := e[0].(Symbol); ok {
+			// switch-case through all special symbols
+			switch car {
+			case "outer": // execute value in outer scope
+				value = Eval(e[1], en.Outer)
+			case "quote":
+				value = e[1]
+			case "eval":
+				// ...
+				expression = Eval(e[1], en)
 				goto restart
-			} else {
-				if len(e) > 3 {
-					expression = e[3]
+			case "time":
+				// similar to eval
+				start := time.Now() // time measurement
+				value = Eval(e[1], en)
+				fmt.Println(time.Since(start))
+				return
+			case "if":
+				if ToBool(Eval(e[1], en)) {
+					expression = e[2]
 					goto restart
 				} else {
-					return nil
+					if len(e) > 3 {
+						expression = e[3]
+						goto restart
+					} else {
+						return nil
+					}
 				}
-			}
-		case "and":
-			for i, x := range e {
-				if i > 0 && !ToBool(Eval(x, en)) {
-					return false
+			case "and":
+				for i, x := range e {
+					if i > 0 && !ToBool(Eval(x, en)) {
+						return false
+					}
 				}
-			}
-			return true
-		case "or":
-			for i, x := range e {
-				if i > 0 && ToBool(Eval(x, en)) {
-					return true
+				return true
+			case "or":
+				for i, x := range e {
+					if i > 0 && ToBool(Eval(x, en)) {
+						return true
+					}
 				}
-			}
-			return false
-		case "coalesce":
-			for i, x := range e {
-				x2 := Eval(x, en)
-				if i > 0 && ToBool(x2) {
-					return x2
+				return false
+			case "coalesce":
+				for i, x := range e {
+					x2 := Eval(x, en)
+					if i > 0 && ToBool(x2) {
+						return x2
+					}
 				}
-			}
-			return nil
-		case "coalesceNil":
-			for i, x := range e {
-				x2 := Eval(x, en)
-				if i > 0 && x2 != nil {
-					return x2
+				return nil
+			case "coalesceNil":
+				for i, x := range e {
+					x2 := Eval(x, en)
+					if i > 0 && x2 != nil {
+						return x2
+					}
 				}
-			}
-			return nil
-		case "match": // (match <value> <pattern> <result> <pattern> <result> <pattern> <result> [<default>])
-			val := Eval(e[1], en)
-			i := 2
-			en2 := Env{make(Vars), en, true}
-			for i < len(e)-1 {
-				if match(val, e[i], &en2) {
-					// pattern has matched
-					en = &en2
-					expression = e[i+1]
-					goto restart
+				return nil
+			case "match": // (match <value> <pattern> <result> <pattern> <result> <pattern> <result> [<default>])
+				val := Eval(e[1], en)
+				i := 2
+				en2 := Env{make(Vars), en.VarsNumbered, en, true}
+				for i < len(e)-1 {
+					if match(val, e[i], &en2) {
+						// pattern has matched
+						en = &en2
+						expression = e[i+1]
+						goto restart
+					}
+					i += 2
 				}
-				i += 2
+				if i < len(e) {
+					// default: nothing matched
+					expression = e[i]
+					goto restart // tail call
+				} else {
+					// otherwise: nil
+					value = nil
+				}
+			/* set! is forbidden due to side effects
+			case "set!":
+				v := e[1].(Symbol)
+				en2 := en.FindWrite(v)
+				if en2 == nil {
+					// not yet defined: set in innermost env
+					en2 = en
+				}
+				en.Vars[v] = Eval(e[2], en)
+				value = "ok"*/
+			case "define", "set": // set only works in innermost env
+				// define will return itself back
+				value = Eval(e[2], en)
+				for en.Nodefine {
+					// skip nodefine envs so that imports write to the global env
+					en = en.Outer
+				}
+				en.Vars[e[1].(Symbol)] = value
+			case "setN": // set numbered
+				value = Eval(e[2], en)
+				en.VarsNumbered[int(e[1].(NthLocalVar))] = value
+			case "parser": // special form of lambda function
+				if len(e) > 3 {
+					value = NewParser(e[1], e[2], e[3], en)
+				} else if len(e) > 2 {
+					value = NewParser(e[1], e[2], nil, en)
+				} else {
+					value = NewParser(e[1], nil, nil, en)
+				}
+			case "lambda":
+				switch si := e[1].(type) {
+					case SourceInfo:
+						// strip SourceInfo from lambda declarations
+						e[1] = si.value
+				}
+				value = Proc{e[1], e[2], en, 0}
+			case "begin":
+				// execute begin.. in own environment
+				en2 := Env{make(Vars), en.VarsNumbered, en, false}
+				for _, i := range e[1:len(e)-1] {
+					Eval(i, &en2)
+				}
+				// tail call optimized version: last begin part will be tailed
+				expression = e[len(e)-1]
+				en = &en2
+				goto restart
+			default:
+				goto to_apply
 			}
-			if i < len(e) {
-				// default: nothing matched
-				expression = e[i]
-				goto restart // tail call
-			} else {
-				// otherwise: nil
-				value = nil
-			}
-		/* set! is forbidden due to side effects
-		case "set!":
-			v := e[1].(Symbol)
-			en2 := en.FindWrite(v)
-			if en2 == nil {
-				// not yet defined: set in innermost env
-				en2 = en
-			}
-			en.Vars[v] = Eval(e[2], en)
-			value = "ok"*/
-		case "define", "set": // set only works in innermost env
-			// define will return itself back
-			value = Eval(e[2], en)
-			for en.Nodefine {
-				// skip nodefine envs so that imports write to the global env
-				en = en.Outer
-			}
-			en.Vars[e[1].(Symbol)] = value
-		case "parser": // special form of lambda function
-			if len(e) > 3 {
-				value = NewParser(e[1], e[2], e[3], en)
-			} else if len(e) > 2 {
-				value = NewParser(e[1], e[2], nil, en)
-			} else {
-				value = NewParser(e[1], nil, nil, en)
-			}
-		case "lambda":
-			switch si := e[1].(type) {
-				case SourceInfo:
-					// strip SourceInfo from lambda declarations
-					e[1] = si.value
-			}
-			value = Proc{e[1], e[2], en}
-		case "begin":
-			// execute begin.. in own environment
-			en2 := Env{make(Vars), en, false}
-			for _, i := range e[1:len(e)-1] {
-				Eval(i, &en2)
-			}
-			// tail call optimized version: last begin part will be tailed
-			expression = e[len(e)-1]
-			en = &en2
-			goto restart
-		default:
-			// apply
-			operands := e[1:]
-			args := make([]Scmer, len(operands))
-			for i, x := range operands {
-				args[i] = Eval(x, en)
-			}
-			procedure := Eval(e[0], en)
-			switch p := procedure.(type) {
+			return
+		}
+		to_apply:
+		// apply
+		operands := e[1:]
+		args := make([]Scmer, len(operands))
+		for i, x := range operands {
+			args[i] = Eval(x, en)
+		}
+		procedure := Eval(e[0], en)
+		switch p := procedure.(type) {
 			case func(...Scmer) Scmer:
 				return p(args...)
 			case *ScmParser:
 				return p.Execute(String(Eval(e[1], en)), en)
 			case Proc:
-				en2 := Env{make(Vars), p.En, false}
+				en2 := Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
 				switch params := p.Params.(type) {
 				case []Scmer:
 					if len(params) > len(args) {
@@ -217,8 +233,17 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 					for i, param := range params {
 						en2.Vars[param.(Symbol)] = args[i]
 					}
+				case Symbol:
+					en2.Vars[params] = args
+				case nil:
+					if len(args) > p.NumVars {
+						panic("too many parameters provided to optimized function")
+					}
+					// copy n params into numbered vars
+					for i, param := range args {
+						en2.VarsNumbered[i] = param
+					}
 				default:
-					en2.Vars[params.(Symbol)] = args
 				}
 				en = &en2
 				expression = p.Body
@@ -242,7 +267,6 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				panic("Unknown function: " + fmt.Sprint(e[0]))
 			default:
 				panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
-			}
 		}
 	case nil:
 		return nil
@@ -282,7 +306,7 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 	case *ScmParser:
 		return p.Execute(String(args[0]), &Globalenv)
 	case Proc:
-		en := &Env{make(Vars), p.En, false}
+		en := &Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
 		switch params := p.Params.(type) {
 		case []Scmer:
 			if len(params) > len(args) {
@@ -291,8 +315,15 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 			for i, param := range params {
 				en.Vars[param.(Symbol)] = args[i]
 			}
-		default:
-			en.Vars[params.(Symbol)] = args
+		case Symbol:
+			en.Vars[params] = args
+		case nil:
+			if p.NumVars < len(args) {
+				panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", p.NumVars, len(args)))
+			}
+			for i, arg := range args {
+				en.VarsNumbered[i] = arg
+			}
 		}
 		return Eval(p.Body, en)
 	case []Scmer: // associative list
@@ -324,6 +355,7 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 type Proc struct {
 	Params, Body Scmer
 	En           *Env
+	NumVars      int
 }
 
 // helper pseudo type to optimize parameter reading from indices
@@ -336,7 +368,7 @@ type NthLocalVar uint8 // equals to (var i)
 type Vars map[Symbol]Scmer
 type Env struct {
 	Vars Vars
-	//VarsNumbered []Scmer // <- for the optimizer
+	VarsNumbered []Scmer // <- for the optimizer
 	Outer *Env
 	Nodefine bool // define will write to Outer
 }
@@ -378,6 +410,7 @@ func init() {
 			// basic
 			"list": Eval(Optimize(Read("internal", "(lambda z z)"), &Globalenv), &Globalenv),
 		},
+		nil,
 		nil,
 		false,
 	}
@@ -538,7 +571,7 @@ Patterns can be any of:
 		"lambda", "returns a function (func) constructed from the given code",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"parameters", "symbol|list", "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"},
+			DeclarationParameter{"parameters", "symbol|list|nil", "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"},
 			DeclarationParameter{"code", "any", "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"},
 		}, "func", // TODO: func(...)->returntype as soon as function types are implemented
 		nil,

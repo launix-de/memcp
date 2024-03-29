@@ -51,6 +51,7 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 					"import": getImport(wd),
 					"load": getLoad(wd),
 				},
+				nil,
 				&IOEnv,
 				true,
 			}
@@ -137,6 +138,7 @@ func main() {
 	wd, _ := os.Getwd() // libraries are relative to working directory... is that right?
 	IOEnv = scm.Env {
 		scm.Vars {},
+		nil,
 		&scm.Globalenv,
 		true, // other defines go into Globalenv
 	}
