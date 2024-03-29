@@ -40,16 +40,23 @@ func String(v Scmer) string {
 		return "[func]"
 	case func(...Scmer) Scmer:
 		return "[native func]"
+	case string:
+		return v // this is not valid scm code! (but we need it to convert strings)
+	case nil:
+		return "nil"
 	default:
 		return fmt.Sprint(v)
 	}
 }
-func SerializeToString(v Scmer, en *Env, glob *Env) string {
+func SerializeToString(v Scmer, glob *Env) string {
 	var b bytes.Buffer
-	Serialize(&b, v, en, glob)
+	SerializeEx(&b, v, glob, glob, nil)
 	return b.String()
 }
-func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
+func Serialize(b *bytes.Buffer, v Scmer, glob *Env) {
+	SerializeEx(b, v, glob, glob, nil)
+}
+func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 	if en != glob {
 		b.WriteString("(begin ")
 		for k, v := range en.Vars {
@@ -59,17 +66,17 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 				b.WriteString("(define ")
 				b.WriteString(string(k)) // what if k contains spaces?? can it?
 				b.WriteString(" ")
-				Serialize(b, v, en.Outer, glob)
+				SerializeEx(b, v, en.Outer, glob, p)
 				b.WriteString(") ")
 			}
 		}
-		Serialize(b, v, en.Outer, glob)
+		SerializeEx(b, v, en.Outer, glob, p)
 		b.WriteString(")")
 		return
 	}
 	switch v := v.(type) {
 	case SourceInfo:
-		Serialize(b, v.value, en, glob)
+		SerializeEx(b, v.value, en, glob, p)
 	case []Scmer:
 		if len(v) > 0 && v[0] == Symbol("list") {
 			b.WriteByte('\'')
@@ -80,7 +87,7 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 			if i != 0 {
 				b.WriteByte(' ')
 			}
-			Serialize(b, x, en, glob)
+			SerializeEx(b, x, en, glob, p)
 		}
 		b.WriteByte(')')
 	case func(...Scmer) Scmer:
@@ -101,23 +108,33 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 		b.WriteString("[unserializable native func]")
 	case *ScmParser:
 		b.WriteString("(parser ")
-		Serialize(b, v.Syntax, glob, glob)
+		SerializeEx(b, v.Syntax, glob, glob, p)
 		b.WriteByte(' ')
-		Serialize(b, v.Generator, en, glob)
+		SerializeEx(b, v.Generator, en, glob, p)
 		b.WriteByte(')')
 	case Proc:
 		b.WriteString("(lambda ")
 		if (v.NumVars > 0 && v.Params == nil) {
 			// TODO: deeoptimize
 		}
-		Serialize(b, v.Params, glob, glob)
+		SerializeEx(b, v.Params, glob, glob, nil)
 		b.WriteByte(' ')
-		Serialize(b, v.Body, v.En, glob)
+		SerializeEx(b, v.Body, v.En, glob, &v)
 		b.WriteByte(')')
 	case NthLocalVar:
-		b.WriteString("(var ")
-		b.WriteString(fmt.Sprint(v))
-		b.WriteByte(')')
+		if p != nil && p.NumVars >= int(v) && p.Params != nil {
+			if l, ok := p.Params.([]Scmer); ok {
+				s, _ := l[v].(Symbol)
+				b.WriteString(string(s))
+			} else {
+				s, _ := p.Params.(Symbol)
+				b.WriteString(string(s))
+			}
+		} else {
+			b.WriteString("(var ")
+			b.WriteString(fmt.Sprint(v))
+			b.WriteByte(')')
+		}
 	case Symbol:
 		// print as Symbol (because we already used a begin-block for defining our env)
 		b.WriteString(fmt.Sprint(v))
@@ -125,6 +142,8 @@ func Serialize(b *bytes.Buffer, v Scmer, en *Env, glob *Env) {
 		b.WriteByte('"')
 		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(v))
 		b.WriteByte('"')
+	case nil:
+		b.WriteString("nil")
 	default:
 		b.WriteString(fmt.Sprint(v))
 	}

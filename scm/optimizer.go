@@ -30,18 +30,42 @@ func OptimizeProcToSerialFunction(val Scmer, env *Env) func (...Scmer) Scmer {
 	en := &Env{make(Vars), make([]Scmer, p.NumVars), p.En, false} // reusable environment
 	switch params := p.Params.(type) {
 	case []Scmer: // default case: 
-		return func (args ...Scmer) Scmer {
-			if len(params) > len(args) {
-				panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
+		if p.NumVars > 0 {
+			return func (args ...Scmer) Scmer {
+				for i, arg := range args {
+					if i < len(args) {
+						en.VarsNumbered[i] = arg
+					} else {
+						en.VarsNumbered[i] = nil // fill in nil values
+					}
+				}
+				return Eval(p.Body, en)
 			}
-			for i, param := range params {
-				en.Vars[param.(Symbol)] = args[i]
+		} else {
+			return func (args ...Scmer) Scmer {
+				if len(params) > len(args) {
+					panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
+				}
+				for i, param := range params {
+					en.Vars[param.(Symbol)] = args[i]
+				}
+				return Eval(p.Body, en)
 			}
-			return Eval(p.Body, en)
 		}
-	default: // otherwise: param list is stored in a single variable
+	case Symbol: // otherwise: param list is stored in a single variable
+		if p.NumVars > 0 {
+			return func (args ...Scmer) Scmer {
+				en.VarsNumbered[0] = args
+				return Eval(p.Body, en)
+			}
+		} else {
+			return func (args ...Scmer) Scmer {
+				en.Vars[params] = args
+				return Eval(p.Body, en)
+			}
+		}
+	case nil:
 		return func (args ...Scmer) Scmer {
-			en.Vars[params.(Symbol)] = args
 			return Eval(p.Body, en)
 		}
 	}
@@ -52,7 +76,7 @@ func OptimizeProcToSerialFunction(val Scmer, env *Env) func (...Scmer) Scmer {
 func Optimize(val Scmer, env *Env) Scmer {
 	ome := newOptimizerMetainfo()
 	v := OptimizeEx(val, env, &ome)
-	fmt.Println(SerializeToString(v, env, env))
+	fmt.Println(SerializeToString(v, env))
 	return v
 }
 type optimizerMetainfo struct {
@@ -72,7 +96,6 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	return
 }
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
-	fmt.Println("optimize node ",String(val))
 	// TODO: strip source code information (source, line, col)
 	// TODO: static code analysis like escape analysis + replace memory-safe functions with in-place memory manipulating versions (e.g. in set_assoc)
 	// TODO: inline use-once
@@ -124,29 +147,19 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					p.Optimize(env, ome)
 					return p
 				}
-				// all items:
-				if v[0] != Symbol("quote") && v[0] != Symbol("match") {
-					// optimize all other parameters
-					for i := 1; i < len(v); i++ {
-						v[i] = OptimizeEx(v[i], env, ome)
-					}
-				}
-				if (v[0] == Symbol("set") || v[0] == Symbol("define")) && len(v) == 3 {
-					if _, ok := v[1].(NthLocalVar); ok {
-						// change symbol of set/define to setN
-						v[0] = Symbol("setN")
-					}
-				}
+
+				// now all the special cases
 				if v[0] == Symbol("match") {
-					// TODO: optimize matches
+					// TODO: optimize matches with nvars
+					/* code is deactivated since variables can be overwritten!
 					for i := 2; i < len(v); i+= 2 {
 						v[i] = OptimizeEx(v[i], env, ome)
 					}
 					if len(v)%2 == 1 {
 						v[len(v)-1] = OptimizeEx(v[len(v)-1], env, ome)
 					}
-				}
-				if v[0] == Symbol("parser") {
+					*/
+				} else if v[0] == Symbol("parser") {
 					// TODO: precompile parsers
 					/*
 					if len(e) > 3 {
@@ -156,6 +169,21 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					} else {
 						value = NewParser(e[1], nil, nil, en)
 					}*/
+
+				// last but not least: recurse over the arguments when we aren't a special case
+				} else if v[0] != Symbol("quote") {
+					// optimize all other parameters
+					for i := 1; i < len(v); i++ {
+						v[i] = OptimizeEx(v[i], env, ome)
+					}
+				}
+
+				// now rewrite set into setN when NthLocalVar has been inserted
+				if (v[0] == Symbol("set") || v[0] == Symbol("define")) && len(v) == 3 {
+					if _, ok := v[1].(NthLocalVar); ok {
+						// change symbol of set/define to setN
+						v[0] = Symbol("setN")
+					}
 				}
 			}
 	}
@@ -165,6 +193,7 @@ func (p *Proc) Optimize(env *Env, ome *optimizerMetainfo) {
 	// optimize lambdas
 	// prepare to optimize body
 	return
+	fmt.Println("optimize node ",String(p))
 	ome2 := ome.Copy()
 	switch params := p.Params.(type) {
 		case []Scmer: // parameter list
@@ -186,6 +215,8 @@ func (p *Proc) Optimize(env *Env, ome *optimizerMetainfo) {
 			panic("unknown lambda parameter: " + String(params))
 	}
 	ome2.lambda = p
-	p.Params = nil // replace parameter list with
+	// p.Params = nil do not replace parameter list with nil, the execution engine must handle it different
 	p.Body = OptimizeEx(p.Body, env, &ome2) // optimize body
+	fmt.Println("optimized ",String(p))
+	fmt.Println("optimized ",SerializeToString(p, env))
 }

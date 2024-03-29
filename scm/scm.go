@@ -230,19 +230,23 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 					if len(params) > len(args) {
 						panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
 					}
-					for i, param := range params {
-						en2.Vars[param.(Symbol)] = args[i]
+					if p.NumVars > 0 {
+						for i, _ := range params {
+							en2.VarsNumbered[i] = args[i]
+						}
+					} else {
+						for i, param := range params {
+							en2.Vars[param.(Symbol)] = args[i]
+						}
 					}
 				case Symbol:
-					en2.Vars[params] = args
+					if p.NumVars > 0 {
+						en2.VarsNumbered[0] = args
+					} else {
+						en2.Vars[params] = args
+					}
 				case nil:
-					if len(args) > p.NumVars {
-						panic("too many parameters provided to optimized function")
-					}
-					// copy n params into numbered vars
-					for i, param := range args {
-						en2.VarsNumbered[i] = param
-					}
+					// no arguments
 				default:
 				}
 				en = &en2
@@ -312,18 +316,22 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 			if len(params) > len(args) {
 				panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
 			}
-			for i, param := range params {
-				en.Vars[param.(Symbol)] = args[i]
+			if p.NumVars > 0 {
+				for i, _ := range params {
+					en.VarsNumbered[i] = args[i]
+				}
+			} else {
+				for i, param := range params {
+					en.Vars[param.(Symbol)] = args[i]
+				}
 			}
 		case Symbol:
-			en.Vars[params] = args
+			if p.NumVars > 0 {
+				en.VarsNumbered[0] = args
+			} else {
+				en.Vars[params] = args
+			}
 		case nil:
-			if p.NumVars < len(args) {
-				panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", p.NumVars, len(args)))
-			}
-			for i, arg := range args {
-				en.VarsNumbered[i] = arg
-			}
 		}
 		return Eval(p.Body, en)
 	case []Scmer: // associative list

@@ -127,7 +127,7 @@ func Repl(en *Env) {
 			Validate(code, "any")
 			code = Optimize(code, en)
 			result := Eval(code, en)
-			Serialize(&b, result, en, en)
+			Serialize(&b, result, en)
 			fmt.Print(resultprompt)
 			fmt.Println(b.String())
 			oldline = ""
