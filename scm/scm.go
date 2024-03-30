@@ -267,18 +267,23 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				goto restart // tail call optimized
 			case []Scmer: // associative list
 				// format: (key value key value ... default)
-				arg := Eval(operands[0], en)
-				i := 0
-				for i < len(p)-1 {
-					if reflect.DeepEqual(arg, p[i]) {
-						return p[i+1]
+				if i, ok := operands[0].(NthLocalVar); ok {
+					// indexed access generated through optimizer
+					return p[i]
+				} else {
+					arg := Eval(operands[0], en)
+					i := 0
+					for i < len(p)-1 {
+						if reflect.DeepEqual(arg, p[i]) {
+							return p[i+1]
+						}
+						i += 2
 					}
-					i += 2
+					if i < len(p) {
+						return p[i] // default value on n+1
+					}
+					return nil // no default value
 				}
-				if i < len(p) {
-					return p[i] // default value on n+1
-				}
-				return nil // no default value
 			case nil:
 				panic("Unknown function: " + fmt.Sprint(e[0]))
 			default:
@@ -353,17 +358,22 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		return Eval(p.Body, en)
 	case []Scmer: // associative list
 		// format: (key value key value ... default)
-		i := 0
-		for i < len(p)-1 {
-			if reflect.DeepEqual(args[0], p[i]) {
-				return p[i+1]
+		if i, ok := args[0].(NthLocalVar); ok {
+			// indexed access generated through optimizer
+			return p[i]
+		} else {
+			i := 0
+			for i < len(p)-1 {
+				if reflect.DeepEqual(args[0], p[i]) {
+					return p[i+1]
+				}
+				i += 2
 			}
-			i += 2
+			if i < len(p) {
+				return p[i] // default value on n+1
+			}
+			return nil // no default value
 		}
-		if i < len(p) {
-			return p[i] // default value on n+1
-		}
-		return nil // no default value
 	case nil:
 		panic("Unknown function")
 	default:
