@@ -33,6 +33,7 @@ import "io/ioutil"
 import "os/signal"
 import "crypto/rand"
 import "path/filepath"
+import "runtime/pprof"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage"
@@ -130,7 +131,9 @@ func main() {
 	var commands arrayFlags
 	flag.Var(&commands, "c", "Execute scm command")
 	basepath := "data"
+	profile := ""
 	flag.StringVar(&basepath, "data", "data", "Data folder for persistence")
+	flag.StringVar(&profile, "profile", "", "Data folder for persistence")
 	flag.Parse()
 	imports := flag.Args()
 
@@ -259,6 +262,17 @@ func main() {
     Type (help) to show help
 
 `)
+	// init profiling
+	if profile != "" {
+		f, err := os.Create(profile)
+		if err != nil {
+			panic(err)
+		}
+		defer f.Close()
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+
 	// REPL shell
 	scm.Repl(&IOEnv)
 
