@@ -424,6 +424,9 @@ func (e *Env) FindWrite(s Symbol) *Env {
 
 var Globalenv Env
 
+func List(a ...Scmer) Scmer {
+	return a
+}
 func init() {
 	Globalenv = Env{
 		Vars{ //aka an incomplete set of compiled-in functions
@@ -431,7 +434,7 @@ func init() {
 			"false": false,
 
 			// basic
-			"list": func (a ...Scmer) Scmer {return a},
+			"list": List,
 		},
 		nil,
 		nil,

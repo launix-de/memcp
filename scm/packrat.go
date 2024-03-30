@@ -241,6 +241,14 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 					result.Parser = parseSyntax(n[2], en)
 					return result
 			}
+			// the optimizer does this, so we have to handle it
+			if fmt.Sprint(n[0]) == fmt.Sprint(List) {
+				subparser := make([]packrat.Parser, len(n)-1)
+				for i := 1; i < len(n); i++ {
+					subparser[i-1] = parseSyntax(n[i], en)
+				}
+				return packrat.NewAndParser(subparser...)
+			}
 	}
 	panic("Unknown syntax: " + fmt.Sprint(syntax))
 }

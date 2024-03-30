@@ -100,6 +100,8 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 	// TODO: pure imperative functions (map, produce_map, produceN_map) that execute code and return nothing
 	// TODO: value chaining -> produce+map+filter -> inplace append (based on pure imperative)
 	// TODO: cons/merge->append
+	// TODO: constant folding -> functions with constant parameters can be tagged that they are safe to execute AOT
+	// TODO: currify -> functions can be partially executed (constmask -> specialized functions that return a func/lambda)
 	switch v := val.(type) {
 		case SourceInfo:
 			// strip SourceInfo from lambda declarations
@@ -138,14 +140,14 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 							// strip SourceInfo from lambda declarations
 							v[1] = si.value
 					}
+					return v // TODO: fix the code, remove return
 					// optimize body
 					numVars := 0
-					//ome2 := ome.Copy()
+					ome2 := ome.Copy()
 					if len(v) == 4 {
 						numVars = ToInt(v[3]) // we already have a numvars
 					} else {
 						// get the params
-						/*
 						switch params := v[1].(type) {
 							case []Scmer: // parameter list
 								for _, s := range params {
@@ -159,19 +161,26 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 							default:
 								panic("unknown lambda parameter: " + String(params))
 						}
-						*/
-						v = append(v, numVars) // add parameter
+						v = append(v, float64(numVars)) // add parameter
 					}
 					// p.Params = nil do not replace parameter list with nil, the execution engine must handle it different
-					//v[2] = OptimizeEx(v[2], env, &ome2) // optimize body
-					fmt.Println("optimized", String(v))
-					return val
+					v[2] = OptimizeEx(v[2], env, &ome2) // optimize body
+					return v
 				}
 
 				// now all the special cases
 
 				// set/define
 				if (v[0] == Symbol("set") || v[0] == Symbol("define")) && len(v) == 3 {
+					if s, ok := v[1].(Symbol); ok {
+						if vp, ok := ome.variableReplacement[s]; ok {
+							if lv, ok := vp.(NthLocalVar); ok {
+								v[1] = lv // set local var -> replace with (var i)
+							}
+						} else {
+							// TODO: new variable -> increase variable count?? inline?
+						}
+					}
 					if _, ok := v[1].(NthLocalVar); ok {
 						// change symbol of set/define to setN
 						v[0] = Symbol("setN")
@@ -179,7 +188,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					v[2] = OptimizeEx(v[2], env, ome)
 					// TODO: check if we could remove the set instruction and inline the value if it occurs only once
 				} else if v[0] == Symbol("match") {
-					// TODO: optimize matches with nvars
+					// TODO: optimize matches with nvars and your own ome
 					v[1] = OptimizeEx(v[1], env, ome)
 					/* code is deactivated since variables can be overwritten! */
 					/*
@@ -190,15 +199,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 						v[len(v)-1] = OptimizeEx(v[len(v)-1], env, ome)
 					}*/
 				} else if v[0] == Symbol("parser") {
-					// TODO: precompile parsers
-					/*
-					if len(e) > 3 {
-						value = NewParser(e[1], e[2], e[3], en)
-					} else if len(e) > 2 {
-						value = NewParser(e[1], e[2], nil, en)
-					} else {
-						value = NewParser(e[1], nil, nil, en)
-					}*/
+					return OptimizeParser(v, env, ome)
 
 				// last but not least: recurse over the arguments when we aren't a special case
 				} else if v[0] != Symbol("quote") {
@@ -208,6 +209,36 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					}
 				}
 			}
+	}
+	return val
+}
+func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
+	// TODO: precompile parsers
+	switch v := val.(type) {
+		case []Scmer:
+			if v[0] == Symbol("parse") {
+				ome2 := ome.Copy()
+				v[1] = OptimizeParser(v[1], env, &ome2) // syntax expr -> collect new variables
+				if len(v) > 2 {
+					v[2] = OptimizeEx(v[2], env, &ome2) // generator expr -> use variables
+				}
+				if len(v) > 3 {
+					v[3] = OptimizeEx(v[3], env, ome) // delimiter expr
+				}
+			} else if v[0] == Symbol("define") {
+				v[2] = OptimizeParser(v[2], env, ome)
+				// TODO: numbered parameters v[1]
+				if _, ok := ome.variableReplacement[v[1].(Symbol)]; ok {
+					// remove entry from map so we really read out the real variable
+					delete(ome.variableReplacement, v[1].(Symbol))
+				}
+			} else {
+				// + * ? or atom regex
+				for i := 1; i < len(v); i++ {
+					v[i] = OptimizeParser(v[i], env, ome)
+				}
+			}
+		return v
 	}
 	return val
 }
