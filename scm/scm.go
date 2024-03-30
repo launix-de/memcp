@@ -191,7 +191,11 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 						// strip SourceInfo from lambda declarations
 						e[1] = si.value
 				}
-				value = Proc{e[1], e[2], en, 0}
+				numVars := 0
+				if len(e) > 3 {
+					numVars = ToInt(e[3])
+				}
+				value = Proc{e[1], e[2], en, numVars}
 			case "begin":
 				// execute begin.. in own environment
 				en2 := Env{make(Vars), en.VarsNumbered, en, false}
@@ -425,7 +429,7 @@ func init() {
 			"false": false,
 
 			// basic
-			"list": Eval(Optimize(Read("internal", "(lambda z z)"), &Globalenv), &Globalenv),
+			"list": func (a ...Scmer) Scmer {return a},
 		},
 		nil,
 		nil,
@@ -586,10 +590,11 @@ Patterns can be any of:
 	})
 	Declare(&Globalenv, &Declaration{
 		"lambda", "returns a function (func) constructed from the given code",
-		2, 2,
+		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"parameters", "symbol|list|nil", "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"},
 			DeclarationParameter{"code", "any", "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"},
+			DeclarationParameter{"numvars", "number", "number of unnamed variables that can be accessed via (var 0) (var 1) etc."},
 		}, "func", // TODO: func(...)->returntype as soon as function types are implemented
 		nil,
 	})

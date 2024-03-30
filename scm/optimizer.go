@@ -33,7 +33,7 @@ func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
 		if p.NumVars > 0 {
 			return func (args ...Scmer) Scmer {
 				for i, arg := range args {
-					if i < len(args) {
+					if i < p.NumVars {
 						en.VarsNumbered[i] = arg
 					} else {
 						en.VarsNumbered[i] = nil // fill in nil values
@@ -81,7 +81,6 @@ func Optimize(val Scmer, env *Env) Scmer {
 }
 type optimizerMetainfo struct {
 	variableReplacement map[Symbol]Scmer
-	lambda *Proc // when inside a Proc
 }
 func newOptimizerMetainfo() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
@@ -92,11 +91,9 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	for k, v := range ome.variableReplacement {
 		result.variableReplacement[k] = []Scmer{Symbol("outer"), v}
 	}
-	result.lambda = ome.lambda
 	return
 }
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
-	// TODO: strip source code information (source, line, col)
 	// TODO: static code analysis like escape analysis + replace memory-safe functions with in-place memory manipulating versions (e.g. in set_assoc)
 	// TODO: inline use-once
 	// TODO: inplace functions (map -> map_inplace, filter -> filter_inplace) will manipulate the first parameter instead of allocating something new
@@ -136,16 +133,41 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 						// whatever comes
 					}
 				}
-				// pack lambdas into objects
+				// analyze lambdas (but don't pack them into *Proc since they need a fresh env)
 				if v[0] == Symbol("lambda") {
 					switch si := v[1].(type) {
 						case SourceInfo:
 							// strip SourceInfo from lambda declarations
 							v[1] = si.value
 					}
-					p := Proc{v[1], v[2], env, 0}
-					p.Optimize(env, ome)
-					return p
+					// optimize body
+					numVars := 0
+					//ome2 := ome.Copy()
+					if len(v) == 4 {
+						numVars = ToInt(v[3]) // we already have a numvars
+					} else {
+						// get the params
+						/*
+						switch params := v[1].(type) {
+							case []Scmer: // parameter list
+								for _, s := range params {
+									ome2.variableReplacement[s.(Symbol)] = NthLocalVar(numVars)
+									numVars++
+								}
+							case Symbol: // parameter variable
+								ome2.variableReplacement[params] = NthLocalVar(numVars)
+								numVars++
+							case nil: // parameterless version
+							default:
+								panic("unknown lambda parameter: " + String(params))
+						}
+						*/
+						v = append(v, numVars) // add parameter
+					}
+					// p.Params = nil do not replace parameter list with nil, the execution engine must handle it different
+					//v[2] = OptimizeEx(v[2], env, &ome2) // optimize body
+					fmt.Println("optimized", String(v))
+					return val
 				}
 
 				// now all the special cases
@@ -189,35 +211,4 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 			}
 	}
 	return val
-}
-func (p *Proc) Optimize(env *Env, ome *optimizerMetainfo) {
-	// optimize lambdas
-	// prepare to optimize body
-	return
-	fmt.Println("optimize node ",String(p))
-	ome2 := ome.Copy()
-	switch params := p.Params.(type) {
-		case []Scmer: // parameter list
-			if p.NumVars != 0 {
-				panic("lambda function with unnamed variables must not have a parameter list")
-			}
-			for _, s := range params {
-				ome2.variableReplacement[s.(Symbol)] = NthLocalVar(p.NumVars)
-				p.NumVars++
-			}
-		case Symbol: // parameter variable
-			if p.NumVars != 0 {
-				panic("lambda function with unnamed variables must not have a parameter list")
-			}
-			ome2.variableReplacement[params] = NthLocalVar(p.NumVars)
-			p.NumVars++
-		case nil: // optimized parameterless version
-		default:
-			panic("unknown lambda parameter: " + String(params))
-	}
-	ome2.lambda = p
-	// p.Params = nil do not replace parameter list with nil, the execution engine must handle it different
-	p.Body = OptimizeEx(p.Body, env, &ome2) // optimize body
-	fmt.Println("optimized ",String(p))
-	fmt.Println("optimized ",SerializeToString(p, env))
 }
