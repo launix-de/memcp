@@ -62,7 +62,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 /* dedicated mysql protocol listening at port 3307 */
 (mysql 3307
 	(lambda (username_) (scan "system" "user" (lambda (username) (equal? username username_)) (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
-	(lambda (username schema) (show schema)) /* switch schema (TODO check grants; in the moment, only the existence of the database is checked) */
+	(lambda (username schema) (list? (show schema))) /* switch schema (TODO check grants; in the moment, only the existence of the database is checked) */
 	(lambda (schema sql resultrow_sql session) (begin /* sql */
 		(print "received query: " sql)
 		(define formula (parse_sql schema sql))

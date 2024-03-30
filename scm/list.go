@@ -223,6 +223,18 @@ func init_list() {
 			return result
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		"list?", "checks if a value is a list",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value to check"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			// arr
+			_, ok := a[0].([]Scmer)
+			return ok
+		},
+	})
 
 	// dictionary functions
 	DeclareTitle("Associative Lists / Dictionaries")
