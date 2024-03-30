@@ -41,7 +41,6 @@ if there is a group function, create a temporary preaggregate table
 */
 
 (define extract_columns_from_expr (lambda (expr) (match expr
-	(cons (symbol aggregate) args) /* aggregates: keep unchanged */ (cons aggregate args)
 	'((symbol get_column) tblvar col) '('(tblvar col))
 	(cons sym args) /* function call */ (merge (map args extract_columns_from_expr))
 	'()
@@ -101,10 +100,11 @@ if there is a group function, create a temporary preaggregate table
 
 	*/
 
+	/* tells whether there is an aggregate inside */
 	(define expr_find_aggregate (lambda (expr) (match expr
 		'((symbol aggregate) item reduce neutral) true
-		(cons sym args) /* function call */ (merge (map args expr_find_aggregate)) /* TODO: use collector */
-		'()
+		(cons sym args) /* function call */ (reduce args (lambda (a b) (or a (expr_find_aggregate b))))
+		false
 	)))
 
 	/* replace all aggregates with respected subtitutions */
