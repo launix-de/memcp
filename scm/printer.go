@@ -78,18 +78,24 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 	case SourceInfo:
 		SerializeEx(b, v.value, en, glob, p)
 	case []Scmer:
-		if len(v) > 0 && v[0] == Symbol("list") {
-			b.WriteByte('\'')
-			v = v[1:]
-		}
-		b.WriteByte('(')
-		for i, x := range v {
-			if i != 0 {
-				b.WriteByte(' ')
+		if len(v) == 2 && v[0] == Symbol("outer") {
+			b.WriteString("(outer ")
+			SerializeEx(b, v[1], en, glob, nil)
+			b.WriteByte(')')
+		} else {
+			if len(v) > 0 && v[0] == Symbol("list") {
+				b.WriteByte('\'')
+				v = v[1:]
 			}
-			SerializeEx(b, x, en, glob, p)
+			b.WriteByte('(')
+			for i, x := range v {
+				if i != 0 {
+					b.WriteByte(' ')
+				}
+				SerializeEx(b, x, en, glob, p)
+			}
+			b.WriteByte(')')
 		}
-		b.WriteByte(')')
 	case func(...Scmer) Scmer:
 		// native func serialization is the hardest; reverse the env!
 		// when later functional JIT is done, this must also handle deoptimization

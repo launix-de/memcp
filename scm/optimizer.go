@@ -19,7 +19,7 @@ package scm
 import "fmt"
 
 // to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
-func OptimizeProcToSerialFunction(val Scmer, env *Env) func (...Scmer) Scmer {
+func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
 	if result, ok := val.(func(...Scmer) Scmer); ok {
 		return result // already optimized
 	}
@@ -76,7 +76,7 @@ func OptimizeProcToSerialFunction(val Scmer, env *Env) func (...Scmer) Scmer {
 func Optimize(val Scmer, env *Env) Scmer {
 	ome := newOptimizerMetainfo()
 	v := OptimizeEx(val, env, &ome)
-	fmt.Println(SerializeToString(v, env))
+	//fmt.Println(SerializeToString(v, env))
 	return v
 }
 type optimizerMetainfo struct {
@@ -151,14 +151,15 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 				// now all the special cases
 				if v[0] == Symbol("match") {
 					// TODO: optimize matches with nvars
-					/* code is deactivated since variables can be overwritten!
-					for i := 2; i < len(v); i+= 2 {
+					v[1] = OptimizeEx(v[1], env, ome)
+					/* code is deactivated since variables can be overwritten! */
+					/*
+					for i := 3; i < len(v); i+= 2 {
 						v[i] = OptimizeEx(v[i], env, ome)
 					}
 					if len(v)%2 == 1 {
 						v[len(v)-1] = OptimizeEx(v[len(v)-1], env, ome)
-					}
-					*/
+					}*/
 				} else if v[0] == Symbol("parser") {
 					// TODO: precompile parsers
 					/*

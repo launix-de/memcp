@@ -47,6 +47,9 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		case Symbol:
 			en.Vars[p] = val
 			return true
+		case NthLocalVar:
+			en.VarsNumbered[p] = val
+			return true
 		case []Scmer:
 			switch p[0] {
 				case Symbol("list"):
@@ -81,11 +84,46 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 							// examine the pattern
 							if len(p) == 3 {
 								switch p1 := p[1].(type) {
+									case NthLocalVar:
+										if val_str, ok := en.VarsNumbered[p1].(string); ok {
+											// concat sym sym but left sym is assigned
+											switch p2 := p[2].(type) {
+												case NthLocalVar:
+													// string Symbol
+													if strings.HasPrefix(v, val_str) {
+														// extract postfix and match
+														en.VarsNumbered[p2] = v[len(val_str):]
+														return true
+													}
+													// else
+													return false
+												case Symbol:
+													// string Symbol
+													if strings.HasPrefix(v, val_str) {
+														// extract postfix and match
+														en.Vars[p2] = v[len(val_str):]
+														return true
+													}
+													// else
+													return false
+												default:
+													// panic
+											}
+										}
 									case Symbol:
 										if val, ok := en.FindRead(p1).Vars[p1]; ok {
 											if val_str, ok := val.(string); ok {
 												// concat sym sym but left sym is assigned
 												switch p2 := p[2].(type) {
+													case NthLocalVar:
+														// string Symbol
+														if strings.HasPrefix(v, val_str) {
+															// extract postfix and match
+															en.VarsNumbered[p2] = v[len(val_str):]
+															return true
+														}
+														// else
+														return false
 													case Symbol:
 														// string Symbol
 														if strings.HasPrefix(v, val_str) {
@@ -102,6 +140,15 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 										}
 									case string:
 										switch p2 := p[2].(type) {
+											case NthLocalVar:
+												// string Symbol
+												if strings.HasPrefix(v, p1) {
+													// extract postfix and match
+													en.VarsNumbered[p2] = v[len(p1):]
+													return true
+												}
+												// else
+												return false
 											case Symbol:
 												// string Symbol
 												if strings.HasPrefix(v, p1) {
@@ -152,7 +199,14 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 									if match != nil {
 										for i := 0; i <= re.NumSubexp(); i++ {
 											if p[i+2] != Symbol("_") {
-												en.Vars[p[i+2].(Symbol)] = match[i]
+												switch v := p[i+2].(type) {
+													case NthLocalVar:
+														en.VarsNumbered[v] = match[i]
+													case Symbol:
+														en.Vars[v] = match[i]
+													default:
+														panic("regex variable invalid: "+SerializeToString(v, en))
+												}
 											}
 										}
 										return true

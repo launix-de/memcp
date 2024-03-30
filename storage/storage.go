@@ -80,7 +80,7 @@ func Init(en scm.Env) {
 				}
 				for _, val := range list {
 					// filter
-					reduce := scm.OptimizeProcToSerialFunction(a[4], &scm.Globalenv)
+					reduce := scm.OptimizeProcToSerialFunction(a[4])
 					if scm.ToBool(scm.ApplyAssoc(a[2], val.([]scm.Scmer))) {
 						// map
 						v := scm.ApplyAssoc(a[3], val.([]scm.Scmer))

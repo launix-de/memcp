@@ -100,10 +100,10 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 	// TODO: sortcols that are not just simple columns but complex lambda expressions could be temporarily materialized to trade memory for execution time
 	// --> sortcols can then be rewritten to strings
 
-	callbackFn := scm.OptimizeProcToSerialFunction(callback, &scm.Globalenv)
+	callbackFn := scm.OptimizeProcToSerialFunction(callback)
 	aggregateFn := func(...scm.Scmer) scm.Scmer {return nil}
 	if aggregate != nil {
-		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate, &scm.Globalenv)
+		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
 
 	// prepare map phase (map has to occur late and ordered)
@@ -194,7 +194,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	result.shard = t
 	// TODO: mergesort sink instead of list-append-sort would allow early-out
 
-	conditionFn := scm.OptimizeProcToSerialFunction(condition, &scm.Globalenv)
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
 	// prepare filter function
 	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
@@ -212,7 +212,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 			for j, param := range proc.Params.([]scm.Scmer) {
 				largs[j] = t.ColumnReader(string(param.(scm.Symbol)))
 			}
-			procFn := scm.OptimizeProcToSerialFunction(proc, &scm.Globalenv)
+			procFn := scm.OptimizeProcToSerialFunction(proc)
 			result.scols[i] = func(idx uint) scm.Scmer {
 				largs_ := make([]scm.Scmer, len(largs))
 				for i, getter := range largs {

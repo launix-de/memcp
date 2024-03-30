@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2024  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -44,10 +44,6 @@ import (
 // (dict key value rest_dict)
 // dict acts like a function; apply to a dict will yield the value
 
-type Applicable interface {
-	Apply(...Scmer) Scmer
-}
-
 /*
  Eval / Apply
 */
@@ -83,6 +79,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			// switch-case through all special symbols
 			switch car {
 			case "outer": // execute value in outer scope
+				//fmt.Println("eval outer",e[1],en.Outer,"in",en)
 				value = Eval(e[1], en.Outer)
 			case "quote":
 				value = e[1]
@@ -213,33 +210,43 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		to_apply:
 		// apply
 		operands := e[1:]
-		args := make([]Scmer, len(operands))
-		for i, x := range operands {
-			args[i] = Eval(x, en)
-		}
 		procedure := Eval(e[0], en)
 		switch p := procedure.(type) {
 			case func(...Scmer) Scmer:
+				args := make([]Scmer, len(operands))
+				for i, x := range operands {
+					args[i] = Eval(x, en)
+				}
 				return p(args...)
+			case func(*Env, ...Scmer) Scmer:
+				args := make([]Scmer, len(operands))
+				for i, x := range operands {
+					args[i] = Eval(x, en)
+				}
+				return p(en, args...)
 			case *ScmParser:
 				return p.Execute(String(Eval(e[1], en)), en)
 			case Proc:
 				en2 := Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
 				switch params := p.Params.(type) {
 				case []Scmer:
-					if len(params) > len(args) {
-						panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
+					if len(params) < len(operands) {
+						panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
 					}
 					if p.NumVars > 0 {
 						for i, _ := range params {
-							en2.VarsNumbered[i] = args[i]
+							en2.VarsNumbered[i] = Eval(operands[i], en)
 						}
 					} else {
 						for i, param := range params {
-							en2.Vars[param.(Symbol)] = args[i]
+							en2.Vars[param.(Symbol)] = Eval(operands[i], en)
 						}
 					}
 				case Symbol:
+					args := make([]Scmer, len(operands))
+					for i, x := range operands {
+						args[i] = Eval(x, en)
+					}
 					if p.NumVars > 0 {
 						en2.VarsNumbered[0] = args
 					} else {
@@ -254,9 +261,10 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				goto restart // tail call optimized
 			case []Scmer: // associative list
 				// format: (key value key value ... default)
+				arg := Eval(operands[0], en)
 				i := 0
 				for i < len(p)-1 {
-					if reflect.DeepEqual(args[0], p[i]) {
+					if reflect.DeepEqual(arg, p[i]) {
 						return p[i+1]
 					}
 					i += 2
@@ -265,8 +273,6 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 					return p[i] // default value on n+1
 				}
 				return nil // no default value
-			case Applicable:
-				return p.Apply(args)
 			case nil:
 				panic("Unknown function: " + fmt.Sprint(e[0]))
 			default:
@@ -304,17 +310,22 @@ func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
 
 // helper function; Eval uses a code duplicate to get the tail recursion done right
 func Apply(procedure Scmer, args []Scmer) (value Scmer) {
+	return ApplyEx(procedure, args, &Globalenv)
+}
+func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 	switch p := procedure.(type) {
 	case func(...Scmer) Scmer:
 		return p(args...)
+	case func(*Env, ...Scmer) Scmer:
+		return p(en, args...)
 	case *ScmParser:
-		return p.Execute(String(args[0]), &Globalenv)
+		return p.Execute(String(args[0]), en)
 	case Proc:
 		en := &Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
 		switch params := p.Params.(type) {
 		case []Scmer:
-			if len(params) > len(args) {
-				panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
+			if len(params) < len(args) {
+				panic(fmt.Sprintf("Apply: function %s with %d parameters is supplied with %d arguments", String(procedure), len(params), len(args)))
 			}
 			if p.NumVars > 0 {
 				for i, _ := range params {
@@ -347,8 +358,6 @@ func Apply(procedure Scmer, args []Scmer) (value Scmer) {
 			return p[i] // default value on n+1
 		}
 		return nil // no default value
-	case Applicable:
-		return p.Apply(args)
 	case nil:
 		panic("Unknown function")
 	default:

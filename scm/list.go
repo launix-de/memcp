@@ -131,7 +131,7 @@ func init_list() {
 		}, "list",
 		func(a ...Scmer) Scmer {
 			result := make([]Scmer, 0)
-			fn := OptimizeProcToSerialFunction(a[1], &Globalenv)
+			fn := OptimizeProcToSerialFunction(a[1])
 			for _, v := range a[0].([]Scmer) {
 				if ToBool(fn(v)) {
 					result = append(result, v)
@@ -150,7 +150,7 @@ func init_list() {
 		func(a ...Scmer) Scmer {
 			list := a[0].([]Scmer)
 			result := make([]Scmer, len(list))
-			fn := OptimizeProcToSerialFunction(a[1], &Globalenv)
+			fn := OptimizeProcToSerialFunction(a[1])
 			for i, v := range list {
 				result[i] = fn(v)
 			}
@@ -168,6 +168,7 @@ func init_list() {
 		func(a ...Scmer) Scmer {
 			// arr, reducefn(a, b), [neutral]
 			list := a[0].([]Scmer)
+			fn := OptimizeProcToSerialFunction(a[1])
 			var result Scmer = nil
 			i := 0
 			if len(a) > 2 {
@@ -179,7 +180,7 @@ func init_list() {
 				}
 			}
 			for i < len(list) {
-				result = Apply(a[1], []Scmer{result, list[i],})
+				result = fn(result, list[i])
 				i = i + 1
 			}
 			return result
@@ -197,8 +198,8 @@ func init_list() {
 			// arr, reducefn(a, b), [neutral]
 			result := make([]Scmer, 0)
 			state := a[0]
-			condition := OptimizeProcToSerialFunction(a[1], &Globalenv)
-			iterator := OptimizeProcToSerialFunction(a[2], &Globalenv)
+			condition := OptimizeProcToSerialFunction(a[1])
+			iterator := OptimizeProcToSerialFunction(a[2])
 			for ToBool(condition(state)) {
 				result = append(result, state)
 				state = iterator(state)
@@ -237,8 +238,9 @@ func init_list() {
 			// list, fn(key, value)
 			list := a[0].([]Scmer)
 			result := make([]Scmer, 0)
+			fn := OptimizeProcToSerialFunction(a[1])
 			for i := 0; i < len(list); i += 2 {
-				if ToBool(Apply(a[1], []Scmer{list[i], list[i+1]})) {
+				if ToBool(fn(list[i], list[i+1])) {
 					result = append(result, list[i], list[i+1])
 				}
 			}
@@ -256,6 +258,7 @@ func init_list() {
 			// apply fn(key value) to each assoc item and return mapped dict
 			list := a[0].([]Scmer)
 			result := make([]Scmer, len(list))
+			fn := OptimizeProcToSerialFunction(a[1])
 			var k Scmer
 			for i, v := range list {
 				if i % 2 == 0 {
@@ -264,7 +267,7 @@ func init_list() {
 					k = v
 				} else {
 					// value -> map fn(key, value)
-					result[i] = Apply(a[1], []Scmer{k, v,})
+					result[i] = fn(k, v)
 				}
 			}
 			return result
@@ -276,14 +279,15 @@ func init_list() {
 		[]DeclarationParameter{
 			DeclarationParameter{"dict", "list", "dictionary that has to be reduced"},
 			DeclarationParameter{"reduce", "func", "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator."},
-			DeclarationParameter{"neutral", "func", "initial value for the accumulator"},
+			DeclarationParameter{"neutral", "any", "initial value for the accumulator"},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			// dict, reducefn(a, key, value), neutral
 			list := a[0].([]Scmer)
 			result := a[2]
+			reduce := OptimizeProcToSerialFunction(a[1])
 			for i := 0; i < len(list); i += 2 {
-				result = Apply(a[1], []Scmer{result, list[i], list[i+1],})
+				result = reduce(result, list[i], list[i+1])
 			}
 			return result
 		},
@@ -317,6 +321,7 @@ func init_list() {
 			// apply fn(key value) to each assoc item and return results as array
 			list := a[0].([]Scmer)
 			result := make([]Scmer, len(list) / 2)
+			fn := OptimizeProcToSerialFunction(a[1])
 			var k Scmer
 			for i, v := range list {
 				if i % 2 == 0 {
@@ -324,7 +329,7 @@ func init_list() {
 					k = v
 				} else {
 					// value -> map fn(key, value)
-					result[i / 2] = Apply(a[1], []Scmer{k, v,})
+					result[i / 2] = fn(k, v)
 				}
 			}
 			return result
@@ -341,12 +346,13 @@ func init_list() {
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := a[0].([]Scmer)
+			fn := OptimizeProcToSerialFunction(a[3])
 			for i := 0; i < len(list); i += 2 {
 				if reflect.DeepEqual(list[i], a[1]) {
 					// overwrite
 					if len(a) > 3 {
 						// overwrite with merge function
-						list[i + 1] = Apply(a[3], []Scmer{list[i + 1], a[2],})
+						list[i + 1] = fn(list[i + 1], a[2])
 					} else {
 						// overwrite naive
 						list[i + 1] = a[2]

@@ -56,6 +56,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 	// collect values from parallel scan
 	akkumulator := neutral
 	if aggregate != nil {
+		fn := scm.OptimizeProcToSerialFunction(aggregate)
 		for {
 			if rest == 0 {
 				return akkumulator
@@ -66,7 +67,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 				case scanError:
 					panic(x) // cascade panic
 				default:
-					akkumulator = scm.Apply(aggregate, []scm.Scmer{akkumulator, intermediate,})
+					akkumulator = fn(akkumulator, intermediate)
 			}
 			rest = rest - 1
 		}
@@ -87,11 +88,11 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 	akkumulator := neutral
 
-	conditionFn := scm.OptimizeProcToSerialFunction(condition, &scm.Globalenv)
-	callbackFn := scm.OptimizeProcToSerialFunction(callback, &scm.Globalenv)
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	callbackFn := scm.OptimizeProcToSerialFunction(callback)
 	aggregateFn := func(...scm.Scmer) scm.Scmer {return nil}
 	if aggregate != nil {
-		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate, &scm.Globalenv)
+		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
 	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
 	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
