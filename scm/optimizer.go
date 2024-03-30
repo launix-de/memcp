@@ -109,6 +109,12 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 			if replacement, ok := ome.variableReplacement[v]; ok {
 				return replacement
 			}
+
+			// prefetch system functions
+			xen := env.FindRead(v)
+			if xen != nil {
+				return xen.Vars[v]
+			}
 		case []Scmer:
 			if len(v) > 0 {
 				if v[0] == Symbol("begin") {
@@ -123,15 +129,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 				}
 				// (var i) is a serialization artifact
 				if v[0] == Symbol("var") && len(v) == 2 {
-					switch xv := v[1].(type) {
-						case float64:
-							return NthLocalVar(xv)
-						case uint64:
-							return NthLocalVar(xv)
-						case int:
-							return NthLocalVar(xv)
-						// whatever comes
-					}
+					return NthLocalVar(ToInt(v[1]))
 				}
 				// analyze lambdas (but don't pack them into *Proc since they need a fresh env)
 				if v[0] == Symbol("lambda") {
@@ -171,7 +169,16 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 				}
 
 				// now all the special cases
-				if v[0] == Symbol("match") {
+
+				// set/define
+				if (v[0] == Symbol("set") || v[0] == Symbol("define")) && len(v) == 3 {
+					if _, ok := v[1].(NthLocalVar); ok {
+						// change symbol of set/define to setN
+						v[0] = Symbol("setN")
+					}
+					v[2] = OptimizeEx(v[2], env, ome)
+					// TODO: check if we could remove the set instruction and inline the value if it occurs only once
+				} else if v[0] == Symbol("match") {
 					// TODO: optimize matches with nvars
 					v[1] = OptimizeEx(v[1], env, ome)
 					/* code is deactivated since variables can be overwritten! */
@@ -198,14 +205,6 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					// optimize all other parameters
 					for i := 1; i < len(v); i++ {
 						v[i] = OptimizeEx(v[i], env, ome)
-					}
-				}
-
-				// now rewrite set into setN when NthLocalVar has been inserted
-				if (v[0] == Symbol("set") || v[0] == Symbol("define")) && len(v) == 3 {
-					if _, ok := v[1].(NthLocalVar); ok {
-						// change symbol of set/define to setN
-						v[0] = Symbol("setN")
 					}
 				}
 			}

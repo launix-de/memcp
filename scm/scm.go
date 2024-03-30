@@ -70,6 +70,8 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		value = e
 	case Proc:
 		value = e
+	case func(a ...Scmer) Scmer:
+		value = e
 	case Symbol:
 		value = en.FindRead(e).Vars[e]
 	case NthLocalVar:
