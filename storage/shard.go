@@ -402,13 +402,13 @@ func (t *storageShard) rebuild() *storageShard {
 				i++
 			}
 			// build delta
-			for idx, item := range t.inserts {
+			for idx := 0; idx < maxInsertIndex; idx++ {
 				// check for deletion
 				if _, ok := deletions[t.main_count + uint(idx)]; ok {
 					continue
 				}
 				// build
-				newcol.build(i, item.Get(col))
+				newcol.build(i, t.inserts[idx].Get(col))
 				i++
 			}
 			newcol.finish()
