@@ -19,9 +19,9 @@ package scm
 
 import (
 	"fmt"
+	"regexp"
 	"reflect"
 	"strings"
-	regexp "github.com/wasilibs/go-re2"
 )
 
 // pattern matching

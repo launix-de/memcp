@@ -111,8 +111,9 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 			if replacement, ok := ome.variableReplacement[v]; ok {
 				return replacement
 			}
+			return val // TODO: remove this return once there is a solution to mask out prefetch variables
 
-			// prefetch system functions
+			// prefetch system functions (not working yet -> sometimes lambdas redefine variables which are not allowed to replace)
 			xen := env.FindRead(v)
 			if xen != nil {
 				if v, ok := xen.Vars[v]; ok {
@@ -144,10 +145,10 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 							// strip SourceInfo from lambda declarations
 							v[1] = si.value
 					}
-					return v // TODO: fix the code, remove return
 					// optimize body
-					numVars := 0
 					ome2 := ome.Copy()
+					/* TODO: reactivate this code once the corner case of double nested scopes is solved
+					numVars := 0
 					if len(v) == 4 {
 						numVars = ToInt(v[3]) // we already have a numvars
 					} else {
@@ -167,6 +168,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 						}
 						v = append(v, float64(numVars)) // add parameter
 					}
+					*/
 					// p.Params = nil do not replace parameter list with nil, the execution engine must handle it different
 					v[2] = OptimizeEx(v[2], env, &ome2) // optimize body
 					return v
@@ -246,10 +248,8 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 	// precompile parser if possible
 	p := parseSyntax(val, env, ome) // env = nil since we don't have the env yet
 	if p != nil { // parseSyntax will return nil when the part is not translatable yet
-		//fmt.Println("optimized parser", String(val))
 		return p // part of that parser could be precompiled
 	} else {
-		//fmt.Println("didnt optimize parser", String(val))
 	}
 	return val
 }

@@ -22,10 +22,10 @@ import (
 	"io"
 	"fmt"
 	"bytes"
+	"regexp"
 	"strings"
 	"runtime/debug"
 	"github.com/chzyer/readline"
-	regexp "github.com/wasilibs/go-re2"
 )
 
 const newprompt  = "\033[32m>\033[0m "

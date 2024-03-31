@@ -18,8 +18,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package scm
 
 import "fmt"
+import "regexp"
 import packrat "github.com/launix-de/go-packrat"
-import regexp "github.com/wasilibs/go-re2"
 
 type ScmParser struct {
 	Root packrat.Parser // wrapper for parser
