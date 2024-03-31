@@ -204,7 +204,7 @@ func (t *table) Insert(d dataset) {
 
 // TODO: refactor to "has" (cols, dataset)
 func (t *table) GetUniqueErrorsFor(d dataset) scm.Scmer {
-	return nil
+	// TODO: delta storage uniq cache
 	// check for duplicates
 	for _, uniq := range t.Unique {
 		// build scan for unique check
