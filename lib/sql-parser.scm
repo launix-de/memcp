@@ -16,6 +16,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 */
 
 /* TODO: make lower_identifiers settable */
+(define lower_identifiers false)
 (define sql_identifier_unquoted (parser (define id (regex "[a-zA-Z_][a-zA-Z0-9_]*")) (if lower_identifiers (toLower id) id))) /* raw -> toLower */
 (define sql_identifier (parser (or
 	(parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`")) /* with backtick */

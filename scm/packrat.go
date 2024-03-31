@@ -18,8 +18,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package scm
 
 import "fmt"
-import "regexp"
 import packrat "github.com/launix-de/go-packrat"
+import regexp "github.com/wasilibs/go-re2"
 
 type ScmParser struct {
 	Root packrat.Parser // wrapper for parser
@@ -39,6 +39,7 @@ type UndefinedParser struct { // a parser with forward declaration
 	Sym Symbol
 }
 
+// allows self recursion on parsers
 func (b *UndefinedParser) Match(s *packrat.Scanner) *packrat.Node {
 	if b.Parser == nil {
 		en2 := b.En.FindRead(b.Sym)
@@ -137,12 +138,14 @@ func (b *ScmParserVariable) Match(s *packrat.Scanner) *packrat.Node {
 }
 
 
-func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
+func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo) packrat.Parser {
 	switch n := syntax.(type) {
 		case SourceInfo:
-			return parseSyntax(n.value, en)
+			return parseSyntax(n.value, en, ome)
 		case string:
 			return packrat.NewAtomParser(n, false, true)
+		case packrat.Parser: // parser passthrough for precompiled parsers
+			return n
 		case Symbol:
 			if n == Symbol("$") {
 				return packrat.NewEndParser(true)
@@ -150,12 +153,24 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 			if n == Symbol("empty") {
 				return packrat.NewEmptyParser()
 			}
-			en2 := en.FindRead(n)
-			if en2 == nil {
-				panic("error parsing parser: variable not defined: " + string(n))
+			if ome != nil {
+				// variables cannot be predefined
+				// TODO: precompiled parsers from the OME environment?
+				return nil
 			}
+			en2 := en.FindRead(n)
 			if result, ok := en2.Vars[n].(*ScmParser); !ok {
 				return &UndefinedParser{nil, en, n}
+			} else {
+				return result
+			}
+		case NthLocalVar:
+			if ome != nil {
+				// variables cannot be predefined
+				return nil
+			}
+			if result, ok := en.VarsNumbered[n].(*ScmParser); !ok {
+				panic("error invalid parser: " + String(en.VarsNumbered[n]))
 			} else {
 				return result
 			}
@@ -165,13 +180,24 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 			}
 			switch n[0] {
 				case Symbol("parser"): // inner anonymous parser
-					Validate(n[2], "any")
+					var resulter Scmer
+					if len(n) > 2 {
+						Validate(n[2], "any")
+						resulter = n[2]
+					}
 					var skipper Scmer = nil
 					if len(n) > 3 {
 						Validate(n[3], "string")
 						skipper = n[3]
 					}
-					return NewParser(n[1], n[2], skipper, en)
+					if ome != nil {
+						// parsers cannot be created now, but we can sub-optimize them
+						//n[1] = OptimizeParser(n[1], en, ome)
+						return nil
+					} else {
+						// instanciate subparser
+						return NewParser(n[1], resulter, skipper, en)
+					}
 				case Symbol("atom"):
 					caseinsensitive := false
 					if len(n) > 2 {
@@ -195,29 +221,47 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 				case Symbol("list"):
 					subparser := make([]packrat.Parser, len(n)-1)
 					for i := 1; i < len(n); i++ {
-						subparser[i-1] = parseSyntax(n[i], en)
+						subparser[i-1] = parseSyntax(n[i], en, ome)
+						if subparser[i-1] == nil {
+							return nil
+						}
 					}
 					return packrat.NewAndParser(subparser...)
 				case Symbol("or"):
 					subparser := make([]packrat.Parser, len(n)-1)
 					for i := 1; i < len(n); i++ {
-						subparser[i-1] = parseSyntax(n[i], en)
+						subparser[i-1] = parseSyntax(n[i], en, ome)
+						if subparser[i-1] == nil {
+							return nil
+						}
 					}
 					return packrat.NewOrParser(subparser...)
 				case Symbol("*"):
-					subparser := parseSyntax(n[1], en)
+					subparser := parseSyntax(n[1], en, ome)
+					if subparser == nil {
+						return nil
+					}
 					var sepparser packrat.Parser
 					if len(n) > 2 {
-						sepparser = parseSyntax(n[2], en)
+						sepparser = parseSyntax(n[2], en, ome)
+						if sepparser == nil {
+							return nil
+						}
 					} else {
 						sepparser = packrat.NewEmptyParser()
 					}
 					return packrat.NewKleeneParser(subparser, sepparser)
 				case Symbol("+"):
-					subparser := parseSyntax(n[1], en)
+					subparser := parseSyntax(n[1], en, ome)
+					if subparser == nil {
+						return nil
+					}
 					var sepparser packrat.Parser
 					if len(n) > 2 {
-						sepparser = parseSyntax(n[2], en)
+						sepparser = parseSyntax(n[2], en, ome)
+						if sepparser == nil {
+							return nil
+						}
 					} else {
 						sepparser = packrat.NewEmptyParser()
 					}
@@ -225,37 +269,50 @@ func parseSyntax(syntax Scmer, en *Env) packrat.Parser {
 				case Symbol("?"):
 					if len(n) == 2 {
 						// single element
-						subparser := parseSyntax(n[1], en)
+						subparser := parseSyntax(n[1], en, ome)
+						if subparser == nil {
+							return nil
+						}
 						return packrat.NewMaybeParser(subparser)
 					} else {
 						// maybe with a list
 						subparser := make([]packrat.Parser, len(n)-1)
 						for i := 1; i < len(n); i++ {
-							subparser[i-1] = parseSyntax(n[i], en)
+							subparser[i-1] = parseSyntax(n[i], en, ome)
+							if subparser[i-1] == nil {
+								return nil
+							}
 						}
 						return packrat.NewMaybeParser(packrat.NewAndParser(subparser...))
 					}
 				case Symbol("define"):
 					result := new(ScmParserVariable)
 					result.Variable = n[1].(Symbol)
-					result.Parser = parseSyntax(n[2], en)
+					result.Parser = parseSyntax(n[2], en, ome)
+					if result.Parser == nil {
+						// uncompilable in the moment
+						return nil
+					}
 					return result
 			}
 			// the optimizer does this, so we have to handle it
 			if fmt.Sprint(n[0]) == fmt.Sprint(List) {
 				subparser := make([]packrat.Parser, len(n)-1)
 				for i := 1; i < len(n); i++ {
-					subparser[i-1] = parseSyntax(n[i], en)
+					subparser[i-1] = parseSyntax(n[i], en, ome)
+					if subparser[i-1] == nil {
+						return nil
+					}
 				}
 				return packrat.NewAndParser(subparser...)
 			}
 	}
-	panic("Unknown syntax: " + fmt.Sprint(syntax))
+	panic("Unknown parser syntax: " + fmt.Sprint(syntax))
 }
 
 func NewParser(syntax, generator, whitespace Scmer, en *Env) *ScmParser {
 	result := new(ScmParser)
-	result.Root = parseSyntax(syntax, en)
+	result.Root = parseSyntax(syntax, en, nil)
 	result.Syntax = syntax // for serialization purposes
 	result.Generator = generator
 	if whitespace != nil {

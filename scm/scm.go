@@ -70,6 +70,8 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		value = e
 	case Proc:
 		value = e
+	case *ScmParser:
+		value = e
 	case func(a ...Scmer) Scmer:
 		value = e
 	case Symbol:

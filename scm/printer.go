@@ -118,6 +118,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteByte(' ')
 		SerializeEx(b, v.Generator, en, glob, p)
 		b.WriteByte(')')
+	// TODO: further parsers
 	case Proc:
 		b.WriteString("(lambda ")
 		if (v.NumVars > 0 && v.Params == nil) {

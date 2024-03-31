@@ -115,7 +115,11 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 			// prefetch system functions
 			xen := env.FindRead(v)
 			if xen != nil {
-				return xen.Vars[v]
+				if v, ok := xen.Vars[v]; ok {
+					return v
+				} else {
+					return val
+				}
 			}
 		case []Scmer:
 			if len(v) > 0 {
@@ -213,10 +217,9 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 	return val
 }
 func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
-	// TODO: precompile parsers
 	switch v := val.(type) {
 		case []Scmer:
-			if v[0] == Symbol("parse") {
+			if v[0] == Symbol("parser") {
 				ome2 := ome.Copy()
 				v[1] = OptimizeParser(v[1], env, &ome2) // syntax expr -> collect new variables
 				if len(v) > 2 {
@@ -238,7 +241,15 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					v[i] = OptimizeParser(v[i], env, ome)
 				}
 			}
-		return v
+	}
+	// after optimization:
+	// precompile parser if possible
+	p := parseSyntax(val, env, ome) // env = nil since we don't have the env yet
+	if p != nil { // parseSyntax will return nil when the part is not translatable yet
+		//fmt.Println("optimized parser", String(val))
+		return p // part of that parser could be precompiled
+	} else {
+		//fmt.Println("didnt optimize parser", String(val))
 	}
 	return val
 }
