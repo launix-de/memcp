@@ -27,6 +27,7 @@ import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/NonLockingReadMap"
 
 type storageShard struct {
 	t *table
@@ -36,7 +37,7 @@ type storageShard struct {
 	columns map[string]ColumnStorage
 	// delta storage
 	inserts []dataset // items added to storage
-	deletions map[uint]struct{} // items removed from main or inserts (based on main_count + i)
+	deletions NonLockingReadMap.NonBlockingBitMap // items removed from main or inserts (based on main_count + i)
 	logfile *os.File // only in safe mode
 	mu sync.RWMutex // delta write lock (working on main storage is lock free)
 	next *storageShard
@@ -51,8 +52,8 @@ func (s *storageShard) Size() uint {
 		result += c.Size()
 	}
 	s.mu.RUnlock()
-	result += uint(len(s.deletions)) * 8 // approximation of delete map
-	result += uint(len(s.inserts)) * 128 // heuristic
+	result += uint(s.deletions.Size()) // approximation of delete map
+	result += uint(len(s.inserts)) * 256 // heuristic
 	return result
 }
 
@@ -62,7 +63,7 @@ func (u *storageShard) MarshalJSON() ([]byte, error) {
 func (u *storageShard) UnmarshalJSON(data []byte) error {
 	u.uuid.UnmarshalText(data)
 	u.columns = make(map[string]ColumnStorage)
-	u.deletions = make(map[uint]struct{})
+	u.deletions.Reset()
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
 }
@@ -112,7 +113,7 @@ func (u *storageShard) load(t *table) {
 				if string(b[0:7]) == "delete " {
 					var idx uint
 					json.Unmarshal(b[7:], &idx)
-					u.deletions[idx] = struct{}{} // mark deletion
+					u.deletions.Set(idx, true) // mark deletion
 				} else if string(b[0:7]) == "insert " {
 					var d dataset
 					json.Unmarshal(b[7:], &d)
@@ -130,7 +131,7 @@ func NewShard(t *table) *storageShard {
 	result.uuid, _ = uuid.NewRandom()
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
-	result.deletions = make(map[uint]struct{})
+	result.deletions.Reset()
 	for _, column := range t.Columns {
 		result.columns[column.Name] = new (StorageSCMER)
 	}
@@ -142,7 +143,7 @@ func NewShard(t *table) *storageShard {
 }
 
 func (t *storageShard) Count() uint {
-	return uint(int(t.main_count) + len(t.inserts) - len(t.deletions))
+	return t.main_count + uint(len(t.inserts)) - t.deletions.Count()
 }
 
 func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Scmer) scm.Scmer {
@@ -194,7 +195,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					}
 				}
 
-				t.deletions[idx] = struct{}{} // mark as deleted
+				t.deletions.Set(idx, true) // mark as deleted
 				t.inserts = append(t.inserts, d) // append to delta storage
 				if t.t.PersistencyMode == Safe {
 					t.logfile.Write([]byte("delete "))
@@ -214,7 +215,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			}
 		} else {
 			// delete
-			t.deletions[idx] = struct{}{} // mark as deleted
+			t.deletions.Set(idx, true) // mark as deleted
 			if t.t.PersistencyMode == Safe {
 				t.logfile.Write([]byte("delete "))
 				tmp, _ := json.Marshal(idx)
@@ -229,12 +230,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 		if result && t.next != nil {
 			// also change in next storage
 			// idx translation (subtract the amount of deletions from that idx)
-			idx2 := idx
-			for k, _ := range t.deletions {
-				if k < idx {
-					idx2--
-				}
-			}
+			idx2 := idx - t.deletions.CountUntil(idx)
 			t.next.UpdateFunction(idx2, false)(a...) // propagate to succeeding shard
 		}
 		return result // maybe instead return UpdateFunction for newly inserted item??
@@ -314,14 +310,11 @@ func (t *storageShard) rebuild() *storageShard {
 	t.mu.RLock()
 	maxInsertIndex := len(t.inserts)
 	// copy-freeze deletions so we don't have to lock anything
-	deletions := make(map[uint]struct{})
-	for k, v := range t.deletions {
-		deletions[k] = v
-	}
+	deletions := t.deletions.Copy()
 	t.mu.RUnlock()
 	// from now on, we can rebuild with no hurry; inserts and update/deletes on the previous shard will propagate to us, too
 
-	if maxInsertIndex > 0 || len(deletions) > 0 {
+	if maxInsertIndex > 0 || deletions.Count() > 0 {
 		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
 		// SetFinalizer to old shard to delete files from disk
 		runtime.SetFinalizer(t, func (t *storageShard) {
@@ -335,7 +328,7 @@ func (t *storageShard) rebuild() *storageShard {
 
 		// prepare delta storage
 		result.columns = make(map[string]ColumnStorage)
-		result.deletions = make(map[uint]struct{})
+		result.deletions.Reset()
 		if t.t.PersistencyMode == Safe {
 			// safe mode: also write all deltas to disk
 			f, err := os.Create(result.t.schema.path + result.uuid.String() + ".log")
@@ -362,7 +355,7 @@ func (t *storageShard) rebuild() *storageShard {
 				// scan main
 				for idx := uint(0); idx < t.main_count; idx++ {
 					// check for deletion
-					if _, ok := deletions[idx]; ok {
+					if deletions.Get(idx) {
 						continue
 					}
 					// scan
@@ -372,7 +365,7 @@ func (t *storageShard) rebuild() *storageShard {
 				// scan delta
 				for idx := 0; idx < maxInsertIndex; idx++ {
 					// check for deletion
-					if _, ok := deletions[t.main_count + uint(idx)]; ok {
+					if deletions.Get(t.main_count + uint(idx)) {
 						continue
 					}
 					// scan
@@ -394,7 +387,7 @@ func (t *storageShard) rebuild() *storageShard {
 			// build main
 			for idx := uint(0); idx < t.main_count; idx++ {
 				// check for deletion
-				if _, ok := deletions[idx]; ok {
+				if deletions.Get(idx) {
 					continue
 				}
 				// build
@@ -404,7 +397,7 @@ func (t *storageShard) rebuild() *storageShard {
 			// build delta
 			for idx := 0; idx < maxInsertIndex; idx++ {
 				// check for deletion
-				if _, ok := deletions[t.main_count + uint(idx)]; ok {
+				if deletions.Get(t.main_count + uint(idx)) {
 					continue
 				}
 				// build

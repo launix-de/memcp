@@ -126,7 +126,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 
 	// iterate over items (indexed)
 	for idx := range t.iterateIndex(boundaries) {
-		if _, ok := t.deletions[idx]; ok {
+		if t.deletions.Get(idx) {
 			continue // item is on delete list
 		}
 		// check condition
@@ -155,7 +155,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 	// delta storage (unindexed)
 	for idx := 0; idx < maxInsertIndex; idx++ { // iterate over table
 		item := t.inserts[idx]
-		if _, ok := t.deletions[t.main_count + uint(idx)]; ok {
+		if t.deletions.Get(t.main_count + uint(idx)) {
 			continue // item is in delete list
 		}
 		// prepare&call condition function
