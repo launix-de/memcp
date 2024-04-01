@@ -244,11 +244,17 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 					}
 					if p.NumVars > 0 {
 						for i, _ := range params {
-							en2.VarsNumbered[i] = Eval(operands[i], en)
+							if i < len(operands) {
+								en2.VarsNumbered[i] = Eval(operands[i], en)
+							}
 						}
 					} else {
 						for i, param := range params {
-							en2.Vars[param.(Symbol)] = Eval(operands[i], en)
+							if i < len(operands) {
+								en2.Vars[param.(Symbol)] = Eval(operands[i], en)
+							} else {
+								en2.Vars[param.(Symbol)] = nil
+							}
 						}
 					}
 				case Symbol:

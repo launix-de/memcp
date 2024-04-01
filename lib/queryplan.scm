@@ -73,9 +73,14 @@ if there is a group function, create a temporary preaggregate table
 	)
 )))
 
-/* emulate metadata tables */
+/* emulate metadata tables (TODO: information_schema.columns) */
+(define get_schema (lambda (schema tbl) (match '(schema tbl)
+	/* special tables */
+	'((ignorecase "information_schema") (ignorecase "tables")) '('("name" "table_schema") '("name" "table_name") '("name" "table_type"))
+	(show schema tbl) /* otherwise: fetch from metadata */
+)))
 (define scan_wrapper (lambda (schema tbl filter map reduce neutral) (match '(schema tbl)
-	'("information_schema" "tables")
+	'((ignorecase "information_schema") (ignorecase "tables"))
 		'((quote scan) schema 
 			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
 			filter map reduce neutral)
@@ -130,7 +135,10 @@ if there is a group function, create a temporary preaggregate table
 
 	(if (coalesce order limit offset) (begin
 		/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
-		(error "Ordered scan is not implemented yet")
+		(match order
+			'('('((symbol get_column) tblalias "ORDINAL_POSITION") direction)) (build_queryplan schema tables fields condition group having nil nil nil) /* ignore ordering for some cases by now to use the dbeaver tool */
+			(error "Ordered scan is not implemented yet")
+		)
 	) (begin
 		/* set group to 1 if fields contain aggregates even if not */
 		(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) 1 nil)))
@@ -176,7 +184,7 @@ if there is a group function, create a temporary preaggregate table
 			/* expand *-columns */
 			(set fields (merge (extract_assoc fields (lambda (col expr) (match col
 				"*" (merge (map tables (lambda (t) (match t '(alias schema tbl) /* all FROM-tables*/
-					(merge (map (show schema tbl) (lambda (coldesc) /* all columns of each table */
+					(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
 						'((coldesc "name") '((quote get_column) alias (coldesc "name")))
 					)))
 				))))
@@ -186,11 +194,7 @@ if there is a group function, create a temporary preaggregate table
 			/* columns: '('(tblalias colname) ...) */
 			(set columns (merge (extract_assoc fields extract_columns)))
 			/* TODO: expand fields if it contains '(tblalias "*") or '("*" "*") */
-				'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (match '(schema tbl)
-					/* special tables */
-					'("information_schema" "tables") '('("name" "table_schema") '("name" "table_name") '("name" "table_type"))
-					(show schema tbl) /* otherwise: fetch from metadata */
-				) (lambda (col) '(tblvar (col "name"))))))))
+				'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (get_schema schema tbl) (lambda (col) '(tblvar (col "name"))))))))
 
 			/* TODO: sort tables according to join plan */
 			/* TODO: match tbl to inner query vs string */

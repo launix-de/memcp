@@ -20,6 +20,11 @@ import "fmt"
 
 // to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
 func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
+	if val == nil {
+		return func(...Scmer) Scmer {
+			return nil
+		}
+	}
 	if result, ok := val.(func(...Scmer) Scmer); ok {
 		return result // already optimized
 	}

@@ -95,6 +95,15 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 						default:
 							return false
 					}
+				case Symbol("ignorecase"):
+					switch val2 := valueFromPattern(p[1], en).(type) {
+						case string:
+							switch val1 := val.(type) {
+								case string:
+									return strings.EqualFold(val1, val2)
+							}
+					}
+					return false
 				case Symbol("concat"):
 					switch v := val.(type) {
 						case string: // only allowed for strings
