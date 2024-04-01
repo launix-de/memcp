@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"time"
 	"reflect"
+	"strings"
 )
 
 // TODO: (unquote string) -> symbol
@@ -526,12 +527,20 @@ func init() {
 	// basic
 	Declare(&Globalenv, &Declaration{
 		"error", "halts the whole execution thread and throws an error message",
-		1, 1,
+		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "value or message to throw"},
+			DeclarationParameter{"value...", "any", "value or message to throw"},
 		}, "string",
 		func (a ...Scmer) Scmer {
-			panic(a[0])
+			if len(a) == 1 {
+				panic(a[0])
+			} else {
+				var b strings.Builder
+				for _, v := range a {
+					b.WriteString(String(v))
+				}
+				panic(b.String())
+			}
 		},
 	})
 	Declare(&Globalenv, &Declaration{
