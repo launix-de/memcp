@@ -24,6 +24,23 @@ import (
 	"strings"
 )
 
+func valueFromPattern(pattern Scmer, en *Env) Scmer {
+	switch p := pattern.(type) {
+		case SourceInfo:
+			return valueFromPattern(p.value, en)
+		case Symbol:
+			en = en.FindRead(p)
+			if varcontent, ok := en.Vars[p]; ok {
+				return varcontent
+			} else {
+				return p
+			}
+		case NthLocalVar:
+			return en.VarsNumbered[p]
+	}
+	return pattern
+}
+
 // pattern matching
 func match(val Scmer, pattern Scmer, en *Env) bool {
 	/* our custom implementation of match consisting of:
@@ -82,73 +99,19 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					switch v := val.(type) {
 						case string: // only allowed for strings
 							// examine the pattern
-							if len(p) == 3 {
-								switch p1 := p[1].(type) {
-									case NthLocalVar:
-										if val_str, ok := en.VarsNumbered[p1].(string); ok {
-											// concat sym sym but left sym is assigned
-											switch p2 := p[2].(type) {
-												case NthLocalVar:
-													// string Symbol
-													if strings.HasPrefix(v, val_str) {
-														// extract postfix and match
-														en.VarsNumbered[p2] = v[len(val_str):]
-														return true
-													}
-													// else
-													return false
-												case Symbol:
-													// string Symbol
-													if strings.HasPrefix(v, val_str) {
-														// extract postfix and match
-														en.Vars[p2] = v[len(val_str):]
-														return true
-													}
-													// else
-													return false
-												default:
-													// panic
-											}
-										}
-									case Symbol:
-										if val, ok := en.FindRead(p1).Vars[p1]; ok {
-											if val_str, ok := val.(string); ok {
-												// concat sym sym but left sym is assigned
-												switch p2 := p[2].(type) {
-													case NthLocalVar:
-														// string Symbol
-														if strings.HasPrefix(v, val_str) {
-															// extract postfix and match
-															en.VarsNumbered[p2] = v[len(val_str):]
-															return true
-														}
-														// else
-														return false
-													case Symbol:
-														// string Symbol
-														if strings.HasPrefix(v, val_str) {
-															// extract postfix and match
-															en.Vars[p2] = v[len(val_str):]
-															return true
-														}
-														// else
-														return false
-													default:
-														// panic
-												}
-											}
-										}
+							if len(p) == 3 { // concat a b
+								switch p1 := valueFromPattern(p[1], en).(type) {
 									case string:
-										switch p2 := p[2].(type) {
+										switch p2 := valueFromPattern(p[2], en).(type) {
 											case NthLocalVar:
 												// string Symbol
 												if strings.HasPrefix(v, p1) {
 													// extract postfix and match
 													en.VarsNumbered[p2] = v[len(p1):]
 													return true
+												} else {
+													return false
 												}
-												// else
-												return false
 											case Symbol:
 												// string Symbol
 												if strings.HasPrefix(v, p1) {
@@ -171,7 +134,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 							return false // non-strings are not matching
 					}
 				case Symbol("cons"):
-					switch v := val.(type) {
+					switch v := valueFromPattern(val, en).(type) {
 						case []Scmer: // only matches on arrays
 							if len(v) == 0 {
 								return false // empty list does not match cons
@@ -184,9 +147,9 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					// syntax: (match "v=5" (regex "^v=(.*)" _ v) (print "v is " v))
 					// for multiline parsing, use (?ms:<REGEXP>)
 					// for additional info, see https://github.com/google/re2/wiki/Syntax
-					switch v := val.(type) {
+					switch v := valueFromPattern(val, en).(type) {
 						case string: // only allowed for strings
-							switch p1 := p[1].(type) {
+							switch p1 := valueFromPattern(p[1], en).(type) {
 								case string:
 									re, err := regexp.Compile(p1)
 									if err != nil {
