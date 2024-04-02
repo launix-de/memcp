@@ -40,6 +40,7 @@ func (d database) GetKey() string {
 
 func LoadDatabases() {
 	// this happens before any init, so no read/write action is performed on any data yet
+	done := make(chan bool, 200)
 	entries, _ := os.ReadDir(Basepath)
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -52,10 +53,24 @@ func LoadDatabases() {
 			for _, t := range db.Tables.GetAll() {
 				t.schema = db // restore schema reference
 				for _, s := range t.Shards {
-					s.load(t)
+					go func(s *storageShard) {
+						s.load(t)
+						done <- true
+					}(s)
 				}
 			}
 			databases.Set(db)
+		}
+	}
+	// wait for all loading go routines to finish
+	for _, entry := range entries {
+		if entry.IsDir() {
+			db := databases.Get(entry.Name())
+			for _, t := range db.Tables.GetAll() {
+				for range t.Shards {
+					<-done // wait for shard
+				}
+			}
 		}
 	}
 }
