@@ -150,7 +150,7 @@ if there is a group function, create a temporary preaggregate table
 				(cons head tail) (cons (string head) (cons '((quote car) expr) (build_indexmap '((quote cdr) expr) tail)))
 				'()
 			)))
-			(define indexmap (build_indexmap (quote ags) ags))
+			(define indexmap (match ags '('(expr reduce neutral)) '((string '(expr reduce neutral)) (quote ags)) (build_indexmap (quote ags) ags)))
 			(if (equal? group 1) (begin
 				/* one implemented corner case; TODO: recursively go through the scan tables */
 				(set columns (merge (extract_assoc fields extract_columns)))
@@ -165,10 +165,10 @@ if there is a group function, create a temporary preaggregate table
 								(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 								/* todo filter columns for alias */
 								'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
-								/* reduce */ '((quote lambda) (quote p) (build_reducer ags))
-								/* neutral */ (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) neutral))))
+								/* reduce */ (match ags '('(expr reduce neutral)) reduce '((quote lambda) (quote p) (build_reducer ags)))
+								/* neutral */ (match ags '('(expr reduce neutral)) neutral (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) neutral)))))
 							)
-						'() /* final inner */ (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) (replace_columns nil expr)))))
+						'() /* final inner */ (match ags '('(expr reduce neutral)) (replace_columns nil expr) (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) (replace_columns nil expr))))))
 					)
 				))
 				'((quote begin)
