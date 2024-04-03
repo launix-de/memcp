@@ -126,6 +126,9 @@ func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
 }
 
 func (t *table) ShowColumns() scm.Scmer {
+	if t == nil {
+		return nil
+	}
 	result := make([]scm.Scmer, len(t.Columns))
 	for i, v := range t.Columns {
 		result[i] = v.Show()

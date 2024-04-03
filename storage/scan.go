@@ -125,54 +125,50 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 	maxInsertIndex := len(t.inserts)
 
 	// iterate over items (indexed)
-	for idx := range t.iterateIndex(boundaries) {
+	for idx := range t.iterateIndex(boundaries, maxInsertIndex) {
 		if t.deletions.Get(idx) {
 			continue // item is on delete list
 		}
-		// check condition
-		for i, k := range ccols { // iterate over columns
-			cdataset[i] = k.GetValue(idx)
-		}
-		if (!scm.ToBool(conditionFn(cdataset...))) {
-			continue // condition did not match
-		}
 
-		// call map function
-		for i, k := range mcols { // iterate over columns
-			if k == nil {
-				// update/delete function
-				mdataset[i] = t.UpdateFunction(idx, true)
-			} else {
-				mdataset[i] = k.GetValue(idx)
+		// prepare mdataset
+		if idx < t.main_count {
+			// value from main storage
+			// check condition
+			for i, k := range ccols { // iterate over columns
+				cdataset[i] = k.GetValue(idx)
 			}
-		}
-		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating
-		intermediate := callbackFn(mdataset...)
-		akkumulator = aggregateFn(akkumulator, intermediate)
-		t.mu.RLock()
-	}
+			if (!scm.ToBool(conditionFn(cdataset...))) {
+				continue // condition did not match
+			}
 
-	// delta storage (unindexed)
-	for idx := 0; idx < maxInsertIndex; idx++ { // iterate over table
-		item := t.inserts[idx]
-		if t.deletions.Get(t.main_count + uint(idx)) {
-			continue // item is in delete list
-		}
-		// prepare&call condition function
-		for i, k := range cargs { // iterate over columns
-			cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
-		}
-		// check condition
-		if (!scm.ToBool(conditionFn(cdataset...))) {
-			continue // condition did not match
-		}
+			// call map function
+			for i, k := range mcols { // iterate over columns
+				if k == nil {
+					// update/delete function
+					mdataset[i] = t.UpdateFunction(idx, true)
+				} else {
+					mdataset[i] = k.GetValue(idx)
+				}
+			}
+		} else {
+			// value from delta storage
+			item := t.inserts[idx - t.main_count]
+			// prepare&call condition function
+			for i, k := range cargs { // iterate over columns
+				cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+			}
+			// check condition
+			if (!scm.ToBool(conditionFn(cdataset...))) {
+				continue // condition did not match
+			}
 
-		// prepare&call map function
-		for i, k := range margs { // iterate over columns
-			if string(k.(scm.Symbol)) == "$update" {
-				mdataset[i] = t.UpdateFunction(t.main_count + uint(idx), true)
-			} else {
-				mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+			// prepare&call map function
+			for i, k := range margs { // iterate over columns
+				if string(k.(scm.Symbol)) == "$update" {
+					mdataset[i] = t.UpdateFunction(idx, true)
+				} else {
+					mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+				}
 			}
 		}
 		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating

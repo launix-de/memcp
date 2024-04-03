@@ -253,40 +253,33 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	maxInsertIndex := len(t.inserts)
 
 	// iterate over items (indexed)
-	for idx := range t.iterateIndex(boundaries) {
+	for idx := range t.iterateIndex(boundaries, maxInsertIndex) {
 		if t.deletions.Get(idx) {
 			continue // item is on delete list
 		}
-		// check condition
-		for i, k := range ccols { // iterate over columns
-			cdataset[i] = k.GetValue(idx)
+
+		if idx < t.main_count {
+			// value from main storage
+			// check condition
+			for i, k := range ccols { // iterate over columns
+				cdataset[i] = k.GetValue(idx)
+			}
+		} else {
+			// value from delta storage
+			item := t.inserts[idx - t.main_count]
+			// prepare&call condition function
+			for i, k := range cargs { // iterate over columns
+				cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+			}
 		}
+		// check condition
 		if (!scm.ToBool(conditionFn(cdataset...))) {
 			continue // condition did not match
 		}
 
 		result.items = append(result.items, idx)
-
-		// TODO: early cutoff if limit > 0 and iterateIndex fits the sort criteria
 	}
 
-	// delta storage (unindexed)
-	for idx := 0; idx < maxInsertIndex; idx++ { // iterate over table
-		item := t.inserts[idx]
-		if t.deletions.Get(t.main_count + uint(idx)) {
-			continue // item is in delete list
-		}
-		// prepare&call condition function
-		for i, k := range cargs { // iterate over columns
-			cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
-		}
-		// check condition
-		if (!scm.ToBool(conditionFn(cdataset...))) {
-			continue // condition did not match
-		}
-
-		result.items = append(result.items, t.main_count + uint(idx))
-	}
 	t.mu.RUnlock() // finished reading
 
 	// and now sort result!

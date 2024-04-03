@@ -89,6 +89,31 @@ func ToFloat(v Scmer) float64 {
 	}
 }
 
+// sort function for scmer
+func Less(a, b Scmer) bool {
+	switch a_ := a.(type) {
+	case nil:
+		return b != nil // nil is always less than any other value except for nil (which is equal)
+	case int, uint, int64, uint64:
+		return scm.ToFloat(a) < scm.ToFloat(b) // todo: more fine grained
+	case float64:
+		return a_ < scm.ToFloat(b)
+	case string:
+		switch b_ := b.(type) {
+			case float64:
+				return scm.ToFloat(a) < b_
+			case string:
+				return a_ < b_
+			default:
+				panic("unknown type combo in comparison")
+		}
+	// are there any other types??
+	default:
+		panic("unknown type combo in comparison: " + scm.String(a) + " < " + scm.String(b))
+	}
+	return false
+}
+
 
 func init_alu() {
 	// string functions

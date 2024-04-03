@@ -38,7 +38,7 @@ type StorageIndex struct {
 }
 
 // iterates over items
-func (t *storageShard) iterateIndex(cols boundaries) chan uint {
+func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan uint {
 
 	// check if we found conditions
 	if len(cols) > 0 {
@@ -79,7 +79,7 @@ func (t *storageShard) iterateIndex(cols boundaries) chan uint {
 					}
 				}
 				// this index fits!
-				return index.iterate(lower, upperLast)
+				return index.iterate(lower, upperLast, maxInsertIndex)
 			}
 		}
 
@@ -93,7 +93,7 @@ func (t *storageShard) iterateIndex(cols boundaries) chan uint {
 		index.inactive = true // tell the engine that index has to be built first
 		index.t = t
 		t.indexes = append(t.indexes, index)
-		return index.iterate(lower, upperLast)
+		return index.iterate(lower, upperLast, maxInsertIndex)
 	}
 
 	// otherwise: iterate over all items
@@ -102,11 +102,9 @@ func (t *storageShard) iterateIndex(cols boundaries) chan uint {
 		for i := uint(0); i < t.main_count; i++ {
 			result <- i
 		}
-		/*
 		for i := 0; i < maxInsertIndex; i++ {
-			result <- t.main_count + i
+			result <- t.main_count + uint(i)
 		}
-		*/
 		close(result)
 	}()
 	return result
@@ -122,30 +120,8 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 	// (also consider incremental indexes??)
 }
 
-// sort function for scmer
-func scmerLess(a, b scm.Scmer) bool {
-	// TODO: 2D check if NULL etc.
-	switch a_ := a.(type) {
-		case float64:
-			return a_ < scm.ToFloat(b)
-		case string:
-			switch b_ := b.(type) {
-				case float64:
-					return scm.ToFloat(a) < b_
-				case string:
-					return a_ < b_
-				default:
-					panic("unknown type combo in comparison")
-			}
-		// are there any other types??
-		default:
-			panic("unknown type combo in comparison")
-	}
-	return false
-}
-
 // iterate over index
-func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint {
+func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int) chan uint {
 	result := make(chan uint, 64)
 
 	// find columns in storage
@@ -180,7 +156,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 					for _, c := range cols {
 						a := c.GetValue(tmp[i])
 						b := c.GetValue(tmp[j])
-						if scmerLess(a, b) {
+						if scm.Less(a, b) {
 							return true // less
 						} else if !reflect.DeepEqual(a, b) {
 							return false // greater
@@ -205,7 +181,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 					for _, c := range s.cols {
 						a := i.data.Get(c)
 						b := i.data.Get(c)
-						if scmerLess(a, b) {
+						if scm.Less(a, b) {
 							return true // less
 						} else if !reflect.DeepEqual(a, b) {
 							return false // greater
@@ -214,38 +190,21 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 					}
 					return false // fully equal
 				})
-				// fill deltaBtree
-				s.t.mu.Lock()
+				// fill deltaBtree (no locking required; we are already in a readlock)
 				for i, data := range s.t.inserts {
 					s.deltaBtree.ReplaceOrInsert(indexPair{i, data})
 				}
-				s.t.mu.Unlock()
 
 				s.inactive = false // mark as ready
 			}
 		}
-		/* code for go 1.19
-		i, found := sort.Find(s.t.main_count, func (idx int) int {
-			for i, c := range cols {
-				a := lower[i]
-				b := c.GetValue(uint(idx))
-				if scmerLess(a, b) {
-					return -1 // less
-				} else if !reflect.DeepEqual(a, b) {
-					return 1 // greater
-				}
-				// otherwise: next iteration
-			}
-			return 0 // fully equal
-		})
-		*/
 		// bisect where the lower bound is found
 		idx := sort.Search(int(s.t.main_count), func (idx int) bool {
 			idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
 			for i, c := range cols {
 				a := lower[i]
 				b := c.GetValue(uint(idx2))
-				if scmerLess(a, b) {
+				if scm.Less(a, b) {
 					return true // less
 				} else if !reflect.DeepEqual(a, b) {
 					return false // greater
@@ -266,7 +225,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 			for i, c := range cols {
 				a := c.GetValue(uint(idx2))
 				if i == len(cols) - 1 {
-					if scmerLess(upperLast, a) {
+					if scm.Less(upperLast, a) {
 						break iteration // stop traversing when we exceed the < part of last col
 					}
 				} else if !reflect.DeepEqual(a, lower[i]) {
@@ -278,7 +237,10 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 			result <- uint(idx2)
 			idx++
 		}
-		// TODO: delta storage -> scan btree
+		// TODO: delta storage -> scan btree (but we can also eject all items, it won't break the code)
+		for i := 0; i < maxInsertIndex; i++ {
+			result <- s.t.main_count + uint(i)
+		}
 		close(result)
 	}()
 	return result
