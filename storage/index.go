@@ -258,6 +258,9 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
 			result <- s.t.main_count + uint(p.itemid)
 		}
+		/*for i := 0; i < maxInsertIndex; i++ {
+			result <- s.t.main_count + uint(i)
+		}*/
 		close(result)
 	}()
 	return result
