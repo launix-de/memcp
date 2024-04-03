@@ -110,7 +110,9 @@ func (u *storageShard) load(t *table) {
 			scanner := bufio.NewScanner(u.logfile)
 			for scanner.Scan() {
 				b := scanner.Bytes()
-				if string(b[0:7]) == "delete " {
+				if string(b) == "" {
+					// nop
+				} else if string(b[0:7]) == "delete " {
 					var idx uint
 					json.Unmarshal(b[7:], &idx)
 					u.deletions.Set(idx, true) // mark deletion
