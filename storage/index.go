@@ -25,7 +25,7 @@ import "github.com/launix-de/memcp/scm"
 
 type indexPair struct {
 	itemid int // -1 for reference items
-	data dataset
+	data []scm.Scmer
 }
 
 type StorageIndex struct {
@@ -178,9 +178,9 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 
 				// delta storage
 				s.deltaBtree = btree.NewG[indexPair](8, func (i, j indexPair) bool {
-					for _, c := range s.cols {
-						a := i.data.Get(c)
-						b := i.data.Get(c)
+					for _, col := range s.cols {
+						a := s.t.getDelta(i.itemid, col)
+						b := s.t.getDelta(j.itemid, col)
 						if scm.Less(a, b) {
 							return true // less
 						} else if !reflect.DeepEqual(a, b) {

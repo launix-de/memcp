@@ -36,7 +36,8 @@ type storageShard struct {
 	main_count uint // size of main storage
 	columns map[string]ColumnStorage
 	// delta storage
-	inserts []dataset // items added to storage
+	deltaColumns map[string]int
+	inserts [][]scm.Scmer // items added to storage
 	deletions NonLockingReadMap.NonBlockingBitMap // items removed from main or inserts (based on main_count + i)
 	logfile *os.File // only in safe mode
 	mu sync.RWMutex // delta write lock (working on main storage is lock free)
@@ -53,7 +54,7 @@ func (s *storageShard) Size() uint {
 	}
 	s.mu.RUnlock()
 	result += uint(s.deletions.Size()) // approximation of delete map
-	result += uint(len(s.inserts)) * 256 // heuristic
+	result += uint(len(s.inserts) * len(s.deltaColumns)) * 32 // heuristic
 	return result
 }
 
@@ -63,6 +64,7 @@ func (u *storageShard) MarshalJSON() ([]byte, error) {
 func (u *storageShard) UnmarshalJSON(data []byte) error {
 	u.uuid.UnmarshalText(data)
 	u.columns = make(map[string]ColumnStorage)
+	u.deltaColumns = make(map[string]int)
 	u.deletions.Reset()
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
@@ -119,7 +121,7 @@ func (u *storageShard) load(t *table) {
 				} else if string(b[0:7]) == "insert " {
 					var d dataset
 					json.Unmarshal(b[7:], &d)
-					u.inserts = append(u.inserts, d) // insert
+					u.insertDataset(d)
 				} else {
 					panic("unknown log sequence: " + string(b))
 				}
@@ -133,6 +135,7 @@ func NewShard(t *table) *storageShard {
 	result.uuid, _ = uuid.NewRandom()
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
+	result.deltaColumns = make(map[string]int)
 	result.deletions.Reset()
 	for _, column := range t.Columns {
 		result.columns[column.Name] = new (StorageSCMER)
@@ -162,28 +165,43 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			// TODO: check if we can do in-place editing in the delta storage (if idx > t.main_count)
 			changes := a[0].([]scm.Scmer)
 			// build the whole dataset from storage
-			d := make(dataset, 2 * len(t.columns))
-			i := 0
+			d2 := make([]scm.Scmer, 0, len(t.columns))
 			for k, v := range t.columns {
-				d[i] = k
+				colidx, ok := t.deltaColumns[k]
+				if !ok {
+					colidx = len(t.deltaColumns)
+					t.deltaColumns[k] = colidx
+				}
+				for len(d2) <= colidx {
+					d2 = append(d2, nil)
+				}
 				if idx < t.main_count {
-					d[i+1] = v.GetValue(idx)
+					d2[colidx] = v.GetValue(idx)
 				} else {
-					d[i+1] = t.inserts[idx - t.main_count].Get(k)
+					d2[colidx] = t.getDelta(int(idx - t.main_count), k)
 				}
-				for j := 0; j < len(changes); j += 2 {
-					if k == changes[j] {
-						if d[i+1] != changes[j+1] {
-							d[i+1] = changes[j+1]
-							result = true // something changed, so return true
-						}
-						goto skip_set
-					}
+			}
+			// now d2 contains the old col (TODO: preserve OLD and NEW for triggers or bind them to trigger variables)
+			for j := 0; j < len(changes); j += 2 {
+				colidx, ok := t.deltaColumns[scm.String(changes[j])]
+				if !ok {
+					panic("UPDATE on invalid column: " + scm.String(changes[j]))
 				}
-				skip_set:
-				i += 2
+				if d2[colidx] != changes[j+1] {
+					d2[colidx] = changes[j+1]
+					result = true // mark that something has changed
+				}
 			}
 			if result { // only do a write if something changed
+				var d dataset
+				if t.t.Unique != nil || t.t.PersistencyMode == Safe {
+					// we need a dataset object (slow)
+					d = make(dataset, 0, 2 * len(t.columns))
+					for col, idx := range t.deltaColumns {
+						d = append(d, col, d2[idx])
+					}
+				}
+
 				// unique constraint checking
 				if t.t.Unique != nil {
 					t.t.uniquelock.Lock()
@@ -197,7 +215,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				}
 
 				t.deletions.Set(idx, true) // mark as deleted
-				t.inserts = append(t.inserts, d) // append to delta storage
+				t.inserts = append(t.inserts, d2)
 				if t.t.PersistencyMode == Safe {
 					var b strings.Builder
 					b.Write([]byte("delete "))
@@ -259,20 +277,14 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 		if idx < t.main_count {
 			return cstorage.GetValue(idx)
 		} else {
-			item := t.inserts[idx - t.main_count]
-			for i := 0; i < len(item); i += 2 {
-				if item[i] == col {
-					return item[i+1]
-				}
-			}
-			return nil
+			return t.getDelta(int(idx - t.main_count), col)
 		}
 	}
 }
 
 func (t *storageShard) Insert(d dataset) {
 	t.mu.Lock()
-	t.inserts = append(t.inserts, d) // append to delta storage
+	d2 := t.insertDataset(d)
 	if t.t.PersistencyMode == Safe {
 		var b strings.Builder
 		b.Write([]byte("insert "))
@@ -283,7 +295,7 @@ func (t *storageShard) Insert(d dataset) {
 	}
 	for _, index := range t.indexes {
 		// add to delta indexes
-		index.deltaBtree.ReplaceOrInsert(indexPair{len(t.inserts)-1, d})
+		index.deltaBtree.ReplaceOrInsert(indexPair{len(t.inserts)-1, d2})
 	}
 	if t.next != nil {
 		// also insert into next storage
@@ -294,6 +306,40 @@ func (t *storageShard) Insert(d dataset) {
 		t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 	}
 	// TODO: before/after insert trigger
+}
+
+// contract: must only be called inside full write mutex mu.Lock()
+func (t *storageShard) insertDataset(d dataset) []scm.Scmer {
+	result := make([]scm.Scmer, 0, len(t.deltaColumns))
+	for i := 0; i < len(d); i += 2 {
+		// copy all dataset entries into packed array
+		colidx, ok := t.deltaColumns[scm.String(d[i])]
+		if !ok {
+			// acquire new column
+			colidx := len(t.deltaColumns)
+			t.deltaColumns[scm.String(d[i])] = colidx
+		}
+		for len(result) <= colidx {
+			result = append(result, nil)
+		}
+		result[colidx] = d[i+1]
+	}
+	t.inserts = append(t.inserts, result)
+	return result
+}
+
+func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
+	item := t.inserts[idx]
+	colidx, ok := t.deltaColumns[col]
+	if ok {
+		if colidx < len(item) {
+			return item[colidx]
+		} else {
+			return nil
+		}
+	} else {
+		return nil
+	}
 }
 
 func (t *storageShard) RemoveFromDisk() {
@@ -350,6 +396,7 @@ func (t *storageShard) rebuild() *storageShard {
 
 		// prepare delta storage
 		result.columns = make(map[string]ColumnStorage)
+		result.deltaColumns = make(map[string]int)
 		result.deletions.Reset()
 		if t.t.PersistencyMode == Safe {
 			// safe mode: also write all deltas to disk
@@ -391,7 +438,7 @@ func (t *storageShard) rebuild() *storageShard {
 						continue
 					}
 					// scan
-					newcol.scan(i, t.inserts[idx].Get(col))
+					newcol.scan(i, t.getDelta(idx, col))
 					i++
 				}
 				newcol2 := newcol.proposeCompression(i)
@@ -423,7 +470,7 @@ func (t *storageShard) rebuild() *storageShard {
 					continue
 				}
 				// build
-				newcol.build(i, t.inserts[idx].Get(col))
+				newcol.build(i, t.getDelta(idx, col))
 				i++
 			}
 			newcol.finish()
@@ -453,6 +500,7 @@ func (t *storageShard) rebuild() *storageShard {
 		// otherwise: table stays the same
 		result.uuid = t.uuid // copy uuid in case nothing changes
 		result.columns = t.columns
+		result.deltaColumns = t.deltaColumns
 		result.main_count = t.main_count
 		result.inserts = t.inserts
 		result.deletions = deletions

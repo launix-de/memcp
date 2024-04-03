@@ -152,10 +152,9 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			}
 		} else {
 			// value from delta storage
-			item := t.inserts[idx - t.main_count]
 			// prepare&call condition function
 			for i, k := range cargs { // iterate over columns
-				cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+				cdataset[i] = t.getDelta(int(idx - t.main_count), string(k.(scm.Symbol)))
 			}
 			// check condition
 			if (!scm.ToBool(conditionFn(cdataset...))) {
@@ -167,7 +166,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 				if string(k.(scm.Symbol)) == "$update" {
 					mdataset[i] = t.UpdateFunction(idx, true)
 				} else {
-					mdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+					mdataset[i] = t.getDelta(int(idx - t.main_count), string(k.(scm.Symbol))) // fill value
 				}
 			}
 		}

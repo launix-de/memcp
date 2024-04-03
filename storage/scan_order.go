@@ -266,10 +266,9 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 			}
 		} else {
 			// value from delta storage
-			item := t.inserts[idx - t.main_count]
 			// prepare&call condition function
 			for i, k := range cargs { // iterate over columns
-				cdataset[i] = item.Get(string(k.(scm.Symbol))) // fill value
+				cdataset[i] = t.getDelta(int(idx - t.main_count), string(k.(scm.Symbol))) // fill value
 			}
 		}
 		// check condition
