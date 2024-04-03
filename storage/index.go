@@ -236,10 +236,27 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			// output recordid
 			result <- uint(idx2)
 			idx++
+			// TODO: stop on limit
 		}
-		// TODO: delta storage -> scan btree (but we can also eject all items, it won't break the code)
-		for i := 0; i < maxInsertIndex; i++ {
-			result <- s.t.main_count + uint(i)
+		// delta storage -> scan btree (but we can also eject all items, it won't break the code)
+		delta_lower := make(dataset, 2 * len(s.cols))
+		delta_upper := make(dataset, 2 * len(s.cols))
+		for i := 0; i < len(s.cols); i++ {
+			delta_lower[2 * i] = s.cols[i]
+			delta_lower[2 * i + 1] = lower[i]
+			delta_upper[2 * i] = s.cols[i]
+			delta_upper[2 * i + 1] = lower[i]
+		}
+		delta_upper[len(delta_upper)-1] = upperLast
+		// scan less than
+		s.deltaBtree.AscendRange(indexPair{-1, delta_lower}, indexPair{-1, delta_upper}, func (p indexPair) bool {
+			result <- s.t.main_count + uint(p.itemid)
+			return true // don't stop iteration
+			// TODO: stop on limit
+		})
+		// find exact fit, too
+		if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
+			result <- s.t.main_count + uint(p.itemid)
 		}
 		close(result)
 	}()

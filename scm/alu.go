@@ -95,13 +95,13 @@ func Less(a, b Scmer) bool {
 	case nil:
 		return b != nil // nil is always less than any other value except for nil (which is equal)
 	case int, uint, int64, uint64:
-		return scm.ToFloat(a) < scm.ToFloat(b) // todo: more fine grained
+		return ToFloat(a) < ToFloat(b) // todo: more fine grained
 	case float64:
-		return a_ < scm.ToFloat(b)
+		return a_ < ToFloat(b)
 	case string:
 		switch b_ := b.(type) {
 			case float64:
-				return scm.ToFloat(a) < b_
+				return ToFloat(a) < b_
 			case string:
 				return a_ < b_
 			default:
@@ -109,7 +109,7 @@ func Less(a, b Scmer) bool {
 		}
 	// are there any other types??
 	default:
-		panic("unknown type combo in comparison: " + scm.String(a) + " < " + scm.String(b))
+		panic("unknown type combo in comparison: " + String(a) + " < " + String(b))
 	}
 	return false
 }
