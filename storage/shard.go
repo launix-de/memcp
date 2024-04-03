@@ -153,7 +153,6 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 		// TODO: check foreign keys (new value of column must be present in referenced table)
 		// TODO: check foreign key removal (old value is referenced in another table)
 		t.mu.Lock() // write lock
-		defer t.mu.Unlock()
 
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		if len(a) > 0 {
@@ -198,16 +197,22 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				t.deletions.Set(idx, true) // mark as deleted
 				t.inserts = append(t.inserts, d) // append to delta storage
 				if t.t.PersistencyMode == Safe {
-					t.logfile.Write([]byte("delete "))
+					var b strings.Builder
+					b.Write([]byte("delete "))
 					tmp, _ := json.Marshal(idx)
-					t.logfile.Write(tmp)
-					t.logfile.Write([]byte("\ninsert "))
+					b.Write(tmp)
+					b.Write([]byte("\ninsert "))
 					tmp, _ = json.Marshal(d)
-					t.logfile.Write(tmp)
-					t.logfile.Write([]byte("\n"))
+					b.Write(tmp)
+					b.Write([]byte("\n"))
+					t.logfile.WriteString(b.String())
 				}
 				if t.t.Unique != nil {
 					t.t.uniquelock.Unlock()
+				}
+				t.mu.Unlock()
+				if t.t.PersistencyMode == Safe {
+					defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 				}
 				if withTrigger {
 					// TODO: before/after update trigger
@@ -217,12 +222,18 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			// delete
 			t.deletions.Set(idx, true) // mark as deleted
 			if t.t.PersistencyMode == Safe {
-				t.logfile.Write([]byte("delete "))
+				var b strings.Builder
+				b.Write([]byte("delete "))
 				tmp, _ := json.Marshal(idx)
-				t.logfile.Write(tmp)
-				t.logfile.Write([]byte("\n"))
+				b.Write(tmp)
+				b.Write([]byte("\n"))
+				t.logfile.WriteString(b.String())
 			}
 			result = true
+			t.mu.Unlock()
+			if t.t.PersistencyMode == Safe {
+				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
+			}
 			if withTrigger {
 				// TODO: before/after delete trigger
 			}
@@ -261,10 +272,12 @@ func (t *storageShard) Insert(d dataset) {
 	t.mu.Lock()
 	t.inserts = append(t.inserts, d) // append to delta storage
 	if t.t.PersistencyMode == Safe {
-		t.logfile.Write([]byte("insert "))
+		var b strings.Builder
+		b.Write([]byte("insert "))
 		tmp, _ := json.Marshal(d)
-		t.logfile.Write(tmp)
-		t.logfile.Write([]byte("\n"))
+		b.Write(tmp)
+		b.Write([]byte("\n"))
+		t.logfile.WriteString(b.String())
 	}
 	for _, index := range t.indexes {
 		// add to delta indexes
@@ -275,6 +288,9 @@ func (t *storageShard) Insert(d dataset) {
 		t.next.Insert(d)
 	}
 	t.mu.Unlock()
+	if t.t.PersistencyMode == Safe {
+		t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
+	}
 	// TODO: before/after insert trigger
 }
 
