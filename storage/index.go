@@ -20,12 +20,19 @@ package storage
 import "fmt"
 import "sort"
 import "reflect"
+import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
+
+type indexPair struct {
+	itemid int // -1 for reference items
+	data dataset
+}
 
 type StorageIndex struct {
 	cols []string // sort equal-cols alphabetically, so similar conditions are canonical
 	savings float64 // store the amount of time savings here -> add selectivity (outputted / size) on each
-	sortedItems StorageInt // we can do binary searches here
+	mainIndexes StorageInt // we can do binary searches here
+	deltaBtree *btree.BTreeG[indexPair]
 	t *storageShard
 	inactive bool
 }
@@ -95,6 +102,11 @@ func (t *storageShard) iterateIndex(cols boundaries) chan uint {
 		for i := uint(0); i < t.main_count; i++ {
 			result <- i
 		}
+		/*
+		for i := 0; i < maxInsertIndex; i++ {
+			result <- t.main_count + i
+		}
+		*/
 		close(result)
 	}()
 	return result
@@ -157,6 +169,8 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 			} else {
 				// rebuild index
 				fmt.Println("building index on", s.t.t.Name, "over", s.cols)
+
+				// main storage
 				tmp := make([]uint, s.t.main_count)
 				for i := uint(0); i < s.t.main_count; i++ {
 					tmp[i] = i // fill with natural order
@@ -176,15 +190,37 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 					return false // fully equal
 				})
 				// store sorted values into compressed format
-				s.sortedItems.prepare()
+				s.mainIndexes.prepare()
 				for i, v := range tmp {
-					s.sortedItems.scan(uint(i), v)
+					s.mainIndexes.scan(uint(i), v)
 				}
-				s.sortedItems.init(uint(len(tmp)))
+				s.mainIndexes.init(uint(len(tmp)))
 				for i, v := range tmp {
-					s.sortedItems.build(uint(i), v)
+					s.mainIndexes.build(uint(i), v)
 				}
-				s.sortedItems.finish()
+				s.mainIndexes.finish()
+
+				// delta storage
+				s.deltaBtree = btree.NewG[indexPair](8, func (i, j indexPair) bool {
+					for _, c := range s.cols {
+						a := i.data.Get(c)
+						b := i.data.Get(c)
+						if scmerLess(a, b) {
+							return true // less
+						} else if !reflect.DeepEqual(a, b) {
+							return false // greater
+						}
+						// otherwise: next iteration
+					}
+					return false // fully equal
+				})
+				// fill deltaBtree
+				s.t.mu.Lock()
+				for i, data := range s.t.inserts {
+					s.deltaBtree.ReplaceOrInsert(indexPair{i, data})
+				}
+				s.t.mu.Unlock()
+
 				s.inactive = false // mark as ready
 			}
 		}
@@ -205,7 +241,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 		*/
 		// bisect where the lower bound is found
 		idx := sort.Search(int(s.t.main_count), func (idx int) bool {
-			idx2 := uint(int64(s.sortedItems.GetValueUInt(uint(idx))) + s.sortedItems.offset)
+			idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
 			for i, c := range cols {
 				a := lower[i]
 				b := c.GetValue(uint(idx2))
@@ -225,7 +261,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 			if uint(idx) >= s.t.main_count {
 				break
 			}
-			idx2 := uint(int64(s.sortedItems.GetValueUInt(uint(idx))) + s.sortedItems.offset)
+			idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
 			// check for index bounds
 			for i, c := range cols {
 				a := c.GetValue(uint(idx2))
@@ -242,6 +278,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer) chan uint
 			result <- uint(idx2)
 			idx++
 		}
+		// TODO: delta storage -> scan btree
 		close(result)
 	}()
 	return result

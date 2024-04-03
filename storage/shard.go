@@ -266,6 +266,10 @@ func (t *storageShard) Insert(d dataset) {
 		t.logfile.Write(tmp)
 		t.logfile.Write([]byte("\n"))
 	}
+	for _, index := range t.indexes {
+		// add to delta indexes
+		index.deltaBtree.ReplaceOrInsert(indexPair{len(t.inserts)-1, d})
+	}
 	if t.next != nil {
 		// also insert into next storage
 		t.next.Insert(d)
