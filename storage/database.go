@@ -53,10 +53,10 @@ func LoadDatabases() {
 			for _, t := range db.Tables.GetAll() {
 				t.schema = db // restore schema reference
 				for _, s := range t.Shards {
-					go func(s *storageShard) {
+					go func(t *table, s *storageShard) {
 						s.load(t)
 						done <- true
-					}(s)
+					}(t, s)
 				}
 			}
 			databases.Set(db)
