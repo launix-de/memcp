@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2024  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -19,35 +19,41 @@ package scm
 
 import "fmt"
 import "regexp"
-import packrat "github.com/launix-de/go-packrat"
+import packrat "github.com/cphaensch/go-packrat"
+
+type parserResult struct {
+	value Scmer
+	env map[Symbol]Scmer // asdf
+}
 
 type ScmParser struct {
-	Root packrat.Parser // wrapper for parser
+	Root packrat.Parser[parserResult] // wrapper for parser
 	Syntax Scmer // keep syntax for deserializer
 	Generator Scmer
+	Outer *Env
 	Skipper *regexp.Regexp
 }
 
 type ScmParserVariable struct {
-	Parser packrat.Parser // wrapper for parser
+	Parser packrat.Parser[parserResult] // wrapper for parser
 	Variable Symbol
 }
 
 type UndefinedParser struct { // a parser with forward declaration
-	Parser packrat.Parser // if we finally found
+	Parser packrat.Parser[parserResult] // if we finally found
 	En *Env
 	Sym Symbol
 }
 
 // allows self recursion on parsers
-func (b *UndefinedParser) Match(s *packrat.Scanner) *packrat.Node {
+func (b *UndefinedParser) Match(s *packrat.Scanner[parserResult]) (packrat.Node[parserResult], bool) {
 	if b.Parser == nil {
 		en2 := b.En.FindRead(b.Sym)
 		val, ok := en2.Vars[b.Sym]
 		if !ok {
 			panic("error parsing parser: variable does not contain a valid parser: " + string(b.Sym))
 		}
-		b.Parser = val.(packrat.Parser)
+		b.Parser = val.(packrat.Parser[parserResult])
 	}
 	return b.Parser.Match(s)
 }
@@ -56,64 +62,40 @@ func (b *ScmParser) String() string {
 	return "(parser ...)" // fallback generator
 }
 
-func (b *ScmParser) Match(s *packrat.Scanner) *packrat.Node {
-	m := b.Root.Match(s)
-	if m == nil {
-		return nil
+func (b *ScmParser) Match(s *packrat.Scanner[parserResult]) (packrat.Node[parserResult], bool) {
+	m, ok := b.Root.Match(s)
+	if !ok {
+		return m, false
 	}
-	return &packrat.Node{m.Matched, m.Start, b, []*packrat.Node{m}}
-}
-
-func findVarNodes(node *packrat.Node, en *Env) {
-	if extractor, ok := node.Parser.(*ScmParserVariable); ok {
-		en.Vars[extractor.Variable] = ExtractScmer(node.Children[0], en)
-	}
-	if _, ok := node.Parser.(*ScmParser); ok {
-		return // early exit, don't deep-dive into their variables
-	}
-	for _, child := range node.Children {
-		findVarNodes(child, en)
+	if b.Generator == nil {
+		return packrat.Node[parserResult]{parserResult{m.Payload.value, nil}}, true // TODO: m.env, too?
+	} else {
+		var en2 Env
+		// evaluate parser
+		en2.Vars = m.Payload.env // take variable assignments
+		en2.Outer = b.Outer
+		en2.Nodefine = true
+		return packrat.Node[parserResult]{parserResult{Eval(b.Generator, &en2), nil}}, true
 	}
 }
 
-func ExtractScmer(n *packrat.Node, en *Env) Scmer {
-	switch parser := n.Parser.(type) {
-		case *ScmParser:
-			if parser.Generator == nil {
-				return ExtractScmer(n.Children[0], en)
+// TODO: create two variants of mergeParserResults, one where the result is not needed and thus nil can be returned as payload
+func mergeParserResults(s string, r ...parserResult) parserResult {
+	var m map[Symbol]Scmer
+	var arr []Scmer
+	for _, e := range r {
+		arr = append(arr, e.value) // put results into array
+		if e.env != nil { // merge env variables
+			if m == nil {
+				m = e.env // reuse the object (untested)
 			} else {
-				// call generator
-				var en2 Env
-				en2.Vars = make(map[Symbol]Scmer)
-				en2.Outer = en
-				en2.Nodefine = true
-				findVarNodes(n.Children[0], &en2)
-				return Eval(parser.Generator, &en2)
+				for k, v := range e.env {
+					m[k] = v
+				}
 			}
-		case *packrat.OrParser:
-			return ExtractScmer(n.Children[0], en)
-		case *packrat.KleeneParser:
-			// build list from n.Children
-			result := make([]Scmer, 0, len(n.Children)/2+1)
-			for i := 0; i < len(n.Children); i += 2 {
-				result = append(result, ExtractScmer(n.Children[i], en))
-			}
-			return result
-		case *packrat.ManyParser:
-			// build list from n.Children
-			result := make([]Scmer, 0, len(n.Children)/2+1)
-			for i := 0; i < len(n.Children); i += 2 {
-				result = append(result, ExtractScmer(n.Children[i], en))
-			}
-			return result
-		case *packrat.MaybeParser: // nil or value
-			if len(n.Children) > 0 {
-				return ExtractScmer(n.Children[0], en)
-			} else {
-				return nil
-			}
+		}
 	}
-	return n.Matched
+	return parserResult{arr, m}
 }
 
 func (b *ScmParser) Execute(str string, en *Env) Scmer {
@@ -121,37 +103,47 @@ func (b *ScmParser) Execute(str string, en *Env) Scmer {
 	if skipper == nil {
 		skipper = packrat.SkipWhitespaceAndCommentsRegex // also skip C-style comments as whitespaces
 	}
-	scanner := packrat.NewScanner(str, skipper)
+	scanner := packrat.NewScanner[parserResult](str, skipper)
 	node, err := packrat.Parse(b, scanner)
 	if err != nil {
 		panic(err)
 	}
-	return ExtractScmer(node, en)
+	return node.Payload.value
 }
 
-func (b *ScmParserVariable) Match(s *packrat.Scanner) *packrat.Node {
-	m := b.Parser.Match(s)
-	if m == nil {
-		return nil
+func (b *ScmParserVariable) Match(s *packrat.Scanner[parserResult]) (packrat.Node[parserResult], bool) {
+	m, ok := b.Parser.Match(s)
+	if !ok {
+		return m, ok
 	}
-	return &packrat.Node{m.Matched, m.Start, b, []*packrat.Node{m}}
+	env := make(map[Symbol]Scmer)
+	/*if m.Payload.env == nil {
+		m.Payload.env = make(map[Symbol]Scmer)
+	}*/
+	if m.Payload.env != nil {
+		for k, v := range m.Payload.env {
+			env[k] = v
+		}
+	}
+	env[b.Variable] = m.Payload.value // add variable to scope (TODO: replace with fixed-size arrays?)
+	return packrat.Node[parserResult]{Payload: parserResult{m.Payload, env}}, true
 }
 
 
-func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo) packrat.Parser {
+func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo) packrat.Parser[parserResult] {
 	switch n := syntax.(type) {
 		case SourceInfo:
 			return parseSyntax(n.value, en, ome)
 		case string:
-			return packrat.NewAtomParser(n, false, true)
-		case packrat.Parser: // parser passthrough for precompiled parsers
+			return packrat.NewAtomParser(parserResult{n, nil}, n, false, true)
+		case packrat.Parser[parserResult]: // parser passthrough for precompiled parsers
 			return n
 		case Symbol:
 			if n == Symbol("$") {
-				return packrat.NewEndParser(true)
+				return packrat.NewEndParser(parserResult{nil, nil}, true)
 			}
 			if n == Symbol("empty") {
-				return packrat.NewEmptyParser()
+				return packrat.NewEmptyParser(parserResult{nil, nil})
 			}
 			if ome != nil {
 				// variables cannot be predefined
@@ -207,7 +199,11 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo) packrat.Parser {
 					if len(n) > 3 {
 						skipws = ToBool(n[3])
 					}
-					return packrat.NewAtomParser(String(n[1]), caseinsensitive, skipws)
+					value := n[1] // 4th param: atom value (default: the string itself)
+					if len(n) > 4 {
+						value = n[4]
+					}
+					return packrat.NewAtomParser(parserResult{value, nil}, String(n[1]), caseinsensitive, skipws)
 				case Symbol("regex"):
 					caseinsensitive := false
 					if len(n) > 2 {
@@ -217,18 +213,18 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo) packrat.Parser {
 					if len(n) > 3 {
 						skipws = ToBool(n[3])
 					}
-					return packrat.NewRegexParser(String(n[1]), caseinsensitive, skipws)
+					return packrat.NewRegexParser(func (s string) parserResult {return parserResult{s, nil}}, String(n[1]), caseinsensitive, skipws)
 				case Symbol("list"):
-					subparser := make([]packrat.Parser, len(n)-1)
+					subparser := make([]packrat.Parser[parserResult], len(n)-1)
 					for i := 1; i < len(n); i++ {
 						subparser[i-1] = parseSyntax(n[i], en, ome)
 						if subparser[i-1] == nil {
 							return nil
 						}
 					}
-					return packrat.NewAndParser(subparser...)
+					return packrat.NewAndParser(mergeParserResults, subparser...)
 				case Symbol("or"):
-					subparser := make([]packrat.Parser, len(n)-1)
+					subparser := make([]packrat.Parser[parserResult], len(n)-1)
 					for i := 1; i < len(n); i++ {
 						subparser[i-1] = parseSyntax(n[i], en, ome)
 						if subparser[i-1] == nil {
@@ -241,31 +237,31 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo) packrat.Parser {
 					if subparser == nil {
 						return nil
 					}
-					var sepparser packrat.Parser
+					var sepparser packrat.Parser[parserResult]
 					if len(n) > 2 {
 						sepparser = parseSyntax(n[2], en, ome)
 						if sepparser == nil {
 							return nil
 						}
 					} else {
-						sepparser = packrat.NewEmptyParser()
+						sepparser = packrat.NewEmptyParser(parserResult{nil, nil})
 					}
-					return packrat.NewKleeneParser(subparser, sepparser)
+					return packrat.NewKleeneParser(mergeParserResults, subparser, sepparser)
 				case Symbol("+"):
 					subparser := parseSyntax(n[1], en, ome)
 					if subparser == nil {
 						return nil
 					}
-					var sepparser packrat.Parser
+					var sepparser packrat.Parser[parserResult]
 					if len(n) > 2 {
 						sepparser = parseSyntax(n[2], en, ome)
 						if sepparser == nil {
 							return nil
 						}
 					} else {
-						sepparser = packrat.NewEmptyParser()
+						sepparser = packrat.NewEmptyParser(parserResult{nil, nil})
 					}
-					return packrat.NewKleeneParser(subparser, sepparser)
+					return packrat.NewKleeneParser(mergeParserResults, subparser, sepparser)
 				case Symbol("?"):
 					if len(n) == 2 {
 						// single element
@@ -273,17 +269,17 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo) packrat.Parser {
 						if subparser == nil {
 							return nil
 						}
-						return packrat.NewMaybeParser(subparser)
+						return packrat.NewMaybeParser(parserResult{nil, nil}, subparser)
 					} else {
 						// maybe with a list
-						subparser := make([]packrat.Parser, len(n)-1)
+						subparser := make([]packrat.Parser[parserResult], len(n)-1)
 						for i := 1; i < len(n); i++ {
 							subparser[i-1] = parseSyntax(n[i], en, ome)
 							if subparser[i-1] == nil {
 								return nil
 							}
 						}
-						return packrat.NewMaybeParser(packrat.NewAndParser(subparser...))
+						return packrat.NewMaybeParser(parserResult{nil, nil}, packrat.NewAndParser(mergeParserResults, subparser...))
 					}
 				case Symbol("define"):
 					result := new(ScmParserVariable)
@@ -297,14 +293,14 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo) packrat.Parser {
 			}
 			// the optimizer does this, so we have to handle it
 			if fmt.Sprint(n[0]) == fmt.Sprint(List) {
-				subparser := make([]packrat.Parser, len(n)-1)
+				subparser := make([]packrat.Parser[parserResult], len(n)-1)
 				for i := 1; i < len(n); i++ {
 					subparser[i-1] = parseSyntax(n[i], en, ome)
 					if subparser[i-1] == nil {
 						return nil
 					}
 				}
-				return packrat.NewAndParser(subparser...)
+				return packrat.NewAndParser(mergeParserResults, subparser...)
 			}
 	}
 	panic("Unknown parser syntax: " + fmt.Sprint(syntax))
@@ -315,6 +311,7 @@ func NewParser(syntax, generator, whitespace Scmer, en *Env) *ScmParser {
 	result.Root = parseSyntax(syntax, en, nil)
 	result.Syntax = syntax // for serialization purposes
 	result.Generator = generator
+	result.Outer = en
 	if whitespace != nil {
 		result.Skipper = regexp.MustCompile(String(whitespace))
 		// "^(?:/\\*.*?\\*/|[\r\n\t ]+)+"

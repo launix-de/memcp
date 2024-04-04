@@ -14,6 +14,7 @@ require (
 )
 
 require (
+	github.com/cphaensch/go-packrat v1.0.4-0.20240404080842-44f698cbac84 // indirect
 	github.com/magefile/mage v1.15.0 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
 	github.com/tetratelabs/wazero v1.7.0 // indirect
