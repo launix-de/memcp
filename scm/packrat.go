@@ -116,15 +116,16 @@ func (b *ScmParserVariable) Match(s *packrat.Scanner[parserResult]) (packrat.Nod
 	if !ok {
 		return m, ok
 	}
-	env := make(map[Symbol]Scmer)
-	/*if m.Payload.env == nil {
-		m.Payload.env = make(map[Symbol]Scmer)
-	}*/
+	env := m.Payload.env // reuse map from inner scope (risky but faster; corner cases not examined yet)
+	if env == nil {
+		env = make(map[Symbol]Scmer) // if problems occur, make this the default
+	}
+	/* otherwise:
 	if m.Payload.env != nil {
 		for k, v := range m.Payload.env {
 			env[k] = v
 		}
-	}
+	}*/
 	env[b.Variable] = m.Payload.value // add variable to scope (TODO: replace with fixed-size arrays?)
 	return packrat.Node[parserResult]{Payload: parserResult{m.Payload, env}}, true
 }
