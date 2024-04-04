@@ -19,7 +19,7 @@ package scm
 
 import "fmt"
 import "regexp"
-import packrat "github.com/cphaensch/go-packrat/v2"
+import packrat "github.com/launix-de/go-packrat/v2"
 
 type parserResult struct {
 	value Scmer
