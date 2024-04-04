@@ -210,7 +210,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 						v[len(v)-1] = OptimizeEx(v[len(v)-1], env, ome)
 					}*/
 				} else if v[0] == Symbol("parser") {
-					return OptimizeParser(v, env, ome)
+					return OptimizeParser(v, env, ome, false)
 
 				// last but not least: recurse over the arguments when we aren't a special case
 				} else if v[0] != Symbol("quote") {
@@ -223,12 +223,16 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 	}
 	return val
 }
-func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
+func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) Scmer {
 	switch v := val.(type) {
 		case []Scmer:
 			if v[0] == Symbol("parser") {
+				ign2 := ignoreResult
+				if len(v) > 2 {
+					ign2 = true // result of parser can be ignored when expr is executed
+				}
 				ome2 := ome.Copy()
-				v[1] = OptimizeParser(v[1], env, &ome2) // syntax expr -> collect new variables
+				v[1] = OptimizeParser(v[1], env, &ome2, ign2) // syntax expr -> collect new variables
 				if len(v) > 2 {
 					v[2] = OptimizeEx(v[2], env, &ome2) // generator expr -> use variables
 				}
@@ -236,7 +240,7 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					v[3] = OptimizeEx(v[3], env, ome) // delimiter expr
 				}
 			} else if v[0] == Symbol("define") {
-				v[2] = OptimizeParser(v[2], env, ome)
+				v[2] = OptimizeParser(v[2], env, ome, false)
 				// TODO: numbered parameters v[1]
 				if _, ok := ome.variableReplacement[v[1].(Symbol)]; ok {
 					// remove entry from map so we really read out the real variable
@@ -245,13 +249,13 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 			} else {
 				// + * ? or atom regex
 				for i := 1; i < len(v); i++ {
-					v[i] = OptimizeParser(v[i], env, ome)
+					v[i] = OptimizeParser(v[i], env, ome, ignoreResult)
 				}
 			}
 	}
 	// after optimization:
 	// precompile parser if possible
-	p := parseSyntax(val, env, ome) // env = nil since we don't have the env yet
+	p := parseSyntax(val, env, ome, ignoreResult) // env = nil since we don't have the env yet
 	if p != nil { // parseSyntax will return nil when the part is not translatable yet
 		return p // part of that parser could be precompiled
 	} else {
