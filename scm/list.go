@@ -158,6 +158,23 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "list that has to be mapped"},
+			DeclarationParameter{"map", "func", "map function func(i, any)->any that is applied to each item"},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			list := a[0].([]Scmer)
+			result := make([]Scmer, len(list))
+			fn := OptimizeProcToSerialFunction(a[1])
+			for i, v := range list {
+				result[i] = fn(i, v)
+			}
+			return result
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"reduce", "returns a list that contains the result of a map function",
 		2, 3,
 		[]DeclarationParameter{

@@ -154,9 +154,12 @@ if there is a group function, create a temporary preaggregate table
 			(if (equal? group 1) (begin
 				/* one implemented corner case; TODO: recursively go through the scan tables */
 				(set columns (merge (extract_assoc fields extract_columns)))
-				(define build_reducer (lambda (ags) (match ags
-					(cons '(val reduce neutral) rest) '((quote match) (quote p) '((quote list) '((quote cons) (quote xa) (quote a)) '((quote cons) (quote xb) (quote b))) '((quote cons) '(reduce (quote xa) (quote xb)) (build_reducer rest)))
-					'() '((quote list))
+				(define build_reducer (lambda (ags) (begin
+					'((quote lambda) (quote p) '((quote match) (quote p) '((quote list)
+						(cons (quote list) (mapIndex ags (lambda (i ag) (symbol (concat "a" i)))))
+						(cons (quote list) (mapIndex ags (lambda (i ag) (symbol (concat "b" i))))))
+						(cons (quote list) (mapIndex ags (lambda (i ag) (match ag '(expr reduce neutral) '(reduce (symbol (concat "a" i)) (symbol (concat "b" i)))))))
+					))
 				)))
 				(define build_scan (lambda (tables)
 					(match tables
@@ -165,7 +168,7 @@ if there is a group function, create a temporary preaggregate table
 								(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 								/* todo filter columns for alias */
 								'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
-								/* reduce */ (match ags '('(expr reduce neutral)) reduce '((quote lambda) (quote p) (build_reducer ags)))
+								/* reduce */ (match ags '('(expr reduce neutral)) reduce (build_reducer ags))
 								/* neutral */ (match ags '('(expr reduce neutral)) neutral (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) neutral)))))
 							)
 						'() /* final inner */ (match ags '('(expr reduce neutral)) (replace_columns nil expr) (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) (replace_columns nil expr))))))

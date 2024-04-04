@@ -69,6 +69,10 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			return true
 		case []Scmer:
 			switch p[0] {
+				case Symbol("var"):
+					// unoptimized pattern
+					en.VarsNumbered[ToInt(p[1])] = val
+					return true
 				case Symbol("list"):
 					// list matching
 					switch v := val.(type) {
