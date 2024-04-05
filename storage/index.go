@@ -37,6 +37,12 @@ type StorageIndex struct {
 	inactive bool
 }
 
+func (x *StorageIndex) notifyInsert(i int, d []scm.Scmer) {
+	if !x.inactive {
+		x.deltaBtree.ReplaceOrInsert(indexPair{i, d})
+	}
+}
+
 // iterates over items
 func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan uint {
 
@@ -179,8 +185,17 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 				// delta storage
 				s.deltaBtree = btree.NewG[indexPair](8, func (i, j indexPair) bool {
 					for _, col := range s.cols {
-						a := s.t.getDelta(i.itemid, col)
-						b := s.t.getDelta(j.itemid, col)
+						colpos, ok := s.t.deltaColumns[col]
+						if !ok {
+							continue // non-existing column -> don't compare
+						}
+						var a, b scm.Scmer
+						if colpos < len(i.data) {
+							a = i.data[colpos]
+						}
+						if colpos < len(j.data) {
+							b = j.data[colpos]
+						}
 						if scm.Less(a, b) {
 							return true // less
 						} else if !reflect.DeepEqual(a, b) {

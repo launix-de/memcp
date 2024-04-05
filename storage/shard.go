@@ -295,7 +295,7 @@ func (t *storageShard) Insert(d dataset) {
 	}
 	for _, index := range t.indexes {
 		// add to delta indexes
-		index.deltaBtree.ReplaceOrInsert(indexPair{len(t.inserts)-1, d2})
+		index.notifyInsert(len(t.inserts)-1, d2)
 	}
 	if t.next != nil {
 		// also insert into next storage
