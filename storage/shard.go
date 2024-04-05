@@ -316,7 +316,7 @@ func (t *storageShard) insertDataset(d dataset) []scm.Scmer {
 		colidx, ok := t.deltaColumns[scm.String(d[i])]
 		if !ok {
 			// acquire new column
-			colidx := len(t.deltaColumns)
+			colidx = len(t.deltaColumns)
 			t.deltaColumns[scm.String(d[i])] = colidx
 		}
 		for len(result) <= colidx {
