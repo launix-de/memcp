@@ -87,6 +87,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "COUNT" true) "(" sql_expression ")") '((quote aggregate) 1 (quote +) 0))
 		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") '((quote aggregate) s (quote +) 0))
 		(parser '((atom "AVG" true) "(" (define s sql_expression) ")") '((quote /) '((quote aggregate) s (quote +) 0) '((quote aggregate) 1 (quote +) 0)))
+		(parser '((atom "MIN" true) "(" (define s sql_expression) ")") '((quote aggregate) s (quote min) nil))
+		(parser '((atom "MAX" true) "(" (define s sql_expression) ")") '((quote aggregate) s (quote max) nil))
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '((quote password) p))
 		/* TODO: function call */
