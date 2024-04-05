@@ -99,6 +99,9 @@ func Init(en scm.Env) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
 			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
 			if len(a) > 4 {
@@ -111,7 +114,6 @@ func Init(en scm.Env) {
 			return result
 		},
 	})
-	// TODO: scan_order -> schema table filter sortcols(list of lambda|string) offset limit map reduce neutral; has only one reduce phase
 	scm.Declare(&en, &scm.Declaration{
 		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
 		8, 10,
@@ -128,12 +130,16 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
+			// TODO: version on primitive lists like in scan
 			// params: table, condition, map, reduce, reduceSeed
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
 			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
 			if len(a) > 8 {
