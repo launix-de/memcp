@@ -1,4 +1,5 @@
-<h1 align="center">memcp: A High-Performance, Open-Source Columnar In-Memory Database </h1>
+<h1 align="center">memcp: Made for Big Data</h1>
+<h4 align="center">A High-Performance, Open-Source Columnar In-Memory Databasea</h4>
 <h4 align="center">Protocol compatible drop-in replacement for MySQL</h4>
 
 <div align="center">
