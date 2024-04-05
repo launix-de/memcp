@@ -496,6 +496,12 @@ func (t *storageShard) rebuild() *storageShard {
 		fmt.Println(b.String())
 		rebuildIndexes(t, result)
 		result.t.schema.save()
+
+		if t.t.PersistencyMode == Safe {
+			// remove old log file
+			t.logfile.Close()
+			os.Remove(t.t.schema.path + t.uuid.String() + ".log")
+		}
 	} else {
 		// otherwise: table stays the same
 		result.uuid = t.uuid // copy uuid in case nothing changes
