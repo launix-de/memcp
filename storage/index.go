@@ -213,6 +213,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 				s.inactive = false // mark as ready
 			}
 		}
+
 		// bisect where the lower bound is found
 		idx := sort.Search(int(s.t.main_count), func (idx int) bool {
 			idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
@@ -253,29 +254,32 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			idx++
 			// TODO: stop on limit
 		}
+
 		// delta storage -> scan btree (but we can also eject all items, it won't break the code)
-		delta_lower := make(dataset, 2 * len(s.cols))
-		delta_upper := make(dataset, 2 * len(s.cols))
-		for i := 0; i < len(s.cols); i++ {
-			delta_lower[2 * i] = s.cols[i]
-			delta_lower[2 * i + 1] = lower[i]
-			delta_upper[2 * i] = s.cols[i]
-			delta_upper[2 * i + 1] = lower[i]
+		if len(s.t.inserts) > 0 { // avoid building objects if there is no delta
+			delta_lower := make(dataset, 2 * len(s.cols))
+			delta_upper := make(dataset, 2 * len(s.cols))
+			for i := 0; i < len(s.cols); i++ {
+				delta_lower[2 * i] = s.cols[i]
+				delta_lower[2 * i + 1] = lower[i]
+				delta_upper[2 * i] = s.cols[i]
+				delta_upper[2 * i + 1] = lower[i]
+			}
+			delta_upper[len(delta_upper)-1] = upperLast
+			// scan less than
+			s.deltaBtree.AscendRange(indexPair{-1, delta_lower}, indexPair{-1, delta_upper}, func (p indexPair) bool {
+				result <- s.t.main_count + uint(p.itemid)
+				return true // don't stop iteration
+				// TODO: stop on limit
+			})
+			// find exact fit, too
+			if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
+				result <- s.t.main_count + uint(p.itemid)
+			}
+			/*for i := 0; i < maxInsertIndex; i++ {
+				result <- s.t.main_count + uint(i)
+			}*/
 		}
-		delta_upper[len(delta_upper)-1] = upperLast
-		// scan less than
-		s.deltaBtree.AscendRange(indexPair{-1, delta_lower}, indexPair{-1, delta_upper}, func (p indexPair) bool {
-			result <- s.t.main_count + uint(p.itemid)
-			return true // don't stop iteration
-			// TODO: stop on limit
-		})
-		// find exact fit, too
-		if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
-			result <- s.t.main_count + uint(p.itemid)
-		}
-		/*for i := 0; i < maxInsertIndex; i++ {
-			result <- s.t.main_count + uint(i)
-		}*/
 		close(result)
 	}()
 	return result
