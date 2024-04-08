@@ -99,17 +99,19 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				fmt.Println(time.Since(start))
 				return
 			case "if":
-				if ToBool(Eval(e[1], en)) {
-					expression = e[2]
-					goto restart
-				} else {
-					if len(e) > 3 {
-						expression = e[3]
+				i := 1
+				for i+1 < len(e) {
+					if ToBool(Eval(e[i], en)) {
+						expression = e[i+1]
 						goto restart
-					} else {
-						return nil
 					}
+					i += 2
 				}
+				if i < len(e) { // else block
+					expression = e[i]
+					goto restart
+				}
+				return nil
 			case "and":
 				for i, x := range e {
 					if i > 0 && !ToBool(Eval(x, en)) {
@@ -477,11 +479,11 @@ func init() {
 		}, "any", nil,
 	})
 	Declare(&Globalenv, &Declaration{
-		"if", "checks a condition and then conditionally evaluates code branches",
-		2, 3,
+		"if", "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
+		2, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"condition", "bool", "condition to evaluate"},
-			DeclarationParameter{"true-branch", "returntype", "code to evaluate if condition is true"},
+			DeclarationParameter{"condition...", "bool", "condition to evaluate"},
+			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true"},
 			DeclarationParameter{"false-branch", "returntype", "code to evaluate if condition is false"},
 		}, "returntype", nil,
 	})

@@ -83,20 +83,25 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"merge", "flattens a list of lists into a list containing all the subitems",
-		1, 1,
+		"merge", "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
+		1, 1000,
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list of lists of items"},
 		}, "list",
 		func (a ...Scmer) Scmer {
+			list := a
+			if len(a) == 1 {
+				// one parameter: interpret as list of lists
+				list = a[0].([]Scmer)
+			}
 			// merge arrays into one
 			size := 0
-			for _, v := range a[0].([]Scmer) {
+			for _, v := range list {
 				size = size + len(v.([]Scmer))
 			}
 			result := make([]Scmer, size)
 			pos := 0
-			for _, v := range a[0].([]Scmer) {
+			for _, v := range list {
 				inner := v.([]Scmer)
 				copy(result[pos:pos+len(inner)], inner)
 				pos = pos + len(inner)

@@ -17,7 +17,7 @@ require (
 	github.com/magefile/mage v1.15.0 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
 	github.com/tetratelabs/wazero v1.7.0 // indirect
-	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8 // indirect
-	golang.org/x/net v0.23.0 // indirect
-	golang.org/x/sys v0.18.0 // indirect
+	golang.org/x/exp v0.0.0-20240404231335-c0f41cb1a7a0 // indirect
+	golang.org/x/net v0.24.0 // indirect
+	golang.org/x/sys v0.19.0 // indirect
 )
