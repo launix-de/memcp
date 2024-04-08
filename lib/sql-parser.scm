@@ -224,6 +224,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	(define sql_insert_into (parser '(
 		(atom "INSERT" true)
+		(define ignoreexists (? (atom "IGNORE" true true true)))
 		(atom "INTO" true)
 		(define tbl sql_identifier)
 		(? "("
@@ -240,7 +241,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	) (begin
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "name")))))
 		(print coldesc)
-		(cons (quote begin) (map (map datasets (lambda (dataset) (zip_cols coldesc dataset))) (lambda (dataset) '((quote insert) schema tbl (cons (quote list) dataset)))))
+		(cons (quote begin) (map (map datasets (lambda (dataset) (zip_cols coldesc dataset))) (lambda (dataset) '((quote insert) schema tbl (cons (quote list) dataset) ignoreexists))))
 	)))
 
 	(define sql_create_table (parser '(

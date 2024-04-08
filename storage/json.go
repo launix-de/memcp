@@ -54,7 +54,7 @@ func LoadJSON(schema, filename string) {
 			// ignore
 		} else if s[0:7] == "#table " {
 			// new table (or find the existing one)
-			t = CreateTable(schema, s[7:], Safe, true)
+			t, _ = CreateTable(schema, s[7:], Safe, true)
 		} else if s[0] == '#' {
 			// comment
 		} else {
@@ -80,7 +80,7 @@ func LoadJSON(schema, filename string) {
 						x[i+1] = v
 						i += 2
 					}
-					t.Insert(x) // put into table
+					t.Insert(x, true) // put into table
 				}(t, s)
 			}
 		}

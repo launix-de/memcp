@@ -83,7 +83,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			SerializeEx(b, v[1], en, glob, nil)
 			b.WriteByte(')')
 		} else {
-			if len(v) > 0 && v[0] == Symbol("list") {
+			if len(v) > 0 && (v[0] == Symbol("list") || fmt.Sprint(v[0]) == fmt.Sprint(List)) {
 				b.WriteByte('\'')
 				v = v[1:]
 			}
@@ -148,7 +148,13 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case Symbol:
 		// print as Symbol (because we already used a begin-block for defining our env)
-		b.WriteString(fmt.Sprint(v))
+		if strings.Contains(string(v), " ") || strings.Contains(string(v), "(") || strings.Contains(string(v), ")") || strings.Contains(string(v), "\"") {
+			b.WriteString("(symbol \"")
+			b.WriteString(strings.Replace(string(v), "\"", "\\\"", -1))
+			b.WriteString("\")")
+		} else {
+			b.WriteString(string(v))
+		}
 	case string:
 		b.WriteByte('"')
 		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(v))

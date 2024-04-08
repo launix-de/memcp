@@ -219,53 +219,56 @@ func Init(en scm.Env) {
 			if len(a) > 4 && scm.ToBool(a[4]) {
 				ifnotexists = true
 			}
-			t := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
+			t, created := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
 			t.Auto_increment = auto_increment
-			for _, coldef := range(a[2].([]scm.Scmer)) {
-				def := coldef.([]scm.Scmer)
-				if len(def) == 0 {
-					continue
-				}
-				if def[0] == "unique" {
-					// id cols
-					cols := make([]string, len(def[2].([]scm.Scmer)))
-					for i, v := range def[2].([]scm.Scmer) {
-						cols[i] = scm.String(v)
+			if created {
+				// add columns and constraints
+				for _, coldef := range(a[2].([]scm.Scmer)) {
+					def := coldef.([]scm.Scmer)
+					if len(def) == 0 {
+						continue
 					}
-					t.Unique = append(t.Unique, uniqueKey{scm.String(def[1]), cols})
-				} else
-				if def[0] == "foreign" {
-					// id cols tbl cols2
-					cols1 := make([]string, len(def[2].([]scm.Scmer)))
-					for i, v := range def[2].([]scm.Scmer) {
-						cols1[i] = scm.String(v)
-					}
-					cols2 := make([]string, len(def[4].([]scm.Scmer)))
-					for i, v := range def[4].([]scm.Scmer) {
-						cols2[i] = scm.String(v)
-					}
-					t2 := t.schema.Tables.Get(scm.String(def[3]))
-					if t2 == nil {
-						panic("Table in foreign key does not exist: " + scm.String(def[3]))
-					}
-					t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
-					t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
-				} else
-				if def[0] == "column" {
-					// normal column
-					colname := scm.String(def[1])
-					typename := scm.String(def[2])
-					dimensions_ := def[3].([]scm.Scmer)
-					dimensions := make([]int, len(dimensions_))
-					for i, d := range dimensions_ {
-						dimensions[i] = scm.ToInt(d)
-					}
-					typeparams := scm.String(def[4])
-					t.CreateColumn(colname, typename, dimensions, typeparams)
-					// todo: not null flags, PRIMARY KEY flag usw.
-					if strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
-						// append unique key
-						t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
+					if def[0] == "unique" {
+						// id cols
+						cols := make([]string, len(def[2].([]scm.Scmer)))
+						for i, v := range def[2].([]scm.Scmer) {
+							cols[i] = scm.String(v)
+						}
+						t.Unique = append(t.Unique, uniqueKey{scm.String(def[1]), cols})
+					} else
+					if def[0] == "foreign" {
+						// id cols tbl cols2
+						cols1 := make([]string, len(def[2].([]scm.Scmer)))
+						for i, v := range def[2].([]scm.Scmer) {
+							cols1[i] = scm.String(v)
+						}
+						cols2 := make([]string, len(def[4].([]scm.Scmer)))
+						for i, v := range def[4].([]scm.Scmer) {
+							cols2[i] = scm.String(v)
+						}
+						t2 := t.schema.Tables.Get(scm.String(def[3]))
+						if t2 == nil {
+							panic("Table in foreign key does not exist: " + scm.String(def[3]))
+						}
+						t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
+						t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
+					} else
+					if def[0] == "column" {
+						// normal column
+						colname := scm.String(def[1])
+						typename := scm.String(def[2])
+						dimensions_ := def[3].([]scm.Scmer)
+						dimensions := make([]int, len(dimensions_))
+						for i, d := range dimensions_ {
+							dimensions[i] = scm.ToInt(d)
+						}
+						typeparams := scm.String(def[4])
+						t.CreateColumn(colname, typename, dimensions, typeparams)
+						// todo: not null flags, PRIMARY KEY flag usw.
+						if strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
+							// append unique key
+							t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
+						}
 					}
 				}
 			}
@@ -291,19 +294,23 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table",
-		3, 3,
+		3, 4,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
 			scm.DeclarationParameter{"row", "list", "list of the pattern '(\"col1\" value1 \"col2\" value2)"},
+			scm.DeclarationParameter{"ignoreexists", "bool", "if true, it will return false on duplicate keys instead of throwing an error"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			db.Tables.Get(scm.String(a[1])).Insert(dataset(a[2].([]scm.Scmer)))
-			return true
+			ignoreexists := false
+			if (len(a) > 3 && scm.ToBool(a[3])) {
+				ignoreexists = true
+			}
+			return db.Tables.Get(scm.String(a[1])).Insert(dataset(a[2].([]scm.Scmer)), ignoreexists)
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

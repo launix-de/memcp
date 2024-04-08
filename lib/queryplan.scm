@@ -178,8 +178,30 @@ if there is a group function, create a temporary preaggregate table
 					'((quote define) (quote ags) (build_scan tables))
 					'((quote resultrow) (cons (quote list) (map_assoc fields (lambda (key value) (expr_replace_aggregate value indexmap)))))
 				)
-			) (begin
-				(error "Grouping and aggregates are not implemented yet (Preaggregate tables)")
+			) (match tables
+				'('(tblvar schema tbl)) (begin
+					/* TODO: check if there is a foreign key on tbl.groupcol */
+
+					/* prepare preaggregate */
+					(set grouptbl (concat "." tbl ":" group))
+					(createtable schema grouptbl (cons
+						/* unique key over all identiying columns */ '("unique" "group" (map group (lambda (col) (concat col))))
+						/* all identifying columns */ (map group (lambda (col) '("column" (concat col) "any"/* TODO get type from schema */ '() '())))
+					) '("engine" "sloppy") true)
+
+					'((quote begin)
+						/* insert group cols into preaggregate */
+						/* TODO: replace hardcoded column name with extracted value */
+						'((quote scan) schema tbl (build_condition schema tbl condition) '((quote lambda) '((symbol "g")) '((quote insert) schema grouptbl '(list "(get_column nil g)" (symbol "g")) true)))
+
+						/* TODO: add scan values */
+
+						/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
+						'((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) '((symbol "(get_column nil g)")) '((quote resultrow) '(list "g" (symbol "(get_column nil g)")))))
+							       /*(cons (quote list) (map_assoc fields (lambda (key value) (expr_replace_aggregate value indexmap)))))*/
+					)
+				)
+				(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
 			))
 		) (begin
 			/* else: normal table scan */

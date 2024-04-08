@@ -163,7 +163,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 	t.schema.schemalock.Unlock()
 }
 
-func (t *table) Insert(d dataset) {
+func (t *table) Insert(d dataset, ignoreexists bool) bool {
 	// load balance: if bucket is full, create new one
 	shard := t.Shards[len(t.Shards)-1]
 	if shard.Count() >= max_shardsize {
@@ -192,7 +192,11 @@ func (t *table) Insert(d dataset) {
 		err := t.GetUniqueErrorsFor(d)
 		if err != nil {
 			t.uniquelock.Unlock()
-			panic(err)
+			if ignoreexists {
+				return false
+			} else {
+				panic(err)
+			}
 		}
 		// physically insert
 		shard.Insert(d)
@@ -203,6 +207,7 @@ func (t *table) Insert(d dataset) {
 	}
 
 	// TODO: Trigger after insert
+	return true
 }
 
 // TODO: refactor to "has" (cols, dataset)
@@ -226,7 +231,7 @@ func (t *table) GetUniqueErrorsFor(d dataset) scm.Scmer {
 		}
 		condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
 		if t.scan(condition, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false) != false {
-			return "Unique key constraint validated in table "+t.Name+": " + uniq.Id
+			return "Unique key constraint violated in table "+t.Name+": " + uniq.Id
 		}
 	}
 	return nil
