@@ -27,6 +27,9 @@ TODO
  - tables stored in a table? (StorageSCMER)
  - periodic (rebuild)
  - shard resorting (measure the time spent for each index, then resort the dataset according to the index in a rebuild_sorted function)
+ - compression wrappers for strings: an interface .getValue()Scmer what is called whenever the value is used (e.g. for equal?)
+ - medium sized strings -> lzma https://github.com/ulikunitz/xz/blob/master/example.go
+ - big strings -> hdd blob (instances are reference counted)
 
 
 Cache strategy
