@@ -84,6 +84,13 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)))
 
 	(define sql_expression5 (parser (or
+		(parser '((atom "NOT" true) (define expr sql_expression6)) '((quote not) expr))
+		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '((quote nil?) expr))
+		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '((quote not) '((quote nil?) expr)))
+		sql_expression6
+	)))
+
+	(define sql_expression6 (parser (or
 		(parser '("(" (define a sql_expression) ")") a)
 
 		(parser '((atom "CASE" true) (define conditions (* (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
@@ -98,7 +105,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '((quote password) p))
 		/* TODO: function call */
+
 		(parser (atom "NULL" true) nil)
+		(parser (atom "TRUE" true) true)
+		(parser (atom "FALSE" true) false)
 		(parser '((atom "@" true) (define var sql_identifier)) '((quote session) var))
 		sql_int
 		sql_string
