@@ -257,5 +257,63 @@ func init_alu() {
 			return a[0] == nil;
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		"min", "returns the smallest value",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"value...", "number|string", "value"},
+		}, "number|string",
+		func(a ...Scmer) (result Scmer) {
+			for _, v := range a {
+				if result == nil {
+					result = v
+				} else {
+					switch vv := v.(type) {
+						case nil: // dont care for nil values
+						case float64, int, uint, int64, uint64, int8, uint8:
+							if ToFloat(vv) < ToFloat(result) {
+								result = vv
+							}
+						case string:
+							if vv < String(result) {
+								result = vv
+							}
+						default:
+							panic("unknown input value for min: " + String(vv))
+					}
+				}
+			}
+			return
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"max", "returns the highest value",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"value...", "number|string", "value"},
+		}, "number|string",
+		func(a ...Scmer) (result Scmer) {
+			for _, v := range a {
+				if result == nil {
+					result = v
+				} else {
+					switch vv := v.(type) {
+						case nil: // dont care for nil values
+						case float64, int, uint, int64, uint64, int8, uint8:
+							if ToFloat(vv) > ToFloat(result) {
+								result = vv
+							}
+						case string:
+							if vv > String(result) {
+								result = vv
+							}
+						default:
+							panic("unknown input value for max: " + String(vv))
+					}
+				}
+			}
+			return
+		},
+	})
 	// TODO: number? string? func?
 }

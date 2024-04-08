@@ -295,7 +295,7 @@ func (t *storageShard) Insert(d dataset) {
 	}
 	for _, index := range t.indexes {
 		// add to delta indexes
-		index.deltaBtree.ReplaceOrInsert(indexPair{len(t.inserts)-1, d2})
+		index.notifyInsert(len(t.inserts)-1, d2)
 	}
 	if t.next != nil {
 		// also insert into next storage
@@ -316,7 +316,7 @@ func (t *storageShard) insertDataset(d dataset) []scm.Scmer {
 		colidx, ok := t.deltaColumns[scm.String(d[i])]
 		if !ok {
 			// acquire new column
-			colidx := len(t.deltaColumns)
+			colidx = len(t.deltaColumns)
 			t.deltaColumns[scm.String(d[i])] = colidx
 		}
 		for len(result) <= colidx {
@@ -496,6 +496,12 @@ func (t *storageShard) rebuild() *storageShard {
 		fmt.Println(b.String())
 		rebuildIndexes(t, result)
 		result.t.schema.save()
+
+		if t.t.PersistencyMode == Safe {
+			// remove old log file
+			t.logfile.Close()
+			os.Remove(t.t.schema.path + t.uuid.String() + ".log")
+		}
 	} else {
 		// otherwise: table stays the same
 		result.uuid = t.uuid // copy uuid in case nothing changes

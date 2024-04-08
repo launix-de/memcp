@@ -127,6 +127,10 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		SerializeEx(b, v.Params, glob, glob, nil)
 		b.WriteByte(' ')
 		SerializeEx(b, v.Body, v.En, glob, &v)
+		if v.NumVars > 0 {
+			b.WriteByte(' ')
+			b.WriteString(fmt.Sprint(v.NumVars))
+		}
 		b.WriteByte(')')
 	case NthLocalVar:
 		if p != nil && p.NumVars >= int(v) && p.Params != nil {

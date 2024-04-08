@@ -98,6 +98,17 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	}
 	return
 }
+func (ome *optimizerMetainfo) RemoveSymbolsFromTree(tree Scmer) {
+	switch v := tree.(type) {
+	case Symbol:
+		delete(ome.variableReplacement, v)
+	case []Scmer:
+		for i := 1; i < len(v); i++ {
+			// recurse over parameters
+			ome.RemoveSymbolsFromTree(v[i])
+		}
+	}
+}
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 	// TODO: static code analysis like escape analysis + replace memory-safe functions with in-place memory manipulating versions (e.g. in set_assoc)
 	// TODO: inline use-once
@@ -202,13 +213,16 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					// TODO: optimize matches with nvars and your own ome
 					v[1] = OptimizeEx(v[1], env, ome)
 					/* code is deactivated since variables can be overwritten! */
-					/*
 					for i := 3; i < len(v); i+= 2 {
-						v[i] = OptimizeEx(v[i], env, ome)
+						// for each pattern
+						ome2 := ome.Copy()
+						ome2.RemoveSymbolsFromTree(v[i-1])
+						v[i] = OptimizeEx(v[i], env, &ome2)
 					}
 					if len(v)%2 == 1 {
+						// last item
 						v[len(v)-1] = OptimizeEx(v[len(v)-1], env, ome)
-					}*/
+					}
 				} else if v[0] == Symbol("parser") {
 					return OptimizeParser(v, env, ome, false)
 

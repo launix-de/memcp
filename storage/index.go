@@ -37,6 +37,12 @@ type StorageIndex struct {
 	inactive bool
 }
 
+func (x *StorageIndex) notifyInsert(i int, d []scm.Scmer) {
+	if !x.inactive {
+		x.deltaBtree.ReplaceOrInsert(indexPair{i, d})
+	}
+}
+
 // iterates over items
 func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan uint {
 
@@ -179,8 +185,17 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 				// delta storage
 				s.deltaBtree = btree.NewG[indexPair](8, func (i, j indexPair) bool {
 					for _, col := range s.cols {
-						a := s.t.getDelta(i.itemid, col)
-						b := s.t.getDelta(j.itemid, col)
+						colpos, ok := s.t.deltaColumns[col]
+						if !ok {
+							continue // non-existing column -> don't compare
+						}
+						var a, b scm.Scmer
+						if colpos < len(i.data) {
+							a = i.data[colpos]
+						}
+						if colpos < len(j.data) {
+							b = j.data[colpos]
+						}
 						if scm.Less(a, b) {
 							return true // less
 						} else if !reflect.DeepEqual(a, b) {
@@ -198,6 +213,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 				s.inactive = false // mark as ready
 			}
 		}
+
 		// bisect where the lower bound is found
 		idx := sort.Search(int(s.t.main_count), func (idx int) bool {
 			idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
@@ -238,29 +254,32 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			idx++
 			// TODO: stop on limit
 		}
+
 		// delta storage -> scan btree (but we can also eject all items, it won't break the code)
-		delta_lower := make(dataset, 2 * len(s.cols))
-		delta_upper := make(dataset, 2 * len(s.cols))
-		for i := 0; i < len(s.cols); i++ {
-			delta_lower[2 * i] = s.cols[i]
-			delta_lower[2 * i + 1] = lower[i]
-			delta_upper[2 * i] = s.cols[i]
-			delta_upper[2 * i + 1] = lower[i]
+		if len(s.t.inserts) > 0 { // avoid building objects if there is no delta
+			delta_lower := make(dataset, 2 * len(s.cols))
+			delta_upper := make(dataset, 2 * len(s.cols))
+			for i := 0; i < len(s.cols); i++ {
+				delta_lower[2 * i] = s.cols[i]
+				delta_lower[2 * i + 1] = lower[i]
+				delta_upper[2 * i] = s.cols[i]
+				delta_upper[2 * i + 1] = lower[i]
+			}
+			delta_upper[len(delta_upper)-1] = upperLast
+			// scan less than
+			s.deltaBtree.AscendRange(indexPair{-1, delta_lower}, indexPair{-1, delta_upper}, func (p indexPair) bool {
+				result <- s.t.main_count + uint(p.itemid)
+				return true // don't stop iteration
+				// TODO: stop on limit
+			})
+			// find exact fit, too
+			if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
+				result <- s.t.main_count + uint(p.itemid)
+			}
+			/*for i := 0; i < maxInsertIndex; i++ {
+				result <- s.t.main_count + uint(i)
+			}*/
 		}
-		delta_upper[len(delta_upper)-1] = upperLast
-		// scan less than
-		s.deltaBtree.AscendRange(indexPair{-1, delta_lower}, indexPair{-1, delta_upper}, func (p indexPair) bool {
-			result <- s.t.main_count + uint(p.itemid)
-			return true // don't stop iteration
-			// TODO: stop on limit
-		})
-		// find exact fit, too
-		if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
-			result <- s.t.main_count + uint(p.itemid)
-		}
-		/*for i := 0; i < maxInsertIndex; i++ {
-			result <- s.t.main_count + uint(i)
-		}*/
 		close(result)
 	}()
 	return result

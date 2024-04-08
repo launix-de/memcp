@@ -667,7 +667,6 @@ Patterns can be any of:
 
 /* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt
 zero?, negative?, positive?, off?, even?
-max, min
 sin, cos, tan, asin, acos, atan
 exp, log
 number->string, string->number
