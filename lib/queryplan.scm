@@ -195,6 +195,7 @@ if there is a group function, create a temporary preaggregate table
 						'((quote scan) schema tbl (build_condition schema tbl condition) '((quote lambda) '((symbol "g")) '((quote insert) schema grouptbl '(list "(get_column nil g)" (symbol "g")) true)))
 
 						/* TODO: add scan values */
+						/* (createcolumn schema grouptbl "g" "any" '() '() (lambda (g) (scan "test" "g" (lambda (g) (equal? g (outer g))) (lambda (v) v) + 0)) */
 
 						/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
 						'((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) '((symbol "(get_column nil g)")) '((quote resultrow) '(list "g" (symbol "(get_column nil g)")))))

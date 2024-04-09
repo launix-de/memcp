@@ -276,6 +276,52 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"createcolumn", "creates a new column in table",
+		6, 7,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"table", "string", "name of the new table"},
+			scm.DeclarationParameter{"colname", "string", "name of the new column"},
+			scm.DeclarationParameter{"type", "string", "name of the basetype"},
+			scm.DeclarationParameter{"dimensions", "list", "dimensions of the type (e.g. for decimal)"},
+			scm.DeclarationParameter{"options", "string", "further options like AUTO_INCREMENT or NOT NULL"},
+			scm.DeclarationParameter{"computor", "func", "lambda expression that can take other column values and computes the value of that column"},
+		}, "bool",
+		func (a ...scm.Scmer) scm.Scmer {
+			// get tbl
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+
+			// normal column
+			colname := scm.String(a[2])
+			typename := scm.String(a[3])
+			dimensions_ := a[4].([]scm.Scmer)
+			dimensions := make([]int, len(dimensions_))
+			for i, d := range dimensions_ {
+				dimensions[i] = scm.ToInt(d)
+			}
+			typeparams := scm.String(a[5])
+			t.CreateColumn(colname, typename, dimensions, typeparams)
+			// todo: not null flags, PRIMARY KEY flag usw.
+			if strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
+				// append unique key
+				t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
+			}
+
+			if len(a) > 6 && a[6] != nil {
+				// TODO: computed columns
+			}
+			
+			return true
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"droptable", "removes a table",
 		2, 3,
 		[]scm.DeclarationParameter{
