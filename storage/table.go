@@ -156,11 +156,30 @@ func (d dataset) Get(key string) scm.Scmer {
 func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo string) {
 	t.schema.schemalock.Lock()
 	t.Columns = append(t.Columns, column{name, typ, typdimensions, extrainfo})
-	for i := range t.Shards {
-		t.Shards[i].columns[name] = new (StorageSCMER)
+	for _, s := range t.Shards {
+		s.columns[name] = new (StorageSparse)
 	}
 	t.schema.save()
 	t.schema.schemalock.Unlock()
+}
+
+func (t *table) DropColumn(name string) bool {
+	t.schema.schemalock.Lock()
+	for i, c := range t.Columns {
+		if c.Name == name {
+			// found the column
+			t.Columns = append(t.Columns[:i], t.Columns[i+1:]...) // remove from slice
+			for _, s := range t.Shards {
+				delete(s.columns, name)
+			}
+
+			t.schema.save()
+			t.schema.schemalock.Unlock()
+			return true
+		}
+	}
+	t.schema.schemalock.Unlock()
+	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
 func (t *table) Insert(d dataset, ignoreexists bool) bool {

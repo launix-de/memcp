@@ -279,11 +279,43 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		)))
 	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists)))
 
+	(define sql_alter_table (parser '(
+		(atom "ALTER" true)
+		(atom "TABLE" true)
+		(define id sql_identifier)
+		(define alters (+ (or
+			/* TODO
+			(parser '((atom "ADD" true) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
+			(parser '((atom "ADD" true) (atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ sql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
+			(parser '((atom "ADD" true) (atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2))) */
+			(parser '((atom "ADD" true) (atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) nil) /* ignore index definitions */
+			(parser '((atom "ADD" true) (?(atom "COLUMN" true))
+				(define col sql_identifier)
+				(define type sql_identifier)
+				(define dimensions (or
+					(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
+					(parser '("(" (define a sql_int) ")") '((quote list) a))
+					(parser empty '((quote list)))
+				))
+				(define typeparams (regex "[^,)]*")) /* TODO: rest */
+			) (lambda (id) '((quote createcolumn) schema id col type dimensions typeparams)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
+			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
+			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
+			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
+			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) schema id "collation" collation)))
+			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) schema id "auto_increment" ai)))
+		) ","))
+	) (cons (quote begin) (map alters (lambda (alter) (alter id))))))
+
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (define query sql_select) (apply build_queryplan query))
 		sql_insert_into
 		sql_create_table
+		sql_alter_table
 		sql_update
 		sql_delete
 

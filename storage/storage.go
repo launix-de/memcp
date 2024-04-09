@@ -322,6 +322,35 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"altertable", "alters a table",
+		4, 4,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"table", "string", "name of the new table"},
+			scm.DeclarationParameter{"operation", "string", "one of drop|engine|collation|auto_increment"},
+			scm.DeclarationParameter{"parameter", "any", "name of the column to drop or value of the parameter"},
+		}, "bool",
+		func (a ...scm.Scmer) scm.Scmer {
+			// get tbl
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+
+			switch a[2] {
+			case "drop":
+				return t.DropColumn(scm.String(a[3]))
+			default:
+				panic("unimplemented alter table operation: " + scm.String(a[2]))
+			}
+			return true
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"droptable", "removes a table",
 		2, 3,
 		[]scm.DeclarationParameter{
