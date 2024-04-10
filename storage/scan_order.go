@@ -248,38 +248,42 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + string(k.(scm.Symbol)) + "`")
 		}
 	}
-	// remember current insert status (so don't scan things that are inserted during map)
-	t.mu.RLock() // lock whole shard for reading since we frequently read deletions
-	maxInsertIndex := len(t.inserts)
 
-	// iterate over items (indexed)
-	for idx := range t.iterateIndex(boundaries, maxInsertIndex) {
-		if t.deletions.Get(idx) {
-			continue // item is on delete list
-		}
+	// scan loop in read lock
+	var maxInsertIndex int
+	func () {
+		t.mu.RLock() // lock whole shard for reading since we frequently read deletions
+		defer t.mu.RUnlock() // finished reading
+		// remember current insert status (so don't scan things that are inserted during map)
+		maxInsertIndex = len(t.inserts)
 
-		if idx < t.main_count {
-			// value from main storage
+		// iterate over items (indexed)
+		for idx := range t.iterateIndex(boundaries, maxInsertIndex) {
+			if t.deletions.Get(idx) {
+				continue // item is on delete list
+			}
+
+			if idx < t.main_count {
+				// value from main storage
+				// check condition
+				for i, k := range ccols { // iterate over columns
+					cdataset[i] = k.GetValue(idx)
+				}
+			} else {
+				// value from delta storage
+				// prepare&call condition function
+				for i, k := range cargs { // iterate over columns
+					cdataset[i] = t.getDelta(int(idx - t.main_count), string(k.(scm.Symbol))) // fill value
+				}
+			}
 			// check condition
-			for i, k := range ccols { // iterate over columns
-				cdataset[i] = k.GetValue(idx)
+			if (!scm.ToBool(conditionFn(cdataset...))) {
+				continue // condition did not match
 			}
-		} else {
-			// value from delta storage
-			// prepare&call condition function
-			for i, k := range cargs { // iterate over columns
-				cdataset[i] = t.getDelta(int(idx - t.main_count), string(k.(scm.Symbol))) // fill value
-			}
-		}
-		// check condition
-		if (!scm.ToBool(conditionFn(cdataset...))) {
-			continue // condition did not match
-		}
 
-		result.items = append(result.items, idx)
-	}
-
-	t.mu.RUnlock() // finished reading
+			result.items = append(result.items, idx)
+		}
+	}()
 
 	// and now sort result!
 	result.sortdirs = sortdirs

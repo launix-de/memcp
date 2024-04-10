@@ -122,6 +122,7 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 	}
 	// remember current insert status (so don't scan things that are inserted during map)
 	t.mu.RLock() // lock whole shard for reading since we frequently read deletions
+	defer t.mu.RUnlock() // finished reading
 	maxInsertIndex := len(t.inserts)
 
 	// iterate over items (indexed)
@@ -175,6 +176,5 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 		akkumulator = aggregateFn(akkumulator, intermediate)
 		t.mu.RLock()
 	}
-	t.mu.RUnlock() // finished reading
 	return akkumulator
 }

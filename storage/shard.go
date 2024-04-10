@@ -157,42 +157,47 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 		//fmt.Println("update/delete", a)
 		// TODO: check foreign keys (new value of column must be present in referenced table)
 		// TODO: check foreign key removal (old value is referenced in another table)
-		t.mu.Lock() // write lock
 
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		if len(a) > 0 {
-			// update statement -> also perform an insert
-			// TODO: check if we can do in-place editing in the delta storage (if idx > t.main_count)
-			changes := a[0].([]scm.Scmer)
-			// build the whole dataset from storage
-			d2 := make([]scm.Scmer, 0, len(t.columns))
-			for k, v := range t.columns {
-				colidx, ok := t.deltaColumns[k]
-				if !ok {
-					colidx = len(t.deltaColumns)
-					t.deltaColumns[k] = colidx
+			func () {
+				t.mu.Lock() // write lock
+				defer t.mu.Unlock() // write lock
+
+				// update statement -> also perform an insert
+				// TODO: check if we can do in-place editing in the delta storage (if idx > t.main_count)
+				changes := a[0].([]scm.Scmer)
+				// build the whole dataset from storage
+				d2 := make([]scm.Scmer, 0, len(t.columns))
+				for k, v := range t.columns {
+					colidx, ok := t.deltaColumns[k]
+					if !ok {
+						colidx = len(t.deltaColumns)
+						t.deltaColumns[k] = colidx
+					}
+					for len(d2) <= colidx {
+						d2 = append(d2, nil)
+					}
+					if idx < t.main_count {
+						d2[colidx] = v.GetValue(idx)
+					} else {
+						d2[colidx] = t.getDelta(int(idx - t.main_count), k)
+					}
 				}
-				for len(d2) <= colidx {
-					d2 = append(d2, nil)
+				// now d2 contains the old col (TODO: preserve OLD and NEW for triggers or bind them to trigger variables)
+				for j := 0; j < len(changes); j += 2 {
+					colidx, ok := t.deltaColumns[scm.String(changes[j])]
+					if !ok {
+						panic("UPDATE on invalid column: " + scm.String(changes[j]))
+					}
+					if d2[colidx] != changes[j+1] {
+						d2[colidx] = changes[j+1]
+						result = true // mark that something has changed
+					}
 				}
-				if idx < t.main_count {
-					d2[colidx] = v.GetValue(idx)
-				} else {
-					d2[colidx] = t.getDelta(int(idx - t.main_count), k)
+				if !result { // only do a write if something changed
+					return // leave inner func to unlock
 				}
-			}
-			// now d2 contains the old col (TODO: preserve OLD and NEW for triggers or bind them to trigger variables)
-			for j := 0; j < len(changes); j += 2 {
-				colidx, ok := t.deltaColumns[scm.String(changes[j])]
-				if !ok {
-					panic("UPDATE on invalid column: " + scm.String(changes[j]))
-				}
-				if d2[colidx] != changes[j+1] {
-					d2[colidx] = changes[j+1]
-					result = true // mark that something has changed
-				}
-			}
-			if result { // only do a write if something changed
 				var d dataset
 				if t.t.Unique != nil || t.t.PersistencyMode == Safe {
 					// we need a dataset object (slow)
@@ -205,16 +210,19 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				// unique constraint checking
 				if t.t.Unique != nil {
 					t.t.uniquelock.Lock()
+					t.deletions.Set(idx, true) // mark as deleted
 					t.mu.Unlock() // release write lock, so the scan can be performed
 					err := t.t.GetUniqueErrorsFor(d)
 					t.mu.Lock() // write lock
 					if err != nil {
+						t.deletions.Set(idx, false) // mark as undeleted
 						t.t.uniquelock.Unlock()
 						panic(err)
 					}
+				} else {
+					t.deletions.Set(idx, true) // mark as deleted
 				}
 
-				t.deletions.Set(idx, true) // mark as deleted
 				t.inserts = append(t.inserts, d2)
 				if t.t.PersistencyMode == Safe {
 					var b strings.Builder
@@ -230,27 +238,30 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				if t.t.Unique != nil {
 					t.t.uniquelock.Unlock()
 				}
-				t.mu.Unlock()
-				if t.t.PersistencyMode == Safe {
-					defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
-				}
-				if withTrigger {
-					// TODO: before/after update trigger
-				}
+			}()
+			if t.t.PersistencyMode == Safe {
+				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
+			}
+			if withTrigger {
+				// TODO: before/after update trigger
 			}
 		} else {
 			// delete
-			t.deletions.Set(idx, true) // mark as deleted
-			if t.t.PersistencyMode == Safe {
-				var b strings.Builder
-				b.Write([]byte("delete "))
-				tmp, _ := json.Marshal(idx)
-				b.Write(tmp)
-				b.Write([]byte("\n"))
-				t.logfile.WriteString(b.String())
-			}
-			result = true
-			t.mu.Unlock()
+			func () {
+				t.mu.Lock() // write lock
+				defer t.mu.Unlock() // write lock
+
+				t.deletions.Set(idx, true) // mark as deleted
+				if t.t.PersistencyMode == Safe {
+					var b strings.Builder
+					b.Write([]byte("delete "))
+					tmp, _ := json.Marshal(idx)
+					b.Write(tmp)
+					b.Write([]byte("\n"))
+					t.logfile.WriteString(b.String())
+				}
+				result = true
+			}()
 			if t.t.PersistencyMode == Safe {
 				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 			}
