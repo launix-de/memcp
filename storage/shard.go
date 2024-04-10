@@ -75,20 +75,20 @@ func (u *storageShard) load(t *table) {
 	for _, col := range u.t.Columns {
 		if t.PersistencyMode == Memory {
 			// recreate the shards empty (because in memory-mode we forget all data)
-			u.columns[col.Name] = new(StorageSCMER)
+			u.columns[col.Name] = new(StorageSparse)
 		} else {
 			// read column from file
 			f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + col.Name)
 			if err != nil {
 				// file does not exist -> no data available
-				u.columns[col.Name] = new(StorageSCMER)
+				u.columns[col.Name] = new(StorageSparse)
 				continue
 			}
 			var magicbyte uint8 // type of that column
 			err = binary.Read(f, binary.LittleEndian, &magicbyte)
 			if err != nil {
 				// empty storage
-				u.columns[col.Name] = new(StorageSCMER)
+				u.columns[col.Name] = new(StorageSparse)
 				continue
 			}
 
@@ -138,7 +138,7 @@ func NewShard(t *table) *storageShard {
 	result.deltaColumns = make(map[string]int)
 	result.deletions.Reset()
 	for _, column := range t.Columns {
-		result.columns[column.Name] = new (StorageSCMER)
+		result.columns[column.Name] = new (StorageSparse)
 	}
 	if t.PersistencyMode == Safe {
 		f, _ := os.Create(result.t.schema.path + result.uuid.String() + ".log")
