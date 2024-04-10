@@ -307,6 +307,7 @@ func Init(en scm.Env) {
 				dimensions[i] = scm.ToInt(d)
 			}
 			typeparams := scm.String(a[5])
+			// TODO: check if column exists (and then skip to compute)
 			t.CreateColumn(colname, typename, dimensions, typeparams)
 			// todo: not null flags, PRIMARY KEY flag usw.
 			if strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
@@ -315,7 +316,8 @@ func Init(en scm.Env) {
 			}
 
 			if len(a) > 6 && a[6] != nil {
-				// TODO: computed columns
+				// computed columns (interface might not be final)
+				t.ComputeColumn(colname, a[6])
 			}
 			
 			return true

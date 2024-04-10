@@ -16,12 +16,17 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "runtime/debug"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
 	r interface{}
 	stack string
+}
+
+func (s scanError) Error() string {
+	return fmt.Sprint(s.r) + "\n" + s.stack // room for improvement
 }
 
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
