@@ -17,6 +17,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 package storage
 
 import "os"
+import "fmt"
 import "sync"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
@@ -48,27 +49,33 @@ func LoadDatabases() {
 			db := new(database)
 			db.path = Basepath + "/" + entry.Name() + "/"
 			jsonbytes, _ := os.ReadFile(db.path + "schema.json")
-			json.Unmarshal(jsonbytes, db) // json import
-			// restore back references of the tables
-			for _, t := range db.Tables.GetAll() {
-				t.schema = db // restore schema reference
-				for _, s := range t.Shards {
-					go func(t *table, s *storageShard) {
-						s.load(t)
-						done <- true
-					}(t, s)
+			if len(jsonbytes) == 0 {
+				fmt.Println("Warning: database " + entry.Name() + " is empty")
+			} else {
+				json.Unmarshal(jsonbytes, db) // json import
+				// restore back references of the tables
+				for _, t := range db.Tables.GetAll() {
+					t.schema = db // restore schema reference
+					for _, s := range t.Shards {
+						go func(t *table, s *storageShard) {
+							s.load(t)
+							done <- true
+						}(t, s)
+					}
 				}
+				databases.Set(db)
 			}
-			databases.Set(db)
 		}
 	}
 	// wait for all loading go routines to finish
 	for _, entry := range entries {
 		if entry.IsDir() {
 			db := databases.Get(entry.Name())
-			for _, t := range db.Tables.GetAll() {
-				for range t.Shards {
-					<-done // wait for shard
+			if db != nil {
+				for _, t := range db.Tables.GetAll() {
+					for range t.Shards {
+						<-done // wait for shard
+					}
 				}
 			}
 		}
