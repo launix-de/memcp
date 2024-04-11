@@ -50,6 +50,10 @@ func LoadDatabases() {
 			db.path = Basepath + "/" + entry.Name() + "/"
 			jsonbytes, _ := os.ReadFile(db.path + "schema.json")
 			if len(jsonbytes) == 0 {
+				// try to load backup (in case of failure while save)
+				jsonbytes, _ = os.ReadFile(db.path + "schema.json.old")
+			}
+			if len(jsonbytes) == 0 {
 				fmt.Println("Warning: database " + entry.Name() + " is empty")
 			} else {
 				json.Unmarshal(jsonbytes, db) // json import
@@ -84,6 +88,7 @@ func LoadDatabases() {
 
 func (db *database) save() {
 	os.MkdirAll(db.path, 0750)
+	os.Rename(db.path + "schema.json", db.path + "schema.json.old")
 	f, err := os.Create(db.path + "schema.json")
 	if err != nil {
 		panic(err)
