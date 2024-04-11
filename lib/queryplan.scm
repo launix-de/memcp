@@ -192,13 +192,14 @@ if there is a group function, create a temporary preaggregate table
 					'((quote begin)
 						/* insert group cols into preaggregate */
 						/* TODO: replace hardcoded column name with extracted value */
-						'((quote scan) schema tbl (build_condition schema tbl condition) '((quote lambda) '((symbol "g")) '((quote insert) schema grouptbl '(list "(get_column nil g)" (symbol "g")) true)))
+						/* TODO: recurse over build_queryplan and insert into grouptbl */
+						'((quote scan) schema tbl (build_condition schema tbl condition) '((quote lambda) '((symbol "i")) '((quote insert) schema grouptbl '(list "(get_column nil i)" (symbol "i")) true)))
 
 						/* TODO: add scan values */
-						/* (createcolumn schema grouptbl "g" "any" '() '() (lambda (g) (scan "test" "g" (lambda (g) (equal? g (outer g))) (lambda (v) v) + 0)) */
+						'((quote createcolumn) schema grouptbl "sumv" "any" '(list) '(list) '((quote lambda) '((symbol "(get_column nil i)")) '((quote scan) "test" "g" '((quote lambda) '((symbol "i")) '((quote equal?) (symbol "i") '((quote outer) (symbol "(get_column nil i)")))) '((quote lambda) '((symbol "v")) (symbol "v")) + 0)))
 
 						/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
-						'((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) '((symbol "(get_column nil g)")) '((quote resultrow) '(list "g" (symbol "(get_column nil g)")))))
+						'((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) '((symbol "(get_column nil i)") (quote sumv)) '((quote resultrow) '(list "i" (symbol "(get_column nil i)") "sumv" (quote sumv)))))
 							       /*(cons (quote list) (map_assoc fields (lambda (key value) (expr_replace_aggregate value indexmap)))))*/
 					)
 				)

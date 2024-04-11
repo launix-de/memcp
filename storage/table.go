@@ -28,7 +28,7 @@ type column struct {
 	Typ string
 	Typdimensions []int // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	Extrainfo string // TODO: further diversify into NOT NULL, AUTOINCREMENT etc.
-	Computor scm.Scmer // TODO: marshaljson -> serialize
+	Computor scm.Scmer `json:"-"` // TODO: marshaljson -> serialize
 }
 type PersistencyMode uint8
 const (
@@ -154,14 +154,22 @@ func (d dataset) Get(key string) scm.Scmer {
 	return nil
 }
 
-func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo string) {
+func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo string) bool {
 	t.schema.schemalock.Lock()
+	defer t.schema.schemalock.Unlock()
+
+	for _, c := range t.Columns {
+		if c.Name == name {
+			return false // column already exists
+		}
+	}
+	
 	t.Columns = append(t.Columns, column{name, typ, typdimensions, extrainfo, nil})
 	for _, s := range t.Shards {
 		s.columns[name] = new (StorageSparse)
 	}
 	t.schema.save()
-	t.schema.schemalock.Unlock()
+	return true
 }
 
 func (t *table) DropColumn(name string) bool {

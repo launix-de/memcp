@@ -308,9 +308,9 @@ func Init(en scm.Env) {
 			}
 			typeparams := scm.String(a[5])
 			// TODO: check if column exists (and then skip to compute)
-			t.CreateColumn(colname, typename, dimensions, typeparams)
+			ok := t.CreateColumn(colname, typename, dimensions, typeparams)
 			// todo: not null flags, PRIMARY KEY flag usw.
-			if strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
+			if ok && strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
 				// append unique key
 				t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
 			}
@@ -320,7 +320,7 @@ func Init(en scm.Env) {
 				t.ComputeColumn(colname, a[6])
 			}
 			
-			return true
+			return ok
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

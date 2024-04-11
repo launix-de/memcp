@@ -16,16 +16,18 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "runtime/debug"
 import "github.com/launix-de/memcp/scm"
 
 func (t *table) ComputeColumn(name string, computor scm.Scmer) {
+	fmt.Println("cc "+name)
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// found the column
 			t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 			done := make(chan error, 6)
-			for _, s := range t.Shards {
+			for i, s := range t.Shards {
 				go func() {
 					defer func () {
 						if r := recover(); r != nil {
@@ -33,7 +35,13 @@ func (t *table) ComputeColumn(name string, computor scm.Scmer) {
 							done <- scanError{r, string(debug.Stack())}
 						}
 					}()
-					s.ComputeColumn(name, computor)
+					for !s.ComputeColumn(name, computor) {
+						// couldn't compute column because delta is still active
+						t.mu.Lock()
+						s = s.rebuild()
+						t.Shards[i] = s
+						t.mu.Unlock()
+					}
 					done <- nil
 				}()
 			}
@@ -49,11 +57,14 @@ func (t *table) ComputeColumn(name string, computor scm.Scmer) {
 	panic("column "+t.Name+"."+name+" does not exist")
 }
 
-func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) {
-	s = s.rebuild() // flush delta storage
-
+func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
+		return false // can't compute in shards with delta storage
+	}
+	fmt.Println("cs "+name)
+
 	fn := scm.OptimizeProcToSerialFunction(computor)
 	param_names := computor.(scm.Proc).Params.([]scm.Scmer)
 	cols := make([]ColumnStorage, len(param_names))
@@ -73,6 +84,7 @@ func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) {
 		}
 		s.mu.Unlock()
 		vals[i] = fn(colvalues...) // execute computor kernel
+		fmt.Println("poke",vals[i])
 		s.mu.Lock()
 	}
 
@@ -80,4 +92,5 @@ func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) {
 	store.values = vals
 	s.columns[name] = store
 	// TODO: decide whether to rebuild optimized store
+	return true
 }
