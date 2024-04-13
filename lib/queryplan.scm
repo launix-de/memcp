@@ -207,7 +207,7 @@ if there is a group function, create a temporary preaggregate table
 					/* preparation */
 					/* changes (get_column tblvar col) into its counterpart */
 					(define replace_columns_agg_expr (lambda (expr) (match expr
-						'((symbol aggregate) item reduce neutral) (symbol (concat (expr))) /* aggregate helper column */
+						'((symbol aggregate) item reduce neutral) (symbol (concat expr)) /* aggregate helper column */
 						'((symbol get_column) tblvar col) (symbol (concat expr)) /* grouped col */
 						(cons sym args) /* function call */ (cons sym (map args replace_columns_agg_expr))
 						expr /* literals */
