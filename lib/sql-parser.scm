@@ -106,6 +106,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '((quote password) p))
 		/* TODO: function call */
 
+		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
+
 		(parser (atom "NULL" true) nil)
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)

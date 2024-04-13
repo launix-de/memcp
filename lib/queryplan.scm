@@ -242,9 +242,9 @@ if there is a group function, create a temporary preaggregate table
 						/* TODO: HAVING */
 						'('((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) (merge
 							/* group columns */
-							'((symbol "(get_column nil a)"))
+							(map group (lambda (col) (symbol (concat col))))
 							/* aggregates */
-							'((symbol "((get_column nil b) + 0)"))
+							(map ags (lambda (ag) (symbol (concat ag))))
 						) '((quote resultrow) (cons (quote list) (map_assoc fields (lambda (col expr) (replace_columns_agg_expr expr))))))))
 					)
 				)
