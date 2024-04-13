@@ -88,7 +88,10 @@ func LoadDatabases() {
 
 func (db *database) save() {
 	os.MkdirAll(db.path, 0750)
-	os.Rename(db.path + "schema.json", db.path + "schema.json.old")
+	if stat, err := os.Stat(db.path + "schema.json"); err != nil && stat.Size() > 0 {
+		// rescue a copy of schema.json in case the schema is not serializable
+		os.Rename(db.path + "schema.json", db.path + "schema.json.old")
+	}
 	f, err := os.Create(db.path + "schema.json")
 	if err != nil {
 		panic(err)

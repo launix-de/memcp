@@ -301,3 +301,4 @@ Normally, REST applications are implemented in any programming language, make a 
 - [Sequence Compression in In-Memory Database](https://launix.de/launix/sequence-compression-in-in-memory-database-yields-99-memory-savings-and-a-total-of-13/)
 - [Storing Data Smaller Than One Bit](https://launix.de/launix/storing-a-bit-smaller-than-in-one-bit/)
 - [memcp Announcement Video](https://www.youtube.com/watch?v=DWg4nx4KVLo)
+- https://wwwdb.inf.tu-dresden.de/research-projects/eris/
