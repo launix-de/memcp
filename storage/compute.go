@@ -16,12 +16,10 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package storage
 
-import "fmt"
 import "runtime/debug"
 import "github.com/launix-de/memcp/scm"
 
 func (t *table) ComputeColumn(name string, computor scm.Scmer) {
-	fmt.Println("cc "+name)
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// found the column
@@ -63,7 +61,6 @@ func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) bool {
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		return false // can't compute in shards with delta storage
 	}
-	fmt.Println("cs "+name)
 
 	fn := scm.OptimizeProcToSerialFunction(computor)
 	param_names := computor.(scm.Proc).Params.([]scm.Scmer)
@@ -84,7 +81,6 @@ func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) bool {
 		}
 		s.mu.Unlock()
 		vals[i] = fn(colvalues...) // execute computor kernel
-		fmt.Println("poke",vals[i])
 		s.mu.Lock()
 	}
 
