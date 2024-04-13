@@ -126,8 +126,11 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values to add"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := ToFloat(a[0])
-			for _, i := range a[1:] {
+			v := float64(0)
+			for _, i := range a {
+				if i == nil {
+					return nil
+				}
 				v += ToFloat(i)
 			}
 			return v

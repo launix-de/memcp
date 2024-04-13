@@ -80,10 +80,10 @@ if there is a group function, create a temporary preaggregate table
 	(nil? expr)
 	'((quote lambda) '() (quote nil))
 	(begin
-		(set cols (extract_columns_from_expr condition))
+		(set cols (extract_columns_from_expr expr))
 		(set cols (map cols (lambda (x) (match x '(tblvar col) (symbol col))))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
 
-		/* return lambda for tbl condition */
+		/* return lambda for tbl expr */
 		'((quote lambda) cols (replace_columns_from_expr expr))
 	)
 )))
@@ -138,6 +138,13 @@ if there is a group function, create a temporary preaggregate table
 	(define extract_columns (lambda (col expr) (match expr
 		'((symbol get_column) tblvar col) '('(tblvar col))
 		(cons sym args) /* function call */ (merge (map args extract_columns_from_expr)) /* TODO: use collector */
+		'()
+	)))
+
+	/* returns a list of '(string...) */
+	(define extract_columns_for_tblvar (lambda (tblvar expr) (match expr
+		'((symbol get_column) tblvar col) '(col)
+		(cons sym args) /* function call */ (merge (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg)))) /* TODO: merge unique */
 		'()
 	)))
 
@@ -207,11 +214,13 @@ if there is a group function, create a temporary preaggregate table
 					/* preparation */
 					/* changes (get_column tblvar col) into its counterpart */
 					(define replace_columns_agg_expr (lambda (expr) (match expr
-						'((symbol aggregate) item reduce neutral) (symbol (concat expr)) /* aggregate helper column */
+						(cons (symbol aggregate) rest) (symbol (concat rest)) /* aggregate helper column */
 						'((symbol get_column) tblvar col) (symbol (concat expr)) /* grouped col */
 						(cons sym args) /* function call */ (cons sym (map args replace_columns_agg_expr))
 						expr /* literals */
 					)))
+
+					(define tblvar_cols (merge (map group (lambda (col) (extract_columns_for_tblvar tblvar col))))) /* TODO: merge unique */
 
 					(merge
 						'((quote begin)
@@ -224,17 +233,18 @@ if there is a group function, create a temporary preaggregate table
 
 						/* compute aggregates */
 						(map ags (lambda (ag) (match ag '(expr reduce neutral)
-							'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) '(list) '((quote lambda) '((symbol (concat expr))) 
+							'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
 								/* TODO: recurse build_queryplan? */
-								'((quote scan) schema tbl '((quote lambda) (cons (quote list) (map group (lambda (col) (symbol (concat col))))) (cons (quote and) (map group (lambda (col) '((quote equal?) (symbol (concat col)) '((quote outer) (symbol (concat col)))))))) (build_expr schema tbl expr) reduce neutral)))
+								'((quote scan) schema tbl '((quote lambda) (map tblvar_cols (lambda (col) (symbol (concat col)))) (cons (quote and) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col)))))))) (build_expr schema tbl expr) reduce neutral)))
 						)))
 
 						/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
 						/* TODO: HAVING */
 						'('((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) (merge
 							/* group columns */
-							'('((symbol "(get_column nil a)")))
+							'((symbol "(get_column nil a)"))
 							/* aggregates */
+							'((symbol "((get_column nil b) + 0)"))
 						) '((quote resultrow) (cons (quote list) (map_assoc fields (lambda (col expr) (replace_columns_agg_expr expr))))))))
 					)
 				)
