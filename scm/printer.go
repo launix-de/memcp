@@ -149,7 +149,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 	case Symbol:
 		// print as Symbol (because we already used a begin-block for defining our env)
 		if strings.Contains(string(v), " ") || strings.Contains(string(v), "(") || strings.Contains(string(v), ")") || strings.Contains(string(v), "\"") {
-			b.WriteString("(symbol \"")
+			b.WriteString("(unquote \"")
 			b.WriteString(strings.Replace(string(v), "\"", "\\\"", -1))
 			b.WriteString("\")")
 		} else {

@@ -40,19 +40,22 @@ if there is a group function, create a temporary preaggregate table
 
 */
 
+/* returns a list of '(tblvar col) of all get_column present in expr */
 (define extract_columns_from_expr (lambda (expr) (match expr
 	'((symbol get_column) tblvar col) '('(tblvar col))
 	(cons sym args) /* function call */ (merge (map args extract_columns_from_expr))
 	'()
 )))
 
+/* returns expr with get_column replaced by the correct variable */
 (define replace_columns_from_expr (lambda (expr) (match expr
-	(cons (symbol aggregate) args) /* aggregates: keep unchanged */ (cons aggregate args)
+	(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
 	'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
 	(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 	expr /* literals */
 )))
 
+/* returns a list of all aggregates in this expr */
 (define extract_aggregates (lambda (expr) (match expr
 	(cons (symbol aggregate) args) '(args)
 	(cons sym args) /* function call */ (merge (map args extract_aggregates))
@@ -70,6 +73,18 @@ if there is a group function, create a temporary preaggregate table
 
 		/* return lambda for tbl condition */
 		'((quote lambda) cols (replace_columns_from_expr condition))
+	)
+)))
+
+(define build_expr (lambda (schema table expr) (if
+	(nil? expr)
+	'((quote lambda) '() (quote nil))
+	(begin
+		(set cols (extract_columns_from_expr condition))
+		(set cols (map cols (lambda (x) (match x '(tblvar col) (symbol col))))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
+
+		/* return lambda for tbl condition */
+		'((quote lambda) cols (replace_columns_from_expr expr))
 	)
 )))
 
@@ -92,15 +107,15 @@ if there is a group function, create a temporary preaggregate table
 (define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
 	/* tables: '('(alias schema tbl) ...) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
-	/* TODO: GROUP, HAVING,  */
 	/* expressions will use (get_column tblvar col) for reading from columns. we have to replace it with the correct variable */
 	/* TODO: unnest arbitrary queries -> turn them into a big schema+tables+fields+condition */
 
 	/*
 		Query builder masterplan:
 		1. make sure all optimizations are done (unnesting arbitrary queries, leave just one big table list with a field list, conditions, as well as a order+limit+offset)
-		2. if order+limit+offset -> find or create all tables that have to be nestedly scanned. if two tables are clumsed together, create a prejoin. recurse over build_queryplan without the order clause.
-		3. if group stage -> find or create the preaggregate table, scan over the preaggregate
+		2. if order+limit+offset is present: split the queryplan into providing a scannable tableset and a ordered scan on that tableset
+		   -> find or create all tables that have to be nestedly scanned. if two tables are clumsed together, create a prejoin. recurse over build_queryplan without the order clause.
+		3. if group is present: split the queryplan into filling the grouped table and scanning it -> find or create the preaggregate table, scan over the preaggregate
 		4. scan the rest of the tables
 
 	*/
@@ -144,7 +159,6 @@ if there is a group function, create a temporary preaggregate table
 		(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) 1 nil)))
 
 		(if group (begin
-			/* TOOD: find or create preaggregate table, scan over preaggregate */
 			(define ags (extract_aggregates_assoc fields))
 			(define build_indexmap (lambda (expr ags) (match ags
 				(cons head tail) (cons (string head) (cons '((quote car) expr) (build_indexmap '((quote cdr) expr) tail)))
@@ -152,7 +166,7 @@ if there is a group function, create a temporary preaggregate table
 			)))
 			(define indexmap (match ags '('(expr reduce neutral)) '((string '(expr reduce neutral)) (quote ags)) (build_indexmap (quote ags) ags)))
 			(if (equal? group 1) (begin
-				/* one implemented corner case; TODO: recursively go through the scan tables */
+				/* group 1 -> merge all items into one and return only one tuple */
 				(set columns (merge (extract_assoc fields extract_columns)))
 				(define build_reducer (lambda (ags) (begin
 					'((quote lambda) (quote p) '((quote match) (quote p) '((quote list)
@@ -179,28 +193,49 @@ if there is a group function, create a temporary preaggregate table
 					'((quote resultrow) (cons (quote list) (map_assoc fields (lambda (key value) (expr_replace_aggregate value indexmap)))))
 				)
 			) (match tables
+				/* TODO: allow for more than just group by single table */
 				'('(tblvar schema tbl)) (begin
-					/* TODO: check if there is a foreign key on tbl.groupcol */
-
 					/* prepare preaggregate */
+
+					/* TODO: check if there is a foreign key on tbl.groupcol and then reuse that table */
 					(set grouptbl (concat "." tbl ":" group))
 					(createtable schema grouptbl (cons
 						/* unique key over all identiying columns */ '("unique" "group" (map group (lambda (col) (concat col))))
 						/* all identifying columns */ (map group (lambda (col) '("column" (concat col) "any"/* TODO get type from schema */ '() '())))
 					) '("engine" "sloppy") true)
 
-					'((quote begin)
-						/* insert group cols into preaggregate */
-						/* TODO: replace hardcoded column name with extracted value */
-						/* TODO: recurse over build_queryplan and insert into grouptbl */
-						'((quote scan) schema tbl (build_condition schema tbl condition) '((quote lambda) '((symbol "i")) '((quote insert) schema grouptbl '(list "(get_column nil i)" (symbol "i")) true)))
+					/* preparation */
+					/* changes (get_column tblvar col) into its counterpart */
+					(define replace_columns_agg_expr (lambda (expr) (match expr
+						'((symbol aggregate) item reduce neutral) (symbol (concat (expr))) /* aggregate helper column */
+						'((symbol get_column) tblvar col) (symbol (concat expr)) /* grouped col */
+						(cons sym args) /* function call */ (cons sym (map args replace_columns_agg_expr))
+						expr /* literals */
+					)))
 
-						/* TODO: add scan values */
-						'((quote createcolumn) schema grouptbl "sumv" "any" '(list) '(list) '((quote lambda) '((symbol "(get_column nil i)")) '((quote scan) "test" "g" '((quote lambda) '((symbol "i")) '((quote equal?) (symbol "i") '((quote outer) (symbol "(get_column nil i)")))) '((quote lambda) '((symbol "v")) (symbol "v")) + 0)))
+					(merge
+						'((quote begin)
+							/* INSERT IGNORE group cols into preaggregate */
+							'((quote begin)
+								'((quote set) (quote resultrow) '((quote lambda) '((quote item)) '((quote insert) schema grouptbl (quote item) true)))
+								(build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) nil nil nil nil nil nil) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
+							)
+						)
+
+						/* compute aggregates */
+						(map ags (lambda (ag) (match ag '(expr reduce neutral)
+							'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) '(list) '((quote lambda) '((symbol (concat expr))) 
+								/* TODO: recurse build_queryplan? */
+								'((quote scan) schema tbl '((quote lambda) (cons (quote list) (map group (lambda (col) (symbol (concat col))))) (cons (quote and) (map group (lambda (col) '((quote equal?) (symbol (concat col)) '((quote outer) (symbol (concat col)))))))) (build_expr schema tbl expr) reduce neutral)))
+						)))
 
 						/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
-						'((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) '((symbol "(get_column nil i)") (quote sumv)) '((quote resultrow) '(list "i" (symbol "(get_column nil i)") "sumv" (quote sumv)))))
-							       /*(cons (quote list) (map_assoc fields (lambda (key value) (expr_replace_aggregate value indexmap)))))*/
+						/* TODO: HAVING */
+						'('((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) (merge
+							/* group columns */
+							'('((symbol "(get_column nil a)")))
+							/* aggregates */
+						) '((quote resultrow) (cons (quote list) (map_assoc fields (lambda (col expr) (replace_columns_agg_expr expr))))))))
 					)
 				)
 				(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */

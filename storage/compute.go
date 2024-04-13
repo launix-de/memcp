@@ -56,9 +56,9 @@ func (t *table) ComputeColumn(name string, computor scm.Scmer) {
 }
 
 func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.Lock() // don't defer because we unlock inbetween
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
+		s.mu.Unlock()
 		return false // can't compute in shards with delta storage
 	}
 
@@ -87,6 +87,7 @@ func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) bool {
 	store := new(StorageSCMER)
 	store.values = vals
 	s.columns[name] = store
+	s.mu.Unlock()
 	// TODO: decide whether to rebuild optimized store
 	return true
 }

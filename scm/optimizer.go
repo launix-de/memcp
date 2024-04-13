@@ -154,15 +154,31 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 				if v[0] == Symbol("var") && len(v) == 2 {
 					return NthLocalVar(ToInt(v[1]))
 				}
+				// (unquote s) is a serialization artifact
+				if v[0] == Symbol("unquote") && len(v) == 2 {
+					if s, ok := v[1].(string); ok {
+						return Symbol(s) // replace with the symbol directly
+					}
+				}
 				// analyze lambdas (but don't pack them into *Proc since they need a fresh env)
 				if v[0] == Symbol("lambda") {
+					// normalize header and strip meta info
 					switch si := v[1].(type) {
 						case SourceInfo:
 							// strip SourceInfo from lambda declarations
 							v[1] = si.value
 					}
-					// optimize body
 					ome2 := ome.Copy()
+					if l, ok := v[1].([]Scmer); ok {
+						emptyome := newOptimizerMetainfo()
+						for i, item := range l {
+							l[i] = OptimizeEx(item, nil, &emptyome)
+							ome2.RemoveSymbolsFromTree(l[i]) // remove overrides
+						}
+					} else {
+						ome2.RemoveSymbolsFromTree(v[1]) // remove overrides
+					}
+					// optimize body
 					/* TODO: reactivate this code once the corner case of double nested scopes is solved
 					numVars := 0
 					if len(v) == 4 {
