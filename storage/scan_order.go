@@ -288,7 +288,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	// and now sort result!
 	result.sortdirs = sortdirs
 	// TODO: find conditions when exactly we don't need to sort anymore (fully covered indexes, no inserts); the same condition could be used to exit early during iterateIndex
-	if maxInsertIndex > 0 || true {
+	if (maxInsertIndex > 0 || true) && len(sortcols) > 0 {
 		sort.Sort(result)
 	}
 	return
