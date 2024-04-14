@@ -217,13 +217,13 @@ func (t *table) Insert(d dataset, ignoreexists bool, mergeNull bool) bool {
 	// check unique constraints in a thread safe manner
 	if len(t.Unique) > 0 {
 		t.uniquelock.Lock()
-		err := t.GetUniqueErrorsFor(d, mergeNull)
-		if err != nil {
+		uniq_collision := t.GetUniqueCollisionFor(d, mergeNull)
+		if uniq_collision != "" {
 			t.uniquelock.Unlock()
 			if ignoreexists {
 				return false
 			} else {
-				panic(err)
+				panic("Unique key constraint violated in table "+t.Name+": " + uniq_collision)
 			}
 		}
 		// physically insert
@@ -238,8 +238,8 @@ func (t *table) Insert(d dataset, ignoreexists bool, mergeNull bool) bool {
 	return true
 }
 
-// TODO: refactor to "has" (cols, dataset)
-func (t *table) GetUniqueErrorsFor(d dataset, mergeNull bool) scm.Scmer {
+// TODO: refactor to "has" (cols, dataset); returns the id of the unique key
+func (t *table) GetUniqueCollisionFor(d dataset, mergeNull bool) string {
 	// check for duplicates
 	for _, uniq := range t.Unique {
 		// build scan for unique check
@@ -259,8 +259,8 @@ func (t *table) GetUniqueErrorsFor(d dataset, mergeNull bool) scm.Scmer {
 		}
 		condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
 		if t.scan(condition, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false) != false {
-			return "Unique key constraint violated in table "+t.Name+": " + uniq.Id
+			return uniq.Id
 		}
 	}
-	return nil
+	return ""
 }

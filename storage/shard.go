@@ -212,12 +212,12 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					t.t.uniquelock.Lock()
 					t.deletions.Set(idx, true) // mark as deleted
 					t.mu.Unlock() // release write lock, so the scan can be performed
-					err := t.t.GetUniqueErrorsFor(d, false)
+					uniq_collision := t.t.GetUniqueCollisionFor(d, false)
 					t.mu.Lock() // write lock
-					if err != nil {
+					if uniq_collision != "" {
 						t.deletions.Set(idx, false) // mark as undeleted
 						t.t.uniquelock.Unlock()
-						panic(err)
+						panic("Unique key constraint violated in table "+t.t.Name+": " + uniq_collision)
 					}
 				} else {
 					t.deletions.Set(idx, true) // mark as deleted
