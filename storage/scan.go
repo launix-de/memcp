@@ -40,7 +40,7 @@ func (s scanError) Error() string {
 // map reduce implementation based on scheme scripts
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer) scm.Scmer {
 	/* analyze query */
-	boundaries := extractBoundaries(condition)
+	boundaries := extractBoundaries(conditionCols, condition)
 
 	values := make(chan scm.Scmer, 4)
 	rest := 0

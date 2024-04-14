@@ -27,7 +27,12 @@ type columnboundaries struct{
 type boundaries []columnboundaries
 
 // analyzes a lambda expression for value boundaries, so the best index can be found
-func extractBoundaries(condition scm.Scmer) boundaries {
+func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
+	p := condition.(scm.Proc)
+	symbolmapping := make(map[scm.Symbol]string)
+	for i, sym := range p.Params.([]scm.Scmer) {
+		symbolmapping[sym.(scm.Symbol)] = conditionCols[i]
+	}
 	cols := make([]columnboundaries, 0, 4)
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
@@ -54,10 +59,12 @@ func extractBoundaries(condition scm.Scmer) boundaries {
 				if v[0] == scm.Symbol("equal?") {
 					// equi
 					switch v1 := v[1].(type) {
-						case scm.Symbol: // TODO: check if v1 is part of condition.(scm.Proc).Params
-							if v2, ok := extractConstant(v[2]); ok {
-								// ?equal var const
-								cols = append(cols, columnboundaries{string(v1), v2, v2})
+						case scm.Symbol:
+							if col, ok := symbolmapping[v1]; ok { // left is a column
+								if v2, ok := extractConstant(v[2]); ok { // right is a constant
+									// ?equal var const
+									cols = append(cols, columnboundaries{col, v2, v2})
+								}
 							}
 						// TODO: equals constant vs. column
 					}
@@ -72,7 +79,7 @@ func extractBoundaries(condition scm.Scmer) boundaries {
 				// TODO: variable expressions that can be expanded
 		}
 	}
-	traverseCondition(condition.(scm.Proc).Body) // recursive analysis over condition
+	traverseCondition(p.Body) // recursive analysis over condition
 	return cols
 }
 

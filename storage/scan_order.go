@@ -94,7 +94,7 @@ func (s *globalqueue) Pop() any {
 func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 
 	/* analyze condition query */
-	boundaries := extractBoundaries(condition)
+	boundaries := extractBoundaries(conditionCols, condition)
 	// TODO: append sortcols to boundaries
 
 	// TODO: sortcols that are not just simple columns but complex lambda expressions could be temporarily materialized to trade memory for execution time
