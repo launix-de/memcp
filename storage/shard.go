@@ -43,7 +43,8 @@ type storageShard struct {
 	mu sync.RWMutex // delta write lock (working on main storage is lock free)
 	next *storageShard
 	// indexes
-	indexes []*StorageIndex
+	indexes []*StorageIndex // sorted keys
+	hashmaps1 map[string]map[scm.Scmer]uint // hashmaps for single columned unique keys
 }
 
 func (s *storageShard) Size() uint {
@@ -65,6 +66,7 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 	u.uuid.UnmarshalText(data)
 	u.columns = make(map[string]ColumnStorage)
 	u.deltaColumns = make(map[string]int)
+	u.hashmaps1 = make(map[string]map[scm.Scmer]uint)
 	u.deletions.Reset()
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
@@ -136,6 +138,7 @@ func NewShard(t *table) *storageShard {
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
 	result.deltaColumns = make(map[string]int)
+	result.hashmaps1 = make(map[string]map[scm.Scmer]uint)
 	result.deletions.Reset()
 	for _, column := range t.Columns {
 		result.columns[column.Name] = new (StorageSparse)
@@ -324,19 +327,51 @@ func (t *storageShard) insertDataset(d dataset) []scm.Scmer {
 	result := make([]scm.Scmer, 0, len(t.deltaColumns))
 	for i := 0; i < len(d); i += 2 {
 		// copy all dataset entries into packed array
-		colidx, ok := t.deltaColumns[scm.String(d[i])]
+		column := scm.String(d[i])
+		colidx, ok := t.deltaColumns[column]
 		if !ok {
 			// acquire new column
 			colidx = len(t.deltaColumns)
-			t.deltaColumns[scm.String(d[i])] = colidx
+			t.deltaColumns[column] = colidx
 		}
 		for len(result) <= colidx {
 			result = append(result, nil)
 		}
 		result[colidx] = d[i+1]
+
+		// if column has a unique key, insert into hashmap
+		if hm, ok := t.hashmaps1[column]; ok {
+			hm[d[i+1]] = uint(len(t.inserts)) + t.main_count
+		}
 	}
 	t.inserts = append(t.inserts, result)
 	return result
+}
+
+func (t *storageShard) GetRecordidForUnique(column string, value scm.Scmer) (result uint, present bool) {
+	t.mu.RLock()
+	hm, ok := t.hashmaps1[column]
+	if !ok {
+		// no hashmap entry? create the hashmap
+		t.mu.RUnlock()
+		t.mu.Lock()
+		hm := make(map[scm.Scmer]uint)
+		col := t.columns[column]
+		for i := uint(0); i < t.main_count; i++ {
+			hm[col.GetValue(i)] = i
+		}
+		dcolid := t.deltaColumns[column]
+		for i := uint(0); i < uint(len(t.inserts)); i++ {
+			hm[dcolid] = i + t.main_count
+		}
+		t.hashmaps1[column] = hm
+		t.mu.Unlock()
+		return t.GetRecordidForUnique(column, value) // retry
+	}
+
+	result, present = hm[value] // read recid from hashmap
+	t.mu.RUnlock()
+	return
 }
 
 func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
@@ -408,6 +443,7 @@ func (t *storageShard) rebuild() *storageShard {
 		// prepare delta storage
 		result.columns = make(map[string]ColumnStorage)
 		result.deltaColumns = make(map[string]int)
+		result.hashmaps1 = make(map[string]map[scm.Scmer]uint)
 		result.deletions.Reset()
 		if t.t.PersistencyMode == Safe {
 			// safe mode: also write all deltas to disk
@@ -522,6 +558,7 @@ func (t *storageShard) rebuild() *storageShard {
 		result.inserts = t.inserts
 		result.deletions = deletions
 		result.indexes = t.indexes
+		result.hashmaps1 = t.hashmaps1
 	}
 	return result
 }

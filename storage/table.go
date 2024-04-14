@@ -242,24 +242,34 @@ func (t *table) Insert(d dataset, ignoreexists bool, mergeNull bool) bool {
 func (t *table) GetUniqueCollisionFor(d dataset, mergeNull bool) string {
 	// check for duplicates
 	for _, uniq := range t.Unique {
-		// build scan for unique check
-		cols := make([]scm.Scmer, len(uniq.Cols))
-		for i, c := range uniq.Cols {
-			cols[i] = scm.Symbol(c)
-		}
-		conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
-		conditionBody[0] = scm.Symbol("and")
-		for i, c := range uniq.Cols {
-			value := d.Get(c)
-			if !mergeNull && value == nil {
-				conditionBody[i + 1] = false // NULL can be there multiple times
-			} else {
-				conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.NthLocalVar(i), value}
+		if len(uniq.Cols) == 1 {
+			// use hashmap
+			for _, s := range t.Shards {
+				uid, present := s.GetRecordidForUnique(uniq.Cols[0], d.Get(uniq.Cols[0]))
+				if present && !s.deletions.Get(uid) {
+					return uniq.Id
+				}
 			}
-		}
-		condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-		if t.scan(condition, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false) != false {
-			return uniq.Id
+		} else {
+			// build scan for unique check
+			cols := make([]scm.Scmer, len(uniq.Cols))
+			for i, c := range uniq.Cols {
+				cols[i] = scm.Symbol(c)
+			}
+			conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
+			conditionBody[0] = scm.Symbol("and")
+			for i, c := range uniq.Cols {
+				value := d.Get(c)
+				if !mergeNull && value == nil {
+					conditionBody[i + 1] = false // NULL can be there multiple times
+				} else {
+					conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.NthLocalVar(i), value}
+				}
+			}
+			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
+			if t.scan(condition, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false) != false {
+				return uniq.Id
+			}
 		}
 	}
 	return ""
