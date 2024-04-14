@@ -212,7 +212,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					t.t.uniquelock.Lock()
 					t.deletions.Set(idx, true) // mark as deleted
 					t.mu.Unlock() // release write lock, so the scan can be performed
-					err := t.t.GetUniqueErrorsFor(d)
+					err := t.t.GetUniqueErrorsFor(d, false)
 					t.mu.Lock() // write lock
 					if err != nil {
 						t.deletions.Set(idx, false) // mark as undeleted

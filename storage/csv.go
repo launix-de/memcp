@@ -56,7 +56,7 @@ func LoadCSV(schema, table, filename, delimiter string) {
 					x[2*i+1] = scm.Simplify(arr[i])
 				}
 			}
-			t.Insert(x, true)
+			t.Insert(x, true, false)
 		}
 	}
 }

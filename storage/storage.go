@@ -371,12 +371,13 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table",
-		3, 4,
+		3, 5,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
 			scm.DeclarationParameter{"row", "list", "list of the pattern '(\"col1\" value1 \"col2\" value2)"},
 			scm.DeclarationParameter{"ignoreexists", "bool", "if true, it will return false on duplicate keys instead of throwing an error"},
+			scm.DeclarationParameter{"mergeNull", "bool", "if true, it will handle NULL values as equal"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
@@ -387,7 +388,11 @@ func Init(en scm.Env) {
 			if (len(a) > 3 && scm.ToBool(a[3])) {
 				ignoreexists = true
 			}
-			return db.Tables.Get(scm.String(a[1])).Insert(dataset(a[2].([]scm.Scmer)), ignoreexists)
+			mergeNull := false
+			if (len(a) > 4 && scm.ToBool(a[4])) {
+				mergeNull = true
+			}
+			return db.Tables.Get(scm.String(a[1])).Insert(dataset(a[2].([]scm.Scmer)), ignoreexists, mergeNull)
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

@@ -80,7 +80,7 @@ func LoadJSON(schema, filename string) {
 						x[i+1] = v
 						i += 2
 					}
-					t.Insert(x, true) // put into table
+					t.Insert(x, true, false) // put into table
 				}(t, s)
 			}
 		}

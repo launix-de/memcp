@@ -226,7 +226,7 @@ if there is a group function, create a temporary preaggregate table
 						'((quote begin)
 							/* INSERT IGNORE group cols into preaggregate */
 							'((quote begin)
-								'((quote set) (quote resultrow) '((quote lambda) '((quote item)) '((quote insert) schema grouptbl (quote item) true)))
+								'((quote set) (quote resultrow) '((quote lambda) '((quote item)) '((quote insert) schema grouptbl (quote item) true true)))
 								(build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) nil nil nil nil nil nil) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
 							)
 						)

@@ -191,7 +191,7 @@ func (t *table) DropColumn(name string) bool {
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
-func (t *table) Insert(d dataset, ignoreexists bool) bool {
+func (t *table) Insert(d dataset, ignoreexists bool, mergeNull bool) bool {
 	// load balance: if bucket is full, create new one
 	shard := t.Shards[len(t.Shards)-1]
 	if shard.Count() >= max_shardsize {
@@ -217,7 +217,7 @@ func (t *table) Insert(d dataset, ignoreexists bool) bool {
 	// check unique constraints in a thread safe manner
 	if len(t.Unique) > 0 {
 		t.uniquelock.Lock()
-		err := t.GetUniqueErrorsFor(d)
+		err := t.GetUniqueErrorsFor(d, mergeNull)
 		if err != nil {
 			t.uniquelock.Unlock()
 			if ignoreexists {
@@ -239,7 +239,7 @@ func (t *table) Insert(d dataset, ignoreexists bool) bool {
 }
 
 // TODO: refactor to "has" (cols, dataset)
-func (t *table) GetUniqueErrorsFor(d dataset) scm.Scmer {
+func (t *table) GetUniqueErrorsFor(d dataset, mergeNull bool) scm.Scmer {
 	// check for duplicates
 	for _, uniq := range t.Unique {
 		// build scan for unique check
@@ -251,7 +251,7 @@ func (t *table) GetUniqueErrorsFor(d dataset) scm.Scmer {
 		conditionBody[0] = scm.Symbol("and")
 		for i, c := range uniq.Cols {
 			value := d.Get(c)
-			if value == nil {
+			if !mergeNull && value == nil {
 				conditionBody[i + 1] = false // NULL can be there multiple times
 			} else {
 				conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.NthLocalVar(i), value}
