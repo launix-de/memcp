@@ -91,7 +91,7 @@ func (s *globalqueue) Pop() any {
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, offset int, limit int, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 
 	/* analyze condition query */
 	boundaries := extractBoundaries(condition)
@@ -105,9 +105,6 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 	if aggregate != nil {
 		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
-
-	// prepare map phase (map has to occur late and ordered)
-	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
 
 	// total_limit helps the shard-scanners to early-out
 	total_limit := -1
@@ -127,7 +124,7 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 					q_ <- &shardqueue{s, nil, scanError{r, string(debug.Stack())}, nil, nil, nil}
 				}
 			}()
-			q_ <- s.scan_order(boundaries, condition, sortcols, sortdirs, total_limit, margs)
+			q_ <- s.scan_order(boundaries, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
 		}(s)
 		rest = rest + 1
 	}
@@ -168,7 +165,7 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 			}
 
 			// prepare args for map function (map is guaranteed to run in order)
-			mapargs := make([]scm.Scmer, len(margs))
+			mapargs := make([]scm.Scmer, len(callbackCols))
 			for i, reader := range qx.mcols {
 				mapargs[i] = reader(idx) // read column value into map argument
 			}
@@ -189,7 +186,7 @@ func (t *table) scan_order(condition scm.Scmer, sortcols []scm.Scmer, sortdirs [
 	return akkumulator
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, limit int, margs []scm.Scmer) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, limit int, callbackCols []string) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	// TODO: mergesort sink instead of list-append-sort would allow early-out
@@ -197,8 +194,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
 	// prepare filter function
-	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
-	cdataset := make([]scm.Scmer, len(cargs))
+	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	// prepare sort criteria so they can be queried easily
 	result.scols = make([]func(uint) scm.Scmer, len(sortcols))
@@ -228,24 +224,24 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 	}
 
 	// prepare map columns (but only caller will use them)
-	result.mcols = make([]func(uint) scm.Scmer, len(margs))
-	for i, arg := range margs {
-		if string(arg.(scm.Symbol)) == "$update" {
+	result.mcols = make([]func(uint) scm.Scmer, len(callbackCols))
+	for i, arg := range callbackCols {
+		if arg == "$update" {
 			result.mcols[i] = func(idx uint) scm.Scmer {
 				return t.UpdateFunction(idx, true)
 			}
 		} else {
-			result.mcols[i] = t.ColumnReader(string(arg.(scm.Symbol)))
+			result.mcols[i] = t.ColumnReader(arg)
 		}
 	}
 
 	// main storage
-	ccols := make([]ColumnStorage, len(cargs))
-	for i, k := range cargs { // iterate over columns
+	ccols := make([]ColumnStorage, len(conditionCols))
+	for i, k := range conditionCols { // iterate over columns
 		var ok bool
-		ccols[i], ok = t.columns[string(k.(scm.Symbol))] // find storage
+		ccols[i], ok = t.columns[k] // find storage
 		if !ok {
-			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + string(k.(scm.Symbol)) + "`")
+			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
 		}
 	}
 
@@ -272,8 +268,8 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 			} else {
 				// value from delta storage
 				// prepare&call condition function
-				for i, k := range cargs { // iterate over columns
-					cdataset[i] = t.getDelta(int(idx - t.main_count), string(k.(scm.Symbol))) // fill value
+				for i, k := range conditionCols { // iterate over columns
+					cdataset[i] = t.getDelta(int(idx - t.main_count), k) // fill value
 				}
 			}
 			// check condition

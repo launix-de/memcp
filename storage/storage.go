@@ -150,20 +150,30 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
-		8, 10,
+		10, 12,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "database where the table is located"},
 			scm.DeclarationParameter{"table", "string", "name of the table to scan"},
+			scm.DeclarationParameter{"filterColumns", "list", "list of columns that are fed into filter"},
 			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
 			scm.DeclarationParameter{"sortcols", "list", "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"},
 			scm.DeclarationParameter{"sortdirs", "list", "list of column directions to sort. Must be same length as sortcols. false means ASC, true means DESC"},
 			scm.DeclarationParameter{"offset", "number", "number of items to skip before the first one is fed into map"},
 			scm.DeclarationParameter{"limit", "number", "max number of items to read"},
+			scm.DeclarationParameter{"mapColumns", "list", "list of columns that are fed into map"},
 			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
 			scm.DeclarationParameter{"reduce", "func", "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass."},
 			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
+			filtercols_ := a[2].([]scm.Scmer)
+			filtercols := make([]string, len(filtercols_))
+			for i, c := range filtercols_ {
+				filtercols[i] = scm.String(c)
+			}
+			mapcols_ := a[8].([]scm.Scmer)
+			mapcols := make([]string, len(mapcols_))
+
 			// TODO: version on primitive lists like in scan
 			// params: table, condition, map, reduce, reduceSeed
 			db := GetDatabase(scm.String(a[0]))
@@ -176,18 +186,18 @@ func Init(en scm.Env) {
 			}
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
-			if len(a) > 8 {
-				aggregate = a[8]
+			if len(a) > 10 {
+				aggregate = a[10]
 			}
-			if len(a) > 9 {
-				neutral = a[9]
+			if len(a) > 11 {
+				neutral = a[11]
 			}
-			sortcols := a[3].([]scm.Scmer)
+			sortcols := a[4].([]scm.Scmer)
 			sortdirs := make([]bool, len(sortcols))
-			for i, dir := range a[4].([]scm.Scmer) {
+			for i, dir := range a[5].([]scm.Scmer) {
 				sortdirs[i] = scm.ToBool(dir)
 			}
-			result := t.scan_order(a[2], sortcols, sortdirs, scm.ToInt(a[5]), scm.ToInt(a[6]), a[7], aggregate, neutral)
+			result := t.scan_order(filtercols, a[3], sortcols, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral)
 			return result
 		},
 	})
