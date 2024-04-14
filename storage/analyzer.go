@@ -49,6 +49,19 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							return val3, true
 					}
 				}
+			case []scm.Scmer:
+				if val[0] == scm.Symbol("outer") {
+					if sym, ok := val[1].(scm.Symbol); ok {
+						if val2, ok := condition.(scm.Proc).En.Vars[sym]; ok {
+							switch val3 := val2.(type) {
+								// bound constant
+								case float64, string:
+									// equals column vs. constant
+									return val3, true
+							}
+						}
+					}
+				}
 		}
 		return nil, false
 	}

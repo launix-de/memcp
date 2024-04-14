@@ -104,6 +104,8 @@ func Less(a, b Scmer) bool {
 				return ToFloat(a) < b_
 			case string:
 				return a_ < b_
+			case nil:
+				return false
 			default:
 				panic("unknown type combo in comparison")
 		}
