@@ -258,7 +258,7 @@ func (t *storageShard) scan_order(boundaries boundaries, condition scm.Scmer, so
 		maxInsertIndex = len(t.inserts)
 
 		// iterate over items (indexed)
-		for idx := range t.iterateIndex(boundaries, maxInsertIndex) {
+		for idx := range t.iterateIndex(boundaries, maxInsertIndex) { // TODO: iterateIndexSorted
 			if t.deletions.Get(idx) {
 				continue // item is on delete list
 			}
