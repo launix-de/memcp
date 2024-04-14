@@ -377,7 +377,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"table", "string", "name of the table"},
 			scm.DeclarationParameter{"row", "list", "list of the pattern '(\"col1\" value1 \"col2\" value2)"},
 			scm.DeclarationParameter{"ignoreexists", "bool", "if true, it will return false on duplicate keys instead of throwing an error"},
-			scm.DeclarationParameter{"mergeNull", "bool", "if true, it will handle NULL values as equal"},
+			scm.DeclarationParameter{"mergeNull", "bool", "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
