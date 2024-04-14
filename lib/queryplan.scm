@@ -64,6 +64,17 @@ if there is a group function, create a temporary preaggregate table
 (define extract_aggregates_assoc (lambda (fields) (merge (extract_assoc fields (lambda (key expr) (extract_aggregates expr))))))
 
 /* condition for update/delete */
+(define build_condition_cols (lambda (schema table condition) (if
+	(nil? condition)
+	'()
+	(begin
+		(set cols (extract_columns_from_expr condition))
+		(set cols (map cols (lambda (x) (match x '(tblvar col) col)))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
+
+		/* return column list */
+		cols
+	)
+)))
 (define build_condition (lambda (schema table condition) (if
 	(nil? condition)
 	'((quote lambda) '() (quote true))
@@ -76,6 +87,17 @@ if there is a group function, create a temporary preaggregate table
 	)
 )))
 
+(define build_expr_cols (lambda (schema table expr) (if
+	(nil? expr)
+	'()
+	(begin
+		(set cols (extract_columns_from_expr expr))
+		(set cols (map cols (lambda (x) (match x '(tblvar col) col)))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
+
+		/* return column list */
+		cols
+	)
+)))
 (define build_expr (lambda (schema table expr) (if
 	(nil? expr)
 	'((quote lambda) '() (quote nil))
@@ -94,13 +116,13 @@ if there is a group function, create a temporary preaggregate table
 	'((ignorecase "information_schema") (ignorecase "tables")) '('("name" "table_schema") '("name" "table_name") '("name" "table_type"))
 	(show schema tbl) /* otherwise: fetch from metadata */
 )))
-(define scan_wrapper (lambda (schema tbl filter map reduce neutral) (match '(schema tbl)
+(define scan_wrapper (lambda (schema tbl filtercols filter mapcols map reduce neutral) (match '(schema tbl)
 	'((ignorecase "information_schema") (ignorecase "tables"))
 		'((quote scan) schema 
 			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
-			filter map reduce neutral)
+			filtercols filter mapcols map reduce neutral)
 	'(schema tbl) /* normal case */
-		'((quote scan) schema tbl filter map reduce neutral)
+		'((quote scan) schema tbl filtercols filter mapcols map reduce neutral)
 )))
 
 /* build queryplan from parsed query */
@@ -179,8 +201,10 @@ if there is a group function, create a temporary preaggregate table
 				(match tables
 					(cons '(alias schema tbl) tables) /* outer scan */
 						(scan_wrapper schema tbl
+							(cons list (build_condition_cols schema tbl condition)) /* TODO: conditions in multiple tables */
 							(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 							/* todo filter columns for alias */
+							(cons list (map columns (lambda(column) (match column '(tblvar colname) colname))))
 							'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
 							/* reduce */ (match ags '('(expr reduce neutral)) reduce (build_reducer ags))
 							/* neutral */ (match ags '('(expr reduce neutral)) neutral (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) neutral)))))
@@ -228,18 +252,38 @@ if there is a group function, create a temporary preaggregate table
 					(map ags (lambda (ag) (match ag '(expr reduce neutral)
 						'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
 							/* TODO: recurse build_queryplan? */
-							'((quote scan) schema tbl '((quote lambda) (map tblvar_cols (lambda (col) (symbol (concat col)))) (cons (quote and) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col)))))))) (build_expr schema tbl expr) reduce neutral)))
+							(scan_wrapper schema tbl
+								(cons list (map tblvar_cols (lambda (col) (concat col))))
+								'((quote lambda) (map tblvar_cols (lambda (col) (symbol (concat col)))) (cons (quote and) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))
+								(cons list (build_expr_cols schema tbl expr))
+								(build_expr schema tbl expr)
+								reduce
+								neutral
+							)
+						))
 					)))
 
 					/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
 					/* TODO: HAVING */
 					/* TODO: build_queryplan with order limit offset */
-					'('((quote scan) schema grouptbl '((quote lambda) '() true) '((quote lambda) (merge
-						/* group columns */
-						(map group (lambda (col) (symbol (concat col))))
-						/* aggregates */
-						(map ags (lambda (ag) (symbol (concat ag))))
-					) '((quote resultrow) (cons (quote list) (map_assoc fields (lambda (col expr) (replace_columns_agg_expr expr))))))))
+					'((scan_wrapper schema grouptbl
+						'(list)
+						'((quote lambda) '() true)
+						(cons list (merge
+							/* group columns */
+							(map group (lambda (col) (concat col)))
+							/* aggregates */
+							(map ags (lambda (ag) (concat ag)))
+						))
+						'((quote lambda) (merge
+							/* group columns */
+							(map group (lambda (col) (symbol (concat col))))
+							/* aggregates */
+							(map ags (lambda (ag) (symbol (concat ag))))
+						) '((quote resultrow)
+							(cons (quote list) (map_assoc fields (lambda (col expr) (replace_columns_agg_expr expr))))
+						))
+					))
 				)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
@@ -278,8 +322,10 @@ if there is a group function, create a temporary preaggregate table
 				(match tables
 					(cons '(alias schema tbl) tables) /* outer scan */
 						(scan_wrapper schema tbl
+							(cons list (build_condition_cols schema tbl condition)) /* TODO: conditions in multiple tables */
 							(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
 							/* todo filter columns for alias */
+							(cons list (map columns (lambda(column) (match column '(tblvar colname) colname))))
 							'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
 						)
 					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))

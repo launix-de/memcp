@@ -63,6 +63,8 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			}
 		}()
 		goto restart
+	case nil:
+		return nil
 	case bool:
 		value = e
 	case string:
@@ -300,8 +302,6 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			default:
 				panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 		}
-	case nil:
-		return nil
 	default:
 		panic("Unknown expression type - EVAL " + fmt.Sprint(e))
 	}

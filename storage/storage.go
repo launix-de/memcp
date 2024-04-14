@@ -62,33 +62,63 @@ func Init(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		"scan", "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
-		4, 6,
+		6, 9,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string|nil", "database where the table is located"},
 			scm.DeclarationParameter{"table", "string|list", "name of the table to scan (or a list if you have temporary data)"},
+			scm.DeclarationParameter{"filterColumns", "list", "list of columns that are fed into filter"},
 			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
+			scm.DeclarationParameter{"mapColumns", "list", "list of columns that are fed into map"},
 			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
 			scm.DeclarationParameter{"reduce", "func", "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass."},
 			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
+			scm.DeclarationParameter{"neutral2", "func", "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator"},
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
+			filtercols_ := a[2].([]scm.Scmer)
+			filtercols := make([]string, len(filtercols_))
+			for i, c := range filtercols_ {
+				filtercols[i] = scm.String(c)
+			}
+			mapcols_ := a[4].([]scm.Scmer)
+			mapcols := make([]string, len(mapcols_))
+			for i, c := range mapcols_ {
+				mapcols[i] = scm.String(c)
+			}
 			if list, ok := a[1].([]scm.Scmer); ok {
 				// implementation on lists
 				var result scm.Scmer = nil
-				if len(a) > 5 {
-					result = a[5]
+				if len(a) > 7 { // custom neutral element
+					result = a[7]
+				}
+				filterfn := scm.OptimizeProcToSerialFunction(a[3])
+				filterparams := make([]scm.Scmer, len(filtercols))
+				mapfn := scm.OptimizeProcToSerialFunction(a[5])
+				mapparams := make([]scm.Scmer, len(mapcols))
+				reducefn := func(a ...scm.Scmer) scm.Scmer {
+					return a[1]
+				}
+				if len(a) > 6 {
+					reducefn = scm.OptimizeProcToSerialFunction(a[6])
 				}
 				for _, val := range list {
+					ds := dataset(val.([]scm.Scmer))
 					// filter
-					reduce := scm.OptimizeProcToSerialFunction(a[4])
-					if scm.ToBool(scm.ApplyAssoc(a[2], val.([]scm.Scmer))) {
-						// map
-						v := scm.ApplyAssoc(a[3], val.([]scm.Scmer))
-						if len(a) > 4 && a[4] != nil {
-							// reduce
-							result = reduce(result, v)
-						}
+					for i, col := range filtercols {
+						filterparams[i] = ds.Get(col)
 					}
+					if scm.ToBool(filterfn(filterparams...)) {
+						// map
+						for i, col := range filtercols {
+							mapparams[i] = ds.Get(col)
+						}
+						// reduce
+						result = reducefn(result, mapfn(mapparams...))
+					}
+				}
+				if len(a) > 8 {
+					reduce2 := scm.OptimizeProcToSerialFunction(a[8])
+					result = reduce2(a[7], result)
 				}
 				return result
 			}
@@ -104,13 +134,17 @@ func Init(en scm.Env) {
 			}
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
-			if len(a) > 4 {
-				aggregate = a[4]
+			if len(a) > 6 {
+				aggregate = a[6]
 			}
-			if len(a) > 5 {
-				neutral = a[5]
+			if len(a) > 7 {
+				neutral = a[7]
 			}
-			result := t.scan(a[2], a[3], aggregate, neutral)
+			reduce2 := scm.Scmer(nil)
+			if len(a) > 8 {
+				reduce2 = a[8]
+			}
+			result := t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2)
 			return result
 		},
 	})

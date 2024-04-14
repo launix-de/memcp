@@ -38,7 +38,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(match (req "path")
 			(regex "^/sql/([^/]+)/(.*)$" url schema query) (begin
 				/* check for password */
-				(set pw (scan "system" "user" (lambda (username) (equal? username (req "username"))) (lambda (password) password) (lambda (a b) b) nil))
+				(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("username") (lambda (password) password) (lambda (a b) b) nil))
 				(if (and pw (equal? pw (password (req "password")))) (begin
 					((res "header") "Content-Type" "text/plain")
 					((res "status") 200)
@@ -61,7 +61,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 /* dedicated mysql protocol listening at port 3307 */
 (mysql 3307
-	(lambda (username_) (scan "system" "user" (lambda (username) (equal? username username_)) (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
+	(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
 	(lambda (username schema) (list? (show schema))) /* switch schema (TODO check grants; in the moment, only the existence of the database is checked) */
 	(lambda (schema sql resultrow_sql session) (begin /* sql */
 		(print "received query: " sql)

@@ -38,7 +38,7 @@ func (s scanError) Error() string {
 */
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer) scm.Scmer {
 	/* analyze query */
 	boundaries := extractBoundaries(condition)
 
@@ -53,14 +53,30 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 					values <- scanError{r, string(debug.Stack())}
 				}
 			}()
-			values <- s.scan(boundaries, condition, callback, aggregate, neutral)
+			values <- s.scan(boundaries, conditionCols, condition, callbackCols, callback, aggregate, neutral)
 		}(s)
 		rest = rest + 1
 		// TODO: measure scan balance
 	}
 	// collect values from parallel scan
 	akkumulator := neutral
-	if aggregate != nil {
+	if aggregate2 != nil {
+		fn := scm.OptimizeProcToSerialFunction(aggregate2)
+		for {
+			if rest == 0 {
+				return akkumulator
+			}
+			// eat value
+			intermediate := <- values
+			switch x := intermediate.(type) {
+				case scanError:
+					panic(x) // cascade panic
+				default:
+					akkumulator = fn(akkumulator, intermediate)
+			}
+			rest = rest - 1
+		}
+	} else if aggregate != nil {
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
 		for {
 			if rest == 0 {
@@ -90,7 +106,7 @@ func (t *table) scan(condition scm.Scmer, callback scm.Scmer, aggregate scm.Scme
 	}
 }
 
-func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 	akkumulator := neutral
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
@@ -99,29 +115,27 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 	if aggregate != nil {
 		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
-	cargs := condition.(scm.Proc).Params.([]scm.Scmer) // list of arguments condition
-	margs := callback.(scm.Proc).Params.([]scm.Scmer) // list of arguments map
-	cdataset := make([]scm.Scmer, len(cargs))
-	mdataset := make([]scm.Scmer, len(margs))
+	cdataset := make([]scm.Scmer, len(conditionCols))
+	mdataset := make([]scm.Scmer, len(callbackCols))
 
 	// main storage
-	ccols := make([]ColumnStorage, len(cargs))
-	mcols := make([]ColumnStorage, len(margs))
-	for i, k := range cargs { // iterate over columns
+	ccols := make([]ColumnStorage, len(conditionCols))
+	mcols := make([]ColumnStorage, len(callbackCols))
+	for i, k := range conditionCols { // iterate over columns
 		var ok bool
-		ccols[i], ok = t.columns[string(k.(scm.Symbol))] // find storage
+		ccols[i], ok = t.columns[k] // find storage
 		if !ok {
-			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + string(k.(scm.Symbol)) + "`")
+			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
 		}
 	}
-	for i, k := range margs { // iterate over columns
-		if string(k.(scm.Symbol)) == "$update" {
+	for i, k := range callbackCols { // iterate over columns
+		if string(k) == "$update" {
 			mcols[i] = nil
 		} else {
 			var ok bool
-			mcols[i], ok = t.columns[string(k.(scm.Symbol))] // find storage
+			mcols[i], ok = t.columns[k] // find storage
 			if !ok {
-				panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + string(k.(scm.Symbol)) + "`")
+				panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
 			}
 		}
 	}
@@ -158,8 +172,8 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 		} else {
 			// value from delta storage
 			// prepare&call condition function
-			for i, k := range cargs { // iterate over columns
-				cdataset[i] = t.getDelta(int(idx - t.main_count), string(k.(scm.Symbol)))
+			for i, k := range conditionCols { // iterate over columns
+				cdataset[i] = t.getDelta(int(idx - t.main_count), k)
 			}
 			// check condition
 			if (!scm.ToBool(conditionFn(cdataset...))) {
@@ -167,11 +181,11 @@ func (t *storageShard) scan(boundaries boundaries, condition scm.Scmer, callback
 			}
 
 			// prepare&call map function
-			for i, k := range margs { // iterate over columns
-				if string(k.(scm.Symbol)) == "$update" {
+			for i, k := range callbackCols { // iterate over columns
+				if k == "$update" {
 					mdataset[i] = t.UpdateFunction(idx, true)
 				} else {
-					mdataset[i] = t.getDelta(int(idx - t.main_count), string(k.(scm.Symbol))) // fill value
+					mdataset[i] = t.getDelta(int(idx - t.main_count), k) // fill value
 				}
 			}
 		}

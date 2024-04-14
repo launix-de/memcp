@@ -267,7 +267,7 @@ func (t *table) GetUniqueCollisionFor(d dataset, mergeNull bool) string {
 				}
 			}
 			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-			if t.scan(condition, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false) != false {
+			if t.scan(uniq.Cols, condition, []string{}, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false, nil) != false {
 				return uniq.Id
 			}
 		}

@@ -203,7 +203,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	'((quote scan)
 		schema
 		tbl
+		(build_condition_cols schema tbl condition)
 		(build_condition schema tbl condition)
+		(cons "$update" (merge (extract_assoc cols (lambda (col expr) (map (extract_columns_from_expr expr) (lambda (x) (match x '(tblvar col) col)))))))
 		'((quote lambda)
 			(cons (quote $update) (merge (extract_assoc cols (lambda (col expr) (map (extract_columns_from_expr expr) (lambda (x) (match x '(tblvar col) (symbol col))))))))
 			'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
@@ -222,7 +224,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(atom "WHERE" true)
 			(define condition sql_expression)
 		))
-	) '((quote scan) schema tbl (build_condition schema tbl condition) '((quote lambda) '((quote $update)) '((quote $update))))))
+	) '((quote scan) schema tbl (build_condition_cols schema tbl condition) (build_condition schema tbl condition) '("$update") '((quote lambda) '((quote $update)) '((quote $update))))))
 
 	(define sql_insert_into (parser '(
 		(atom "INSERT" true)
@@ -327,7 +329,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			'((quote insert) "system" "user" '((quote list) "username" username "password" '((quote password) password))))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
-			'((quote scan) "system" "user" '((quote lambda) '((quote username)) '((quote equal?) (quote username) username)) '((quote lambda) '((quote $update)) '((quote $update) '((quote list) "password" '((quote password) password))))))
+			'((quote scan) "system" "user" '("username") '((quote lambda) '((quote username)) '((quote equal?) (quote username) username)) ("$update") '((quote lambda) '((quote $update)) '((quote $update) '((quote list) "password" '((quote password) password))))))
 
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true) (? (atom "FROM" true) (define schema sql_identifier))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '((quote resultrow) '((quote list) "Table" (quote tbl))))))
