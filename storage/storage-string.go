@@ -48,9 +48,9 @@ func (s *StorageString) Size() uint {
 
 func (s *StorageString) String() string {
 	if s.nodict {
-		return fmt.Sprintf("string-buffer[%d]", len(s.dictionary))
+		return fmt.Sprintf("string-buffer[%d bytes]", len(s.dictionary))
 	} else {
-		return fmt.Sprintf("string-dict[%d]", s.count)
+		return fmt.Sprintf("string-dict[%d entries; %d bytes]", s.count, len(s.dictionary))
 	}
 }
 
