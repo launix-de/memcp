@@ -139,9 +139,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define from (+
 				(or
 					(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query)) /* inner select as from */
-					(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl))
+					(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (?(atom "AS" true)) (define id sql_identifier)) '(id schema tbl))
 					(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '(tbl schema tbl))
-					(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl))
+					(parser '((define tbl sql_identifier) (?(atom "AS" true)) (define id sql_identifier)) '(id schema tbl))
 					(parser '((define tbl sql_identifier)) '(tbl schema tbl))
 				)
 			","))
