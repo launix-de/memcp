@@ -144,8 +144,8 @@ if there is a group function, create a temporary preaggregate table
 
 	/* tells whether there is an aggregate inside */
 	(define expr_find_aggregate (lambda (expr) (match expr
-		'((symbol aggregate) item reduce neutral) true
-		(cons sym args) /* function call */ (reduce args (lambda (a b) (or a (expr_find_aggregate b))))
+		'((symbol aggregate) item reduce neutral) 5
+		(cons sym args) /* function call */ (reduce args (lambda (a b) (or a (expr_find_aggregate b))) false)
 		false
 	)))
 
@@ -176,6 +176,27 @@ if there is a group function, create a temporary preaggregate table
 		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 		expr /* literals */
 	)))
+
+	/* expand *-columns */
+	(set fields (merge (extract_assoc fields (lambda (col expr) (match col
+		"*" (match expr
+			/* *.* */
+			'((symbol get_column) nil "*")(merge (map tables (lambda (t) (match t '(alias schema tbl) /* all FROM-tables*/
+				(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
+					'((coldesc "name") '((quote get_column) alias (coldesc "name")))
+				)))
+			))))
+			/* tbl.* */
+			'((symbol get_column) tblvar "*")(merge (map tables (lambda (t) (match t '(alias schema tbl) /* one FROM-table*/
+				(if (equal? alias tblvar)
+					(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
+						'((coldesc "name") '((quote get_column) alias (coldesc "name")))
+					)))
+					'())
+			))))
+		)
+		'(col expr)
+	)))))
 
 	/* set group to 1 if fields contain aggregates even if not */
 	(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) 1 nil)))
@@ -302,20 +323,8 @@ if there is a group function, create a temporary preaggregate table
 		) (begin
 			/* unordered unlimited scan */
 
-			/* expand *-columns */
-			(set fields (merge (extract_assoc fields (lambda (col expr) (match col
-				"*" (merge (map tables (lambda (t) (match t '(alias schema tbl) /* all FROM-tables*/
-					(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
-						'((coldesc "name") '((quote get_column) alias (coldesc "name")))
-					)))
-				))))
-				'(col expr)
-			)))))
-
 			/* columns: '('(tblalias colname) ...) */
 			(set columns (merge (extract_assoc fields extract_columns)))
-			/* TODO: expand fields if it contains '(tblalias "*") or '("*" "*") */
-				'((symbol get_column_all)) (merge (map tables (lambda (t) (match t '(alias schema tbl) (map (get_schema schema tbl) (lambda (col) '(tblvar (col "name"))))))))
 
 			/* TODO: sort tables according to join plan */
 			/* TODO: match tbl to inner query vs string */
