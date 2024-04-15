@@ -41,11 +41,10 @@ type uniqueKey struct {
 	Cols []string
 }
 type foreignKey struct {
-	// TODO: custom Marshal/Unmarshal functions to serialize Tbl1 and Tbl2 as id
 	Id string
-	Tbl1 *table
+	Tbl1 string
 	Cols1 []string
-	Tbl2 *table
+	Tbl2 string
 	Cols2 []string
 }
 /*

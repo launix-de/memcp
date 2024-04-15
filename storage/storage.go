@@ -290,12 +290,14 @@ func Init(en scm.Env) {
 						for i, v := range def[4].([]scm.Scmer) {
 							cols2[i] = scm.String(v)
 						}
-						t2 := t.schema.Tables.Get(scm.String(def[3]))
-						if t2 == nil {
-							panic("Table in foreign key does not exist: " + scm.String(def[3]))
+						t2name := scm.String(def[3])
+						t2 := t.schema.Tables.Get(t2name)
+						t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2})
+						if t2 != nil {
+							// non-forward declaration
+							t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2})
 						}
-						t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
-						t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t, cols1, t2, cols2})
+						fmt.Println("!----! created foreign key")
 					} else
 					if def[0] == "column" {
 						// normal column
@@ -312,6 +314,17 @@ func Init(en scm.Env) {
 						if strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
 							// append unique key
 							t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
+						}
+					}
+				}
+				// add constraints that are added onto us
+				for _, t2 := range t.schema.Tables.GetAll() {
+					if t2 != t {
+						for _, foreign := range t2.Foreign {
+							if foreign.Tbl2 == t.Name {
+								// copy foward declaration to our definition list
+								t.Foreign = append(t.Foreign, foreign)
+							}
 						}
 					}
 				}

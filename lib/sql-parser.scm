@@ -29,6 +29,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 )))
 
 (define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
+(define sql_number (parser (define x (regex "-?[0-9]+\.?[0-9]*(?:e[0-9]+)?" true)) (simplify x)))
 
 (define sql_string (parser '("'" (define x (regex "(\\\\.|[^\\'])*" false false)) "'") (replace x "\'" "'")))
 
@@ -112,7 +113,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
 		(parser '((atom "@" true) (define var sql_identifier)) '((quote session) var))
-		sql_int
+		sql_number
 		sql_string
 		sql_column
 	)))
@@ -256,6 +257,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
 			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ sql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
+			(parser '((atom "CONSTRAINT" true) (define id (? sql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
 			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
 			(parser '((atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
 			(parser '(
