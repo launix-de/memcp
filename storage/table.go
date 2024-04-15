@@ -191,8 +191,9 @@ func (t *table) DropColumn(name string) bool {
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
-func (t *table) Insert(d dataset, ignoreexists bool, mergeNull bool) bool {
-	// load balance: if bucket is full, create new one
+func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool, mergeNull bool) int {
+	result := 0
+	// load balance: if bucket is full, create new one; if bucket is busy (trylock), try another one
 	shard := t.Shards[len(t.Shards)-1]
 	if shard.Count() >= max_shardsize {
 		t.mu.Lock()
@@ -217,60 +218,82 @@ func (t *table) Insert(d dataset, ignoreexists bool, mergeNull bool) bool {
 	// check unique constraints in a thread safe manner
 	if len(t.Unique) > 0 {
 		t.uniquelock.Lock()
-		uniq_collision := t.GetUniqueCollisionFor(d, mergeNull)
-		if uniq_collision != "" {
-			t.uniquelock.Unlock()
-			if ignoreexists {
-				return false
-			} else {
-				panic("Unique key constraint violated in table "+t.Name+": " + uniq_collision)
+		uniq_collisions := t.GetUniqueCollisionFor(columns, values, mergeNull)
+		// let the whole block fail if one item is unique
+		last_i := 0
+		for i, err := range uniq_collisions {
+			if err != "" {
+				if ignoreexists {
+					shard.Insert(columns, values[last_i:i]) // insert all chunks from before
+					last_i = i+1 // skip this one
+				} else {
+					t.uniquelock.Unlock()
+					panic("Unique key constraint violated in table "+t.Name+": " + err)
+				}
 			}
 		}
 		// physically insert
-		shard.Insert(d)
+		shard.Insert(columns, values[last_i:])
 		t.uniquelock.Unlock()
 	} else {
 		// physically insert (parallel)
-		shard.Insert(d)
+		shard.Insert(columns, values)
 	}
 
 	// TODO: Trigger after insert
-	return true
+	return result
 }
 
 // TODO: refactor to "has" (cols, dataset); returns the id of the unique key
-func (t *table) GetUniqueCollisionFor(d dataset, mergeNull bool) string {
+func (t *table) GetUniqueCollisionFor(columns []string, values [][]scm.Scmer, mergeNull bool) []string {
 	// check for duplicates
+	result := make([]string, len(values))
 	for _, uniq := range t.Unique {
 		if len(uniq.Cols) == 1 {
 			// use hashmap
-			for _, s := range t.Shards {
-				uid, present := s.GetRecordidForUnique(uniq.Cols[0], d.Get(uniq.Cols[0]))
-				if present && !s.deletions.Get(uid) {
-					return uniq.Id
+			for i, col := range columns {
+				if col == uniq.Cols[0] {
+					for j, row := range values {
+						for _, s := range t.Shards {
+							uid, present := s.GetRecordidForUnique(uniq.Cols[0], row[i])
+							if present && !s.deletions.Get(uid) {
+								result[j] = uniq.Id
+								goto nextrow
+							}
+						}
+						nextrow:
+					}
 				}
 			}
 		} else {
 			// build scan for unique check
 			cols := make([]scm.Scmer, len(uniq.Cols))
+			colidx := make([]int, len(uniq.Cols))
 			for i, c := range uniq.Cols {
 				cols[i] = scm.Symbol(c)
+				for j, col := range columns { // find uniq columns
+					if c == col {
+						colidx[i] = j
+					}
+				}
 			}
 			conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
 			conditionBody[0] = scm.Symbol("and")
-			for i, c := range uniq.Cols {
-				value := d.Get(c)
-				if !mergeNull && value == nil {
-					conditionBody[i + 1] = false // NULL can be there multiple times
-				} else {
-					conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.NthLocalVar(i), value}
+			for j, row := range values {
+				for i, colidx := range colidx {
+					value := row[colidx]
+					if !mergeNull && value == nil {
+						conditionBody[i + 1] = false // NULL can be there multiple times
+					} else {
+						conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.NthLocalVar(i), value}
+					}
 				}
-			}
-			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-			if t.scan(uniq.Cols, condition, []string{}, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false, nil) != false {
-				return uniq.Id
+				condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
+				if t.scan(uniq.Cols, condition, []string{}, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false, nil) != false {
+					result[j] = uniq.Id
+				}
 			}
 		}
 	}
-	return ""
+	return result
 }

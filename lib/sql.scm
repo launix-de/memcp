@@ -27,7 +27,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
 	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text) ENGINE=SAFE"))
-	(insert "system" "user" '("id" 1 "username" "root" "password" (password "admin")))
+	(insert "system" "user" '("id" "username" "password") '('(1 "root" (password "admin"))))
 ))
 
 /* http hook for handling SQL */

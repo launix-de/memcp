@@ -37,12 +37,6 @@ type StorageIndex struct {
 	inactive bool
 }
 
-func (x *StorageIndex) notifyInsert(i int, d []scm.Scmer) {
-	if !x.inactive {
-		x.deltaBtree.ReplaceOrInsert(indexPair{i, d})
-	}
-}
-
 // iterates over items
 func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan uint {
 

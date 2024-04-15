@@ -44,19 +44,22 @@ func LoadCSV(schema, table, filename, delimiter string) {
 	if t == nil {
 		panic("table " + table + " does not exist")
 	}
+	cols := make([]string, len(t.Columns))
+	for i, col := range t.Columns {
+		cols[i] = col.Name
+	}
 	for s := range(lines) {
 		if s == "" {
 			// ignore
 		} else {
 			arr := strings.Split(s, delimiter)
-			x := make([]scm.Scmer, 2*len(t.Columns))
-			for i, col := range t.Columns {
-				x[2*i] = col.Name
+			x := make([]scm.Scmer, len(t.Columns))
+			for i, _ := range t.Columns {
 				if i < len(arr) {
-					x[2*i+1] = scm.Simplify(arr[i])
+					x[i] = scm.Simplify(arr[i])
 				}
 			}
-			t.Insert(x, true, false)
+			t.Insert(cols, [][]scm.Scmer{x}, true, false)
 		}
 	}
 }

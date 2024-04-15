@@ -121,9 +121,12 @@ func (u *storageShard) load(t *table) {
 					json.Unmarshal(b[7:], &idx)
 					u.deletions.Set(idx, true) // mark deletion
 				} else if string(b[0:7]) == "insert " {
-					var d dataset
-					json.Unmarshal(b[7:], &d)
-					u.insertDataset(d)
+					split := strings.Index(string(b), "][") + 1
+					var cols []string
+					var values [][]scm.Scmer
+					json.Unmarshal(b[7:split], &cols)
+					json.Unmarshal(b[split:], &values)
+					u.insertDataset(cols, values)
 				} else {
 					panic("unknown log sequence: " + string(b))
 				}
@@ -171,6 +174,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				// TODO: check if we can do in-place editing in the delta storage (if idx > t.main_count)
 				changes := a[0].([]scm.Scmer)
 				// build the whole dataset from storage
+				cols := make([]string, len(t.columns))
 				d2 := make([]scm.Scmer, 0, len(t.columns))
 				for k, v := range t.columns {
 					colidx, ok := t.deltaColumns[k]
@@ -181,6 +185,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					for len(d2) <= colidx {
 						d2 = append(d2, nil)
 					}
+					cols[colidx] = k
 					if idx < t.main_count {
 						d2[colidx] = v.GetValue(idx)
 					} else {
@@ -201,26 +206,18 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				if !result { // only do a write if something changed
 					return // leave inner func to unlock
 				}
-				var d dataset
-				if t.t.Unique != nil || t.t.PersistencyMode == Safe {
-					// we need a dataset object (slow)
-					d = make(dataset, 0, 2 * len(t.columns))
-					for col, idx := range t.deltaColumns {
-						d = append(d, col, d2[idx])
-					}
-				}
 
 				// unique constraint checking
 				if t.t.Unique != nil {
 					t.t.uniquelock.Lock()
 					t.deletions.Set(idx, true) // mark as deleted
 					t.mu.Unlock() // release write lock, so the scan can be performed
-					uniq_collision := t.t.GetUniqueCollisionFor(d, false)
+					uniq_collisions := t.t.GetUniqueCollisionFor(cols, [][]scm.Scmer{d2}, false)
 					t.mu.Lock() // write lock
-					if uniq_collision != "" {
+					if uniq_collisions[0] != "" {
 						t.deletions.Set(idx, false) // mark as undeleted
 						t.t.uniquelock.Unlock()
-						panic("Unique key constraint violated in table "+t.t.Name+": " + uniq_collision)
+						panic("Unique key constraint violated in table "+t.t.Name+": " + uniq_collisions[0])
 					}
 				} else {
 					t.deletions.Set(idx, true) // mark as deleted
@@ -233,7 +230,9 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					tmp, _ := json.Marshal(idx)
 					b.Write(tmp)
 					b.Write([]byte("\ninsert "))
-					tmp, _ = json.Marshal(d)
+					tmp, _ = json.Marshal(cols)
+					b.Write(tmp)
+					tmp, _ = json.Marshal(d2)
 					b.Write(tmp)
 					b.Write([]byte("\n"))
 					t.logfile.WriteString(b.String())
@@ -296,24 +295,22 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 	}
 }
 
-func (t *storageShard) Insert(d dataset) {
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer) {
 	t.mu.Lock()
-	d2 := t.insertDataset(d)
+	t.insertDataset(columns, values)
 	if t.t.PersistencyMode == Safe {
 		var b strings.Builder
 		b.Write([]byte("insert "))
-		tmp, _ := json.Marshal(d)
+		tmp, _ := json.Marshal(columns)
+		b.Write(tmp)
+		tmp, _ = json.Marshal(values)
 		b.Write(tmp)
 		b.Write([]byte("\n"))
 		t.logfile.WriteString(b.String())
 	}
-	for _, index := range t.indexes {
-		// add to delta indexes
-		index.notifyInsert(len(t.inserts)-1, d2)
-	}
 	if t.next != nil {
 		// also insert into next storage
-		t.next.Insert(d)
+		t.next.Insert(columns, values)
 	}
 	t.mu.Unlock()
 	if t.t.PersistencyMode == Safe {
@@ -323,29 +320,37 @@ func (t *storageShard) Insert(d dataset) {
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
-func (t *storageShard) insertDataset(d dataset) []scm.Scmer {
-	result := make([]scm.Scmer, 0, len(t.deltaColumns))
-	for i := 0; i < len(d); i += 2 {
+func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
+	colidx := make([]int, len(columns))
+	for i, col := range columns {
 		// copy all dataset entries into packed array
-		column := scm.String(d[i])
-		colidx, ok := t.deltaColumns[column]
+		var ok bool
+		colidx[i], ok = t.deltaColumns[col]
 		if !ok {
 			// acquire new column
-			colidx = len(t.deltaColumns)
-			t.deltaColumns[column] = colidx
-		}
-		for len(result) <= colidx {
-			result = append(result, nil)
-		}
-		result[colidx] = d[i+1]
-
-		// if column has a unique key, insert into hashmap
-		if hm, ok := t.hashmaps1[column]; ok {
-			hm[d[i+1]] = uint(len(t.inserts)) + t.main_count
+			colidx[i] = len(t.deltaColumns)
+			t.deltaColumns[col] = colidx[i]
 		}
 	}
-	t.inserts = append(t.inserts, result)
-	return result
+	for _, row := range values {
+		newrow := make([]scm.Scmer, len(t.deltaColumns))
+		recid := uint(len(t.inserts)) + t.main_count
+		for j, colidx := range colidx {
+			newrow[colidx] = row[j]
+
+			// if column has a unique key, insert into hashmap
+			if hm, ok := t.hashmaps1[columns[j]]; ok {
+				hm[row[j]] = recid
+			}
+		}
+		t.inserts = append(t.inserts, newrow)
+
+		// also notify indices
+		for _, index := range t.indexes {
+			// add to delta indexes
+			index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+		}
+	}
 }
 
 func (t *storageShard) GetRecordidForUnique(column string, value scm.Scmer) (result uint, present bool) {

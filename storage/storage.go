@@ -415,11 +415,12 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table",
-		3, 5,
+		4, 6,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
-			scm.DeclarationParameter{"row", "list", "list of the pattern '(\"col1\" value1 \"col2\" value2)"},
+			scm.DeclarationParameter{"columns", "list", "list of column names, e.g. '(\"ID\", \"value\")"},
+			scm.DeclarationParameter{"datasets", "list", "list of list of column values, e.g. '('(1 10) '(2 15))"},
 			scm.DeclarationParameter{"ignoreexists", "bool", "if true, it will return false on duplicate keys instead of throwing an error"},
 			scm.DeclarationParameter{"mergeNull", "bool", "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)"},
 		}, "bool",
@@ -429,14 +430,24 @@ func Init(en scm.Env) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
 			ignoreexists := false
-			if (len(a) > 3 && scm.ToBool(a[3])) {
+			if (len(a) > 4 && scm.ToBool(a[4])) {
 				ignoreexists = true
 			}
 			mergeNull := false
-			if (len(a) > 4 && scm.ToBool(a[4])) {
+			if (len(a) > 5 && scm.ToBool(a[5])) {
 				mergeNull = true
 			}
-			return db.Tables.Get(scm.String(a[1])).Insert(dataset(a[2].([]scm.Scmer)), ignoreexists, mergeNull)
+			cols_ := a[2].([]scm.Scmer)
+			cols := make([]string, len(cols_))
+			for i, col := range cols_ {
+				cols[i] = scm.String(col)
+			}
+			rows_ := a[3].([]scm.Scmer)
+			rows := make([][]scm.Scmer, len(rows_))
+			for i, row := range rows_ {
+				rows[i] = row.([]scm.Scmer)
+			}
+			return float64(db.Tables.Get(scm.String(a[1])).Insert(cols, rows, ignoreexists, mergeNull))
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

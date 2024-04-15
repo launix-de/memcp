@@ -244,8 +244,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		) dataset) ","))
 	) (begin
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "name")))))
-		(print coldesc)
-		(cons (quote begin) (map (map datasets (lambda (dataset) (zip_cols coldesc dataset))) (lambda (dataset) '((quote insert) schema tbl (cons (quote list) dataset) ignoreexists))))
+		'((quote insert) schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) ignoreexists)
 	)))
 
 	(define sql_create_table (parser '(
@@ -326,7 +325,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote createdatabase) id))
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
-			'((quote insert) "system" "user" '((quote list) "username" username "password" '((quote password) password))))
+			'((quote insert) "system" "user" '((quote list) "username" "password") '((quote list) '((quote list) username '((quote password) password)))))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			'((quote scan) "system" "user" '("username") '((quote lambda) '((quote username)) '((quote equal?) (quote username) username)) ("$update") '((quote lambda) '((quote $update)) '((quote $update) '((quote list) "password" '((quote password) password))))))

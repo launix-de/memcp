@@ -73,14 +73,15 @@ func LoadJSON(schema, filename string) {
 				func (t *table, s string) {
 					var y map[string]scm.Scmer
 					json.Unmarshal([]byte(s), &y) // parse JSON
-					x := make([]scm.Scmer, 2*len(y))
+					cols := make([]string, len(y))
+					x := make([]scm.Scmer, len(y))
 					i := 0
 					for k, v := range y {
-						x[i] = k
-						x[i+1] = v
-						i += 2
+						cols[i] = k
+						x[i] = v
+						i++
 					}
-					t.Insert(x, true, false) // put into table
+					t.Insert(cols, [][]scm.Scmer{x}, true, false) // put into table
 				}(t, s)
 			}
 		}
