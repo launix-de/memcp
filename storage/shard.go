@@ -44,7 +44,9 @@ type storageShard struct {
 	next *storageShard
 	// indexes
 	indexes []*StorageIndex // sorted keys
-	hashmaps1 map[string]map[scm.Scmer]uint // hashmaps for single columned unique keys
+	hashmaps1 map[[1]string]map[[1]scm.Scmer]uint // hashmaps for single columned unique keys
+	hashmaps2 map[[2]string]map[[2]scm.Scmer]uint // hashmaps for single columned unique keys
+	hashmaps3 map[[3]string]map[[3]scm.Scmer]uint // hashmaps for single columned unique keys
 }
 
 func (s *storageShard) Size() uint {
@@ -66,7 +68,9 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 	u.uuid.UnmarshalText(data)
 	u.columns = make(map[string]ColumnStorage)
 	u.deltaColumns = make(map[string]int)
-	u.hashmaps1 = make(map[string]map[scm.Scmer]uint)
+	u.hashmaps1 = make(map[[1]string]map[[1]scm.Scmer]uint)
+	u.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint)
+	u.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint)
 	u.deletions.Reset()
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
@@ -141,7 +145,9 @@ func NewShard(t *table) *storageShard {
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
 	result.deltaColumns = make(map[string]int)
-	result.hashmaps1 = make(map[string]map[scm.Scmer]uint)
+	result.hashmaps1 = make(map[[1]string]map[[1]scm.Scmer]uint)
+	result.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint)
+	result.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint)
 	result.deletions.Reset()
 	for _, column := range t.Columns {
 		result.columns[column.Name] = new (StorageSparse)
@@ -337,13 +343,28 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 		recid := uint(len(t.inserts)) + t.main_count
 		for j, colidx := range colidx {
 			newrow[colidx] = row[j]
-
-			// if column has a unique key, insert into hashmap
-			if hm, ok := t.hashmaps1[columns[j]]; ok {
-				hm[row[j]] = recid
-			}
 		}
 		t.inserts = append(t.inserts, newrow)
+
+		// notify all hashmaps
+		for k, v := range t.hashmaps1 {
+			v[[1]scm.Scmer{
+				newrow[t.deltaColumns[k[0]]],
+			}] = recid
+		}
+		for k, v := range t.hashmaps2 {
+			v[[2]scm.Scmer{
+				newrow[t.deltaColumns[k[0]]],
+				newrow[t.deltaColumns[k[1]]],
+			}] = recid
+		}
+		for k, v := range t.hashmaps3 {
+			v[[3]scm.Scmer{
+				newrow[t.deltaColumns[k[0]]],
+				newrow[t.deltaColumns[k[1]]],
+				newrow[t.deltaColumns[k[2]]],
+			}] = recid
+		}
 
 		// also notify indices
 		for _, index := range t.indexes {
@@ -353,28 +374,114 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 	}
 }
 
-func (t *storageShard) GetRecordidForUnique(column string, value scm.Scmer) (result uint, present bool) {
+func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer) (result uint, present bool) {
 	t.mu.RLock()
-	hm, ok := t.hashmaps1[column]
-	if !ok {
-		// no hashmap entry? create the hashmap
-		t.mu.RUnlock()
-		t.mu.Lock()
-		hm := make(map[scm.Scmer]uint)
-		col := t.columns[column]
-		for i := uint(0); i < t.main_count; i++ {
-			hm[col.GetValue(i)] = i
+	if len(columns) == 1 {
+		columns_ := (*[1]string)(columns)
+		values_ := (*[1]scm.Scmer)(values)
+		hm, ok := t.hashmaps1[*columns_]
+		if !ok {
+			// no hashmap entry? create the hashmap
+			t.mu.RUnlock()
+			t.mu.Lock()
+			hm := make(map[[1]scm.Scmer]uint)
+			col := []ColumnStorage{
+				t.columns[columns[0]],
+			}
+			for i := uint(0); i < t.main_count; i++ {
+				hm[[1]scm.Scmer{
+					col[0].GetValue(i),
+				}] = i
+			}
+			dcolids := []int{
+				t.deltaColumns[columns[0]],
+			}
+			for i := uint(0); i < uint(len(t.inserts)); i++ {
+				hm[[1]scm.Scmer{
+					t.inserts[i][dcolids[0]],
+				}] = i + t.main_count
+			}
+			t.hashmaps1[*columns_] = hm
+			t.mu.Unlock()
+			return t.GetRecordidForUnique(columns, values) // retry
 		}
-		dcolid := t.deltaColumns[column]
-		for i := uint(0); i < uint(len(t.inserts)); i++ {
-			hm[dcolid] = i + t.main_count
+		result, present = hm[*values_] // read recid from hashmap
+	} else
+	if len(columns) == 2 {
+		columns_ := (*[2]string)(columns)
+		values_ := (*[2]scm.Scmer)(values)
+		hm, ok := t.hashmaps2[*columns_]
+		if !ok {
+			// no hashmap entry? create the hashmap
+			t.mu.RUnlock()
+			t.mu.Lock()
+			hm := make(map[[2]scm.Scmer]uint)
+			col := []ColumnStorage{
+				t.columns[columns[0]],
+				t.columns[columns[1]],
+			}
+			for i := uint(0); i < t.main_count; i++ {
+				hm[[2]scm.Scmer{
+					col[0].GetValue(i),
+					col[1].GetValue(i),
+				}] = i
+			}
+			dcolids := []int{
+				t.deltaColumns[columns[0]],
+				t.deltaColumns[columns[1]],
+			}
+			for i := uint(0); i < uint(len(t.inserts)); i++ {
+				hm[[2]scm.Scmer{
+					t.inserts[i][dcolids[0]],
+					t.inserts[i][dcolids[1]],
+				}] = i + t.main_count
+			}
+			t.hashmaps2[*columns_] = hm
+			t.mu.Unlock()
+			return t.GetRecordidForUnique(columns, values) // retry
 		}
-		t.hashmaps1[column] = hm
-		t.mu.Unlock()
-		return t.GetRecordidForUnique(column, value) // retry
+		result, present = hm[*values_] // read recid from hashmap
+	} else
+	if len(columns) == 3 {
+		columns_ := (*[3]string)(columns)
+		values_ := (*[3]scm.Scmer)(values)
+		hm, ok := t.hashmaps3[*columns_]
+		if !ok {
+			// no hashmap entry? create the hashmap
+			t.mu.RUnlock()
+			t.mu.Lock()
+			hm := make(map[[3]scm.Scmer]uint)
+			col := []ColumnStorage{
+				t.columns[columns[0]],
+				t.columns[columns[1]],
+				t.columns[columns[2]],
+			}
+			for i := uint(0); i < t.main_count; i++ {
+				hm[[3]scm.Scmer{
+					col[0].GetValue(i),
+					col[1].GetValue(i),
+					col[2].GetValue(i),
+				}] = i
+			}
+			dcolids := []int{
+				t.deltaColumns[columns[0]],
+				t.deltaColumns[columns[1]],
+				t.deltaColumns[columns[2]],
+			}
+			for i := uint(0); i < uint(len(t.inserts)); i++ {
+				hm[[3]scm.Scmer{
+					t.inserts[i][dcolids[0]],
+					t.inserts[i][dcolids[1]],
+					t.inserts[i][dcolids[2]],
+				}] = i + t.main_count
+			}
+			t.hashmaps3[*columns_] = hm
+			t.mu.Unlock()
+			return t.GetRecordidForUnique(columns, values) // retry
+		}
+		result, present = hm[*values_] // read recid from hashmap
 	}
 
-	result, present = hm[value] // read recid from hashmap
 	t.mu.RUnlock()
 	return
 }
@@ -448,7 +555,9 @@ func (t *storageShard) rebuild() *storageShard {
 		// prepare delta storage
 		result.columns = make(map[string]ColumnStorage)
 		result.deltaColumns = make(map[string]int)
-		result.hashmaps1 = make(map[string]map[scm.Scmer]uint)
+		result.hashmaps1 = make(map[[1]string]map[[1]scm.Scmer]uint)
+		result.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint)
+		result.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint)
 		result.deletions.Reset()
 		if t.t.PersistencyMode == Safe {
 			// safe mode: also write all deltas to disk
@@ -564,6 +673,8 @@ func (t *storageShard) rebuild() *storageShard {
 		result.deletions = deletions
 		result.indexes = t.indexes
 		result.hashmaps1 = t.hashmaps1
+		result.hashmaps2 = t.hashmaps2
+		result.hashmaps3 = t.hashmaps3
 	}
 	return result
 }

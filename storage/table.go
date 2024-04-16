@@ -248,21 +248,29 @@ func (t *table) GetUniqueCollisionFor(columns []string, values [][]scm.Scmer, me
 	// check for duplicates
 	result := make([]string, len(values))
 	for _, uniq := range t.Unique {
-		if len(uniq.Cols) == 1 {
+		if len(uniq.Cols) <= 3 {
 			// use hashmap
-			for i, col := range columns {
-				if col == uniq.Cols[0] {
-					for j, row := range values {
-						for _, s := range t.Shards {
-							uid, present := s.GetRecordidForUnique(uniq.Cols[0], row[i])
-							if present && !s.deletions.Get(uid) {
-								result[j] = uniq.Id
-								goto nextrow
-							}
-						}
-						nextrow:
+			key := make([]scm.Scmer, len(uniq.Cols))
+			keyIdx := make([]int, len(uniq.Cols))
+			for i, col := range uniq.Cols {
+				for j, col2 := range columns {
+					if col == col2 {
+						keyIdx[i] = j
 					}
 				}
+			}
+			for j, row := range values {
+				for i, colidx := range keyIdx {
+					key[i] = row[colidx]
+				}
+				for _, s := range t.Shards {
+					uid, present := s.GetRecordidForUnique(uniq.Cols, key)
+					if present && !s.deletions.Get(uid) {
+						result[j] = uniq.Id
+						goto nextrow
+					}
+				}
+				nextrow:
 			}
 		} else {
 			// build scan for unique check
