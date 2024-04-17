@@ -176,7 +176,7 @@ func (s *StorageInt) init(i uint) {
 		s.bitsize = 1
 	}
 	// allocate
-	s.chunk = make([]uint64, (i * uint(s.bitsize) + 63) / 64)
+	s.chunk = make([]uint64, (i * uint(s.bitsize)) / 64 + 1)
 	s.count = uint64(i)
 	// fmt.Println("storing bitsize", s.bitsize,"null",s.null,"offset",s.offset)
 }
