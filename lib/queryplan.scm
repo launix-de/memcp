@@ -40,6 +40,12 @@ if there is a group function, create a temporary preaggregate table
 
 */
 
+/* helper functions:
+ - (build_queryplan schema tables fields condition group having order limit offset) builds a lisp expression that runs the query and calls resultrow for each result tuple
+ - (extract_columns_for_tblvar)
+
+*/
+
 /* returns a list of '(tblvar col) of all get_column present in expr */
 (define extract_columns_from_expr (lambda (expr) (match expr
 	'((symbol get_column) tblvar col) '('(tblvar col))
