@@ -278,10 +278,12 @@ if there is a group function, create a temporary preaggregate table
 
 					/* compute aggregates */
 					(map ags (lambda (ag) (match ag '(expr reduce neutral)
+						/* TODO: name that column (concat ag "|" condition) */
 						'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
 							/* TODO: recurse build_queryplan? */
 							(scan_wrapper schema tbl
 								(cons list (map tblvar_cols (lambda (col) (concat col))))
+								/* TODO: AND WHERE */
 								'((quote lambda) (map tblvar_cols (lambda (col) (symbol (concat col)))) (cons (quote and) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))
 								(cons list (build_expr_cols schema tbl expr))
 								(build_expr schema tbl expr)
