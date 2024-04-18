@@ -42,7 +42,9 @@ if there is a group function, create a temporary preaggregate table
 
 /* helper functions:
  - (build_queryplan schema tables fields condition group having order limit offset) builds a lisp expression that runs the query and calls resultrow for each result tuple
- - (extract_columns_for_tblvar)
+ - (build_scan schema tables cols map reduce neutral neutral2 condition group having order limit offset) builds a lisp expression that scans the tables
+ - (extract_columns_for_tblvar expr tblvar) extracts a list of used columns for each tblvar '(tblvar col)
+ - (replace_columns expr) replaces all (get_column ...) and (aggregate ...) with values
 
 */
 
