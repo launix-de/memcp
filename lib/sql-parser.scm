@@ -17,7 +17,17 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 /* TODO: make lower_identifiers settable */
 (define lower_identifiers false)
-(define sql_identifier_unquoted (parser (define id (regex "[a-zA-Z_][a-zA-Z0-9_]*")) (if lower_identifiers (toLower id) id))) /* raw -> toLower */
+(define sql_identifier_unquoted (parser (define id (not
+		(regex "[a-zA-Z_][a-zA-Z0-9_]*")
+		/* exceptions for things that can't be identifiers */
+		(atom "GROUP" true)
+		(atom "BY" true)
+		(atom "VALUEs" true)
+		(atom "FROM" true)
+		(atom "SELECT" true)
+		(atom "INSERT" true)
+		(atom "DELIMITER" true)
+	)) (if lower_identifiers (toLower id) id))) /* raw -> toLower */
 (define sql_identifier (parser (or
 	(parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`")) /* with backtick */
 	sql_identifier_unquoted

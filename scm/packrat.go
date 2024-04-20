@@ -252,6 +252,15 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 						}
 					}
 					return packrat.NewOrParser(subparser...)
+				case Symbol("not"):
+					subparser := make([]packrat.Parser[parserResult], len(n)-1)
+					for i := 1; i < len(n); i++ {
+						subparser[i-1] = parseSyntax(n[i], en, ome, ignoreResult)
+						if subparser[i-1] == nil {
+							return nil
+						}
+					}
+					return packrat.NewNotParser(subparser[0], subparser[1:]...)
 				case Symbol("*"):
 					subparser := parseSyntax(n[1], en, ome, ignoreResult)
 					if subparser == nil {
@@ -362,6 +371,7 @@ syntax can be one of:
 (* sub separator) KleeneParser
 (+ sub separator) ManyParser
 (? xyz) MaybeParser (if >1 AndParser)
+(not mainparser parser1 parser2 parser3 ...) a parser that matches mainparser but not parser1...
 $ EndParser
 empty EmptyParser
 symbol -> use other parser defined in env
