@@ -210,6 +210,7 @@ if there is a group function, create a temporary preaggregate table
 	(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) 1 nil)))
 
 	(if group (begin
+		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		(define ags (extract_aggregates_assoc fields))
 		(define build_indexmap (lambda (expr ags) (match ags
 			(cons head tail) (cons (string head) (cons '((quote car) expr) (build_indexmap '((quote cdr) expr) tail)))

@@ -44,6 +44,29 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
+		2, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "base list"},
+			DeclarationParameter{"item...", "any", "items to add"},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			// append a b ...: append item b to list a (construct list from item + tail)
+			list := a[0].([]Scmer)
+			for _, el := range a {
+				for _, el2 := range list {
+					if reflect.DeepEqual(el, el2) {
+						// ignore duplicates
+						goto skipItem
+					}
+				}
+				list = append(list, el)
+				skipItem:
+			}
+			return list
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"cons", "constructs a list from a head and a tail list",
 		2, 2,
 		[]DeclarationParameter{
@@ -105,6 +128,39 @@ func init_list() {
 				inner := v.([]Scmer)
 				copy(result[pos:pos+len(inner)], inner)
 				pos = pos + len(inner)
+			}
+			return result
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"merge_unique", "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "list of lists of items"},
+		}, "list",
+		func (a ...Scmer) Scmer {
+			list := a
+			if len(a) == 1 {
+				// one parameter: interpret as list of lists
+				list = a[0].([]Scmer)
+			}
+			// merge arrays into one
+			size := 0
+			for _, v := range list {
+				size = size + len(v.([]Scmer))
+			}
+			result := make([]Scmer, 0, size)
+			for _, v := range list {
+				inner := v.([]Scmer)
+				for _, el := range inner {
+					for _, el2 := range result {
+						if reflect.DeepEqual(el, el2) {
+							goto skipNext
+						}
+					}
+					result = append(result, el)
+					skipNext:
+				}
 			}
 			return result
 		},
