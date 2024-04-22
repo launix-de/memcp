@@ -20,6 +20,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 (define sql_identifier_unquoted (parser (define id (not
 		(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 		/* exceptions for things that can't be identifiers */
+		(atom "WHERE" true)
 		(atom "GROUP" true)
 		(atom "BY" true)
 		(atom "VALUEs" true)

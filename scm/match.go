@@ -63,8 +63,16 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		case float64, string:
 			return reflect.DeepEqual(val, p)
 		case Symbol:
-			// unify value into variable
-			en.Vars[p] = val
+			if p == Symbol("nil") {
+				return val == nil
+			} else if p == Symbol("true") {
+				return val == true
+			} else if p == Symbol("false") {
+				return val == false
+			} else {
+				// unify value into variable
+				en.Vars[p] = val
+			}
 			return true
 		case NthLocalVar:
 			en.VarsNumbered[p] = val

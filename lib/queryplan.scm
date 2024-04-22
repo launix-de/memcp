@@ -63,8 +63,6 @@ if there is a group function, create a temporary preaggregate table
 	expr /* literals */
 )))
 
-/* TODO: cleanup functions from here */
-
 /* returns a list of all aggregates in this expr */
 (define extract_aggregates (lambda (expr) (match expr
 	(cons (symbol aggregate) args) '(args)
@@ -72,6 +70,8 @@ if there is a group function, create a temporary preaggregate table
 	/* literal */ '()
 )))
 (define extract_aggregates_assoc (lambda (fields) (merge (extract_assoc fields (lambda (key expr) (extract_aggregates expr))))))
+
+/* TODO: cleanup functions from here */
 
 /* condition for update/delete */
 (define build_condition_cols (lambda (schema table condition) (if
@@ -332,27 +332,33 @@ if there is a group function, create a temporary preaggregate table
 		) (begin
 			/* unordered unlimited scan */
 
-			/* columns: '('(tblalias colname) ...) TODO: remove??*/
-			(set columns (merge (extract_assoc fields extract_columns)))
-
 			/* TODO: sort tables according to join plan */
 			/* TODO: match tbl to inner query vs string */
-			(define build_scan (lambda (tables)
+			(define build_scan (lambda (tables condition)
 				(match tables
 					(cons '(tblvar schema tbl) tables) (begin /* outer scan */
-						(set cols (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))))
+						(set cols (merge_unique
+							    (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
+							    (extract_columns_for_tblvar tblvar condition)
+						))
+						/* TODO: split condition in those ANDs that still contain get_column from tables and those evaluatable now */
+						(set rest_condition (match tables '() (coalesce condition true) true))
+						(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
+						/* TODO: add columns from rest condition into cols list */
+
 						(scan_wrapper schema tbl
-							(cons list (build_condition_cols schema tbl condition)) /* TODO: conditions in multiple tables */
-							(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
+							/* condition */
+							(cons list filtercols)
+							'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition))
 							/* extract columns and store them into variables */
 							(cons list cols)
-							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables))
+							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables condition))
 						)
 					)
 					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 				)
 			))
-			(build_scan tables)
+			(build_scan tables (replace_find_column condition))
 		))
 	))
 )))
