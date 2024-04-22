@@ -55,6 +55,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	 - (concat Symbol string) will split postfix
 	 - (cons x y) will split a list (x and y will be unified)
 	 - (regex "(.*)=(.*)" _ Symbol Symbol) will parse regex
+	 - (eval expr) will match the value result from expr
 	*/
 	switch p := pattern.(type) {
 		case SourceInfo:
@@ -62,6 +63,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		case float64, string:
 			return reflect.DeepEqual(val, p)
 		case Symbol:
+			// unify value into variable
 			en.Vars[p] = val
 			return true
 		case NthLocalVar:
@@ -69,6 +71,9 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			return true
 		case []Scmer:
 			switch p[0] {
+				case Symbol("eval"):
+					// evaluate value and match then
+					return reflect.DeepEqual(Eval(p[1], en), val)
 				case Symbol("var"):
 					// unoptimized pattern
 					en.VarsNumbered[ToInt(p[1])] = val
