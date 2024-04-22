@@ -173,6 +173,16 @@ if there is a group function, create a temporary preaggregate table
 		'()
 	)))
 
+	/* put all schemas of corresponding tables into an assoc */
+	(set schemas (merge (map tables (lambda (t) (match t '(alias schema tbl) '(alias (get_schema schema tbl)))))))
+
+	/* find those columns that have no table */
+	(define replace_find_column (lambda (expr) (match expr
+		'((symbol get_column) nil col) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a (equal? (coldef "name") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) col)
+		(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+		expr
+	)))
+
 	/* expand *-columns */
 	(set fields (merge (extract_assoc fields (lambda (col expr) (match col
 		"*" (match expr
@@ -191,7 +201,7 @@ if there is a group function, create a temporary preaggregate table
 					'())
 			))))
 		)
-		'(col expr)
+		'(col (replace_find_column expr))
 	)))))
 
 	/* set group to 1 if fields contain aggregates even if not */
