@@ -48,20 +48,22 @@ if there is a group function, create a temporary preaggregate table
 
 */
 
-/* returns a list of '(tblvar col) of all get_column present in expr */
-(define extract_columns_from_expr (lambda (expr) (match expr
-	'((symbol get_column) tblvar col) '('(tblvar col))
-	(cons sym args) /* function call */ (merge (map args extract_columns_from_expr))
+/* returns a list of '(string...) */
+(define extract_columns_for_tblvar (lambda (tblvar expr) (match expr
+	'((symbol get_column) tblvar col) '(col)
+	(cons sym args) /* function call */ (merge_unique (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg))))
 	'()
 )))
 
-/* returns expr with get_column replaced by the correct variable */
+/* changes (get_column tblvar col) into its symbol */
 (define replace_columns_from_expr (lambda (expr) (match expr
 	(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
-	'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
+	'((symbol get_column) tblvar col) (symbol (concat tblvar "." col))
 	(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 	expr /* literals */
 )))
+
+/* TODO: cleanup functions from here */
 
 /* returns a list of all aggregates in this expr */
 (define extract_aggregates (lambda (expr) (match expr
@@ -169,20 +171,6 @@ if there is a group function, create a temporary preaggregate table
 		'((symbol get_column) tblvar col) '('(tblvar col))
 		(cons sym args) /* function call */ (merge (map args extract_columns_from_expr)) /* TODO: use collector */
 		'()
-	)))
-
-	/* returns a list of '(string...) */
-	(define extract_columns_for_tblvar (lambda (tblvar expr) (match expr
-		'((symbol get_column) tblvar col) '(col)
-		(cons sym args) /* function call */ (merge (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg)))) /* TODO: merge unique */
-		'()
-	)))
-
-	/* changes (get_column tblvar col) into its counterpart */
-	(define replace_columns (lambda (col expr) (match expr
-		'((symbol get_column) tblvar col) (symbol col) /* TODO: rename in outer scans */
-		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
-		expr /* literals */
 	)))
 
 	/* expand *-columns */
@@ -334,22 +322,24 @@ if there is a group function, create a temporary preaggregate table
 		) (begin
 			/* unordered unlimited scan */
 
-			/* columns: '('(tblalias colname) ...) */
+			/* columns: '('(tblalias colname) ...) TODO: remove??*/
 			(set columns (merge (extract_assoc fields extract_columns)))
 
 			/* TODO: sort tables according to join plan */
 			/* TODO: match tbl to inner query vs string */
 			(define build_scan (lambda (tables)
 				(match tables
-					(cons '(alias schema tbl) tables) /* outer scan */
+					(cons '(tblvar schema tbl) tables) (begin /* outer scan */
+						(set cols (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))))
 						(scan_wrapper schema tbl
 							(cons list (build_condition_cols schema tbl condition)) /* TODO: conditions in multiple tables */
 							(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
-							/* todo filter columns for alias */
-							(cons list (map columns (lambda(column) (match column '(tblvar colname) colname))))
-							'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
+							/* extract columns and store them into variables */
+							(cons list cols)
+							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables))
 						)
-					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields replace_columns)))
+					)
+					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 				)
 			))
 			(build_scan tables)
