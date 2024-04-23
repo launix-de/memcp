@@ -71,55 +71,6 @@ if there is a group function, create a temporary preaggregate table
 )))
 (define extract_aggregates_assoc (lambda (fields) (merge (extract_assoc fields (lambda (key expr) (extract_aggregates expr))))))
 
-/* TODO: cleanup functions from here */
-
-/* condition for update/delete */
-(define build_condition_cols (lambda (schema table condition) (if
-	(nil? condition)
-	'()
-	(begin
-		(set cols (extract_columns_from_expr condition))
-		(set cols (map cols (lambda (x) (match x '(tblvar col) col)))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
-
-		/* return column list */
-		cols
-	)
-)))
-(define build_condition (lambda (schema table condition) (if
-	(nil? condition)
-	'((quote lambda) '() (quote true))
-	(begin
-		(set cols (extract_columns_from_expr condition))
-		(set cols (map cols (lambda (x) (match x '(tblvar col) (symbol col))))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
-
-		/* return lambda for tbl condition */
-		'((quote lambda) cols (replace_columns_from_expr condition))
-	)
-)))
-
-(define build_expr_cols (lambda (schema table expr) (if
-	(nil? expr)
-	'()
-	(begin
-		(set cols (extract_columns_from_expr expr))
-		(set cols (map cols (lambda (x) (match x '(tblvar col) col)))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
-
-		/* return column list */
-		cols
-	)
-)))
-(define build_expr (lambda (schema table expr) (if
-	(nil? expr)
-	'((quote lambda) '() (quote nil))
-	(begin
-		(set cols (extract_columns_from_expr expr))
-		(set cols (map cols (lambda (x) (match x '(tblvar col) (symbol col))))) /* assume that tblvar always points to table (todo: pass tblvar and filter according to join order) */
-
-		/* return lambda for tbl expr */
-		'((quote lambda) cols (replace_columns_from_expr expr))
-	)
-)))
-
 /* emulate metadata tables (TODO: information_schema.columns) */
 (define get_schema (lambda (schema tbl) (match '(schema tbl)
 	/* special tables */
@@ -166,13 +117,6 @@ if there is a group function, create a temporary preaggregate table
 		expr
 	)))
 
-	/* returns a list of '(tblvar col) */
-	(define extract_columns (lambda (col expr) (match expr
-		'((symbol get_column) tblvar col) '('(tblvar col))
-		(cons sym args) /* function call */ (merge (map args extract_columns_from_expr)) /* TODO: use collector */
-		'()
-	)))
-
 	/* put all schemas of corresponding tables into an assoc */
 	(set schemas (merge (map tables (lambda (t) (match t '(alias schema tbl) '(alias (get_schema schema tbl)))))))
 
@@ -210,14 +154,13 @@ if there is a group function, create a temporary preaggregate table
 	(if group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		(define ags (extract_aggregates_assoc fields))
-		(define build_indexmap (lambda (expr ags) (match ags
-			(cons head tail) (cons (string head) (cons '((quote car) expr) (build_indexmap '((quote cdr) expr) tail)))
-			'()
-		)))
-		(define indexmap (match ags '('(expr reduce neutral)) '((string '(expr reduce neutral)) (quote ags)) (build_indexmap (quote ags) ags)))
 		(if (equal? group 1) (begin
+			(define build_indexmap (lambda (expr ags) (match ags
+				(cons head tail) (cons (string head) (cons '((quote car) expr) (build_indexmap '((quote cdr) expr) tail)))
+				'()
+			)))
+			(define indexmap (match ags '('(expr reduce neutral)) '((string '(expr reduce neutral)) (quote ags)) (build_indexmap (quote ags) ags)))
 			/* group 1 -> merge all items into one and return only one tuple */
-			(set columns (merge (extract_assoc fields extract_columns)))
 			(define build_reducer (lambda (ags) (begin
 				'((quote lambda) (quote p) '((quote match) (quote p) '((quote list)
 					(cons (quote list) (mapIndex ags (lambda (i ag) (symbol (concat "a" i)))))
@@ -225,23 +168,31 @@ if there is a group function, create a temporary preaggregate table
 					(cons (quote list) (mapIndex ags (lambda (i ag) (match ag '(expr reduce neutral) '(reduce (symbol (concat "a" i)) (symbol (concat "b" i)))))))
 				))
 			)))
-			(define build_scan (lambda (tables)
+			(define build_scan (lambda (tables condition)
 				(match tables
-					(cons '(alias schema tbl) tables) /* outer scan */
+					(cons '(tblvar schema tbl) tables) (begin /* outer scan */
+						(set cols (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))))
+
+						/* TODO: split condition in those ANDs that still contain get_column from tables and those evaluatable now */
+						(set rest_condition (match tables '() (coalesce condition true) true))
+						(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
+
 						(scan_wrapper schema tbl
-							(cons list (build_condition_cols schema tbl condition)) /* TODO: conditions in multiple tables */
-							(build_condition schema tbl condition) /* TODO: conditions in multiple tables */
-							/* todo filter columns for alias */
-							(cons list (map columns (lambda(column) (match column '(tblvar colname) colname))))
-							'((quote lambda) (map columns (lambda(column) (match column '(tblvar colname) (symbol colname)))) (build_scan tables))
+							/* filter */
+							(cons list filtercols)
+							'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition))
+							/* extract columns and store them into variables */
+							(cons list cols)
+							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables condition))
 							/* reduce */ (match ags '('(expr reduce neutral)) reduce (build_reducer ags))
 							/* neutral */ (match ags '('(expr reduce neutral)) neutral (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) neutral)))))
 						)
-					'() /* final inner */ (match ags '('(expr reduce neutral)) (replace_columns nil expr) (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) (replace_columns nil expr))))))
-				)
+					)
+					'() /* final inner */ (match ags '('(expr reduce neutral)) (replace_columns_from_expr expr) (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) (replace_columns_from_expr expr)))))
+				))
 			))
 			'((quote begin)
-				'((quote define) (quote ags) (build_scan tables))
+				'((quote define) (quote ags) (build_scan tables condition))
 				'((quote resultrow) (cons (quote list) (map_assoc fields (lambda (key value) (expr_replace_aggregate value indexmap)))))
 			)
 		) (match tables
