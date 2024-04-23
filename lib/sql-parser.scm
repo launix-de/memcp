@@ -213,20 +213,28 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define condition sql_expression)
 		))
 	) (begin
-	(set cols (merge cols))
-	'((quote scan)
-		schema
-		tbl
-		(build_condition_cols schema tbl condition)
-		(build_condition schema tbl condition)
-		(cons "$update" (merge (extract_assoc cols (lambda (col expr) (map (extract_columns_from_expr expr) (lambda (x) (match x '(tblvar col) col)))))))
-		'((quote lambda)
-			(cons (quote $update) (merge (extract_assoc cols (lambda (col expr) (map (extract_columns_from_expr expr) (lambda (x) (match x '(tblvar col) (symbol col))))))))
-			'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
+		(define replace_find_column (lambda (expr) (match expr
+			'((symbol get_column) nil col) '((quote get_column) tbl col)
+			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+			expr
+		)))
+		(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
+		(set condition (replace_find_column (coalesce condition true)))
+		(set filtercols (extract_columns_for_tblvar tbl condition))
+		(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
+		'((quote scan)
+			schema
+			tbl
+			(cons list filtercols)
+			'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
+			(cons list (cons "$update" scancols))
+			'((quote lambda)
+				(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
+				'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
+			)
+			(quote +)
+			0
 		)
-		(quote +)
-		0
-	)
 	)))
 
 	(define sql_delete (parser '(
@@ -238,7 +246,23 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(atom "WHERE" true)
 			(define condition sql_expression)
 		))
-	) '((quote scan) schema tbl (build_condition_cols schema tbl condition) (build_condition schema tbl condition) '("$update") '((quote lambda) '((quote $update)) '((quote $update))))))
+	) (begin
+		(define replace_find_column (lambda (expr) (match expr
+			'((symbol get_column) nil col) '((quote get_column) tbl col)
+			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+			expr
+		)))
+		(set filtercols (extract_columns_for_tblvar tbl condition))
+		(set condition (replace_find_column (coalesce condition true)))
+		'((quote scan)
+			schema
+			tbl
+			(cons list filtercols)
+			'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
+			'(list "$update")
+			'((quote lambda) '((quote $update)) '((quote $update)))
+		)
+	)))
 
 	(define sql_insert_into (parser '(
 		(atom "INSERT" true)
