@@ -69,7 +69,6 @@ if there is a group function, create a temporary preaggregate table
 	(cons sym args) /* function call */ (merge (map args extract_aggregates))
 	/* literal */ '()
 )))
-(define extract_aggregates_assoc (lambda (fields) (merge (extract_assoc fields (lambda (key expr) (extract_aggregates expr))))))
 
 /* emulate metadata tables (TODO: information_schema.columns) */
 (define get_schema (lambda (schema tbl) (match '(schema tbl)
@@ -153,7 +152,9 @@ if there is a group function, create a temporary preaggregate table
 
 	(if group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
-		(define ags (extract_aggregates_assoc fields))
+		(set group (map group replace_find_column))
+		(define ags (merge (extract_assoc fields (lambda (key expr) (extract_aggregates expr)))))
+
 		(if (equal? group 1) (begin
 			(define build_indexmap (lambda (expr ags) (match ags
 				(cons head tail) (cons (string head) (cons '((quote car) expr) (build_indexmap '((quote cdr) expr) tail)))
@@ -216,41 +217,48 @@ if there is a group function, create a temporary preaggregate table
 					expr /* literals */
 				)))
 
-				(define tblvar_cols (merge (map group (lambda (col) (extract_columns_for_tblvar tblvar col))))) /* TODO: merge unique */
+				(define tblvar_cols (merge_unique (map group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
+
+				/* HAVING */
+				(set rest_condition (replace_find_column (coalesce having true)))
+				(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
 
 				(merge
+					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
 					'((quote begin)
 						/* INSERT IGNORE group cols into preaggregate */
 						/* TODO: use bulk insert in scan reduce phase (and filter duplicates from a bulk!) */
 						'((quote begin)
 							'((quote set) (quote resultrow) '((quote lambda) '((quote item)) '((quote insert) schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '((quote extract_assoc) (quote item) '((quote lambda) '((quote key) (quote value)) (quote value)))) true true)))
-							(build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) nil nil nil nil nil nil) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
+							(build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
 						)
 					)
 
 					/* compute aggregates */
-					(map ags (lambda (ag) (match ag '(expr reduce neutral)
+					(map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
+						(set cols (extract_columns_for_tblvar tblvar expr))
 						/* TODO: name that column (concat ag "|" condition) */
 						'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
 							/* TODO: recurse build_queryplan? */
 							(scan_wrapper schema tbl
-								(cons list (map tblvar_cols (lambda (col) (concat col))))
+								(cons list tblvar_cols)
 								/* TODO: AND WHERE */
-								'((quote lambda) (map tblvar_cols (lambda (col) (symbol (concat col)))) (cons (quote and) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))
-								(cons list (build_expr_cols schema tbl expr))
-								(build_expr schema tbl expr)
+								'((quote lambda) (map tblvar_cols (lambda (col) (symbol (concat tblvar "." col)))) (cons (quote and) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))
+								(cons list cols)
+								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))/* TODO: (build_scan tables condition)*/
 								reduce
 								neutral
 							)
 						))
-					)))
+					))))
 
 					/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
 					/* TODO: HAVING */
 					/* TODO: build_queryplan with order limit offset */
 					'((scan_wrapper schema grouptbl
-						'(list)
-						'((quote lambda) '() true)
+						/* HAVING */
+						(cons list filtercols)
+						'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition)) /* TODO: filter count|condition > 0 */
 						(cons list (merge
 							/* group columns */
 							(map group (lambda (col) (concat col)))
