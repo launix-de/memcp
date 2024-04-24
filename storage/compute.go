@@ -63,6 +63,7 @@ func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) bool {
 	}
 
 	fn := scm.OptimizeProcToSerialFunction(computor)
+	// TODO: column names via list
 	param_names := computor.(scm.Proc).Params.([]scm.Scmer)
 	cols := make([]ColumnStorage, len(param_names))
 	for i, col := range param_names {
