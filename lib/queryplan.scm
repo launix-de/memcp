@@ -148,55 +148,14 @@ if there is a group function, create a temporary preaggregate table
 	)))))
 
 	/* set group to 1 if fields contain aggregates even if not */
-	(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) 1 nil)))
+	(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
 
 	(if group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		(set group (map group replace_find_column))
 		(define ags (merge (extract_assoc fields (lambda (key expr) (extract_aggregates expr)))))
 
-		(if (equal? group 1) (begin
-			(define build_indexmap (lambda (expr ags) (match ags
-				(cons head tail) (cons (string head) (cons '((quote car) expr) (build_indexmap '((quote cdr) expr) tail)))
-				'()
-			)))
-			(define indexmap (match ags '('(expr reduce neutral)) '((string '(expr reduce neutral)) (quote ags)) (build_indexmap (quote ags) ags)))
-			/* group 1 -> merge all items into one and return only one tuple */
-			(define build_reducer (lambda (ags) (begin
-				'((quote lambda) (quote p) '((quote match) (quote p) '((quote list)
-					(cons (quote list) (mapIndex ags (lambda (i ag) (symbol (concat "a" i)))))
-					(cons (quote list) (mapIndex ags (lambda (i ag) (symbol (concat "b" i))))))
-					(cons (quote list) (mapIndex ags (lambda (i ag) (match ag '(expr reduce neutral) '(reduce (symbol (concat "a" i)) (symbol (concat "b" i)))))))
-				))
-			)))
-			(define build_scan (lambda (tables condition)
-				(match tables
-					(cons '(tblvar schema tbl) tables) (begin /* outer scan */
-						(set cols (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))))
-
-						/* TODO: split condition in those ANDs that still contain get_column from tables and those evaluatable now */
-						(set rest_condition (match tables '() (coalesce condition true) true))
-						(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
-
-						(scan_wrapper schema tbl
-							/* filter */
-							(cons list filtercols)
-							'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition))
-							/* extract columns and store them into variables */
-							(cons list cols)
-							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables condition))
-							/* reduce */ (match ags '('(expr reduce neutral)) reduce (build_reducer ags))
-							/* neutral */ (match ags '('(expr reduce neutral)) neutral (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) neutral)))))
-						)
-					)
-					'() /* final inner */ (match ags '('(expr reduce neutral)) (replace_columns_from_expr expr) (cons (quote list) (map ags (lambda (val) (match val '(expr reduce neutral) (replace_columns_from_expr expr)))))
-				))
-			))
-			'((quote begin)
-				'((quote define) (quote ags) (build_scan tables condition))
-				'((quote resultrow) (cons (quote list) (map_assoc fields (lambda (key value) (expr_replace_aggregate value indexmap)))))
-			)
-		) (match tables
+		(match tables
 			/* TODO: allow for more than just group by single table */
 			'('(tblvar schema tbl)) (begin
 				/* prepare preaggregate */
@@ -253,7 +212,6 @@ if there is a group function, create a temporary preaggregate table
 					))))
 
 					/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
-					/* TODO: HAVING */
 					/* TODO: build_queryplan with order limit offset */
 					'((scan_wrapper schema grouptbl
 						/* HAVING */
@@ -277,7 +235,7 @@ if there is a group function, create a temporary preaggregate table
 				)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
-		))
+		)
 	) (begin
 		/* grouping has been removed; now to the real data: */
 
