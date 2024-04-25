@@ -29,6 +29,7 @@ type column struct {
 	Typdimensions []int // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	Extrainfo string // TODO: further diversify into NOT NULL, AUTOINCREMENT etc.
 	Computor scm.Scmer `json:"-"` // TODO: marshaljson -> serialize
+	PartitioningScore int // count this up to increase the chance of partitioning for this column
 }
 type PersistencyMode uint8
 const (
@@ -46,6 +47,11 @@ type foreignKey struct {
 	Cols1 []string
 	Tbl2 string
 	Cols2 []string
+}
+type shardDimension struct {
+	Column string
+	NumPartitions int
+	Pivots []scm.Scmer
 }
 /*
 unique keys:
@@ -72,7 +78,9 @@ type table struct {
 	Auto_increment uint64 // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 
 	// storage
-	Shards []*storageShard
+	Shards []*storageShard // unordered shards
+	PShards []*storageShard // partitioned shards according to PDimensions
+	PDimensions []shardDimension
 	// TODO: data structure to per-column value-based shard map
 	// every shard has a min-value and a max-value
 	// problem: naive approach needs len(Shards)² complexity
@@ -163,7 +171,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 		}
 	}
 	
-	t.Columns = append(t.Columns, column{name, typ, typdimensions, extrainfo, nil})
+	t.Columns = append(t.Columns, column{name, typ, typdimensions, extrainfo, nil, 0})
 	for _, s := range t.Shards {
 		s.columns[name] = new (StorageSparse)
 	}
