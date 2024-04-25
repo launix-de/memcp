@@ -252,8 +252,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 			expr
 		)))
-		(set filtercols (extract_columns_for_tblvar tbl condition))
 		(set condition (replace_find_column (coalesce condition true)))
+		(set filtercols (extract_columns_for_tblvar tbl condition))
 		'((quote scan)
 			schema
 			tbl
