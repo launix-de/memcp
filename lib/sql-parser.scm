@@ -27,6 +27,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "FROM" true)
 		(atom "SELECT" true)
 		(atom "INSERT" true)
+		(atom "LIMIT" true)
 		(atom "DELIMITER" true)
 	)) (if lower_identifiers (toLower id) id))) /* raw -> toLower */
 (define sql_identifier (parser (or
@@ -193,9 +194,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(?
 			(atom "LIMIT" true)
 			(or
-				'((define limit sql_expression))
 				'((define offset sql_expression) (atom "," true) (define limit sql_expression))
 				'((define limit sql_expression) (atom "OFFSET" true) (define offset sql_expression))
+				'((define limit sql_expression))
 			)
 		)
 	) '(schema (if (nil? from) '() from) (merge cols) condition group having order limit offset)))

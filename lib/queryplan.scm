@@ -239,7 +239,7 @@ if there is a group function, create a temporary preaggregate table
 	) (begin
 		/* grouping has been removed; now to the real data: */
 
-		(if (coalesce order limit offset) (begin
+		(if (coalesce order /*limit offset*/) (begin
 			/* ordered or limited scan */
 			/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
 			(match order
