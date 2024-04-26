@@ -30,6 +30,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(insert "system" "user" '("id" "username" "password") '('(1 "root" (password "admin"))))
 ))
 
+(set globalvars '("lower_case_table_names" 0))
+
 /* http hook for handling SQL */
 (define http_handler (begin
 	(set old_handler http_handler)

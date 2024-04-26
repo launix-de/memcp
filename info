@@ -95,3 +95,28 @@ WHERE
 table_schema = "foo"
 AND table_name = "bar"
 
+
+MariaDB [fuse]> show table status from fuse like 'tree';
++------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+---------------------+---------------------+------------+--------------------+----------+----------------+---------+--------------------+-----------+
+| Name | Engine | Version | Row_format | Rows | Avg_row_length | Data_length | Max_data_length | Index_length | Data_free | Auto_increment | Create_time         | Update_time         | Check_time | Collation          | Checksum | Create_options | Comment | Max_index_length   | Temporary |
++------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+---------------------+---------------------+------------+--------------------+----------+----------------+---------+--------------------+-----------+
+| tree | MyISAM |      10 | Dynamic    |    4 |             28 |         112 | 281474976710655 |        10240 |         0 |              8 | 2024-03-04 10:11:48 | 2024-03-04 17:30:59 | NULL       | utf8mb3_general_ci |     NULL |                |         | 288230376151710720 | N         |
++------+--------+---------+------------+------+----------------+-------------+-----------------+--------------+-----------+----------------+---------------------+---------------------+------------+--------------------+----------+----------------+---------+--------------------+-----------+
+
+MariaDB [fuse]> show engines;
++--------------------+---------+-------------------------------------------------------------------------------------------------+--------------+------+------------+
+| Engine             | Support | Comment                                                                                         | Transactions | XA   | Savepoints |
++--------------------+---------+-------------------------------------------------------------------------------------------------+--------------+------+------------+
+| CSV                | YES     | Stores tables as CSV files                                                                      | NO           | NO   | NO         |
+| MRG_MyISAM         | YES     | Collection of identical MyISAM tables                                                           | NO           | NO   | NO         |
+| MEMORY             | YES     | Hash based, stored in memory, useful for temporary tables                                       | NO           | NO   | NO         |
+| Aria               | YES     | Crash-safe tables with MyISAM heritage. Used for internal temporary tables and privilege tables | NO           | NO   | NO         |
+| MyISAM             | YES     | Non-transactional engine with good performance and small data footprint                         | NO           | NO   | NO         |
+| SEQUENCE           | YES     | Generated tables filled with sequential values                                                  | YES          | NO   | YES        |
+| InnoDB             | DEFAULT | Supports transactions, row-level locking, foreign keys and encryption for tables                | YES          | YES  | YES        |
+| PERFORMANCE_SCHEMA | YES     | Performance Schema                                                                              | NO           | NO   | NO         |
++--------------------+---------+-------------------------------------------------------------------------------------------------+--------------+------+------------+
+8 rows in set (0,000 sec)
+
+MariaDB [fuse]> 
+
