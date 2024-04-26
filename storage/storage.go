@@ -109,7 +109,7 @@ func Init(en scm.Env) {
 					}
 					if scm.ToBool(filterfn(filterparams...)) {
 						// map
-						for i, col := range filtercols {
+						for i, col := range mapcols {
 							mapparams[i] = ds.Get(col)
 						}
 						// reduce
