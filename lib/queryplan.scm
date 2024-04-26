@@ -70,20 +70,7 @@ if there is a group function, create a temporary preaggregate table
 	/* literal */ '()
 )))
 
-/* emulate metadata tables (TODO: information_schema.columns) */
-(define get_schema (lambda (schema tbl) (match '(schema tbl)
-	/* special tables */
-	'((ignorecase "information_schema") (ignorecase "tables")) '('("name" "table_schema") '("name" "table_name") '("name" "table_type"))
-	(show schema tbl) /* otherwise: fetch from metadata */
-)))
-(define scan_wrapper (lambda (schema tbl filtercols filter mapcols map reduce neutral) (match '(schema tbl)
-	'((ignorecase "information_schema") (ignorecase "tables"))
-		'((quote scan) schema 
-			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
-			filtercols filter mapcols map reduce neutral)
-	'(schema tbl) /* normal case */
-		'((quote scan) schema tbl filtercols filter mapcols map reduce neutral)
-)))
+(import "sql-metadata.scm")
 
 /* build queryplan from parsed query */
 (define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
@@ -244,6 +231,7 @@ if there is a group function, create a temporary preaggregate table
 			/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
 			(match order
 				'('('((symbol get_column) tblalias "ORDINAL_POSITION") direction)) (build_queryplan schema tables fields condition group having nil nil nil) /* ignore ordering for some cases by now to use the dbeaver tool */
+				'('('((symbol get_column) tblalias "CONSTRAINT_NAME") direction) '('((symbol get_column) tblalias "ORDINAL_POSITION") direction)) (build_queryplan schema tables fields condition group having nil nil nil) /* ignore ordering for some cases by now to use the dbeaver tool */
 				(error "Ordered scan is not implemented yet")
 			)
 		) (begin
