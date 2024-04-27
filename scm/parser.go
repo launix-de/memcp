@@ -110,7 +110,9 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 					source_info.value = L // append to source info
 					return source_info
 				} else {
-					return token
+					// quote symbol
+					*tokens = (*tokens)[1:]
+					return []Scmer{Symbol("quote"), token}
 				}
 			} else {
 				return token
@@ -208,6 +210,9 @@ func tokenize(source, s string) []Scmer {
 				state = 0
 			} else if ch == ')' {
 				result = append(result, Symbol(")"))
+				state = 0
+			} else if ch == '\'' {
+				result = append(result, Symbol("'"))
 				state = 0
 			} else if ch == '"' {
 				// start string

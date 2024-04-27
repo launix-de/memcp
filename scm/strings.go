@@ -19,6 +19,48 @@ package scm
 import "bytes"
 import "strings"
 
+/* SQL LIKE operator implementation on strings */
+func StrLike(str, pattern string) bool {
+	for {
+		// boundary check
+		if len(pattern) == 0 {
+			if len(str) == 0 {
+				// we finished matching
+				return true
+			} else {
+				// pattern is consumed but no string left: no match
+				return false
+			}
+		}
+		// now str[0] and pattern[0] are assured to exist
+		if pattern[0] == '%' { // wildcard
+			pattern = pattern[1:]
+			if pattern == "" {
+				return true // string ends with wildcard
+			}
+			// otherwise: match against all possible endings
+			for i := len(str)-1; i >= 0; i-- { // run from right to left to be as greedy and performant as possible
+				if str[i] == pattern[0] {
+					// check if this caracter matches the rest
+					if StrLike(str[i:], pattern) {
+						return true // we found a match with this position as continuation
+					}
+				}
+			}
+			return false // no continuation found
+		} else {
+			if len(str) > 0 && (pattern[0] == '_' || pattern[0] == str[0]) {
+				// match -> move one character forward
+				pattern = pattern[1:]
+				str = str[1:]
+			} else {
+				// mismatch -> we're out
+				return false
+			}
+		}
+	}
+}
+
 func init_strings() {
 	// string functions
 	DeclareTitle("Strings")
@@ -58,6 +100,18 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// string
 			return float64(len(String(a[0])))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"strlike", "matches the string against a wildcard pattern (SQL compliant)",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+			DeclarationParameter{"pattern", "string", "pattern with % and _ in them"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			// string
+			return StrLike(String(a[0]), String(a[1]))
 		},
 	})
 	Declare(&Globalenv, &Declaration{

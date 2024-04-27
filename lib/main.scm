@@ -15,7 +15,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+(print "")
 (print "Welcome to memcp")
+(print "")
+(import "test.scm")
 
 /* this can be overhooked */
 (define http_handler (lambda (req res) (begin
