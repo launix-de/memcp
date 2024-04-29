@@ -43,6 +43,9 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (strlike "masdf" "a%f") false "!strlike infix")
 (assert (strlike "asd whatever mif" "a%ever%f") true "two infix")
 
+/* match */
+(assert (match '(1 2 3 5 6) (merge '(a b) rest) (concat "a=" a ", b=" b ", rest=" rest)) "a=1, b=2, rest=(3 5 6)" "match merge")
+
 (print "finished unit tests")
 (print "test result: " (teststat "success") "/" (teststat "count"))
 (if (< (teststat "success") (teststat "count")) (begin

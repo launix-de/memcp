@@ -54,6 +54,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	 - (concat Symbol string Symbol) will split infix
 	 - (concat Symbol string) will split postfix
 	 - (cons x y) will split a list (x and y will be unified)
+	 - (merge '(a b c) rest) will split a list into multiple head elements and their rest (as alternative to cons)
 	 - (regex "(.*)=(.*)" _ Symbol Symbol) will parse regex
 	 - (eval expr) will match the value result from expr
 	*/
@@ -158,6 +159,32 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 							panic("unknown concat pattern: " + fmt.Sprint(p))
 						default:
 							return false // non-strings are not matching
+					}
+				case Symbol("merge"):
+					switch v := val.(type) {
+						case []Scmer: // only allowed for lists
+							// examine the pattern
+							if len(p) == 3 { // merge '(list) rest
+								switch p1 := valueFromPattern(p[1], en).(type) {
+									case []Scmer:
+										if len(p1) > 0 && p1[0] == Symbol("list") && len(p1)-1 <= len(v) {
+											for i := 1; i < len(p1); i++ {
+												if !match(v[i-1], p1[i], en) {
+													return false // pattern at position i dosen't match
+												}
+											}
+											return match(v[len(p1)-1:], p[2], en) // match the rest of the array with the rest match pattern
+										} else {
+											return false
+										}
+									default:
+										// panic
+								}
+								// TODO: Symbol string
+							}
+							panic("unknown merge pattern: " + fmt.Sprint(p))
+						default:
+							return false // non-lists are not matching
 					}
 				case Symbol("cons"):
 					switch v := valueFromPattern(val, en).(type) {
