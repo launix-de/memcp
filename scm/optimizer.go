@@ -98,17 +98,6 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	}
 	return
 }
-func (ome *optimizerMetainfo) RemoveSymbolsFromTree(tree Scmer) {
-	switch v := tree.(type) {
-	case Symbol:
-		delete(ome.variableReplacement, v)
-	case []Scmer:
-		for i := 1; i < len(v); i++ {
-			// recurse over parameters
-			ome.RemoveSymbolsFromTree(v[i])
-		}
-	}
-}
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 	// TODO: static code analysis like escape analysis + replace memory-safe functions with in-place memory manipulating versions (e.g. in set_assoc)
 	// TODO: inline use-once
@@ -170,13 +159,11 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					}
 					ome2 := ome.Copy()
 					if l, ok := v[1].([]Scmer); ok {
-						emptyome := newOptimizerMetainfo()
-						for i, item := range l {
-							l[i] = OptimizeEx(item, nil, &emptyome)
-							ome2.RemoveSymbolsFromTree(l[i]) // remove overrides
+						for _, param := range l {
+							delete(ome2.variableReplacement, param.(Symbol)) // remove overrides
 						}
 					} else {
-						ome2.RemoveSymbolsFromTree(v[1]) // remove overrides
+						delete(ome2.variableReplacement, v[1].(Symbol)) // remove overrides
 					}
 					// optimize body
 					/* TODO: reactivate this code once the corner case of double nested scopes is solved
@@ -226,14 +213,13 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					v[2] = OptimizeEx(v[2], env, ome)
 					// TODO: check if we could remove the set instruction and inline the value if it occurs only once
 				} else if v[0] == Symbol("match") {
-					// TODO: optimize matches with nvars and your own ome
 					v[1] = OptimizeEx(v[1], env, ome)
 					/* code is deactivated since variables can be overwritten! */
 					for i := 3; i < len(v); i+= 2 {
 						// for each pattern
 						ome2 := ome.Copy()
-						ome2.RemoveSymbolsFromTree(v[i-1])
-						v[i] = OptimizeEx(v[i], env, &ome2)
+						v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2) // optimize pattern and collect overwritten variables
+						v[i] = OptimizeEx(v[i], env, &ome2) // optimize result and apply overwritten variables
 					}
 					if len(v)%2 == 1 {
 						// last item
@@ -252,6 +238,30 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 			}
 	}
 	return val
+}
+func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMetainfo, ome2 *optimizerMetainfo) Scmer {
+	// TODO: Prune patterns that are not matched by the value (happens mostly during inlining)
+	switch p := pattern.(type) {
+	case Symbol:
+		// TODO: replace Symbol with NthLocalVar
+		delete(ome2.variableReplacement, p)
+		// TODO: insert replacement into ome2
+		return p
+	case []Scmer:
+		if p[0] == Symbol("eval") {
+			// optimize inner value
+			p[1] = OptimizeEx(p[1], env, ome)
+			return p
+		} else if p[0] == Symbol("var") {
+			// expand (it is faster)
+			return NthLocalVar(ToInt(p[1]))
+		} else {
+			for i := 1; i < len(p); i++ {
+				p[i] = OptimizeMatchPattern(nil, p[i], env, ome, ome2)
+			}
+		}
+	}
+	return pattern
 }
 func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) Scmer {
 	switch v := val.(type) {
