@@ -155,16 +155,16 @@ if there is a group function, create a temporary preaggregate table
 				) '("engine" "sloppy") true)
 
 				/* preparation */
+				(define tblvar_cols (merge_unique (map group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
+				(set condition (replace_find_column (coalesce condition true)))
+				(set filtercols (extract_columns_for_tblvar tblvar condition))
+
 				(define replace_agg_with_fetch (lambda (expr) (match expr
-					(cons (symbol aggregate) rest) '('get_column grouptbl (concat rest)) /* aggregate helper column */
+					(cons (symbol aggregate) rest) '('get_column grouptbl (concat rest "|" condition)) /* aggregate helper column */
 					'((symbol get_column) tblvar col) '('get_column grouptbl (concat '('get_column tblvar col))) /* grouped col */
 					(cons sym args) /* function call */ (cons sym (map args replace_agg_with_fetch))
 					expr /* literals */
 				)))
-
-				(define tblvar_cols (merge_unique (map group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
-				(set condition (replace_find_column condition))
-				(set filtercols (extract_columns_for_tblvar tblvar condition))
 
 				(merge
 					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
@@ -181,7 +181,7 @@ if there is a group function, create a temporary preaggregate table
 					(map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 						(set cols (extract_columns_for_tblvar tblvar expr))
 						/* TODO: name that column (concat ag "|" condition) */
-						'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
+						'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
 							(scan_wrapper 'scan schema tbl
 								(cons list (merge tblvar_cols filtercols))
 								/* check group equality AND WHERE-condition */
