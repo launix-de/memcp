@@ -163,6 +163,8 @@ if there is a group function, create a temporary preaggregate table
 				)))
 
 				(define tblvar_cols (merge_unique (map group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
+				(set condition (replace_find_column condition))
+				(set filtercols (extract_columns_for_tblvar tblvar condition))
 
 				(merge
 					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
@@ -181,9 +183,9 @@ if there is a group function, create a temporary preaggregate table
 						/* TODO: name that column (concat ag "|" condition) */
 						'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
 							(scan_wrapper 'scan schema tbl
-								(cons list tblvar_cols)
-								/* TODO: AND WHERE */
-								'((quote lambda) (map tblvar_cols (lambda (col) (symbol (concat tblvar "." col)))) (cons (quote and) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))
+								(cons list (merge tblvar_cols filtercols))
+								/* check group equality AND WHERE-condition */
+								'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (cons (quote and) (cons (replace_columns_from_expr condition) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col)))))))))
 								(cons list cols)
 								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))/* TODO: (build_scan tables condition)*/
 								reduce
@@ -193,7 +195,7 @@ if there is a group function, create a temporary preaggregate table
 					))))
 
 					/* build the queryplan for the ordered limited scan on the grouped table */
-					'((build_queryplan schema '('(grouptbl schema grouptbl)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch (replace_find_column having)) nil nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch (replace_find_column col)) dir)))) limit offset))
+					'((build_queryplan schema '('(grouptbl schema grouptbl)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch (replace_find_column having)) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch (replace_find_column col)) dir))))) limit offset))
 				)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
