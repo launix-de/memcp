@@ -186,7 +186,7 @@ if there is a group function, create a temporary preaggregate table
 						/* TODO: name that column (concat ag "|" condition) */
 						'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
 							/* TODO: recurse build_queryplan? */
-							(scan_wrapper schema tbl
+							(scan_wrapper 'scan schema tbl
 								(cons list tblvar_cols)
 								/* TODO: AND WHERE */
 								'((quote lambda) (map tblvar_cols (lambda (col) (symbol (concat tblvar "." col)))) (cons (quote and) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))
@@ -200,7 +200,7 @@ if there is a group function, create a temporary preaggregate table
 
 					/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
 					/* TODO: build_queryplan with order limit offset */
-					'((scan_wrapper schema grouptbl
+					'((scan_wrapper 'scan schema grouptbl
 						/* HAVING */
 						(cons list filtercols)
 						'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition)) /* TODO: filter count|condition > 0 */
@@ -251,7 +251,7 @@ if there is a group function, create a temporary preaggregate table
 						(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
 						/* TODO: add columns from rest condition into cols list */
 
-						(scan_wrapper schema tbl
+						(scan_wrapper 'scan schema tbl
 							/* condition */
 							(cons list filtercols)
 							'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition))

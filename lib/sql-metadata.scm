@@ -50,18 +50,18 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)
 	(show schema tbl) /* otherwise: fetch from metadata */
 )))
-(define scan_wrapper (lambda (schema tbl filtercols filter mapcols map reduce neutral) (match '(schema tbl)
+(define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
 	'((ignorecase "information_schema") (ignorecase "tables"))
-		'((quote scan) schema 
+		(merge '(scanfn schema 
 			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
-			filtercols filter mapcols map reduce neutral)
+			) rest)
 	'((ignorecase "information_schema") (ignorecase "columns"))
-		'((quote scan) schema 
+		(merge '(scanfn schema 
 			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "name") "data_type" '((quote col) "type") "column_type" '((quote concat) '((quote col) "type") '((quote col) "dimensions")))))))))))
-			filtercols filter mapcols map reduce neutral)
+			) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-		'(list) /* TODO: list constraints */
+		(merge '(scanfn schema tbl) rest) /* TODO: list constraints */
 	'(schema tbl) /* normal case */
-		'((quote scan) schema tbl filtercols filter mapcols map reduce neutral)
-)))
+		(merge '(scanfn schema tbl) rest)
+))))
 
