@@ -130,15 +130,20 @@ func main() {
 	// parse command line options
 	var commands arrayFlags
 	flag.Var(&commands, "c", "Execute scm command")
+
 	basepath := "data"
-	profile := ""
 	flag.StringVar(&basepath, "data", "data", "Data folder for persistence")
+
+	profile := ""
 	flag.StringVar(&profile, "profile", "", "Data folder for persistence")
+
+	wd, _ := os.Getwd() // libraries are relative to working directory... or change with -wd PATH
+	flag.StringVar(&wd, "wd", wd, "Working Directory for (import) and (load) (Default: .)")
+
 	flag.Parse()
 	imports := flag.Args()
 
 	// define some IO functions (scm will not provide them since it is sandboxable)
-	wd, _ := os.Getwd() // libraries are relative to working directory... is that right?
 	IOEnv = scm.Env {
 		scm.Vars {},
 		nil,

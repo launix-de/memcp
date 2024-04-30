@@ -2,7 +2,7 @@ Bootstrap: docker
 From: ubuntu:22.04
 
 # build with: sudo singularity build memcp.sif memcp.singularity.recipe
-# run with: sinuglarity run memcp.sif
+# run with: singularity run --bind `pwd`:/data memcp.sif
 
 %post
 	apt-get -y update
@@ -16,6 +16,7 @@ From: ubuntu:22.04
 	go build
 
 %environment
+	export PATH="/memcp:$PATH"
 
 %runscript
-	/memcp/memcp -data data
+	cd /memcp && ./memcp -data /data
