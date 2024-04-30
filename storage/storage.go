@@ -173,8 +173,17 @@ func Init(en scm.Env) {
 			}
 			mapcols_ := a[8].([]scm.Scmer)
 			mapcols := make([]string, len(mapcols_))
+			for i, c := range mapcols_ {
+				mapcols[i] = scm.String(c)
+			}
 
-			// TODO: version on primitive lists like in scan
+			if list, ok := a[1].([]scm.Scmer); ok {
+				// implementation on lists
+				// TODO: version on primitive lists like in scan
+				panic("scan_order is not implemented on lists yet")
+				for range list {}
+				return nil
+			}
 			// params: table, condition, map, reduce, reduceSeed
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {

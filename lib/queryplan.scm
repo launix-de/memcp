@@ -226,14 +226,45 @@ if there is a group function, create a temporary preaggregate table
 	) (begin
 		/* grouping has been removed; now to the real data: */
 
-		(if (coalesce order /*limit offset*/) (begin
+		(if (coalesce order limit offset) (begin
 			/* ordered or limited scan */
 			/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
-			(match order
-				'('('((symbol get_column) tblalias "ORDINAL_POSITION") direction)) (build_queryplan schema tables fields condition group having nil nil nil) /* ignore ordering for some cases by now to use the dbeaver tool */
-				'('('((symbol get_column) tblalias "CONSTRAINT_NAME") direction) '('((symbol get_column) tblalias "ORDINAL_POSITION") direction)) (build_queryplan schema tables fields condition group having nil nil nil) /* ignore ordering for some cases by now to use the dbeaver tool */
-				(error "Ordered scan is not implemented yet")
-			)
+			(set order (map (coalesce order '()) (lambda (x) (match x '(col dir) '((replace_find_column col) dir)))))
+			(define build_scan (lambda (tables condition)
+				(match tables
+					(cons '(tblvar schema tbl) tables) (begin /* outer scan */
+						(set cols (merge_unique
+							    (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
+							    (extract_columns_for_tblvar tblvar condition)
+						))
+						/* TODO: split condition in those ANDs that still contain get_column from tables and those evaluatable now */
+						(set rest_condition (match tables '() (coalesce condition true) true))
+						(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
+						/* TODO: add columns from rest condition into cols list */
+
+						/* extract order cols for this tblvar */
+						(set ordercols (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) col) dir) (cons col a) a)) '()))
+						(set dirs      (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) col) dir) (cons dir a) a)) '()))
+
+						(scan_wrapper 'scan_order schema tbl
+							/* condition */
+							(cons list filtercols)
+							'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition))
+							/* sortcols, sortdirs */
+							(cons list ordercols)
+							(cons list dirs)
+							offset
+							(coalesce limit -1)
+							/* extract columns and store them into variables */
+							(cons list cols)
+							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables condition))
+							/* no reduce+neutral */
+						)
+					)
+					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
+				)
+			))
+			(build_scan tables (replace_find_column condition))
 		) (begin
 			/* unordered unlimited scan */
 
