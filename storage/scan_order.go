@@ -37,13 +37,13 @@ func (s *shardqueue) Len() int {
 }
 func (s *shardqueue) Less(i, j int) bool {
 	for c := 0; c < len(s.scols); c++ {
-		comparison := scm.Compare(s.scols[c](s.items[i]), s.scols[c](s.items[j]))
-		if (comparison < 0) != s.sortdirs[c] {
-			return true
-		}
-		if (comparison > 0) != s.sortdirs[c] {
-			return false
-		}
+		a := s.scols[c](s.items[i])
+		b := s.scols[c](s.items[j])
+		if scm.Less(a, b) {
+			return !s.sortdirs[c]
+		} else if scm.Less(b, a) {
+			return s.sortdirs[c]
+		} // else: go to next level
 		// otherwise: move on to c++
 	}
 	return false // equal is not less
@@ -62,13 +62,13 @@ func (s *globalqueue) Len() int {
 }
 func (s *globalqueue) Less(i, j int) bool {
 	for c := 0; c < len(s.q[i].scols); c++ {
-		comparison := scm.Compare(s.q[i].scols[c](s.q[i].items[0]), s.q[j].scols[c](s.q[j].items[0]))
-		if (comparison < 0) != s.q[i].sortdirs[c] {
-			return true
-		}
-		if (comparison > 0) != s.q[i].sortdirs[c] {
-			return false
-		}
+		a := s.q[i].scols[c](s.q[i].items[0])
+		b :=s.q[j].scols[c](s.q[j].items[0])
+		if scm.Less(a, b) {
+			return !s.q[i].sortdirs[c]
+		} else if scm.Less(b, a) {
+			return s.q[i].sortdirs[c]
+		} // else: go to next level
 		// otherwise: move on to c++
 	}
 	return false // equal is not less

@@ -129,9 +129,9 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				}
 				return false
 			case "coalesce":
-				for i, x := range e {
-					x2 := Eval(x, en)
-					if i > 0 && ToBool(x2) {
+				for i := 1; i < len(e); i++ {
+					x2 := Eval(e[i], en)
+					if i == len(e)-1 || ToBool(x2) { // last value is taken even if ToBool is false, especially used for '()
 						return x2
 					}
 				}

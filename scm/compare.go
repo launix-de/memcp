@@ -16,30 +16,30 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package scm
 
-import "fmt"
-
-func Compare(a, b Scmer) int {
-	// TODO: nil
+// sort function for scmer
+func Less(a, b Scmer) bool {
 	switch a_ := a.(type) {
-		case float64:
-			b_ := ToFloat(b)
-			if a_ == b_ {
-				return 0
-			}
-			if a_ < b_ {
-				return -1
-			}
-			return 1
-		case string:
-			b_ := String(b)
-			if a_ == b_ {
-				return 0
-			}
-			if a_ < b_ {
-				return -1
-			}
-			return 1
-		default:
-			panic("Cannot compare " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
+	case nil:
+		return b != nil // nil is always less than any other value except for nil (which is equal)
+	case int, uint, int64, uint64:
+		return ToFloat(a) < ToFloat(b) // todo: more fine grained
+	case float64:
+		return a_ < ToFloat(b)
+	case string:
+		switch b_ := b.(type) {
+			case float64:
+				return ToFloat(a) < b_
+			case string:
+				return a_ < b_
+			case nil:
+				return false
+			default:
+				panic("unknown type combo in comparison")
+		}
+	// are there any other types??
+	default:
+		panic("unknown type combo in comparison: " + String(a) + " < " + String(b))
 	}
+	return false
 }
+
