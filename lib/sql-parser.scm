@@ -27,6 +27,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "FROM" true)
 		(atom "SELECT" true)
 		(atom "INSERT" true)
+		(atom "ORDER" true)
 		(atom "LIMIT" true)
 		(atom "DELIMITER" true)
 	)) (if lower_identifiers (toLower id) id))) /* raw -> toLower */
