@@ -155,19 +155,14 @@ if there is a group function, create a temporary preaggregate table
 				) '("engine" "sloppy") true)
 
 				/* preparation */
-				/* changes (get_column tblvar col) into its counterpart */
-				(define replace_columns_agg_expr (lambda (expr) (match expr
-					(cons (symbol aggregate) rest) (symbol (concat rest)) /* aggregate helper column */
-					'((symbol get_column) tblvar col) (symbol (concat expr)) /* grouped col */
-					(cons sym args) /* function call */ (cons sym (map args replace_columns_agg_expr))
+				(define replace_agg_with_fetch (lambda (expr) (match expr
+					(cons (symbol aggregate) rest) '('get_column grouptbl (concat rest)) /* aggregate helper column */
+					'((symbol get_column) tblvar col) '('get_column grouptbl (concat '('get_column tblvar col))) /* grouped col */
+					(cons sym args) /* function call */ (cons sym (map args replace_agg_with_fetch))
 					expr /* literals */
 				)))
 
 				(define tblvar_cols (merge_unique (map group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
-
-				/* HAVING */
-				(set rest_condition (replace_find_column (coalesce having true)))
-				(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
 
 				(merge
 					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
@@ -197,26 +192,8 @@ if there is a group function, create a temporary preaggregate table
 						))
 					))))
 
-					/* TODO: (build_queryplan schema '('(grouptbl schema grouptbl)) (map_assoc replace_aggregates_with_get_column fields) having nil nil order limit offset) */
-					'((scan_wrapper 'scan schema grouptbl
-						/* HAVING */
-						(cons list filtercols)
-						'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition)) /* TODO: filter count|condition > 0 */
-						(cons list (merge
-							/* group columns */
-							(map group (lambda (col) (concat col)))
-							/* aggregates */
-							(map ags (lambda (ag) (concat ag)))
-						))
-						'((quote lambda) (merge
-							/* group columns */
-							(map group (lambda (col) (symbol (concat col))))
-							/* aggregates */
-							(map ags (lambda (ag) (symbol (concat ag))))
-						) '((quote resultrow)
-							(cons (quote list) (map_assoc fields (lambda (col expr) (replace_columns_agg_expr expr))))
-						))
-					))
+					/* build the queryplan for the ordered limited scan on the grouped table */
+					'((build_queryplan schema '('(grouptbl schema grouptbl)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch (replace_find_column having)) nil nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch (replace_find_column col)) dir)))) limit offset))
 				)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
