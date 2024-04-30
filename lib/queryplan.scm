@@ -185,7 +185,6 @@ if there is a group function, create a temporary preaggregate table
 						(set cols (extract_columns_for_tblvar tblvar expr))
 						/* TODO: name that column (concat ag "|" condition) */
 						'((quote createcolumn) schema grouptbl (concat ag) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
-							/* TODO: recurse build_queryplan? */
 							(scan_wrapper 'scan schema tbl
 								(cons list tblvar_cols)
 								/* TODO: AND WHERE */
@@ -198,8 +197,7 @@ if there is a group function, create a temporary preaggregate table
 						))
 					))))
 
-					/* scan preaggregate (TODO: recurse over build_queryplan with group=nil over the preagg table) */
-					/* TODO: build_queryplan with order limit offset */
+					/* TODO: (build_queryplan schema '('(grouptbl schema grouptbl)) (map_assoc replace_aggregates_with_get_column fields) having nil nil order limit offset) */
 					'((scan_wrapper 'scan schema grouptbl
 						/* HAVING */
 						(cons list filtercols)
