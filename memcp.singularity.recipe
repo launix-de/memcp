@@ -1,0 +1,21 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+# build with: sudo singularity build memcp.sif memcp.singularity.recipe
+# run with: sinuglarity run memcp.sif
+
+%post
+	apt-get -y update
+	apt-get -y install git software-properties-common
+	add-apt-repository -y ppa:longsleep/golang-backports
+	apt-get -y install golang
+
+	git clone https://github.com/launix-de/memcp /memcp
+	cd /memcp
+	go get
+	go build
+
+%environment
+
+%runscript
+	/memcp/memcp -data data
