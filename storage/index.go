@@ -37,6 +37,60 @@ type StorageIndex struct {
 	inactive bool
 }
 
+/*
+ TODO: n-ary heap btree implementation for better cache exploitation
+
+ - len(tree) = len(data)
+ - completely pointerless
+ - each node has up to 32 items
+ - all nodes except the last node are fully occupied
+ - the first item is guaranteed to be the smallest item
+ - the next smallest item is its first child
+ - if the node is a leaf, the next smallest item is its sibling
+ - if the item is the last in the node, the next smallest item is the sibling of its parent
+ - forward iteration algorithm:
+    if 32 * i < len(heap) {
+	    // visit child
+	    i = 32 * i
+    } else {
+	    // move to next sibling
+	    i = i + 1
+	    while i % 32 == 0 {
+		    // end of node -> go to parent's next
+		    i = i / 32
+		    if i == 0 {
+			    return "finished"
+		    }
+	    }
+    }
+ - backward iteration algorithm:
+    if i == 0 {
+            return "finished"
+    }
+    if i % 32 == 0 {
+            // end of node -> go to parent's next
+            i = i / 32
+    } else {
+	    // move to next sibling
+	    i = i - 1
+	    while 32 * i + 31 < len(heap) {
+		    // visit highest child
+		    i = 32 * i + 31
+	    }
+    }
+  - bisect algorithm: given a searchvalue, find the lowest index where all items below that point are less than searchvalue
+     - start with left=0, right=min(32, len(heap))
+     - pivot = (left+right)/2
+     - if Less(item[pivot], searchvalue) { left = pivot } else { right = pivot }
+     - if left = right:
+       - if not left*32 <= len(heap): return left
+       - if left == 0: return 0
+       - left = (left-1) * 32, right = left + 32 // search items left from left that might be smaller
+       - recurse
+  - bisect for a greater-equal variant (find the highest index where all items above are not less than searchvalue)
+
+*/
+
 // iterates over items
 func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan uint {
 
