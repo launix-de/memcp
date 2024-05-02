@@ -81,7 +81,7 @@ func ProcessColumnName(col string) string {
 		return col
 	} else {
 		hashsum := sha256.Sum256([]byte(col))
-		return string(hashsum[:])
+		return fmt.Sprintf("%x", hashsum[:8])
 	}
 }
 func (u *storageShard) load(t *table) {
