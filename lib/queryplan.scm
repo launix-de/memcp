@@ -140,7 +140,9 @@ if there is a group function, create a temporary preaggregate table
 	(if group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		(set group (map group replace_find_column))
-		(define ags (merge (extract_assoc fields (lambda (key expr) (extract_aggregates expr)))))
+		(define ags (merge_unique (extract_assoc fields (lambda (key expr) (extract_aggregates expr))))) /* aggregates in fields */
+		(define ags (merge_unique ags (merge_unique (map (coalesce order '()) (lambda (x) (match x '(col dir) (extract_aggregates col))))))) /* aggregates in order */
+		(define ags (merge_unique ags (extract_aggregates (coalesce having true)))) /* aggregates in having */
 
 		(match tables
 			/* TODO: allow for more than just group by single table */
