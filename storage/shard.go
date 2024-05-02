@@ -23,6 +23,7 @@ import "bufio"
 import "strings"
 import "reflect"
 import "runtime"
+import "crypto/sha256"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
@@ -75,6 +76,14 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
 }
+func ProcessColumnName(col string) string {
+	if len(col) < 64 {
+		return col
+	} else {
+		hashsum := sha256.Sum256([]byte(col))
+		return string(hashsum[:])
+	}
+}
 func (u *storageShard) load(t *table) {
 	u.t = t
 	// load the columns
@@ -84,7 +93,7 @@ func (u *storageShard) load(t *table) {
 			u.columns[col.Name] = new(StorageSparse)
 		} else {
 			// read column from file
-			f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + col.Name)
+			f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + ProcessColumnName(col.Name))
 			if err != nil {
 				// file does not exist -> no data available
 				u.columns[col.Name] = new(StorageSparse)
@@ -507,7 +516,7 @@ func (t *storageShard) RemoveFromDisk() {
 	}
 	for _, col := range t.t.Columns {
 		// delete column from file
-		os.Remove(t.t.schema.path + t.uuid.String() + "-" + col.Name)
+		os.Remove(t.t.schema.path + t.uuid.String() + "-" + ProcessColumnName(col.Name))
 	}
 	os.Remove(t.t.schema.path + t.uuid.String() + ".log")
 }
