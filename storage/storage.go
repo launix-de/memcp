@@ -528,15 +528,20 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"rebuild", "rebuilds all main storages and returns the amount of time it took",
-		0, 0,
+		0, 1,
 		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"all", "bool", "if true, rebuild all shards, even if nothing has changed (default: false)"},
 		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
 			start := time.Now()
+			all := false
+			if len(a) > 0 && scm.ToBool(a[0]) {
+				all = true
+			}
 
 			dbs := databases.GetAll()
 			for _, db := range dbs {
-				db.rebuild()
+				db.rebuild(all)
 				db.save()
 			}
 

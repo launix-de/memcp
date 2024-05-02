@@ -113,12 +113,12 @@ func (db *database) ShowTables() scm.Scmer {
 	return result
 }
 
-func (db *database) rebuild() {
+func (db *database) rebuild(all bool) {
 	for _, t := range db.Tables.GetAll() {
 		t.mu.Lock() // table lock
 		for i, s := range t.Shards {
 			// TODO: go + chan done
-			t.Shards[i] = s.rebuild()
+			t.Shards[i] = s.rebuild(all)
 		}
 		t.mu.Unlock() // TODO: do this after chan done??
 	}

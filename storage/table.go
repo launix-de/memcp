@@ -73,7 +73,7 @@ type table struct {
 	Unique []uniqueKey // unique keys
 	Foreign []foreignKey // foreign keys
 	PersistencyMode PersistencyMode /* 0 = safe (default), 1 = sloppy, 2 = memory */
-	mu sync.Mutex // schema lock
+	mu sync.Mutex // schema/sharding lock
 	uniquelock sync.Mutex // unique insert lock
 	Auto_increment uint64 // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 
@@ -209,7 +209,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 		if shard.Count() >= max_shardsize {
 			go func(i int) {
 				// rebuild full shards in background
-				t.Shards[i] = t.Shards[i].rebuild()
+				t.Shards[i] = t.Shards[i].rebuild(false)
 				// write new uuids to disk
 				t.schema.save()
 			}(len(t.Shards)-1)

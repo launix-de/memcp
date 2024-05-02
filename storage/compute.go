@@ -36,7 +36,7 @@ func (t *table) ComputeColumn(name string, computor scm.Scmer) {
 					for !s.ComputeColumn(name, computor) {
 						// couldn't compute column because delta is still active
 						t.mu.Lock()
-						s = s.rebuild()
+						s = s.rebuild(false)
 						t.Shards[i] = s
 						t.mu.Unlock()
 					}

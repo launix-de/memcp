@@ -513,7 +513,7 @@ func (t *storageShard) RemoveFromDisk() {
 }
 
 // rebuild main storage from main+delta
-func (t *storageShard) rebuild() *storageShard {
+func (t *storageShard) rebuild(all bool) *storageShard {
 
 	// concurrency! when rebuild is run in background, inserts and deletions into and from old delta storage must be duplicated to the ongoing process
 	t.mu.Lock()
@@ -540,7 +540,7 @@ func (t *storageShard) rebuild() *storageShard {
 	t.mu.RUnlock()
 	// from now on, we can rebuild with no hurry; inserts and update/deletes on the previous shard will propagate to us, too
 
-	if maxInsertIndex > 0 || deletions.Count() > 0 {
+	if all || maxInsertIndex > 0 || deletions.Count() > 0 {
 		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
 		// SetFinalizer to old shard to delete files from disk
 		runtime.SetFinalizer(t, func (t *storageShard) {
