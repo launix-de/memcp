@@ -209,7 +209,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 		if shard.Count() >= max_shardsize {
 			go func(i int) {
 				// rebuild full shards in background
-				t.Shards[i] = t.Shards[i].rebuild(false)
+				s := t.Shards[i]
+				s.RunOn()
+				t.Shards[i] = s.rebuild(false)
 				// write new uuids to disk
 				t.schema.save()
 			}(len(t.Shards)-1)

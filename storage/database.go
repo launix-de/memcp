@@ -20,6 +20,7 @@ import "os"
 import "fmt"
 import "sync"
 import "encoding/json"
+import "github.com/lrita/numa"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 
@@ -62,7 +63,7 @@ func LoadDatabases() {
 					t.schema = db // restore schema reference
 					for _, s := range t.Shards {
 						go func(t *table, s *storageShard) {
-							s.load(t)
+							s.load(t) // this captures current node id of shard
 							done <- true
 						}(t, s)
 					}
@@ -114,13 +115,25 @@ func (db *database) ShowTables() scm.Scmer {
 }
 
 func (db *database) rebuild(all bool) {
+	count := 0
+	done := make(chan bool)
 	for _, t := range db.Tables.GetAll() {
 		t.mu.Lock() // table lock
 		for i, s := range t.Shards {
-			// TODO: go + chan done
-			t.Shards[i] = s.rebuild(all)
+			count++
+			go func(t *table, i int, s *storageShard) {
+				// reshuffle numa awareness, so memory can reorganize during rebuild
+				numa.RunOnNode(-1)
+				// go + chan done
+				s.RunOn()
+				t.Shards[i] = s.rebuild(all)
+				done <- true
+			}(t, i, s)
 		}
 		t.mu.Unlock() // TODO: do this after chan done??
+	}
+	for i := 0; i < count; i++ {
+		<- done
 	}
 }
 

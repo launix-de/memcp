@@ -47,6 +47,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	for _, s := range t.Shards { // TODO: replace for loop with a more efficient algo that takes column boundaries to only pick the few of possibly thousands of shards that are within the min-max bounds
 		// parallel scan over shards
 		go func(s *storageShard) {
+			s.RunOn()
 			defer func () {
 				if r := recover(); r != nil {
 					//fmt.Println("panic during scan:", r, string(debug.Stack()))
