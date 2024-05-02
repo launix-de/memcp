@@ -654,7 +654,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 			// write to disc (only if required)
 			if t.t.PersistencyMode != Memory {
-				f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + col)
+				f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + ProcessColumnName(col))
 				if err != nil {
 					panic(err)
 				}
