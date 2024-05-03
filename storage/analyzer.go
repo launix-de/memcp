@@ -69,7 +69,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	traverseCondition = func (node scm.Scmer) {
 		switch v := node.(type) {
 			case []scm.Scmer:
-				if v[0] == scm.Symbol("equal?") {
+				if v[0] == scm.Symbol("equal?") || v[0] == scm.Symbol("equal??") {
 					// equi
 					switch v1 := v[1].(type) {
 						case scm.Symbol:
@@ -80,6 +80,30 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 								}
 							}
 						// TODO: equals constant vs. column
+					}
+				} else if v[0] == scm.Symbol("<") || v[0] == scm.Symbol("<=") {
+					// compare
+					switch v1 := v[1].(type) {
+						case scm.Symbol:
+							if col, ok := symbolmapping[v1]; ok { // left is a column
+								if v2, ok := extractConstant(v[2]); ok { // right is a constant
+									// ?equal var const
+									cols = append(cols, columnboundaries{col, nil, v2})
+								}
+							}
+						// TODO: constant vs. column
+					}
+				} else if v[0] == scm.Symbol(">") || v[0] == scm.Symbol(">=") {
+					// compare
+					switch v1 := v[1].(type) {
+						case scm.Symbol:
+							if col, ok := symbolmapping[v1]; ok { // left is a column
+								if v2, ok := extractConstant(v[2]); ok { // right is a constant
+									// ?equal var const
+									cols = append(cols, columnboundaries{col, v2, nil})
+								}
+							}
+						// TODO: constant vs. column
 					}
 				} else if v[0] == scm.Symbol("and") {
 					// AND -> recursive traverse
