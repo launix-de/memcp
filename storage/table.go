@@ -162,6 +162,13 @@ func (d dataset) Get(key string) scm.Scmer {
 }
 
 func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo string) bool {
+	// one early out without schemalock (especially for computed columns)
+	for _, c := range t.Columns {
+		if c.Name == name {
+			return false // column already exists
+		}
+	}
+
 	t.schema.schemalock.Lock()
 	defer t.schema.schemalock.Unlock()
 
