@@ -16,6 +16,49 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package scm
 
+import "fmt"
+import "strings"
+import "unicode"
+import "unicode/utf8"
+
+func Equal(a, b Scmer) Scmer {
+	// == NULL is always NULL
+	if a == nil || b == nil {
+		return nil
+	}
+	switch a_ := a.(type) {
+		case string:
+			switch b_ := b.(type) {
+				case string:
+					return strings.EqualFold(a_, b_)
+				case float64:
+					return a_ == String(b_)
+				case bool:
+					return ToBool(a) == b_
+			}
+		case float64:
+			switch b_ := b.(type) {
+				case string:
+					return String(a_) == b_
+				case float64:
+					return a_ == b_
+				case bool:
+					return ToBool(a) == b_
+			}
+		case bool:
+			switch b_ := b.(type) {
+				case string:
+					return a_ == ToBool(b)
+				case float64:
+					return a_ == ToBool(b)
+				case bool:
+					return a_ == b_
+			}
+
+	}
+	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
+}
+
 // sort function for scmer
 func Less(a, b Scmer) bool {
 	switch a_ := a.(type) {
@@ -30,7 +73,7 @@ func Less(a, b Scmer) bool {
 			case float64:
 				return ToFloat(a) < b_
 			case string:
-				return a_ < b_
+				return StringLess(a_, b_)
 			case nil:
 				return false
 			default:
@@ -43,3 +86,28 @@ func Less(a, b Scmer) bool {
 	return false
 }
 
+func StringLess(a, b string) bool {
+    for {
+        if len(a) == 0 {
+            return false
+        }
+        if len(b) == 0 {
+            return true
+        }
+        ar, sa := utf8.DecodeRuneInString(a)
+        br, sb := utf8.DecodeRuneInString(b)
+
+	// if case insensitive
+        al := unicode.ToLower(ar)
+        bl := unicode.ToLower(br)
+
+        if al < bl {
+            return true
+        } else if al > bl {
+            return false
+        } else {
+		a = a[sa:]
+		b = b[sb:]
+	}
+    }
+}

@@ -157,52 +157,60 @@ func init_alu() {
 		"<=", "compares two numbers",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"value...", "number", "values"},
+			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			// TODO: string vs. float
-			return ToFloat(a[0]) <= ToFloat(a[1])
+			return !Less(a[1], a[0])
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		"<", "compares two numbers",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"value...", "number", "values"},
+			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			// TODO: string vs. float
-			return ToFloat(a[0]) < ToFloat(a[1])
+			return Less(a[0], a[1])
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		">", "compares two numbers",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"value...", "number", "values"},
+			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return a[0].(float64) > a[1].(float64)
+			return Less(a[1], a[0])
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		">=", "compares two numbers",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"value...", "number", "values"},
+			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return a[0].(float64) >= a[1].(float64)
+			return !Less(a[0], a[1])
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"equal?", "compares two values of the same type",
+		"equal?", "deep-compares two values of the same type",
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			return reflect.DeepEqual(a[0], a[1])
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"equal??", "performs a sloppy equality check on primitive values (number, string, bool. nil), strings are compared case insensitive",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"value...", "any", "values"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			return Equal(a[0], a[1])
 		},
 	})
 	Declare(&Globalenv, &Declaration{

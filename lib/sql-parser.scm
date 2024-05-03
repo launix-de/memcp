@@ -75,7 +75,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)))
 
 	(define sql_expression2 (parser (or
-		(parser '((define a sql_expression3) "=" (define b sql_expression2)) '((quote equal?) a b))
+		(parser '((define a sql_expression3) "==" (define b sql_expression2)) '((quote equal??) a b))
+		(parser '((define a sql_expression3) "=" (define b sql_expression2)) '((quote equal??) a b))
 		(parser '((define a sql_expression3) "<>" (define b sql_expression2)) '((quote not) '((quote equal?) a b)))
 		(parser '((define a sql_expression3) "!=" (define b sql_expression2)) '((quote not) '((quote equal?) a b)))
 		(parser '((define a sql_expression3) "<=" (define b sql_expression2)) '((quote <=) a b))
