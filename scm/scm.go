@@ -215,6 +215,14 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				expression = e[len(e)-1]
 				en = &en2
 				goto restart
+			case "!begin":
+				// execute begin.. in parent environment
+				for _, i := range e[1:len(e)-1] {
+					Eval(i, en)
+				}
+				// tail call optimized version: last begin part will be tailed
+				expression = e[len(e)-1]
+				goto restart
 			default:
 				goto to_apply
 			}
@@ -477,6 +485,15 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"code", "list", "list with head and optional parameters"},
 		}, "any", nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"optimize", "optimize the given scheme program",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"code", "list", "list with head and optional parameters"},
+		}, "any", func (a ...Scmer) Scmer {
+			return Optimize(a[0], &Globalenv)
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		"if", "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
