@@ -21,7 +21,9 @@ import "github.com/launix-de/memcp/scm"
 type columnboundaries struct{
 	col string
 	lower scm.Scmer
+	lowerInclusive bool
 	upper scm.Scmer
+	upperInclusive bool
 }
 
 type boundaries []columnboundaries
@@ -76,7 +78,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							if col, ok := symbolmapping[v1]; ok { // left is a column
 								if v2, ok := extractConstant(v[2]); ok { // right is a constant
 									// ?equal var const
-									cols = append(cols, columnboundaries{col, v2, v2})
+									cols = append(cols, columnboundaries{col, v2, true, v2, true})
 								}
 							}
 						// TODO: equals constant vs. column
@@ -88,7 +90,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							if col, ok := symbolmapping[v1]; ok { // left is a column
 								if v2, ok := extractConstant(v[2]); ok { // right is a constant
 									// ?equal var const
-									cols = append(cols, columnboundaries{col, nil, v2})
+									cols = append(cols, columnboundaries{col, nil, false, v2, v[0] == scm.Symbol("<=")})
 								}
 							}
 						// TODO: constant vs. column
@@ -100,7 +102,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							if col, ok := symbolmapping[v1]; ok { // left is a column
 								if v2, ok := extractConstant(v[2]); ok { // right is a constant
 									// ?equal var const
-									cols = append(cols, columnboundaries{col, v2, nil})
+									cols = append(cols, columnboundaries{col, v2, v[0] == scm.Symbol(">="), nil, false})
 								}
 							}
 						// TODO: constant vs. column
