@@ -80,7 +80,7 @@ func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
 // do preprocessing and optimization (Optimize is allowed to edit the value in-place)
 func Optimize(val Scmer, env *Env) Scmer {
 	ome := newOptimizerMetainfo()
-	v := OptimizeEx(val, env, &ome)
+	v, _ := OptimizeEx(val, env, &ome)
 	//fmt.Println(SerializeToString(v, env))
 	return v
 }
@@ -98,7 +98,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	}
 	return
 }
-func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
+func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) (result Scmer, transferOwnership bool) {
 	// TODO: static code analysis like escape analysis + replace memory-safe functions with in-place memory manipulating versions (e.g. in set_assoc)
 	// TODO: inline use-once
 	// TODO: inplace functions (map -> map_inplace, filter -> filter_inplace) will manipulate the first parameter instead of allocating something new
@@ -114,17 +114,17 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 		case Symbol:
 			// replace variables with their counterparts
 			if replacement, ok := ome.variableReplacement[v]; ok {
-				return replacement
+				return replacement, false
 			}
-			return val // TODO: remove this return once there is a solution to mask out prefetch variables
+			return val, true // TODO: remove this return once there is a solution to mask out prefetch variables
 
 			// prefetch system functions (not working yet -> sometimes lambdas redefine variables which are not allowed to replace)
 			xen := env.FindRead(v)
 			if xen != nil {
 				if v, ok := xen.Vars[v]; ok {
-					return v
+					return v, false
 				} else {
-					return val
+					return val, false
 				}
 			}
 		case []Scmer:
@@ -135,18 +135,18 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 						// TODO: v[i]'s return value is not used -> discard
 					}
 					for i := 1; i < len(v); i++ {
-						v[i] = OptimizeEx(v[i], env, &ome2)
+						v[i], transferOwnership = OptimizeEx(v[i], env, &ome2)
 					}
-					return v
+					return v, transferOwnership
 				}
 				// (var i) is a serialization artifact
 				if v[0] == Symbol("var") && len(v) == 2 {
-					return NthLocalVar(ToInt(v[1]))
+					return NthLocalVar(ToInt(v[1])), false
 				}
 				// (unquote s) is a serialization artifact
 				if v[0] == Symbol("unquote") && len(v) == 2 {
 					if s, ok := v[1].(string); ok {
-						return Symbol(s) // replace with the symbol directly
+						return Symbol(s), true // replace with the symbol directly
 					}
 				}
 				// analyze lambdas (but don't pack them into *Proc since they need a fresh env)
@@ -189,8 +189,8 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 					}
 					*/
 					// p.Params = nil do not replace parameter list with nil, the execution engine must handle it different
-					v[2] = OptimizeEx(v[2], env, &ome2) // optimize body
-					return v
+					v[2], transferOwnership = OptimizeEx(v[2], env, &ome2) // optimize body
+					return v, transferOwnership
 				}
 
 				// now all the special cases
@@ -210,34 +210,34 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo) Scmer {
 						// change symbol of set/define to setN
 						v[0] = Symbol("setN")
 					}
-					v[2] = OptimizeEx(v[2], env, ome)
+					v[2], _ = OptimizeEx(v[2], env, ome)
 					// TODO: check if we could remove the set instruction and inline the value if it occurs only once
 				} else if v[0] == Symbol("match") {
-					v[1] = OptimizeEx(v[1], env, ome)
+					v[1], _ = OptimizeEx(v[1], env, ome)
 					/* code is deactivated since variables can be overwritten! */
 					for i := 3; i < len(v); i+= 2 {
 						// for each pattern
 						ome2 := ome.Copy()
 						v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2) // optimize pattern and collect overwritten variables
-						v[i] = OptimizeEx(v[i], env, &ome2) // optimize result and apply overwritten variables
+						v[i], _ = OptimizeEx(v[i], env, &ome2) // optimize result and apply overwritten variables
 					}
 					if len(v)%2 == 1 {
 						// last item
-						v[len(v)-1] = OptimizeEx(v[len(v)-1], env, ome)
+						v[len(v)-1], _ = OptimizeEx(v[len(v)-1], env, ome)
 					}
 				} else if v[0] == Symbol("parser") {
-					return OptimizeParser(v, env, ome, false)
+					return OptimizeParser(v, env, ome, false), true
 
 				// last but not least: recurse over the arguments when we aren't a special case
 				} else if v[0] != Symbol("quote") {
 					// optimize all other parameters
 					for i := 1; i < len(v); i++ {
-						v[i] = OptimizeEx(v[i], env, ome)
+						v[i], _ = OptimizeEx(v[i], env, ome)
 					}
 				}
 			}
 	}
-	return val
+	return val, transferOwnership
 }
 func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMetainfo, ome2 *optimizerMetainfo) Scmer {
 	// TODO: Prune patterns that are not matched by the value (happens mostly during inlining)
@@ -250,7 +250,7 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 	case []Scmer:
 		if p[0] == Symbol("eval") {
 			// optimize inner value
-			p[1] = OptimizeEx(p[1], env, ome)
+			p[1], _ = OptimizeEx(p[1], env, ome)
 			return p
 		} else if p[0] == Symbol("var") {
 			// expand (it is faster)
@@ -274,10 +274,10 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 				ome2 := ome.Copy()
 				v[1] = OptimizeParser(v[1], env, &ome2, ign2) // syntax expr -> collect new variables
 				if len(v) > 2 {
-					v[2] = OptimizeEx(v[2], env, &ome2) // generator expr -> use variables
+					v[2], _ = OptimizeEx(v[2], env, &ome2) // generator expr -> use variables
 				}
 				if len(v) > 3 {
-					v[3] = OptimizeEx(v[3], env, ome) // delimiter expr
+					v[3], _ = OptimizeEx(v[3], env, ome) // delimiter expr
 				}
 			} else if v[0] == Symbol("define") {
 				v[2] = OptimizeParser(v[2], env, ome, false)
