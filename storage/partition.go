@@ -65,7 +65,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 			result.Pivots = append(result.Pivots, sample)
 		}
 	}
-	result.NumPartitions = len(result.Pivots) - 1
+	result.NumPartitions = len(result.Pivots) + 1
 
 	return
 }
