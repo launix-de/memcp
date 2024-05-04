@@ -390,7 +390,9 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 		// also notify indices
 		for _, index := range t.indexes {
 			// add to delta indexes
-			index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+			if index.deltaBtree != nil {
+				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+			}
 		}
 	}
 }
