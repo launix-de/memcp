@@ -16,7 +16,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
+import "io"
 import "fmt"
 import "time"
 import "reflect"
@@ -43,8 +43,8 @@ type ColumnStorage interface {
 	finish()
 
 	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
-	Serialize(*os.File) // write content to file (and maybe swap the old content out of ram) (must set finalizer if file is kept open)
-	Deserialize(*os.File) uint // read from file (or swap in) (note that first byte is already read)
+	Serialize(io.Writer) // write content to Writer
+	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)
 }
 
 var storages = map[uint8]reflect.Type {
@@ -55,6 +55,8 @@ var storages = map[uint8]reflect.Type {
 	12: reflect.TypeOf(StorageFloat{}),
 	20: reflect.TypeOf(StorageString{}),
 	21: reflect.TypeOf(StoragePrefix{}),
+	//30: reflect.TypeOf(OverlaySCMER{}),
+	31: reflect.TypeOf(OverlayBlob{}),
 }
 
 func Init(en scm.Env) {

@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
+import "io"
 import "math"
 import "unsafe"
 import "encoding/binary"
@@ -35,10 +35,9 @@ func (s *StorageFloat) String() string {
 	return "float64"
 }
 
-func (s *StorageFloat) Serialize(f *os.File) {
-	defer f.Close()
+func (s *StorageFloat) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(12)) // 12 = StorageFloat
-	f.WriteString("1234567") // fill up to 64 bit alignment
+	io.WriteString(f, "1234567") // fill up to 64 bit alignment
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	// now at offset 16 begin data
 	rawdata := unsafe.Slice((*byte)(unsafe.Pointer(&s.values[0])), 8 * len(s.values))
@@ -49,8 +48,7 @@ func (s *StorageFloat) Serialize(f *os.File) {
 	s.values = unsafe.Slice((*float64)&newrawdata[16], len(s.values))
 	*/
 }
-func (s *StorageFloat) Deserialize(f *os.File) uint {
-	defer f.Close()
+func (s *StorageFloat) Deserialize(f io.Reader) uint {
 	var dummy [7]byte
 	f.Read(dummy[:])
 	var l uint64

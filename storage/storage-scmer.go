@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
+import "io"
 import "math"
 import "bufio"
 import "encoding/json"
@@ -29,6 +29,7 @@ type StorageSCMER struct {
 	onlyInt bool
 	onlyFloat bool
 	hasString bool
+	longStrings int
 	null uint // amount of NULL values (sparse map!)
 	numSeq uint // sequence statistics
 	last1, last2 int64 // sequence statistics
@@ -43,8 +44,7 @@ func (s *StorageSCMER) String() string {
 	return "SCMER"
 }
 
-func (s *StorageSCMER) Serialize(f *os.File) {
-	defer f.Close()
+func (s *StorageSCMER) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for i := 0; i < len(s.values); i++ {
@@ -56,8 +56,7 @@ func (s *StorageSCMER) Serialize(f *os.File) {
 		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
 	}
 }
-func (s *StorageSCMER) Deserialize(f *os.File) uint {
-	defer f.Close()
+func (s *StorageSCMER) Deserialize(f io.Reader) uint {
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.values = make([]scm.Scmer, l)
@@ -93,6 +92,9 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 			s.onlyInt = false
 			s.onlyFloat = false
 			s.hasString = true
+			if len(v) > 255 {
+				s.longStrings++
+			}
 		case nil:
 			s.null = s.null + 1 // count NULL
 			// storageInt can also handle null
@@ -124,9 +126,14 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 		return new(StorageSparse)
 	}
 	if s.hasString {
+		if s.longStrings > 2 {
+			b := new (OverlayBlob)
+			b.Base = new (StorageString)
+			return b
+		}
 		return new(StorageString)
 	}
-	if s.onlyInt {
+	if s.onlyInt { // TODO: OverlaySCMER?
 		// propose sequence compression in the form (recordid, startvalue, length, stride) using binary search on recordid for reading
 		if i > 5 && 2 * (i - s.numSeq) < i {
 			return new(StorageSeq)

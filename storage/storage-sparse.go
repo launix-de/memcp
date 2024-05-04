@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
+import "io"
 import "bufio"
 import "encoding/json"
 import "encoding/binary"
@@ -35,8 +35,7 @@ func (s *StorageSparse) Size() uint {
 func (s *StorageSparse) String() string {
 	return "SCMER-sparse"
 }
-func (s *StorageSparse) Serialize(f *os.File) {
-	defer f.Close()
+func (s *StorageSparse) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(2)) // 2 = StorageSparse
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
@@ -55,8 +54,7 @@ func (s *StorageSparse) Serialize(f *os.File) {
 		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
 	}
 }
-func (s *StorageSparse) Deserialize(f *os.File) uint {
-	defer f.Close()
+func (s *StorageSparse) Deserialize(f io.Reader) uint {
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.count = l

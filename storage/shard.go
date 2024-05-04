@@ -670,6 +670,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					panic(err)
 				}
 				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
+				f.Close()
 			}
 		}
 		b.WriteString(") -> ")

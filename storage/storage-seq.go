@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
+import "io"
 import "fmt"
 import "sort"
 import "encoding/binary"
@@ -44,19 +44,17 @@ func (s *StorageSeq) String() string {
 	return fmt.Sprintf("seq[%dx %s/%s]", s.seqCount, s.start.String(), s.stride.String())
 }
 
-func (s *StorageSeq) Serialize(f *os.File) {
-	defer f.Close()
+func (s *StorageSeq) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(11)) // 11 = StorageSeq
-	f.WriteString("1234567") // dummy
+	io.WriteString(f, "1234567") // dummy
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(s.seqCount))
-	s.recordId.SerializeToFile(f)
-	s.start.SerializeToFile(f)
-	s.stride.SerializeToFile(f)
+	s.recordId.Serialize(f)
+	s.start.Serialize(f)
+	s.stride.Serialize(f)
 }
 
-func (s *StorageSeq) Deserialize(f *os.File) uint {
-	defer f.Close()
+func (s *StorageSeq) Deserialize(f io.Reader) uint {
 	var dummy [7]byte
 	f.Read(dummy[:])
 	var l uint64
@@ -65,9 +63,9 @@ func (s *StorageSeq) Deserialize(f *os.File) uint {
 	var sc uint64
 	binary.Read(f, binary.LittleEndian, &sc)
 	s.seqCount = uint(sc)
-	s.recordId.DeserializeFromFile(f, true)
-	s.start.DeserializeFromFile(f, true)
-	s.stride.DeserializeFromFile(f, true)
+	s.recordId.DeserializeEx(f, true)
+	s.start.DeserializeEx(f, true)
+	s.stride.DeserializeEx(f, true)
 	return uint(l)
 }
 

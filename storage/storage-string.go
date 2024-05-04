@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
+import "io"
 import "fmt"
 import "unsafe"
 import "strings"
@@ -54,29 +54,27 @@ func (s *StorageString) String() string {
 	}
 }
 
-func (s *StorageString) Serialize(f *os.File) {
-	defer f.Close()
+func (s *StorageString) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(20)) // 20 = StorageString
 	var nodict uint8 = 0
 	if s.nodict {
 		nodict = 1
 	}
 	binary.Write(f, binary.LittleEndian, uint8(nodict))
-	f.WriteString("123456") // dummy
+	io.WriteString(f, "123456") // dummy
 	if s.nodict {
 		binary.Write(f, binary.LittleEndian, uint64(s.starts.count))
 	} else {
 		binary.Write(f, binary.LittleEndian, uint64(s.values.count))
 	}
-	s.values.SerializeToFile(f)
-	s.starts.SerializeToFile(f)
-	s.lens.SerializeToFile(f)
+	s.values.Serialize(f)
+	s.starts.Serialize(f)
+	s.lens.Serialize(f)
 	binary.Write(f, binary.LittleEndian, uint64(len(s.dictionary)))
-	f.WriteString(s.dictionary)
+	io.WriteString(f, s.dictionary)
 }
 
-func (s *StorageString) Deserialize(f *os.File) uint {
-	defer f.Close()
+func (s *StorageString) Deserialize(f io.Reader) uint {
 	var nodict uint8
 	binary.Read(f, binary.LittleEndian, &nodict)
 	if nodict == 1 {
@@ -86,9 +84,9 @@ func (s *StorageString) Deserialize(f *os.File) uint {
 	f.Read(dummy[:])
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
-	s.values.DeserializeFromFile(f, true)
-	s.starts.DeserializeFromFile(f, true)
-	s.lens.DeserializeFromFile(f, true)
+	s.values.DeserializeEx(f, true)
+	s.starts.DeserializeEx(f, true)
+	s.lens.DeserializeEx(f, true)
 	var dictionarylength uint64
 	binary.Read(f, binary.LittleEndian, &dictionarylength)
 	if dictionarylength > 0 {

@@ -16,7 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
+import "io"
 import "fmt"
 import "unsafe"
 import "math/bits"
@@ -33,12 +33,7 @@ type StorageInt struct {
 	null uint64 // which value is null
 }
 
-func (s *StorageInt) Serialize(f *os.File) {
-	defer f.Close()
-	s.SerializeToFile(f)
-}
-
-func (s *StorageInt) SerializeToFile(f *os.File) {
+func (s *StorageInt) Serialize(f io.Writer) {
 	var hasNull uint8
 	if s.hasNull {
 		hasNull = 1
@@ -56,11 +51,11 @@ func (s *StorageInt) SerializeToFile(f *os.File) {
 		f.Write(unsafe.Slice((*byte)(unsafe.Pointer(&s.chunk[0])), 8 * len(s.chunk)))
 	}
 }
-func (s *StorageInt) Deserialize(f *os.File) uint {
-	defer f.Close()
-	return s.DeserializeFromFile(f, false)
+func (s *StorageInt) Deserialize(f io.Reader) uint {
+	return s.DeserializeEx(f, false)
 }
-func (s *StorageInt) DeserializeFromFile(f *os.File, readMagicbyte bool) uint {
+
+func (s *StorageInt) DeserializeEx(f io.Reader, readMagicbyte bool) uint {
 	var dummy8 uint8
 	var dummy32 uint32
 	if readMagicbyte {
