@@ -392,6 +392,28 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"shardcolumn", "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
+		4, 4,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"table", "string", "name of the new table"},
+			scm.DeclarationParameter{"colname", "string", "name of the column"},
+			scm.DeclarationParameter{"numpartitions", "number", "number of partitions"},
+		}, "list",
+		func (a ...scm.Scmer) scm.Scmer {
+			// get tbl
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+			return t.NewShardDimension(scm.String(a[2]), scm.ToInt(a[3])).Pivots
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"altertable", "alters a table",
 		4, 4,
 		[]scm.DeclarationParameter{

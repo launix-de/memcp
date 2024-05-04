@@ -48,11 +48,6 @@ type foreignKey struct {
 	Tbl2 string
 	Cols2 []string
 }
-type shardDimension struct {
-	Column string
-	NumPartitions int
-	Pivots []scm.Scmer
-}
 /*
 unique keys:
 	insert: check all columns of all unique keys (--> index scan!), if it is unique, deny insert
