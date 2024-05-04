@@ -122,6 +122,7 @@ func (u *storageShard) load(t *table) {
 			columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 			u.main_count = columnstorage.Deserialize(f) // read; ownership of f goes to Deserialize, so they will free the handle
 			u.columns[col.Name] = columnstorage
+			f.Close()
 		}
 	}
 
