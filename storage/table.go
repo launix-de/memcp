@@ -73,7 +73,7 @@ type table struct {
 	Auto_increment uint64 // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 
 	// storage
-	Shards []*storageShard // unordered shards
+	Shards []*storageShard // unordered shards; as long as this value is not nil, use shards instead of pshards
 	PShards []*storageShard // partitioned shards according to PDimensions
 	PDimensions []shardDimension
 	// TODO: data structure to per-column value-based shard map
@@ -228,37 +228,30 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 
 	// check unique constraints in a thread safe manner
 	if len(t.Unique) > 0 {
-		t.uniquelock.Lock()
-		uniq_collisions := t.GetUniqueCollisionFor(columns, values, mergeNull)
-		// let the whole block fail if one item is unique
-		last_i := 0
-		for i, err := range uniq_collisions {
-			if err != "" {
-				if ignoreexists {
-					shard.Insert(columns, values[last_i:i]) // insert all chunks from before
-					last_i = i+1 // skip this one
-				} else {
-					t.uniquelock.Unlock()
-					panic("Unique key constraint violated in table "+t.Name+": " + err)
-				}
+		t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
+			// physically insert
+			shard.Insert(columns, values)
+			result += len(values)
+		}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer) {
+			if !ignoreexists {
+				panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
 			}
-		}
-		// physically insert
-		shard.Insert(columns, values[last_i:])
-		t.uniquelock.Unlock()
+			// TODO: on duplicate key update ...
+		})
 	} else {
 		// physically insert (parallel)
 		shard.Insert(columns, values)
+		result += len(values)
 	}
 
 	// TODO: Trigger after insert
 	return result
 }
 
-// TODO: refactor to "has" (cols, dataset); returns the id of the unique key
-func (t *table) GetUniqueCollisionFor(columns []string, values [][]scm.Scmer, mergeNull bool) []string {
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), failure func(string, func(...scm.Scmer) scm.Scmer)) {
 	// check for duplicates
-	result := make([]string, len(values))
+	t.uniquelock.Lock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
+	defer t.uniquelock.Unlock()
 	for _, uniq := range t.Unique {
 		if len(uniq.Cols) <= 3 {
 			// use hashmap
@@ -271,6 +264,7 @@ func (t *table) GetUniqueCollisionFor(columns []string, values [][]scm.Scmer, me
 					}
 				}
 			}
+			last_j := 0
 			for j, row := range values {
 				for i, colidx := range keyIdx {
 					key[i] = row[colidx]
@@ -278,11 +272,19 @@ func (t *table) GetUniqueCollisionFor(columns []string, values [][]scm.Scmer, me
 				for _, s := range t.Shards {
 					uid, present := s.GetRecordidForUnique(uniq.Cols, key)
 					if present && !s.deletions.Get(uid) {
-						result[j] = uniq.Id
+						// found a unique collision
+						if j != last_j {
+							success(values[last_j:j]) // flush
+							last_j = j+1
+						}
+						failure(uniq.Id, s.UpdateFunction(uid, true)) // notify about failure
 						goto nextrow
 					}
 				}
 				nextrow:
+			}
+			if len(values) != last_j {
+				success(values[last_j:]) // flush the rest
 			}
 		} else {
 			// build scan for unique check
@@ -298,6 +300,7 @@ func (t *table) GetUniqueCollisionFor(columns []string, values [][]scm.Scmer, me
 			}
 			conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
 			conditionBody[0] = scm.Symbol("and")
+			last_j := 0
 			for j, row := range values {
 				for i, colidx := range colidx {
 					value := row[colidx]
@@ -308,11 +311,19 @@ func (t *table) GetUniqueCollisionFor(columns []string, values [][]scm.Scmer, me
 					}
 				}
 				condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-				if t.scan(uniq.Cols, condition, []string{}, scm.Proc{[]scm.Scmer{}, true, &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[0].(bool) || a[1].(bool)}, false, nil) != false {
-					result[j] = uniq.Id
+				updatefn := t.scan(uniq.Cols, condition, []string{"$update"}, scm.Proc{[]scm.Scmer{scm.Symbol("$update")}, scm.Symbol("$update"), &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil)
+				if updatefn != nil {
+					// found a unique collision
+					if j != last_j {
+						success(values[last_j:j]) // flush
+						last_j = j+1
+					}
+					failure(uniq.Id, updatefn.(func(...scm.Scmer) scm.Scmer)) // notify about failure
 				}
+			}
+			if len(values) != last_j {
+				success(values[last_j:]) // flush the rest
 			}
 		}
 	}
-	return result
 }

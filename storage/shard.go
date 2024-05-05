@@ -236,16 +236,14 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 
 				// unique constraint checking
 				if t.t.Unique != nil {
-					t.t.uniquelock.Lock()
 					t.deletions.Set(idx, true) // mark as deleted
 					t.mu.Unlock() // release write lock, so the scan can be performed
-					uniq_collisions := t.t.GetUniqueCollisionFor(cols, [][]scm.Scmer{d2}, false)
-					t.mu.Lock() // write lock
-					if uniq_collisions[0] != "" {
+					t.t.ProcessUniqueCollision(cols, [][]scm.Scmer{d2}, false, func (values [][]scm.Scmer) {
+						t.mu.Lock() // start write lock
+					}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer) {
 						t.deletions.Set(idx, false) // mark as undeleted
-						t.t.uniquelock.Unlock()
-						panic("Unique key constraint violated in table "+t.t.Name+": " + uniq_collisions[0])
-					}
+						panic("Unique key constraint violated in table "+t.t.Name+": " + errmsg)
+					})
 				} else {
 					t.deletions.Set(idx, true) // mark as deleted
 				}
@@ -263,9 +261,6 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					b.Write(tmp)
 					b.Write([]byte("\n"))
 					t.logfile.WriteString(b.String())
-				}
-				if t.t.Unique != nil {
-					t.t.uniquelock.Unlock()
 				}
 			}()
 			if t.t.PersistencyMode == Safe {
