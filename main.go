@@ -26,7 +26,9 @@ import "os"
 import "io"
 import "fmt"
 import "flag"
+import "time"
 import "bufio"
+import "sync"
 import "syscall"
 import "runtime"
 import "io/ioutil"
@@ -278,6 +280,9 @@ func main() {
 		defer pprof.StopCPUProfile()
 	}
 
+	// start cron
+	go cronroutine()
+
 	// REPL shell
 	scm.Repl(&IOEnv)
 
@@ -285,7 +290,29 @@ func main() {
 	exitroutine()
 }
 
+var exitsignal chan bool = make(chan bool, 1) // set true to start shutdown routine and wait for all jobs
+var exitable sync.WaitGroup
+func cronroutine() {
+	exitable.Add(1)
+	for {
+		// wait first
+		select {
+			case <- exitsignal:
+				// memcp is about to exit; confirm the waitgroup and exit
+				exitable.Done()
+				return
+			case <- time.After(time.Minute * 15): // rebuild shards for all 15 minutes
+				// continue
+		}
+
+		fmt.Println("running 15min cron ...")
+		fmt.Println("table compression done in ", scm.Globalenv.Vars["rebuild"].(func(...scm.Scmer) scm.Scmer)())
+	}
+}
+
 func exitroutine() {
+	exitsignal <- true
+	exitable.Wait()
 	fmt.Println("Exit procedure... syncing to disk")
 	fmt.Println("table compression done in ", scm.Globalenv.Vars["rebuild"].(func(...scm.Scmer) scm.Scmer)())
 	fmt.Println("finalizing memory...")
