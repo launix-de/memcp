@@ -42,7 +42,7 @@ func (d database) GetKey() string {
 
 func LoadDatabases() {
 	// this happens before any init, so no read/write action is performed on any data yet
-	done := make(chan bool, 200)
+	var done sync.WaitGroup
 	entries, _ := os.ReadDir(Basepath)
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -61,10 +61,11 @@ func LoadDatabases() {
 				// restore back references of the tables
 				for _, t := range db.Tables.GetAll() {
 					t.schema = db // restore schema reference
+					done.Add(len(t.Shards))
 					for _, s := range t.Shards {
 						go func(t *table, s *storageShard) {
 							s.load(t) // this captures current node id of shard
-							done <- true
+							done.Done()
 						}(t, s)
 					}
 				}
@@ -73,18 +74,7 @@ func LoadDatabases() {
 		}
 	}
 	// wait for all loading go routines to finish
-	for _, entry := range entries {
-		if entry.IsDir() {
-			db := databases.Get(entry.Name())
-			if db != nil {
-				for _, t := range db.Tables.GetAll() {
-					for range t.Shards {
-						<-done // wait for shard
-					}
-				}
-			}
-		}
-	}
+	done.Wait()
 }
 
 func (db *database) save() {
@@ -116,9 +106,10 @@ func (db *database) ShowTables() scm.Scmer {
 
 func (db *database) rebuild(all bool) {
 	count := 0
-	done := make(chan bool)
+	var done sync.WaitGroup
 	for _, t := range db.Tables.GetAll() {
 		t.mu.Lock() // table lock
+		done.Add(len(t.Shards))
 		for i, s := range t.Shards {
 			count++
 			go func(t *table, i int, s *storageShard) {
@@ -127,14 +118,12 @@ func (db *database) rebuild(all bool) {
 				// go + chan done
 				s.RunOn()
 				t.Shards[i] = s.rebuild(all)
-				done <- true
+				done.Done()
 			}(t, i, s)
 		}
 		t.mu.Unlock() // TODO: do this after chan done??
 	}
-	for i := 0; i < count; i++ {
-		<- done
-	}
+	done.Wait()
 }
 
 func GetDatabase(schema string) *database {
