@@ -288,7 +288,6 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, failure, idx + 1) // flush
 					}
 					last_j = j+1
-					fmt.Println("failure@",uid,t.Unique)
 					failure(uniq.Id, s.UpdateFunction(uid, true)) // notify about failure
 					goto nextrow
 				}
