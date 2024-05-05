@@ -62,14 +62,16 @@ Copyright (C) 2023  Carl-Philip Hänsch
 ))
 
 /* dedicated mysql protocol listening at port 3307 */
-(mysql 3307
-	(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
-	(lambda (username schema) (list? (show schema))) /* switch schema (TODO check grants; in the moment, only the existence of the database is checked) */
-	(lambda (schema sql resultrow_sql session) (begin /* sql */
-		(print "received query: " sql)
-		(define formula (parse_sql schema sql))
-		(define resultrow resultrow_sql)
-		(eval (source "SQL Query" 1 1 formula))
-	))
-)
-(print "MySQL server listening on port 3307 (connect with `mysql -P 3307 -u root -p` using password 'admin')")
+(try (lambda () (begin
+	(mysql 3307
+		(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
+		(lambda (username schema) (list? (show schema))) /* switch schema (TODO check grants; in the moment, only the existence of the database is checked) */
+		(lambda (schema sql resultrow_sql session) (begin /* sql */
+			(print "received query: " sql)
+			(define formula (parse_sql schema sql))
+			(define resultrow resultrow_sql)
+			(eval (source "SQL Query" 1 1 formula))
+		))
+	)
+	(print "MySQL server listening on port 3307 (connect with `mysql -P 3307 -u root -p` using password 'admin')")
+)) print)

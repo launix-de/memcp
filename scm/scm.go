@@ -569,6 +569,24 @@ func init() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"func", "func", "function with no parameters that will be called"},
+			DeclarationParameter{"errorhandler", "func", "function that takes the error as parameter"},
+		}, "any",
+		func (a ...Scmer) (result Scmer) {
+			defer func() {
+				err := recover()
+				if err != nil {
+					result = Apply(a[1], []Scmer{err})
+				}
+			}()
+			result = Apply(a[0], []Scmer{})
+			return
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"apply", "runs the function with its arguments",
 		2, 2,
 		[]DeclarationParameter{
