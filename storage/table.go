@@ -275,8 +275,8 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 						// found a unique collision
 						if j != last_j {
 							success(values[last_j:j]) // flush
-							last_j = j+1
 						}
+						last_j = j+1
 						failure(uniq.Id, s.UpdateFunction(uid, true)) // notify about failure
 						goto nextrow
 					}
