@@ -123,6 +123,11 @@ func (s *StorageSCMER) finish() {
 func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 	if s.null * 100 > i * 13 {
 		// sparse payoff against bitcompressed is at ~13%
+		if s.longStrings > 2 {
+			b := new (OverlayBlob)
+			b.Base = new (StorageSparse)
+			return b
+		}
 		return new(StorageSparse)
 	}
 	if s.hasString {
