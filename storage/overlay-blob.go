@@ -22,6 +22,7 @@ import "unsafe"
 import "reflect"
 import "strings"
 import "compress/gzip"
+import "crypto/sha256"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
@@ -29,7 +30,7 @@ type OverlayBlob struct {
 	// every overlay has a base
 	Base ColumnStorage
 	// values
-	values map[uint]string // gzipped contents
+	values map[[32]byte]string // gzipped contents content addressable
 	size uint
 }
 
@@ -47,7 +48,7 @@ func (s *OverlayBlob) Serialize(f io.Writer) {
 	var size uint64 = uint64(len(s.values))
 	binary.Write(f, binary.LittleEndian, size) // write number of overlay items
 	for k, v := range s.values {
-		binary.Write(f, binary.LittleEndian, uint64(k)) // write index
+		f.Write(k[:])
 		binary.Write(f, binary.LittleEndian, uint64(len(v))) // write length
 		io.WriteString(f, v) // write content
 	}
@@ -60,17 +61,17 @@ func (s *OverlayBlob) Deserialize(f io.Reader) uint {
 
 	var size uint64
 	binary.Read(f, binary.LittleEndian, &size) // read size
-	s.values = make(map[uint]string)
+	s.values = make(map[[32]byte]string)
 
 	for i := uint64(0); i < size; i++ {
-		var key uint64
-		binary.Read(f, binary.LittleEndian, &key)
+		var key [32]byte
+		f.Read(key[:])
 		var l uint64
 		binary.Read(f, binary.LittleEndian, &l)
 		value := make([]byte, l)
 		f.Read(value)
 		s.size += uint(l) // statistics
-		s.values[uint(key)] = string(value)
+		s.values[key] = string(value)
 	}
 	var basetype uint8
 	f.Read(unsafe.Slice(&basetype, 1))
@@ -80,17 +81,31 @@ func (s *OverlayBlob) Deserialize(f io.Reader) uint {
 }
 
 func (s *OverlayBlob) GetValue(i uint) scm.Scmer {
-	if v, ok := s.values[i]; ok {
-		var b strings.Builder
-		reader, err := gzip.NewReader(strings.NewReader(v))
-		if err != nil {
-			panic(err)
-		}
-		io.Copy(&b, reader)
-		reader.Close()
-		return b.String()
-	} else {
-		return s.Base.GetValue(i)
+	v := s.Base.GetValue(i)
+	switch v_ := v.(type) {
+		case string:
+			if v_ != "" && v_[0] == '!' {
+				if v_[1] == '!' {
+					return v_[1:] // escaped string
+				} else {
+					// unpack from storage
+					if v, ok := s.values[*(*[32]byte)(unsafe.Pointer(unsafe.StringData(v_[1:])))]; ok {
+						var b strings.Builder
+						reader, err := gzip.NewReader(strings.NewReader(v))
+						if err != nil {
+							panic(err)
+						}
+						io.Copy(&b, reader)
+						reader.Close()
+						return b.String()
+					}
+					return nil // value was lost (this should not happen)
+				}
+			} else {
+				return v
+			}
+		default:
+			return v
 	}
 }
 
@@ -102,16 +117,22 @@ func (s *OverlayBlob) scan(i uint, value scm.Scmer) {
 	switch v_ := value.(type) {
 		case string:
 			if len(v_) > 255 {
-				s.Base.scan(i, nil)
+				h := sha256.New()
+				io.WriteString(h, v_)
+				s.Base.scan(i, fmt.Sprintf("!%s", h.Sum(nil)))
 			} else {
-				s.Base.scan(i, value)
+				if v_ != "" && v_[0] == '!' {
+					s.Base.scan(i, "!" + v_) // escape strings that start with !
+				} else {
+					s.Base.scan(i, value)
+				}
 			}
 		default:
 			s.Base.scan(i, value)
 	}
 }
 func (s *OverlayBlob) init(i uint) {
-	s.values = make(map[uint]string)
+	s.values = make(map[[32]byte]string)
 	s.size = 0
 	s.Base.init(i)
 }
@@ -119,15 +140,22 @@ func (s *OverlayBlob) build(i uint, value scm.Scmer) {
 	switch v_ := value.(type) {
 		case string:
 			if len(v_) > 255 {
-				s.Base.build(i, nil)
-				s.size += uint(len(v_))
+				h := sha256.New()
+				io.WriteString(h, v_)
+				hashsum := h.Sum(nil)
+				s.Base.build(i, fmt.Sprintf("!%s", hashsum))
 				var b strings.Builder
 				z := gzip.NewWriter(&b)
 				io.Copy(z, strings.NewReader(v_))
 				z.Close()
-				s.values[i] = b.String()
+				s.size += uint(b.Len())
+				s.values[*(*[32]byte)(unsafe.Pointer(&hashsum[0]))] = b.String()
 			} else {
-				s.Base.build(i, value)
+				if v_ != "" && v_[0] == '!' {
+					s.Base.build(i, "!" + v_) // escape strings that start with !
+				} else {
+					s.Base.build(i, value)
+				}
 			}
 		default:
 			s.Base.build(i, value)
