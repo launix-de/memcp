@@ -100,6 +100,11 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	// TODO: sortcols that are not just simple columns but complex lambda expressions could be temporarily materialized to trade memory for execution time
 	// --> sortcols can then be rewritten to strings
 
+	// give sharding hints
+	for _, b := range boundaries {
+		t.AddPartitioningScore([]string{b.col})
+	}
+
 	callbackFn := scm.OptimizeProcToSerialFunction(callback)
 	aggregateFn := func(...scm.Scmer) scm.Scmer {return nil}
 	if aggregate != nil {

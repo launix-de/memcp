@@ -41,6 +41,10 @@ func (s scanError) Error() string {
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer) scm.Scmer {
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	// give sharding hints
+	for _, b := range boundaries {
+		t.AddPartitioningScore([]string{b.col})
+	}
 
 	values := make(chan scm.Scmer, 4)
 	rest := 0

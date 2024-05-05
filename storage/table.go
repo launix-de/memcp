@@ -76,15 +76,7 @@ type table struct {
 	Shards []*storageShard // unordered shards; as long as this value is not nil, use shards instead of pshards
 	PShards []*storageShard // partitioned shards according to PDimensions
 	PDimensions []shardDimension
-	// TODO: data structure to per-column value-based shard map
-	// every shard has a min-value and a max-value
-	// problem: naive approach needs len(Shards)² complexity
-	// solution: two shard lists: one sorted by min-value, one sorted by max-value; also every shard remembers its max-index in the min-list and min-index in max list
-	// where x > value -> peek value from shard list, iterate shardlist upwards
-	// where x = value -> only peek the range
-	// TODO: move rows between shards when values get too widespread; triggered on equi-joins
-	// the rebalance algorithm is run on a list of shards (mostly the range of shards on a equi-join; goal is to minimize the range to 1)
-	// rebalance sorts all values of a column in an index (sharnr+recordid), then moves all items that would change shardid via delete+insert command
+	// TODO: move rows from Shards to PShards according to PDimensions
 }
 
 const max_shardsize = 65536 // dont overload the shards to get a responsive parallel full table scan
@@ -92,6 +84,18 @@ const max_shardsize = 65536 // dont overload the shards to get a responsive para
 /* Implement NonLockingReadMap */
 func (t table) GetKey() string {
 	return t.Name
+}
+
+// increases PartitioningScore for a set of columns
+func (t *table) AddPartitioningScore(cols []string) {
+	// we don't sync because we want to be fast; we ignore write-after-write hazards
+	for i, c := range t.Columns {
+		for _, col := range cols {
+			if col == c.Name {
+				t.Columns[i].PartitioningScore = c.PartitioningScore + 1
+			}
+		}
+	}
 }
 
 func (m *PersistencyMode) MarshalJSON() ([]byte, error) {
@@ -259,6 +263,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		defer t.uniquelock.Unlock()
 	}
 	uniq := t.Unique[idx]
+	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
 	if len(uniq.Cols) <= 3 {
 		// use hashmap
 		key := make([]scm.Scmer, len(uniq.Cols))

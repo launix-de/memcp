@@ -105,13 +105,11 @@ func (db *database) ShowTables() scm.Scmer {
 }
 
 func (db *database) rebuild(all bool) {
-	count := 0
 	var done sync.WaitGroup
 	for _, t := range db.Tables.GetAll() {
 		t.mu.Lock() // table lock
 		done.Add(len(t.Shards))
 		for i, s := range t.Shards {
-			count++
 			go func(t *table, i int, s *storageShard) {
 				// reshuffle numa awareness, so memory can reorganize during rebuild
 				numa.RunOnNode(-1)
