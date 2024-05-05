@@ -243,7 +243,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer) {
 						t.deletions.Set(idx, false) // mark as undeleted
 						panic("Unique key constraint violated in table "+t.t.Name+": " + errmsg)
-					})
+					}, 0)
 				} else {
 					t.deletions.Set(idx, true) // mark as deleted
 				}

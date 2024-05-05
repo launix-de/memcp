@@ -237,7 +237,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 				panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
 			}
 			// TODO: on duplicate key update ...
-		})
+		}, 0)
 	} else {
 		// physically insert (parallel)
 		shard.Insert(columns, values)
@@ -248,82 +248,88 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 	return result
 }
 
-func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), failure func(string, func(...scm.Scmer) scm.Scmer)) {
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), failure func(string, func(...scm.Scmer) scm.Scmer), idx int) {
 	// check for duplicates
-	t.uniquelock.Lock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
-	defer t.uniquelock.Unlock()
-	for _, uniq := range t.Unique {
-		if len(uniq.Cols) <= 3 {
-			// use hashmap
-			key := make([]scm.Scmer, len(uniq.Cols))
-			keyIdx := make([]int, len(uniq.Cols))
-			for i, col := range uniq.Cols {
-				for j, col2 := range columns {
-					if col == col2 {
-						keyIdx[i] = j
-					}
+	if idx >= len(t.Unique) {
+		success(values) // we finally made it, these values have passed all unique checks
+		return
+	}
+	if idx == 0 {
+		t.uniquelock.Lock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
+		defer t.uniquelock.Unlock()
+	}
+	uniq := t.Unique[idx]
+	if len(uniq.Cols) <= 3 {
+		// use hashmap
+		key := make([]scm.Scmer, len(uniq.Cols))
+		keyIdx := make([]int, len(uniq.Cols))
+		for i, col := range uniq.Cols {
+			for j, col2 := range columns {
+				if col == col2 {
+					keyIdx[i] = j
 				}
 			}
-			last_j := 0
-			for j, row := range values {
-				for i, colidx := range keyIdx {
-					key[i] = row[colidx]
-				}
-				for _, s := range t.Shards {
-					uid, present := s.GetRecordidForUnique(uniq.Cols, key)
-					if present && !s.deletions.Get(uid) {
-						// found a unique collision
-						if j != last_j {
-							success(values[last_j:j]) // flush
-						}
-						last_j = j+1
-						failure(uniq.Id, s.UpdateFunction(uid, true)) // notify about failure
-						goto nextrow
-					}
-				}
-				nextrow:
+		}
+		last_j := 0
+		for j, row := range values {
+			for i, colidx := range keyIdx {
+				key[i] = row[colidx]
 			}
-			if len(values) != last_j {
-				success(values[last_j:]) // flush the rest
-			}
-		} else {
-			// build scan for unique check
-			cols := make([]scm.Scmer, len(uniq.Cols))
-			colidx := make([]int, len(uniq.Cols))
-			for i, c := range uniq.Cols {
-				cols[i] = scm.Symbol(c)
-				for j, col := range columns { // find uniq columns
-					if c == col {
-						colidx[i] = j
-					}
-				}
-			}
-			conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
-			conditionBody[0] = scm.Symbol("and")
-			last_j := 0
-			for j, row := range values {
-				for i, colidx := range colidx {
-					value := row[colidx]
-					if !mergeNull && value == nil {
-						conditionBody[i + 1] = false // NULL can be there multiple times
-					} else {
-						conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.NthLocalVar(i), value}
-					}
-				}
-				condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-				updatefn := t.scan(uniq.Cols, condition, []string{"$update"}, scm.Proc{[]scm.Scmer{scm.Symbol("$update")}, scm.Symbol("$update"), &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil)
-				if updatefn != nil {
+			for _, s := range t.Shards {
+				uid, present := s.GetRecordidForUnique(uniq.Cols, key)
+				if present && !s.deletions.Get(uid) {
 					// found a unique collision
 					if j != last_j {
-						success(values[last_j:j]) // flush
-						last_j = j+1
+						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, failure, idx + 1) // flush
 					}
-					failure(uniq.Id, updatefn.(func(...scm.Scmer) scm.Scmer)) // notify about failure
+					last_j = j+1
+					fmt.Println("failure@",uid,t.Unique)
+					failure(uniq.Id, s.UpdateFunction(uid, true)) // notify about failure
+					goto nextrow
 				}
 			}
-			if len(values) != last_j {
-				success(values[last_j:]) // flush the rest
+			nextrow:
+		}
+		if len(values) != last_j {
+			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, failure, idx + 1) // flush the rest
+		}
+	} else {
+		// build scan for unique check
+		cols := make([]scm.Scmer, len(uniq.Cols))
+		colidx := make([]int, len(uniq.Cols))
+		for i, c := range uniq.Cols {
+			cols[i] = scm.Symbol(c)
+			for j, col := range columns { // find uniq columns
+				if c == col {
+					colidx[i] = j
+				}
 			}
+		}
+		conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
+		conditionBody[0] = scm.Symbol("and")
+		last_j := 0
+		for j, row := range values {
+			for i, colidx := range colidx {
+				value := row[colidx]
+				if !mergeNull && value == nil {
+					conditionBody[i + 1] = false // NULL can be there multiple times
+				} else {
+					conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.NthLocalVar(i), value}
+				}
+			}
+			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
+			updatefn := t.scan(uniq.Cols, condition, []string{"$update"}, scm.Proc{[]scm.Scmer{scm.Symbol("$update")}, scm.Symbol("$update"), &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil)
+			if updatefn != nil {
+				// found a unique collision
+				if j != last_j {
+					success(values[last_j:j]) // flush
+					last_j = j+1
+				}
+				failure(uniq.Id, updatefn.(func(...scm.Scmer) scm.Scmer)) // notify about failure
+			}
+		}
+		if len(values) != last_j {
+			success(values[last_j:]) // flush the rest
 		}
 	}
 }
