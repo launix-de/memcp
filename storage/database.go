@@ -19,6 +19,7 @@ package storage
 import "os"
 import "fmt"
 import "sync"
+import "time"
 import "encoding/json"
 import "github.com/lrita/numa"
 import "github.com/launix-de/memcp/scm"
@@ -38,6 +39,16 @@ var Basepath string = "data"
 /* implement NonLockingReadMap */
 func (d database) GetKey() string {
 	return d.Name
+}
+
+func Rebuild(all bool) string {
+	start := time.Now()
+	dbs := databases.GetAll()
+	for _, db := range dbs {
+		db.rebuild(all)
+		db.save()
+	}
+	return fmt.Sprint(time.Since(start))
 }
 
 func LoadDatabases() {

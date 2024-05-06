@@ -557,19 +557,12 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"all", "bool", "if true, rebuild all shards, even if nothing has changed (default: false)"},
 		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
-			start := time.Now()
 			all := false
 			if len(a) > 0 && scm.ToBool(a[0]) {
 				all = true
 			}
 
-			dbs := databases.GetAll()
-			for _, db := range dbs {
-				db.rebuild(all)
-				db.save()
-			}
-
-			return fmt.Sprint(time.Since(start))
+			return Rebuild(all)
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
