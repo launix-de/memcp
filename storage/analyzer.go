@@ -36,6 +36,26 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		symbolmapping[sym.(scm.Symbol)] = conditionCols[i]
 	}
 	cols := make([]columnboundaries, 0, 4)
+	addConstraint := func(in []columnboundaries, b2 columnboundaries) []columnboundaries {
+		for i, b := range in {
+			if b.col == b2.col {
+				// column match -> merge value range
+				if b2.lower != nil && b.lower != nil && scm.Less(b.lower, b2.lower) {
+					// both values are ANDed, so take the higher value as lower bound
+					in[i].lower = b2.lower
+				}
+				in[i].lowerInclusive = b.lowerInclusive || b2.lowerInclusive // TODO: check correctness
+				if b2.upper != nil && b.upper != nil && scm.Less(b2.upper, b.upper) {
+					// the lower of both upper values will be the new upper bound
+					in[i].upper = b2.upper
+				}
+				in[i].upperInclusive = b.upperInclusive || b2.upperInclusive // TODO: check correctness
+				return in
+			}
+		}
+		// else: append
+		return append(in, b2)
+	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
 		switch val := v.(type) {
@@ -78,7 +98,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							if col, ok := symbolmapping[v1]; ok { // left is a column
 								if v2, ok := extractConstant(v[2]); ok { // right is a constant
 									// ?equal var const
-									cols = append(cols, columnboundaries{col, v2, true, v2, true})
+									cols = addConstraint(cols, columnboundaries{col, v2, true, v2, true})
 								}
 							}
 						// TODO: equals constant vs. column
@@ -90,7 +110,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							if col, ok := symbolmapping[v1]; ok { // left is a column
 								if v2, ok := extractConstant(v[2]); ok { // right is a constant
 									// ?equal var const
-									cols = append(cols, columnboundaries{col, nil, false, v2, v[0] == scm.Symbol("<=")})
+									cols = addConstraint(cols, columnboundaries{col, nil, false, v2, v[0] == scm.Symbol("<=")})
 								}
 							}
 						// TODO: constant vs. column
@@ -102,7 +122,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							if col, ok := symbolmapping[v1]; ok { // left is a column
 								if v2, ok := extractConstant(v[2]); ok { // right is a constant
 									// ?equal var const
-									cols = append(cols, columnboundaries{col, v2, v[0] == scm.Symbol(">="), nil, false})
+									cols = addConstraint(cols, columnboundaries{col, v2, v[0] == scm.Symbol(">="), nil, false})
 								}
 							}
 						// TODO: constant vs. column
