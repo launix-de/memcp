@@ -40,12 +40,12 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		for i, b := range in {
 			if b.col == b2.col {
 				// column match -> merge value range
-				if b2.lower != nil && b.lower != nil && scm.Less(b.lower, b2.lower) {
+				if b.lower == nil || b2.lower != nil && scm.Less(b.lower, b2.lower) {
 					// both values are ANDed, so take the higher value as lower bound
 					in[i].lower = b2.lower
 				}
 				in[i].lowerInclusive = b.lowerInclusive || b2.lowerInclusive // TODO: check correctness
-				if b2.upper != nil && b.upper != nil && scm.Less(b2.upper, b.upper) {
+				if b.upper == nil || b2.upper != nil && scm.Less(b2.upper, b.upper) {
 					// the lower of both upper values will be the new upper bound
 					in[i].upper = b2.upper
 				}
