@@ -20,6 +20,7 @@ import "os"
 import "fmt"
 import "sync"
 import "time"
+import "sort"
 import "encoding/json"
 import "github.com/lrita/numa"
 import "github.com/launix-de/memcp/scm"
@@ -117,20 +118,100 @@ func (db *database) ShowTables() scm.Scmer {
 
 func (db *database) rebuild(all bool) {
 	var done sync.WaitGroup
-	for _, t := range db.Tables.GetAll() {
-		t.mu.Lock() // table lock
-		done.Add(len(t.Shards))
-		for i, s := range t.Shards {
-			go func(t *table, i int, s *storageShard) {
-				// reshuffle numa awareness, so memory can reorganize during rebuild
-				numa.RunOnNode(-1)
-				// go + chan done
-				s.RunOn()
-				t.Shards[i] = s.rebuild(all)
-				done.Done()
-			}(t, i, s)
-		}
-		t.mu.Unlock() // TODO: do this after chan done??
+	dbs := db.Tables.GetAll()
+	done.Add(len(dbs))
+	for _, t := range dbs {
+		go func(t *table) {
+			t.mu.Lock() // table lock
+			// TODO: check LRU statistics and remove unused computed columns
+
+			// rebuild shards
+			shardlist := t.Shards // if Shards AND PShards are present, Shards is the single point of truth
+			if shardlist == nil {
+				shardlist = t.PShards
+			}
+			var sdone sync.WaitGroup
+			maincount := uint(0)
+			sdone.Add(len(shardlist))
+			for i, s := range shardlist {
+				maincount += s.main_count + uint(len(s.inserts)) // estimate size of that table
+				go func(shardlist []*storageShard, i int, s *storageShard) {
+					// reshuffle numa awareness, so memory can reorganize during rebuild
+					numa.RunOnNode(-1)
+					s.RunOn()
+					shardlist[i] = s.rebuild(all)
+					sdone.Done()
+				}(shardlist, i, s)
+			}
+			sdone.Wait()
+
+			// reevaluate partitioning schema
+			var shardCandidates []shardDimension
+			for _, c := range t.Columns {
+				if c.PartitioningScore > 0 {
+					shardCandidates = append(shardCandidates, shardDimension{c.Name, c.PartitioningScore, nil})
+				}
+			}
+			if len(shardCandidates) > 0 {
+				// sort for highest ranking column
+				sort.Slice(shardCandidates, func (i, j int) bool { // Less
+					return shardCandidates[i].NumPartitions > shardCandidates[j].NumPartitions
+				})
+				sf := 0.01 // scale factor
+				desiredNumberOfShards := maincount / 30000 + 1 // keep some extra room
+				for iter := 2; iter < 30; iter++ { // find perfect scale factor such that we get the best number of shards
+					deviation := 1
+					for _, sc := range shardCandidates {
+						deviation *= int(float64(sc.NumPartitions) * sf)
+					}
+					deviation -= int(desiredNumberOfShards)
+					if deviation < 0 {
+						// too few shards: increase sf
+						sf = sf * (1.0+1.0/float64(iter))
+					} else {
+						// too much shards: decrease sf
+						sf = sf * (1.0-1.0/float64(iter))
+					}
+				}
+				for i, sc := range shardCandidates {
+					shardCandidates[i] = t.NewShardDimension(sc.Column, int(float64(sc.NumPartitions) * sf))
+				}
+				// remove partitions
+				for len(shardCandidates) > 0 && shardCandidates[len(shardCandidates)-1].NumPartitions <= 1 {
+					shardCandidates = shardCandidates[:len(shardCandidates)-1]
+				}
+				// check if we should change partitioning schema already
+				shouldChange := false
+				if len(shardCandidates) != len(t.PDimensions) {
+					shouldChange = true
+				} else {
+					totalShards1 := 1
+					totalShards2 := 1
+					for i, sc := range shardCandidates {
+						if sc.Column != t.PDimensions[i].Column {
+							shouldChange = true
+						} else {
+							totalShards1 *= sc.NumPartitions
+							totalShards2 *= t.PDimensions[i].NumPartitions
+						}
+					}
+					// deviation of >50% of shardsize
+					if 2 * totalShards1 > 3 * totalShards2 || 2 * totalShards2 > 3 * totalShards1 {
+						shouldChange = true
+					}
+				}
+
+				// rebuild sharding schema
+				if len(shardCandidates) > 0 && shouldChange {
+					fmt.Println("repartitioning", t.Name, "by", shardCandidates)
+					// TODO
+				}
+
+			}
+
+			t.mu.Unlock()
+			done.Done()
+		}(t)
 	}
 	done.Wait()
 }

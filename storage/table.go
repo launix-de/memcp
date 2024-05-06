@@ -30,6 +30,7 @@ type column struct {
 	Extrainfo string // TODO: further diversify into NOT NULL, AUTOINCREMENT etc.
 	Computor scm.Scmer `json:"-"` // TODO: marshaljson -> serialize
 	PartitioningScore int // count this up to increase the chance of partitioning for this column
+	// TODO: LRU statistics for computed columns
 }
 type PersistencyMode uint8
 const (
@@ -72,7 +73,7 @@ type table struct {
 	uniquelock sync.Mutex // unique insert lock
 	Auto_increment uint64 // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 
-	// storage
+	// storage: if both arrays Shards and PShards are present, Shards is the single point of truth
 	Shards []*storageShard // unordered shards; as long as this value is not nil, use shards instead of pshards
 	PShards []*storageShard // partitioned shards according to PDimensions
 	PDimensions []shardDimension
