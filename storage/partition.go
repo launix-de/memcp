@@ -32,12 +32,12 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 		// get slice idx of this dimension
 		min := 0 // greater equal min
 		max := sd.NumPartitions-1 // smaller than max
-		for min != max {
+		for min < max {
 			pivot := (min + max) / 2
 			if scm.Less(values[i], sd.Pivots[pivot]) {
-				max = pivot
+				max = pivot - 1
 			} else {
-				min = pivot
+				min = pivot + 1
 			}
 		}
 		result = result * sd.NumPartitions + min // accumulate
@@ -84,19 +84,19 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 			if b.lower != nil {
 				// lower bound is given -> find lowest part
 				max := len(shards) / blockdim
-				for min != max {
+				for min < max {
 					pivot := (min + max) / 2
 					if b.lowerInclusive {
 						if scm.Less(b.lower, schema[0].Pivots[pivot]) {
-							max = pivot
+							max = pivot - 1
 						} else {
-							min = pivot
+							min = pivot + 1
 						}
 					} else {
 						if !scm.Less(schema[0].Pivots[pivot], b.lower) {
-							max = pivot
+							max = pivot - 1
 						} else {
-							min = pivot
+							min = pivot + 1
 						}
 					}
 				}
@@ -106,19 +106,19 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 			if b.upper != nil {
 				// upper bound is given -> find highest part
 				umin := min
-				for umin != max {
+				for umin < max {
 					pivot := (umin + max) / 2
 					if b.upperInclusive {
 						if scm.Less(b.upper, schema[0].Pivots[pivot]) {
-							max = pivot
+							max = pivot - 1
 						} else {
-							umin = pivot
+							umin = pivot + 1
 						}
 					} else {
 						if !scm.Less(schema[0].Pivots[pivot], b.upper) {
-							max = pivot
+							max = pivot - 1
 						} else {
-							umin = pivot
+							umin = pivot + 1
 						}
 					}
 				}
@@ -140,6 +140,9 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 
 func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	result.Column = col
+	if n < 1 {
+		return // empty dimension
+	}
 	result.Pivots = make([]scm.Scmer, 0, n-1)
 
 	// pivots are extracted from sampling
@@ -268,8 +271,6 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 		oldshards = t.PShards
 	}
 
-	return
-
 	// collect all dataset IDs
 	datasetids := make([]map[*storageShard][]uint, totalShards)
 	collector := make(chan partitioningSet, 16)
@@ -291,7 +292,7 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 	// put values into shards
 	fmt.Println("moving data from", t.Name, "into", totalShards,"shards")
 	newshards := make([]*storageShard, totalShards)
-	for i, _ := range newshards {
+	for si, _ := range newshards {
 		go func(si int) {
 			// create a new shard and put all data in
 			s := NewShard(t)
@@ -305,7 +306,7 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 				for {
 					newcol.prepare()
 					i = 0
-					for s2, items := range datasetids[i] {
+					for s2, items := range datasetids[si] {
 						reader := s2.ColumnReader(col.Name)
 						for _, item := range items {
 							newcol.scan(i, reader(item))
@@ -322,7 +323,8 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 					}
 				}
 				newcol.init(i) // allocate memory
-				for s2, items := range datasetids[i] {
+				i = 0
+				for s2, items := range datasetids[si] {
 					reader := s2.ColumnReader(col.Name)
 					for _, item := range items {
 						newcol.build(i, reader(item))
@@ -332,8 +334,8 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 				newcol.finish()
 				s.columns[col.Name] = newcol
 			}
-			newshards[i] = s
-		}(i)
+			newshards[si] = s
+		}(si)
 	}
 
 	// now take over the new sharding schema

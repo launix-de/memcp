@@ -97,14 +97,6 @@ func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan ui
 	// check if we found conditions
 	if len(cols) > 0 {
 		//fmt.Println("conditions:", cols)
-		// sort columns -> at first, the lower==upper alphabetically; then one lower!=upper according to best selectivity; discard the rest
-		sort.Slice(cols, func (i, j int) bool {
-			if cols[i].lower == cols[i].upper && cols[j].lower != cols[j].upper {
-				return true // put equal?-conditions leftmost
-			}
-			return cols[i].col < cols[j].col // otherwise: alphabetically
-		})
-
 		// build up lower and upper bounds of index
 		for {
 			if len(cols) >= 2 && cols[len(cols)-2].lower != cols[len(cols)-2].upper {

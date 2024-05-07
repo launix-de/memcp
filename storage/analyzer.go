@@ -16,6 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
+import "sort"
 import "github.com/launix-de/memcp/scm"
 
 type columnboundaries struct{
@@ -139,6 +140,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		}
 	}
 	traverseCondition(p.Body) // recursive analysis over condition
+
+	// sort columns -> at first, the lower==upper alphabetically; then one lower!=upper according to best selectivity; discard the rest
+	sort.Slice(cols, func (i, j int) bool {
+		if cols[i].lower == cols[i].upper && cols[j].lower != cols[j].upper {
+			return true // put equal?-conditions leftmost
+		}
+		return cols[i].col < cols[j].col // otherwise: alphabetically
+	})
+
 	return cols
 }
 
