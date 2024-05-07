@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "sort"
+import "sync"
 import "github.com/launix-de/memcp/scm"
 
 type shardDimension struct {
@@ -47,27 +48,33 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 
 func (t *table) iterateShards(boundaries []columnboundaries, callback func(*storageShard)) {
 	shards := t.Shards
+	var done sync.WaitGroup
 	if shards != nil {
+		done.Add(len(shards))
 		for _, s := range shards {
 			// iterateShardIndex will go
 			go func(s *storageShard) {
 				s.RunOn()
 				callback(s)
+				done.Done()
 			}(s)
 		}
 	} else {
-		iterateShardIndex(t.PDimensions, boundaries, t.PShards, callback)
+		iterateShardIndex(t.PDimensions, boundaries, t.PShards, callback, &done)
 	}
+	done.Wait()
 }
 
 // iterate over all shards parallely
-func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, callback func(*storageShard)) {
+func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, callback func(*storageShard), done *sync.WaitGroup) {
 	if len(schema) == 0 {
+		done.Add(len(shards))
 		for _, s := range shards {
 			// iterateShardIndex will go
 			go func(s *storageShard) {
 				s.RunOn()
 				callback(s)
+				done.Done()
 			}(s)
 		}
 		return
@@ -126,7 +133,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 
 			for i := min; i < max; i++ {
 				// recurse over range
-				iterateShardIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], callback)
+				iterateShardIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], callback, done)
 			}
 			return // finish (don't run into next boundary, don't run into the all-loop)
 		}
@@ -134,7 +141,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 
 	// else: no boundaries: iterate all
 	for i := 0; i < len(shards); i += blockdim {
-		iterateShardIndex(schema[1:], boundaries, shards[i:i+blockdim], callback)
+		iterateShardIndex(schema[1:], boundaries, shards[i:i+blockdim], callback, done)
 	}
 }
 
@@ -210,7 +217,7 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 	})
 	sf := 0.01 // scale factor
 	desiredNumberOfShards := maincount / 30000 + 1 // keep some extra room
-	for iter := 2; iter < 30; iter++ { // find perfect scale factor such that we get the best number of shards
+	for iter := 2; iter < 300; iter++ { // find perfect scale factor such that we get the best number of shards
 		deviation := 1
 		for _, sc := range shardCandidates {
 			deviation *= int(float64(sc.NumPartitions) * sf)
@@ -255,8 +262,8 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 			shouldChange = true
 		}
 	}
-	if !shouldChange {
-		return
+	if !shouldChange && t.Shards == nil {
+		return // don't repartition if we don't need it; repartition again if we have a unfinished repartitioning (Shards+PShards present)
 	}
 
 	totalShards := 1
