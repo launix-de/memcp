@@ -182,6 +182,9 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 	for _, s := range t.Shards {
 		s.columns[name] = new (StorageSparse)
 	}
+	for _, s := range t.PShards {
+		s.columns[name] = new (StorageSparse)
+	}
 	t.schema.save()
 	return true
 }
@@ -193,6 +196,9 @@ func (t *table) DropColumn(name string) bool {
 			// found the column
 			t.Columns = append(t.Columns[:i], t.Columns[i+1:]...) // remove from slice
 			for _, s := range t.Shards {
+				delete(s.columns, name)
+			}
+			for _, s := range t.PShards {
 				delete(s.columns, name)
 			}
 
@@ -207,46 +213,72 @@ func (t *table) DropColumn(name string) bool {
 
 func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool, mergeNull bool) int {
 	result := 0
-	// load balance: if bucket is full, create new one; if bucket is busy (trylock), try another one
-	shard := t.Shards[len(t.Shards)-1]
-	if shard.Count() >= max_shardsize {
-		t.mu.Lock()
-		// reload shard after lock to avoid race conditions
-		shard = t.Shards[len(t.Shards)-1]
-		if shard.Count() >= max_shardsize {
-			go func(i int) {
-				// rebuild full shards in background
-				s := t.Shards[i]
-				s.RunOn()
-				t.Shards[i] = s.rebuild(false)
-				// write new uuids to disk
-				t.schema.save()
-			}(len(t.Shards)-1)
-			shard = NewShard(t)
-			fmt.Println("started new shard for table", t.Name)
-			t.Shards = append(t.Shards, shard)
-		}
-		t.mu.Unlock()
-	}
-
 	// TODO: check foreign keys (new value of column must be present in referenced table)
 
-	// check unique constraints in a thread safe manner
-	if len(t.Unique) > 0 {
-		t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
-			// physically insert
+	var shard *storageShard
+	if t.Shards != nil { // unpartitioned sharding
+		shard = t.Shards[len(t.Shards)-1]
+		// load balance: if bucket is full, create new one; if bucket is busy (trylock), try another one
+		if shard.Count() >= max_shardsize {
+			t.mu.Lock()
+			// reload shard after lock to avoid race conditions
+			shard = t.Shards[len(t.Shards)-1]
+			if shard.Count() >= max_shardsize {
+				go func(i int) {
+					// rebuild full shards in background
+					s := t.Shards[i]
+					s.RunOn()
+					t.Shards[i] = s.rebuild(false)
+					// write new uuids to disk
+					t.schema.save()
+				}(len(t.Shards)-1)
+				shard = NewShard(t)
+				fmt.Println("started new shard for table", t.Name)
+				t.Shards = append(t.Shards, shard)
+			}
+			t.mu.Unlock()
+		}
+
+		// check unique constraints in a thread safe manner
+		if len(t.Unique) > 0 {
+			t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
+				// physically insert
+				shard.Insert(columns, values)
+				result += len(values)
+			}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer) {
+				if !ignoreexists {
+					panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
+				}
+				// TODO: on duplicate key update ...
+			}, 0)
+		} else {
+			// physically insert (parallel)
 			shard.Insert(columns, values)
 			result += len(values)
-		}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer) {
-			if !ignoreexists {
-				panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
-			}
-			// TODO: on duplicate key update ...
-		}, 0)
+		}
 	} else {
-		// physically insert (parallel)
-		shard.Insert(columns, values)
-		result += len(values)
+		// partitions
+		dims := t.PDimensions
+		shardcols := make([]scm.Scmer, len(dims))
+		translatable := make([]int, len(dims))
+		for i, cd := range dims {
+			for j, col := range columns {
+				if cd.Column == col {
+					translatable[i] = j
+				}
+			}
+		}
+		last_i := 0
+		var last_shard *storageShard = nil
+		for i := 0; i < len(values); i++ {
+			shard = t.PShards[computeShardIndex(dims, shardcols)]
+			if i > 0 && shard != last_shard {
+				shard.Insert(columns, values[last_i:i])
+				result += i-last_i
+				last_i = i
+			}
+			last_shard = shard
+		}
 	}
 
 	// TODO: Trigger after insert
@@ -265,7 +297,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 	}
 	uniq := t.Unique[idx]
 	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
-	if len(uniq.Cols) <= 3 {
+	if t.Shards != nil && len(uniq.Cols) <= 3 {
 		// use hashmap
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))

@@ -19,6 +19,7 @@ package storage
 import "fmt"
 import "sort"
 import "sync"
+import "time"
 import "github.com/launix-de/memcp/scm"
 
 type shardDimension struct {
@@ -97,13 +98,13 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 						if scm.Less(b.lower, schema[0].Pivots[pivot]) {
 							max = pivot - 1
 						} else {
-							min = pivot + 1
+							min = pivot
 						}
 					} else {
 						if !scm.Less(schema[0].Pivots[pivot], b.lower) {
 							max = pivot - 1
 						} else {
-							min = pivot + 1
+							min = pivot
 						}
 					}
 				}
@@ -119,13 +120,13 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 						if scm.Less(b.upper, schema[0].Pivots[pivot]) {
 							max = pivot - 1
 						} else {
-							umin = pivot + 1
+							umin = pivot
 						}
 					} else {
 						if !scm.Less(schema[0].Pivots[pivot], b.upper) {
 							max = pivot - 1
 						} else {
-							umin = pivot + 1
+							umin = pivot
 						}
 					}
 				}
@@ -176,6 +177,11 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 			}
 		}
 	}
+	if len(pivotSamples) == 0 {
+		result.NumPartitions = 1
+		return
+	}
+
 	// sort samplelist
 	sort.Slice(pivotSamples, func (i, j int) bool {
 		return scm.Less(pivotSamples[i], pivotSamples[j])
@@ -273,6 +279,8 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 
 	// rebuild sharding schema
 	fmt.Println("repartitioning", t.Name, "by", shardCandidates)
+	start := time.Now() // time measurement
+
 	oldshards := t.Shards
 	if oldshards == nil {
 		oldshards = t.PShards
@@ -353,15 +361,12 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 	t.PShards = newshards
 	t.PDimensions = shardCandidates
 
+	t.Shards = nil // now it's live!
+	fmt.Println("activated new partitioning schema for ", t.Name, "after", time.Since(start))
+
 	t.schema.schemalock.Lock()
 	t.schema.save()
 	t.schema.schemalock.Unlock()
-
-	// todo: move behind
-	defer fmt.Println("activated new partitioning schema for ", t.Name)
-
-	return // safety! only remove this line if all loops over shards are upgraded
-	t.Shards = nil // now it's live!
 
 	for _, s := range oldshards {
 		// discard from disk

@@ -47,11 +47,9 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	}
 
 	values := make(chan scm.Scmer, 4)
-	rest := 0
-	for _, s := range t.Shards { // TODO: replace for loop with a more efficient algo that takes column boundaries to only pick the few of possibly thousands of shards that are within the min-max bounds
-		// parallel scan over shards
-		go func(s *storageShard) {
-			s.RunOn()
+	go func() {
+		t.iterateShards(boundaries, func (s *storageShard) {
+			// parallel scan over shards
 			defer func () {
 				if r := recover(); r != nil {
 					//fmt.Println("panic during scan:", r, string(debug.Stack()))
@@ -59,55 +57,43 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 				}
 			}()
 			values <- s.scan(boundaries, conditionCols, condition, callbackCols, callback, aggregate, neutral)
-		}(s)
-		rest = rest + 1
-		// TODO: measure scan balance
-	}
+		})
+		close(values) // last scan is finished
+	}()
 	// collect values from parallel scan
 	akkumulator := neutral
 	if aggregate2 != nil {
 		fn := scm.OptimizeProcToSerialFunction(aggregate2)
-		for {
-			if rest == 0 {
-				return akkumulator
-			}
+		for intermediate := range values {
 			// eat value
-			intermediate := <- values
 			switch x := intermediate.(type) {
 				case scanError:
 					panic(x) // cascade panic
 				default:
 					akkumulator = fn(akkumulator, intermediate)
 			}
-			rest = rest - 1
 		}
+		return akkumulator
 	} else if aggregate != nil {
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
-		for {
-			if rest == 0 {
-				return akkumulator
-			}
+		for intermediate := range values {
 			// eat value
-			intermediate := <- values
 			switch x := intermediate.(type) {
 				case scanError:
 					panic(x) // cascade panic
 				default:
 					akkumulator = fn(akkumulator, intermediate)
 			}
-			rest = rest - 1
 		}
+		return akkumulator
 	} else {
-		for {
-			if rest == 0 {
-				return akkumulator
-			}
+		for range values {
 			switch x := (<- values).(type) { // eat up values and forget
 				case scanError:
 					panic(x) // cascade panic
 			}
-			rest = rest - 1
 		}
+		return akkumulator
 	}
 }
 

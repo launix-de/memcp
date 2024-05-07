@@ -119,11 +119,9 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 
 	var q globalqueue
 	q_ := make(chan *shardqueue, 1)
-	rest := 0
-	for _, s := range t.Shards { // TODO: replace for loop with a more efficient algo that takes column boundaries to only pick the few of possibly thousands of shards that are within the min-max bounds
-		// parallel scan over shards
-		go func(s *storageShard) {
-			s.RunOn()
+	go func() {
+		t.iterateShards(boundaries, func (s *storageShard) {
+			// parallel scan over shards
 			defer func () {
 				if r := recover(); r != nil {
 					// fmt.Println("panic during scan:", r, string(debug.Stack()))
@@ -131,12 +129,11 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 				}
 			}()
 			q_ <- s.scan_order(boundaries, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
-		}(s)
-		rest = rest + 1
-	}
+		})
+		close(q_)
+	}()
 	// collect all subchans
-	for i := 0; i < rest; i++ {
-		qe := <- q_
+	for qe := range q_ {
 		if qe.err.r != nil {
 			panic(qe.err) // propagate errors that occur inside inner scan
 		}

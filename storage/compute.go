@@ -25,7 +25,11 @@ func (t *table) ComputeColumn(name string, computor scm.Scmer) {
 			// found the column
 			t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 			done := make(chan error, 6)
-			for i, s := range t.Shards {
+			shardlist := t.Shards
+			if shardlist == nil {
+				shardlist = t.PShards
+			}
+			for i, s := range shardlist {
 				go func() {
 					defer func () {
 						if r := recover(); r != nil {
@@ -37,13 +41,13 @@ func (t *table) ComputeColumn(name string, computor scm.Scmer) {
 						// couldn't compute column because delta is still active
 						t.mu.Lock()
 						s = s.rebuild(false)
-						t.Shards[i] = s
+						shardlist[i] = s
 						t.mu.Unlock()
 					}
 					done <- nil
 				}()
 			}
-			for range t.Shards {
+			for range shardlist {
 				err := <- done // collect finish signal before return
 				if err != nil {
 					panic(err)

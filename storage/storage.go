@@ -623,14 +623,14 @@ func PrintMemUsage() string {
 func (db *database) PrintMemUsage() string {
         // For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
-	b.WriteString("Table                    \tColumns\tShards\tSize/Bytes\n")
+	b.WriteString("Table                    \tColumns\tShards\tDims\tSize/Bytes\n")
 	var dsize uint
 	for _, t := range db.Tables.GetAll() {
 		var size uint = 10*8 + 32 * uint(len(t.Columns))
 		for _, s := range t.Shards {
 			size += s.Size()
 		}
-		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\n", t.Name, len(t.Columns), len(t.Shards), size));
+		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%d\n", t.Name, len(t.Columns), len(t.Shards) + len(t.PShards), len(t.PDimensions), size));
 		dsize += size
 	}
 	b.WriteString(fmt.Sprintf("\ntotal size = %d\n", dsize));
@@ -640,7 +640,12 @@ func (db *database) PrintMemUsage() string {
 func (t *table) PrintMemUsage() string {
 	var b strings.Builder
 	var dsize uint = 0
-	for i, s := range t.Shards {
+	shards := t.Shards
+	if shards == nil {
+		shards = t.PShards
+		b.WriteString(fmt.Sprint("Partitioning Schema:", t.PDimensions) + "\n\n")
+	}
+	for i, s := range shards {
 		var ssz uint = 0
 		b.WriteString(fmt.Sprintf("Shard %d\n---\n", i))
 		for c, v := range s.columns {

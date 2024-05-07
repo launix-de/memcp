@@ -71,13 +71,11 @@ func LoadDatabases() {
 				// restore back references of the tables
 				for _, t := range db.Tables.GetAll() {
 					t.schema = db // restore schema reference
-					done.Add(len(t.Shards))
-					for _, s := range t.Shards {
-						go func(t *table, s *storageShard) {
-							s.load(t) // this captures current node id of shard
-							done.Done()
-						}(t, s)
-					}
+					func (t *table) {
+						t.iterateShards(nil, func (s *storageShard) {
+							s.load(t)
+						})
+					}(t)
 				}
 				databases.Set(db)
 			}
@@ -238,6 +236,9 @@ func DropTable(schema, name string, ifexists bool) {
 
 	// delete shard files from disk
 	for _, s := range t.Shards {
+		s.RemoveFromDisk()
+	}
+	for _, s := range t.PShards {
 		s.RemoveFromDisk()
 	}
 }
