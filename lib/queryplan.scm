@@ -144,6 +144,8 @@ if there is a group function, create a temporary preaggregate table
 		(define ags (merge_unique ags (merge_unique (map (coalesce order '()) (lambda (x) (match x '(col dir) (extract_aggregates col))))))) /* aggregates in order */
 		(define ags (merge_unique ags (extract_aggregates (coalesce having true)))) /* aggregates in having */
 
+		/* TODO: replace (get_column nil col) in group, having and order with (coalesce (fields col) '('get_column nil col)) */
+
 		(match tables
 			/* TODO: allow for more than just group by single table */
 			'('(tblvar schema tbl)) (begin

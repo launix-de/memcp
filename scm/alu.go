@@ -25,6 +25,7 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
  */
 package scm
 
+import "math"
 import "strconv"
 import "reflect"
 
@@ -253,20 +254,8 @@ func init_alu() {
 			for _, v := range a {
 				if result == nil {
 					result = v
-				} else {
-					switch vv := v.(type) {
-						case nil: // dont care for nil values
-						case float64, int, uint, int64, uint64, int8, uint8:
-							if ToFloat(vv) < ToFloat(result) {
-								result = vv
-							}
-						case string:
-							if vv < String(result) {
-								result = vv
-							}
-						default:
-							panic("unknown input value for min: " + String(vv))
-					}
+				} else if v != nil && Less(v, result) {
+					result = v
 				}
 			}
 			return
@@ -282,23 +271,41 @@ func init_alu() {
 			for _, v := range a {
 				if result == nil {
 					result = v
-				} else {
-					switch vv := v.(type) {
-						case nil: // dont care for nil values
-						case float64, int, uint, int64, uint64, int8, uint8:
-							if ToFloat(vv) > ToFloat(result) {
-								result = vv
-							}
-						case string:
-							if vv > String(result) {
-								result = vv
-							}
-						default:
-							panic("unknown input value for max: " + String(vv))
-					}
+				} else if v != nil && Less(result, v) {
+					result = v
 				}
 			}
 			return
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"floor", "rounds the number down",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "number", "value"},
+		}, "number",
+		func(a ...Scmer) (result Scmer) {
+			return math.Floor(ToFloat(a[0]))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"ceil", "rounds the number up",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "number", "value"},
+		}, "number",
+		func(a ...Scmer) (result Scmer) {
+			return math.Ceil(ToFloat(a[0]))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"round", "rounds the number",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "number", "value"},
+		}, "number",
+		func(a ...Scmer) (result Scmer) {
+			return math.Round(ToFloat(a[0]))
 		},
 	})
 	// TODO: number? string? func?

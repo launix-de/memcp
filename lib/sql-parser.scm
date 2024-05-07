@@ -100,9 +100,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)))
 
 	(define sql_expression5 (parser (or
-		(parser '((atom "NOT" true) (define expr sql_expression6)) '((quote not) expr))
-		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '((quote nil?) expr))
-		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '((quote not) '((quote nil?) expr)))
+		(parser '((atom "NOT" true) (define expr sql_expression6)) '('not expr))
+		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
+		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
 		sql_expression6
 	)))
 
@@ -113,13 +113,17 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
 		(parser '((atom "COUNT" true) "(" sql_expression ")") '((quote aggregate) 1 (quote +) 0))
-		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") '((quote aggregate) s (quote +) 0))
-		(parser '((atom "AVG" true) "(" (define s sql_expression) ")") '((quote /) '((quote aggregate) s (quote +) 0) '((quote aggregate) 1 (quote +) 0)))
-		(parser '((atom "MIN" true) "(" (define s sql_expression) ")") '((quote aggregate) s (quote min) nil))
-		(parser '((atom "MAX" true) "(" (define s sql_expression) ")") '((quote aggregate) s (quote max) nil))
+		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") '('aggregate s (quote +) 0))
+		(parser '((atom "AVG" true) "(" (define s sql_expression) ")") '((quote /) '('aggregate s (quote +) 0) '('aggregate 1 (quote +) 0)))
+		(parser '((atom "MIN" true) "(" (define s sql_expression) ")") '('aggregate s 'min nil))
+		(parser '((atom "MAX" true) "(" (define s sql_expression) ")") '('aggregate s 'max nil))
 
 		(parser '((atom "DATABASE" true) "(" ")") schema)
-		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '((quote password) p))
+		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '('password p))
+		(parser '((atom "FLOOR" true) "(" (define p sql_expression) ")") '('floor p))
+		(parser '((atom "CEIL" true) "(" (define p sql_expression) ")") '('ceil p))
+		(parser '((atom "CEILING" true) "(" (define p sql_expression) ")") '('ceil p))
+		(parser '((atom "ROUND" true) "(" (define p sql_expression) ")") '('round p))
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
@@ -127,8 +131,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser (atom "NULL" true) nil)
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
-		(parser '((atom "@" true) (define var sql_identifier)) '((quote session) var))
-		(parser '((atom "@@" true) (define var sql_identifier)) '((quote globalvars) var))
+		(parser '((atom "@" true) (define var sql_identifier)) '('session var))
+		(parser '((atom "@@" true) (define var sql_identifier)) '('globalvars var))
 		sql_number
 		sql_string
 		sql_column
