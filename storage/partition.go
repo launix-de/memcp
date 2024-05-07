@@ -55,6 +55,10 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback func(*stor
 		for _, s := range shards {
 			// iterateShardIndex will go
 			go func(s *storageShard) {
+				if s == nil {
+					fmt.Println("Warning: a shard is missing")
+					return
+				}
 				s.RunOn()
 				callback(s)
 				done.Done()
@@ -73,6 +77,10 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 		for _, s := range shards {
 			// iterateShardIndex will go
 			go func(s *storageShard) {
+				if s == nil {
+					fmt.Println("Warning: a shard is missing")
+					return
+				}
 				s.RunOn()
 				callback(s)
 				done.Done()
@@ -290,6 +298,7 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 	datasetids := make([]map[*storageShard][]uint, totalShards)
 	collector := make(chan partitioningSet, 16)
 	for _, s := range oldshards {
+		s.mu.RLock()
 		go func (s *storageShard) {
 			collector <- partitioningSet{s, s.partition(shardCandidates)}
 		}(s)
@@ -307,6 +316,8 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 	// put values into shards
 	fmt.Println("moving data from", t.Name, "into", totalShards,"shards")
 	newshards := make([]*storageShard, totalShards)
+	var done sync.WaitGroup
+	done.Add(totalShards)
 	for si, _ := range newshards {
 		go func(si int) {
 			// create a new shard and put all data in
@@ -350,7 +361,13 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 				s.columns[col.Name] = newcol
 			}
 			newshards[si] = s
+			done.Done()
 		}(si)
+	}
+	done.Wait()
+	for _, s := range oldshards {
+		// TODO: set next such that Inserts will be redirected
+		s.mu.RUnlock()
 	}
 
 	// now take over the new sharding schema
@@ -378,8 +395,10 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 	// assigns each dataset into a target shard
 	result = make(map[int][]uint)
 
+	/* this is already done from outside and all locks are kept until the rebuild is done
 	s.mu.RLock() // TODO: somehow seal that shard such that future inserts/deletes are blocked or forwarded
 	defer s.mu.RUnlock()
+	*/
 	values := make([]scm.Scmer, len(schema))
 
 	/* collect main storage */
