@@ -16,6 +16,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "sort"
 import "github.com/launix-de/memcp/scm"
 
@@ -23,6 +24,103 @@ type shardDimension struct {
 	Column string
 	NumPartitions int
 	Pivots []scm.Scmer
+}
+
+// computes the index of a datapoint in PShards
+func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int) {
+	for i, sd := range schema {
+		// get slice idx of this dimension
+		min := 0 // greater equal min
+		max := sd.NumPartitions // smaller than max
+		for min != max {
+			pivot := (min + max) / 2
+			if scm.Less(values[i], sd.Pivots[pivot]) {
+				max = pivot
+			} else {
+				min = pivot
+			}
+		}
+		result = result * sd.NumPartitions + min // accumulate
+	}
+	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
+}
+
+// iterate over all shards parallely
+func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, callback func(*storageShard)) {
+	if len(schema) == 0 {
+		for _, s := range shards {
+			// iterateShardIndex will go
+			go func(s *storageShard) {
+				s.RunOn()
+				callback(s)
+			}(s)
+		}
+		return
+	}
+	blockdim := 1 // shards[idx * blockdim:idx*blockdim+blockdim]
+	for i := 1; i < len(schema); i++ {
+		blockdim *= schema[i].NumPartitions
+	}
+
+	for _, b := range boundaries {
+		if b.col == schema[0].Column {
+			// iterate this axis over boundaries
+			min := 0
+			if b.lower != nil {
+				// lower bound is given -> find lowest part
+				max := len(shards) / blockdim
+				for min != max {
+					pivot := (min + max) / 2
+					if b.lowerInclusive {
+						if scm.Less(b.lower, schema[0].Pivots[pivot]) {
+							max = pivot
+						} else {
+							min = pivot
+						}
+					} else {
+						if !scm.Less(schema[0].Pivots[pivot], b.lower) {
+							max = pivot
+						} else {
+							min = pivot
+						}
+					}
+				}
+			}
+
+			max := len(shards) / blockdim
+			if b.upper != nil {
+				// upper bound is given -> find highest part
+				umin := min
+				for umin != max {
+					pivot := (umin + max) / 2
+					if b.upperInclusive {
+						if scm.Less(b.upper, schema[0].Pivots[pivot]) {
+							max = pivot
+						} else {
+							umin = pivot
+						}
+					} else {
+						if !scm.Less(schema[0].Pivots[pivot], b.upper) {
+							max = pivot
+						} else {
+							umin = pivot
+						}
+					}
+				}
+			}
+
+			for i := min; i < max; i++ {
+				// recurse over range
+				iterateShardIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], callback)
+			}
+			return // finish (don't run into next boundary, don't run into the all-loop)
+		}
+	}
+
+	// else: no boundaries: iterate all
+	for i := 0; i < len(shards); i += blockdim {
+		iterateShardIndex(schema[1:], boundaries, shards[i:i+blockdim], callback)
+	}
 }
 
 func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
@@ -66,6 +164,130 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		}
 	}
 	result.NumPartitions = len(result.Pivots) + 1
+
+	return
+}
+
+func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
+
+	// reevaluate partitioning schema
+	var shardCandidates []shardDimension
+	for _, c := range t.Columns {
+		if c.PartitioningScore > 0 {
+			shardCandidates = append(shardCandidates, shardDimension{c.Name, c.PartitioningScore, nil})
+		}
+	}
+	if len(shardCandidates) == 0 {
+		return
+	}
+
+	// sort for highest ranking column
+	sort.Slice(shardCandidates, func (i, j int) bool { // Less
+		return shardCandidates[i].NumPartitions > shardCandidates[j].NumPartitions
+	})
+	sf := 0.01 // scale factor
+	desiredNumberOfShards := maincount / 30000 + 1 // keep some extra room
+	for iter := 2; iter < 30; iter++ { // find perfect scale factor such that we get the best number of shards
+		deviation := 1
+		for _, sc := range shardCandidates {
+			deviation *= int(float64(sc.NumPartitions) * sf)
+		}
+		deviation -= int(desiredNumberOfShards)
+		if deviation < 0 {
+			// too few shards: increase sf
+			sf = sf * (1.0+1.0/float64(iter))
+		} else {
+			// too much shards: decrease sf
+			sf = sf * (1.0-1.0/float64(iter))
+		}
+	}
+	for i, sc := range shardCandidates {
+		shardCandidates[i] = t.NewShardDimension(sc.Column, int(float64(sc.NumPartitions) * sf))
+	}
+	// remove empty partitions
+	for len(shardCandidates) > 0 && shardCandidates[len(shardCandidates)-1].NumPartitions <= 1 {
+		shardCandidates = shardCandidates[:len(shardCandidates)-1]
+	}
+	if len(shardCandidates) == 0 {
+		return
+	}
+
+	// check if we should change partitioning schema already
+	shouldChange := false
+	if len(shardCandidates) != len(t.PDimensions) {
+		shouldChange = true
+	} else {
+		totalShards1 := 1
+		totalShards2 := 1
+		for i, sc := range shardCandidates {
+			if sc.Column != t.PDimensions[i].Column {
+				shouldChange = true
+			} else {
+				totalShards1 *= sc.NumPartitions
+				totalShards2 *= t.PDimensions[i].NumPartitions
+			}
+		}
+		// deviation of >50% of shardsize
+		if 2 * totalShards1 > 3 * totalShards2 || 2 * totalShards2 > 3 * totalShards1 {
+			shouldChange = true
+		}
+	}
+	if !shouldChange {
+		return
+	}
+
+	// rebuild sharding schema
+	fmt.Println("repartitioning", t.Name, "by", shardCandidates)
+	// TODO
+	/*
+	 - move PShards to Shards
+	 - "go" for all shards, collect {shard,map[shard][]uid} via channel -> s.partition
+	 - reorder these into a map[shard][shard][uid]
+	 - "go" for each new shard (empty!), build the combined main storage
+	*/
+}
+
+func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint) {
+	// assigns each dataset into a target shard
+	result = make(map[int][]uint)
+
+	s.mu.RLock() // TODO: somehow seal that shard such that future inserts/deletes are blocked or forwarded
+	defer s.mu.RUnlock()
+	values := make([]scm.Scmer, len(schema))
+
+	/* collect main storage */
+	maincols := make([]ColumnStorage, len(schema))
+	for i, sd := range schema {
+		maincols[i], _ = s.columns[sd.Column]
+	}
+	for idx := uint(0); idx < s.main_count; idx++ {
+		if s.deletions.Get(idx) {
+			continue
+		}
+		for i, cs := range maincols {
+			values[i] = cs.GetValue(idx)
+		}
+		shardnum := computeShardIndex(schema, values)
+		oldlist, _ := result[shardnum]
+		result[shardnum] = append(oldlist, idx)
+	}
+
+	/* collect delta storage */
+	deltacols := make([]int, len(schema))
+	for i, sd := range schema {
+		deltacols[i], _ = s.deltaColumns[sd.Column]
+	}
+	for i, dataset := range s.inserts {
+		if s.deletions.Get(s.main_count + uint(i)) {
+			continue
+		}
+		for i, cs := range deltacols {
+			values[i] = dataset[cs]
+		}
+		shardnum := computeShardIndex(schema, values)
+		oldlist, _ := result[shardnum]
+		result[shardnum] = append(oldlist, s.main_count + uint(i))
+	}
 
 	return
 }
