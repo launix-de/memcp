@@ -31,7 +31,7 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 	for i, sd := range schema {
 		// get slice idx of this dimension
 		min := 0 // greater equal min
-		max := sd.NumPartitions // smaller than max
+		max := sd.NumPartitions-1 // smaller than max
 		for min != max {
 			pivot := (min + max) / 2
 			if scm.Less(values[i], sd.Pivots[pivot]) {
@@ -43,6 +43,21 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 		result = result * sd.NumPartitions + min // accumulate
 	}
 	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
+}
+
+func (t *table) iterateShards(boundaries []columnboundaries, callback func(*storageShard)) {
+	shards := t.Shards
+	if shards != nil {
+		for _, s := range shards {
+			// iterateShardIndex will go
+			go func(s *storageShard) {
+				s.RunOn()
+				callback(s)
+			}(s)
+		}
+	} else {
+		iterateShardIndex(t.PDimensions, boundaries, t.PShards, callback)
+	}
 }
 
 // iterate over all shards parallely
@@ -168,6 +183,11 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	return
 }
 
+type partitioningSet struct {
+	shard *storageShard
+	items map[int][]uint
+}
+
 func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 
 	// reevaluate partitioning schema
@@ -236,15 +256,108 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 		return
 	}
 
+	totalShards := 1
+	for _, sc := range shardCandidates {
+		totalShards *= sc.NumPartitions
+	}
+
 	// rebuild sharding schema
 	fmt.Println("repartitioning", t.Name, "by", shardCandidates)
-	// TODO
-	/*
-	 - move PShards to Shards
-	 - "go" for all shards, collect {shard,map[shard][]uid} via channel -> s.partition
-	 - reorder these into a map[shard][shard][uid]
-	 - "go" for each new shard (empty!), build the combined main storage
-	*/
+	oldshards := t.Shards
+	if oldshards == nil {
+		oldshards = t.PShards
+	}
+
+	return
+
+	// collect all dataset IDs
+	datasetids := make([]map[*storageShard][]uint, totalShards)
+	collector := make(chan partitioningSet, 16)
+	for _, s := range oldshards {
+		go func (s *storageShard) {
+			collector <- partitioningSet{s, s.partition(shardCandidates)}
+		}(s)
+	}
+	// collect and resort
+	for range oldshards {
+		itemset := <- collector
+		for idx, items := range itemset.items {
+			if datasetids[idx] == nil {
+				datasetids[idx] = make(map[*storageShard][]uint)
+			}
+			datasetids[idx][itemset.shard] = items
+		}
+	}
+	// put values into shards
+	fmt.Println("moving data from", t.Name, "into", totalShards,"shards")
+	newshards := make([]*storageShard, totalShards)
+	for i, _ := range newshards {
+		go func(si int) {
+			// create a new shard and put all data in
+			s := NewShard(t)
+			// directly build main storage from list, no delta
+			for _, items := range datasetids[si] {
+				s.main_count += uint(len(items))
+			}
+			for _, col := range t.Columns {
+				var newcol ColumnStorage = new(StorageSCMER)
+				var i uint // index and amount of items
+				for {
+					newcol.prepare()
+					i = 0
+					for s2, items := range datasetids[i] {
+						reader := s2.ColumnReader(col.Name)
+						for _, item := range items {
+							newcol.scan(i, reader(item))
+							i++
+						}
+					}
+					newcol2 := newcol.proposeCompression(i)
+					if newcol2 == nil {
+						break // we found the optimal storage format
+					} else {
+						// redo scan phase with compression
+						//fmt.Printf("Compression with %T\n", newcol2)
+						newcol = newcol2
+					}
+				}
+				newcol.init(i) // allocate memory
+				for s2, items := range datasetids[i] {
+					reader := s2.ColumnReader(col.Name)
+					for _, item := range items {
+						newcol.build(i, reader(item))
+						i++
+					}
+				}
+				newcol.finish()
+				s.columns[col.Name] = newcol
+			}
+			newshards[i] = s
+		}(i)
+	}
+
+	// now take over the new sharding schema
+	if t.Shards == nil {
+		t.Shards = t.PShards // move shard list over to unordered shardlist
+		// warning! = on slices may not be atomic and thus dangerous
+	}
+	t.PShards = newshards
+	t.PDimensions = shardCandidates
+
+	t.schema.schemalock.Lock()
+	t.schema.save()
+	t.schema.schemalock.Unlock()
+
+	// todo: move behind
+	defer fmt.Println("activated new partitioning schema for ", t.Name)
+
+	return // safety! only remove this line if all loops over shards are upgraded
+	t.Shards = nil // now it's live!
+
+	for _, s := range oldshards {
+		// discard from disk
+		s.RemoveFromDisk()
+	}
 }
 
 func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint) {

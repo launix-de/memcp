@@ -680,6 +680,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		if t.t.PersistencyMode == Safe {
 			// remove old log file
 			t.logfile.Close()
+			t.logfile = nil
 			os.Remove(t.t.schema.path + t.uuid.String() + ".log")
 		}
 		_, result.node = numa.GetCPUAndNode()
