@@ -648,6 +648,7 @@ func (t *table) PrintMemUsage() string {
 	for i, s := range shards {
 		var ssz uint = 0
 		b.WriteString(fmt.Sprintf("Shard %d\n---\n", i))
+		b.WriteString(fmt.Sprintf("main count: %d, delta count: %d, deletions: %d\n", s.main_count, len(s.inserts), s.deletions.Count()))
 		for c, v := range s.columns {
 			sz := v.Size()
 			b.WriteString(fmt.Sprintf("%s: %s, size = %d\n", c, v.String(), sz));

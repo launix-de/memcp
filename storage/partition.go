@@ -16,6 +16,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package storage
 
+import "os"
 import "fmt"
 import "sort"
 import "sync"
@@ -356,12 +357,32 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 				}
 				newcol.finish()
 				s.columns[col.Name] = newcol
+
+				// write to disc (only if required)
+				if s.t.PersistencyMode != Memory {
+					f, err := os.Create(s.t.schema.path + s.uuid.String() + "-" + ProcessColumnName(col.Name))
+					if err != nil {
+						panic(err)
+					}
+					newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
+					f.Close()
+				}
 			}
 			newshards[si] = s
+
+			if s.t.PersistencyMode == Safe {
+				// open a logfile
+				f, err := os.OpenFile(s.t.schema.path + s.uuid.String() + ".log", os.O_RDWR|os.O_CREATE, 0750)
+				if err != nil {
+					panic(err)
+				}
+				s.logfile = f
+			}
 			done.Done()
 		}(si)
 	}
 	done.Wait()
+
 	for _, s := range oldshards {
 		// TODO: set next such that Inserts will be redirected
 		s.mu.RUnlock()
