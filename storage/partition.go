@@ -212,10 +212,8 @@ type partitioningSet struct {
 	items map[int][]uint
 }
 
-func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
-
+func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimension, shouldChange bool) { // this happens inside t.mu.Lock()
 	// reevaluate partitioning schema
-	var shardCandidates []shardDimension
 	for _, c := range t.Columns {
 		if c.PartitioningScore > 0 {
 			shardCandidates = append(shardCandidates, shardDimension{c.Name, c.PartitioningScore, nil})
@@ -257,7 +255,6 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 	}
 
 	// check if we should change partitioning schema already
-	shouldChange := false
 	if len(shardCandidates) != len(t.PDimensions) {
 		shouldChange = true
 	} else {
@@ -276,16 +273,16 @@ func (t *table) repartition(maincount uint) { // this happens inside t.mu.Lock()
 			shouldChange = true
 		}
 	}
-	if !shouldChange && t.Shards == nil {
-		return // don't repartition if we don't need it; repartition again if we have a unfinished repartitioning (Shards+PShards present)
-	}
+	return // the caller will evaluate shouldChange and shardCandidates
+}
 
+func (t *table) repartition(shardCandidates []shardDimension) {
+	// rebuild sharding schema
 	totalShards := 1
 	for _, sc := range shardCandidates {
 		totalShards *= sc.NumPartitions
 	}
 
-	// rebuild sharding schema
 	fmt.Println("repartitioning", t.Name, "by", shardCandidates)
 	start := time.Now() // time measurement
 

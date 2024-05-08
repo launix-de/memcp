@@ -140,8 +140,11 @@ func (db *database) rebuild(all bool) {
 			}
 			sdone.Wait()
 
-			// do the repartitioning
-			t.repartition(maincount)
+			// check if we should do the repartitioning
+			shardCandidates, shouldChange := t.proposerepartition(maincount)
+			if shouldChange || t.Shards != nil {
+				t.repartition(shardCandidates) // perform the repartitioning
+			}
 
 			t.mu.Unlock()
 			done.Done()
