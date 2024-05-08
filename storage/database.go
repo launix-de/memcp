@@ -142,7 +142,7 @@ func (db *database) rebuild(all bool) {
 
 			// check if we should do the repartitioning
 			shardCandidates, shouldChange := t.proposerepartition(maincount)
-			if shouldChange || t.Shards != nil {
+			if shouldChange || (t.PShards != nil && t.Shards != nil) {
 				t.repartition(shardCandidates) // perform the repartitioning
 			}
 
