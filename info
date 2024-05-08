@@ -6,68 +6,41 @@ import "https://github.com/edsrzf/mmap-go/blob/main/mmap.go"
 mmap.Map(file, RDWR, 0) // oder RDONLY
 // available functions: Flush, Unmap
 // ist dann ein byte[]
+--> type MMapReader interface { Reader MMap(int size) []byte }
 
 TODO
 ----
  - primary key auto_increment
- - temptable -> (createtemptable schema tbl columns)
- - tempcol -> (createtempcol schema tbl col mapfn) -> mapfn wird examiniert und per dirty-flag invalidiert oder aktualisiert
- - queryplan builder:
- 	-> turn all subqueries into LEFT JOINs
-	-> merge all join'd tables with the same condition
-	-> join order = put everything into a big result table (
-	-> scan generation = only scan the result table
+ - tempcol -> LRU, garbage collector, lazy reevaluation, change hooks
+ - LEFT JOIN
+ - FOREIGN KEY
+ - group tables -> create foreign key association
+ - empty tables with a foreign key -> shard after their foreign key
+ - turn all subqueries into LEFT JOINs
+ - prejoins for complex query plans (group on inter-table conditions)
+ - iterateIndex -> sort delta storage and merge it with main, so we can guarantee the correct order in iterateIndex
  - scan_star (schema maintbl filter map reduce neutral subtbl[tblalias->tblname] sub-filter sub-map sub-reduce sub-neutral filter-list map-list) -> every sub-alias will become a map column; no need for a lib function; just optimize some pivot caching
- - scan -> only "go" those shards that have the value range within (in an optimized data structure because there can be thousands of shards) --> range-tree
  - docker hub upload
  - mysql importer
  - plugin concept e.g. for AIs (they will declare new scheme functions) -> .so
  - transactions: every delete+insert has a optional txid (or 0 if committed); rebuild only rebuilds up to the last committed insert-item; scans are relative to a txid where items with a non-matching txid are ignored
  - system.grant, system.user.all -> allow access for some databases
  - tables stored in a table? (StorageSCMER)
- - periodic (rebuild)
- - shard resorting (measure the time spent for each index, then resort the dataset according to the index in a rebuild_sorted function)
- - compression wrappers for strings: an interface .getValue()Scmer what is called whenever the value is used (e.g. for equal?)
- - medium sized strings -> lzma https://github.com/ulikunitz/xz/blob/master/example.go
- - big strings -> hdd blob (instances are reference counted)
+ - mmap'd hdd storage manager
 
 
-Cache strategy
---------------
- - Cache objects: parent list, identifier (concurrent map!), created-at, last-used, size
- - delete-list ordered by age*size -> delete those items with highest number first
-
-LISP processor Mach 2
----------------------
-every value consists of two uint64
-a) descriptor (8 bit self type descriptor, 8 bit payload type descriptor, 8 bit env-depth of next, 32 bit next-index)
-b) payload value: uint64, int64, double, listidx, functionptr
-types: empty list, list-head
-
-also, there is an execution environment (each exenv is a heapsize, heap[heapsize]value, parent *exenv)
-the env-depth tells the interpreter to look up next-values from the parent env
-when the heap is full, a new heap is opened
-every thread runs in its own exec-env; a thread can pre-allocate a fixed size heap for fast access
-heaps are removed in whole pieces
+GO JIT Engine
+-------------
+ - store a copy of the program's bytecode somewhere in .data
+ - ship a version of the compiler in the executable
+ - specialize code on the bytecode level (feed parameter values and type information of interfaces into functions)
+ - regenerate the code
+ - get out a new func() object
 
 max integer storable in doubles: 9007199254740992 (9 Peta)
 
-Range tree
-----------
-every column with an index can have a *RangeTree
- - min+max are atomic Scmer (cmpxchg) values
- - shards []*Shard
- - pivot (also atomic scmer value)
- - left-tree []*RangeTree
- - right-tree []*RangeTree
-every insert extends the range tree's min/max
-a pivot is chosen as the mean from all shard's min/max values (sort the list and choose the middle element)
-all shards that span across the pivot are inserted into shards[]; if they are left or right from left/right tree, they are inserted into the subtree
-if a tree's subtrees are empty, it is a leaf
-when traversing a shardlist with a boundary, the one column is chosen that has the smallest shards[] array (=highest selectivity)
-
-phpmyadmin
-----------
+typical phpmyadmin queries
+--------------------------
 SELECT @@version, @@version_comment
 SET NAMES 'utf8mb4' COLLATE 'utf8mb4_general_ci'
 SELECT CURRENT_USER()
