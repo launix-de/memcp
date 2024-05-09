@@ -32,7 +32,16 @@ func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
 
 	// otherwise: precreate a lambda
 	p := val.(Proc) // precast procedure
-	en := &Env{make(Vars), make([]Scmer, p.NumVars), p.En, false} // reusable environment
+
+	// some pre-optimizable corner cases
+	switch p.Body.(type) {
+		case float64, string, bool: // constants
+			return func(...Scmer) Scmer {
+				return p.Body
+			}
+	}
+
+	en := &Env{make(Vars), make([]Scmer, p.NumVars), p.En, false} // reusable environment for one thread
 	switch params := p.Params.(type) {
 	case []Scmer: // default case: 
 		if p.NumVars > 0 {
