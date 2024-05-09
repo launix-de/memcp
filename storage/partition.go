@@ -21,6 +21,7 @@ import "fmt"
 import "sort"
 import "sync"
 import "time"
+import "unsafe"
 import "github.com/launix-de/memcp/scm"
 
 type shardDimension struct {
@@ -201,6 +202,8 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		// only add new items
 		if sample != nil && (len(result.Pivots) == 0 || scm.Less(result.Pivots[len(result.Pivots)-1], sample)) {
 			result.Pivots = append(result.Pivots, sample)
+		} else {
+			// TODO: what if the sample is equal by chance?
 		}
 	}
 	result.NumPartitions = len(result.Pivots) + 1
@@ -208,9 +211,13 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	return
 }
 
+type uintrange struct {
+	min, max uint
+}
+
 type partitioningSet struct {
-	shard *storageShard
-	items map[int][]uint
+	shardid int
+	items map[int][]uint // TODO: use uintrange instead, so we don't need so much allocations
 }
 
 func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimension, shouldChange bool) { // this happens inside t.mu.Lock()
@@ -229,7 +236,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 		return shardCandidates[i].NumPartitions > shardCandidates[j].NumPartitions
 	})
 	sf := 0.01 // scale factor
-	desiredNumberOfShards := maincount / 30000 + 1 // keep some extra room
+	desiredNumberOfShards := maincount / 10000 + 1 // make the number of partition shards 6x bigger than simple shards because this increases the positive effect of selectivity and compensates for imbalances
 	for iter := 2; iter < 300; iter++ { // find perfect scale factor such that we get the best number of shards
 		deviation := 1
 		for _, sc := range shardCandidates {
@@ -247,7 +254,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	for i, sc := range shardCandidates {
 		shardCandidates[i] = t.NewShardDimension(sc.Column, int(float64(sc.NumPartitions) * sf))
 	}
-	// remove empty partitions
+	// remove empty dimensions
 	for len(shardCandidates) > 0 && shardCandidates[len(shardCandidates)-1].NumPartitions <= 1 {
 		shardCandidates = shardCandidates[:len(shardCandidates)-1]
 	}
@@ -277,6 +284,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	return // the caller will evaluate shouldChange and shardCandidates
 }
 
+// this runs inside a t.mu.Lock()
 func (t *table) repartition(shardCandidates []shardDimension) {
 	// rebuild sharding schema
 	totalShards := 1
@@ -293,26 +301,27 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	}
 
 	// collect all dataset IDs
-	datasetids := make([]map[*storageShard][]uint, totalShards)
-	collector := make(chan partitioningSet, 16)
-	for _, s := range oldshards {
+	datasetids := make([][][]uint, totalShards) // newshard, oldshard, item
+	collector := make(chan partitioningSet, len(oldshards) / 4 + 8)
+	for si, s := range oldshards {
+		s.RunOn()
 		s.mu.RLock()
 		go func (s *storageShard) {
-			collector <- partitioningSet{s, s.partition(shardCandidates)}
+			collector <- partitioningSet{si, s.partition(shardCandidates)}
 		}(s)
 	}
-	// collect and resort
+	// collect and resort serially
 	for range oldshards {
 		itemset := <- collector
 		for idx, items := range itemset.items {
 			if datasetids[idx] == nil {
-				datasetids[idx] = make(map[*storageShard][]uint)
+				datasetids[idx] = make([][]uint, len(oldshards))
 			}
-			datasetids[idx][itemset.shard] = items
+			datasetids[idx][itemset.shardid] = items
 		}
 	}
 	// put values into shards
-	fmt.Println("moving data from", t.Name, "into", totalShards,"shards")
+	fmt.Println("moving data from", t.Name, len(oldshards), "into", totalShards,"shards")
 	newshards := make([]*storageShard, totalShards)
 	var done sync.WaitGroup
 	done.Add(totalShards)
@@ -326,12 +335,15 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 			}
 			for _, col := range t.Columns {
 				var newcol ColumnStorage = new(StorageSCMER)
+				controlvalues := make([]unsafe.Pointer, 0, len(oldshards))
 				var i uint // index and amount of items
 				for {
 					newcol.prepare()
+					controlvalues = controlvalues[:0]
 					i = 0
-					for s2, items := range datasetids[si] {
-						reader := s2.ColumnReader(col.Name)
+					for s2id, items := range datasetids[si] {
+						controlvalues = append(controlvalues, unsafe.Pointer(oldshards[s2id]))
+						reader := oldshards[s2id].ColumnReader(col.Name)
 						for _, item := range items {
 							newcol.scan(i, reader(item))
 							i++
@@ -346,10 +358,15 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 						newcol = newcol2
 					}
 				}
-				newcol.init(i) // allocate memory
+				newcol.init(s.main_count) // allocate memory
 				i = 0
-				for s2, items := range datasetids[si] {
-					reader := s2.ColumnReader(col.Name)
+				j := 0
+				for s2id, items := range datasetids[si] {
+					if controlvalues[j] != unsafe.Pointer(oldshards[s2id]) {
+						panic(fmt.Sprint("penik",j,controlvalues,(unsafe.Pointer)(oldshards[s2id])))
+					}
+					j++
+					reader := oldshards[s2id].ColumnReader(col.Name)
 					for _, item := range items {
 						newcol.build(i, reader(item))
 						i++
@@ -441,8 +458,8 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 	for i, sd := range schema {
 		deltacols[i], _ = s.deltaColumns[sd.Column]
 	}
-	for i, dataset := range s.inserts {
-		if s.deletions.Get(s.main_count + uint(i)) {
+	for idx, dataset := range s.inserts {
+		if s.deletions.Get(s.main_count + uint(idx)) {
 			continue
 		}
 		for i, cs := range deltacols {
@@ -450,7 +467,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 		}
 		shardnum := computeShardIndex(schema, values)
 		oldlist, _ := result[shardnum]
-		result[shardnum] = append(oldlist, s.main_count + uint(i))
+		result[shardnum] = append(oldlist, s.main_count + uint(idx))
 	}
 
 	return

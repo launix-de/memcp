@@ -171,11 +171,14 @@ func (s *StorageInt) init(i uint) {
 		s.bitsize = 1
 	}
 	// allocate
-	s.chunk = make([]uint64, ((i-1) * uint(s.bitsize) + 64) / 64 + 1)
+	s.chunk = make([]uint64, ((i-1) * uint(s.bitsize) + 65) / 64 + 1)
 	s.count = uint64(i)
 	// fmt.Println("storing bitsize", s.bitsize,"null",s.null,"offset",s.offset)
 }
 func (s *StorageInt) build(i uint, value scm.Scmer) {
+	if i >= uint(s.count) {
+		panic("tried to build StorageInt outside of range")
+	}
 	// store
 	vi := toInt(value)
 	if value == nil {

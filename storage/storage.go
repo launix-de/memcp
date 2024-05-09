@@ -552,17 +552,22 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"rebuild", "rebuilds all main storages and returns the amount of time it took",
-		0, 1,
+		0, 2,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"all", "bool", "if true, rebuild all shards, even if nothing has changed (default: false)"},
+			scm.DeclarationParameter{"repartition", "bool", "if true, also repartition (default: true)"},
 		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
 			all := false
 			if len(a) > 0 && scm.ToBool(a[0]) {
 				all = true
 			}
+			repartition := true
+			if len(a) > 1 {
+				repartition = scm.ToBool(a[1])
+			}
 
-			return Rebuild(all)
+			return Rebuild(all, repartition)
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

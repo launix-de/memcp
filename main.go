@@ -306,7 +306,7 @@ func cronroutine() {
 		}
 
 		fmt.Println("running 15min cron ...")
-		fmt.Println("table compression done in ", storage.Rebuild(false))
+		fmt.Println("table compression done in ", storage.Rebuild(false, true))
 	}
 }
 
@@ -314,7 +314,7 @@ func exitroutine() {
 	exitsignal <- true
 	exitable.Wait()
 	fmt.Println("Exit procedure... syncing to disk")
-	fmt.Println("table compression done in ", storage.Rebuild(false))
+	fmt.Println("table compression done in ", storage.Rebuild(false, false))
 	fmt.Println("finalizing memory...")
 	runtime.GC() // this will call the finalizers on shards
 	fmt.Println("Exit procedure finished")

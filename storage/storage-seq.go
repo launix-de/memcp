@@ -138,6 +138,8 @@ func (s *StorageSeq) init(i uint) {
 	s.recordId.init(s.seqCount)
 	s.start.init(s.seqCount)
 	s.stride.init(s.seqCount)
+	s.lastValue = 0
+	s.lastStride = 0
 	s.lastValueNil = false
 	s.lastValueFirst = false
 	s.count = i

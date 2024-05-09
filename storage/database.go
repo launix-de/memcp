@@ -40,11 +40,11 @@ func (d database) GetKey() string {
 	return d.Name
 }
 
-func Rebuild(all bool) string {
+func Rebuild(all bool, repartition bool) string {
 	start := time.Now()
 	dbs := databases.GetAll()
 	for _, db := range dbs {
-		db.rebuild(all)
+		db.rebuild(all, repartition)
 		db.save()
 	}
 	return fmt.Sprint(time.Since(start))
@@ -112,7 +112,7 @@ func (db *database) ShowTables() scm.Scmer {
 	return result
 }
 
-func (db *database) rebuild(all bool) {
+func (db *database) rebuild(all bool, repartition bool) {
 	var done sync.WaitGroup
 	dbs := db.Tables.GetAll()
 	done.Add(len(dbs))
@@ -141,9 +141,11 @@ func (db *database) rebuild(all bool) {
 			sdone.Wait()
 
 			// check if we should do the repartitioning
-			shardCandidates, shouldChange := t.proposerepartition(maincount)
-			if shouldChange || (t.PShards != nil && t.Shards != nil) {
-				t.repartition(shardCandidates) // perform the repartitioning
+			if repartition {
+				shardCandidates, shouldChange := t.proposerepartition(maincount)
+				if shouldChange || (t.PShards != nil && t.Shards != nil) {
+					t.repartition(shardCandidates) // perform the repartitioning
+				}
 			}
 
 			t.mu.Unlock()
