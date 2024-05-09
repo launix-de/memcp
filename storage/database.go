@@ -126,8 +126,8 @@ func (db *database) rebuild(all bool, repartition bool) {
 			if shardlist == nil {
 				shardlist = t.PShards
 			}
-			var sdone sync.WaitGroup
 			maincount := uint(0)
+			var sdone sync.WaitGroup
 			sdone.Add(len(shardlist))
 			for i, s := range shardlist {
 				maincount += s.main_count + uint(len(s.inserts)) // estimate size of that table

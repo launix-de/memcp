@@ -302,22 +302,14 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 	// collect all dataset IDs
 	datasetids := make([][][]uint, totalShards) // newshard, oldshard, item
-	collector := make(chan partitioningSet, len(oldshards) / 4 + 8)
 	for si, s := range oldshards {
-		s.RunOn()
+		//s.RunOn()
 		s.mu.RLock()
-		go func (s *storageShard) {
-			collector <- partitioningSet{si, s.partition(shardCandidates)}
-		}(s)
-	}
-	// collect and resort serially
-	for range oldshards {
-		itemset := <- collector
-		for idx, items := range itemset.items {
+		for idx, items := range s.partition(shardCandidates) {
 			if datasetids[idx] == nil {
 				datasetids[idx] = make([][]uint, len(oldshards))
 			}
-			datasetids[idx][itemset.shardid] = items
+			datasetids[idx][si] = items
 		}
 	}
 	// put values into shards
