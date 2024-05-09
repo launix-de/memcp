@@ -145,6 +145,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			// function resultrow(item)
 			item := a[0].([]Scmer)
 			newitem := make([]sqltypes.Value, len(result.Fields))
+			resultlock.Lock()
+			defer resultlock.Unlock()
+
 			for i := 0; i < len(item); i += 2 {
 				colname := String(item[i])
 				colid, ok := colmap[colname]
@@ -152,9 +155,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 					newitem[colid] = sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(String(item[i+1])))
 				} else {
 					// add row to result
-					resultlock.Lock()
 					colmap[colname] = len(result.Fields)
-					resultlock.Unlock()
 					newcol := new(querypb.Field)
 					newcol.Name = colname
 					newcol.Type = querypb.Type_TEXT
@@ -162,7 +163,6 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 					newitem = append(newitem, sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(String(item[i+1]))))
 				}
 			}
-			resultlock.Lock()
 			if len(result.Rows) == cap(result.Rows) {
 				// flush
 				callback(&result)
@@ -173,7 +173,6 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				result.Rows = result.Rows[0:0] // slice off rest of buffer to restart
 			}
 			result.Rows = append(result.Rows, newitem)
-			resultlock.Unlock()
 			return true
 		},
 		scmSession,
