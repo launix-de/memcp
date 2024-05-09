@@ -101,7 +101,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 			min := 0
 			if b.lower != nil {
 				// lower bound is given -> find lowest part
-				max := len(shards) / blockdim
+				max := schema[0].NumPartitions - 1
 				for min < max {
 					pivot := (min + max - 1) / 2
 					if b.lowerInclusive {
@@ -120,7 +120,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 				}
 			}
 
-			max := schema[0].NumPartitions-1 // smaller than max
+			max := schema[0].NumPartitions - 1 // smaller than max
 			if b.upper != nil {
 				// upper bound is given -> find highest part
 				umin := min
