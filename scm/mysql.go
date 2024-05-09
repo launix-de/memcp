@@ -152,7 +152,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 					newitem[colid] = sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(String(item[i+1])))
 				} else {
 					// add row to result
+					resultlock.Lock()
 					colmap[colname] = len(result.Fields)
+					resultlock.Unlock()
 					newcol := new(querypb.Field)
 					newcol.Name = colname
 					newcol.Type = querypb.Type_TEXT
