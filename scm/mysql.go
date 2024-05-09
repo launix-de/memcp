@@ -148,7 +148,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			resultlock.Lock()
 			defer resultlock.Unlock()
 
-			for i := 0; i < len(item); i += 2 {
+			for i := 0; i < len(item)-1; i += 2 {
 				colname := String(item[i])
 				colid, ok := colmap[colname]
 				if ok {
