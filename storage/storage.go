@@ -24,6 +24,7 @@ import "runtime"
 import "strings"
 import "strconv"
 import "github.com/launix-de/memcp/scm"
+import units "github.com/docker/go-units"
 
 // THE basic storage pattern
 type ColumnStorage interface {
@@ -616,7 +617,7 @@ func PrintMemUsage() string {
         runtime.ReadMemStats(&m)
         // For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
-        b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", bToMb(m.Alloc), bToMb(m.TotalAlloc), bToMb(m.Sys), m.NumGC))
+        b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", units.BytesSize(float64(m.Alloc)), units.BytesSize(float64(m.TotalAlloc)), units.BytesSize(float64(m.Sys)), m.NumGC))
 
 	for _, db := range databases.GetAll() {
 		b.WriteString("\n\n" + db.Name + "\n======\n")
@@ -635,10 +636,10 @@ func (db *database) PrintMemUsage() string {
 		for _, s := range t.Shards {
 			size += s.Size()
 		}
-		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%d\n", t.Name, len(t.Columns), len(t.Shards) + len(t.PShards), len(t.PDimensions), size));
+		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%s\n", t.Name, len(t.Columns), len(t.Shards) + len(t.PShards), len(t.PDimensions), units.BytesSize(float64(size))));
 		dsize += size
 	}
-	b.WriteString(fmt.Sprintf("\ntotal size = %d\n", dsize));
+	b.WriteString(fmt.Sprintf("\ntotal size = %s\n", units.BytesSize(float64(dsize))));
 	return b.String()
 }
 
@@ -656,16 +657,12 @@ func (t *table) PrintMemUsage() string {
 		b.WriteString(fmt.Sprintf("main count: %d, delta count: %d, deletions: %d\n", s.main_count, len(s.inserts), s.deletions.Count()))
 		for c, v := range s.columns {
 			sz := v.Size()
-			b.WriteString(fmt.Sprintf("%s: %s, size = %d\n", c, v.String(), sz));
+			b.WriteString(fmt.Sprintf("%s: %s, size = %s\n", c, v.String(), units.BytesSize(float64(sz))));
 			ssz += sz
 		}
-		b.WriteString(fmt.Sprintf("= total %d\n\n", ssz));
+		b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(ssz))));
 		dsize += ssz
 	}
-	b.WriteString(fmt.Sprintf("= total %d\n\n", dsize));
+	b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(dsize))));
 	return b.String()
-}
-
-func bToMb(b uint64) uint64 {
-    return b / 1024 / 1024
 }
