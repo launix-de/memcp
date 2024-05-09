@@ -21,7 +21,7 @@ import "fmt"
 import "sort"
 import "sync"
 import "time"
-import "unsafe"
+import "runtime"
 import "github.com/launix-de/memcp/scm"
 
 type shardDimension struct {
@@ -236,7 +236,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 		return shardCandidates[i].NumPartitions > shardCandidates[j].NumPartitions
 	})
 	sf := 0.01 // scale factor
-	desiredNumberOfShards := maincount / 10000 + 1 // make the number of partition shards 6x bigger than simple shards because this increases the positive effect of selectivity and compensates for imbalances
+	desiredNumberOfShards := maincount / 30000 + 1 // TODO: find a balancing mechanism
 	for iter := 2; iter < 300; iter++ { // find perfect scale factor such that we get the best number of shards
 		deviation := 1
 		for _, sc := range shardCandidates {
@@ -300,7 +300,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		oldshards = t.PShards
 	}
 
-	// collect all dataset IDs
+	// collect all dataset IDs (this is done sequentially and takes ~4s for 8G of data)
 	datasetids := make([][][]uint, totalShards) // newshard, oldshard, item
 	for si, s := range oldshards {
 		//s.RunOn()
@@ -317,78 +317,79 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	newshards := make([]*storageShard, totalShards)
 	var done sync.WaitGroup
 	done.Add(totalShards)
-	for si, _ := range newshards {
-		go func(si int) {
-			// create a new shard and put all data in
-			s := NewShard(t)
-			// directly build main storage from list, no delta
-			for _, items := range datasetids[si] {
-				s.main_count += uint(len(items))
-			}
-			for _, col := range t.Columns {
-				var newcol ColumnStorage = new(StorageSCMER)
-				controlvalues := make([]unsafe.Pointer, 0, len(oldshards))
-				var i uint // index and amount of items
-				for {
-					newcol.prepare()
-					controlvalues = controlvalues[:0]
-					i = 0
+	progress := make(chan int, runtime.NumCPU() / 2) // don't go all at once, we don't have enough RAM
+	for i := 0; i < runtime.NumCPU() / 2; i++ {
+		go func() { // threadpool with half of the cores
+			for si := range progress {
+				// create a new shard and put all data in
+				s := NewShard(t)
+				// directly build main storage from list, no delta
+				for _, items := range datasetids[si] {
+					s.main_count += uint(len(items))
+				}
+				// allocate only once
+				values := make([]scm.Scmer, s.main_count)
+				for _, col := range t.Columns {
+					// build the cache-optimized scmer list
+					var i uint // index and amount of items
 					for s2id, items := range datasetids[si] {
-						controlvalues = append(controlvalues, unsafe.Pointer(oldshards[s2id]))
 						reader := oldshards[s2id].ColumnReader(col.Name)
 						for _, item := range items {
-							newcol.scan(i, reader(item))
+							values[i] = reader(item) // call decompression only once; this uses more RAM at once but is way faster
 							i++
 						}
 					}
-					newcol2 := newcol.proposeCompression(i)
-					if newcol2 == nil {
-						break // we found the optimal storage format
-					} else {
-						// redo scan phase with compression
-						//fmt.Printf("Compression with %T\n", newcol2)
-						newcol = newcol2
-					}
-				}
-				newcol.init(s.main_count) // allocate memory
-				i = 0
-				j := 0
-				for s2id, items := range datasetids[si] {
-					if controlvalues[j] != unsafe.Pointer(oldshards[s2id]) {
-						panic(fmt.Sprint("penik",j,controlvalues,(unsafe.Pointer)(oldshards[s2id])))
-					}
-					j++
-					reader := oldshards[s2id].ColumnReader(col.Name)
-					for _, item := range items {
-						newcol.build(i, reader(item))
-						i++
-					}
-				}
-				newcol.finish()
-				s.columns[col.Name] = newcol
 
-				// write to disc (only if required)
-				if s.t.PersistencyMode != Memory {
-					f, err := os.Create(s.t.schema.path + s.uuid.String() + "-" + ProcessColumnName(col.Name))
+					// compress into a new column
+					var newcol ColumnStorage = new(StorageSCMER)
+					for {
+						newcol.prepare()
+						for i, v := range values {
+							newcol.scan(uint(i), v)
+						}
+						newcol2 := newcol.proposeCompression(i)
+						if newcol2 == nil {
+							break // we found the optimal storage format
+						} else {
+							// redo scan phase with compression
+							//fmt.Printf("Compression with %T\n", newcol2)
+							newcol = newcol2
+						}
+					}
+					newcol.init(s.main_count) // allocate memory
+					for i, v := range values {
+						newcol.build(uint(i), v)
+					}
+					newcol.finish()
+					s.columns[col.Name] = newcol
+
+					// write to disc (only if required)
+					if s.t.PersistencyMode != Memory {
+						f, err := os.Create(s.t.schema.path + s.uuid.String() + "-" + ProcessColumnName(col.Name))
+						if err != nil {
+							panic(err)
+						}
+						newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
+						f.Close()
+					}
+				}
+				newshards[si] = s
+
+				if s.t.PersistencyMode == Safe {
+					// open a logfile
+					f, err := os.OpenFile(s.t.schema.path + s.uuid.String() + ".log", os.O_RDWR|os.O_CREATE, 0750)
 					if err != nil {
 						panic(err)
 					}
-					newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
-					f.Close()
+					s.logfile = f
 				}
+				done.Done()
 			}
-			newshards[si] = s
-
-			if s.t.PersistencyMode == Safe {
-				// open a logfile
-				f, err := os.OpenFile(s.t.schema.path + s.uuid.String() + ".log", os.O_RDWR|os.O_CREATE, 0750)
-				if err != nil {
-					panic(err)
-				}
-				s.logfile = f
-			}
-			done.Done()
-		}(si)
+		}()
+	}
+	for si, _ := range newshards {
+		progress <- si // inserting into this chan blocks when the queue is full, so we can use it as a progress bar
+		fmt.Println("rebuild", t.Name, si+1, "/", len(newshards))
 	}
 	done.Wait()
 
