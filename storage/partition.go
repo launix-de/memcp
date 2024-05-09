@@ -37,9 +37,9 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 		min := 0 // greater equal min
 		max := sd.NumPartitions-1 // smaller than max
 		for min < max {
-			pivot := (min + max) / 2
+			pivot := (min + max - 1) / 2
 			if scm.Less(values[i], sd.Pivots[pivot]) {
-				max = pivot - 1
+				max = pivot
 			} else {
 				min = pivot + 1
 			}
@@ -103,46 +103,46 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 				// lower bound is given -> find lowest part
 				max := len(shards) / blockdim
 				for min < max {
-					pivot := (min + max) / 2
+					pivot := (min + max - 1) / 2
 					if b.lowerInclusive {
 						if scm.Less(b.lower, schema[0].Pivots[pivot]) {
-							max = pivot - 1
+							max = pivot
 						} else {
-							min = pivot
+							min = pivot + 1
 						}
 					} else {
 						if !scm.Less(schema[0].Pivots[pivot], b.lower) {
-							max = pivot - 1
+							max = pivot
 						} else {
-							min = pivot
+							min = pivot + 1
 						}
 					}
 				}
 			}
 
-			max := len(shards) / blockdim
+			max := schema[0].NumPartitions-1 // smaller than max
 			if b.upper != nil {
 				// upper bound is given -> find highest part
 				umin := min
 				for umin < max {
-					pivot := (umin + max) / 2
+					pivot := (umin + max - 1) / 2
 					if b.upperInclusive {
 						if scm.Less(b.upper, schema[0].Pivots[pivot]) {
-							max = pivot - 1
+							max = pivot
 						} else {
-							umin = pivot
+							umin = pivot + 1
 						}
 					} else {
 						if !scm.Less(schema[0].Pivots[pivot], b.upper) {
-							max = pivot - 1
+							max = pivot
 						} else {
-							umin = pivot
+							umin = pivot + 1
 						}
 					}
 				}
 			}
 
-			for i := min; i < max; i++ {
+			for i := min; i <= max; i++ {
 				// recurse over range
 				iterateShardIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], callback, done)
 			}
