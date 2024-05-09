@@ -172,7 +172,7 @@ if there is a group function, create a temporary preaggregate table
 
 				(merge
 					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
-					'((quote begin)
+					'('begin
 						/* INSERT IGNORE group cols into preaggregate */
 						/* TODO: use bulk insert in scan reduce phase (and filter duplicates from a bulk!) */
 						'((quote begin)
@@ -182,7 +182,7 @@ if there is a group function, create a temporary preaggregate table
 					)
 
 					/* compute aggregates */
-					(map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
+					(cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 						(set cols (extract_columns_for_tblvar tblvar expr))
 						/* TODO: name that column (concat ag "|" condition) */
 						'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) "" '((quote lambda) (map group (lambda (col) (symbol (concat col))))
@@ -196,7 +196,7 @@ if there is a group function, create a temporary preaggregate table
 								neutral
 							)
 						))
-					))))
+					)))))
 
 					/* build the queryplan for the ordered limited scan on the grouped table */
 					'((build_queryplan schema '('(grouptbl schema grouptbl)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch (replace_find_column having)) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch (replace_find_column col)) dir))))) limit offset))

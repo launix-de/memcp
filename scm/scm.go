@@ -223,6 +223,24 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				// tail call optimized version: last begin part will be tailed
 				expression = e[len(e)-1]
 				goto restart
+			case "parallel":
+				// execute all childs parallely, return null after finish
+				errs := make(chan Scmer, 1)
+				for _, i := range e[1:] {
+					go func(i Scmer) {
+						defer func() {
+							// catch errors and pass them on
+							errs <- recover()
+						}()
+						Eval(i, en)
+					}(i)
+				}
+				for range e[1:] {
+					if err := <- errs; err != nil {
+						panic(err)
+					}
+				}
+				return nil
 			default:
 				goto to_apply
 			}
@@ -672,6 +690,15 @@ Patterns can be any of:
 		0, 10000,
 		[]DeclarationParameter{
 			DeclarationParameter{"expression...", "any", "expressions to evaluate"},
+			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
+		}, "any", // TODO: returntype as soon as repeat is implemented
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"parallel", "executes all parameters in parallel and returns nil if they are finished",
+		1, 10000,
+		[]DeclarationParameter{
+			DeclarationParameter{"expression...", "any", "expressions to evaluate in parallel"},
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any", // TODO: returntype as soon as repeat is implemented
 		nil,
