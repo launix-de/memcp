@@ -19,6 +19,7 @@ package storage
 import "io"
 import "fmt"
 import "time"
+import "sort"
 import "reflect"
 import "runtime"
 import "strings"
@@ -180,22 +181,6 @@ func Init(en scm.Env) {
 				mapcols[i] = scm.String(c)
 			}
 
-			if list, ok := a[1].([]scm.Scmer); ok {
-				// implementation on lists
-				// TODO: version on primitive lists like in scan
-				panic("scan_order is not implemented on lists yet")
-				for range list {}
-				return nil
-			}
-			// params: table, condition, map, reduce, reduceSeed
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.Tables.Get(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
 			var aggregate scm.Scmer
 			var neutral scm.Scmer
 			if len(a) > 10 {
@@ -208,6 +193,95 @@ func Init(en scm.Env) {
 			sortdirs := make([]bool, len(sortcols))
 			for i, dir := range a[5].([]scm.Scmer) {
 				sortdirs[i] = scm.ToBool(dir)
+			}
+
+			if list, ok := a[1].([]scm.Scmer); ok {
+				// implementation on lists
+				var result scm.Scmer = neutral
+				filterfn := scm.OptimizeProcToSerialFunction(a[3])
+				filterparams := make([]scm.Scmer, len(filtercols))
+				mapfn := scm.OptimizeProcToSerialFunction(a[9])
+				mapparams := make([]scm.Scmer, len(mapcols))
+				reducefn := func(a ...scm.Scmer) scm.Scmer {
+					return a[1]
+				}
+				if aggregate != nil {
+					reducefn = scm.OptimizeProcToSerialFunction(aggregate)
+				}
+				var list2 []scm.Scmer // this is the list we will sort
+				for _, val := range list {
+					ds := dataset(val.([]scm.Scmer))
+					// filter
+					for i, col := range filtercols {
+						filterparams[i] = ds.Get(col)
+					}
+					if scm.ToBool(filterfn(filterparams...)) {
+						list2 = append(list2, val)
+					}
+				}
+				// prepare sorting stage
+				scols := make([]func(uint) scm.Scmer, len(sortcols))
+				for i, scol := range sortcols {
+					if colname, ok := scol.(string); ok {
+						// naive column sort
+						scols[i] = func (i uint) scm.Scmer {
+							return dataset(list2[i].([]scm.Scmer)).Get(colname)
+						}
+					} else if proc, ok := scol.(scm.Proc); ok {
+						// complex lambda columns (TODO: either remove lambda columns or add colname mapping)
+						largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer))) // allocate only once, reuse in loop
+						for j, param := range proc.Params.([]scm.Scmer) {
+							largs[j] = func (i uint) scm.Scmer {
+								return dataset(list2[i].([]scm.Scmer)).Get(string(param.(scm.Symbol)))
+							}
+						}
+						procFn := scm.OptimizeProcToSerialFunction(proc)
+						scols[i] = func(idx uint) scm.Scmer {
+							largs_ := make([]scm.Scmer, len(largs))
+							for i, getter := range largs {
+								// fetch columns used for getter
+								largs_[i] = getter(idx)
+							}
+							// execute getter
+							return procFn(largs_...)
+						}
+					} else {
+						panic("unknown sort criteria: " + fmt.Sprint(scol))
+					}
+				}
+				sort.Slice(list2, func (i, j int) bool {
+					// sort list2
+					for c := 0; c < len(scols); c++ {
+						a := scols[c](uint(i))
+						b := scols[c](uint(j))
+						if scm.Less(a, b) {
+							return !sortdirs[c]
+						} else if scm.Less(b, a) {
+							return sortdirs[c]
+						} // else: go to next level
+						// otherwise: move on to c++
+					}
+					return false // equal is not less
+				})
+				for _, val := range list2 {
+					ds := dataset(val.([]scm.Scmer))
+					// map
+					for i, col := range mapcols {
+						mapparams[i] = ds.Get(col)
+					}
+					// reduce
+					result = reducefn(result, mapfn(mapparams...))
+				}
+				return result
+			}
+			// params: table, condition, map, reduce, reduceSeed
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
 			result := t.scan_order(filtercols, a[3], sortcols, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral)
 			return result

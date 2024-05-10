@@ -192,7 +192,6 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 func (t *storageShard) scan_order(boundaries boundaries, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, limit int, callbackCols []string) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
-	// TODO: mergesort sink instead of list-append-sort would allow early-out
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
@@ -206,7 +205,7 @@ func (t *storageShard) scan_order(boundaries boundaries, conditionCols []string,
 			// naive column sort
 			result.scols[i] = t.ColumnReader(colname)
 		} else if proc, ok := scol.(scm.Proc); ok {
-			// complex lambda columns
+			// complex lambda columns (TODO: either remove lambda columns or add colname mapping)
 			largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer))) // allocate only once, reuse in loop
 			for j, param := range proc.Params.([]scm.Scmer) {
 				largs[j] = t.ColumnReader(string(param.(scm.Symbol)))
@@ -289,6 +288,7 @@ func (t *storageShard) scan_order(boundaries boundaries, conditionCols []string,
 	// TODO: find conditions when exactly we don't need to sort anymore (fully covered indexes, no inserts); the same condition could be used to exit early during iterateIndex
 	if (maxInsertIndex > 0 || true) && len(sortcols) > 0 {
 		sort.Sort(result)
+		// or: quicksort but those segments above offset+limit can be omitted
 	}
 	return
 }

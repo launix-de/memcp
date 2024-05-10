@@ -209,7 +209,7 @@ func init_list() {
 			DeclarationParameter{"map", "func", "map function func(any)->any that is applied to each item"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			list := a[0].([]Scmer)
+			list, _ := a[0].([]Scmer)
 			result := make([]Scmer, len(list))
 			fn := OptimizeProcToSerialFunction(a[1])
 			for i, v := range list {
@@ -226,7 +226,7 @@ func init_list() {
 			DeclarationParameter{"map", "func", "map function func(i, any)->any that is applied to each item"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			list := a[0].([]Scmer)
+			list, _ := a[0].([]Scmer)
 			result := make([]Scmer, len(list))
 			fn := OptimizeProcToSerialFunction(a[1])
 			for i, v := range list {
@@ -245,7 +245,7 @@ func init_list() {
 		}, "any",
 		func(a ...Scmer) Scmer {
 			// arr, reducefn(a, b), [neutral]
-			list := a[0].([]Scmer)
+			list, _ := a[0].([]Scmer)
 			fn := OptimizeProcToSerialFunction(a[1])
 			var result Scmer = nil
 			i := 0
