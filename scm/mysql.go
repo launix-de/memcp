@@ -144,10 +144,10 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		return Apply(m.querycallback, []Scmer{session.Schema(), query, func (a... Scmer) Scmer {
 			// function resultrow(item)
 			item := a[0].([]Scmer)
-			newitem := make([]sqltypes.Value, len(result.Fields))
 			resultlock.Lock()
 			defer resultlock.Unlock()
 
+			newitem := make([]sqltypes.Value, len(result.Fields))
 			for i := 0; i < len(item)-1; i += 2 {
 				colname := String(item[i])
 				colid, ok := colmap[colname]
