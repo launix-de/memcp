@@ -45,14 +45,12 @@ Copyright (C) 2024  Carl-Philip Hänsch
 			(atom "WHERE" true)
 			(atom "{" true)
 			(define conditions (* (or
-				(parser '((define s rdf_expression) (define p rdf_expression) (define o rdf_expression)) '(s p o))
-				(parser '((define p rdf_expression) (define o rdf_expression)) '(nil p o))
-				(parser '((define o rdf_expression)) '(nil nil o))
-			) ";"))
+				(parser '((define s rdf_expression) (define ps (+ (parser '((define p rdf_expression) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";")) ".") (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
+			)))
 			(atom "}" true)
 		)
 		/* TODO: GROUP etc. */
-	) '(schema cols /* TODO: merge cols -> AS */ conditions)))
+	) '(schema cols /* TODO: merge cols -> AS */ (merge conditions))))
 
 	((parser (define command rdf_select) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
@@ -63,9 +61,9 @@ Copyright (C) 2024  Carl-Philip Hänsch
 			(parser '((atom "@prefix" true) (define pfx (regex "[a-zA-Z_][a-zA-Z0-9_]*" false)) (atom ":" false false) (define content rdf_constant)) '(pfx content))
 		))
 		(define facts (+ (or
-			(parser '((define s rdf_constant) (define ps (+ '((define p rdf_constant) (define os (+ rdf_constant ","))) ";")) ".") (map ps (lambda (p) '(s p))))
+			(parser '((define s rdf_constant) (define ps (+ (parser '((define p rdf_constant) (define os (+ rdf_constant ","))) (map os (lambda (o) '(p o)))) ";")) ".") (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 		)))
-	) '("prefixes" definitions "facts" facts)))
+	) '("prefixes" definitions "facts" (merge facts)))) /* TODO: insert command into spo */
 
 	((parser (define content ttl_file) content "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
