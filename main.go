@@ -241,7 +241,15 @@ func main() {
 	storage.Basepath = basepath
 	storage.LoadDatabases()
 	// scripts initialization
-	scm.Eval(scm.Read("init", "(import \"lib/main.scm\")"), &IOEnv)
+	if flag.NArg() == 0 {
+		// load default script
+		IOEnv.Vars["import"].(func(...scm.Scmer)scm.Scmer)("lib/main.scm")
+	} else {
+		// load scripts from command line
+		for _, scmfile := range flag.Args() {
+			IOEnv.Vars["import"].(func(...scm.Scmer)scm.Scmer)(scmfile)
+		}
+	}
 	// command line initialization
 	for _, filename := range imports {
 		fmt.Println("Loading " + filename + " ...")
