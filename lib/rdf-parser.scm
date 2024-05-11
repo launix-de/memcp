@@ -17,16 +17,25 @@ Copyright (C) 2024  Carl-Philip Hänsch
 
 /* RDF parser according to: https://www.w3.org/TR/sparql11-query/ */
 
+(define rdf_variable (parser (define x (regex "\?[a-zA-Z0-9_:]+")) '('get_var (symbol x))))
+(define rdf_constant (parser (or
+	(parser '((atom "<" false) (define x (regex "[^>]*" false false)) (atom ">" false false)) x) /* string */
+	(parser '((atom "\"" false) (define x (regex "[^\"]*" false false)) (atom "\"" false false)) x) /* string */
+	(regex "[a-zA-Z0-9_:]+" false) /* string, TODO: handle prefixing */
+)))
+(define rdf_expression (parser (or
+	rdf_variable
+	rdf_constant
+)))
+
+/* TODO: blank nodes
+ [ p o ]
+ oder [] p o
+ oder _:identifier
+
+*/
+
 (define parse_rdf (lambda (schema s) (begin
-
-	(define rdf_variable (parser (define x (regex "\?[a-zA-Z_][a-zA-Z0-9_]*")) '('get_var (symbol x))))
-	(define rdf_expression (parser (or
-		rdf_variable
-		(parser '((atom "<" false false) (define x (regex "[^>]*" false)) (atom ">" false)) x) /* string */
-		(parser '((atom "\"" false false) (define x (regex "[^\"]*" false)) (atom "\"" false)) x) /* string */
-		(regex "[a-zA-Z_][a-zA-Z0-9_]*" false) /* string */
-	)))
-
 	(define rdf_select (parser '(
 		(atom "SELECT" true)
 		(define cols (+ (or
@@ -46,5 +55,21 @@ Copyright (C) 2024  Carl-Philip Hänsch
 	) '(schema cols /* TODO: merge cols -> AS */ conditions)))
 
 	((parser (define command rdf_select) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+)))
+
+(define parse_ttl (lambda (s) (begin
+	(define ttl_file (parser '(
+		(define definitions (*
+			(parser '((atom "@prefix" true) (define pfx (regex "[a-zA-Z_][a-zA-Z0-9_]*" false)) (atom ":" false false) (define content rdf_constant)) '(pfx content))
+		))
+		(define facts (+ (or
+			(parser '((define s rdf_constant) (define p rdf_constant) (define o rdf_constant)) '(s p o))
+			(parser '((define p rdf_constant) (define o rdf_constant)) '(nil p o))
+			(parser '((define o rdf_constant)) '(nil nil o))
+		) ";"))
+		"."
+	)))
+
+	((parser (define content ttl_file) content "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
 
