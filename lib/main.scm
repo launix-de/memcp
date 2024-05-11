@@ -30,6 +30,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 )))
 
 (import "sql.scm")
+(import "rdf.scm")
 
 /* read  http_handler fresh from the environment */
 (serve 4321 (lambda (req res) (http_handler req res)))
