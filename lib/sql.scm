@@ -40,7 +40,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(match (req "path")
 			(regex "^/sql/([^/]+)/(.*)$" url schema query) (begin
 				/* check for password */
-				(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("username") (lambda (password) password) (lambda (a b) b) nil))
+				(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 				(if (and pw (equal? pw (password (req "password")))) (begin
 					((res "header") "Content-Type" "text/plain")
 					((res "status") 200)
