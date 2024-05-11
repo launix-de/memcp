@@ -84,7 +84,11 @@ func mergeParserResults(s string, r ...parserResult) parserResult {
 	var m map[Symbol]Scmer
 	var arr []Scmer
 	for _, e := range r {
-		arr = append(arr, e.value) // put results into array
+		var v Scmer = e.value
+		if v2, ok := v.(parserResult); ok {
+			v = v2.value
+		}
+		arr = append(arr, v) // put results into array
 		if e.env != nil { // merge env variables
 			if m == nil {
 				m = e.env // reuse the object (untested)
@@ -290,7 +294,7 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 					} else {
 						sepparser = packrat.NewEmptyParser(parserResult{nil, nil})
 					}
-					return packrat.NewKleeneParser(merger, subparser, sepparser)
+					return packrat.NewManyParser(merger, subparser, sepparser)
 				case Symbol("?"):
 					if len(n) == 2 {
 						// single element

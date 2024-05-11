@@ -63,12 +63,9 @@ Copyright (C) 2024  Carl-Philip Hänsch
 			(parser '((atom "@prefix" true) (define pfx (regex "[a-zA-Z_][a-zA-Z0-9_]*" false)) (atom ":" false false) (define content rdf_constant)) '(pfx content))
 		))
 		(define facts (+ (or
-			(parser '((define s rdf_constant) (define p rdf_constant) (define o rdf_constant)) '(s p o))
-			(parser '((define p rdf_constant) (define o rdf_constant)) '(nil p o))
-			(parser '((define o rdf_constant)) '(nil nil o))
-		) ";"))
-		"."
-	)))
+			(parser '((define s rdf_constant) (define ps (+ '((define p rdf_constant) (define os (+ rdf_constant ","))) ";")) ".") (map ps (lambda (p) '(s p))))
+		)))
+	) '("prefixes" definitions "facts" facts)))
 
 	((parser (define content ttl_file) content "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
