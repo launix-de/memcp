@@ -26,8 +26,15 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "WHERE" true)
 		(atom "GROUP" true)
 		(atom "BY" true)
-		(atom "VALUEs" true)
+		(atom "VALUES" true)
 		(atom "FROM" true)
+		(atom "FROM" true)
+		(atom "LEFT" true)
+		(atom "RIGHT" true)
+		(atom "INNER" true)
+		(atom "OUTER" true)
+		(atom "CROSS" true)
+		(atom "JOIN" true)
 		(atom "SELECT" true)
 		(atom "INSERT" true)
 		(atom "ORDER" true)
@@ -151,6 +158,17 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		sql_column
 	)))
 
+	(define tabledef (parser (or
+		/* TODO: left [outer] join, right [outer] join recursive buildup */
+		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '('(id schema query false))) /* inner select as from */
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '('(id schema tbl false)))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) '('(id schema tbl false)))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '('(tbl schema tbl false)))
+		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '('(id schema tbl false)))
+		(parser '((define tbl sql_identifier) (define id sql_identifier)) '('(id schema tbl false)))
+		(parser '((define tbl sql_identifier)) '(tbl schema tbl))
+	)))
+
 	/* bring those variables into a defined state */
 	(define from nil)
 	(define condition nil)
@@ -170,17 +188,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		) ","))
 		(?
 			(atom "FROM" true)
-			(define from (+
-				(or
-					(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query)) /* inner select as from */
-					(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl))
-					(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) '(id schema tbl))
-					(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '(tbl schema tbl))
-					(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl))
-					(parser '((define tbl sql_identifier) (define id sql_identifier)) '(id schema tbl))
-					(parser '((define tbl sql_identifier)) '(tbl schema tbl))
-				)
-			","))
+			(define from (+ tabledef ","))
 			(?
 				(atom "WHERE" true)
 				(define condition sql_expression)
@@ -220,7 +228,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				'((define limit sql_expression))
 			)
 		)
-	) '(schema (if (nil? from) '() from) (merge cols) condition group having order limit offset)))
+	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))
 
 	(define sql_update (parser '(
 		(atom "UPDATE" true)
