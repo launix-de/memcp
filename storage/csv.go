@@ -48,6 +48,7 @@ func LoadCSV(schema, table, filename, delimiter string) {
 	for i, col := range t.Columns {
 		cols[i] = col.Name
 	}
+	buffer := make([][]scm.Scmer, 0, 4096)
 	for s := range(lines) {
 		if s == "" {
 			// ignore
@@ -59,8 +60,15 @@ func LoadCSV(schema, table, filename, delimiter string) {
 					x[i] = scm.Simplify(arr[i])
 				}
 			}
-			t.Insert(cols, [][]scm.Scmer{x}, true, false)
+			buffer = append(buffer, x)
+			if len(buffer) >= 4096 {
+				t.Insert(cols, buffer, true, false)
+				buffer = buffer[:0]
+			}
 		}
+	}
+	if len(buffer) > 0 {
+		t.Insert(cols, buffer, true, false)
 	}
 }
 
