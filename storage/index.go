@@ -143,7 +143,7 @@ func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan ui
 	}
 
 	// otherwise: iterate over all items
-	result := make(chan uint, 64)
+	result := make(chan uint, 256)
 	go func() {
 		for i := uint(0); i < t.main_count; i++ {
 			result <- i
@@ -168,7 +168,7 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 
 // iterate over index
 func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int) chan uint {
-	result := make(chan uint, 64)
+	result := make(chan uint, 256)
 
 	// find columns in storage
 	cols := make([]ColumnStorage, len(s.cols))
