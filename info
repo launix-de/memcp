@@ -96,3 +96,10 @@ MariaDB [fuse]>
 
 SELECT kc.CONSTRAINT_NAME,kc.TABLE_NAME,kc.COLUMN_NAME,kc.ORDINAL_POSITION
 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kc WHERE kc.TABLE_SCHEMA='bayes' AND kc.REFERENCED_TABLE_NAME IS NULL
+
+/* vscode db tool */
+SELECT schema_name as "label", schema_name as "database", catalog_name as "catalog", 'connection.database' as "type", 'database' as "detail"
+FROM information_schema.schemata
+WHERE schema_name NOT IN ('information_schema', 'performance_schema', 'sys', 'mysql') OR schema_name = 'test'
+ORDER BY schema_name <> 'test',  schema_name
+

@@ -20,6 +20,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 (define sql_identifier_unquoted (parser (define id (not
 		(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 		/* exceptions for things that can't be identifiers */
+		(atom "AS" true)
 		(atom "WHERE" true)
 		(atom "GROUP" true)
 		(atom "BY" true)
@@ -44,7 +45,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 (define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
 (define sql_number (parser (define x (regex "-?[0-9]+\.?[0-9]*(?:e-?[0-9]+)?" true)) (simplify x)))
 
-(define sql_string (parser '("'" (define x (regex "(\\\\.|[^\\'])*" false false)) "'") (replace x "\'" "'")))
+(define sql_string (parser (or
+	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (replace x "\'" "'"))
+	(parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (replace x "\\\"" "\""))
+)))
 
 (define parse_sql (lambda (schema s) (begin
 
@@ -152,6 +156,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser "*" '("*" '((quote get_column) nil "*")))
 			(parser '((define tbl sql_identifier) "." "*") '("*" '((quote get_column) tbl "*")))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_identifier)) '(title e))
+			(parser '((define e sql_expression) (atom "AS" true) (define title sql_string)) '(title e))
 			(parser (define e sql_expression) '((extract_title e) e))
 		) ","))
 		(?

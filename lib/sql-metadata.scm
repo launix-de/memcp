@@ -18,6 +18,15 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 /* emulate metadata tables */
 (define get_schema (lambda (schema tbl) (match '(schema tbl)
 	/* special tables */
+	'((ignorecase "information_schema") (ignorecase "schemata")) '(
+		'("name" "catalog_name")
+		'("name" "schema_name")
+		'("name" "default_character_set_name")
+		'("name" "default_collation_name")
+		'("name" "sql_path")
+		'("name" "schema_comment")
+	)
+
 	'((ignorecase "information_schema") (ignorecase "tables")) '(
 		'("name" "table_schema")
 		'("name" "table_name")
@@ -51,6 +60,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(show schema tbl) /* otherwise: fetch from metadata */
 )))
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
+	'((ignorecase "information_schema") (ignorecase "schemata"))
+		(merge '(scanfn schema 
+			'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
+			) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
 		(merge '(scanfn schema 
 			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
