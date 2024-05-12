@@ -132,6 +132,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "CEIL" true) "(" (define p sql_expression) ")") '('ceil p))
 		(parser '((atom "CEILING" true) "(" (define p sql_expression) ")") '('ceil p))
 		(parser '((atom "ROUND" true) "(" (define p sql_expression) ")") '('round p))
+		(parser '((atom "UPPER" true) "(" (define p sql_expression) ")") '('toUpper p))
+		(parser '((atom "LOWER" true) "(" (define p sql_expression) ")") '('toLower p))
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))

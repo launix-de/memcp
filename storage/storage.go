@@ -109,12 +109,12 @@ func Init(en scm.Env) {
 					ds := dataset(val.([]scm.Scmer))
 					// filter
 					for i, col := range filtercols {
-						filterparams[i] = ds.Get(col)
+						filterparams[i] = ds.GetI(col)
 					}
 					if scm.ToBool(filterfn(filterparams...)) {
 						// map
 						for i, col := range mapcols {
-							mapparams[i] = ds.Get(col)
+							mapparams[i] = ds.GetI(col)
 						}
 						// reduce
 						result = reducefn(result, mapfn(mapparams...))
@@ -213,7 +213,7 @@ func Init(en scm.Env) {
 					ds := dataset(val.([]scm.Scmer))
 					// filter
 					for i, col := range filtercols {
-						filterparams[i] = ds.Get(col)
+						filterparams[i] = ds.GetI(col)
 					}
 					if scm.ToBool(filterfn(filterparams...)) {
 						list2 = append(list2, val)
@@ -225,14 +225,14 @@ func Init(en scm.Env) {
 					if colname, ok := scol.(string); ok {
 						// naive column sort
 						scols[i] = func (i uint) scm.Scmer {
-							return dataset(list2[i].([]scm.Scmer)).Get(colname)
+							return dataset(list2[i].([]scm.Scmer)).GetI(colname)
 						}
 					} else if proc, ok := scol.(scm.Proc); ok {
 						// complex lambda columns (TODO: either remove lambda columns or add colname mapping)
 						largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer))) // allocate only once, reuse in loop
 						for j, param := range proc.Params.([]scm.Scmer) {
 							largs[j] = func (i uint) scm.Scmer {
-								return dataset(list2[i].([]scm.Scmer)).Get(string(param.(scm.Symbol)))
+								return dataset(list2[i].([]scm.Scmer)).GetI(string(param.(scm.Symbol)))
 							}
 						}
 						procFn := scm.OptimizeProcToSerialFunction(proc)
@@ -267,7 +267,7 @@ func Init(en scm.Env) {
 					ds := dataset(val.([]scm.Scmer))
 					// map
 					for i, col := range mapcols {
-						mapparams[i] = ds.Get(col)
+						mapparams[i] = ds.GetI(col)
 					}
 					// reduce
 					result = reducefn(result, mapfn(mapparams...))

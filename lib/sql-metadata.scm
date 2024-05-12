@@ -28,6 +28,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)
 
 	'((ignorecase "information_schema") (ignorecase "tables")) '(
+		'("name" "table_catalog")
 		'("name" "table_schema")
 		'("name" "table_name")
 		'("name" "table_type")
@@ -66,7 +67,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
 		(merge '(scanfn schema 
-			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote list) "table_schema" (quote schema) "table_name" (quote tbl) "table_type" "BASE TABLE")))))) 
+			'('merge '('map '('show) '('lambda '('schema) '('map '('show 'schema) '('lambda '('tbl) '('list "table_catalog" "def" "table_schema" 'schema "table_name" 'tbl "table_type" "BASE TABLE")))))) 
 			) rest)
 	'((ignorecase "information_schema") (ignorecase "columns"))
 		(merge '(scanfn schema 

@@ -19,6 +19,7 @@ package storage
 import "fmt"
 import "sync"
 import "errors"
+import "strings"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
@@ -155,6 +156,15 @@ func (c *column) Show() scm.Scmer {
 func (d dataset) Get(key string) scm.Scmer {
 	for i := 0; i < len(d); i += 2 {
 		if d[i] == key {
+			return d[i+1]
+		}
+	}
+	return nil
+}
+
+func (d dataset) GetI(key string) scm.Scmer { // case insensitive
+	for i := 0; i < len(d); i += 2 {
+		if strings.EqualFold(scm.String(d[i]), key) {
 			return d[i+1]
 		}
 	}
