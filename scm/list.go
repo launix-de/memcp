@@ -120,17 +120,14 @@ func init_list() {
 			// merge arrays into one
 			size := 0
 			for _, v := range list {
-				if v2, ok := v.([]Scmer); ok {
-					size = size + len(v2)
-				}
+				size = size + len(v.([]Scmer))
 			}
 			result := make([]Scmer, size)
 			pos := 0
 			for _, v := range list {
-				if inner, ok := v.([]Scmer); ok {
-					copy(result[pos:pos+len(inner)], inner)
-					pos = pos + len(inner)
-				}
+				inner := v.([]Scmer)
+				copy(result[pos:pos+len(inner)], inner)
+				pos = pos + len(inner)
 			}
 			return result
 		},

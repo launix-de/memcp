@@ -166,7 +166,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '('(tbl schema tbl false)))
 		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '('(id schema tbl false)))
 		(parser '((define tbl sql_identifier) (define id sql_identifier)) '('(id schema tbl false)))
-		(parser '((define tbl sql_identifier)) '(tbl schema tbl false))
+		(parser '((define tbl sql_identifier)) '('(tbl schema tbl false)))
 	)))
 
 	/* bring those variables into a defined state */

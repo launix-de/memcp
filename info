@@ -11,6 +11,7 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 TODO
 ----
  - processes implementation with https://pkg.go.dev/context (killable, timeoutable)
+ - alter table set ENGINE, global var @ENGINE
  - RDF insert
  - RDF query
  - HTTP requests -> fetch @prefix
