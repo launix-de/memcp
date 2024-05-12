@@ -256,9 +256,9 @@ func (t *storageShard) scan_order(boundaries boundaries, conditionCols []string,
 		maxInsertIndex = len(t.inserts)
 
 		// iterate over items (indexed)
-		for idx := range t.iterateIndex(boundaries, maxInsertIndex) { // TODO: iterateIndexSorted
+		t.iterateIndex(boundaries, maxInsertIndex, func(idx uint) { // TODO: iterateIndexSorted
 			if t.deletions.Get(idx) {
-				continue // item is on delete list
+				return // item is on delete list
 			}
 
 			if idx < t.main_count {
@@ -276,11 +276,11 @@ func (t *storageShard) scan_order(boundaries boundaries, conditionCols []string,
 			}
 			// check condition
 			if (!scm.ToBool(conditionFn(cdataset...))) {
-				continue // condition did not match
+				return // condition did not match
 			}
 
 			result.items = append(result.items, idx)
-		}
+		})
 	}()
 
 	// and now sort result!

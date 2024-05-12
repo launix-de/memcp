@@ -92,7 +92,7 @@ type StorageIndex struct {
 */
 
 // iterates over items
-func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan uint {
+func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int, callback func(uint)) {
 
 	// check if we found conditions
 	if len(cols) > 0 {
@@ -125,7 +125,8 @@ func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan ui
 					}
 				}
 				// this index fits!
-				return index.iterate(lower, upperLast, maxInsertIndex)
+				index.iterate(lower, upperLast, maxInsertIndex, callback)
+				return
 			}
 		}
 
@@ -139,21 +140,17 @@ func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int) chan ui
 		index.inactive = true // tell the engine that index has to be built first
 		index.t = t
 		t.indexes = append(t.indexes, index)
-		return index.iterate(lower, upperLast, maxInsertIndex)
+		index.iterate(lower, upperLast, maxInsertIndex, callback)
+		return
 	}
 
 	// otherwise: iterate over all items
-	result := make(chan uint, 256)
-	go func() {
-		for i := uint(0); i < t.main_count; i++ {
-			result <- i
-		}
-		for i := 0; i < maxInsertIndex; i++ {
-			result <- t.main_count + uint(i)
-		}
-		close(result)
-	}()
-	return result
+	for i := uint(0); i < t.main_count; i++ {
+		callback(i)
+	}
+	for i := 0; i < maxInsertIndex; i++ {
+		callback(t.main_count + uint(i))
+	}
 }
 
 func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
@@ -167,8 +164,7 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 }
 
 // iterate over index
-func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int) chan uint {
-	result := make(chan uint, 256)
+func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint)) {
 
 	// find columns in storage
 	cols := make([]ColumnStorage, len(s.cols))
@@ -178,149 +174,144 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 
 	savings_threshold := 2.0 // building an index costs 1x the time as traversing the list
 	s.savings = s.savings + 1.0 // mark that we could save time
-	go func() {
-		if s.inactive {
-			// index is not built yet
-			if s.savings < savings_threshold {
-				// iterate over all items because we don't want to store the index
-				for i := uint(0); i < s.t.main_count; i++ {
-					result <- i
-				}
-				close(result)
-				return
-			} else {
-				// rebuild index
-				fmt.Println("building index on", s.t.t.Name, "over", s.cols)
+	if s.inactive {
+		// index is not built yet
+		if s.savings < savings_threshold {
+			// iterate over all items because we don't want to store the index
+			for i := uint(0); i < s.t.main_count; i++ {
+				callback(i)
+			}
+			return
+		} else {
+			// rebuild index
+			fmt.Println("building index on", s.t.t.Name, "over", s.cols)
 
-				// main storage
-				tmp := make([]uint, s.t.main_count)
-				for i := uint(0); i < s.t.main_count; i++ {
-					tmp[i] = i // fill with natural order
-				}
-				// sort indexes
-				sort.Slice(tmp, func (i, j int) bool {
-					for _, c := range cols {
-						a := c.GetValue(tmp[i])
-						b := c.GetValue(tmp[j])
-						if scm.Less(a, b) {
-							return true // less
-						} else if !reflect.DeepEqual(a, b) {
-							return false // greater
-						}
-						// otherwise: next iteration
+			// main storage
+			tmp := make([]uint, s.t.main_count)
+			for i := uint(0); i < s.t.main_count; i++ {
+				tmp[i] = i // fill with natural order
+			}
+			// sort indexes
+			sort.Slice(tmp, func (i, j int) bool {
+				for _, c := range cols {
+					a := c.GetValue(tmp[i])
+					b := c.GetValue(tmp[j])
+					if scm.Less(a, b) {
+						return true // less
+					} else if !reflect.DeepEqual(a, b) {
+						return false // greater
 					}
-					return false // fully equal
-				})
-				// store sorted values into compressed format
-				s.mainIndexes.prepare()
-				for i, v := range tmp {
-					s.mainIndexes.scan(uint(i), v)
+					// otherwise: next iteration
 				}
-				s.mainIndexes.init(uint(len(tmp)))
-				for i, v := range tmp {
-					s.mainIndexes.build(uint(i), v)
-				}
-				s.mainIndexes.finish()
-
-				// delta storage
-				s.deltaBtree = btree.NewG[indexPair](8, func (i, j indexPair) bool {
-					for _, col := range s.cols {
-						colpos, ok := s.t.deltaColumns[col]
-						if !ok {
-							continue // non-existing column -> don't compare
-						}
-						var a, b scm.Scmer
-						if colpos < len(i.data) {
-							a = i.data[colpos]
-						}
-						if colpos < len(j.data) {
-							b = j.data[colpos]
-						}
-						if scm.Less(a, b) {
-							return true // less
-						} else if !reflect.DeepEqual(a, b) {
-							return false // greater
-						}
-						// otherwise: next iteration
-					}
-					return false // fully equal
-				})
-				// fill deltaBtree (no locking required; we are already in a readlock)
-				for i, data := range s.t.inserts {
-					s.deltaBtree.ReplaceOrInsert(indexPair{i, data})
-				}
-
-				s.inactive = false // mark as ready
-			}
-		}
-
-		// bisect where the lower bound is found
-		idx := sort.Search(int(s.t.main_count), func (idx int) bool {
-			idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
-			for i, c := range cols {
-				a := lower[i]
-				b := c.GetValue(uint(idx2))
-				if scm.Less(a, b) {
-					return true // less
-				} else if !reflect.DeepEqual(a, b) {
-					return false // greater
-				}
-				// otherwise: next iteration
-			}
-			return true // fully equal
-		})
-		// now iterate over all items as long as we stay in sync
-		iteration:
-		for {
-			// check for array bounds
-			if uint(idx) >= s.t.main_count {
-				break
-			}
-			idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
-			// check for index bounds
-			for i, c := range cols {
-				a := c.GetValue(uint(idx2))
-				if i == len(cols) - 1 {
-					if upperLast != nil && scm.Less(upperLast, a) {
-						break iteration // stop traversing when we exceed the < part of last col
-					}
-				} else if !reflect.DeepEqual(a, lower[i]) {
-					break iteration // stop traversing when we exceed the equal-part
-				}
-				// otherwise: next col
-			}
-			// output recordid
-			result <- uint(idx2)
-			idx++
-			// TODO: stop on limit
-		}
-
-		// delta storage -> scan btree (but we can also eject all items, it won't break the code)
-		if len(s.t.inserts) > 0 { // avoid building objects if there is no delta
-			delta_lower := make(dataset, 2 * len(s.cols))
-			delta_upper := make(dataset, 2 * len(s.cols))
-			for i := 0; i < len(s.cols); i++ {
-				delta_lower[2 * i] = s.cols[i]
-				delta_lower[2 * i + 1] = lower[i]
-				delta_upper[2 * i] = s.cols[i]
-				delta_upper[2 * i + 1] = lower[i]
-			}
-			delta_upper[len(delta_upper)-1] = upperLast
-			// scan less than
-			s.deltaBtree.AscendRange(indexPair{-1, delta_lower}, indexPair{-1, delta_upper}, func (p indexPair) bool {
-				result <- s.t.main_count + uint(p.itemid)
-				return true // don't stop iteration
-				// TODO: stop on limit
+				return false // fully equal
 			})
-			// find exact fit, too
-			if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
-				result <- s.t.main_count + uint(p.itemid)
+			// store sorted values into compressed format
+			s.mainIndexes.prepare()
+			for i, v := range tmp {
+				s.mainIndexes.scan(uint(i), v)
 			}
-			/*for i := 0; i < maxInsertIndex; i++ {
-				result <- s.t.main_count + uint(i)
-			}*/
+			s.mainIndexes.init(uint(len(tmp)))
+			for i, v := range tmp {
+				s.mainIndexes.build(uint(i), v)
+			}
+			s.mainIndexes.finish()
+
+			// delta storage
+			s.deltaBtree = btree.NewG[indexPair](8, func (i, j indexPair) bool {
+				for _, col := range s.cols {
+					colpos, ok := s.t.deltaColumns[col]
+					if !ok {
+						continue // non-existing column -> don't compare
+					}
+					var a, b scm.Scmer
+					if colpos < len(i.data) {
+						a = i.data[colpos]
+					}
+					if colpos < len(j.data) {
+						b = j.data[colpos]
+					}
+					if scm.Less(a, b) {
+						return true // less
+					} else if !reflect.DeepEqual(a, b) {
+						return false // greater
+					}
+					// otherwise: next iteration
+				}
+				return false // fully equal
+			})
+			// fill deltaBtree (no locking required; we are already in a readlock)
+			for i, data := range s.t.inserts {
+				s.deltaBtree.ReplaceOrInsert(indexPair{i, data})
+			}
+
+			s.inactive = false // mark as ready
 		}
-		close(result)
-	}()
-	return result
+	}
+
+	// bisect where the lower bound is found
+	idx := sort.Search(int(s.t.main_count), func (idx int) bool {
+		idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
+		for i, c := range cols {
+			a := lower[i]
+			b := c.GetValue(uint(idx2))
+			if scm.Less(a, b) {
+				return true // less
+			} else if !reflect.DeepEqual(a, b) {
+				return false // greater
+			}
+			// otherwise: next iteration
+		}
+		return true // fully equal
+	})
+	// now iterate over all items as long as we stay in sync
+	iteration:
+	for {
+		// check for array bounds
+		if uint(idx) >= s.t.main_count {
+			break
+		}
+		idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
+		// check for index bounds
+		for i, c := range cols {
+			a := c.GetValue(uint(idx2))
+			if i == len(cols) - 1 {
+				if upperLast != nil && scm.Less(upperLast, a) {
+					break iteration // stop traversing when we exceed the < part of last col
+				}
+			} else if !reflect.DeepEqual(a, lower[i]) {
+				break iteration // stop traversing when we exceed the equal-part
+			}
+			// otherwise: next col
+		}
+		// output recordid
+		callback(uint(idx2))
+		idx++
+		// TODO: stop on limit
+	}
+
+	// delta storage -> scan btree (but we can also eject all items, it won't break the code)
+	if len(s.t.inserts) > 0 { // avoid building objects if there is no delta
+		delta_lower := make(dataset, 2 * len(s.cols))
+		delta_upper := make(dataset, 2 * len(s.cols))
+		for i := 0; i < len(s.cols); i++ {
+			delta_lower[2 * i] = s.cols[i]
+			delta_lower[2 * i + 1] = lower[i]
+			delta_upper[2 * i] = s.cols[i]
+			delta_upper[2 * i + 1] = lower[i]
+		}
+		delta_upper[len(delta_upper)-1] = upperLast
+		// scan less than
+		s.deltaBtree.AscendRange(indexPair{-1, delta_lower}, indexPair{-1, delta_upper}, func (p indexPair) bool {
+			callback(s.t.main_count + uint(p.itemid))
+			return true // don't stop iteration
+			// TODO: stop on limit
+		})
+		// find exact fit, too
+		if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
+			callback(s.t.main_count + uint(p.itemid))
+		}
+		/*for i := 0; i < maxInsertIndex; i++ {
+			callback(s.t.main_count + uint(i))
+		}*/
+	}
 }

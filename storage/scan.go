@@ -135,9 +135,9 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 	maxInsertIndex := len(t.inserts)
 
 	// iterate over items (indexed)
-	for idx := range t.iterateIndex(boundaries, maxInsertIndex) {
+	t.iterateIndex(boundaries, maxInsertIndex, func (idx uint) {
 		if t.deletions.Get(idx) {
-			continue // item is on delete list
+			return // item is on delete list
 		}
 
 		// prepare mdataset
@@ -148,7 +148,7 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 				cdataset[i] = k.GetValue(idx)
 			}
 			if (!scm.ToBool(conditionFn(cdataset...))) {
-				continue // condition did not match
+				return // condition did not match
 			}
 
 			// call map function
@@ -168,7 +168,7 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 			}
 			// check condition
 			if (!scm.ToBool(conditionFn(cdataset...))) {
-				continue // condition did not match
+				return // condition did not match
 			}
 
 			// prepare&call map function
@@ -184,7 +184,7 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 		intermediate := callbackFn(mdataset...)
 		akkumulator = aggregateFn(akkumulator, intermediate)
 		t.mu.RLock()
-	}
+	})
 	t.mu.RUnlock() // finished reading
 	return akkumulator
 }
