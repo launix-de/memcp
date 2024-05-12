@@ -134,6 +134,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "ROUND" true) "(" (define p sql_expression) ")") '('round p))
 		(parser '((atom "UPPER" true) "(" (define p sql_expression) ")") '('toUpper p))
 		(parser '((atom "LOWER" true) "(" (define p sql_expression) ")") '('toLower p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p)) /* TODO: proper implement CAST; for now make vscode work */
+		(parser '((atom "CONCAT" true) "(" (define p (+ sql_expression ",")) ")") (cons 'concat p)) /* TODO: proper implement CAST; for now make vscode work */
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
