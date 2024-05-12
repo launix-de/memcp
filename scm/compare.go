@@ -54,6 +54,7 @@ func Equal(a, b Scmer) Scmer {
 				case bool:
 					return a_ == b_
 			}
+		// TODO: []Scmer
 
 	}
 	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))

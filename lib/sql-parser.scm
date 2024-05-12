@@ -20,6 +20,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 (define sql_identifier_unquoted (parser (define id (not
 		(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 		/* exceptions for things that can't be identifiers */
+		(atom "NOT" true)
+		(atom "IN" true)
 		(atom "AS" true)
 		(atom "WHERE" true)
 		(atom "GROUP" true)
@@ -88,6 +90,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((define a sql_expression3) "<" (define b sql_expression2)) '((quote <) a b))
 		(parser '((define a sql_expression3) ">" (define b sql_expression2)) '((quote >) a b))
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b))
+		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('contains? (cons list b) a))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('not '('contains? (cons list b) a)))
 		sql_expression3
 	)))
 

@@ -313,6 +313,24 @@ func init_list() {
 			return ok
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		"contains?", "checks if a value is in a list; uses the equal?? operator",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "list to check"},
+			DeclarationParameter{"value", "any", "value to check"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			// arr
+			arr, _ := a[0].([]Scmer)
+			for _, v := range arr {
+				if Equal(v, a[1]) == true {
+					return true
+				}
+			}
+			return false
+		},
+	})
 
 	// dictionary functions
 	DeclareTitle("Associative Lists / Dictionaries")

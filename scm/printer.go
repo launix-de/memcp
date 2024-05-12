@@ -39,6 +39,9 @@ func String(v Scmer) string {
 	case Proc:
 		return "[func]"
 	case func(...Scmer) Scmer:
+		if fmt.Sprint(v) == fmt.Sprint(List) { //fmt.Sprint
+			return "list"
+		}
 		return "[native func]"
 	case string:
 		return v // this is not valid scm code! (but we need it to convert strings)
