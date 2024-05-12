@@ -140,6 +140,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 			}
 		case []Scmer:
 			if len(v) > 0 {
+				// TODO: if v[0] == list -> check if children are constant -> use quote instead
 				if v[0] == Symbol("begin") {
 					// analyze which variables are to be used
 					usedVariables := make(map[Symbol]int)

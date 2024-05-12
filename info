@@ -10,6 +10,11 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 
 TODO
 ----
+ - processes implementation with https://pkg.go.dev/context (killable, timeoutable)
+ - RDF insert
+ - RDF query
+ - HTTP requests -> fetch @prefix
+ - IPFS client -> fetch @prefix (https://pkg.go.dev/github.com/ipfs/kubo/client/rpc#HttpApi.ResolveNode)
  - primary key auto_increment
  - tempcol -> LRU, garbage collector, lazy reevaluation, change hooks
  - LEFT JOIN
