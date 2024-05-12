@@ -67,26 +67,32 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback func(*stor
 			}(s)
 		}
 	} else {
-		iterateShardIndex(t.PDimensions, boundaries, t.PShards, callback, &done)
+		iterateShardIndex(t.PDimensions, boundaries, t.PShards, callback, &done, false)
 	}
 	done.Wait()
 }
 
 // iterate over all shards parallely
-func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, callback func(*storageShard), done *sync.WaitGroup) {
+func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard, callback func(*storageShard), done *sync.WaitGroup, parallel bool) {
 	if len(schema) == 0 {
-		done.Add(len(shards))
-		for _, s := range shards {
-			// iterateShardIndex will go
-			go func(s *storageShard) {
-				if s == nil {
-					fmt.Println("Warning: a shard is missing")
-					return
-				}
-				s.RunOn()
-				callback(s)
-				done.Done()
-			}(s)
+		if len(shards) == 1 && !parallel {
+			// execute without go
+			shards[0].RunOn()
+			callback(shards[0])
+		} else {
+			done.Add(len(shards))
+			for _, s := range shards {
+				// iterateShardIndex will go
+				go func(s *storageShard) {
+					if s == nil {
+						fmt.Println("Warning: a shard is missing")
+						return
+					}
+					s.RunOn()
+					callback(s)
+					done.Done()
+				}(s)
+			}
 		}
 		return
 	}
@@ -144,7 +150,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 
 			for i := min; i <= max; i++ {
 				// recurse over range
-				iterateShardIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], callback, done)
+				iterateShardIndex(schema[1:], boundaries, shards[i*blockdim:(i+1)*blockdim], callback, done, parallel || (min != max))
 			}
 			return // finish (don't run into next boundary, don't run into the all-loop)
 		}
@@ -152,7 +158,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 
 	// else: no boundaries: iterate all
 	for i := 0; i < len(shards); i += blockdim {
-		iterateShardIndex(schema[1:], boundaries, shards[i:i+blockdim], callback, done)
+		iterateShardIndex(schema[1:], boundaries, shards[i:i+blockdim], callback, done, parallel || len(shards) >= blockdim)
 	}
 }
 
