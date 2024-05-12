@@ -175,8 +175,8 @@ if there is a group function, create a temporary preaggregate table
 					'('begin
 						/* INSERT IGNORE group cols into preaggregate */
 						/* TODO: use bulk insert in scan reduce phase (and filter duplicates from a bulk!) */
-						'((quote begin)
-							'((quote set) (quote resultrow) '((quote lambda) '((quote item)) '((quote insert) schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '((quote extract_assoc) (quote item) '((quote lambda) '((quote key) (quote value)) (quote value)))) true true)))
+						'('begin
+							'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) true true)))
 							(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
 						)
 					)

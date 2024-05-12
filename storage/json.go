@@ -39,7 +39,7 @@ func LoadJSON(schema, filename string) {
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
 
-	lines := make(chan string, 64)
+	lines := make(chan string, 512)
 
 	go func () {
 		for scanner.Scan() {

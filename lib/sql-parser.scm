@@ -166,7 +166,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '('(tbl schema tbl false)))
 		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '('(id schema tbl false)))
 		(parser '((define tbl sql_identifier) (define id sql_identifier)) '('(id schema tbl false)))
-		(parser '((define tbl sql_identifier)) '(tbl schema tbl))
+		(parser '((define tbl sql_identifier)) '(tbl schema tbl false))
 	)))
 
 	/* bring those variables into a defined state */
@@ -381,7 +381,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) schema id "collation" collation)))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) schema id "auto_increment" ai)))
 		) ","))
-	) (cons (quote begin) (map alters (lambda (alter) (alter id))))))
+	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
@@ -412,7 +412,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote dropdatabase) id))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons (quote begin) vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or sql_identifier '(sql_identifier (atom "AS" true) sql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
@@ -437,7 +437,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		"" '((parse_sql schema pre))
 		error("failed to parse compound SQL")
 	)))
-	(cons (quote begin) (tailrecursiveparser "" s ";"))
+	(cons '!begin (tailrecursiveparser "" s ";"))
 )))
 /*
 > (parse_sql_multi "sparse" "select * from a--man\n; 'b=4' ; moms ;\nDELIMITER foo\nafterwards" ";")
