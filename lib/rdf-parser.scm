@@ -17,7 +17,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 
 /* RDF parser according to: https://www.w3.org/TR/sparql11-query/ */
 
-(define rdf_variable (parser (define x (regex "\?[a-zA-Z0-9_]+")) '('get_var (symbol x))))
+(define rdf_variable (parser (define x (regex "\?[a-zA-Z0-9_]+" true)) '('get_var (symbol x))))
 (define rdf_constant (parser (or
 	(parser '((atom "<" true) (define x (regex "[^>]*" false false)) (atom ">" false false)) x) /* string */
 	(parser '((atom "\"" true) (define x (regex "[^\"]*" false false)) (atom "\"@" false false) (regex "[a-zA-Z_0-9]+" false)) x) /* string with language, ignore language, TODO: escape tbnrf */
@@ -25,6 +25,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 	(regex "[a-zA-Z0-9_]+" true) /* string, TODO: handle prefixing */
 )))
 (define rdf_expression (parser (or
+	(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) '('concat '('definitions pfx) post)) /* as expression */
 	rdf_variable
 	rdf_constant
 	/* TODO: SUM(...), COUNT(), AVG, MIN, MAX, GROUP_CONCAT */
@@ -38,33 +39,28 @@ Copyright (C) 2024  Carl-Philip Hänsch
 
 */
 
-(define parse_rdf (lambda (schema s) (begin
-	(set group nil)
-	(define rdf_select (parser '(
-		(atom "SELECT" true)
-		(define cols (+ (or
-			rdf_variable /* TODO: other expressions AS xyz */
-		) ","))
-		(?
-			(atom "WHERE" true)
-			(atom "{" true)
-			(define conditions (* (or
-				(parser '((define s rdf_expression) (define ps (+ (parser '((define p rdf_expression) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";"))) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
-				/* TODO: FILTER regex(?var "pattern") */
-			) "."))
-			(? (atom "." true))
-			(atom "}" true) /* TODO: {} UNION {} */
-		)
-		(?
-			(atom "GROUP" true)
-			(atom "BY" true)
-			(define group (+ rdf_variable ","))
-		)
-		/* TODO: OFFSET xyz LIMIT xyz */
-	) '(schema cols /* TODO: merge cols -> AS */ (merge conditions))))
-
-	((parser (define command rdf_select) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
-)))
+(define rdf_select (parser '(
+	(atom "SELECT" true)
+	(define cols (+ (or
+		rdf_variable /* TODO: other expressions AS xyz */
+	) ","))
+	(?
+		(atom "WHERE" true)
+		(atom "{" true)
+		(define conditions (* (or
+			(parser '((define s rdf_expression) (define ps (+ (parser '((define p rdf_expression) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";"))) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
+			/* TODO: FILTER regex(?var "pattern") */
+		) "."))
+		(? (atom "." true))
+		(atom "}" true) /* TODO: {} UNION {} */
+	)
+	(?
+		(atom "GROUP" true)
+		(atom "BY" true)
+		(define group (+ rdf_variable ","))
+	)
+	/* TODO: OFFSET xyz LIMIT xyz */
+) '(schema cols /* TODO: merge cols -> AS */ (merge (coalesce conditions '('())))) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define ttl_header (parser '(
 	(define definitions (*
@@ -72,6 +68,12 @@ Copyright (C) 2024  Carl-Philip Hänsch
 	))
 	(define rest rest)
 ) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+
+(define execute_sparql (lambda (schema s) (match (ttl_header s)
+       '("prefixes" definitions "rest" rest) (begin
+		(print (rdf_select rest))
+	)
+)))
 
 
 (define load_ttl (lambda (schema s) (match (ttl_header s)

@@ -122,6 +122,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 		case SourceInfo:
 			// strip SourceInfo from lambda declarations
 			return OptimizeEx(v.value, env, ome, useResult)
+			// TODO: don't remove SourceInfo if we are in debug mode!
 		case Symbol:
 			// replace variables with their counterparts
 			if replacement, ok := ome.variableReplacement[v]; ok {

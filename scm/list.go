@@ -25,6 +25,7 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
  */
 package scm
 
+import "fmt"
 import "reflect"
 
 func init_list() {
@@ -115,7 +116,11 @@ func init_list() {
 			list := a
 			if len(a) == 1 {
 				// one parameter: interpret as list of lists
-				list = a[0].([]Scmer)
+				var ok bool
+				list, ok = a[0].([]Scmer)
+				if !ok {
+					panic("invalid input for merge: " + fmt.Sprint(a))
+				}
 			}
 			// merge arrays into one
 			size := 0
