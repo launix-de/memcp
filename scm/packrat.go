@@ -169,6 +169,9 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 			if n == Symbol("empty") {
 				return packrat.NewEmptyParser(parserResult{nil, nil})
 			}
+			if n == Symbol("rest") {
+				return packrat.NewRestParser(func (s string) parserResult { return parserResult{s, nil}; })
+			}
 			if ome != nil {
 				// variables cannot be predefined
 				// TODO: precompiled parsers from the OME environment?
