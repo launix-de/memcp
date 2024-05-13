@@ -96,6 +96,17 @@ func init_alu() {
 	DeclareTitle("Arithmetic / Logic")
 
 	Declare(&Globalenv, &Declaration{
+		"number?", "tells if the value is a number",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value"},
+		}, "bool",
+		func(a ...Scmer) (result Scmer) {
+			_, ok := a[0].(float64)
+			return ok
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"+", "adds two or more numbers",
 		2, 1000,
 		[]DeclarationParameter{
@@ -308,5 +319,4 @@ func init_alu() {
 			return math.Round(ToFloat(a[0]))
 		},
 	})
-	// TODO: number? string? func?
 }

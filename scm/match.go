@@ -57,6 +57,9 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	 - (merge '(a b c) rest) will split a list into multiple head elements and their rest (as alternative to cons)
 	 - (regex "(.*)=(.*)" _ Symbol Symbol) will parse regex
 	 - (eval expr) will match the value result from expr
+	 - (string? Symbol) will match if value is a string and put the value into Symbol
+	 - (number? Symbol) will match if value is a number and put the value into Symbol
+	 - (list? Symbol) will match if value is a list and put the value into Symbol
 	*/
 	switch p := pattern.(type) {
 		case SourceInfo:
@@ -105,11 +108,43 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 						default:
 							return false
 					}
+				case Symbol("quote"):
+					// symbol literal
+					switch v := val.(type) {
+						case Symbol:
+							return p[1].(Symbol) == v
+						default:
+							return false
+					}
 				case Symbol("symbol"):
 					// symbol literal
 					switch v := val.(type) {
 						case Symbol:
 							return p[1].(Symbol) == v
+						default:
+							return false
+					}
+				case Symbol("string?"):
+					// symbol literal
+					switch v := val.(type) {
+						case string:
+							return match(v, p[1], en)
+						default:
+							return false
+					}
+				case Symbol("number?"):
+					// symbol literal
+					switch v := val.(type) {
+						case float64:
+							return match(v, p[1], en)
+						default:
+							return false
+					}
+				case Symbol("list?"):
+					// symbol literal
+					switch v := val.(type) {
+						case []Scmer:
+							return match(v, p[1], en)
 						default:
 							return false
 					}

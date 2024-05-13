@@ -61,7 +61,9 @@ func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
 					panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
 				}
 				for i, param := range params {
-					en.Vars[param.(Symbol)] = args[i]
+					if param != Symbol("_") {
+						en.Vars[param.(Symbol)] = args[i]
+					}
 				}
 				return Eval(p.Body, en)
 			}

@@ -66,6 +66,17 @@ func init_strings() {
 	DeclareTitle("Strings")
 
 	Declare(&Globalenv, &Declaration{
+		"string?", "tells if the value is a string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value"},
+		}, "bool",
+		func(a ...Scmer) (result Scmer) {
+			_, ok := a[0].(string)
+			return ok
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"concat", "concatenates stringable values and returns a string",
 		1, 1000,
 		[]DeclarationParameter{

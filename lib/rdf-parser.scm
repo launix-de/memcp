@@ -42,7 +42,8 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (define rdf_select (parser '(
 	(atom "SELECT" true)
 	(define cols (+ (or
-		rdf_variable /* TODO: other expressions AS xyz */
+		(parser (define v rdf_variable) (match v '('get_var s) '((concat s) v))) /* rdf_variable */
+		(parser '((define v rdf_expression) (atom "AS" true) (define v2 rdf_variable)) (match v2 '('get_var s) '((concat s) v))) /* rdf_variable AS rdf_variable */
 	) ","))
 	(?
 		(atom "WHERE" true)
@@ -60,7 +61,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 		(define group (+ rdf_variable ","))
 	)
 	/* TODO: OFFSET xyz LIMIT xyz */
-) '(schema cols /* TODO: merge cols -> AS */ (merge (coalesce conditions '('())))) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+) '("select" (merge cols) /* TODO: merge cols -> AS */ "where" (merge (coalesce conditions '('())))) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define ttl_header (parser '(
 	(define definitions (*
@@ -70,9 +71,39 @@ Copyright (C) 2024  Carl-Philip Hänsch
 ) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define execute_sparql (lambda (schema s) (match (ttl_header s)
-       '("prefixes" definitions "rest" rest) (begin
-		(print (rdf_select rest))
-	)
+       '("prefixes" definitions "rest" rest) (match (rdf_select rest)
+		'("select" cols "where" conditions) (begin
+			/* TODO: context: array with predefined variables */
+			(set context '())
+			(define replace_context (lambda (expr context) (match expr
+				'('get_var sym) (coalesce (context sym) (error "unknown symbol " sym " in " context))
+				(cons head tail) (cons head (map tail (lambda (x) (replace_context x context))))
+				x x
+			)))
+			/* no join reordering yet */
+			(define build_scan (lambda (conditions context) (match conditions
+				(cons '(s p o) tail) (begin
+					(define process (lambda (v sym conditions vars) (match v
+						'('get_var var) (if (context var)
+							'((append conditions sym (context var)) vars) /* variable is bound: match value */
+							'(conditions (append vars sym (symbol var)))) /* variable is free: collect in scope */
+						(string? s) '((append conditions sym s) vars)
+						(list? l) '((append conditions sym (eval l)) vars)
+						(print "undetected " v)
+					)))
+					(match (process s "s" '() '()) '(conditions vars)
+						(match (process p "p" conditions vars) '(conditions vars)
+							(match (process o "o" conditions vars) '(conditions vars)
+								'('scan schema "rdf"
+									/* condition */ (cons list (extract_assoc conditions (lambda (k v) k))) '('lambda (extract_assoc conditions (lambda (k v) (symbol k))) (cons 'and (extract_assoc conditions (lambda (k v) '('equal? (symbol k) v)))))
+									/* map */ (cons list (extract_assoc vars (lambda (k v) k))) '('lambda (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (merge context (merge (extract_assoc vars (lambda (k v) '(v (symbol v))))))))
+								)
+					)))
+				)
+				'() (cons 'resultrow (map_assoc cols (lambda (k v) (replace_context v context))))
+			)))
+			(build_scan conditions context)
+	))
 )))
 
 

@@ -280,10 +280,12 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 						}
 					} else {
 						for i, param := range params {
-							if i < len(operands) {
-								en2.Vars[param.(Symbol)] = Eval(operands[i], en)
-							} else {
-								en2.Vars[param.(Symbol)] = nil
+							if param != Symbol("_") {
+								if i < len(operands) {
+									en2.Vars[param.(Symbol)] = Eval(operands[i], en)
+								} else {
+									en2.Vars[param.(Symbol)] = nil
+								}
 							}
 						}
 					}
@@ -381,7 +383,9 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 				}
 			} else {
 				for i, param := range params {
-					en.Vars[param.(Symbol)] = args[i]
+					if param != Symbol("_") {
+						en.Vars[param.(Symbol)] = args[i]
+					}
 				}
 			}
 		case Symbol:
