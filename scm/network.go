@@ -88,7 +88,13 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		/* 10: */ "username", req.URL.User.Username(),
 		/* 12: */ "password", pwtostring(req.URL.User.Password()),
 		"ip", req.RemoteAddr,
-		// TODO: req.Body io.ReadCloser
+		"body", func(a ...Scmer) Scmer {
+			// req.Body io.ReadCloser
+			var b strings.Builder
+			io.Copy(&b, req.Body)
+			req.Body.Close()
+			return b.String()
+		},
 	}
 	if len(basic_auth) == 2 {
 		// set username/password from Basic auth string
@@ -191,7 +197,8 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			fmt.Println("request failed:", req_scm, r, string(debug.Stack()))
 			res.Header().Set("Content-Type", "text/plain")
 			res.WriteHeader(500)
-			io.WriteString(res, "500 Internal Server Error.")
+			io.WriteString(res, "500 Internal Server Error: ")
+			io.WriteString(res, fmt.Sprint(r))
 		}
 	}()
 	Apply(s.callback, []Scmer{req_scm, res_scm})

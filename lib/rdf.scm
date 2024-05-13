@@ -26,28 +26,35 @@ this is how rdf works:
 /* http hook for handling SparQL */
 (define http_handler (begin
 	(set old_handler http_handler)
+	(define handle_query (lambda (req res schema query) (begin
+		/* check for password */
+		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(if (and pw (equal? pw (password (req "password")))) (begin
+			((res "header") "Content-Type" "text/plain")
+			((res "status") 200)
+			(print "RDF query: " query)
+			(define formula (parse_sparql schema query))
+			(define resultrow (res "jsonl"))
+			/*(define session (newsession))*/
+
+			(eval formula)
+		) (begin
+			((res "header") "Content-Type" "text/plain")
+			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+			((res "status") 401)
+			((res "print") "Unauthorized")
+		))
+	)))
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
 		(match (req "path")
+			(regex "^/rdf/([^/]+)$" url schema) (begin
+				(set query ((req "body")))
+				(handle_query req res schema query)
+			)
 			(regex "^/rdf/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
-				/* check for password */
-				(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
-				(if (and pw (equal? pw (password (req "password")))) (begin
-					((res "header") "Content-Type" "text/plain")
-					((res "status") 200)
-					(print "RDF query: " query)
-					(define formula (parse_sparql schema query))
-					(define resultrow (res "jsonl"))
-					/*(define session (newsession))*/
-
-					(eval formula)
-				) (begin
-					((res "header") "Content-Type" "text/plain")
-					((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
-					((res "status") 401)
-					((res "print") "Unauthorized")
-				))
+				(handle_query req res schema query)
 			)
 			/* default */
 			(old_handler req res))

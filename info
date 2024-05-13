@@ -11,26 +11,27 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 TODO
 ----
  - global variable: partition_max_dimensions
- - processes implementation with https://pkg.go.dev/context (killable, timeoutable)
+ . global variable: debug mode
+ - processes implementation with https://pkg.go.dev/context (killable, timeoutable), see also: https://pkg.go.dev/github.com/jtolds/gls and support KILL pid (processlist stored in in sync.Map pid->{user,commandstring,cancelfunc})
  - alter table set ENGINE, global var @ENGINE
  - RDF insert
  - RDF query
- - HTTP requests -> fetch @prefix
- - IPFS client -> fetch @prefix (https://pkg.go.dev/github.com/ipfs/kubo/client/rpc#HttpApi.ResolveNode)
+ - HTTP requests -> fetch @prefix (loadRemote)
+ - IPFS client -> fetch @prefix (https://pkg.go.dev/github.com/ipfs/kubo/client/rpc#HttpApi.ResolveNode) (loadRemote)
  - primary key auto_increment
  - tempcol -> LRU, garbage collector, lazy reevaluation, change hooks
- - LEFT JOIN
+ - LEFT JOIN -> bool parameter in scan/scan_order, der bewirkt, dass bei keinem Treffer ein NULL-Map aufgerufen wird
  - FOREIGN KEY
  - group tables -> create foreign key association
- - empty tables with a foreign key -> shard after their foreign key
+ - empty tables with a foreign key -> shard after their foreign key (copy partition schema)
  - turn all subqueries into LEFT JOINs
  - prejoins for complex query plans (group on inter-table conditions)
  - iterateIndex -> sort delta storage and merge it with main, so we can guarantee the correct order in iterateIndex
- - scan_star (schema maintbl filter map reduce neutral subtbl[tblalias->tblname] sub-filter sub-map sub-reduce sub-neutral filter-list map-list) -> every sub-alias will become a map column; no need for a lib function; just optimize some pivot caching
+ - merge join: (scan_star schema tbls[] joincols[] filtercols[][] filterfn mapcols[][] mapfn reduce neutral)
  - docker hub upload
  - mysql importer
  - plugin concept e.g. for AIs (they will declare new scheme functions) -> .so
- - transactions: every delete+insert has a optional txid (or 0 if committed); rebuild only rebuilds up to the last committed insert-item; scans are relative to a txid where items with a non-matching txid are ignored
+ - transactions: map[shard]2xNonBlockingBitmap, deletion overlay negates deletions (insert in tx -> item is set as deleted for public; delete in tx -> deletion mask is set); scan will respect tx-maps; commit will apply the masks to main
  - system.grant, system.user.all -> allow access for some databases
  - tables stored in a table? (StorageSCMER)
  - mmap'd hdd storage manager
