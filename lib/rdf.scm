@@ -29,16 +29,18 @@ this is how rdf works:
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
 		(match (req "path")
-			(regex "^/rdf/([^/]+)/(.*)$" url schema query) (begin
+			(regex "^/rdf/([^/]+)/(.*)$" url schema query_un) (begin
+				(set query (urldecode query_un))
 				/* check for password */
 				(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 				(if (and pw (equal? pw (password (req "password")))) (begin
 					((res "header") "Content-Type" "text/plain")
 					((res "status") 200)
-					(define formula (parse_rdf schema query))
+					(print "RDF query: " query)
+					(define formula (parse_sparql schema query))
 					(define resultrow (res "jsonl"))
-					(print "received query: " query)
-					(define session (newsession))
+					/*(define session (newsession))*/
+
 					(eval formula)
 				) (begin
 					((res "header") "Content-Type" "text/plain")

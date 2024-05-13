@@ -29,6 +29,7 @@ import "flag"
 import "time"
 import "bufio"
 import "sync"
+import "net/url"
 import "syscall"
 import "runtime"
 import "io/ioutil"
@@ -208,6 +209,30 @@ func main() {
 			scm.DeclarationParameter{"handler", "func", "handler: lambda(req res) that handles the http request (TODO: detailed documentation)"},
 		}, "bool",
 		scm.HTTPServe,
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"urlencode", "encodes a string according to URI coding schema",
+		1, 1,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"value", "string", "string to encode"},
+		}, "string",
+		func (a ...scm.Scmer) scm.Scmer {
+			return url.QueryEscape(scm.String(a[0]))
+		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"urldecode", "decodes a string according to URI coding schema",
+		1, 1,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"value", "string", "string to decode"},
+		}, "string",
+		func (a ...scm.Scmer) scm.Scmer {
+			if result, err := url.QueryUnescape(scm.String(a[0])); err == nil {
+				return result
+			} else {
+				panic("error while decoding URL: " + fmt.Sprint(err))
+			}
+		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"mysql", "Imports a file .scm file into current namespace",

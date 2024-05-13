@@ -70,7 +70,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 	(define rest rest)
 ) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
-(define execute_sparql (lambda (schema s) (match (ttl_header s)
+(define parse_sparql (lambda (schema s) (match (ttl_header s)
        '("prefixes" definitions "rest" rest) (match (rdf_select rest)
 		'("select" cols "where" conditions) (begin
 			/* TODO: context: array with predefined variables */
@@ -100,7 +100,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 								)
 					)))
 				)
-				'() (cons 'resultrow (map_assoc cols (lambda (k v) (replace_context v context))))
+				'() '('resultrow (cons list (map_assoc cols (lambda (k v) (replace_context v context)))))
 			)))
 			(build_scan conditions context)
 	))
@@ -127,6 +127,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 			(define process_fact (lambda (rest) (match (ttl_fact rest)
 				'("facts" facts "rest" (regex "[ \\n\\r\\t]*" _)) (load facts)
 				'("facts" facts "rest" rest) (!begin (load facts) (process_fact rest))
+				rest (error "couldnt parse: " rest)
 			)))
 			(process_fact rest)
 		)
