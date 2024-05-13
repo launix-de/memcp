@@ -159,9 +159,12 @@ func GetDatabase(schema string) *database {
 	return databases.Get(schema)
 }
 
-func CreateDatabase(schema string) {
+func CreateDatabase(schema string, ignoreexists bool) bool {
 	db := databases.Get(schema)
 	if db != nil {
+		if ignoreexists {
+			return false
+		}
 		panic("Database " + schema + " already exists")
 	}
 
@@ -178,6 +181,7 @@ func CreateDatabase(schema string) {
 	}
 
 	db.save()
+	return true
 }
 
 func DropDatabase(schema string) {

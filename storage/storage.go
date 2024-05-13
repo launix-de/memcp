@@ -289,13 +289,17 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createdatabase", "creates a new database",
-		1, 1,
+		1, 2,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the new database"},
+			scm.DeclarationParameter{"ignoreexists", "bool", "if true, return false instead of throwing an error"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
-			CreateDatabase(scm.String(a[0]))
-			return true
+			ignoreexists := false
+			if len(a) > 1 && scm.ToBool(a[1]) {
+				ignoreexists = true
+			}
+			return CreateDatabase(scm.String(a[0]), ignoreexists)
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
