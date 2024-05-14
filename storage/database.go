@@ -66,7 +66,7 @@ func LoadDatabases() {
 		defer settings.Close()
 		stat, _ := settings.Stat()
 		data := make([]byte, stat.Size())
-		if _, err := settings.Read(data); err != nil {
+		if _, err := settings.Read(data); err == nil {
 			json.Unmarshal(data, &Settings)
 		}
 	}
