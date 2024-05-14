@@ -242,6 +242,8 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 		return shardCandidates[i].NumPartitions > shardCandidates[j].NumPartitions
 	})
 	sf := 0.01 // scale factor
+	best := 100000000
+	bestSf := sf
 	desiredNumberOfShards := maincount / 30000 + 1 // TODO: find a balancing mechanism
 	for iter := 2; iter < 300; iter++ { // find perfect scale factor such that we get the best number of shards
 		deviation := 1
@@ -250,15 +252,21 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 		}
 		deviation -= int(desiredNumberOfShards)
 		if deviation < 0 {
+			if -deviation < best {
+				best, bestSf = deviation, sf
+			}
 			// too few shards: increase sf
 			sf = sf * (1.0+1.0/float64(iter))
 		} else {
+			if deviation < best {
+				best, bestSf = deviation, sf
+			}
 			// too much shards: decrease sf
 			sf = sf * (1.0-1.0/float64(iter))
 		}
 	}
 	for i, sc := range shardCandidates {
-		shardCandidates[i] = t.NewShardDimension(sc.Column, int(float64(sc.NumPartitions) * sf))
+		shardCandidates[i] = t.NewShardDimension(sc.Column, int(float64(sc.NumPartitions) * bestSf))
 	}
 	// remove empty dimensions
 	for len(shardCandidates) > 0 && shardCandidates[len(shardCandidates)-1].NumPartitions <= 1 {
