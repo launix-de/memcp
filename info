@@ -18,7 +18,6 @@ TODO
  - IPFS client -> fetch @prefix (https://pkg.go.dev/github.com/ipfs/kubo/client/rpc#HttpApi.ResolveNode) (loadRemote)
  - primary key auto_increment
  - tempcol -> LRU, garbage collector, lazy reevaluation, change hooks
- - LEFT JOIN -> bool parameter in scan/scan_order, der bewirkt, dass bei keinem Treffer ein NULL-Map aufgerufen wird
  - FOREIGN KEY
  - group tables -> create foreign key association
  - empty tables with a foreign key -> shard after their foreign key (copy partition schema)

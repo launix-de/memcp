@@ -37,8 +37,10 @@ func (s scanError) Error() string {
 
 */
 
+type emptyResult struct {}
+
 // map reduce implementation based on scheme scripts
-func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer) scm.Scmer {
+func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
 	// give sharding hints
@@ -62,6 +64,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	}()
 	// collect values from parallel scan
 	akkumulator := neutral
+	hadValue := false
 	if aggregate2 != nil {
 		fn := scm.OptimizeProcToSerialFunction(aggregate2)
 		for intermediate := range values {
@@ -69,9 +72,16 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			switch x := intermediate.(type) {
 				case scanError:
 					panic(x) // cascade panic
+				case emptyResult:
+					// do nothing
+					hadValue = hadValue // do not delete this line, otherwise it will fall through to default
 				default:
 					akkumulator = fn(akkumulator, intermediate)
+					hadValue = true
 			}
+		}
+		if !hadValue && isOuter {
+			akkumulator = fn(akkumulator, scm.Apply(callback, make([]scm.Scmer, len(callbackCols)))) // outer join: push one NULL row
 		}
 		return akkumulator
 	} else if aggregate != nil {
@@ -81,17 +91,33 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			switch x := intermediate.(type) {
 				case scanError:
 					panic(x) // cascade panic
+				case emptyResult:
+					// do nothing
+					hadValue = hadValue // do not delete this line, otherwise it will fall through to default
 				default:
 					akkumulator = fn(akkumulator, intermediate)
+					hadValue = true
 			}
+		}
+		if !hadValue && isOuter {
+			akkumulator = fn(akkumulator, scm.Apply(callback, make([]scm.Scmer, len(callbackCols)))) // outer join: push one NULL row
 		}
 		return akkumulator
 	} else {
-		for range values {
-			switch x := (<- values).(type) { // eat up values and forget
+		for intermediate := range values {
+			// eat value
+			switch intermediate.(type) { // eat up values and forget
 				case scanError:
-					panic(x) // cascade panic
+					panic(intermediate) // cascade panic
+				case emptyResult:
+					// do nothing
+					hadValue = hadValue // do not delete this line, otherwise it will fall through to default
+				default:
+					hadValue = true
 			}
+		}
+		if !hadValue && isOuter {
+			scm.Apply(callback, make([]scm.Scmer, len(callbackCols))) // outer join: push one NULL row
 		}
 		return akkumulator
 	}
@@ -135,6 +161,7 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 	maxInsertIndex := len(t.inserts)
 
 	// iterate over items (indexed)
+	hadValue := false
 	t.iterateIndex(boundaries, maxInsertIndex, func (idx uint) {
 		if t.deletions.Get(idx) {
 			return // item is on delete list
@@ -183,8 +210,13 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating
 		intermediate := callbackFn(mdataset...)
 		akkumulator = aggregateFn(akkumulator, intermediate)
+		hadValue = true
 		t.mu.RLock()
 	})
 	t.mu.RUnlock() // finished reading
-	return akkumulator
+	if !hadValue {
+		return emptyResult{}
+	} else {
+		return akkumulator
+	}
 }

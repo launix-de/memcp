@@ -91,7 +91,6 @@ if there is a group function, create a temporary preaggregate table
 
 	/* at first: extract additional join exprs into condition list */
 	(set condition (cons 'and (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x))))))
-	(print condition)
 
 	/* tells whether there is an aggregate inside */
 	(define expr_find_aggregate (lambda (expr) (match expr
@@ -198,6 +197,8 @@ if there is a group function, create a temporary preaggregate table
 								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))/* TODO: (build_scan tables condition)*/
 								reduce
 								neutral
+								nil
+								isOuter
 							)
 						))
 					)))))
@@ -244,6 +245,9 @@ if there is a group function, create a temporary preaggregate table
 							(cons list cols)
 							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables condition))
 							/* no reduce+neutral */
+							nil
+							nil
+							isOuter
 						)
 					)
 					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
@@ -274,6 +278,10 @@ if there is a group function, create a temporary preaggregate table
 							/* extract columns and store them into variables */
 							(cons list cols)
 							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables condition))
+							nil
+							nil
+							nil
+							isOuter
 						)
 					)
 					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))

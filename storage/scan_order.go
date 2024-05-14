@@ -91,7 +91,7 @@ func (s *globalqueue) Pop() any {
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
 
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
@@ -145,6 +145,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	// collect values from parallel scan
 	akkumulator := neutral
 	// TODO: do queue polling instead of this naive testing code
+	hadValue := false
 	for len(q.q) > 0 {
 		qx := q.q[0] // draw a random queue element
 
@@ -177,6 +178,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 
 			// aggregate
 			akkumulator = aggregateFn(akkumulator, value)
+			hadValue = true
 		}
 
 		if len(qx.items) > 0 {
@@ -185,6 +187,9 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 			// sub-queue is empty -> remove
 			heap.Pop(&q)
 		}
+	}
+	if !hadValue && isOuter {
+		akkumulator = aggregateFn(akkumulator, callbackFn(make([]scm.Scmer, len(callbackCols)))) // outer join: call once with NULLs
 	}
 	return akkumulator
 }

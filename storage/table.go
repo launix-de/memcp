@@ -365,7 +365,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				}
 			}
 			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-			updatefn := t.scan(uniq.Cols, condition, []string{"$update"}, scm.Proc{[]scm.Scmer{scm.Symbol("$update")}, scm.Symbol("$update"), &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil)
+			updatefn := t.scan(uniq.Cols, condition, []string{"$update"}, scm.Proc{[]scm.Scmer{scm.Symbol("$update")}, scm.Symbol("$update"), &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil, false)
 			if updatefn != nil {
 				// found a unique collision
 				if j != last_j {

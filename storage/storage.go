@@ -66,7 +66,7 @@ func Init(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		"scan", "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
-		6, 9,
+		6, 10,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string|nil", "database where the table is located"},
 			scm.DeclarationParameter{"table", "string|list", "name of the table to scan (or a list if you have temporary data)"},
@@ -76,7 +76,8 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
 			scm.DeclarationParameter{"reduce", "func", "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass."},
 			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
-			scm.DeclarationParameter{"neutral2", "func", "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator"},
+			scm.DeclarationParameter{"reduce2", "func", "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator"},
+			scm.DeclarationParameter{"isOuter", "bool", "(optional) if true, in case of no hits, call map once anyway with NULL values"},
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
 			filtercols_ := a[2].([]scm.Scmer)
@@ -88,6 +89,10 @@ func Init(en scm.Env) {
 			mapcols := make([]string, len(mapcols_))
 			for i, c := range mapcols_ {
 				mapcols[i] = scm.String(c)
+			}
+			isOuter := false
+			if len(a) > 9 && scm.ToBool(a[9]) {
+				isOuter = true
 			}
 			if list, ok := a[1].([]scm.Scmer); ok {
 				// implementation on lists
@@ -105,6 +110,7 @@ func Init(en scm.Env) {
 				if len(a) > 6 {
 					reducefn = scm.OptimizeProcToSerialFunction(a[6])
 				}
+				hadValue := false
 				for _, val := range list {
 					ds := dataset(val.([]scm.Scmer))
 					// filter
@@ -112,6 +118,7 @@ func Init(en scm.Env) {
 						filterparams[i] = ds.GetI(col)
 					}
 					if scm.ToBool(filterfn(filterparams...)) {
+						hadValue = true
 						// map
 						for i, col := range mapcols {
 							mapparams[i] = ds.GetI(col)
@@ -120,7 +127,11 @@ func Init(en scm.Env) {
 						result = reducefn(result, mapfn(mapparams...))
 					}
 				}
-				if len(a) > 8 {
+				if !hadValue && isOuter {
+					// outer join
+					result = reducefn(result, mapfn(mapparams...)) // mapparams is filled with NULL
+				}
+				if len(a) > 8 && a[8] != nil {
 					reduce2 := scm.OptimizeProcToSerialFunction(a[8])
 					result = reduce2(a[7], result)
 				}
@@ -148,13 +159,13 @@ func Init(en scm.Env) {
 			if len(a) > 8 {
 				reduce2 = a[8]
 			}
-			result := t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2)
+			result := t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
 			return result
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
-		10, 12,
+		10, 13,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "database where the table is located"},
 			scm.DeclarationParameter{"table", "string", "name of the table to scan"},
@@ -168,6 +179,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."},
 			scm.DeclarationParameter{"reduce", "func", "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass."},
 			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
+			scm.DeclarationParameter{"isOuter", "bool", "(optional) if true, in case of no hits, call map once anyway with NULL values"},
 		}, "any",
 		func (a ...scm.Scmer) scm.Scmer {
 			filtercols_ := a[2].([]scm.Scmer)
@@ -193,6 +205,11 @@ func Init(en scm.Env) {
 			sortdirs := make([]bool, len(sortcols))
 			for i, dir := range a[5].([]scm.Scmer) {
 				sortdirs[i] = scm.ToBool(dir)
+			}
+
+			isOuter := false
+			if len(a) > 12 && scm.ToBool(a[12]) {
+				isOuter = true
 			}
 
 			if list, ok := a[1].([]scm.Scmer); ok {
@@ -263,14 +280,20 @@ func Init(en scm.Env) {
 					}
 					return false // equal is not less
 				})
+				hadValue := false
 				for _, val := range list2 {
 					ds := dataset(val.([]scm.Scmer))
+					hadValue = true
 					// map
 					for i, col := range mapcols {
 						mapparams[i] = ds.GetI(col)
 					}
 					// reduce
 					result = reducefn(result, mapfn(mapparams...))
+				}
+				if !hadValue && isOuter {
+					// outer join
+					result = reducefn(result, mapfn(mapparams...)) // mapparams is filled with NULL
 				}
 				return result
 			}
@@ -283,7 +306,7 @@ func Init(en scm.Env) {
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
-			result := t.scan_order(filtercols, a[3], sortcols, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral)
+			result := t.scan_order(filtercols, a[3], sortcols, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
 			return result
 		},
 	})
