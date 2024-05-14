@@ -85,7 +85,7 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.values.DeserializeEx(f, true)
-	s.starts.DeserializeEx(f, true)
+	s.count = s.starts.DeserializeEx(f, true)
 	s.lens.DeserializeEx(f, true)
 	var dictionarylength uint64
 	binary.Read(f, binary.LittleEndian, &dictionarylength)
