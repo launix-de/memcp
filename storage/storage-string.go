@@ -258,6 +258,26 @@ func (s *StorageString) proposeCompression(i uint) ColumnStorage {
 		stor.prefixdictionary = []string{"", mostprefix}
 		return stor
 	}
+
+	Prefix tree index:
+	rootnodes = []
+	for each s := range string {
+		foreach k, v := rootnodes {
+			pfx := commonPrefix(s, k)
+			if pfx == k {
+				// insert into subtree
+				v.insert(s[len(pfx):], value)
+			} else {
+				// split the tree
+				delete(rootnodes, k)
+				rootnodes[pfx] = {k[len(pfx):]: v, s[len(pfx):]: value}
+			}
+		}
+		rootnodes[s] = value
+		cont:
+	}
+	implementation: byte stream of id, len, byte[len] + array:id->*treenode; encode bigger ids similar to utf-8: for { result = result < 7 | (byte & 127) if byte & 128 == 0 {break}}
+
 	*/
 	// dont't propose another pass
 	return nil
