@@ -233,7 +233,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 			shardCandidates = append(shardCandidates, shardDimension{c.Name, c.PartitioningScore, nil})
 		}
 	}
-	if len(shardCandidates) == 0 {
+	if len(shardCandidates) == 0 || Settings.PartitionMaxDimensions == 0 {
 		return
 	}
 
@@ -241,6 +241,11 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	sort.Slice(shardCandidates, func (i, j int) bool { // Less
 		return shardCandidates[i].NumPartitions > shardCandidates[j].NumPartitions
 	})
+	// prune shard candidates to max dimensions
+	if len(shardCandidates) > Settings.PartitionMaxDimensions {
+		shardCandidates = shardCandidates[:Settings.PartitionMaxDimensions]
+	}
+	// algorithm from the paper
 	sf := 0.01 // scale factor
 	best := 100000000
 	bestSf := sf

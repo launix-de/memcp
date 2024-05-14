@@ -50,8 +50,29 @@ func Rebuild(all bool, repartition bool) string {
 	return fmt.Sprint(time.Since(start))
 }
 
+func UnloadDatabases() {
+	fmt.Println("table compression done in ", Rebuild(false, false))
+	data, _ := json.Marshal(Settings)
+	if settings, err := os.OpenFile(Basepath + "/settings.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640); err == nil {
+		defer settings.Close()
+		settings.Write(data)
+	}
+}
+
 func LoadDatabases() {
 	// this happens before any init, so no read/write action is performed on any data yet
+	// read settings file
+	if settings, err := os.Open(Basepath + "/settings.json"); err == nil {
+		defer settings.Close()
+		stat, _ := settings.Stat()
+		data := make([]byte, stat.Size())
+		if _, err := settings.Read(data); err != nil {
+			json.Unmarshal(data, &Settings)
+		}
+	}
+	InitSettings()
+
+	// load dbs
 	var done sync.WaitGroup
 	entries, _ := os.ReadDir(Basepath)
 	for _, entry := range entries {

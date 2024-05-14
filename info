@@ -10,8 +10,6 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 
 TODO
 ----
- - global variable: partition_max_dimensions
- . global variable: debug mode
  - processes implementation with https://pkg.go.dev/context (killable, timeoutable), see also: https://pkg.go.dev/github.com/jtolds/gls and support KILL pid (processlist stored in in sync.Map pid->{user,commandstring,cancelfunc})
  - alter table set ENGINE, global var @ENGINE
  - RDF insert

@@ -328,17 +328,10 @@ func Init(en scm.Env) {
 			var pm PersistencyMode = Safe
 			options := a[3].([]scm.Scmer)
 			var auto_increment uint64 = 0
+			engine := Settings.DefaultEngine
 			for i := 0; i < len(options); i += 2 {
 				if options[i] == "engine" {
-					if options[i+1] == "memory" {
-						pm = Memory
-					} else if options[i+1] == "sloppy" {
-						pm = Sloppy
-					} else if options[i+1] == "safe" {
-						pm = Safe
-					} else {
-						panic("unknown engine: " + scm.String(options[i+1]))
-					}
+					engine = scm.String(options[i+1])
 				} else if options[i] == "collation" {
 					// TODO: store the collation??
 				} else if options[i] == "auto_increment" {
@@ -346,6 +339,15 @@ func Init(en scm.Env) {
 				} else {
 					panic("unknown option: " + scm.String(options[i]))
 				}
+			}
+			if engine == "memory" {
+				pm = Memory
+			} else if engine == "sloppy" {
+				pm = Sloppy
+			} else if engine == "safe" {
+				pm = Safe
+			} else {
+				panic("unknown engine: " + engine)
 			}
 
 			// create table
@@ -686,6 +688,15 @@ func Init(en scm.Env) {
 
 			return fmt.Sprint(time.Since(start))
 		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"settings", "reads or writes a global settings value. This",
+		1, 2,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"key", "string", "name of the key to set or get (for reference, rts)"},
+			scm.DeclarationParameter{"value", "any", "new value of that setting"},
+		}, "any",
+		ChangeSettings,
 	})
 }
 

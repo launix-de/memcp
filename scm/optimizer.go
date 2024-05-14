@@ -18,6 +18,8 @@ package scm
 
 import "fmt"
 
+var SettingsHaveGoodBacktraces bool
+
 // to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
 func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
 	if val == nil {
@@ -122,9 +124,14 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 	// TODO: currify -> functions can be partially executed (constmask -> specialized functions that return a func/lambda)
 	switch v := val.(type) {
 		case SourceInfo:
-			// strip SourceInfo from lambda declarations
-			//return OptimizeEx(v.value, env, ome, useResult)
-			// TODO: don't remove SourceInfo if we are in debug mode!
+			if SettingsHaveGoodBacktraces {
+				// in debug mode, we have better backtraces
+				v.value, transferOwnership = OptimizeEx(v.value, env, ome, useResult)
+				return v, transferOwnership
+			} else {
+				// strip SourceInfo from lambda declarations
+				return OptimizeEx(v.value, env, ome, useResult)
+			}
 		case Symbol:
 			// replace variables with their counterparts
 			if replacement, ok := ome.variableReplacement[v]; ok {
