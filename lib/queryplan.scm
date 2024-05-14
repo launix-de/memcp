@@ -74,7 +74,7 @@ if there is a group function, create a temporary preaggregate table
 
 /* build queryplan from parsed query */
 (define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
-	/* tables: '('(alias schema tbl isOuter) ...) */
+	/* tables: '('(alias schema tbl outerJoinExpression) ...) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar col) for reading from columns. we have to replace it with the correct variable */
 	/* TODO: unnest arbitrary queries -> turn them into a big schema+tables+fields+condition */
@@ -104,7 +104,7 @@ if there is a group function, create a temporary preaggregate table
 	)))
 
 	/* put all schemas of corresponding tables into an assoc */
-	(set schemas (merge (map tables (lambda (t) (match t '(alias schema tbl isOuter) '(alias (get_schema schema tbl)))))))
+	(set schemas (merge (map tables (lambda (t) (match t '(alias schema tbl outerJoinExpression) '(alias (get_schema schema tbl)))))))
 
 	/* find those columns that have no table */
 	(define replace_find_column (lambda (expr) (match expr
@@ -117,13 +117,13 @@ if there is a group function, create a temporary preaggregate table
 	(set fields (merge (extract_assoc fields (lambda (col expr) (match col
 		"*" (match expr
 			/* *.* */
-			'((symbol get_column) nil "*")(merge (map tables (lambda (t) (match t '(alias schema tbl isOuter) /* all FROM-tables*/
+			'((symbol get_column) nil "*")(merge (map tables (lambda (t) (match t '(alias schema tbl outerJoinExpression) /* all FROM-tables*/
 				(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
 					'((coldesc "name") '((quote get_column) alias (coldesc "name")))
 				)))
 			))))
 			/* tbl.* */
-			'((symbol get_column) tblvar "*")(merge (map tables (lambda (t) (match t '(alias schema tbl isOuter) /* one FROM-table*/
+			'((symbol get_column) tblvar "*")(merge (map tables (lambda (t) (match t '(alias schema tbl outerJoinExpression) /* one FROM-table*/
 				(if (equal? alias tblvar)
 					(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
 						'((coldesc "name") '((quote get_column) alias (coldesc "name")))
@@ -148,7 +148,7 @@ if there is a group function, create a temporary preaggregate table
 
 		(match tables
 			/* TODO: allow for more than just group by single table */
-			'('(tblvar schema tbl isOuter)) (begin
+			'('(tblvar schema tbl outerJoinExpression)) (begin
 				/* prepare preaggregate */
 
 				/* TODO: check if there is a foreign key on tbl.groupcol and then reuse that table */
@@ -213,7 +213,7 @@ if there is a group function, create a temporary preaggregate table
 			(set order (map (coalesce order '()) (lambda (x) (match x '(col dir) '((replace_find_column col) dir)))))
 			(define build_scan (lambda (tables condition)
 				(match tables
-					(cons '(tblvar schema tbl isOuter) tables) (begin /* outer scan */
+					(cons '(tblvar schema tbl outerJoinExpression) tables) (begin /* outer scan */
 						(set cols (merge_unique
 							    (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 							    (extract_columns_for_tblvar tblvar condition)
@@ -253,7 +253,7 @@ if there is a group function, create a temporary preaggregate table
 			/* TODO: match tbl to inner query vs string */
 			(define build_scan (lambda (tables condition)
 				(match tables
-					(cons '(tblvar schema tbl isOuter) tables) (begin /* outer scan */
+					(cons '(tblvar schema tbl outerJoinExpression) tables) (begin /* outer scan */
 						(set cols (merge_unique
 							    (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 							    (extract_columns_for_tblvar tblvar condition)

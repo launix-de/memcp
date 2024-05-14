@@ -23,6 +23,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "NOT" true)
 		(atom "IN" true)
 		(atom "AS" true)
+		(atom "ON" true)
 		(atom "WHERE" true)
 		(atom "GROUP" true)
 		(atom "BY" true)
@@ -158,15 +159,21 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		sql_column
 	)))
 
-	(define tabledef (parser (or
+	(define tabledefs (parser (or
 		/* TODO: left [outer] join, right [outer] join recursive buildup */
-		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '('(id schema query false))) /* inner select as from */
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '('(id schema tbl false)))
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) '('(id schema tbl false)))
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '('(tbl schema tbl false)))
-		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '('(id schema tbl false)))
-		(parser '((define tbl sql_identifier) (define id sql_identifier)) '('(id schema tbl false)))
-		(parser '((define tbl sql_identifier)) '('(tbl schema tbl false)))
+		(parser '((define l tabledefs) (atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl nil) (append l '(id schema tbl e))))
+		(parser '((define l tabledef) (atom "RIGHT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match l '(id schema tbl nil) (cons '(id schema tbl e) r)))
+		(parser '((define l tabledef) (? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) (cons l r))
+		(parser (define t tabledef) '(t))
+	)))
+	(define tabledef (parser (or
+		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query nil)) /* inner select as from */
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl nil))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) '(id schema tbl nil))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '(tbl schema tbl nil))
+		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl nil))
+		(parser '((define tbl sql_identifier) (define id sql_identifier)) '(id schema tbl nil))
+		(parser '((define tbl sql_identifier)) '(tbl schema tbl nil))
 	)))
 
 	/* bring those variables into a defined state */
@@ -188,7 +195,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		) ","))
 		(?
 			(atom "FROM" true)
-			(define from (+ tabledef ","))
+			(define from (+ tabledefs ","))
 			(?
 				(atom "WHERE" true)
 				(define condition sql_expression)
