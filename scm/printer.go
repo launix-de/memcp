@@ -38,7 +38,7 @@ func String(v Scmer) string {
 		}
 		return "(" + strings.Join(l, " ") + ")"
 	case Proc:
-		return "[func]"
+		return fmt.Sprintf("[func %s]", v.Body)
 	case func(...Scmer) Scmer:
 		if isList(v) { // runtime.FuncForPC(..)
 			return "list"

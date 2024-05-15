@@ -194,7 +194,11 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 							}
 							if !isBlacklisted {
 								cnt, _ := usedVariables[sym]
-								usedVariables[sym] = cnt+1
+								if depth > 0 {
+									usedVariables[sym] = 100 // always keep enclosed variables because they can leave the scope
+								} else {
+									usedVariables[sym] = cnt+1
+								}
 							}
 						}
 					}
