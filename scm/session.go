@@ -31,21 +31,31 @@ func NewSession(a ...Scmer) Scmer {
 	// params: port, authcallback, schemacallback, querycallback
 	sess := new(session)
 	sess.Map = make(map[string]Scmer)
-	return func (a ...Scmer) Scmer {
+	return func (a ...Scmer) (result Scmer) {
 		if len(a) == 2 {
 			// set
 			sess.Mu.Lock()
+			defer sess.Mu.Unlock()
 			sess.Map[String(a[0])] = a[1]
-			sess.Mu.Unlock()
 			return a[1] // reflect the value as of mysql semantics
 		} else if len(a) == 1 {
 			// get
 			sess.Mu.RLock()
-			result := sess.Map[String(a[0])]
-			sess.Mu.RUnlock()
-			return result
+			defer sess.Mu.RUnlock()
+			result, _ = sess.Map[String(a[0])]
+			return
+		} else if len(a) == 0 {
+			// list keys
+			sess.Mu.RLock()
+			defer sess.Mu.RUnlock()
+			l := make([]Scmer, 0, len(sess.Map))
+			for k, _ := range sess.Map {
+				l = append(l, k)
+			}
+			result = l
+			return
 		} else {
-			panic("wrong number of parameters provided to session: 1 or 2 required")
+			panic("wrong number of parameters provided to session: 0, 1 or 2 required")
 		}
 	}
 }

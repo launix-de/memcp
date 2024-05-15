@@ -22,7 +22,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 /* this can be overhooked */
 (define http_handler (lambda (req res) (begin
-	/* prototype req is a simple string, res is a func(string) */
 	(print "request " req)
 	((res "header") "Content-Type" "text/plain")
 	((res "status") 404)

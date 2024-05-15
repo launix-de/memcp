@@ -25,7 +25,12 @@ this is how rdf works:
 
 /* http hook for handling SparQL */
 (define http_handler (begin
-	(set old_handler http_handler)
+	(set old_handler (coalesce http_handler (lambda (req res) (begin
+		(print "request " req)
+		((res "header") "Content-Type" "text/plain")
+		((res "status") 404)
+		((res "println") "404 not found")
+	))))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
