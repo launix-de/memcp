@@ -129,6 +129,8 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					switch v := val.(type) {
 						case string:
 							return match(v, p[1], en)
+						case LazyString:
+							return match(v, p[1], en)
 						default:
 							return false
 					}
@@ -150,6 +152,11 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					}
 				case Symbol("ignorecase"):
 					switch val2 := valueFromPattern(p[1], en).(type) {
+						case LazyString:
+							switch val1 := val.(type) {
+								case string:
+									return strings.EqualFold(val1, val2.GetValue())
+							}
 						case string:
 							switch val1 := val.(type) {
 								case string:
@@ -159,10 +166,14 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					return false
 				case Symbol("concat"):
 					switch v := val.(type) {
+						case LazyString:
+							panic("TODO: implement concat pattern on lazy strings")
 						case string: // only allowed for strings
 							// examine the pattern
 							if len(p) == 3 { // concat a b
 								switch p1 := valueFromPattern(p[1], en).(type) {
+									case LazyString:
+										panic("TODO: implement concat pattern on lazy strings")
 									case string:
 										switch p2 := valueFromPattern(p[2], en).(type) {
 											case NthLocalVar:

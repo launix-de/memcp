@@ -34,6 +34,8 @@ func ToBool(v Scmer) bool {
 	switch v2 := v.(type) {
 		case nil:
 			return false
+		case LazyString:
+			return v2.GetValue() != ""
 		case string:
 			return v2 != ""
 		case float64:
@@ -54,6 +56,9 @@ func ToInt(v Scmer) int {
 	switch vv := v.(type) {
 		case nil:
 			return 0
+		case LazyString:
+			x, _ := strconv.Atoi(vv.GetValue())
+			return x
 		case string:
 			x, _ := strconv.Atoi(vv)
 			return x
@@ -73,6 +78,9 @@ func ToInt(v Scmer) int {
 //go:inline
 func ToFloat(v Scmer) float64 {
 	switch vv := v.(type) {
+		case LazyString:
+			x, _ := strconv.ParseFloat(vv.GetValue(), 64)
+			return x
 		case string:
 			x, _ := strconv.ParseFloat(vv, 64)
 			return x

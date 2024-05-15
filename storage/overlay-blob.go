@@ -115,6 +115,12 @@ func (s *OverlayBlob) prepare() {
 }
 func (s *OverlayBlob) scan(i uint, value scm.Scmer) {
 	switch v_ := value.(type) {
+		case scm.LazyString:
+			if v_.Hash != "" {
+				s.Base.scan(i, "!" + v_.Hash)
+			} else {
+				s.Base.scan(i, v_.GetValue())
+			}
 		case string:
 			if len(v_) > 255 {
 				h := sha256.New()

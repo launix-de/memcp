@@ -158,6 +158,10 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		} else {
 			b.WriteString(string(v))
 		}
+	case LazyString:
+		b.WriteByte('"')
+		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(v.GetValue()))
+		b.WriteByte('"')
 	case string:
 		b.WriteByte('"')
 		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(v))

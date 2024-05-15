@@ -128,6 +128,8 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
 	var v string
 	switch v_ := value.(type) {
+		case scm.LazyString:
+			v = v_.GetValue()
 		case string:
 			v = v_
 		default:
@@ -209,6 +211,8 @@ func (s *StorageString) build(i uint, value scm.Scmer) {
 	// store
 	var v string
 	switch v_ := value.(type) {
+		case scm.LazyString:
+			v = v_.GetValue()
 		case string:
 			v = v_
 		default:

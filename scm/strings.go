@@ -19,6 +19,11 @@ package scm
 import "bytes"
 import "strings"
 
+type LazyString struct {
+	Hash string
+	GetValue func() string
+}
+
 /* SQL LIKE operator implementation on strings */
 func StrLike(str, pattern string) bool {
 	for {

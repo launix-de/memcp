@@ -27,8 +27,21 @@ func Equal(a, b Scmer) Scmer {
 		return nil
 	}
 	switch a_ := a.(type) {
+		case LazyString:
+			switch b_ := b.(type) {
+				case LazyString:
+					return a_.Hash == b_.Hash
+				case string:
+					return strings.EqualFold(a_.GetValue(), b_)
+				case float64:
+					return a_.GetValue() == String(b_)
+				case bool:
+					return ToBool(a) == b_
+			}
 		case string:
 			switch b_ := b.(type) {
+				case LazyString:
+					return strings.EqualFold(a_, b_.GetValue())
 				case string:
 					return strings.EqualFold(a_, b_)
 				case float64:
@@ -38,6 +51,8 @@ func Equal(a, b Scmer) Scmer {
 			}
 		case float64:
 			switch b_ := b.(type) {
+				case LazyString:
+					return String(a_) == b_.GetValue()
 				case string:
 					return String(a_) == b_
 				case float64:
@@ -47,6 +62,8 @@ func Equal(a, b Scmer) Scmer {
 			}
 		case bool:
 			switch b_ := b.(type) {
+				case LazyString:
+					return a_ == ToBool(b)
 				case string:
 					return a_ == ToBool(b)
 				case float64:
@@ -69,10 +86,25 @@ func Less(a, b Scmer) bool {
 		return ToFloat(a) < ToFloat(b) // todo: more fine grained
 	case float64:
 		return a_ < ToFloat(b)
+	case LazyString:
+		switch b_ := b.(type) {
+			case float64:
+				return ToFloat(a) < b_
+			case LazyString:
+				return StringLess(a_.GetValue(), b_.GetValue())
+			case string:
+				return StringLess(a_.GetValue(), b_)
+			case nil:
+				return false
+			default:
+				panic("unknown type combo in comparison")
+		}
 	case string:
 		switch b_ := b.(type) {
 			case float64:
 				return ToFloat(a) < b_
+			case LazyString:
+				return StringLess(a_, b_.GetValue())
 			case string:
 				return StringLess(a_, b_)
 			case nil:
