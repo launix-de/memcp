@@ -51,6 +51,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 		(define conditions (* (or
 			(parser '((define s rdf_expression) (define ps (+ (parser '((define p rdf_expression) (define os (+ rdf_expression ","))) (map os (lambda (o) '(p o)))) ";"))) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 			/* TODO: FILTER regex(?var "pattern") */
+			/* TODO: OPTIONAL {subquery} */
 		) "."))
 		(? (atom "." true))
 		(atom "}" true) /* TODO: {} UNION {} */

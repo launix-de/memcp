@@ -15,6 +15,7 @@ TODO
  - alter table set ENGINE, global var @ENGINE -> safe<->!safe closes/rebuilds+repoens the log file; memory<->!memory will delete/serialize the shard files
  - RDF INSERT {triples}, DELETE {triples}
  - RDF templating: PARAMETER, PRINT
+ - RDF WHERE { OPTIONAL {} } <- LEFT JOIN
  - HTTP requests -> fetch @prefix (loadRemote)
  - IPFS client -> fetch @prefix (https://pkg.go.dev/github.com/ipfs/kubo/client/rpc#HttpApi.ResolveNode) (loadRemote)
  - primary key auto_increment
