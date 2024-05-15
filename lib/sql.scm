@@ -53,6 +53,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			((res "print") "Unauthorized")
 		))
 	)))
+	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
 		(match (req "path")

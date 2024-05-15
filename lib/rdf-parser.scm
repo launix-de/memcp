@@ -71,40 +71,43 @@ Copyright (C) 2024  Carl-Philip Hänsch
 	(define rest rest)
 ) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
-(define parse_sparql (lambda (schema s) (match (ttl_header s)
-       '("prefixes" definitions "rest" rest) (match (rdf_select rest)
-		'("select" cols "where" conditions) (begin
-			/* TODO: context: array with predefined variables */
-			(set context '())
-			(define replace_context (lambda (expr context) (match expr
-				'('get_var sym) (coalesce (context sym) (error "unknown symbol " sym " in " context))
-				(cons head tail) (cons head (map tail (lambda (x) (replace_context x context))))
-				x x
-			)))
-			/* no join reordering yet */
-			(define build_scan (lambda (conditions context) (match conditions
-				(cons '(s p o) tail) (begin
-					(define process (lambda (v sym conditions vars) (match v
-						'('get_var var) (if (context var)
-							'((append conditions sym (context var)) vars) /* variable is bound: match value */
-							'(conditions (append vars sym (symbol var)))) /* variable is free: collect in scope */
-						(string? s) '((append conditions sym s) vars)
-						(list? l) '((append conditions sym (eval l)) vars)
-						(print "undetected " v)
-					)))
-					(match (process s "s" '() '()) '(conditions vars)
-						(match (process p "p" conditions vars) '(conditions vars)
-							(match (process o "o" conditions vars) '(conditions vars)
-								'('scan schema "rdf"
-									/* condition */ (cons list (extract_assoc conditions (lambda (k v) k))) '('lambda (extract_assoc conditions (lambda (k v) (symbol k))) (cons 'and (extract_assoc conditions (lambda (k v) '('equal? (symbol k) v)))))
-									/* map */ (cons list (extract_assoc vars (lambda (k v) k))) '('lambda (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (merge context (merge (extract_assoc vars (lambda (k v) '(v (symbol v))))))))
-								)
-					)))
-				)
-				'() '('resultrow (cons list (map_assoc cols (lambda (k v) (replace_context v context)))))
-			)))
-			(build_scan conditions context)
+(define rdf_replace_context (lambda (expr context) (match expr
+	'('get_var sym) (coalesce (context sym) (error "unknown symbol " sym " in " context))
+	(cons head tail) (cons head (map tail (lambda (x) (replace_context x context))))
+	expr
+)))
+
+(define rdf_queryplan (lambda (schema query definitions context resultfunc /* function that gets cols + context */) (begin
+	(match query '("select" cols "where" conditions) (begin
+		/* context: array with predefined variables */
+		/* no join reordering yet */
+		(define build_scan (lambda (conditions context) (match conditions
+			(cons '(s p o) tail) (begin
+				(define process (lambda (v sym conditions vars) (match v
+					'('get_var var) (if (context var)
+						'((append conditions sym (context var)) vars) /* variable is bound: match value */
+						'(conditions (append vars sym (symbol var)))) /* variable is free: collect in scope */
+					(string? s) '((append conditions sym s) vars)
+					(list? l) '((append conditions sym (eval l)) vars)
+					(print "undetected " v)
+				)))
+				(match (process s "s" '() '()) '(conditions vars)
+					(match (process p "p" conditions vars) '(conditions vars)
+						(match (process o "o" conditions vars) '(conditions vars)
+							'('scan schema "rdf"
+								/* condition */ (cons list (extract_assoc conditions (lambda (k v) k))) '('lambda (extract_assoc conditions (lambda (k v) (symbol k))) (cons 'and (extract_assoc conditions (lambda (k v) '('equal? (symbol k) v)))))
+								/* map */ (cons list (extract_assoc vars (lambda (k v) k))) '('lambda (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (merge context (merge (extract_assoc vars (lambda (k v) '(v (symbol v))))))))
+							)
+				)))
+			)
+			'() (resultfunc cols context)
+		)))
+		(build_scan conditions context)
 	))
+)))
+
+(define parse_sparql (lambda (schema s) (match (ttl_header s)
+       '("prefixes" definitions "rest" rest) (rdf_queryplan (rdf_select rest) definitions '() (lambda (cols context) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_context v context)))))))
 )))
 
 
