@@ -32,7 +32,7 @@ import "github.com/gorilla/websocket"
 func HTTPServe(a ...Scmer) Scmer {
 	// HTTP endpoint; params: (port, handler)
 	port := String(a[0])
-	handler := &HttpServer{OptimizeProcToSerialFunction(a[1])}
+	handler := &HttpServer{a[1]}
 	server := &http.Server {
 		Addr: fmt.Sprintf(":%v", port),
 		Handler: handler,
@@ -47,7 +47,7 @@ func HTTPServe(a ...Scmer) Scmer {
 
 // HTTP handler with a scheme script underneath
 type HttpServer struct {
-	callback func(...Scmer) Scmer
+	callback Scmer
 }
 
 func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
@@ -200,5 +200,6 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			io.WriteString(res, fmt.Sprint(r))
 		}
 	}()
-	s.callback(req_scm, res_scm)
+	Apply(s.callback, []Scmer{req_scm, res_scm})
+	// TODO: req.Body io.ReadCloser
 }
