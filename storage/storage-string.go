@@ -282,6 +282,10 @@ func (s *StorageString) proposeCompression(i uint) ColumnStorage {
 	}
 	implementation: byte stream of id, len, byte[len] + array:id->*treenode; encode bigger ids similar to utf-8: for { result = result < 7 | (byte & 127) if byte & 128 == 0 {break}}
 
+	prefix compression: multi-stage storage
+	type prefixTree struct { text string, children []prefixTree }
+	type prefixTreeStorage struct { childIndexes ColumnStorage, recordIdTranslation ColumnStorage, children []prefixTreeStorage } -> Seq-compression should be very effective
+
 	*/
 	// dont't propose another pass
 	return nil

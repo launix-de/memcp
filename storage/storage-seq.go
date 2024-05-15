@@ -18,7 +18,6 @@ package storage
 
 import "io"
 import "fmt"
-import "sort"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
@@ -71,17 +70,45 @@ func (s *StorageSeq) Deserialize(f io.Reader) uint {
 
 func (s *StorageSeq) GetValue(i uint) scm.Scmer {
 	// bisect to the correct index where to find (lowest idx to find our sequence)
-	idx := sort.Search(int(s.seqCount), func (idx int) bool {
-		recid := int64(s.recordId.GetValueUInt(uint(idx))) + s.recordId.offset
-		return int64(i) < recid // return true as long as we are bigger than searched index
-	}) - 1
+	pivot := uint(s.lastValue) // reuse lastValue field to cache last pivot
+	min := uint(0)
+	max := s.seqCount - 1
+	for {
+		recid := int64(s.recordId.GetValueUInt(pivot)) + s.recordId.offset
+		if i < uint(recid) {
+			max = pivot - 1
+			pivot--
+		} else {
+			min = pivot
+			pivot++
+		}
+		if min == max {
+			break // we found the sequence for i
+		}
+
+		// also read the next neighbour (we are in the cache line anyway and we achieve O(1) in case the same sequence is read again!)
+		recid = int64(s.recordId.GetValueUInt(pivot)) + s.recordId.offset
+		if i < uint(recid) {
+			max = pivot - 1
+		} else {
+			min = pivot
+		}
+		if min == max {
+			break // we found the sequence for i
+		}
+		pivot = (min + max) / 2
+	}
+
+	// remember match for next time
+	s.lastValue = int64(min)
+
 	var value, stride int64
-	value = int64(s.start.GetValueUInt(uint(idx))) + s.start.offset
+	value = int64(s.start.GetValueUInt(min)) + s.start.offset
 	if s.start.hasNull && value == int64(s.start.null) {
 		return nil
 	}
-	stride = int64(s.stride.GetValueUInt(uint(idx))) + s.stride.offset
-	recid := int64(s.recordId.GetValueUInt(uint(idx))) + s.recordId.offset
+	stride = int64(s.stride.GetValueUInt(min)) + s.stride.offset
+	recid := int64(s.recordId.GetValueUInt(min)) + s.recordId.offset
 	return float64(value + int64(int64(i) - recid) * stride)
 
 }
@@ -192,6 +219,8 @@ func (s *StorageSeq) finish() {
 	s.recordId.finish()
 	s.start.finish()
 	s.stride.finish()
+
+	s.lastValue = int64(s.seqCount / 2) // initialize pivot cache
 
 	/* debug output of the sequence:
 	for i := uint(0); i < s.seqCount; i++ {
