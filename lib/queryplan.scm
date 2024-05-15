@@ -151,6 +151,7 @@ if there is a group function, create a temporary preaggregate table
 
 		(match tables
 			/* TODO: allow for more than just group by single table */
+			/* TODO: outer tables that only join on group */
 			'('(tblvar schema tbl isOuter _)) (begin
 				/* prepare preaggregate */
 

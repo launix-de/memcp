@@ -10,6 +10,7 @@ mmap.Map(file, RDWR, 0) // oder RDONLY
 
 TODO
 ----
+ - place outer joins after group: ((job_data pika job_data false nil) (footprint_base pika footprint_base true (equal?? (get_column job_data uid) (get_column footprint_base uid))) (footprint_fileio pika footprint_fileio true (equal?? (get_column job_data uid) (get_column footprint_fileio uid))) (footprint_gpu pika footprint_gpu true (equal?? (get_column job_data uid) (get_column footprint_gpu uid))))
  - processes implementation with https://pkg.go.dev/context (killable, timeoutable), see also: https://pkg.go.dev/github.com/jtolds/gls and support KILL pid (processlist stored in in sync.Map pid->{user,commandstring,cancelfunc})
  - alter table set ENGINE, global var @ENGINE -> safe<->!safe closes/rebuilds+repoens the log file; memory<->!memory will delete/serialize the shard files
  - RDF INSERT {triples}, DELETE {triples}
