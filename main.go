@@ -119,33 +119,7 @@ func (i *arrayFlags) Set(value string) error {
     return nil
 }
 
-func main() {
-	fmt.Print(`memcp Copyright (C) 2023, 2024   Carl-Philip Hänsch
-    This program comes with ABSOLUTELY NO WARRANTY;
-    This is free software, and you are welcome to redistribute it
-    under certain conditions;
-
-`)
-
-	// init random generator for UUIDs
-	uuid.SetRand(rand.Reader)
-
-	// parse command line options
-	var commands arrayFlags
-	flag.Var(&commands, "c", "Execute scm command")
-
-	basepath := "data"
-	flag.StringVar(&basepath, "data", "data", "Data folder for persistence")
-
-	profile := ""
-	flag.StringVar(&profile, "profile", "", "Data folder for persistence")
-
-	wd, _ := os.Getwd() // libraries are relative to working directory... or change with -wd PATH
-	flag.StringVar(&wd, "wd", wd, "Working Directory for (import) and (load) (Default: .)")
-
-	flag.Parse()
-	imports := flag.Args()
-
+func setupIO(wd string) {
 	// define some IO functions (scm will not provide them since it is sandboxable)
 	IOEnv = scm.Env {
 		scm.Vars {},
@@ -260,8 +234,37 @@ func main() {
 		}, "string",
 		scm.MySQLPassword,
 	})
+}
+
+func main() {
+	fmt.Print(`memcp Copyright (C) 2023, 2024   Carl-Philip Hänsch
+    This program comes with ABSOLUTELY NO WARRANTY;
+    This is free software, and you are welcome to redistribute it
+    under certain conditions;
+
+`)
+
+	// init random generator for UUIDs
+	uuid.SetRand(rand.Reader)
+
+	// parse command line options
+	var commands arrayFlags
+	flag.Var(&commands, "c", "Execute scm command")
+
+	basepath := "data"
+	flag.StringVar(&basepath, "data", "data", "Data folder for persistence")
+
+	profile := ""
+	flag.StringVar(&profile, "profile", "", "Data folder for persistence")
+
+	wd, _ := os.Getwd() // libraries are relative to working directory... or change with -wd PATH
+	flag.StringVar(&wd, "wd", wd, "Working Directory for (import) and (load) (Default: .)")
+
+	flag.Parse()
+	imports := flag.Args()
 
 	// storage initialization
+	setupIO(wd)
 	storage.Init(scm.Globalenv)
 	storage.Basepath = basepath
 	storage.LoadDatabases()

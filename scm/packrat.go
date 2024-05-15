@@ -328,7 +328,7 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 					return result
 			}
 			// the optimizer does this, so we have to handle it
-			if fmt.Sprint(n[0]) == fmt.Sprint(List) {
+			if isList(n[0]) {
 				subparser := make([]packrat.Parser[parserResult], len(n)-1)
 				for i := 1; i < len(n); i++ {
 					subparser[i-1] = parseSyntax(n[i], en, ome, ignoreResult)

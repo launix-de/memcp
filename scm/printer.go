@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"bytes"
 	"strings"
+	"reflect"
 )
 
 func String(v Scmer) string {
@@ -39,7 +40,7 @@ func String(v Scmer) string {
 	case Proc:
 		return "[func]"
 	case func(...Scmer) Scmer:
-		if fmt.Sprint(v) == fmt.Sprint(List) { //fmt.Sprint
+		if isList(v) { // runtime.FuncForPC(..)
 			return "list"
 		}
 		return "[native func]"
@@ -86,7 +87,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			SerializeEx(b, v[1], en, glob, nil)
 			b.WriteByte(')')
 		} else {
-			if len(v) > 0 && (v[0] == Symbol("list") || fmt.Sprint(v[0]) == fmt.Sprint(List)) {
+			if len(v) > 0 && (v[0] == Symbol("list") || isList(v[0])) {
 				b.WriteByte('\'')
 				v = v[1:]
 			}
@@ -105,8 +106,8 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		en2 := en
 		for en2 != nil {
 			for k, v2 := range en2.Vars {
-				// compare function pointers (hacky but golang dosent give another opt)
-				if fmt.Sprint(v) == fmt.Sprint(v2) {
+				// compare function pointers
+				if reflect.DeepEqual(v, v2) {
 					// found the right global function
 					b.WriteString(fmt.Sprint(k)) // print out variable name
 					return

@@ -478,6 +478,13 @@ var Globalenv Env
 func List(a ...Scmer) Scmer {
 	return a
 }
+func isList(v Scmer)  bool {
+	f, ok := v.(func(...Scmer) Scmer)
+	if !ok {
+		return false
+	}
+	return reflect.ValueOf(f).Pointer() == reflect.ValueOf(List).Pointer()
+}
 func init() {
 	Globalenv = Env{
 		Vars{ //aka an incomplete set of compiled-in functions
