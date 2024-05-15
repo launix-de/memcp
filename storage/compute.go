@@ -19,7 +19,7 @@ package storage
 import "runtime/debug"
 import "github.com/launix-de/memcp/scm"
 
-func (t *table) ComputeColumn(name string, computor scm.Scmer) {
+func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer) {
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// found the column
@@ -37,7 +37,7 @@ func (t *table) ComputeColumn(name string, computor scm.Scmer) {
 							done <- scanError{r, string(debug.Stack())}
 						}
 					}()
-					for !s.ComputeColumn(name, computor) {
+					for !s.ComputeColumn(name, inputCols, computor) {
 						// couldn't compute column because delta is still active
 						t.mu.Lock()
 						s = s.rebuild(false)
@@ -59,7 +59,7 @@ func (t *table) ComputeColumn(name string, computor scm.Scmer) {
 	panic("column "+t.Name+"."+name+" does not exist")
 }
 
-func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) bool {
+func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer) bool {
 	s.mu.Lock() // don't defer because we unlock inbetween
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		s.mu.Unlock()
@@ -67,14 +67,13 @@ func (s *storageShard) ComputeColumn(name string, computor scm.Scmer) bool {
 	}
 
 	fn := scm.OptimizeProcToSerialFunction(computor)
-	// TODO: column names via list
-	param_names := computor.(scm.Proc).Params.([]scm.Scmer)
-	cols := make([]ColumnStorage, len(param_names))
-	for i, col := range param_names {
+
+	cols := make([]ColumnStorage, len(inputCols))
+	for i, col := range inputCols {
 		var ok bool
-		cols[i], ok = s.columns[string(col.(scm.Symbol))]
+		cols[i], ok = s.columns[col]
 		if !ok {
-			panic("column "+s.t.Name+"."+string(col.(scm.Symbol))+" does not exist")
+			panic("column "+s.t.Name+"."+col+" does not exist")
 		}
 	}
 	colvalues := make([]scm.Scmer, len(cols))

@@ -449,7 +449,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createcolumn", "creates a new column in table",
-		6, 7,
+		6, 8,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
@@ -457,6 +457,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"type", "string", "name of the basetype"},
 			scm.DeclarationParameter{"dimensions", "list", "dimensions of the type (e.g. for decimal)"},
 			scm.DeclarationParameter{"options", "string", "further options like AUTO_INCREMENT or NOT NULL"},
+			scm.DeclarationParameter{"computorCols", "list", "list of columns that is passed into params of computor"},
 			scm.DeclarationParameter{"computor", "func", "lambda expression that can take other column values and computes the value of that column"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
@@ -487,9 +488,14 @@ func Init(en scm.Env) {
 				t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
 			}
 
-			if len(a) > 6 && a[6] != nil {
+			if len(a) > 7 && a[7] != nil {
 				// computed columns (interface might not be final)
-				t.ComputeColumn(colname, a[6])
+				param_names_ := a[6].([]scm.Scmer)
+				param_names := make([]string, len(param_names_))
+				for i, pn := range param_names_ {
+					param_names[i] = scm.String(pn)
+				}
+				t.ComputeColumn(colname, param_names, a[7])
 			}
 			
 			return ok
