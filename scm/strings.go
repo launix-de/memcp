@@ -16,8 +16,11 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package scm
 
+import "fmt"
+import "html"
 import "bytes"
 import "strings"
+import "net/url"
 
 type LazyString struct {
 	Hash string
@@ -184,6 +187,42 @@ func init_strings() {
 				result[i] = v
 			}
 			return result
+		},
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"htmlentities", "escapes the string for use in HTML",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			// string
+			return html.EscapeString(String(a[0]))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"urlencode", "encodes a string according to URI coding schema",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string to encode"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			return url.QueryEscape(String(a[0]))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"urldecode", "decodes a string according to URI coding schema",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string to decode"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			if result, err := url.QueryUnescape(String(a[0])); err == nil {
+				return result
+			} else {
+				panic("error while decoding URL: " + fmt.Sprint(err))
+			}
 		},
 	})
 
