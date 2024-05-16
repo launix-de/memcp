@@ -100,6 +100,25 @@ func init_strings() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		"substr", "returns a substring",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string to cut"},
+			DeclarationParameter{"start", "number", "first character index"},
+			DeclarationParameter{"len", "number", "optional length"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			// concat strings
+			s := String(a[0])
+			i := ToInt(a[1])
+			if len(a) > 2 {
+				return s[i:i+ToInt(a[2])]
+			} else {
+				return s[i:]
+			}
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"simplify", "turns a stringable input value in the easiest-most value (e.g. turn strings into numbers if they are numeric",
 		1, 1,
 		[]DeclarationParameter{
