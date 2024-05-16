@@ -217,7 +217,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 							ome2.variableReplacement[sym] = content
 						}
 					}
-					if len(usedVariables) == 0 {
+					if len(usedVariables) == 0 && false { // TODO: this feature is deactivated because of bugs. See overloading of request handler
 						v[0] = Symbol("!begin") // make them env-free
 						for sym, content := range ome2.variableReplacement {
 							if ar, ok := content.([]Scmer); ok {
