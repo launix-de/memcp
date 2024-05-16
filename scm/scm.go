@@ -349,7 +349,7 @@ func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
 					}
 				}
 			}
-			return Apply(procedure, new_params)
+			return Apply(procedure, new_params...)
 		default:
 			panic("apply_assoc cannot run on non-list parameters")
 		}
@@ -359,7 +359,7 @@ func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
 }
 
 // helper function; Eval uses a code duplicate to get the tail recursion done right
-func Apply(procedure Scmer, args []Scmer) (value Scmer) {
+func Apply(procedure Scmer, args ...Scmer) (value Scmer) {
 	return ApplyEx(procedure, args, &Globalenv)
 }
 func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
@@ -608,10 +608,10 @@ func init() {
 			defer func() {
 				err := recover()
 				if err != nil {
-					result = Apply(a[1], []Scmer{err})
+					result = Apply(a[1], err)
 				}
 			}()
-			result = Apply(a[0], []Scmer{})
+			result = Apply(a[0])
 			return
 		},
 	})
@@ -623,7 +623,7 @@ func init() {
 			DeclarationParameter{"arguments", "list", "list of arguments to apply"},
 		}, "symbol",
 		func (a ...Scmer) Scmer {
-			return Apply(a[0], a[1].([]Scmer))
+			return Apply(a[0], a[1].([]Scmer)...)
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -738,6 +738,7 @@ Patterns can be any of:
 	init_strings()
 	init_list()
 	init_parser()
+	init_sync()
 }
 
 /* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt

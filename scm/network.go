@@ -176,7 +176,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 					}
 					// TODO: messageType 1 = text, 2 = binary?
 					if messageType == 1 {
-						Apply(a[0], []Scmer{string(msg)}) // 1st parameter is callback to receive message
+						Apply(a[0], string(msg)) // 1st parameter is callback to receive message
 					}
 				}
 			}()
@@ -200,6 +200,6 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			io.WriteString(res, fmt.Sprint(r))
 		}
 	}()
-	Apply(s.callback, []Scmer{req_scm, res_scm})
+	Apply(s.callback, req_scm, res_scm)
 	// TODO: req.Body io.ReadCloser
 }

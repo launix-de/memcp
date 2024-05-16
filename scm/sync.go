@@ -59,3 +59,54 @@ func NewSession(a ...Scmer) Scmer {
 		}
 	}
 }
+
+func init_sync() {
+	DeclareTitle("Sync")
+	Declare(&Globalenv, &Declaration{
+		"newsession", "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
+		0, 0,
+		[]DeclarationParameter{
+		}, "func",
+		NewSession,
+	})
+	Declare(&Globalenv, &Declaration{
+		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"f", "func", "function that produces the result value"},
+		}, "func",
+		func (a ...Scmer) Scmer {
+			var params []Scmer
+			once := sync.OnceValue[Scmer](func () Scmer {
+				return Apply(a[0], params...)
+			})
+			return func(a ...Scmer) Scmer {
+				params = a
+				return once()
+			}
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
+		1, 1,
+		[]DeclarationParameter{
+		}, "func",
+		func (a ...Scmer) Scmer {
+			var mutex sync.Mutex
+			return func(a ...Scmer) Scmer {
+				mutex.Lock()
+				defer func() {
+					mutex.Unlock() // free after return or panic, so we don't get into deadlocks
+					/* this code happens automatically
+					if r := recover(); r != nil {
+						// rethrow panics
+						panic(r)
+					}*/
+				}()
+
+				// execute serially
+				return Apply(a[0])
+			}
+		},
+	})
+}

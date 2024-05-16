@@ -89,7 +89,7 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 						panic(err)
 					}
 					// go??
-					scm.Apply(a[1], []scm.Scmer{str});
+					scm.Apply(a[1], str);
 				}
 			} else {
 				// read in whole
@@ -98,7 +98,7 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 					panic(err)
 				}
 				if len(a) > 1 {
-					scm.Apply(a[1], []scm.Scmer{string(bytes)});
+					scm.Apply(a[1], string(bytes));
 				} else {
 					return string(bytes)
 				}
@@ -218,13 +218,6 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"handler", "func", "lambda(schema sql resultrow session) handler to process sql query (string) in schema (string). resultrow is a lambda(list)"},
 		}, "bool",
 		scm.MySQLServe,
-	})
-	scm.Declare(&IOEnv, &scm.Declaration{
-		"newsession", "Creates a new session which is itself a function either a getter (session key) or setter (session key value)",
-		0, 0,
-		[]scm.DeclarationParameter{
-		}, "list",
-		scm.NewSession,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"password", "Hashes a password with sha1 (for mysql user authentication)",

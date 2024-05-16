@@ -81,7 +81,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 		}
 		if !hadValue && isOuter {
-			akkumulator = fn(akkumulator, scm.Apply(callback, make([]scm.Scmer, len(callbackCols)))) // outer join: push one NULL row
+			akkumulator = fn(akkumulator, scm.Apply(callback, make([]scm.Scmer, len(callbackCols))...)) // outer join: push one NULL row
 		}
 		return akkumulator
 	} else if aggregate != nil {
@@ -100,7 +100,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 		}
 		if !hadValue && isOuter {
-			akkumulator = fn(akkumulator, scm.Apply(callback, make([]scm.Scmer, len(callbackCols)))) // outer join: push one NULL row
+			akkumulator = fn(akkumulator, scm.Apply(callback, make([]scm.Scmer, len(callbackCols))...)) // outer join: push one NULL row
 		}
 		return akkumulator
 	} else {
@@ -117,7 +117,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 		}
 		if !hadValue && isOuter {
-			scm.Apply(callback, make([]scm.Scmer, len(callbackCols))) // outer join: push one NULL row
+			scm.Apply(callback, make([]scm.Scmer, len(callbackCols))...) // outer join: push one NULL row
 		}
 		return akkumulator
 	}

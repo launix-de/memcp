@@ -73,7 +73,7 @@ func (m *MySQLWrapper) SetServerVersion() {
 func (m *MySQLWrapper) NewSession(session *driver.Session) {
 	m.log.Info("New Session from " + session.Addr())
 	// initialize something??
-	mysqlsessions.Store(session.ID(), NewSession([]Scmer{}))
+	mysqlsessions.Store(session.ID(), NewSession())
 }
 func (m *MySQLWrapper) SessionInc(session *driver.Session) {
 	// I think we can skip session counting
@@ -93,7 +93,7 @@ func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	m.log.Info("Auth Check with " + session.User())
 	// callback should load password from database
-	password := Apply(m.authcallback, []Scmer{session.User(),})
+	password := Apply(m.authcallback, session.User())
 	if password == nil {
 		// user does not exist
 		return errors.New("Auth failed")
@@ -105,7 +105,7 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
 	m.log.Info("db "+database)
-	allowed := Apply(m.schemacallback, []Scmer{session.User(), database})
+	allowed := Apply(m.schemacallback, session.User(), database)
 	if (!ToBool(allowed)) {
 		return errors.New("access denied for database " + database)
 	}
@@ -141,7 +141,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				debug.PrintStack()
 			}
 		}()
-		return Apply(m.querycallback, []Scmer{session.Schema(), query, func (a... Scmer) Scmer {
+		return Apply(m.querycallback, session.Schema(), query, func (a... Scmer) Scmer {
 			// function resultrow(item)
 			item := a[0].([]Scmer)
 			resultlock.Lock()
@@ -175,8 +175,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			result.Rows = append(result.Rows, newitem)
 			return true
 		},
-		scmSession,
-		})
+		scmSession)
 	}()
 	if myerr != nil {
 		return myerr
