@@ -67,16 +67,18 @@ Project Website: [memcp.org](https://www.memcp.org)
 
 ```
 # first time: build the image
-docker build -t memcp
+docker build . -t memcp
 
 # run with the interactive scheme shell for debugging and development
-docker run -it -p 4321:4321 -p 3307:3307 memcp
+mkdir data
+docker run -v data:/data -it -p 4321:4321 -p 3307:3307 memcp
 
 # run a specific application
-docker run -it -p 4321:4321 -p 3307:3307 memcp ./memcp apps/bayesian.scm
+docker run -e PARAMS="lib/main.scm apps/minigame.scm" -v data:/data -it -p 4321:4321 -p 3307:3307 memcp
 
 # run for productive use
-docker run -di -p 4321:4321 -p 3307:3307 --restart unless-stopped memcp
+mkdir /var/memcp
+docker run -v /var/memcp:/data -di -p 4321:4321 -p 3307:3307 --restart unless-stopped memcp
 
 
 ```
@@ -190,22 +192,7 @@ The standard username/password is root/admin. To change that, type the following
 
 <h1 align="center">Example REST API App 📕</h1>
 
-You can host your own REST APIs directly from the database. You can plug your services into the database as scheme modules. They will offer REST endpoints on the database's builtin HTTP server.
-
-We made an example application that hosts a bayesian text classifier. You can use that app to do spam detection, AI-enhanced automated accounting and much more. A bayesian text classifier learns from example and then applies statistical correlations to generalize and classify unknown texts as well.
-
-To test it, just type:
-
-```
-./memcp apps/bayesian.scm
-```
-
-now you can use the Bayesian text classifier under http://localhost:4321/bayes/ as a REST service
-
-```
-curl 'http://localhost:4321/bayes/i am a booking text?account=4001' # will learn the text to be account=4001
-curl 'http://localhost:4321/bayes/i am a booking text?classify=account' # will return 4001
-```
+You can take a look at https://github.com/launix-de/rdfop which is a RDF hypertext processor based on MemCP
 
 <hr>
 
