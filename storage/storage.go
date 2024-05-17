@@ -719,7 +719,7 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"settings", "reads or writes a global settings value. This",
+		"settings", "reads or writes a global settings value. This modifies your data/settings.json.",
 		1, 2,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"key", "string", "name of the key to set or get (for reference, rts)"},
