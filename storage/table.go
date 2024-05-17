@@ -36,6 +36,7 @@ type column struct {
 type PersistencyMode uint8
 const (
 	Safe PersistencyMode = 0
+	Logged = 1
 	Sloppy = 1
 	Memory = 2
 )
@@ -107,6 +108,9 @@ func (m *PersistencyMode) MarshalJSON() ([]byte, error) {
 	if (*m == Sloppy) {
 		return []byte("\"sloppy\""), nil
 	}
+	if (*m == Logged) {
+		return []byte("\"logged\""), nil
+	}
 	if (*m == Safe) {
 		return []byte("\"safe\""), nil
 	}
@@ -125,6 +129,10 @@ func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
 	}
 	if (str == "sloppy") {
 		*m = Sloppy
+		return nil
+	}
+	if (str == "logged") {
+		*m = Logged
 		return nil
 	}
 	if (str == "safe") {

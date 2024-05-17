@@ -367,6 +367,8 @@ func Init(en scm.Env) {
 				pm = Memory
 			} else if engine == "sloppy" {
 				pm = Sloppy
+			} else if engine == "logged" {
+				pm = Logged
 			} else if engine == "safe" {
 				pm = Safe
 			} else {

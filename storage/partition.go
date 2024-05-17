@@ -394,7 +394,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 				}
 				newshards[si] = s
 
-				if s.t.PersistencyMode == Safe {
+				if s.t.PersistencyMode == Safe || s.t.PersistencyMode == Logged {
 					// open a logfile
 					f, err := os.OpenFile(s.t.schema.path + s.uuid.String() + ".log", os.O_RDWR|os.O_CREATE, 0750)
 					if err != nil {

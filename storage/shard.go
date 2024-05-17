@@ -126,7 +126,7 @@ func (u *storageShard) load(t *table) {
 		}
 	}
 
-	if t.PersistencyMode == Safe {
+	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		f, err := os.OpenFile(u.t.schema.path + u.uuid.String() + ".log", os.O_RDWR|os.O_CREATE, 0750)
 		if err != nil {
 			panic(err)
@@ -173,7 +173,7 @@ func NewShard(t *table) *storageShard {
 	for _, column := range t.Columns {
 		result.columns[column.Name] = new (StorageSparse)
 	}
-	if t.PersistencyMode == Safe {
+	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		f, _ := os.Create(result.t.schema.path + result.uuid.String() + ".log")
 		result.logfile = f
 	}
@@ -249,7 +249,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				}
 
 				t.inserts = append(t.inserts, d2)
-				if t.t.PersistencyMode == Safe {
+				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 					var b strings.Builder
 					b.Write([]byte("delete "))
 					tmp, _ := json.Marshal(idx)
@@ -276,7 +276,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				defer t.mu.Unlock() // write lock
 
 				t.deletions.Set(idx, true) // mark as deleted
-				if t.t.PersistencyMode == Safe {
+				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 					var b strings.Builder
 					b.Write([]byte("delete "))
 					tmp, _ := json.Marshal(idx)
@@ -320,7 +320,7 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer) {
 	t.mu.Lock()
 	t.insertDataset(columns, values)
-	if t.t.PersistencyMode == Safe {
+	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 		var b strings.Builder
 		b.Write([]byte("insert "))
 		tmp, _ := json.Marshal(columns)
@@ -520,7 +520,7 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 
 func (t *storageShard) RemoveFromDisk() {
 	// close logfile
-	if t.t.PersistencyMode == Safe {
+	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 		t.logfile.Close()
 	}
 	for _, col := range t.t.Columns {
@@ -577,7 +577,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint)
 		result.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint)
 		result.deletions.Reset()
-		if t.t.PersistencyMode == Safe {
+		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 			// safe mode: also write all deltas to disk
 			f, err := os.Create(result.t.schema.path + result.uuid.String() + ".log")
 			if err != nil {
@@ -677,7 +677,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		rebuildIndexes(t, result)
 		result.t.schema.save()
 
-		if t.t.PersistencyMode == Safe {
+		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 			// remove old log file
 			t.logfile.Close()
 			t.logfile = nil

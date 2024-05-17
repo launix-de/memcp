@@ -459,7 +459,10 @@ func init_list() {
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := a[0].([]Scmer)
-			fn := OptimizeProcToSerialFunction(a[3])
+			var fn func(a ...Scmer) Scmer
+			if len(a) > 3 {
+				fn = OptimizeProcToSerialFunction(a[3])
+			}
 			for i := 0; i < len(list); i += 2 {
 				if reflect.DeepEqual(list[i], a[1]) {
 					// overwrite
