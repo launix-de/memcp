@@ -45,7 +45,8 @@ type storageShard struct {
 	mu sync.RWMutex // delta write lock (working on main storage is lock free)
 	next *storageShard // TODO: also make a next-partition-schema
 	// indexes
-	indexes []*StorageIndex // sorted keys
+	Indexes []*StorageIndex // sorted keys
+	indexMutex sync.Mutex
 	hashmaps1 map[[1]string]map[[1]scm.Scmer]uint // hashmaps for single columned unique keys
 	hashmaps2 map[[2]string]map[[2]scm.Scmer]uint // hashmaps for single columned unique keys
 	hashmaps3 map[[3]string]map[[3]scm.Scmer]uint // hashmaps for single columned unique keys
@@ -383,7 +384,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 		}
 
 		// also notify indices
-		for _, index := range t.indexes {
+		for _, index := range t.Indexes {
 			// add to delta indexes
 			if index.deltaBtree != nil {
 				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
@@ -692,7 +693,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.main_count = t.main_count
 		result.inserts = t.inserts
 		result.deletions = deletions
-		result.indexes = t.indexes
+		result.Indexes = t.Indexes
 		result.hashmaps1 = t.hashmaps1
 		result.hashmaps2 = t.hashmaps2
 		result.hashmaps3 = t.hashmaps3
