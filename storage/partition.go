@@ -421,7 +421,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 	// verify transformation result
 	total_count2 := uint64(0)
-	for _, s := range t.PShards {
+	for _, s := range newshards {
 		total_count2 += uint64(s.Count())
 	}
 	if total_count != total_count2 {
