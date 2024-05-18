@@ -90,7 +90,7 @@ if there is a group function, create a temporary preaggregate table
 	*/
 
 	/* at first: extract additional join exprs into condition list */
-	(set condition (cons 'and (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x))))))
+	(set condition (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
 
 	/* tells whether there is an aggregate inside */
 	(define expr_find_aggregate (lambda (expr) (match expr
@@ -174,15 +174,14 @@ if there is a group function, create a temporary preaggregate table
 					expr /* literals */
 				)))
 
-				(merge
+				'('begin
 					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
+					/* INSERT IGNORE group cols into preaggregate */
+					/* TODO: use bulk insert in scan reduce phase (and filter duplicates from a bulk!) */
 					'('begin
-						/* INSERT IGNORE group cols into preaggregate */
-						/* TODO: use bulk insert in scan reduce phase (and filter duplicates from a bulk!) */
-						'('begin
-							'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) true true)))
-							(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
-						)
+						/* the optimizer will optimize and group this */
+						'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) true true)))
+						(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
 					)
 
 					/* compute aggregates */
@@ -205,7 +204,7 @@ if there is a group function, create a temporary preaggregate table
 					)))))
 
 					/* build the queryplan for the ordered limited scan on the grouped table */
-					'((build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch (replace_find_column having)) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch (replace_find_column col)) dir))))) limit offset))
+					(build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch (replace_find_column having)) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch (replace_find_column col)) dir))))) limit offset)
 				)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
