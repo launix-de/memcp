@@ -321,9 +321,11 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 	// collect all dataset IDs (this is done sequentially and takes ~4s for 8G of data)
 	datasetids := make([][][]uint, totalShards) // newshard, oldshard, item
+	total_count := uint64(0)
 	for si, s := range oldshards {
 		//s.RunOn()
 		s.mu.RLock()
+		total_count += uint64(s.Count())
 		for idx, items := range s.partition(shardCandidates) {
 			if datasetids[idx] == nil {
 				datasetids[idx] = make([][]uint, len(oldshards))
@@ -415,6 +417,16 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	for _, s := range oldshards {
 		// TODO: set next such that Inserts will be redirected
 		s.mu.RUnlock()
+	}
+
+	// verify transformation result
+	total_count2 := uint64(0)
+	for _, s := range t.PShards {
+		total_count2 += uint64(s.Count())
+	}
+	if total_count != total_count2 {
+		fmt.Println("error: aborted partitioning schema for ", t.Name, "after", time.Since(start), " because of inconsistency: before", total_count, "items, after", total_count2)
+		return
 	}
 
 	// now take over the new sharding schema
