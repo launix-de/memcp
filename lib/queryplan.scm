@@ -180,7 +180,7 @@ if there is a group function, create a temporary preaggregate table
 					/* TODO: use bulk insert in scan reduce phase (and filter duplicates from a bulk!) */
 					'('time '('begin
 						/* the optimizer will optimize and group this */
-						'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) '() '('lambda '() true) true)))
+						'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) '(list) '('lambda '() true) true)))
 						(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
 					) "collect phase")
 
