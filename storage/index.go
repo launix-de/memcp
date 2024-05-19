@@ -305,6 +305,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			}
 			// otherwise: next col
 		}
+		// TODO: merge with delta btree in order to preserve index order
 		// output recordid
 		callback(uint(idx2))
 		idx++
@@ -313,6 +314,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 
 	// delta storage -> scan btree (but we can also eject all items, it won't break the code)
 	if len(s.t.inserts) > 0 { // avoid building objects if there is no delta
+/* TODO: use our own compressed delta Bheap-tree
 		delta_lower := make(dataset, 2 * len(s.Cols))
 		delta_upper := make(dataset, 2 * len(s.Cols))
 		for i := 0; i < len(s.Cols); i++ {
@@ -332,8 +334,10 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
 			callback(s.t.main_count + uint(p.itemid))
 		}
-		/*for i := 0; i < maxInsertIndex; i++ {
+*/
+		// fallback: output all items
+		for i := 0; i < maxInsertIndex; i++ {
 			callback(s.t.main_count + uint(i))
-		}*/
+		}
 	}
 }
