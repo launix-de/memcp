@@ -149,6 +149,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '('password p))
+		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
+		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('parse_date p))
 		(parser '((atom "FLOOR" true) "(" (define p sql_expression) ")") '('floor p))
 		(parser '((atom "CEIL" true) "(" (define p sql_expression) ")") '('ceil p))
 		(parser '((atom "CEILING" true) "(" (define p sql_expression) ")") '('ceil p))

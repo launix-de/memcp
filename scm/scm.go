@@ -750,6 +750,7 @@ Patterns can be any of:
 	init_alu()
 	init_strings()
 	init_list()
+	init_date()
 	init_parser()
 	init_sync()
 }
