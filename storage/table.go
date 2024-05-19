@@ -229,7 +229,7 @@ func (t *table) DropColumn(name string) bool {
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
-func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollision scm.Scmer, mergeNull bool) int {
+func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool) int {
 	result := 0
 	// TODO: check foreign keys (new value of column must be present in referenced table)
 
@@ -263,9 +263,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollision scm.S
 				// physically insert
 				shard.Insert(columns, values, false)
 				result += len(values)
-			}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer, dataset dataset) {
+			}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
 				if onCollision != nil {
-					scm.Apply(onCollision, updatefn, ([]scm.Scmer)(dataset))
+					scm.Apply(onCollision, data...)
 				} else {
 					panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
 				}
@@ -297,9 +297,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollision scm.S
 					// physically insert
 					shard.Insert(columns, values, true)
 					result += len(values)
-				}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer, dataset dataset) {
+				}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
 					if onCollision != nil {
-						scm.Apply(onCollision, updatefn, ([]scm.Scmer)(dataset))
+						scm.Apply(onCollision, data...)
 					} else {
 						panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
 					}
@@ -330,7 +330,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollision scm.S
 	return result
 }
 
-func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), failure func(string, func(...scm.Scmer) scm.Scmer, dataset), idx int) {
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int) {
 	// check for duplicates
 	if idx >= len(t.Unique) {
 		success(values) // we finally made it, these values have passed all unique checks
@@ -362,11 +362,19 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if present && !s.deletions.Get(uid) {
 					// found a unique collision
 					if j != last_j {
-						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, failure, idx + 1) // flush
+						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx + 1) // flush
 					}
 					last_j = j+1
 					t.uniquelock.Unlock()
-					failure(uniq.Id, s.UpdateFunction(uid, true), Zip(columns, row)) // notify about failure
+					params := make([]scm.Scmer, len(onCollisionCols))
+					for i, p := range onCollisionCols {
+						if p == "$update" {
+							params[i] = s.UpdateFunction(uid, true)
+						} else {
+							params[i] = s.ColumnReader(p)(uid)
+						}
+					}
+					failure(uniq.Id, params) // notify about failure
 					t.uniquelock.Lock()
 					goto nextrow
 				}
@@ -374,7 +382,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			nextrow:
 		}
 		if len(values) != last_j {
-			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, failure, idx + 1) // flush the rest
+			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx + 1) // flush the rest
 		}
 	} else {
 		// build scan for unique check
@@ -401,35 +409,25 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				}
 			}
 			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-			updatefn := t.scan(uniq.Cols, condition, []string{"$update"}, scm.Proc{[]scm.Scmer{scm.Symbol("$update")}, scm.Symbol("$update"), &scm.Globalenv, 0}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil, false)
+			updatefn := t.scan(uniq.Cols, condition, onCollisionCols, func (args ...scm.Scmer) scm.Scmer {
+				t.uniquelock.Unlock()
+				failure(uniq.Id, args) // call collision function
+				t.uniquelock.Lock()
+				return true // feedback that there was a collision
+			}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil, false)
 			if updatefn != nil {
-				// found a unique collision
+				// found a unique collision: flush the successing items and skip this one
 				if j != last_j {
-					t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, failure, idx + 1) // flush
+					t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx + 1) // flush
 					last_j = j+1
 				}
-				t.uniquelock.Unlock()
-				failure(uniq.Id, updatefn.(func(...scm.Scmer) scm.Scmer), Zip(columns, row)) // notify about failure
-				t.uniquelock.Lock()
 			}
 		}
 		if len(values) != last_j {
-			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, failure, idx + 1) // flush the rest
+			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx + 1) // flush the rest
 		}
 	}
 	if idx == 0 {
 		t.uniquelock.Unlock()
 	}
-}
-
-// bakes a column list and a value list into an associative array
-// TODO: remove Zip and the usage of Zip completely and use a column list in (insert) instead
-func Zip(cols []string, values []scm.Scmer) (result dataset) {
-	// TODO: build map on bigger objects
-	result = make([]scm.Scmer, 2*len(cols))
-	for i, col := range cols {
-		result[2*i] = col
-		result[2*i+1] = values[i]
-	}
-	return
 }

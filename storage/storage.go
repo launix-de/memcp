@@ -573,12 +573,13 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table and returns the number of successful items",
-		4, 6,
+		4, 7,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
 			scm.DeclarationParameter{"columns", "list", "list of column names, e.g. '(\"ID\", \"value\")"},
 			scm.DeclarationParameter{"datasets", "list", "list of list of column values, e.g. '('(1 10) '(2 15))"},
+			scm.DeclarationParameter{"onCollisionCols", "list", "list of columns of the old dataset that have to be passed to onCollision. Can also request $update."},
 			scm.DeclarationParameter{"onCollision", "func", "the function that is called on each collision dataset. The first parameter is filled with the $update function, the second parameter is the dataset as associative list. If not set, an error is thrown in case of a collision."},
 			scm.DeclarationParameter{"mergeNull", "bool", "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)"},
 		}, "number",
@@ -587,12 +588,18 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
+			var onCollisionCols []string
 			onCollision := scm.Scmer(nil)
-			if len(a) > 4 {
-				onCollision = a[4]
+			if len(a) > 5 {
+				onCollisionCols_ := a[4].([]scm.Scmer)
+				onCollisionCols = make([]string, len(onCollisionCols_))
+				for i, c := range onCollisionCols_ {
+					onCollisionCols[i] = scm.String(c)
+				}
+				onCollision = a[5]
 			}
 			mergeNull := false
-			if (len(a) > 5 && scm.ToBool(a[5])) {
+			if (len(a) > 6 && scm.ToBool(a[6])) {
 				mergeNull = true
 			}
 			cols_ := a[2].([]scm.Scmer)
@@ -605,7 +612,7 @@ func Init(en scm.Env) {
 			for i, row := range rows_ {
 				rows[i] = row.([]scm.Scmer)
 			}
-			return float64(db.Tables.Get(scm.String(a[1])).Insert(cols, rows, onCollision, mergeNull))
+			return float64(db.Tables.Get(scm.String(a[1])).Insert(cols, rows, onCollisionCols, onCollision, mergeNull))
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

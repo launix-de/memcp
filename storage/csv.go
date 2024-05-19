@@ -62,13 +62,13 @@ func LoadCSV(schema, table, filename, delimiter string) {
 			}
 			buffer = append(buffer, x)
 			if len(buffer) >= 4096 {
-				t.Insert(cols, buffer, true, false)
+				t.Insert(cols, buffer, nil, nil, false)
 				buffer = buffer[:0]
 			}
 		}
 	}
 	if len(buffer) > 0 {
-		t.Insert(cols, buffer, true, false)
+		t.Insert(cols, buffer, nil, nil, false)
 	}
 }
 

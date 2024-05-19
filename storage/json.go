@@ -81,7 +81,7 @@ func LoadJSON(schema, filename string) {
 						x[i] = v
 						i++
 					}
-					t.Insert(cols, [][]scm.Scmer{x}, true, false) // put into table
+					t.Insert(cols, [][]scm.Scmer{x}, nil, nil, false) // put into table
 				}(t, s)
 			}
 		}

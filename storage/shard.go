@@ -241,7 +241,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					t.mu.Unlock() // release write lock, so the scan can be performed
 					t.t.ProcessUniqueCollision(cols, [][]scm.Scmer{d2}, false, func (values [][]scm.Scmer) {
 						t.mu.Lock() // start write lock
-					}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer, dataset dataset) {
+					}, nil, func (errmsg string, data []scm.Scmer) {
 						t.deletions.Set(idx, false) // mark as undeleted
 						panic("Unique key constraint violated in table "+t.t.Name+": " + errmsg)
 					}, 0)

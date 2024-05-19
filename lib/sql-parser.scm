@@ -77,11 +77,17 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		'()
 	)))
 
-	/* helper function for triggers and ON DUPLICATE */
-	(define replace_dataset (lambda (expr) (match expr
-		'('get_column _ col) '('dataset col)
-		(cons head tail) (cons head (map tail replace_dataset))
+	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
+	(define replace_stupid (lambda (expr) (match expr
+		'('get_column _ col) (symbol col)
+		(cons head tail) (cons head (map tail replace_stupid))
 		expr
+	)))
+	/* helper function for triggers and ON DUPLICATE: extract all used columns */
+	(define extract_stupid (lambda (expr) (match expr
+		'('get_column _ col) '(col)
+		(cons head tail) (merge_unique (map tail extract_stupid))
+		'()
 	)))
 	
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
@@ -334,8 +340,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 		) updaterows)))
 	) (begin
+		(set updaterows (if (nil? updaterows) nil (merge updaterows)))
+		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows (lambda (k v) (extract_stupid v)))))))
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "name")))))
-		'((quote insert) schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (if ignoreexists '('lambda () true) (if (nil? updaterows) nil '('lambda '('$update 'dataset) '('$update (cons 'list (map_assoc (merge updaterows) (lambda (k v) (replace_dataset v)))))))))
+		'('insert schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda () true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows (lambda (k v) (replace_stupid v)))))))))
 	)))
 
 	(define sql_create_table (parser '(
