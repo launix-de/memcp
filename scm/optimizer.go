@@ -16,7 +16,6 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package scm
 
-import "fmt"
 
 var SettingsHaveGoodBacktraces bool
 
@@ -59,11 +58,8 @@ func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
 			}
 		} else {
 			return func (args ...Scmer) Scmer {
-				if len(params) > len(args) {
-					panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(args)))
-				}
 				for i, param := range params {
-					if param != Symbol("_") {
+					if param != Symbol("_") && i < len(args) {
 						en.Vars[param.(Symbol)] = args[i]
 					}
 				}

@@ -380,16 +380,15 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		en := &Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
 		switch params := p.Params.(type) {
 		case []Scmer:
-			if len(params) < len(args) {
-				panic(fmt.Sprintf("Apply: function %s with %d parameters is supplied with %d arguments", String(procedure), len(params), len(args)))
-			}
 			if p.NumVars > 0 {
 				for i, _ := range params {
-					en.VarsNumbered[i] = args[i]
+					if i < len(args) {
+						en.VarsNumbered[i] = args[i]
+					}
 				}
 			} else {
 				for i, param := range params {
-					if param != Symbol("_") {
+					if param != Symbol("_") && i < len(args) {
 						en.Vars[param.(Symbol)] = args[i]
 					}
 				}
