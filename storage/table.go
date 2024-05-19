@@ -291,11 +291,14 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 		for i := 0; i < len(values); i++ {
 			shard = t.PShards[computeShardIndex(dims, shardcols)]
 			if i > 0 && shard != last_shard {
-				shard.Insert(columns, values[last_i:i])
+				shard.Insert(columns, values[last_i:i]) // shard has changed: bulk insert all items that belong to this shard
 				result += i-last_i
 				last_i = i
 			}
 			last_shard = shard
+		}
+		if last_i < len(values) { // bulk insert the rest
+			last_shard.Insert(columns, values[last_i:])
 		}
 	}
 

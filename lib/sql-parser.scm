@@ -408,7 +408,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			'((quote insert) "system" "user" '((quote list) "username" "password") '((quote list) '((quote list) username '((quote password) password)))))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
-			'((quote scan) "system" "user" '("username") '((quote lambda) '((quote username)) '((quote equal?) (quote username) username)) ("$update") '((quote lambda) '((quote $update)) '((quote $update) '((quote list) "password" '((quote password) password))))))
+			'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password))))))
 
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true) (? (atom "FROM" true) (define schema sql_identifier))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '((quote resultrow) '((quote list) "Table" (quote tbl))))))
