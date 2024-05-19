@@ -95,10 +95,16 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				expression = Eval(e[1], en)
 				goto restart
 			case "time":
-				// similar to eval
-				start := time.Now() // time measurement
-				value = Eval(e[1], en)
-				fmt.Println(time.Since(start))
+				// measure the time a step has taken
+				if len(e) > 2 { // with label
+					start := time.Now() // time measurement
+					value = Eval(e[1], en)
+					fmt.Println(String(Eval(e[2], en))+":", time.Since(start)) // TODO: use proper logging
+				} else {
+					start := time.Now() // time measurement
+					value = Eval(e[1], en)
+					fmt.Println(time.Since(start)) // TODO: use proper logging
+				}
 				return
 			case "if":
 				i := 1
@@ -523,6 +529,14 @@ func init() {
 		}, "any", func (a ...Scmer) Scmer {
 			return Optimize(a[0], &Globalenv)
 		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"time", "measures the time it takes to compute the first argument",
+		1, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"code", "any", "code to execute"},
+			DeclarationParameter{"label", "string", "label to print in the log or trace"},
+		}, "any", nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"if", "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
