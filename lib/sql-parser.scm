@@ -351,6 +351,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(define options (* (or
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) '("engine" "memory"))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) '("engine" "sloppy"))
+			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) '("engine" "logging"))
 			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) '("engine" "safe"))
@@ -383,6 +384,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
+			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) schema id "engine" "logging")))
 			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
 			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
