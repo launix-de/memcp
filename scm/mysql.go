@@ -112,6 +112,24 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 	session.SetSchema(database)
 	return nil
 }
+func ScmerToMySQL(v Scmer) sqltypes.Value {
+	switch v2 := v.(type) {
+		case nil:
+			return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
+		case float64:
+			return sqltypes.NewFloat64(v2)
+		case bool:
+			if v2 {
+				return sqltypes.NewInt32(1)
+			} else {
+				return sqltypes.NewInt32(0)
+			}
+		case string:
+			return sqltypes.NewVarChar(v2) // TODO: also consider NewVarBinary
+		default:
+			return sqltypes.NewVarChar(String(v2))
+	}
+}
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) error {
 	var myerr error = nil
 	if query == "select @@version_comment limit 1" {
@@ -152,7 +170,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				colname := String(item[i])
 				colid, ok := colmap[colname]
 				if ok {
-					newitem[colid] = sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(String(item[i+1])))
+					newitem[colid] = ScmerToMySQL(item[i+1])
 				} else {
 					// add row to result
 					colmap[colname] = len(result.Fields)
@@ -160,7 +178,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 					newcol.Name = colname
 					newcol.Type = querypb.Type_TEXT
 					result.Fields = append(result.Fields, newcol)
-					newitem = append(newitem, sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(String(item[i+1]))))
+					newitem = append(newitem, ScmerToMySQL(item[i+1]))
 				}
 			}
 			if len(result.Rows) == cap(result.Rows) {
