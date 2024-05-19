@@ -163,6 +163,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
+		(parser '((atom "VALUES" true) "(" (define e sql_expression) ")") e) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 
 		(parser (atom "NULL" true) nil)
 		(parser (atom "TRUE" true) true)
