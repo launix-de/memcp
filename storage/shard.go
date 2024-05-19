@@ -249,7 +249,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					t.deletions.Set(idx, true) // mark as deleted
 				}
 
-				t.inserts = append(t.inserts, d2)
+				t.insertDataset(cols, [][]scm.Scmer{d2})
 				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 					var b strings.Builder
 					b.Write([]byte("delete "))
