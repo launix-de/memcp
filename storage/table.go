@@ -229,7 +229,7 @@ func (t *table) DropColumn(name string) bool {
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
-func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool, mergeNull bool) int {
+func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollision scm.Scmer, mergeNull bool) int {
 	result := 0
 	// TODO: check foreign keys (new value of column must be present in referenced table)
 
@@ -261,21 +261,23 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 		if len(t.Unique) > 0 {
 			t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
 				// physically insert
-				shard.Insert(columns, values)
+				shard.Insert(columns, values, false)
 				result += len(values)
-			}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer) {
-				if !ignoreexists {
+			}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer, dataset dataset) {
+				if onCollision != nil {
+					scm.Apply(onCollision, updatefn, ([]scm.Scmer)(dataset))
+				} else {
 					panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
 				}
-				// TODO: on duplicate key update ...
 			}, 0)
 		} else {
 			// physically insert (parallel)
-			shard.Insert(columns, values)
+			shard.Insert(columns, values, false)
 			result += len(values)
 		}
 	} else {
 		// partitions
+		// TODO: check which shards are involved; a sharding dimension column must be present in ALL unique keys, otherwise we cannot prune
 		dims := t.PDimensions
 		shardcols := make([]scm.Scmer, len(dims))
 		translatable := make([]int, len(dims))
@@ -286,19 +288,41 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 				}
 			}
 		}
+
+		checkUniqueForShard := func(s *storageShard, values [][]scm.Scmer) {
+			// check unique constraints in a thread safe manner
+			if len(t.Unique) > 0 {
+				// this function will do the locking for us
+				t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
+					// physically insert
+					shard.Insert(columns, values, true)
+					result += len(values)
+				}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer, dataset dataset) {
+					if onCollision != nil {
+						scm.Apply(onCollision, updatefn, ([]scm.Scmer)(dataset))
+					} else {
+						panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
+					}
+				}, 0)
+			} else {
+				// physically insert (parallel)
+				shard.Insert(columns, values, false)
+				result += len(values)
+			}
+		}
+
 		last_i := 0
 		var last_shard *storageShard = nil
 		for i := 0; i < len(values); i++ {
 			shard = t.PShards[computeShardIndex(dims, shardcols)]
 			if i > 0 && shard != last_shard {
-				shard.Insert(columns, values[last_i:i]) // shard has changed: bulk insert all items that belong to this shard
-				result += i-last_i
+				checkUniqueForShard(last_shard, values[last_i:i]) // shard has changed: bulk insert all items that belong to this shard
 				last_i = i
 			}
 			last_shard = shard
 		}
 		if last_i < len(values) { // bulk insert the rest
-			last_shard.Insert(columns, values[last_i:])
+			checkUniqueForShard(last_shard, values[last_i:])
 		}
 	}
 
@@ -306,7 +330,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, ignoreexists bool
 	return result
 }
 
-func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), failure func(string, func(...scm.Scmer) scm.Scmer), idx int) {
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), failure func(string, func(...scm.Scmer) scm.Scmer, dataset), idx int) {
 	// check for duplicates
 	if idx >= len(t.Unique) {
 		success(values) // we finally made it, these values have passed all unique checks
@@ -314,7 +338,6 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 	}
 	if idx == 0 {
 		t.uniquelock.Lock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
-		defer t.uniquelock.Unlock()
 	}
 	uniq := t.Unique[idx]
 	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
@@ -342,7 +365,9 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, failure, idx + 1) // flush
 					}
 					last_j = j+1
-					failure(uniq.Id, s.UpdateFunction(uid, true)) // notify about failure
+					t.uniquelock.Unlock()
+					failure(uniq.Id, s.UpdateFunction(uid, true), Zip(columns, row)) // notify about failure
+					t.uniquelock.Lock()
 					goto nextrow
 				}
 			}
@@ -380,14 +405,31 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			if updatefn != nil {
 				// found a unique collision
 				if j != last_j {
-					success(values[last_j:j]) // flush
+					t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, failure, idx + 1) // flush
 					last_j = j+1
 				}
-				failure(uniq.Id, updatefn.(func(...scm.Scmer) scm.Scmer)) // notify about failure
+				t.uniquelock.Unlock()
+				failure(uniq.Id, updatefn.(func(...scm.Scmer) scm.Scmer), Zip(columns, row)) // notify about failure
+				t.uniquelock.Lock()
 			}
 		}
 		if len(values) != last_j {
-			success(values[last_j:]) // flush the rest
+			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, failure, idx + 1) // flush the rest
 		}
 	}
+	if idx == 0 {
+		t.uniquelock.Unlock()
+	}
+}
+
+// bakes a column list and a value list into an associative array
+// TODO: remove Zip and the usage of Zip completely and use a column list in (insert) instead
+func Zip(cols []string, values []scm.Scmer) (result dataset) {
+	// TODO: build map on bigger objects
+	result = make([]scm.Scmer, 2*len(cols))
+	for i, col := range cols {
+		result[2*i] = col
+		result[2*i+1] = values[i]
+	}
+	return
 }

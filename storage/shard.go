@@ -241,7 +241,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					t.mu.Unlock() // release write lock, so the scan can be performed
 					t.t.ProcessUniqueCollision(cols, [][]scm.Scmer{d2}, false, func (values [][]scm.Scmer) {
 						t.mu.Lock() // start write lock
-					}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer) {
+					}, func (errmsg string, updatefn func(...scm.Scmer) scm.Scmer, dataset dataset) {
 						t.deletions.Set(idx, false) // mark as undeleted
 						panic("Unique key constraint violated in table "+t.t.Name+": " + errmsg)
 					}, 0)
@@ -318,8 +318,10 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 	}
 }
 
-func (t *storageShard) Insert(columns []string, values [][]scm.Scmer) {
-	t.mu.Lock()
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool) {
+	if !alreadyLocked {
+		t.mu.Lock()
+	}
 	t.insertDataset(columns, values)
 	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 		var b strings.Builder
@@ -333,9 +335,11 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer) {
 	}
 	if t.next != nil {
 		// also insert into next storage
-		t.next.Insert(columns, values)
+		t.next.Insert(columns, values, false)
 	}
-	t.mu.Unlock()
+	if !alreadyLocked {
+		t.mu.Unlock()
+	}
 	if t.t.PersistencyMode == Safe {
 		t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 	}
@@ -359,7 +363,9 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
 		recid := uint(len(t.inserts)) + t.main_count
 		for j, colidx := range colidx {
-			newrow[colidx] = row[j]
+			if j < len(row) {
+				newrow[colidx] = row[j]
+			}
 		}
 		t.inserts = append(t.inserts, newrow)
 

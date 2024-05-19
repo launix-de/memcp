@@ -126,7 +126,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 			) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 			(set load (lambda (facts) (!begin
 				/* (print "start ======== " facts "-- end") */
-				(insert schema "rdf" '("s" "p" "o") facts true)
+				(insert schema "rdf" '("s" "p" "o") facts (lambda () true))
 			)))
 			(define process_fact (lambda (rest) (match (ttl_fact rest)
 				'("facts" facts "rest" (regex "[ \\n\\r\\t]*" _)) (load facts)

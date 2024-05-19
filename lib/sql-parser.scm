@@ -76,6 +76,13 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(cons col cols) (cons col (cons (car tuple) (zip_cols cols (cdr tuple))))
 		'()
 	)))
+
+	/* helper function for triggers and ON DUPLICATE */
+	(define replace_dataset (lambda (expr) (match expr
+		'('get_column _ col) '('dataset col)
+		(cons head tail) (cons head (map tail replace_dataset))
+		expr
+	)))
 	
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
@@ -319,9 +326,16 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define dataset (* sql_expression ","))
 			")"
 		) dataset) ","))
+		(define updaterows (? (parser '(
+			(atom "ON" true)
+			(atom "DUPLICATE" true)
+			(atom "KEY" true)
+			(atom "UPDATE" true)
+			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
+		) updaterows)))
 	) (begin
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "name")))))
-		'((quote insert) schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) ignoreexists)
+		'((quote insert) schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (if ignoreexists '('lambda () true) (if (nil? updaterows) nil '('lambda '('$update 'dataset) '('$update (cons 'list (map_assoc (merge updaterows) (lambda (k v) (replace_dataset v)))))))))
 	)))
 
 	(define sql_create_table (parser '(
@@ -405,7 +419,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define id sql_identifier)) '((quote createdatabase) id))
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
-			'((quote insert) "system" "user" '((quote list) "username" "password") '((quote list) '((quote list) username '((quote password) password)))))
+			'('insert "system" "user" '('list "username" "password") '('list '('list username '('password password)))))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password))))))
