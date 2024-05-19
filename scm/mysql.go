@@ -167,18 +167,23 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 
 			newitem := make([]sqltypes.Value, len(result.Fields))
 			for i := 0; i < len(item)-1; i += 2 {
+				val := ScmerToMySQL(item[i+1])
+
 				colname := String(item[i])
 				colid, ok := colmap[colname]
 				if ok {
-					newitem[colid] = ScmerToMySQL(item[i+1])
+					newitem[colid] = val
+					if result.Fields[colid].Type == querypb.Type_NULL_TYPE {
+						result.Fields[colid].Type = val.Type()
+					}
 				} else {
 					// add row to result
 					colmap[colname] = len(result.Fields)
 					newcol := new(querypb.Field)
 					newcol.Name = colname
-					newcol.Type = querypb.Type_TEXT
+					newcol.Type = val.Type()
 					result.Fields = append(result.Fields, newcol)
-					newitem = append(newitem, ScmerToMySQL(item[i+1]))
+					newitem = append(newitem, val)
 				}
 			}
 			if len(result.Rows) == cap(result.Rows) {
