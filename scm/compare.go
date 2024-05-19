@@ -34,7 +34,7 @@ func Equal(a, b Scmer) Scmer {
 				case string:
 					return strings.EqualFold(a_.GetValue(), b_)
 				case float64:
-					return a_.GetValue() == String(b_)
+					return ToFloat(a_.GetValue()) == b_
 				case bool:
 					return ToBool(a) == b_
 			}
@@ -45,7 +45,7 @@ func Equal(a, b Scmer) Scmer {
 				case string:
 					return strings.EqualFold(a_, b_)
 				case float64:
-					return a_ == String(b_)
+					return ToFloat(a_) == b_
 				case bool:
 					return ToBool(a) == b_
 			}
@@ -54,7 +54,7 @@ func Equal(a, b Scmer) Scmer {
 				case LazyString:
 					return String(a_) == b_.GetValue()
 				case string:
-					return String(a_) == b_
+					return a_ == ToFloat(b_)
 				case float64:
 					return a_ == b_
 				case bool:

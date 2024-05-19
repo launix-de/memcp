@@ -278,7 +278,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			b := c.GetValue(uint(idx2))
 			if scm.Less(a, b) {
 				return true // less
-			} else if !reflect.DeepEqual(a, b) {
+			} else if scm.Less(b, a) {
 				return false // greater
 			}
 			// otherwise: next iteration
