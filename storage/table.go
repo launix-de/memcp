@@ -370,6 +370,12 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					for i, p := range onCollisionCols {
 						if p == "$update" {
 							params[i] = s.UpdateFunction(uid, true)
+						} else if len(p) >= 4 && p[:4] == "NEW." {
+							for j, c := range columns {
+								if p[4:] == c {
+									params[i] = row[j]
+								}
+							}
 						} else {
 							params[i] = s.ColumnReader(p)(uid)
 						}
@@ -411,6 +417,15 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
 			updatefn := t.scan(uniq.Cols, condition, onCollisionCols, func (args ...scm.Scmer) scm.Scmer {
 				t.uniquelock.Unlock()
+				for i, p := range onCollisionCols {
+					if len(p) >= 4 && p[:4] == "NEW." {
+						for j, c := range columns {
+							if p[4:] == c {
+								args[i] = row[j]
+							}
+						}
+					}
+				}
 				failure(uniq.Id, args) // call collision function
 				t.uniquelock.Lock()
 				return true // feedback that there was a collision

@@ -148,6 +148,9 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 	for i, k := range callbackCols { // iterate over columns
 		if string(k) == "$update" {
 			mcols[i] = nil
+		} else if len(k) >= 4 && k[:4] == "NEW." {
+			// ignore NEW.
+			mcols[i] = nil
 		} else {
 			var ok bool
 			mcols[i], ok = t.columns[k] // find storage
@@ -202,6 +205,8 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 			for i, k := range callbackCols { // iterate over columns
 				if k == "$update" {
 					mdataset[i] = t.UpdateFunction(idx, true)
+				} else if len(k) >= 4 && k[:4] == "NEW." {
+					// ignore NEW.
 				} else {
 					mdataset[i] = t.getDelta(int(idx - t.main_count), k) // fill value
 				}

@@ -22,9 +22,10 @@ type SettingsT struct {
 	Backtrace bool
 	PartitionMaxDimensions int
 	DefaultEngine string
+	ShardSize int
 }
 
-var Settings SettingsT = SettingsT{false, 10, "safe"}
+var Settings SettingsT = SettingsT{false, 10, "safe", 60000}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -41,6 +42,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 				return float64(Settings.PartitionMaxDimensions)
 			case "DefaultEngine":
 				return Settings.DefaultEngine
+			case "ShardSize":
+				return float64(Settings.ShardSize)
 			default:
 				panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -53,6 +56,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 				Settings.PartitionMaxDimensions = scm.ToInt(a[1])
 			case "DefaultEngine":
 				Settings.DefaultEngine = scm.String(a[1])
+			case "ShardSize":
+				Settings.ShardSize = scm.ToInt(a[1])
 			default:
 				panic("unknown setting: " + scm.String(a[0]))
 		}

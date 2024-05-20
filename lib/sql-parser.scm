@@ -79,12 +79,14 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
 	(define replace_stupid (lambda (expr) (match expr
+		'('get_column "VALUES" col) (symbol (concat "NEW." col))
 		'('get_column _ col) (symbol col)
 		(cons head tail) (cons head (map tail replace_stupid))
 		expr
 	)))
 	/* helper function for triggers and ON DUPLICATE: extract all used columns */
 	(define extract_stupid (lambda (expr) (match expr
+		'('get_column "VALUES" col) '((concat "NEW." col))
 		'('get_column _ col) '(col)
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
@@ -164,7 +166,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
-		(parser '((atom "VALUES" true) "(" (define e sql_expression) ")") e) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "VALUES" true) "(" (define e sql_identifier) ")") '('get_column "VALUES" e)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 
 		(parser (atom "NULL" true) nil)
 		(parser (atom "TRUE" true) true)
