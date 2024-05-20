@@ -82,8 +82,6 @@ type table struct {
 	// TODO: move rows from Shards to PShards according to PDimensions
 }
 
-const max_shardsize = 65536 // dont overload the shards to get a responsive parallel full table scan
-
 /* Implement NonLockingReadMap */
 func (t table) GetKey() string {
 	return t.Name
@@ -237,11 +235,11 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	if t.Shards != nil { // unpartitioned sharding
 		shard = t.Shards[len(t.Shards)-1]
 		// load balance: if bucket is full, create new one; if bucket is busy (trylock), try another one
-		if shard.Count() >= max_shardsize {
+		if shard.Count() >= Settings.ShardSize {
 			t.mu.Lock()
 			// reload shard after lock to avoid race conditions
 			shard = t.Shards[len(t.Shards)-1]
-			if shard.Count() >= max_shardsize {
+			if shard.Count() >= Settings.ShardSize {
 				go func(i int) {
 					// rebuild full shards in background
 					s := t.Shards[i]
