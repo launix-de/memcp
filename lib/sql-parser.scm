@@ -182,8 +182,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		/* TODO: left [outer] join, right [outer] join recursive buildup */
 		(parser '((define l tabledefs) (atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) (append l '(id schema tbl true e))))
 		(parser '((define l tabledef) (atom "RIGHT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match l '(id schema tbl _ nil) (cons '(id schema tbl true e) r)))
-		(parser '((define l tabledef) (atom "JOIN" true) (define r tabledefs) (atom "ON" true) (define e sql_expression)) (match l '(id schema tbl _ nil) (cons '(id schema tbl false e) r)))
-		(parser '((define l tabledef) (? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) (cons l r))
+		(parser '((define l tabledefs) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) (append l '(id schema tbl false e))))
+		(parser '((define l tabledefs) (? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) (merge l r))
 		(parser (define t tabledef) '(t))
 	)))
 	(define tabledef (parser (or
