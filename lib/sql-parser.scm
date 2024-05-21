@@ -15,9 +15,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-/* TODO: make lower_identifiers settable */
-(define lower_identifiers false)
-(define sql_identifier_unquoted (parser (define id (not
+(define sql_identifier_unquoted (parser (not
 		(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 		/* exceptions for things that can't be identifiers */
 		(atom "NOT" true)
@@ -41,15 +39,17 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "ORDER" true)
 		(atom "LIMIT" true)
 		(atom "DELIMITER" true)
-	)) (if lower_identifiers (toLower id) id))) /* raw -> toLower */
-(define sql_identifier (parser (or
-	(parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`")) /* with backtick */
-	sql_identifier_unquoted
-)))
+	)))
+(define sql_identifier_quoted (parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`"))) /* with backtick */
+(define sql_identifier (parser (define x (or sql_identifier_unquoted sql_identifier_quoted)) x))
 
 (define sql_column (parser (or
-	(parser '((define tbl sql_identifier) "." (define col sql_identifier)) '((quote get_column) tbl col))
-	(parser (define col sql_identifier) '((quote get_column) nil col))
+	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl col true true))
+	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl col true false))
+	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl col false true))
+	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl col false false))
+	(parser (define col sql_identifier_quoted) '((quote get_column) nil col true false))
+	(parser (define col sql_identifier_unquoted) '((quote get_column) nil col true true))
 )))
 
 (define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
@@ -65,8 +65,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	/* derive the description of a column from its expression */
 	(define extract_title (lambda (expr) (match expr
-		'((symbol get_column) nil col) col
-		'((symbol get_column) tblvar col) (concat tblvar "." col)
+		'((symbol get_column) nil col _ _) col
+		'((symbol get_column) tblvar col _ _) (concat tblvar "." col)
 		(cons sym args) /* function call */ (concat (cons sym (map args extract_title)))
 		(concat expr)
 	)))
@@ -79,22 +79,22 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
 	(define replace_stupid (lambda (expr) (match expr
-		'('get_column "VALUES" col) (symbol (concat "NEW." col))
-		'('get_column _ col) (symbol col)
+		'('get_column "VALUES" col _ _) (symbol (concat "NEW." col))
+		'('get_column _ col _ _) (symbol col) /* TODO: case matching */
 		(cons head tail) (cons head (map tail replace_stupid))
 		expr
 	)))
 	/* helper function for triggers and ON DUPLICATE: extract all used columns */
 	(define extract_stupid (lambda (expr) (match expr
-		'('get_column "VALUES" col) '((concat "NEW." col))
-		'('get_column _ col) '(col)
+		'('get_column "VALUES" col _ _) '((concat "NEW." col))
+		'('get_column _ col _ _) '(col)
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
 	)))
 	
 	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
-		(parser '((atom "@" true) (define var sql_identifier) (atom ":=" true) (define value sql_expression)) '((quote session) var value))
+		(parser '((atom "@" true) (define var sql_identifier_unquoted) (atom ":=" true) (define value sql_expression)) '((quote session) var value))
 		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (cons a b)))
 		sql_expression1
 	)))
@@ -166,13 +166,14 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
-		(parser '((atom "VALUES" true) "(" (define e sql_identifier) ")") '('get_column "VALUES" e)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" e true true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" e true false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 
 		(parser (atom "NULL" true) nil)
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
-		(parser '((atom "@" true) (define var sql_identifier)) '('session var))
-		(parser '((atom "@@" true) (define var sql_identifier)) '('globalvars var))
+		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
+		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('globalvars var))
 		sql_number
 		sql_string
 		sql_column
@@ -190,6 +191,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)))
 	(define tabledef (parser (or
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
+		/* TODO: case insensititive table search */
 		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl false nil))
 		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) '(id schema tbl false nil))
 		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '(tbl schema tbl false nil))
@@ -209,8 +211,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define sql_select (parser '(
 		(atom "SELECT" true)
 		(define cols (+ (or
-			(parser "*" '("*" '((quote get_column) nil "*")))
-			(parser '((define tbl sql_identifier) "." "*") '("*" '((quote get_column) tbl "*")))
+			(parser "*" '("*" '((quote get_column) nil "*" false false)))
+			(parser '((define tbl sql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl "*" false false)))
+			(parser '((define tbl sql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl "*" true false)))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_identifier)) '(title e))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_string)) '(title e))
 			(parser (define e sql_expression) '((extract_title e) e))
@@ -262,7 +265,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define sql_update (parser '(
 		(atom "UPDATE" true)
 		/* TODO: UPDATE tbl FROM tbl, tbl, tbl */
-		(define tbl sql_identifier)
+		(define tbl sql_identifier) /* TODO: ignorecase */
 		(atom "SET" true)
 		(define cols (+ (or
 			/* TODO: tbl.identifier */
@@ -274,7 +277,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		))
 	) (begin
 		(define replace_find_column (lambda (expr) (match expr
-			'((symbol get_column) nil col) '((quote get_column) tbl col)
+			'((symbol get_column) nil col _ ci) '((quote get_column) tbl col) /* TODO: case insensitive column */
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 			expr
 		)))
@@ -301,14 +304,14 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "DELETE" true)
 		(atom "FROM" true)
 		/* TODO: DELETE tbl FROM tbl, tbl, tbl */
-		(define tbl sql_identifier)
+		(define tbl sql_identifier) /* TODO: ignorecase */
 		(? '(
 			(atom "WHERE" true)
 			(define condition sql_expression)
 		))
 	) (begin
 		(define replace_find_column (lambda (expr) (match expr
-			'((symbol get_column) nil col) '((quote get_column) tbl col)
+			'((symbol get_column) nil col _ ci) '((quote get_column) tbl col false ci) /* TODO: case insensititive column */
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 			expr
 		)))
@@ -328,7 +331,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
 		(atom "INTO" true)
-		(define tbl sql_identifier)
+		(define tbl sql_identifier) /* TODO: ignorecase */
 		(? "("
 			(define coldesc (*
 				sql_identifier
@@ -345,6 +348,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(atom "DUPLICATE" true)
 			(atom "KEY" true)
 			(atom "UPDATE" true)
+			/* TODO: ignorecase */
 			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 		) updaterows)))
 	) (begin
@@ -394,7 +398,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define sql_alter_table (parser '(
 		(atom "ALTER" true)
 		(atom "TABLE" true)
-		(define id sql_identifier)
+		(define id sql_identifier) /* TODO: ignorecase */
 		(define alters (+ (or
 			/* TODO
 			(parser '((atom "ADD" true) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))

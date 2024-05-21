@@ -50,15 +50,15 @@ if there is a group function, create a temporary preaggregate table
 
 /* returns a list of '(string...) */
 (define extract_columns_for_tblvar (lambda (tblvar expr) (match expr
-	'((symbol get_column) (eval tblvar) col) '(col)
+	'((symbol get_column) (eval tblvar) col _ _) '(col) /* TODO: case matching */
 	(cons sym args) /* function call */ (merge_unique (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg))))
 	'()
 )))
 
-/* changes (get_column tblvar col) into its symbol */
+/* changes (get_column tblvar col ti ci) into its symbol */
 (define replace_columns_from_expr (lambda (expr) (match expr
 	(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
-	'((symbol get_column) tblvar col) (symbol (concat tblvar "." col))
+	'((symbol get_column) tblvar col _ _) (symbol (concat tblvar "." col)) /* TODO: case insensitive matching */
 	(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 	expr /* literals */
 )))
@@ -76,7 +76,7 @@ if there is a group function, create a temporary preaggregate table
 (define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
-	/* expressions will use (get_column tblvar col) for reading from columns. we have to replace it with the correct variable */
+	/* expressions will use (get_column tblvar col ti ci) for reading from columns. we have to replace it with the correct variable */
 	/* TODO: unnest arbitrary queries -> turn them into a big schema+tables+fields+condition */
 
 	/*
@@ -111,7 +111,8 @@ if there is a group function, create a temporary preaggregate table
 
 	/* find those columns that have no table */
 	(define replace_find_column (lambda (expr) (match expr
-		'((symbol get_column) nil col) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a (equal? (coldef "name") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) col)
+		'((symbol get_column) nil col _ ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "name") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) col false false)
+		'((symbol get_column) alias_ col ti ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "name") col))) false)) alias a)) (lambda () (error (concat "column " alias "." col " does not exist in tables")))) col false false)
 		(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 		expr
 	)))
@@ -120,16 +121,16 @@ if there is a group function, create a temporary preaggregate table
 	(set fields (merge (extract_assoc fields (lambda (col expr) (match col
 		"*" (match expr
 			/* *.* */
-			'((symbol get_column) nil "*")(merge (map tables (lambda (t) (match t '(alias schema tbl isOuter _) /* all FROM-tables*/
+			'((symbol get_column) nil "*" _ _)(merge (map tables (lambda (t) (match t '(alias schema tbl isOuter _) /* all FROM-tables*/
 				(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
-					'((coldesc "name") '((quote get_column) alias (coldesc "name")))
+					'((coldesc "name") '((quote get_column) alias (coldesc "name") false false))
 				)))
 			))))
 			/* tbl.* */
-			'((symbol get_column) tblvar "*")(merge (map tables (lambda (t) (match t '(alias schema tbl isOuter _) /* one FROM-table*/
+			'((symbol get_column) tblvar "*" _ _)(merge (map tables (lambda (t) (match t '(alias schema tbl isOuter _) /* one FROM-table*/
 				(if (equal? alias tblvar)
 					(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
-						'((coldesc "name") '((quote get_column) alias (coldesc "name")))
+						'((coldesc "name") '((quote get_column) alias (coldesc "name") false false))
 					)))
 					'())
 			))))
@@ -147,7 +148,7 @@ if there is a group function, create a temporary preaggregate table
 		(define ags (merge_unique ags (merge_unique (map (coalesce order '()) (lambda (x) (match x '(col dir) (extract_aggregates col))))))) /* aggregates in order */
 		(define ags (merge_unique ags (extract_aggregates (coalesce having true)))) /* aggregates in having */
 
-		/* TODO: replace (get_column nil col) in group, having and order with (coalesce (fields col) '('get_column nil col)) */
+		/* TODO: replace (get_column nil col ti ci) in group, having and order with (coalesce (fields col) '('get_column nil col)) */
 
 		(match tables
 			/* TODO: allow for more than just group by single table */
@@ -168,8 +169,8 @@ if there is a group function, create a temporary preaggregate table
 				(set filtercols (extract_columns_for_tblvar tblvar condition))
 
 				(define replace_agg_with_fetch (lambda (expr) (match expr
-					(cons (symbol aggregate) rest) '('get_column grouptbl (concat rest "|" condition)) /* aggregate helper column */
-					'((symbol get_column) tblvar col) '('get_column grouptbl (concat '('get_column tblvar col))) /* grouped col */
+					(cons (symbol aggregate) rest) '('get_column grouptbl (concat rest "|" condition) false false) /* aggregate helper column */
+					'((symbol get_column) tblvar col ti ci) '('get_column grouptbl (concat '('get_column tblvar col ti ci)) ti ci) /* grouped col */
 					(cons sym args) /* function call */ (cons sym (map args replace_agg_with_fetch))
 					expr /* literals */
 				)))
@@ -229,8 +230,9 @@ if there is a group function, create a temporary preaggregate table
 						/* TODO: add columns from rest condition into cols list */
 
 						/* extract order cols for this tblvar */
-						(set ordercols (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) col) dir) (cons col a) a)) '()))
-						(set dirs      (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) col) dir) (cons dir a) a)) '()))
+						/* TODO: match case insensitive column */
+						(set ordercols (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) col _ _) dir) (cons col a) a)) '()))
+						(set dirs      (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) col _ _) dir) (cons dir a) a)) '()))
 
 						(scan_wrapper 'scan_order schema tbl
 							/* condition */
