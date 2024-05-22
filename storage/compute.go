@@ -30,7 +30,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 				shardlist = t.PShards
 			}
 			for i, s := range shardlist {
-				go func() {
+				go func(i int, s *storageShard) {
 					defer func () {
 						if r := recover(); r != nil {
 							//fmt.Println("panic during compute:", r, string(debug.Stack()))
@@ -45,7 +45,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 						t.mu.Unlock()
 					}
 					done <- nil
-				}()
+				}(i, s)
 			}
 			for range shardlist {
 				err := <- done // collect finish signal before return
