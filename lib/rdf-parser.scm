@@ -71,21 +71,21 @@ Copyright (C) 2024  Carl-Philip Hänsch
 	(define rest rest)
 ) '("prefixes" (merge definitions) "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
-(define rdf_replace_context (lambda (expr context) (match expr
-	'('get_var sym) (coalesce (context sym) (error "unknown symbol " sym " in " context))
-	(cons head tail) (cons head (map tail (lambda (x) (replace_context x context))))
+(define rdf_replace_ctx (lambda (expr ctx) (match expr
+	'('get_var sym) (coalesce (ctx sym) (error "unknown symbol " sym " in " ctx))
+	(cons head tail) (cons head (map tail (lambda (x) (replace_ctx x ctx))))
 	expr
 )))
 
-(define rdf_queryplan (lambda (schema query definitions context resultfunc /* function that gets cols + context */) (begin
+(define rdf_queryplan (lambda (schema query definitions ctx resultfunc /* function that gets cols + ctx */) (begin
 	(match query '("select" cols "where" conditions) (begin
-		/* context: array with predefined variables */
+		/* ctx: array with predefined variables */
 		/* no join reordering yet */
-		(define build_scan (lambda (conditions context) (match conditions
+		(define build_scan (lambda (conditions ctx) (match conditions
 			(cons '(s p o) tail) (begin
 				(define process (lambda (v sym conditions vars) (match v
-					'('get_var var) (if (context var)
-						'((append conditions sym (context var)) vars) /* variable is bound: match value */
+					'('get_var var) (if (ctx var)
+						'((append conditions sym (ctx var)) vars) /* variable is bound: match value */
 						'(conditions (append vars sym (symbol var)))) /* variable is free: collect in scope */
 					(string? s) '((append conditions sym s) vars)
 					(list? l) '((append conditions sym (eval l)) vars)
@@ -96,18 +96,18 @@ Copyright (C) 2024  Carl-Philip Hänsch
 						(match (process o "o" conditions vars) '(conditions vars)
 							'('scan schema "rdf"
 								/* condition */ (cons list (extract_assoc conditions (lambda (k v) k))) '('lambda (extract_assoc conditions (lambda (k v) (symbol k))) (cons 'and (extract_assoc conditions (lambda (k v) '('equal? (symbol k) v)))))
-								/* map */ (cons list (extract_assoc vars (lambda (k v) k))) '('lambda (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (merge context (merge (extract_assoc vars (lambda (k v) '(v (symbol v))))))))
+								/* map */ (cons list (extract_assoc vars (lambda (k v) k))) '('lambda (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (merge ctx (merge (extract_assoc vars (lambda (k v) '(v (symbol v))))))))
 							)
 				)))
 			)
-			'() (resultfunc cols context)
+			'() (resultfunc cols ctx)
 		)))
-		(build_scan conditions context)
+		(build_scan conditions ctx)
 	))
 )))
 
 (define parse_sparql (lambda (schema s) (match (ttl_header s)
-       '("prefixes" definitions "rest" rest) (rdf_queryplan (rdf_select rest) definitions '() (lambda (cols context) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_context v context)))))))
+       '("prefixes" definitions "rest" rest) (rdf_queryplan (rdf_select rest) definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))))
 )))
 
 

@@ -30,6 +30,7 @@ import (
 	"time"
 	"reflect"
 	"strings"
+	"github.com/jtolds/gls"
 )
 
 // TODO: (unquote string) -> symbol
@@ -233,13 +234,15 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				// execute all childs parallely, return null after finish
 				errs := make(chan Scmer, 1)
 				for _, i := range e[1:] {
-					go func(i Scmer) {
-						defer func() {
-							// catch errors and pass them on
-							errs <- recover()
-						}()
-						Eval(i, en)
-					}(i)
+					gls.Go(func(i Scmer) func() {
+						return func() {
+							defer func() {
+								// catch errors and pass them on
+								errs <- recover()
+							}()
+							Eval(i, en)
+						}
+					}(i))
 				}
 				for range e[1:] {
 					if err := <- errs; err != nil {

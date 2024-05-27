@@ -88,6 +88,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		/* 12: */ "password", pwtostring(req.URL.User.Password()),
 		"ip", req.RemoteAddr,
 		"body", func(a ...Scmer) Scmer {
+			// read body into string (TODO: also offer other methods like reading POST fields or upload files)
 			// req.Body io.ReadCloser
 			var b strings.Builder
 			io.Copy(&b, req.Body)
@@ -190,16 +191,17 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			}
 		},
 	}
-	// catch panics and print out 500 Internal Server Error
-	defer func () {
-		if r := recover(); r != nil {
-			fmt.Println("request failed:", req_scm, r, string(debug.Stack()))
-			res.Header().Set("Content-Type", "text/plain")
-			res.WriteHeader(500)
-			io.WriteString(res, "500 Internal Server Error: ")
-			io.WriteString(res, fmt.Sprint(r))
-		}
-	}()
-	Apply(s.callback, req_scm, res_scm)
-	// TODO: req.Body io.ReadCloser
+	NewContext(req.Context(), func() {
+		// catch panics and print out 500 Internal Server Error
+		defer func () {
+			if r := recover(); r != nil {
+				fmt.Println("request failed:", req_scm, r, string(debug.Stack()))
+				res.Header().Set("Content-Type", "text/plain")
+				res.WriteHeader(500)
+				io.WriteString(res, "500 Internal Server Error: ")
+				io.WriteString(res, fmt.Sprint(r))
+			}
+		}()
+		Apply(s.callback, req_scm, res_scm)
+	})
 }

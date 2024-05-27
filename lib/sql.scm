@@ -44,7 +44,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(print "SQL query: " query)
 			(define formula (parse_sql schema query))
 			(define resultrow (res "jsonl"))
-			(define session (newsession))
+			(define session (context "session"))
 			(eval formula)
 		) (begin
 			((res "header") "Content-Type" "text/plain")

@@ -8,6 +8,7 @@ require (
 	github.com/google/btree v1.1.2
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.1
+	github.com/jtolds/gls v4.20.0+incompatible
 	github.com/launix-de/NonLockingReadMap v1.0.4
 	github.com/launix-de/go-mysqlstack v0.0.0-20230126065738-28daf61fbef8
 	github.com/launix-de/go-packrat/v2 v2.1.11
@@ -16,6 +17,7 @@ require (
 )
 
 require (
+	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/intel-go/cpuid v0.0.0-20220614022739-219e067757cb // indirect
 	github.com/magefile/mage v1.15.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect

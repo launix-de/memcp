@@ -18,6 +18,9 @@ Copyright (C) 2024  Carl-Philip Hänsch
 package scm
 
 import "sync"
+import "time"
+import "context"
+import "github.com/jtolds/gls"
 
 /* threadsafe session storage */
 
@@ -60,6 +63,64 @@ func NewSession(a ...Scmer) Scmer {
 	}
 }
 
+var mgr *gls.ContextManager
+
+func Context(a ...Scmer) (result Scmer) {
+	if mgr == nil {
+		// prone to race conditions, to the first call should be called in the initialization
+		mgr = gls.NewContextManager()
+	}
+	if a[0] == "session" {
+		result, ok := mgr.GetValue("session")
+		if !ok {
+			panic("no session set")
+		}
+		return result
+	} else if a[0] == "check" {
+		result, ok := mgr.GetValue("context")
+		if !ok {
+			panic("no context set")
+		}
+		e := result.(context.Context).Err()
+		if e != nil {
+			panic(e)
+		}
+		return true
+	} else if a[0] != nil {
+		// constructor
+		NewContext(context.TODO(), func() {
+			result = Apply(a[0], a[1:]...) // call the inner function in the context
+		})
+		return
+	} else {
+		panic("unimplemented")
+	}
+}
+
+func NewContext(ctx context.Context, fn func()) {
+	if mgr == nil {
+		// prone to race conditions, to the first call should be called in the initialization
+		mgr = gls.NewContextManager()
+	}
+	mgr.SetValues(gls.Values{
+		"session": NewSession(),
+		"context": ctx,
+		// TODO: logger for print and time, process ID etc. etc.
+	}, fn)
+}
+
+func GetContext() context.Context {
+	if mgr == nil {
+		// prone to race conditions, to the first call should be called in the initialization
+		mgr = gls.NewContextManager()
+	}
+	r, ok := mgr.GetValue("context")
+	if !ok {
+		panic("no context set")
+	}
+	return r.(context.Context)
+}
+
 func init_sync() {
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
@@ -68,6 +129,30 @@ func init_sync() {
 		[]DeclarationParameter{
 		}, "func",
 		NewSession,
+	})
+	Declare(&Globalenv, &Declaration{
+		"context", "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"args...", "any", "depends on the usage"},
+		}, "any",
+		Context,
+	})
+	Declare(&Globalenv, &Declaration{
+		"sleep", "sleeps the amount of seconds",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"duration", "number", "number of seconds to sleep"},
+		}, "bool",
+		func (a ...Scmer) Scmer {
+			ctx := GetContext()
+			select {
+				case <- ctx.Done():
+					panic(ctx.Err)
+				case <- time.After(time.Duration(ToFloat(a[0]) * float64(time.Second))):
+					return true
+			}
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",

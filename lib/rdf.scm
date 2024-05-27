@@ -42,7 +42,6 @@ this is how rdf works:
 			(print "RDF query: " query)
 			(define formula (parse_sparql schema query))
 			(define resultrow (res "jsonl"))
-			/*(define session (newsession))*/
 
 			(eval formula)
 		) (begin
