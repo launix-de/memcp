@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "runtime/debug"
+import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
@@ -49,7 +50,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	}
 
 	values := make(chan scm.Scmer, 4)
-	go func() {
+	gls.Go(func() {
 		t.iterateShards(boundaries, func (s *storageShard) {
 			// parallel scan over shards
 			defer func () {
@@ -61,7 +62,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			values <- s.scan(boundaries, conditionCols, condition, callbackCols, callback, aggregate, neutral)
 		})
 		close(values) // last scan is finished
-	}()
+	})
 	// collect values from parallel scan
 	akkumulator := neutral
 	hadValue := false

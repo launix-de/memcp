@@ -22,6 +22,7 @@ import "sort"
 import "sync"
 import "time"
 import "runtime"
+import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 type shardDimension struct {
@@ -56,15 +57,17 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback func(*stor
 		done.Add(len(shards))
 		for _, s := range shards {
 			// iterateShardIndex will go
-			go func(s *storageShard) {
-				if s == nil {
-					fmt.Println("Warning: a shard is missing")
-					return
+			gls.Go(func(s *storageShard) func () {
+				return func() {
+					if s == nil {
+						fmt.Println("Warning: a shard is missing")
+						return
+					}
+					s.RunOn()
+					callback(s)
+					done.Done()
 				}
-				s.RunOn()
-				callback(s)
-				done.Done()
-			}(s)
+			}(s))
 		}
 	} else {
 		iterateShardIndex(t.PDimensions, boundaries, t.PShards, callback, &done, false)
@@ -83,15 +86,17 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 			done.Add(len(shards))
 			for _, s := range shards {
 				// iterateShardIndex will go
-				go func(s *storageShard) {
-					if s == nil {
-						fmt.Println("Warning: a shard is missing")
-						return
+				gls.Go(func(s *storageShard) func() {
+					return func() {
+						if s == nil {
+							fmt.Println("Warning: a shard is missing")
+							return
+						}
+						s.RunOn()
+						callback(s)
+						done.Done()
 					}
-					s.RunOn()
-					callback(s)
-					done.Done()
-				}(s)
+				}(s))
 			}
 		}
 		return

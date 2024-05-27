@@ -20,6 +20,7 @@ import "fmt"
 import "sort"
 import "runtime/debug"
 import "container/heap"
+import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 type shardqueue struct {
@@ -119,7 +120,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 
 	var q globalqueue
 	q_ := make(chan *shardqueue, 1)
-	go func() {
+	gls.Go(func() {
 		t.iterateShards(boundaries, func (s *storageShard) {
 			// parallel scan over shards
 			defer func () {
@@ -131,7 +132,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 			q_ <- s.scan_order(boundaries, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
 		})
 		close(q_)
-	}()
+	})
 	// collect all subchans
 	for qe := range q_ {
 		if qe.err.r != nil {

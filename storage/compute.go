@@ -17,6 +17,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 package storage
 
 import "runtime/debug"
+import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer) {
@@ -30,22 +31,24 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 				shardlist = t.PShards
 			}
 			for i, s := range shardlist {
-				go func(i int, s *storageShard) {
-					defer func () {
-						if r := recover(); r != nil {
-							//fmt.Println("panic during compute:", r, string(debug.Stack()))
-							done <- scanError{r, string(debug.Stack())}
+				gls.Go(func(i int, s *storageShard) func () {
+					return func() {
+						defer func () {
+							if r := recover(); r != nil {
+								//fmt.Println("panic during compute:", r, string(debug.Stack()))
+								done <- scanError{r, string(debug.Stack())}
+							}
+						}()
+						for !s.ComputeColumn(name, inputCols, computor) {
+							// couldn't compute column because delta is still active
+							t.mu.Lock()
+							s = s.rebuild(false)
+							shardlist[i] = s
+							t.mu.Unlock()
 						}
-					}()
-					for !s.ComputeColumn(name, inputCols, computor) {
-						// couldn't compute column because delta is still active
-						t.mu.Lock()
-						s = s.rebuild(false)
-						shardlist[i] = s
-						t.mu.Unlock()
+						done <- nil
 					}
-					done <- nil
-				}(i, s)
+				}(i, s))
 			}
 			for range shardlist {
 				err := <- done // collect finish signal before return
