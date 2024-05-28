@@ -44,12 +44,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 (define sql_identifier (parser (define x (or sql_identifier_unquoted sql_identifier_quoted)) x))
 
 (define sql_column (parser (or
-	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl col true true))
-	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl col true false))
-	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl col false true))
-	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl col false false))
-	(parser (define col sql_identifier_quoted) '((quote get_column) nil col true false))
-	(parser (define col sql_identifier_unquoted) '((quote get_column) nil col true true))
+	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl true col true))
+	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl true col false))
+	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl false col true))
+	(parser '((define tbl sql_identifier_quoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl false col false))
+	(parser (define col sql_identifier_quoted) '((quote get_column) nil true col false))
+	(parser (define col sql_identifier_unquoted) '((quote get_column) nil true col true))
 )))
 
 (define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
@@ -65,8 +65,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	/* derive the description of a column from its expression */
 	(define extract_title (lambda (expr) (match expr
-		'((symbol get_column) nil col _ _) col
-		'((symbol get_column) tblvar col _ _) (concat tblvar "." col)
+		'((symbol get_column) nil _ col _) col
+		'((symbol get_column) tblvar _ col _) (concat tblvar "." col)
 		(cons sym args) /* function call */ (concat (cons sym (map args extract_title)))
 		(concat expr)
 	)))
@@ -79,15 +79,15 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
 	(define replace_stupid (lambda (expr) (match expr
-		'('get_column "VALUES" col _ _) (symbol (concat "NEW." col))
-		'('get_column _ col _ _) (symbol col) /* TODO: case matching */
+		'('get_column "VALUES" _ col _) (symbol (concat "NEW." col))
+		'('get_column _ _ col _) (symbol col) /* TODO: case matching */
 		(cons head tail) (cons head (map tail replace_stupid))
 		expr
 	)))
 	/* helper function for triggers and ON DUPLICATE: extract all used columns */
 	(define extract_stupid (lambda (expr) (match expr
-		'('get_column "VALUES" col _ _) '((concat "NEW." col))
-		'('get_column _ col _ _) '(col)
+		'('get_column "VALUES" _ col _) '((concat "NEW." col))
+		'('get_column _ _ col _) '(col)
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
 	)))
@@ -166,8 +166,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
-		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" e true true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
-		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" e true false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 
 		(parser (atom "NULL" true) nil)
 		(parser (atom "TRUE" true) true)
@@ -211,9 +211,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define sql_select (parser '(
 		(atom "SELECT" true)
 		(define cols (+ (or
-			(parser "*" '("*" '((quote get_column) nil "*" false false)))
-			(parser '((define tbl sql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl "*" false false)))
-			(parser '((define tbl sql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl "*" true false)))
+			(parser "*" '("*" '((quote get_column) nil false "*" false)))
+			(parser '((define tbl sql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
+			(parser '((define tbl sql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_identifier)) '(title e))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_string)) '(title e))
 			(parser (define e sql_expression) '((extract_title e) e))
@@ -277,7 +277,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		))
 	) (begin
 		(define replace_find_column (lambda (expr) (match expr
-			'((symbol get_column) nil col _ ci) '((quote get_column) tbl col) /* TODO: case insensitive column */
+			'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 			expr
 		)))
@@ -311,7 +311,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		))
 	) (begin
 		(define replace_find_column (lambda (expr) (match expr
-			'((symbol get_column) nil col _ ci) '((quote get_column) tbl col false ci) /* TODO: case insensititive column */
+			'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 			expr
 		)))
