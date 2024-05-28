@@ -323,6 +323,13 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		last_i := 0
 		var last_shard *storageShard = nil
 		for i := 0; i < len(values); i++ {
+			for j, colidx := range translatable {
+				if colidx < len(values[i]) {
+					shardcols[j] = values[i][colidx]
+				} else {
+					shardcols[j] = nil
+				}
+			}
 			shard = t.PShards[computeShardIndex(dims, shardcols)]
 			if i > 0 && shard != last_shard {
 				checkUniqueForShard(last_shard, values[last_i:i]) // shard has changed: bulk insert all items that belong to this shard
@@ -425,6 +432,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
 			updatefn := t.scan(uniq.Cols, condition, onCollisionCols, func (args ...scm.Scmer) scm.Scmer {
+				t.uniquelock.Unlock()
 				for i, p := range onCollisionCols {
 					if len(p) >= 4 && p[:4] == "NEW." {
 						for j, c := range columns {
@@ -435,6 +443,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					}
 				}
 				failure(uniq.Id, args) // call collision function
+				t.uniquelock.Lock()
 				return true // feedback that there was a collision
 			}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil, false)
 			if updatefn != nil {
