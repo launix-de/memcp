@@ -138,6 +138,8 @@ if there is a group function, create a temporary preaggregate table
 		'(col (replace_find_column expr))
 	)))))
 
+  	/* TODO: order tables: outer joins behind */
+
 	/* set group to 1 if fields contain aggregates even if not */
 	(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
 
