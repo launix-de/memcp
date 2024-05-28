@@ -242,9 +242,8 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	result := 0
 	// TODO: check foreign keys (new value of column must be present in referenced table)
 
-	var shard *storageShard
 	if t.Shards != nil { // unpartitioned sharding
-		shard = t.Shards[len(t.Shards)-1]
+		shard := t.Shards[len(t.Shards)-1]
 		// load balance: if bucket is full, create new one; if bucket is busy (trylock), try another one
 		if shard.Count() >= Settings.ShardSize {
 			t.mu.Lock()
@@ -304,7 +303,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
 					// physically insert
-					shard.Insert(columns, values, true)
+					s.Insert(columns, values, true)
 					result += len(values)
 				}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
 					if onCollision != nil {
@@ -315,7 +314,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				}, 0)
 			} else {
 				// physically insert (parallel)
-				shard.Insert(columns, values, false)
+				s.Insert(columns, values, false)
 				result += len(values)
 			}
 		}
@@ -330,7 +329,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					shardcols[j] = nil
 				}
 			}
-			shard = t.PShards[computeShardIndex(dims, shardcols)]
+			shard := t.PShards[computeShardIndex(dims, shardcols)]
 			if i > 0 && shard != last_shard {
 				checkUniqueForShard(last_shard, values[last_i:i]) // shard has changed: bulk insert all items that belong to this shard
 				last_i = i
@@ -357,7 +356,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 	}
 	uniq := t.Unique[idx]
 	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
-	if t.Shards != nil && len(uniq.Cols) <= 3 {
+	if len(uniq.Cols) <= 3 {
 		// use hashmap
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))
@@ -368,12 +367,44 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				}
 			}
 		}
+
+		shardlist := t.Shards
+		allowPruning := false // if we can prune the shardlist
+		pruningMap := make([]int, len(uniq.Cols))
+		pruningVals := make([]scm.Scmer, len(uniq.Cols))
+		if shardlist == nil {
+			// partitioning
+			allowPruning = true
+			shardlist = t.PShards
+			for i, col := range uniq.Cols {
+				hasPruningCol := false
+				for j, dim := range t.PDimensions {
+					if dim.Column == col {
+						hasPruningCol = true // we found the uniq column in our partitioning schema
+						pruningMap[j] = i
+					}
+				}
+				if !hasPruningCol {
+					allowPruning = false // all unique columns must be present in the partitioning schema, otherwise a unique collision might hide in pruned shards
+				}
+			}
+		}
+		// TODO: only shard-local lock if allowPruning
+
 		last_j := 0
 		for j, row := range values {
 			for i, colidx := range keyIdx {
 				key[i] = row[colidx]
 			}
-			for _, s := range t.Shards {
+			shardlist2 := shardlist
+			if allowPruning {
+				for j, xidx := range pruningMap {
+					pruningVals[j] = row[keyIdx[xidx]]
+				}
+				// only one shard to visit for unique check
+				shardlist2 = []*storageShard{shardlist[computeShardIndex(t.PDimensions, pruningVals)]}
+			}
+			for _, s := range shardlist2 {
 				uid, present := s.GetRecordidForUnique(uniq.Cols, key)
 				if present && !s.deletions.Get(uid) {
 					// found a unique collision
@@ -427,7 +458,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if !mergeNull && value == nil {
 					conditionBody[i + 1] = false // NULL can be there multiple times
 				} else {
-					conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal?"), scm.NthLocalVar(i), value}
+					conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal??"), scm.NthLocalVar(i), value}
 				}
 			}
 			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
@@ -450,8 +481,8 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				// found a unique collision: flush the successing items and skip this one
 				if j != last_j {
 					t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx + 1) // flush
-					last_j = j+1
 				}
+				last_j = j+1
 			}
 		}
 		if len(values) != last_j {

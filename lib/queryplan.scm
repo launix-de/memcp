@@ -175,7 +175,7 @@ if there is a group function, create a temporary preaggregate table
 
 				(define replace_agg_with_fetch (lambda (expr) (match expr
 					(cons (symbol aggregate) rest) '('get_column grouptbl false (concat rest "|" condition) false) /* aggregate helper column */
-					'((symbol get_column) tblvar ti col ci) '('get_column grouptbl (concat '('get_column tblvar ti col ci)) ti ci) /* grouped col */
+					'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (concat '('get_column tblvar ti col ci)) ci) /* grouped col */
 					(cons sym args) /* function call */ (cons sym (map args replace_agg_with_fetch))
 					expr /* literals */
 				)))
