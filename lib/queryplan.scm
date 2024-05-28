@@ -146,6 +146,8 @@ if there is a group function, create a temporary preaggregate table
 	(if group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		(set group (map group replace_find_column))
+		(set having (replace_find_column having))
+		(set order (map order (lambda (o) (match o '(col dir) '((replace_find_column col) dir)))))
 		(define ags (merge_unique (extract_assoc fields (lambda (key expr) (extract_aggregates expr))))) /* aggregates in fields */
 		(define ags (merge_unique ags (merge_unique (map (coalesce order '()) (lambda (x) (match x '(col dir) (extract_aggregates col))))))) /* aggregates in order */
 		(define ags (merge_unique ags (extract_aggregates (coalesce having true)))) /* aggregates in having */
@@ -210,7 +212,7 @@ if there is a group function, create a temporary preaggregate table
 					))))) "compute phase")
 
 					/* build the queryplan for the ordered limited scan on the grouped table */
-					(build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch (replace_find_column having)) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch (replace_find_column col)) dir))))) limit offset)
+					(build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch having) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch col) dir))))) limit offset)
 				)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
