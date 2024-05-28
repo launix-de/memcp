@@ -82,6 +82,17 @@ type table struct {
 	// TODO: move rows from Shards to PShards according to PDimensions
 }
 
+func (t *table) Count() (result uint) {
+	shards := t.Shards
+	if shards == nil {
+		shards = t.PShards
+	}
+	for _, s := range shards {
+		result += s.Count()
+	}
+	return
+}
+
 /* Implement NonLockingReadMap */
 func (t table) GetKey() string {
 	return t.Name
@@ -159,22 +170,22 @@ func (c *column) Show() scm.Scmer {
 	return []scm.Scmer{"name", c.Name, "type", c.Typ, "dimensions", dims}
 }
 
-func (d dataset) Get(key string) scm.Scmer {
+func (d dataset) Get(key string) (scm.Scmer, bool) {
 	for i := 0; i < len(d); i += 2 {
 		if d[i] == key {
-			return d[i+1]
+			return d[i+1], true
 		}
 	}
-	return nil
+	return nil, false
 }
 
-func (d dataset) GetI(key string) scm.Scmer { // case insensitive
+func (d dataset) GetI(key string) (scm.Scmer, bool) { // case insensitive
 	for i := 0; i < len(d); i += 2 {
 		if strings.EqualFold(scm.String(d[i]), key) {
-			return d[i+1]
+			return d[i+1], true
 		}
 	}
-	return nil
+	return nil, false
 }
 
 func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo string) bool {

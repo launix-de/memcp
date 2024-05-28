@@ -115,13 +115,13 @@ func Init(en scm.Env) {
 					ds := dataset(val.([]scm.Scmer))
 					// filter
 					for i, col := range filtercols {
-						filterparams[i] = ds.GetI(col)
+						filterparams[i], _ = ds.GetI(col)
 					}
 					if scm.ToBool(filterfn(filterparams...)) {
 						hadValue = true
 						// map
 						for i, col := range mapcols {
-							mapparams[i] = ds.GetI(col)
+							mapparams[i], _ = ds.GetI(col)
 						}
 						// reduce
 						result = reducefn(result, mapfn(mapparams...))
@@ -230,7 +230,7 @@ func Init(en scm.Env) {
 					ds := dataset(val.([]scm.Scmer))
 					// filter
 					for i, col := range filtercols {
-						filterparams[i] = ds.GetI(col)
+						filterparams[i], _ = ds.GetI(col)
 					}
 					if scm.ToBool(filterfn(filterparams...)) {
 						list2 = append(list2, val)
@@ -242,14 +242,16 @@ func Init(en scm.Env) {
 					if colname, ok := scol.(string); ok {
 						// naive column sort
 						scols[i] = func (i uint) scm.Scmer {
-							return dataset(list2[i].([]scm.Scmer)).GetI(colname)
+							v, _ := dataset(list2[i].([]scm.Scmer)).GetI(colname)
+							return v
 						}
 					} else if proc, ok := scol.(scm.Proc); ok {
 						// complex lambda columns (TODO: either remove lambda columns or add colname mapping)
 						largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer))) // allocate only once, reuse in loop
 						for j, param := range proc.Params.([]scm.Scmer) {
 							largs[j] = func (i uint) scm.Scmer {
-								return dataset(list2[i].([]scm.Scmer)).GetI(string(param.(scm.Symbol)))
+								v, _ := dataset(list2[i].([]scm.Scmer)).GetI(string(param.(scm.Symbol)))
+								return v
 							}
 						}
 						procFn := scm.OptimizeProcToSerialFunction(proc)
@@ -286,7 +288,7 @@ func Init(en scm.Env) {
 					hadValue = true
 					// map
 					for i, col := range mapcols {
-						mapparams[i] = ds.GetI(col)
+						mapparams[i], _ = ds.GetI(col)
 					}
 					// reduce
 					result = reducefn(result, mapfn(mapparams...))
@@ -505,12 +507,12 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"shardcolumn", "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
-		4, 4,
+		3, 4,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
 			scm.DeclarationParameter{"colname", "string", "name of the column"},
-			scm.DeclarationParameter{"numpartitions", "number", "number of partitions"},
+			scm.DeclarationParameter{"numpartitions", "number", "number of partitions; optional. leave 0 if you want to detect the partiton number automatically or copy the partition schema of the table"},
 		}, "list",
 		func (a ...scm.Scmer) scm.Scmer {
 			// get tbl
@@ -522,7 +524,67 @@ func Init(en scm.Env) {
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
-			return t.NewShardDimension(scm.String(a[2]), scm.ToInt(a[3])).Pivots
+			numPartitions := 0
+			if len(a) > 3 {
+				numPartitions = scm.ToInt(a[3])
+			}
+			if numPartitions == 0 {
+				// check if that paritition dimension already exists
+				if t.Shards == nil && t.PShards != nil {
+					for _, sd := range t.PDimensions {
+						if sd.Column == scm.String(a[2]) {
+							return sd.Pivots // found the column in partition schema: return exactly the same pivots as we found already
+						}
+					}
+				}
+				// otherwise: no partition schema yet: find out the best number of partitions
+				// normally, we put ~60,000 items per shard, but to parallelize grouping, we should do less?
+				numPartitions = int(1 + ((2 * t.Count()) / Settings.ShardSize))
+			}
+			// calculate them anew
+			return t.NewShardDimension(scm.String(a[2]), numPartitions).Pivots
+			
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"partitiontable", "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"table", "string", "name of the new table"},
+			scm.DeclarationParameter{"columns", "list", "associative list of string -> list representing column name -> pivots. You can compute pivots by (shardcolumn ...)"},
+		}, "bool",
+		func (a ...scm.Scmer) scm.Scmer {
+			// get tbl
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+			cols := dataset(a[2].([]scm.Scmer))
+			if t.PDimensions == nil {
+				// apply partitioning schema
+				ps := make([]shardDimension, len(cols) / 2)
+				for i := 0; i < len(ps); i++ {
+					ps[i].Column = scm.String(cols[2*i])
+					ps[i].Pivots = cols[2*i+1].([]scm.Scmer)
+					ps[i].NumPartitions = len(ps[i].Pivots) + 1
+				}
+				t.repartition(ps) // perform repartitioning immediately
+				return true
+			} else {
+				// increase partitioning scores
+				for i, c := range t.Columns {
+					if pivots, ok := cols.Get(c.Name); ok {
+						// that column is in the parititoning schema -> increase score
+						t.Columns[i].PartitioningScore = c.PartitioningScore + len(pivots.([]scm.Scmer))
+					}
+				}
+				return false
+			}
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
