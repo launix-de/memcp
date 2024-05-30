@@ -141,7 +141,15 @@ func getWatch(path string) func (a ...scm.Scmer) scm.Scmer {
 					}
 					to_reread:
 					// now reread the file
-					reread()
+					func () {
+						defer func() {
+							if err := recover(); err != nil {
+								// error happens during reload: log to console
+								fmt.Println(err)
+							}
+						}()
+						reread()
+					}()
 					watcher.Add(filename) // text editors rename, so we have to rewatch
 				}
 			}
