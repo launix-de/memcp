@@ -43,6 +43,7 @@ type storageShard struct {
 	deletions NonLockingReadMap.NonBlockingBitMap // items removed from main or inserts (based on main_count + i)
 	logfile *os.File // only in safe mode
 	mu sync.RWMutex // delta write lock (working on main storage is lock free)
+	uniquelock sync.Mutex // unique insert lock (only used in the sharded case)
 	next *storageShard // TODO: also make a next-partition-schema
 	// indexes
 	Indexes []*StorageIndex // sorted keys

@@ -351,9 +351,6 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		success(values) // we finally made it, these values have passed all unique checks
 		return
 	}
-	if idx == 0 {
-		t.uniquelock.Lock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
-	}
 	uniq := t.Unique[idx]
 	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
 	if len(uniq.Cols) <= 3 {
@@ -391,6 +388,12 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		}
 		// TODO: only shard-local lock if allowPruning
 
+		var lock *sync.Mutex
+		lock = &t.uniquelock
+		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
+			lock.Lock()
+		}
+
 		last_j := 0
 		for j, row := range values {
 			for i, colidx := range keyIdx {
@@ -403,6 +406,10 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				}
 				// only one shard to visit for unique check
 				shardlist2 = []*storageShard{shardlist[computeShardIndex(t.PDimensions, pruningVals)]}
+				if len(t.Unique) == 1 {
+					lock = &shardlist2[0].uniquelock
+					lock.Lock()
+				}
 			}
 			for _, s := range shardlist2 {
 				uid, present := s.GetRecordidForUnique(uniq.Cols, key)
@@ -412,7 +419,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx + 1) // flush
 					}
 					last_j = j+1
-					t.uniquelock.Unlock()
+					lock.Unlock()
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {
 						if p == "$update" {
@@ -428,16 +435,27 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 						}
 					}
 					failure(uniq.Id, params) // notify about failure
-					t.uniquelock.Lock()
+					lock.Lock()
 					goto nextrow
 				}
 			}
 			nextrow:
+			if allowPruning {
+				if len(t.Unique) == 1 {
+					lock.Unlock()
+				}
+			}
 		}
 		if len(values) != last_j {
 			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx + 1) // flush the rest
 		}
+		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
+			lock.Unlock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
+		}
 	} else {
+		if idx == 0 {
+			t.uniquelock.Unlock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
+		}
 		// build scan for unique check
 		cols := make([]scm.Scmer, len(uniq.Cols))
 		colidx := make([]int, len(uniq.Cols))
@@ -488,8 +506,8 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		if len(values) != last_j {
 			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx + 1) // flush the rest
 		}
-	}
-	if idx == 0 {
-		t.uniquelock.Unlock()
+		if idx == 0 {
+			t.uniquelock.Unlock()
+		}
 	}
 }
