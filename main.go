@@ -37,6 +37,7 @@ import "crypto/rand"
 import "path/filepath"
 import "runtime/pprof"
 import "github.com/google/uuid"
+import "github.com/fsnotify/fsnotify"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage"
 
@@ -53,6 +54,7 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 					"__FILE__": filename,
 					"import": getImport(wd),
 					"load": getLoad(wd),
+					"watch": getWatch(wd),
 				},
 				nil,
 				&IOEnv,
@@ -102,8 +104,54 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 					return string(bytes)
 				}
 			}
-			return "ok"
+			return true
 		}
+}
+
+func getWatch(path string) func (a ...scm.Scmer) scm.Scmer {
+	return func (a ...scm.Scmer) scm.Scmer {
+		filename := path + "/" + scm.String(a[0])
+		reread := func () {
+			// read in whole
+			bytes, err := ioutil.ReadFile(filename)
+			if err != nil {
+				panic(err)
+			}
+			scm.Apply(a[1], string(bytes))
+		}
+		reread() // read once at the beginning in sync
+		// watch for changes
+		watcher, err := fsnotify.NewWatcher()
+		if err != nil {
+			panic(err)
+		}
+		go func() {
+			for {
+				select {
+				case /*event :=*/ <- watcher.Events:
+					// flush all other events
+					for {
+						time.Sleep(10 * time.Millisecond) // delay a bit, so we don't read empty files
+						select {
+						case <- watcher.Events:
+							// ignore
+						default:
+							goto to_reread
+						}
+					}
+					to_reread:
+					// now reread the file
+					reread()
+					watcher.Add(filename) // text editors rename, so we have to rewatch
+				}
+			}
+		}()
+		err = watcher.Add(filename)
+		if err != nil {
+			panic(err)
+		}
+		return true
+	}
 }
 
 // workaround for flags package to allow multiple values
@@ -171,8 +219,17 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
 			scm.DeclarationParameter{"linehandler", "func", "handler that reads each line"},
 			scm.DeclarationParameter{"delimiter", "string", "delimiter to extract"},
-		}, "string",
+		}, "bool",
 		(func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"watch", "Loads a file and calls the callback. Whenever the file changes on disk, the file is load again.",
+		2, 2,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
+			scm.DeclarationParameter{"updatehandler", "func", "handler that receives the file content func(content)"},
+		}, "bool",
+		(func(...scm.Scmer) scm.Scmer)(getWatch(wd)),
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"serve", "Opens a HTTP server at a given port",
