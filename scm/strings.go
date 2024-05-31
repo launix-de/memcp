@@ -21,6 +21,7 @@ import "html"
 import "bytes"
 import "strings"
 import "net/url"
+import "encoding/json"
 
 type LazyString struct {
 	Hash string
@@ -242,6 +243,84 @@ func init_strings() {
 			} else {
 				panic("error while decoding URL: " + fmt.Sprint(err))
 			}
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"json_encode", "encodes a value in JSON, treats lists as lists",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value to encode"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			b, err := json.Marshal(a[0])
+			if err != nil {
+				panic(err)
+			}
+			return string(b)
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"json_encode_assoc", "encodes a value in JSON, treats lists as associative arrays",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value to encode"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			var transform func(Scmer) Scmer
+			transform = func(a_ Scmer) Scmer {
+				switch a := a_.(type) {
+					case []Scmer:
+						result := make(map[string]Scmer)
+						for i := 0; i < len(a)-1; i += 2 {
+							result[String(a[i])] = transform(a[i+1])
+						}
+						return result
+					default:
+						return a_
+				}
+			}
+			b, err := json.Marshal(transform(a[0]))
+			if err != nil {
+				panic(err)
+			}
+			return string(b)
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"json_decode", "decodes a string according to URI coding schema",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string to decode"},
+		}, "any",
+		func (a ...Scmer) Scmer {
+			var result any
+			err := json.Unmarshal([]byte(String(a[0])), &result)
+			if err != nil {
+				panic(err)
+			}
+			var transform func(any) Scmer
+			transform = func(a_ any) Scmer {
+				switch a := a_.(type) {
+					case map[string]any:
+						result := make([]Scmer, 2 * len(a))
+						i := 0
+						for k, v := range a {
+							result[i] = k
+							result[i+1] = transform(v)
+							i += 2
+						}
+						return result
+					case []any:
+						result := make([]Scmer, len(a))
+						for i, v := range a {
+							result[i] = transform(v)
+						}
+						return result
+					default:
+						return Scmer(a_)
+				}
+			}
+			return transform(result)
 		},
 	})
 
