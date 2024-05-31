@@ -20,12 +20,17 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (print "")
 (import "test.scm")
 
+(set static_files (serveStatic "../assets"))
+
 /* this can be overhooked */
 (define http_handler (lambda (req res) (begin
 	(print "request " req)
+	(static_files req res)
+	/*
 	((res "header") "Content-Type" "text/plain")
 	((res "status") 404)
 	((res "println") "404 not found")
+	*/
 )))
 
 (import "sql.scm")

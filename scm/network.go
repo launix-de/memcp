@@ -19,6 +19,7 @@ package scm
 import "io"
 import "fmt"
 import "time"
+import "mime"
 import "sync"
 import "strings"
 import "strconv"
@@ -44,6 +45,21 @@ func HTTPServe(a ...Scmer) Scmer {
 	// TODO: ListenAndServeTLS
 	return true
 }
+
+// build this function into your file-local SCM environment to serve static files
+func HTTPStaticGetter(wd string) func (...Scmer) Scmer {
+	mime.AddExtensionType(".js", "application/javascript")
+	mime.AddExtensionType(".html", "text/html")
+	return func (a ...Scmer) Scmer {
+		fs := http.FileServer(http.Dir(wd + "/" + String(a[0])))
+		return func (a ...Scmer) Scmer { // req res
+			fs.ServeHTTP(a[1].([]Scmer)[1].(http.ResponseWriter), a[0].([]Scmer)[1].(*http.Request))
+			return nil
+		}
+	}
+}
+
+// TODO: implement NewServeMux.Handle(route, http.StripPrefix(pfx, handler))
 
 // HTTP handler with a scheme script underneath
 type HttpServer struct {
@@ -79,6 +95,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}
 	}
 	req_scm := []Scmer {
+		"req", req, // must be first item to be found by us
 		"method", req.Method,
 		"host", req.Host,
 		"path", req.URL.Path,
@@ -103,6 +120,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 	var res_lock sync.Mutex
 	res_scm := []Scmer {
+		"res", res,
 		"header", func (a ...Scmer) Scmer {
 			res_lock.Lock()
 			res.Header().Set(String(a[0]), String(a[1]))

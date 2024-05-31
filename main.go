@@ -55,6 +55,7 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 					"import": getImport(wd),
 					"load": getLoad(wd),
 					"watch": getWatch(wd),
+					"serveStatic": scm.HTTPStaticGetter(wd),
 				},
 				nil,
 				&IOEnv,
@@ -247,6 +248,14 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"handler", "func", "handler: lambda(req res) that handles the http request (TODO: detailed documentation)"},
 		}, "bool",
 		scm.HTTPServe,
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"serveStatic", "creates a static handler for use as a callback in (serve) - returns a handler lambda(req res)",
+		1, 1,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"directory", "string", "folder with the files to serve"},
+		}, "func",
+		(func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)),
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"mysql", "Imports a file .scm file into current namespace",
