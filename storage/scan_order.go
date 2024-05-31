@@ -96,6 +96,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	lower, upperLast := indexFromBoundaries(boundaries)
 	// TODO: append sortcols to boundaries
 
 	// TODO: sortcols that are not just simple columns but complex lambda expressions could be temporarily materialized to trade memory for execution time
@@ -129,7 +130,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 					q_ <- &shardqueue{s, nil, scanError{r, string(debug.Stack())}, nil, nil, nil}
 				}
 			}()
-			q_ <- s.scan_order(boundaries, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
+			q_ <- s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
 		})
 		close(q_)
 	})
@@ -195,7 +196,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	return akkumulator
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, limit int, callbackCols []string) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, limit int, callbackCols []string) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 
@@ -262,7 +263,7 @@ func (t *storageShard) scan_order(boundaries boundaries, conditionCols []string,
 		maxInsertIndex = len(t.inserts)
 
 		// iterate over items (indexed)
-		t.iterateIndex(boundaries, maxInsertIndex, func(idx uint) { // TODO: iterateIndexSorted
+		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint) { // TODO: iterateIndexSorted
 			if t.deletions.Get(idx) {
 				return // item is on delete list
 			}

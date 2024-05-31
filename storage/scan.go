@@ -44,6 +44,7 @@ type emptyResult struct {}
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	lower, upperLast := indexFromBoundaries(boundaries)
 	// give sharding hints
 	for _, b := range boundaries {
 		t.AddPartitioningScore([]string{b.col})
@@ -59,7 +60,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 					values <- scanError{r, string(debug.Stack())}
 				}
 			}()
-			values <- s.scan(boundaries, conditionCols, condition, callbackCols, callback, aggregate, neutral)
+			values <- s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral)
 		})
 		close(values) // last scan is finished
 	})
@@ -124,7 +125,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	}
 }
 
-func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
+func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) scm.Scmer {
 	akkumulator := neutral
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
@@ -166,7 +167,7 @@ func (t *storageShard) scan(boundaries boundaries, conditionCols []string, condi
 
 	// iterate over items (indexed)
 	hadValue := false
-	t.iterateIndex(boundaries, maxInsertIndex, func (idx uint) {
+	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func (idx uint) {
 		if t.deletions.Get(idx) {
 			return // item is on delete list
 		}

@@ -152,3 +152,25 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	return cols
 }
 
+func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
+	if len(cols) > 0 {
+		//fmt.Println("conditions:", cols)
+		// build up lower and upper bounds of index
+		for {
+			if len(cols) >= 2 && cols[len(cols)-2].lower != cols[len(cols)-2].upper {
+				// remove last col -> we cant have two ranged cols
+				cols = cols[:len(cols)-1]
+			} else {
+				break // finished -> pure index
+			}
+		}
+		// find out boundaries
+		lower = make([]scm.Scmer, len(cols))
+		for i, v := range cols {
+			lower[i] = v.lower
+		}
+		upperLast = cols[len(cols)-1].upper
+		//fmt.Println(cols, lower, upperLast) // debug output if we found the right boundaries
+	}
+	return
+}

@@ -94,37 +94,19 @@ type StorageIndex struct {
 */
 
 // iterates over items
-func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int, callback func(uint)) {
+func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint)) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
 	// check if we found conditions
-	if len(cols) > 0 {
-		//fmt.Println("conditions:", cols)
-		// build up lower and upper bounds of index
-		for {
-			if len(cols) >= 2 && cols[len(cols)-2].lower != cols[len(cols)-2].upper {
-				// remove last col -> we cant have two ranged cols
-				cols = cols[:len(cols)-1]
-			} else {
-				break // finished -> pure index
-			}
-		}
-		// find out boundaries
-		lower := make([]scm.Scmer, len(cols))
-		for i, v := range cols {
-			lower[i] = v.lower
-		}
-		upperLast := cols[len(cols)-1].upper
-		//fmt.Println(cols, lower, upperLast) // debug output if we found the right boundaries
-
+	if len(lower) > 0 {
 		// find an index that has at least the columns in that order we're searching for
 		// if the index is inactive, use the other one
 		retry_indexscan:
 		old_indexes := t.Indexes
 		for _, index := range old_indexes {
 			// naive index search algo; TODO: improve
-			if len(index.Cols) >= len(cols) {
-				for i := 0; i < len(cols); i++ {
+			if len(index.Cols) >= len(lower) {
+				for i := 0; i < len(lower); i++ {
 					if cols[i].col != index.Cols[i] {
 						continue // this index does not fit
 					}
@@ -142,9 +124,9 @@ func (t *storageShard) iterateIndex(cols boundaries, maxInsertIndex int, callbac
 			goto retry_indexscan // someone has added a index in the meantime: recheck
 		}
 		index := new(StorageIndex)
-		index.Cols = make([]string, len(cols))
-		for i, c := range cols {
-			index.Cols[i] = c.col
+		index.Cols = make([]string, len(lower))
+		for i := range lower {
+			index.Cols[i] = cols[i].col
 		}
 		index.Savings = 0.0 // count how many cost we wasted so we decide when to build the index
 		index.active = false // tell the engine that index has to be built first
