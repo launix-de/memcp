@@ -174,6 +174,11 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 								for i := 1; i < len(sub); i++ {
 									visitNode(sub[i], depth+1, blacklist)
 								}
+							} else if sub[0] != Symbol("eval") {
+								usedVariables[Symbol("eval")] = 1 // environments around eval must be preserved
+								for i := 2; i < len(sub); i++ {
+									visitNode(sub[i], depth, blacklist)
+								}
 							} else {
 								for i := 1; i < len(sub); i++ {
 									visitNode(sub[i], depth, blacklist)
@@ -213,7 +218,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 							ome2.variableReplacement[sym] = content
 						}
 					}
-					if len(usedVariables) == 0 && false { // TODO: this feature is deactivated because of bugs. See overloading of request handler
+					if len(usedVariables) == 0 { // TODO: this feature is deactivated because of bugs. See overloading of request handler
 						v[0] = Symbol("!begin") // make them env-free
 						for sym, content := range ome2.variableReplacement {
 							if ar, ok := content.([]Scmer); ok {
