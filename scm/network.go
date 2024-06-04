@@ -26,7 +26,6 @@ import "strconv"
 import "net/http"
 import "runtime/debug"
 import "encoding/json"
-import "encoding/base64"
 import "github.com/gorilla/websocket"
 
 // build this function into your SCM environment to offer http server capabilities
@@ -75,24 +74,17 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}
 	}
 	header_scm := make([]Scmer, 0)
-	basic_auth := []string{}
 	for k, v := range req.Header {
 		for _, v2 := range v {
 			header_scm = append(header_scm, k, v2)
-			if k == "Authorization" && strings.HasPrefix(v2, "Basic ") {
-				// Basic auth parsing
-				b, _ := base64.StdEncoding.DecodeString(v2[6:])
-				basic_auth = strings.SplitN(string(b), ":", 2)
-			}
 		}
 	}
-	// helper
-	pwtostring := func (s string, isset bool) Scmer {
-		if isset {
-			return s
-		} else {
-			return nil
-		}
+	// read user/pass from basicauth
+	user, pass, upok := req.BasicAuth()
+	if !upok {
+		// if no basicauth is provided, read from URL
+		user = req.URL.User.Username()
+		pass, upok = req.URL.User.Password()
 	}
 	req_scm := []Scmer {
 		"req", req, // must be first item to be found by us
@@ -101,8 +93,8 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		"path", req.URL.Path,
 		"query", query_scm,
 		"header", header_scm,
-		/* 10: */ "username", req.URL.User.Username(),
-		/* 12: */ "password", pwtostring(req.URL.User.Password()),
+		"username", user,
+		"password", pass,
 		"ip", req.RemoteAddr,
 		"body", func(a ...Scmer) Scmer {
 			// read body into string (TODO: also offer other methods like reading POST fields or upload files)
@@ -112,11 +104,6 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			req.Body.Close()
 			return b.String()
 		},
-	}
-	if len(basic_auth) == 2 {
-		// set username/password from Basic auth string
-		req_scm[11] = basic_auth[0]
-		req_scm[13] = basic_auth[1]
 	}
 	var res_lock sync.Mutex
 	res_scm := []Scmer {
