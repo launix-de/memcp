@@ -64,7 +64,6 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 
 func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer) bool {
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
-		s.mu.Unlock()
 		return false // can't compute in shards with delta storage
 	}
 
