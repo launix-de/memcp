@@ -153,8 +153,6 @@ func (db *database) rebuild(all bool, repartition bool) {
 			for i, s := range shardlist {
 				maincount += s.main_count + uint(len(s.inserts)) // estimate size of that table
 				go func(shardlist []*storageShard, i int, s *storageShard) {
-					// reshuffle numa awareness, so memory can reorganize during rebuild
-					s.RunOn()
 					shardlist[i] = s.rebuild(all)
 					sdone.Done()
 				}(shardlist, i, s)

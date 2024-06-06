@@ -253,7 +253,6 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				go func(i int) {
 					// rebuild full shards in background
 					s := t.Shards[i]
-					s.RunOn()
 					t.Shards[i] = s.rebuild(false)
 					// write new uuids to disk
 					t.schema.save()

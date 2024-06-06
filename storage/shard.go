@@ -26,7 +26,6 @@ import "runtime"
 import "crypto/sha256"
 import "encoding/json"
 import "encoding/binary"
-import "github.com/lrita/numa"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
@@ -51,14 +50,6 @@ type storageShard struct {
 	hashmaps1 map[[1]string]map[[1]scm.Scmer]uint // hashmaps for single columned unique keys
 	hashmaps2 map[[2]string]map[[2]scm.Scmer]uint // hashmaps for single columned unique keys
 	hashmaps3 map[[3]string]map[[3]scm.Scmer]uint // hashmaps for single columned unique keys
-
-	// numa awareness
-	node int
-}
-
-/// call this function inside go routines that iterate over shards
-func (s *storageShard) RunOn() {
-	numa.RunOnNode(s.node)
 }
 
 func (s *storageShard) Size() uint {
@@ -96,7 +87,6 @@ func ProcessColumnName(col string) string {
 	}
 }
 func (u *storageShard) load(t *table) {
-	_, u.node = numa.GetCPUAndNode()
 	u.t = t
 	// load the columns
 	for _, col := range u.t.Columns {
@@ -164,7 +154,6 @@ func (u *storageShard) load(t *table) {
 func NewShard(t *table) *storageShard {
 	result := new(storageShard)
 	result.uuid, _ = uuid.NewRandom()
-	_, result.node = numa.GetCPUAndNode()
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
 	result.deltaColumns = make(map[string]int)
@@ -691,7 +680,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			t.logfile = nil
 			os.Remove(t.t.schema.path + t.uuid.String() + ".log")
 		}
-		_, result.node = numa.GetCPUAndNode()
 	} else {
 		// otherwise: table stays the same
 		result.uuid = t.uuid // copy uuid in case nothing changes
@@ -704,7 +692,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.hashmaps1 = t.hashmaps1
 		result.hashmaps2 = t.hashmaps2
 		result.hashmaps3 = t.hashmaps3
-		result.node = t.node // keep on NUMA node
 	}
 	return result
 }

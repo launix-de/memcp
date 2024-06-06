@@ -63,7 +63,6 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback func(*stor
 						fmt.Println("Warning: a shard is missing")
 						return
 					}
-					s.RunOn()
 					callback(s)
 					done.Done()
 				}
@@ -80,7 +79,6 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 	if len(schema) == 0 {
 		if len(shards) == 1 && !parallel {
 			// execute without go
-			shards[0].RunOn()
 			callback(shards[0])
 		} else {
 			done.Add(len(shards))
@@ -92,7 +90,6 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 							fmt.Println("Warning: a shard is missing")
 							return
 						}
-						s.RunOn()
 						callback(s)
 						done.Done()
 					}
@@ -328,7 +325,6 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	datasetids := make([][][]uint, totalShards) // newshard, oldshard, item
 	total_count := uint64(0)
 	for si, s := range oldshards {
-		//s.RunOn()
 		s.mu.RLock()
 		total_count += uint64(s.Count())
 		for idx, items := range s.partition(shardCandidates) {
