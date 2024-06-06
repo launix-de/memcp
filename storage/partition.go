@@ -254,7 +254,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	sf := 0.01 // scale factor
 	best := 100000000
 	bestSf := sf
-	desiredNumberOfShards := (2 * maincount) / Settings.ShardSize + 1 // TODO: find a balancing mechanism
+	desiredNumberOfShards := maincount / Settings.ShardSize + 1 // TODO: find a balancing mechanism
 	for iter := 2; iter < 300; iter++ { // find perfect scale factor such that we get the best number of shards
 		deviation := 1
 		for _, sc := range shardCandidates {
