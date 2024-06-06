@@ -70,6 +70,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	fn := scm.OptimizeProcToSerialFunction(computor)
 
 	cols := make([]ColumnStorage, len(inputCols))
+	s.mu.Lock()
 	for i, col := range inputCols {
 		var ok bool
 		cols[i], ok = s.columns[col]
@@ -77,6 +78,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 			panic("column "+s.t.Name+"."+col+" does not exist")
 		}
 	}
+	s.mu.Unlock()
 	colvalues := make([]scm.Scmer, len(cols))
 
 	vals := make([]scm.Scmer, s.main_count) // build the stretchy value array
