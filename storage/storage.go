@@ -573,6 +573,9 @@ func Init(en scm.Env) {
 					ps[i].Pivots = cols[2*i+1].([]scm.Scmer)
 					ps[i].NumPartitions = len(ps[i].Pivots) + 1
 				}
+				if len(ps) > Settings.PartitionMaxDimensions {
+					ps = ps[:Settings.PartitionMaxDimensions]
+				}
 				t.repartition(ps) // perform repartitioning immediately
 				return true
 			} else {
