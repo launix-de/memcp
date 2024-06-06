@@ -168,7 +168,7 @@ if there is a group function, create a temporary preaggregate table
 				) '("engine" "sloppy") true)
 
 				/* prepare a fitting repartitioning for that table from the beginning: copy parititioning schema from the source tbl */
-				(partitiontable schema grouptbl (merge (map group (lambda (col) (match col '('get_column (eval tblvar) false col false) '((concat col) (shardcolumn schema tbl col)) '())))))
+				(partitiontable schema grouptbl (merge (map group (lambda (col) (match col '('get_column (eval tblvar) false scol false) '((concat col) (shardcolumn schema tbl scol)) '())))))
 
 				/* preparation */
 				(define tblvar_cols (merge_unique (map group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
