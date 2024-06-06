@@ -63,7 +63,6 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 }
 
 func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer) bool {
-	s.mu.Lock() // don't defer because we unlock inbetween
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		s.mu.Unlock()
 		return false // can't compute in shards with delta storage
@@ -86,11 +85,10 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		for j, col := range cols {
 			colvalues[j] = col.GetValue(i) // read values from main storage into lambda params
 		}
-		s.mu.Unlock()
 		vals[i] = fn(colvalues...) // execute computor kernel
-		s.mu.Lock()
 	}
 
+	s.mu.Lock() // don't defer because we unlock inbetween
 	store := new(StorageSCMER)
 	store.values = vals
 	s.columns[name] = store
