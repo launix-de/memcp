@@ -268,7 +268,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		if len(t.Unique) > 0 {
 			t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
 				// physically insert
-				shard.Insert(columns, values, true)
+				shard.Insert(columns, values, false)
 				result += len(values)
 			}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
 				if onCollision != nil {
@@ -302,7 +302,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
 					// physically insert
-					s.Insert(columns, values, true)
+					s.Insert(columns, values, false)
 					result += len(values)
 				}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
 					if onCollision != nil {
