@@ -281,6 +281,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 			expr
 		)))
+		replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
 		(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
 		(set condition (replace_find_column (coalesce condition true)))
 		(set filtercols (extract_columns_for_tblvar tbl condition))
@@ -291,7 +292,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(cons list filtercols)
 			'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
 			(cons list (cons "$update" scancols))
-			'((quote lambda)
+			'('lambda
 				(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
 				'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
 			)
@@ -315,6 +316,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 			expr
 		)))
+		replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
 		(set condition (replace_find_column (coalesce condition true)))
 		(set filtercols (extract_columns_for_tblvar tbl condition))
 		'((quote scan)
