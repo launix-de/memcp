@@ -393,4 +393,5 @@ func exitroutine() {
 	fmt.Println("finalizing memory...")
 	runtime.GC() // this will call the finalizers on shards
 	fmt.Println("Exit procedure finished")
+	os.Exit(0)
 }

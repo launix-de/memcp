@@ -16,20 +16,24 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package storage
 
+import "github.com/dc0d/onexit"
 import "github.com/launix-de/memcp/scm"
 
 type SettingsT struct {
 	Backtrace bool
+	Trace bool
 	PartitionMaxDimensions int
 	DefaultEngine string
 	ShardSize uint
 }
 
-var Settings SettingsT = SettingsT{false, 10, "safe", 60000}
+var Settings SettingsT = SettingsT{false, false, 10, "safe", 60000}
 
 // call this after you filled Settings
 func InitSettings() {
 	scm.SettingsHaveGoodBacktraces = Settings.Backtrace
+	scm.SetTrace(Settings.Trace)
+	onexit.Register(func() { scm.SetTrace(false) }) // close trace file on exit
 }
 
 func ChangeSettings(a ...scm.Scmer) scm.Scmer {
@@ -37,6 +41,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 	if len(a) == 1 {
 		switch scm.String(a[0]) {
 			case "Backtrace":
+				return Settings.Backtrace
+			case "Trace":
 				return Settings.Backtrace
 			case "PartitionMaxDimensions":
 				return float64(Settings.PartitionMaxDimensions)
@@ -52,6 +58,9 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			case "Backtrace":
 				scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 				Settings.Backtrace = scm.ToBool(a[1])
+			case "Trace":
+				Settings.Trace = scm.ToBool(a[1])
+				scm.SetTrace(Settings.Trace)
 			case "PartitionMaxDimensions":
 				Settings.PartitionMaxDimensions = scm.ToInt(a[1])
 			case "DefaultEngine":

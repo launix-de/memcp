@@ -4,6 +4,7 @@ go 1.21
 
 require (
 	github.com/chzyer/readline v1.5.1
+	github.com/dc0d/onexit v1.1.0
 	github.com/docker/go-units v0.5.0
 	github.com/fsnotify/fsnotify v1.4.9
 	github.com/google/btree v1.1.2
