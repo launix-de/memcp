@@ -190,7 +190,7 @@ if there is a group function, create a temporary preaggregate table
 						/* the optimizer will optimize and group this */
 						'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) '(list) '('lambda '() true) true)))
 						(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
-					) "collect phase")
+					) "collect")
 
 					/* compute aggregates */
 					'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
@@ -209,7 +209,7 @@ if there is a group function, create a temporary preaggregate table
 								isOuter
 							)
 						))
-					))))) "compute phase")
+					))))) "compute")
 
 					/* build the queryplan for the ordered limited scan on the grouped table */
 					(build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch having) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch col) dir))))) limit offset)

@@ -50,7 +50,16 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
 }
 
-func (t *table) iterateShards(boundaries []columnboundaries, callback func(*storageShard)) {
+func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*storageShard)) {
+	callback := callback_old
+	if scm.Trace != nil {
+		// hook on tracing
+		callback = func(s *storageShard) {
+			scm.Trace.Duration(fmt.Sprintf("%p", s), "shard", func () {
+				callback_old(s)
+			})
+		}
+	}
 	shards := t.Shards
 	var done sync.WaitGroup
 	if shards != nil {
