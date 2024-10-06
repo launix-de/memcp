@@ -228,7 +228,7 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
 			scm.DeclarationParameter{"linehandler", "func", "handler that reads each line"},
 			scm.DeclarationParameter{"delimiter", "string", "delimiter to extract"},
-		}, "bool",
+		}, "string|bool",
 		(func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
