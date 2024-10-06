@@ -354,10 +354,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 		) updaterows)))
 	) (begin
-		(set updaterows (if (nil? updaterows) nil (merge updaterows)))
-		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows (lambda (k v) (extract_stupid v)))))))
+		(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "name")))))
-		'('insert schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda () true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows (lambda (k v) (replace_stupid v)))))))))
+		'('insert schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda () true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
 	)))
 
 	(define sql_create_table (parser '(
