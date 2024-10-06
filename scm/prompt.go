@@ -73,6 +73,8 @@ func (en *Env) Do(line []rune, pos int) (newLine [][]rune, offset int) {
 	return
 }
 
+var ReplInstance *readline.Instance
+
 func Repl(en *Env) {
 	l, err := readline.NewEx(&readline.Config {
 		Prompt: newprompt,
@@ -85,6 +87,7 @@ func Repl(en *Env) {
 	if err != nil {
 		panic(err)
 	}
+	ReplInstance = l
 	defer l.Close()
 	l.CaptureExitSignal()
 
@@ -134,4 +137,5 @@ func Repl(en *Env) {
 			l.SetPrompt(newprompt)
 		}()
 	}
+	ReplInstance = nil
 }

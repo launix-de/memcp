@@ -407,10 +407,13 @@ func exitroutine() {
 	exitsignal <- true
 	exitable.Wait()
 	fmt.Println("Exit procedure...")
+	if scm.ReplInstance != nil {
+		// in case it dosen't exit properly
+		scm.ReplInstance.Close()
+	}
 	fmt.Println("finalizing storage...")
 	storage.UnloadDatabases()
 	fmt.Println("finalizing memory...")
 	runtime.GC() // this will call the finalizers on shards
 	fmt.Println("Exit procedure finished")
-	os.Exit(0)
 }

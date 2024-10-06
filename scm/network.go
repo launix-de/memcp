@@ -175,6 +175,12 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				panic(err)
 			}
 			go func() {
+				defer func () {
+					if r := recover(); r != nil {
+						fmt.Println("error in websocket receive:", r)
+						debug.PrintStack()
+					}
+				}()
 				for {
 					// websocket read loop
 					messageType, msg, err := ws.ReadMessage()
