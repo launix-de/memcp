@@ -324,6 +324,23 @@ func init_strings() {
 			return transform(result)
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		"bin2hex", "turns binary data into hex with lowercase letters",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string to decode"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			input := String(a[0])
+			result := make([]byte, 2 * len(input))
+			hexmap := "0123456789abcdef"
+			for i := 0; i < len(input); i++ {
+				result[2*i] = hexmap[input[i] / 16]
+				result[2*i+1] = hexmap[input[i] % 16]
+			}
+			return string(result);
+		},
+	})
 
 }
 
