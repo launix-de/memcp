@@ -287,7 +287,7 @@ func init_strings() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"json_decode", "decodes a string according to URI coding schema",
+		"json_decode", "parses JSON into a map",
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "string to decode"},
@@ -311,6 +311,7 @@ func init_strings() {
 						}
 						return result
 					case []any:
+						// TODO: maybe rather make a JS like object with length = x, index = ...
 						result := make([]Scmer, len(a))
 						for i, v := range a {
 							result[i] = transform(v)

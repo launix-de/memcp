@@ -33,6 +33,17 @@ func init_list() {
 	DeclareTitle("Lists")
 
 	Declare(&Globalenv, &Declaration{
+		"count", "counts the number of elements in the list",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "base list"},
+		}, "number",
+		func(a ...Scmer) Scmer {
+			// append a b ...: append item b to list a (construct list from item + tail)
+			return len(a[0].([]Scmer))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
 		2, 1000,
 		[]DeclarationParameter{
