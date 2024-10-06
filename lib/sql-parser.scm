@@ -66,7 +66,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	/* derive the description of a column from its expression */
 	(define extract_title (lambda (expr) (match expr
 		'((symbol get_column) nil _ col _) col
-		'((symbol get_column) tblvar _ col _) (concat tblvar "." col)
+		'((symbol get_column) tblvar _ col _) col /* x.y -> (concat tblvar "." col) */
 		(cons sym args) /* function call */ (concat (cons sym (map args extract_title)))
 		(concat expr)
 	)))
