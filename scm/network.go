@@ -163,7 +163,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			return "ok"
 		},
 		"websocket", func (a ...Scmer) Scmer {
-			// upgrade to a websocket
+			// upgrade to a websocket, params: onMessage, onClose
 			var upgrader = websocket.Upgrader{
 				ReadBufferSize:  1024,
 				WriteBufferSize: 1024,
@@ -171,6 +171,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			upgrader.CheckOrigin = func(r *http.Request) bool { return true }
 			ws, err := upgrader.Upgrade(res, req, nil)
 			if err != nil {
+				// TODO: better error handling
 				panic(err)
 			}
 			go func() {
@@ -178,7 +179,16 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 					// websocket read loop
 					messageType, msg, err := ws.ReadMessage()
 					if err != nil {
-						panic(err)
+						if _, ok := err.(*websocket.CloseError); ok {
+							// closed connection
+							if len(a) > 1 {
+								Apply(a[1]) // close callback
+							}
+							return // exit endless loop
+						} else {
+							// TODO: better error handling
+							panic(err)
+						}
 					}
 					// TODO: messageType 1 = text, 2 = binary?
 					if messageType == 1 {
