@@ -199,6 +199,25 @@ func setupIO(wd string) {
 		},
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
+		"env", "returns the content of a environment variable",
+		1, 2,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"var", "string", "envvar"},
+			scm.DeclarationParameter{"default", "string", "default if the env is not found"},
+		}, "string",
+		func (a ...scm.Scmer) scm.Scmer {
+			if len(a) > 1 {
+				if val, ok := os.LookupEnv(scm.String(a[0])); ok {
+					return val
+				} else {
+					return a[1]
+				}
+			} else {
+				return os.Getenv(scm.String(a[0]))
+			}
+		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
 		"help", "Lists all functions or print help for a specific function",
 		0, 1,
 		[]scm.DeclarationParameter{
