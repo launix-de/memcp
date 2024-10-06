@@ -363,7 +363,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define sql_create_table (parser '(
 		(atom "CREATE" true)
 		(atom "TABLE" true)
-		(define ifnotexists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
+		(define ifnotexists (parser (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) true))
 		(define id sql_identifier)
 		"("
 		(define cols (* (or
