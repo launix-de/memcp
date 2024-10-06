@@ -360,6 +360,40 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		'('insert schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
 	)))
 
+	(define sql_insert_select (parser '(
+		(atom "INSERT" true)
+		(define ignoreexists (? (atom "IGNORE" true true true)))
+		(atom "INTO" true)
+		(define tbl sql_identifier) /* TODO: ignorecase */
+		(? "("
+			(define coldesc (*
+				sql_identifier
+			","))
+		")")
+		(define inner sql_select) /* INNER SELECT */
+		(define datasets (* (parser '(
+			"("
+			(define dataset (* sql_expression ","))
+			")"
+		) dataset) ","))
+		(define updaterows (? (parser '(
+			(atom "ON" true)
+			(atom "DUPLICATE" true)
+			(atom "KEY" true)
+			(atom "UPDATE" true)
+			/* TODO: ignorecase */
+			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
+		) updaterows)))
+	) (begin
+		(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "name")))))
+		'('begin
+			'('set 'resultrow '('lambda '('item) '('insert schema tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))))
+			(apply build_queryplan inner)
+		)
+	)))
+
 	(define sql_create_table (parser '(
 		(atom "CREATE" true)
 		(atom "TABLE" true)
@@ -433,6 +467,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define p (parser (or
 		(parser (define query sql_select) (apply build_queryplan query))
 		sql_insert_into
+		sql_insert_select
 		sql_create_table
 		sql_alter_table
 		sql_update

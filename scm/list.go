@@ -40,7 +40,18 @@ func init_list() {
 		}, "number",
 		func(a ...Scmer) Scmer {
 			// append a b ...: append item b to list a (construct list from item + tail)
-			return len(a[0].([]Scmer))
+			return float64(len(a[0].([]Scmer)))
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"nth", "get the nth item of a list",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "base list"},
+			DeclarationParameter{"index", "number", "index beginning from 0"},
+		}, "any",
+		func(a ...Scmer) Scmer {
+			return a[0].([]Scmer)[ToInt(a[1])]
 		},
 	})
 	Declare(&Globalenv, &Declaration{
