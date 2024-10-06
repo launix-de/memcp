@@ -37,5 +37,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (import "rdf.scm")
 
 /* read  http_handler fresh from the environment */
-(serve 4321 (lambda (req res) (http_handler req res)))
-(print "listening on http://localhost:4321")
+(set port (env "PORT" "4321"))
+(serve port (lambda (req res) (http_handler req res)))
+(print "listening on http://localhost:" port)
