@@ -70,6 +70,38 @@ if there is a group function, create a temporary preaggregate table
 	/* literal */ '()
 )))
 
+/* split_condition returns a tuple (now, later) according to what can be checked now and what has to be waited for tables '('(tblvar ...) ...) */
+(define split_condition (lambda (expr tables) (match expr
+	'((symbol get_column) tblvar _ col _) /* a column */ (match tables
+		'() '(expr true) /* last condition: compute now */
+		(cons (cons (eval tblvar) _) _) '(true expr) /* col depends on tblvar */
+		(cons _ tablesrest) (split_condition expr tablesrest) /* check next table in join plan */
+		(error "invalid tables list")
+	)
+	(cons (symbol and) conditions) /* splittable and */ (split_condition_and conditions tables)
+	(cons sym args) /* non-splittable function call */ (split_condition_combine sym args tables)
+	/* literal */ '(expr true)
+)))
+(define split_condition_combine (lambda (sym args tables) (if
+	(reduce args (lambda (other arg) (match (split_condition arg tables) '(_ true) other true)) false) /* if one of the args is later, everything is later */
+	'(true (cons sym args))
+	'((cons sym args) true)
+)))
+(define split_condition_and (lambda (l tables) (match l
+	'() '(true true)
+	(cons head tail) (match '((split_condition head tables) (split_condition_and tail tables))
+		'('(true true) '(x y)) '(x y)
+		'('(true y) '(x true)) '(x y)
+		'('(x true) '(true y)) '(x y)
+		'('(x y) '(true true)) '(x y)
+		'('(x1 y) '(x2 true)) '('('and x1 x2) y)
+		'('(x1 true) '(x2 y)) '('('and x1 x2) y)
+		'('(true y1) '(x y2)) '(x '('and y1 y2))
+		'('(x y1) '(true y2)) '(x '('and y1 y2))
+		'('(x1 y1) '(x2 y2)) '('('and x1 x2) '('and y1 y2))
+	)
+)))
+
 (import "sql-metadata.scm")
 
 /* build queryplan from parsed query */
@@ -231,33 +263,33 @@ if there is a group function, create a temporary preaggregate table
 							    (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 							    (extract_columns_for_tblvar tblvar condition)
 						))
-						/* TODO: split condition in those ANDs that still contain get_column from tables and those evaluatable now */
-						(set rest_condition (match tables '() (coalesce condition true) true))
-						(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
-						/* TODO: add columns from rest condition into cols list */
+						(match (split_condition (coalesce condition true) tables) '(now_condition later_condition) (begin
+							(set filtercols (extract_columns_for_tblvar tblvar now_condition))
+							/* TODO: add columns from rest condition into cols list */
 
-						/* extract order cols for this tblvar */
-						/* TODO: match case insensitive column */
-						(set ordercols (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (cons col a) a)) '()))
-						(set dirs      (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (cons dir a) a)) '()))
+							/* extract order cols for this tblvar */
+							/* TODO: match case insensitive column */
+							(set ordercols (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (cons col a) a)) '()))
+							(set dirs      (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (cons dir a) a)) '()))
 
-						(scan_wrapper 'scan_order schema tbl
-							/* condition */
-							(cons list filtercols)
-							'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition))
-							/* sortcols, sortdirs */
-							(cons list ordercols)
-							(cons list dirs)
-							offset
-							(coalesce limit -1)
-							/* extract columns and store them into variables */
-							(cons list cols)
-							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables condition))
-							/* no reduce+neutral */
-							nil
-							nil
-							isOuter
-						)
+							(scan_wrapper 'scan_order schema tbl
+								/* condition */
+								(cons list filtercols)
+								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr now_condition))
+								/* sortcols, sortdirs */
+								(cons list ordercols)
+								(cons list dirs)
+								offset
+								(coalesce limit -1)
+								/* extract columns and store them into variables */
+								(cons list cols)
+								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
+								/* no reduce+neutral */
+								nil
+								nil
+								isOuter
+							)
+						))
 					)
 					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 				)
@@ -275,23 +307,23 @@ if there is a group function, create a temporary preaggregate table
 							    (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 							    (extract_columns_for_tblvar tblvar condition)
 						))
-						/* TODO: split condition in those ANDs that still contain get_column from tables and those evaluatable now */
-						(set rest_condition (match tables '() (coalesce condition true) true))
-						(set filtercols (extract_columns_for_tblvar tblvar rest_condition))
-						/* TODO: add columns from rest condition into cols list */
+						/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
+						(match (split_condition (coalesce condition true) tables) '(now_condition later_condition) (begin
+							(set filtercols (extract_columns_for_tblvar tblvar now_condition))
 
-						(scan_wrapper 'scan schema tbl
-							/* condition */
-							(cons list filtercols)
-							'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr rest_condition))
-							/* extract columns and store them into variables */
-							(cons list cols)
-							'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables condition))
-							nil
-							nil
-							nil
-							isOuter
-						)
+							(scan_wrapper 'scan schema tbl
+								/* condition */
+								(cons list filtercols)
+								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr now_condition))
+								/* extract columns and store them into variables */
+								(cons list cols)
+								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
+								nil
+								nil
+								nil
+								isOuter
+							)
+						))
 					)
 					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 				)
