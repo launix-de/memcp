@@ -35,6 +35,8 @@ func Equal(a, b Scmer) Scmer {
 					return strings.EqualFold(a_.GetValue(), b_)
 				case float64:
 					return ToFloat(a_.GetValue()) == b_
+				case int64:
+					return ToInt(a_.GetValue()) == int(b_)
 				case bool:
 					return ToBool(a) == b_
 			}
@@ -46,6 +48,8 @@ func Equal(a, b Scmer) Scmer {
 					return strings.EqualFold(a_, b_)
 				case float64:
 					return ToFloat(a_) == b_
+				case int64:
+					return ToInt(a_) == int(b_)
 				case bool:
 					return ToBool(a) == b_
 			}
@@ -57,6 +61,21 @@ func Equal(a, b Scmer) Scmer {
 					return a_ == ToFloat(b_)
 				case float64:
 					return a_ == b_
+				case int64:
+					return a_ == float64(b_)
+				case bool:
+					return ToBool(a) == b_
+			}
+		case int64:
+			switch b_ := b.(type) {
+				case LazyString:
+					return String(a_) == b_.GetValue()
+				case string:
+					return int(a_) == ToInt(b_)
+				case float64:
+					return float64(a_) == b_
+				case int64:
+					return a_ == b_
 				case bool:
 					return ToBool(a) == b_
 			}
@@ -67,6 +86,8 @@ func Equal(a, b Scmer) Scmer {
 				case string:
 					return a_ == ToBool(b)
 				case float64:
+					return a_ == ToBool(b)
+				case int64:
 					return a_ == ToBool(b)
 				case bool:
 					return a_ == b_
@@ -90,6 +111,8 @@ func Less(a, b Scmer) bool {
 		switch b_ := b.(type) {
 			case float64:
 				return ToFloat(a) < b_
+			case int64:
+				return ToInt(a) < int(b_)
 			case LazyString:
 				return StringLess(a_.GetValue(), b_.GetValue())
 			case string:
@@ -103,6 +126,8 @@ func Less(a, b Scmer) bool {
 		switch b_ := b.(type) {
 			case float64:
 				return ToFloat(a) < b_
+			case int64:
+				return ToInt(a) < int(b_)
 			case LazyString:
 				return StringLess(a_, b_.GetValue())
 			case string:

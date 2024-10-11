@@ -69,6 +69,8 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 		value = e
 	case string:
 		value = e
+	case int64:
+		value = e
 	case float64:
 		value = e
 	case Proc:

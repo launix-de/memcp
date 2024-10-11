@@ -25,13 +25,13 @@ type Declaration struct {
 	MinParameter int
 	MaxParameter int
 	Params []DeclarationParameter
-	Returns string // any | string | number | bool | func | list | symbol | nil
+	Returns string // any | string | number | int | bool | func | list | symbol | nil
 	Fn func(...Scmer) Scmer
 }
 
 type DeclarationParameter struct {
 	Name string
-	Type string // any | string | number | bool | func | list | symbol | nil
+	Type string // any | string | number | int | bool | func | list | symbol | nil
 	Desc string
 }
 
@@ -58,6 +58,9 @@ func types_match(given string, required string) bool {
 	}
 	if required == "any" {
 		return true // this is always allowed
+	}
+	if given == "int" && required == "number" {
+		return true // we allow int to number but not otherwise
 	}
 	required_ := strings.Split(required, "|")
 	given_ := strings.Split(given, "|")
@@ -103,6 +106,8 @@ func Validate(val Scmer, require string) string {
 			return "string"
 		case float64:
 			return "number"
+		case int64:
+			return "int"
 		case bool:
 			return "bool"
 		case Proc:

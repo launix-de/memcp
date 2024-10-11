@@ -60,14 +60,14 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
 		switch val := v.(type) {
-			case float64, string:
+			case int64, float64, string:
 				// equals column vs. constant
 				return val, true
 			case scm.Symbol:
 				if val2, ok := condition.(scm.Proc).En.Vars[val]; ok {
 					switch val3 := val2.(type) {
 						// bound constant
-						case float64, string:
+						case int64, float64, string:
 							// equals column vs. constant
 							return val3, true
 					}
@@ -78,7 +78,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						if val2, ok := condition.(scm.Proc).En.Vars[sym]; ok {
 							switch val3 := val2.(type) {
 								// bound constant
-								case float64, string:
+								case int64, float64, string:
 									// equals column vs. constant
 									return val3, true
 							}

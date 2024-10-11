@@ -36,7 +36,7 @@ func OptimizeProcToSerialFunction(val Scmer) func (...Scmer) Scmer {
 
 	// some pre-optimizable corner cases
 	switch p.Body.(type) {
-		case float64, string, bool: // constants
+		case int64, float64, string, bool: // constants
 			return func(...Scmer) Scmer {
 				return p.Body
 			}

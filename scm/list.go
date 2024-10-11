@@ -37,7 +37,7 @@ func init_list() {
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "base list"},
-		}, "number",
+		}, "int",
 		func(a ...Scmer) Scmer {
 			// append a b ...: append item b to list a (construct list from item + tail)
 			return float64(len(a[0].([]Scmer)))

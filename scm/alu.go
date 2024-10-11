@@ -40,6 +40,8 @@ func ToBool(v Scmer) bool {
 			return v2 != ""
 		case float64:
 			return v2 != 0.0
+		case int64:
+			return v2 != 0
 		case bool:
 			return v2 != false
 		case Symbol:
@@ -64,6 +66,8 @@ func ToInt(v Scmer) int {
 			return x
 		case float64:
 			return int(vv)
+		case int64:
+			return int(vv)
 		case bool:
 			if vv {
 				return 1
@@ -86,6 +90,8 @@ func ToFloat(v Scmer) float64 {
 			return x
 		case float64:
 			return vv
+		case int64:
+			return float64(vv)
 		case bool:
 			if vv {
 				return 1.0
@@ -104,6 +110,17 @@ func init_alu() {
 	DeclareTitle("Arithmetic / Logic")
 
 	Declare(&Globalenv, &Declaration{
+		"int?", "tells if the value is a integer",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value"},
+		}, "bool",
+		func(a ...Scmer) (result Scmer) {
+			_, ok2 := a[0].(int64)
+			return ok2
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"number?", "tells if the value is a number",
 		1, 1,
 		[]DeclarationParameter{
@@ -111,7 +128,11 @@ func init_alu() {
 		}, "bool",
 		func(a ...Scmer) (result Scmer) {
 			_, ok := a[0].(float64)
-			return ok
+			if ok {
+				return true
+			}
+			_, ok2 := a[0].(int64)
+			return ok2
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -174,7 +195,7 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"<=", "compares two numbers",
+		"<=", "compares two numbers or strings",
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "values"},
@@ -184,7 +205,7 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"<", "compares two numbers",
+		"<", "compares two numbers or strings",
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "values"},
@@ -194,7 +215,7 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		">", "compares two numbers",
+		">", "compares two numbers or strings",
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "values"},
@@ -204,7 +225,7 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		">=", "compares two numbers",
+		">=", "compares two numbers or strings",
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "values"},
@@ -224,7 +245,7 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"equal??", "performs a sloppy equality check on primitive values (number, string, bool. nil), strings are compared case insensitive",
+		"equal??", "performs a sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive",
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "values"},

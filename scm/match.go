@@ -64,8 +64,8 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	switch p := pattern.(type) {
 		case SourceInfo:
 			return match(val, p.value, en) // omit sourceinfo
-		case float64, string:
-			return reflect.DeepEqual(val, p)
+		case int64, float64, string:
+			return Equal(val, p).(bool)
 		case Symbol:
 			if p == Symbol("nil") {
 				return val == nil
@@ -138,6 +138,8 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					// symbol literal
 					switch v := val.(type) {
 						case float64:
+							return match(v, p[1], en)
+						case int64:
 							return match(v, p[1], en)
 						default:
 							return false

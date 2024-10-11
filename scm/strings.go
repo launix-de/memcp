@@ -135,7 +135,7 @@ func init_strings() {
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "input string"},
-		}, "number",
+		}, "int",
 		func(a ...Scmer) Scmer {
 			// string
 			return float64(len(String(a[0])))

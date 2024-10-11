@@ -75,6 +75,15 @@ func (s *StorageSCMER) GetValue(i uint) scm.Scmer {
 
 func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 	switch v := value.(type) {
+		case int64:
+			v2 := toInt(value)
+			// analyze whether there is a sequence
+			if v2 - s.last1 == s.last1 - s.last2 {
+				s.numSeq = s.numSeq + 1 // count as sequencable
+			}
+			// push sequence detector
+			s.last2 = s.last1
+			s.last1 = v2
 		case float64:
 			if _, f := math.Modf(v); f != 0.0 {
 				s.onlyInt = false

@@ -37,9 +37,9 @@ func init_date() {
 		"now", "returns the unix timestamp",
 		0, 0,
 		[]DeclarationParameter{
-		}, "number",
+		}, "int",
 		func(a ...Scmer) (result Scmer) {
-			return float64(time.Now().Unix())
+			return int64(time.Now().Unix())
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -47,11 +47,11 @@ func init_date() {
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "values to parse"},
-		}, "number",
+		}, "int",
 		func(a ...Scmer) Scmer {
 			for _, format := range allowed_formats { // try through all formats
 				if t, err := time.Parse(format, String(a[0])); err != nil {
-					return float64(t.Unix())
+					return int64(t.Unix())
 				}
 			}
 			return nil

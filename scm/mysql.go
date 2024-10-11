@@ -118,6 +118,8 @@ func ScmerToMySQL(v Scmer) sqltypes.Value {
 			return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
 		case float64:
 			return sqltypes.NewFloat64(v2)
+		case int64:
+			return sqltypes.NewInt64(v2)
 		case bool:
 			if v2 {
 				return sqltypes.NewInt32(1)
@@ -206,6 +208,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	// TODO: also set result.InsertID (maybe as a callback as 4th parameter to m.querycallback?)
 	switch rowcount_ := rowcount.(type) {
 		case float64:
+			result.RowsAffected = uint64(rowcount_)
+		case int64:
 			result.RowsAffected = uint64(rowcount_)
 	}
 	// flush the rest
