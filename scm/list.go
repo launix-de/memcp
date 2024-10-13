@@ -129,6 +129,35 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
+		1, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "list of lists of items"},
+		}, "list",
+		func (a ...Scmer) Scmer {
+			list := a
+			if len(a) == 1 {
+				// one parameter: interpret as list of lists
+				var ok bool
+				list, ok = a[0].([]Scmer)
+				if !ok {
+					panic("invalid input for merge: " + fmt.Sprint(a))
+				}
+			}
+			// merge arrays into one
+			size := len(list[0].([]Scmer))
+			result := make([]Scmer, size)
+			for i := range result {
+				subresult := make([]Scmer, len(list))
+				for j, v := range list {
+					subresult[j] = v.([]Scmer)[i]
+				}
+				result[i] = subresult
+			}
+			return result
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		"merge", "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
 		1, 1000,
 		[]DeclarationParameter{

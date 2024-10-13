@@ -642,7 +642,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"function", "func", "function to execute"},
 			DeclarationParameter{"arguments", "list", "list of arguments to apply"},
-		}, "symbol",
+		}, "any",
 		func (a ...Scmer) Scmer {
 			return Apply(a[0], a[1].([]Scmer)...)
 		},

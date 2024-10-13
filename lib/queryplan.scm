@@ -104,12 +104,30 @@ if there is a group function, create a temporary preaggregate table
 
 (import "sql-metadata.scm")
 
+/* preprocess a query so it does not contain nested select anymore */
+(define untangle_query (lambda (schema tables fields condition group having order limit offset rename_prefix) (begin
+	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
+	/* TODO: when FROM: spill tables and conditions into main query but rename all tables and columns with a prepended rename_prefix
+	/* TODO: multiple group levels, limit+offset for each group level */
+
+/*
+	/* check if we have FROM selects -> returns '(tables renamelist) */
+	(match (map tables (lambda (tbldesc) (match tbldesc
+		'(_ (string? _) _ _) '('(tbldesc) '()) /* leave primary tables as is */
+		'(id subquery _ _) (match (apply untangle_query (append subquery id)) '(schema2 tables2 fields2 condition2 group2 order2 limit2 offset2) (begin
+			'(tables2 fields2)
+		))
+	)))
+		'(tables2 renamelist) '(schema tables fields condition group having order limit offset))
+*/
+	'(schema tables fields condition group having order limit offset)
+)))
+
 /* build queryplan from parsed query */
 (define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
-	/* tables: '('(alias schema tbl isOuter joinexpr) ...) */
+	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition group having order limit offset) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
-	/* TODO: unnest arbitrary queries -> turn them into a big schema+tables+fields+condition */
 
 	/*
 		Query builder masterplan:

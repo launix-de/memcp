@@ -191,6 +191,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)))
 	(define tabledef (parser (or
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
+		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		/* TODO: case insensititive table search */
 		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl false nil))
 		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) '(id schema tbl false nil))
@@ -390,7 +391,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "name")))))
 		'('begin
 			'('set 'resultrow '('lambda '('item) '('insert schema tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))))
-			(apply build_queryplan inner)
+			(apply build_queryplan (apply untangle_query inner))
 		)
 	)))
 
@@ -465,7 +466,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
-		(parser (define query sql_select) (apply build_queryplan query))
+		(parser (define query sql_select) (apply build_queryplan (apply untangle_query query)))
 		sql_insert_into
 		sql_insert_select
 		sql_create_table

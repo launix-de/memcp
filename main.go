@@ -36,6 +36,7 @@ import "os/signal"
 import "crypto/rand"
 import "path/filepath"
 import "runtime/pprof"
+import "runtime/debug"
 import "github.com/google/uuid"
 import "github.com/fsnotify/fsnotify"
 import "github.com/launix-de/memcp/scm"
@@ -307,6 +308,9 @@ func main() {
 
 	// init random generator for UUIDs
 	uuid.SetRand(rand.Reader)
+
+	// Set thread limit - while loading there is a lot of thread pressure because of waiting for IO
+	debug.SetMaxThreads(10000000)
 
 	// parse command line options
 	var commands arrayFlags
