@@ -344,6 +344,11 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	return result
 }
 
+/*
+	checks a number of datasets for unique collisions.
+	For each block of datasets that pass, success is called.
+	For each single unique collision that fails, failure is called.
+*/
 func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int) {
 	// check for duplicates
 	if idx >= len(t.Unique) {

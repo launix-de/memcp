@@ -232,6 +232,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					t.t.ProcessUniqueCollision(cols, [][]scm.Scmer{d2}, false, func (values [][]scm.Scmer) {
 						t.mu.Lock() // start write lock
 					}, nil, func (errmsg string, data []scm.Scmer) {
+						t.mu.Lock() // start write lock
 						t.deletions.Set(idx, false) // mark as undeleted
 						panic("Unique key constraint violated in table "+t.t.Name+": " + errmsg)
 					}, 0)
