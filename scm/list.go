@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2024  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -26,7 +26,6 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import "fmt"
-import "reflect"
 
 func init_list() {
 	// list functions
@@ -78,7 +77,7 @@ func init_list() {
 			list := a[0].([]Scmer)
 			for _, el := range a {
 				for _, el2 := range list {
-					if reflect.DeepEqual(el, el2) {
+					if Equal(el, el2) {
 						// ignore duplicates
 						goto skipItem
 					}
@@ -210,7 +209,7 @@ func init_list() {
 				inner := v.([]Scmer)
 				for _, el := range inner {
 					for _, el2 := range result {
-						if reflect.DeepEqual(el, el2) {
+						if Equal(el, el2) {
 							goto skipNext
 						}
 					}
@@ -232,7 +231,7 @@ func init_list() {
 			// arr, element
 			list := a[0].([]Scmer)
 			for _, v := range list {
-				if reflect.DeepEqual(a[1], v) {
+				if Equal(a[1], v) {
 					return true
 				}
 			}
@@ -467,7 +466,7 @@ func init_list() {
 			// dict, element
 			list := a[0].([]Scmer)
 			for i := 0; i < len(list); i += 2 {
-				if reflect.DeepEqual(list[i], a[1]) {
+				if Equal(list[i], a[1]) {
 					return true
 				}
 			}
@@ -515,7 +514,7 @@ func init_list() {
 				fn = OptimizeProcToSerialFunction(a[3])
 			}
 			for i := 0; i < len(list); i += 2 {
-				if reflect.DeepEqual(list[i], a[1]) {
+				if Equal(list[i], a[1]) {
 					// overwrite
 					if len(a) > 3 {
 						// overwrite with merge function

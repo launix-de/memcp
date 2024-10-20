@@ -329,7 +329,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 					arg := Eval(operands[0], en)
 					i := 0
 					for i < len(p)-1 {
-						if reflect.DeepEqual(arg, p[i]) {
+						if Equal(arg, p[i]) {
 							return p[i+1]
 						}
 						i += 2
@@ -418,7 +418,7 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		} else {
 			i := 0
 			for i < len(p)-1 {
-				if reflect.DeepEqual(args[0], p[i]) {
+				if Equal(args[0], p[i]) {
 					return p[i+1]
 				}
 				i += 2

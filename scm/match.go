@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2024  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -20,7 +20,6 @@ package scm
 import (
 	"fmt"
 	"regexp"
-	"reflect"
 	"strings"
 )
 
@@ -65,7 +64,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		case SourceInfo:
 			return match(val, p.value, en) // omit sourceinfo
 		case int64, float64, string:
-			return Equal(val, p).(bool)
+			return Equal(val, p)
 		case Symbol:
 			if p == Symbol("nil") {
 				return val == nil
@@ -85,7 +84,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			switch p[0] {
 				case Symbol("eval"):
 					// evaluate value and match then
-					return reflect.DeepEqual(Eval(p[1], en), val)
+					return Equal(Eval(p[1], en), val)
 				case Symbol("var"):
 					// unoptimized pattern
 					en.VarsNumbered[ToInt(p[1])] = val

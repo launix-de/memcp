@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2024  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -27,7 +27,6 @@ package scm
 
 import "math"
 import "strconv"
-import "reflect"
 
 //go:inline
 func ToBool(v Scmer) bool {
@@ -235,23 +234,23 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"equal?", "deep-compares two values of the same type",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"value...", "any", "values"},
-		}, "bool",
-		func(a ...Scmer) Scmer {
-			return reflect.DeepEqual(a[0], a[1])
-		},
-	})
-	Declare(&Globalenv, &Declaration{
-		"equal??", "performs a sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive",
+		"equal?", "compares two values of the same type, (equal? nil nil) is true",
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			return Equal(a[0], a[1])
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"equal??", "performs a SQL compliant sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive, (equal? nil nil) is nil",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"value...", "any", "values"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			return EqualSQL(a[0], a[1])
 		},
 	})
 	Declare(&Globalenv, &Declaration{

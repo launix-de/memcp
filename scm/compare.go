@@ -21,7 +21,108 @@ import "strings"
 import "unicode"
 import "unicode/utf8"
 
-func Equal(a, b Scmer) Scmer {
+func EqualScm(a, b Scmer) Scmer { // case sensitive and can compare nil
+	return Equal(a, b)
+}
+func Equal(a, b Scmer) bool { // case sensitive and can compare nil
+	switch a_ := a.(type) {
+		case LazyString:
+			switch b_ := b.(type) {
+				case LazyString:
+					return a_.Hash == b_.Hash
+				case string:
+					return a_.GetValue() == b_
+				case float64:
+					return ToFloat(a_.GetValue()) == b_
+				case int64:
+					return ToInt(a_.GetValue()) == int(b_)
+				case bool:
+					return ToBool(a) == b_
+				case nil:
+					return !ToBool(a)
+			}
+		case string:
+			switch b_ := b.(type) {
+				case LazyString:
+					return a_ == b_.GetValue()
+				case string:
+					return a_ == b_
+				case float64:
+					return ToFloat(a_) == b_
+				case int64:
+					return ToInt(a_) == int(b_)
+				case bool:
+					return ToBool(a) == b_
+				case nil:
+					return !ToBool(a)
+			}
+		case float64:
+			switch b_ := b.(type) {
+				case LazyString:
+					return String(a_) == b_.GetValue()
+				case string:
+					return a_ == ToFloat(b_)
+				case float64:
+					return a_ == b_
+				case int64:
+					return a_ == float64(b_)
+				case bool:
+					return ToBool(a) == b_
+				case nil:
+					return !ToBool(a)
+			}
+		case int64:
+			switch b_ := b.(type) {
+				case LazyString:
+					return String(a_) == b_.GetValue()
+				case string:
+					return int(a_) == ToInt(b_)
+				case float64:
+					return float64(a_) == b_
+				case int64:
+					return a_ == b_
+				case bool:
+					return ToBool(a) == b_
+				case nil:
+					return !ToBool(a)
+			}
+		case bool:
+			switch b_ := b.(type) {
+				case LazyString:
+					return a_ == ToBool(b)
+				case string:
+					return a_ == ToBool(b)
+				case float64:
+					return a_ == ToBool(b)
+				case int64:
+					return a_ == ToBool(b)
+				case bool:
+					return a_ == b_
+				case nil:
+					return !a_
+			}
+		case nil:
+			switch b_ := b.(type) {
+				case LazyString:
+					return !ToBool(b)
+				case string:
+					return !ToBool(b)
+				case float64:
+					return !ToBool(b)
+				case int64:
+					return !ToBool(b)
+				case bool:
+					return !b_
+				case nil:
+					return true
+			}
+		// TODO: []Scmer
+
+	}
+	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
+}
+
+func EqualSQL(a, b Scmer) Scmer {
 	// == NULL is always NULL
 	if a == nil || b == nil {
 		return nil
