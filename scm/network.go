@@ -203,7 +203,10 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				}
 			}()
 			// return send callback
+			var sendmutex sync.Mutex
 			return func(a ...Scmer) Scmer {
+				sendmutex.Lock()
+				defer sendmutex.Unlock()
 				err := ws.WriteMessage(ToInt(a[0]), []byte(String(a[1])))
 				if err != nil {
 					panic(err)
