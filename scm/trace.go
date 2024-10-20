@@ -22,7 +22,6 @@ import "fmt"
 import "sync"
 import "time"
 import "encoding/json"
-import "github.com/lrita/numa"
 
 
 type Tracefile struct {
@@ -62,15 +61,13 @@ func (t *Tracefile) Close() {
 }
 
 func (t *Tracefile) Duration(name string, cat string, f func ()) {
-	tid, pid := numa.GetCPUAndNode()
-	t.EventHalf(name, cat, "B", tid, pid)
-	defer t.EventHalf(name, cat, "E", tid, pid)
+	t.EventHalf(name, cat, "B", 0, 0)
+	defer t.EventHalf(name, cat, "E", 0, 0)
 	f()
 }
 
 func (t *Tracefile) Event(name string, cat string, typ string) {
-	tid, pid := numa.GetCPUAndNode()
-	t.EventHalf(name, cat, typ, tid, pid)
+	t.EventHalf(name, cat, typ, 0, 0)
 }
 
 func (t *Tracefile) EventHalf(name string, cat string, typ string, tid int, pid int) {
