@@ -42,7 +42,7 @@ func ToBool(v Scmer) bool {
 		case int64:
 			return v2 != 0
 		case bool:
-			return v2 != false
+			return v2
 		case Symbol:
 			return v2 != Symbol("false") && v2 != Symbol("nil")
 		case []Scmer:
