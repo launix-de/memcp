@@ -24,7 +24,6 @@ import "sync"
 import "strings"
 import "strconv"
 import "net/http"
-import "runtime/debug"
 import "encoding/json"
 import "github.com/gorilla/websocket"
 
@@ -177,8 +176,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			go func() {
 				defer func () {
 					if r := recover(); r != nil {
-						fmt.Println("error in websocket receive:", r)
-						debug.PrintStack()
+						PrintError("error in websocket receive: " + fmt.Sprint(r))
 					}
 				}()
 				for {
@@ -219,7 +217,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		// catch panics and print out 500 Internal Server Error
 		defer func () {
 			if r := recover(); r != nil {
-				fmt.Println("request failed:", req_scm, r, string(debug.Stack()))
+				PrintError("error in http handler: " + fmt.Sprint(r))
 				res.Header().Set("Content-Type", "text/plain")
 				res.WriteHeader(500)
 				io.WriteString(res, "500 Internal Server Error: ")

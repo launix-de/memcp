@@ -19,7 +19,9 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import (
+	"os"
 	"io"
+	"log"
 	"fmt"
 	"bytes"
 	"regexp"
@@ -120,7 +122,7 @@ func Repl(en *Env) {
 						l.SetPrompt(contprompt)
 						return
 					}
-					fmt.Println("panic:", r, string(debug.Stack()))
+					PrintError(r)
 					oldline = ""
 					l.SetPrompt(newprompt)
 				}
@@ -138,4 +140,21 @@ func Repl(en *Env) {
 		}()
 	}
 	ReplInstance = nil
+}
+
+var errorlog *log.Logger
+func init() {
+	errorlog = log.New(os.Stderr, "", 0)
+}
+func PrintError(r any) {
+	s := fmt.Sprint(r)
+	numlines := strings.Count(s, "\n") * 4 + 9 // skip those stack trace lines that peel out of the error message
+	trace := string(debug.Stack())
+	for numlines > 0 {
+		if trace[0] == '\n' {
+			numlines--
+		}
+		trace = trace[1:]
+	}
+	errorlog.Println(r, ": \n", trace)
 }

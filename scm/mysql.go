@@ -21,7 +21,6 @@ import "fmt"
 import "sync"
 import "errors"
 import "runtime"
-import "runtime/debug"
 import "github.com/launix-de/go-mysqlstack/driver"
 import "github.com/launix-de/go-mysqlstack/xlog"
 import "github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
@@ -157,8 +156,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	rowcount := func () Scmer {
 		defer func () {
 			if r := recover(); r != nil {
-				myerr = fmt.Errorf("%v", r) // transmit r for error
-				debug.PrintStack()
+				PrintError("error in mysql connection: " + fmt.Sprint(r))
 			}
 		}()
 		return Apply(m.querycallback, session.Schema(), query, func (a... Scmer) Scmer {
