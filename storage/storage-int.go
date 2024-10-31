@@ -118,7 +118,7 @@ func (s *StorageInt) GetValue(i uint) scm.Scmer {
 	if s.hasNull && v == s.null {
 		return nil
 	}
-	return float64(int64(v) + s.offset)
+	return int64(v) + s.offset
 }
 
 func (s *StorageInt) GetValueUInt(i uint) uint64 {
