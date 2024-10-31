@@ -420,14 +420,16 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		) ","))
 		")"
 		(define options (* (or
+			(parser '((atom "CHARACTER" true) (atom "SET" true) (define id sql_identifier)) '("charset" id))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) '("engine" "memory"))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) '("engine" "sloppy"))
 			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) '("engine" "logging"))
 			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) '("engine" "safe"))
-			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) "=" sql_identifier) '())
+			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) "=" (define id sql_identifier)) '("charset" id))
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
+			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define collation (regex "[0-9]+"))) '("auto_increment" collation))
 		)))
 	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists)))
@@ -498,6 +500,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or sql_identifier '(sql_identifier (atom "AS" true) sql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
+		(parser '((atom "COMMIT" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
 		"" /* comment only command */
 		))) 
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)

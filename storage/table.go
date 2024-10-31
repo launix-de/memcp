@@ -74,6 +74,8 @@ type table struct {
 	mu sync.Mutex // schema/sharding lock
 	uniquelock sync.Mutex // unique insert lock
 	Auto_increment uint64 // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
+	Collation string
+	Charset string
 
 	// storage: if both arrays Shards and PShards are present, Shards is the single point of truth
 	Shards []*storageShard // unordered shards; as long as this value is not nil, use shards instead of pshards

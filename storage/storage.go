@@ -354,11 +354,15 @@ func Init(en scm.Env) {
 			options := a[3].([]scm.Scmer)
 			var auto_increment uint64 = 0
 			engine := Settings.DefaultEngine
+			collation := ""
+			charset := ""
 			for i := 0; i < len(options); i += 2 {
 				if options[i] == "engine" {
 					engine = scm.String(options[i+1])
 				} else if options[i] == "collation" {
-					// TODO: store the collation??
+					collation = scm.String(options[i+1])
+				} else if options[i] == "charset" {
+					charset = scm.String(options[i+1])
 				} else if options[i] == "auto_increment" {
 					auto_increment, _ = strconv.ParseUint(scm.String(options[i+1]), 0, 64)
 				} else {
@@ -383,6 +387,8 @@ func Init(en scm.Env) {
 				ifnotexists = true
 			}
 			t, created := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
+			t.Collation = collation
+			t.Charset = charset
 			t.Auto_increment = auto_increment
 			if created {
 				// add columns and constraints

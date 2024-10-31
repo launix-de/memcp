@@ -65,6 +65,19 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		'("name" "referenced_table_name")
 		'("name" "referenced_column_name")
 	)
+	'((ignorecase "information_schema") (ignorecase "referential_constraints")) '(
+		'("name" "constraint_catalog")
+		'("name" "constraint_schema")
+		'("name" "constraint_name")
+		'("name" "unique_constraint_catalog")
+		'("name" "unique_constraint_schema")
+		'("name" "unique_constraint_name")
+		'("name" "match_option")
+		'("name" "update_rule")
+		'("name" "delete_rule")
+		'("name" "table_name")
+		'("name" "referenced_table_name")
+	)
 	(show schema tbl) /* otherwise: fetch from metadata */
 )))
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
@@ -81,6 +94,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "name") "data_type" '((quote col) "type") "column_type" '((quote concat) '((quote col) "type") '((quote col) "dimensions")))))))))))
 			) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
+		(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
+	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
 		(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
 	'(schema tbl) /* normal case */
 		(merge '(scanfn schema tbl) rest)

@@ -158,6 +158,7 @@ if there is a group function, create a temporary preaggregate table
 
 	/* put all schemas of corresponding tables into an assoc */
 	(set schemas (merge (map tables (lambda (t) (match t '(alias schema tbl isOuter _) '(alias (get_schema schema tbl)))))))
+	(print "schemas=" schemas)
 
 	/* find those columns that have no table */
 	(define replace_find_column (lambda (expr) (match expr

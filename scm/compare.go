@@ -38,6 +38,8 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return ToInt(a_.GetValue()) == int(b_)
 				case bool:
 					return ToBool(a) == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 				case nil:
 					return !ToBool(a)
 			}
@@ -53,6 +55,8 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return ToInt(a_) == int(b_)
 				case bool:
 					return ToBool(a) == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 				case nil:
 					return !ToBool(a)
 			}
@@ -68,6 +72,8 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return a_ == float64(b_)
 				case bool:
 					return ToBool(a) == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 				case nil:
 					return !ToBool(a)
 			}
@@ -83,6 +89,8 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return a_ == b_
 				case bool:
 					return ToBool(a) == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 				case nil:
 					return !ToBool(a)
 			}
@@ -98,6 +106,8 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return a_ == ToBool(b)
 				case bool:
 					return a_ == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 				case nil:
 					return !a_
 			}
@@ -115,8 +125,29 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return !b_
 				case nil:
 					return true
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 			}
-		// TODO: []Scmer
+		case []Scmer:
+			switch b_ := b.(type) {
+				case LazyString:
+				case string:
+				case float64:
+				case int64:
+				case bool:
+				case nil:
+					return len(a_) == 0 && !ToBool(b)
+				case []Scmer:
+					if len(a_) != len(b_) {
+						return false
+					}
+					for i, v := range a_ {
+						if !Equal(v, b_[i]) {
+							return false
+						}
+					}
+					return true
+			}
 
 	}
 	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
