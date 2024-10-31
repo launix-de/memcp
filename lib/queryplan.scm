@@ -104,7 +104,7 @@ if there is a group function, create a temporary preaggregate table
 
 (import "sql-metadata.scm")
 
-/* preprocess a query so it does not contain nested select anymore */
+/* recursively preprocess a query and return the flattened query */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset) (begin
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
 	/* TODO: when FROM: spill tables and conditions into main query but rename all tables and columns with a prepended rename_prefix
@@ -114,32 +114,72 @@ if there is a group function, create a temporary preaggregate table
 	/* check if we have FROM selects -> returns '(tables renamelist) */
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
-		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2) (begin
+		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2 replace_find_column2) (begin
+			/* TODO: helper function add prefix to expression */
 			/* TODO: integrate tables into main query and add fields to a renamelist */
 			/* TODO: tables -> rename with prefix */
 			/* TODO: fields -> add to renamelist + rename with prefix */
 			/* TODO: condition -> add to main condition list + rename with prefix */
 			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers */
 			(print "TODO: " '(schema2 tables2 fields2 condition2 group2 order2 limit2 offset2 schemas2))
-			'(tables2 '() (append schemas2 id '('("TODO schemadefinition of temp table")))) /* TODO: inner schema list must also be appended to schemas */
-		))
+			'(tables2 '() '(alias '())) /* TODO: declare schema of inner table */
+		) (error "non matching return value for untangle_query"))
 		(error (concat "unknown tabledesc: " tbldesc))
 	))))
-	'(tables2 renamelist schemas) (begin
+	'(tablesList renamelist schemasList) (begin /* schemas is an assoc array from alias -> columnlist */
 		/* rewrite a flat table list according to inner selects */
-		(print "zip = " (merge tables2))
 		(print "renamelist = " (merge renamelist))
+		(set tables (merge tablesList))
+		(set schemas (merge schemasList))
 
 		/* TODO: add rename_prefix to all table names and get_column expressions */
 		/* TODO: apply renamelist to all expressions in fields condition group having order */
 
+		/* at first: extract additional join exprs into condition list */
+		(set condition (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
+
+		/* tells whether there is an aggregate inside */
+		(define expr_find_aggregate (lambda (expr) (match expr
+			'((symbol aggregate) item reduce neutral) true
+			(cons sym args) /* function call */ (reduce args (lambda (a b) (or a (expr_find_aggregate b))) false)
+			false
+		)))
+
+		/* set group to 1 if fields contain aggregates even if not */
+		(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
+
+		/* find those columns that have no table */
+		(define replace_find_column (lambda (expr) (match expr
+			'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
+			'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) (lambda () (error (concat "column " alias "." col " does not exist in tables")))) false col false) expr) /* omit false false), otherwise freshly created columns wont be found */
+			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+			expr
+		)))
+
+		/* expand *-columns */
+		(set fields (merge (extract_assoc fields (lambda (col expr) (match col
+			"*" (match expr
+				/* *.* */
+				'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas (lambda (alias def) (merge (map def (lambda (coldesc) /* all columns of each table */
+						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
+					)))
+				)))
+				/* tbl.* */
+				'((symbol get_column) tblvar ignorecase "*" _) (merge (extract_assoc schemas (lambda (alias def) (if ((if ignorecase equal?? equal?) alias tblvar) (merge (map def (lambda (coldesc) /* all columns of each table */
+						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
+					))) '())
+				)))
+			)
+			'(col (replace_find_column expr))
+		)))))
+
 		/* return parameter list for build_queryplan */
-		'(schema (merge tables2) fields condition group having order limit offset (merge schemas))
+		'(schema tables fields condition group having order limit offset schemas replace_find_column)
 	))
 )))
 
 /* build queryplan from parsed query */
-(define build_queryplan (lambda (schema tables fields condition group having order limit offset schemas) (begin
+(define build_queryplan (lambda (schema tables fields condition group having order limit offset schemas replace_find_column) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition group having order limit offset) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
@@ -154,59 +194,7 @@ if there is a group function, create a temporary preaggregate table
 
 	*/
 
-	/* at first: extract additional join exprs into condition list */
-	(set condition (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
-
-	/* tells whether there is an aggregate inside */
-	(define expr_find_aggregate (lambda (expr) (match expr
-		'((symbol aggregate) item reduce neutral) 5
-		(cons sym args) /* function call */ (reduce args (lambda (a b) (or a (expr_find_aggregate b))) false)
-		false
-	)))
-
-	/* replace all aggregates with respected subtitutions */
-	(define expr_replace_aggregate (lambda (expr indexmap) (match expr
-		(cons (symbol aggregate) agg) (indexmap (string agg))
-		(cons sym args) /* function call */ (cons sym (map args (lambda (x) (expr_replace_aggregate x indexmap))))
-		expr
-	)))
-
-	/* find those columns that have no table */
-	(define replace_find_column (lambda (expr) (match expr
-		'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
-		'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) (lambda () (error (concat "column " alias "." col " does not exist in tables")))) false col false) expr) /* omit false false), otherwise freshly created columns wont be found */
-		(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-		expr
-	)))
-
-	/* expand *-columns */
-	(set fields (merge (extract_assoc fields (lambda (col expr) (match col
-		"*" (match expr
-			/* *.* */
-			'((symbol get_column) nil _ "*" _)(merge (map tables (lambda (t) (match t
-				'((regex "^\\/.*" alias) schema tbl isOuter _) /* all FROM-tables that are not inside inner selects*/
-				'()
-				'(alias schema tbl isOuter _) /* all FROM-tables that are not inside inner selects*/
-				(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
-					'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
-				)))
-			))))
-			/* tbl.* */
-			'((symbol get_column) tblvar _ "*" _)(merge (map tables (lambda (t) (match t '(alias schema tbl isOuter _) /* one FROM-table*/
-				(if (equal? alias tblvar)
-					(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
-						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
-					)))
-					'())
-			))))
-		)
-		'(col (replace_find_column expr))
-	)))))
-
   	/* TODO: order tables: outer joins behind */
-
-	/* set group to 1 if fields contain aggregates even if not */
-	(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
 
 	(if group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
@@ -254,7 +242,7 @@ if there is a group function, create a temporary preaggregate table
 					'('time '('begin
 						/* the optimizer will optimize and group this */
 						'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) '(list) '('lambda '() true) true)))
-						(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil schemas)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
+						(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil schemas replace_find_column)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
 					) "collect")
 
 					/* compute aggregates */
@@ -277,7 +265,7 @@ if there is a group function, create a temporary preaggregate table
 					))))) "compute")
 
 					/* build the queryplan for the ordered limited scan on the grouped table */
-					(build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch having) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch col) dir))))) limit offset schemas)
+					(build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch having) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch col) dir))))) limit offset schemas replace_find_column)
 				)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
