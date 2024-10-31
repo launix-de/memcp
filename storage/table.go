@@ -31,6 +31,11 @@ type column struct {
 	Extrainfo string // TODO: further diversify into NOT NULL, AUTOINCREMENT etc.
 	Computor scm.Scmer `json:"-"` // TODO: marshaljson -> serialize
 	PartitioningScore int // count this up to increase the chance of partitioning for this column
+	AutoIncrement bool
+	Default scm.Scmer // TODO
+	AllowNull bool // TODO: respect this
+	Collation string
+	Comment string
 	// TODO: LRU statistics for computed columns
 }
 type PersistencyMode uint8
@@ -169,7 +174,22 @@ func (c *column) Show() scm.Scmer {
 	for i, v := range c.Typdimensions {
 		dims[i] = v
 	}
-	return []scm.Scmer{"name", c.Name, "type", c.Typ, "dimensions", dims}
+	typ := c.Typ
+	if len(dims) > 0 {
+		typ += "("
+		for i, v := range c.Typdimensions {
+			if i > 0 {
+				typ = typ + ","
+			}
+			typ = typ + scm.String(v)
+		}
+		typ += ")"
+	}
+	extra := ""
+	if c.AutoIncrement {
+		extra = "auto_increment"
+	}
+	return []scm.Scmer{"Field", c.Name, "Type", typ, "Collation", c.Collation, "RawType", c.Typ, "Dimensions", dims, "Null", c.AllowNull, "Default", c.Default, "Extra", extra, "Privileges", "select,insert,update,references", "Comment", c.Comment}
 }
 
 func (d dataset) Get(key string) (scm.Scmer, bool) {
@@ -207,7 +227,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 		}
 	}
 	
-	t.Columns = append(t.Columns, column{name, typ, typdimensions, extrainfo, nil, 0})
+	t.Columns = append(t.Columns, column{name, typ, typdimensions, extrainfo, nil, 0, false /* TODO: auto increment */, nil /* TODO: default */, true, "utf8mb4", ""})
 	for _, s := range t.Shards {
 		s.columns[name] = new (StorageSparse)
 	}
