@@ -115,14 +115,14 @@ if there is a group function, create a temporary preaggregate table
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2 replace_find_column2) (begin
-			/* TODO: helper function add prefix to expression */
+			/* TODO: helper function add prefix to tblalias of every expression */
 			/* TODO: integrate tables into main query and add fields to a renamelist */
 			/* TODO: tables -> rename with prefix */
 			/* TODO: fields -> add to renamelist + rename with prefix */
 			/* TODO: condition -> add to main condition list + rename with prefix */
 			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers */
 			(print "TODO: " '(schema2 tables2 fields2 condition2 group2 order2 limit2 offset2 schemas2))
-			'(tables2 '() '(alias '())) /* TODO: declare schema of inner table */
+			'(tables2 '(id fields2) '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))))
 		) (error "non matching return value for untangle_query"))
 		(error (concat "unknown tabledesc: " tbldesc))
 	))))
