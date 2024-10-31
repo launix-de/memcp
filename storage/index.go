@@ -259,6 +259,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		for i, c := range cols {
 			a := lower[i]
 			b := c.GetValue(uint(idx2))
+			 // TODO: respect !lowerEqual
 			if scm.Less(a, b) {
 				return true // less
 			} else if scm.Less(b, a) {
@@ -280,10 +281,10 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		for i, c := range cols {
 			a := c.GetValue(uint(idx2))
 			if i == len(cols) - 1 {
-				if upperLast != nil && scm.Less(upperLast, a) {
+				if upperLast != nil && scm.Less(upperLast, a) { // TODO: respect !upperEqual
 					break iteration // stop traversing when we exceed the < part of last col
 				}
-			} else if !reflect.DeepEqual(a, lower[i]) {
+			} else if !scm.Equal(a, lower[i]) {
 				break iteration // stop traversing when we exceed the equal-part
 			}
 			// otherwise: next col
