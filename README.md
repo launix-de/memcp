@@ -291,3 +291,4 @@ Normally, REST applications are implemented in any programming language, make a 
 - [Storing Data Smaller Than One Bit](https://launix.de/launix/storing-a-bit-smaller-than-in-one-bit/)
 - [memcp Announcement Video](https://www.youtube.com/watch?v=DWg4nx4KVLo)
 - https://wwwdb.inf.tu-dresden.de/research-projects/eris/
+- https://hyper-db.de/

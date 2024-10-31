@@ -105,7 +105,7 @@ if there is a group function, create a temporary preaggregate table
 (import "sql-metadata.scm")
 
 /* preprocess a query so it does not contain nested select anymore */
-(define untangle_query (lambda (schema tables fields condition group having order limit offset rename_prefix) (begin
+(define untangle_query (lambda (schema tables fields condition group having order limit offset) (begin
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
 	/* TODO: when FROM: spill tables and conditions into main query but rename all tables and columns with a prepended rename_prefix
 	/* TODO: multiple group levels, limit+offset for each group level */
@@ -114,8 +114,12 @@ if there is a group function, create a temporary preaggregate table
 	/* check if we have FROM selects -> returns '(tables renamelist) */
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
-		'(id schemax subquery _ _) (match (apply untangle_query (append subquery (concat "/" id ":"))) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2) (begin
+		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2) (begin
 			/* TODO: integrate tables into main query and add fields to a renamelist */
+			/* TODO: tables -> rename with prefix */
+			/* TODO: fields -> add to renamelist + rename with prefix */
+			/* TODO: condition -> add to main condition list + rename with prefix */
+			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers */
 			(print "TODO: " '(schema2 tables2 fields2 condition2 group2 order2 limit2 offset2 schemas2))
 			'(tables2 '() (append schemas2 id '('("TODO schemadefinition of temp table")))) /* TODO: inner schema list must also be appended to schemas */
 		))
