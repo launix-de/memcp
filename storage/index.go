@@ -108,13 +108,14 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 			if len(index.Cols) >= len(lower) {
 				for i := 0; i < len(lower); i++ {
 					if cols[i].col != index.Cols[i] {
-						continue // this index does not fit
+						goto skip_index // this index does not fit
 					}
 				}
 				// this index fits!
 				index.iterate(lower, upperLast, maxInsertIndex, callback)
 				return
 			}
+			skip_index:
 		}
 
 		// otherwise: create new index
