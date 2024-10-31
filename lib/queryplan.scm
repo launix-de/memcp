@@ -41,7 +41,7 @@ if there is a group function, create a temporary preaggregate table
 */
 
 /* helper functions:
- - (build_queryplan schema tables fields condition group having order limit offset) builds a lisp expression that runs the query and calls resultrow for each result tuple
+ - (build_queryplan schema tables fields condition group having order limit offset schemas) builds a lisp expression that runs the query and calls resultrow for each result tuple
  - (build_scan schema tables cols map reduce neutral neutral2 condition group having order limit offset) builds a lisp expression that scans the tables
  - (extract_columns_for_tblvar expr tblvar) extracts a list of used columns for each tblvar '(tblvar col)
  - (replace_columns expr) replaces all (get_column ...) and (aggregate ...) with values
@@ -109,22 +109,33 @@ if there is a group function, create a temporary preaggregate table
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
 	/* TODO: when FROM: spill tables and conditions into main query but rename all tables and columns with a prepended rename_prefix
 	/* TODO: multiple group levels, limit+offset for each group level */
+	(set rename_prefix (coalesce rename_prefix ""))
 
-/*
 	/* check if we have FROM selects -> returns '(tables renamelist) */
-	(match (map tables (lambda (tbldesc) (match tbldesc
-		'(_ (string? _) _ _) '('(tbldesc) '()) /* leave primary tables as is */
-		'(id subquery _ _) (match (apply untangle_query (append subquery id)) '(schema2 tables2 fields2 condition2 group2 order2 limit2 offset2) (begin
-			'(tables2 fields2)
+	(match (zip (map tables (lambda (tbldesc) (match tbldesc
+		'(alias schema (string? tbl) _ _) '('(tbldesc) '() '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
+		'(id schemax subquery _ _) (match (apply untangle_query (append subquery (concat "/" id ":"))) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2) (begin
+			/* TODO: integrate tables into main query and add fields to a renamelist */
+			(print "TODO: " '(schema2 tables2 fields2 condition2 group2 order2 limit2 offset2 schemas2))
+			'(tables2 '() (append schemas2 id '('("TODO schemadefinition of temp table")))) /* TODO: inner schema list must also be appended to schemas */
 		))
-	)))
-		'(tables2 renamelist) '(schema tables fields condition group having order limit offset))
-*/
-	'(schema tables fields condition group having order limit offset)
+		(error (concat "unknown tabledesc: " tbldesc))
+	))))
+	'(tables2 renamelist schemas) (begin
+		/* rewrite a flat table list according to inner selects */
+		(print "zip = " (merge tables2))
+		(print "renamelist = " (merge renamelist))
+
+		/* TODO: add rename_prefix to all table names and get_column expressions */
+		/* TODO: apply renamelist to all expressions in fields condition group having order */
+
+		/* return parameter list for build_queryplan */
+		'(schema (merge tables2) fields condition group having order limit offset (merge schemas))
+	))
 )))
 
 /* build queryplan from parsed query */
-(define build_queryplan (lambda (schema tables fields condition group having order limit offset) (begin
+(define build_queryplan (lambda (schema tables fields condition group having order limit offset schemas) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition group having order limit offset) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
@@ -156,9 +167,6 @@ if there is a group function, create a temporary preaggregate table
 		expr
 	)))
 
-	/* put all schemas of corresponding tables into an assoc */
-	(set schemas (merge (map tables (lambda (t) (match t '(alias schema tbl isOuter _) '(alias (get_schema schema tbl)))))))
-
 	/* find those columns that have no table */
 	(define replace_find_column (lambda (expr) (match expr
 		'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
@@ -171,7 +179,10 @@ if there is a group function, create a temporary preaggregate table
 	(set fields (merge (extract_assoc fields (lambda (col expr) (match col
 		"*" (match expr
 			/* *.* */
-			'((symbol get_column) nil _ "*" _)(merge (map tables (lambda (t) (match t '(alias schema tbl isOuter _) /* all FROM-tables*/
+			'((symbol get_column) nil _ "*" _)(merge (map tables (lambda (t) (match t
+				'((regex "^\\/.*" alias) schema tbl isOuter _) /* all FROM-tables that are not inside inner selects*/
+				'()
+				'(alias schema tbl isOuter _) /* all FROM-tables that are not inside inner selects*/
 				(merge (map (get_schema schema tbl) (lambda (coldesc) /* all columns of each table */
 					'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
 				)))
@@ -239,7 +250,7 @@ if there is a group function, create a temporary preaggregate table
 					'('time '('begin
 						/* the optimizer will optimize and group this */
 						'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) '(list) '('lambda '() true) true)))
-						(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
+						(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil schemas)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
 					) "collect")
 
 					/* compute aggregates */
@@ -262,7 +273,7 @@ if there is a group function, create a temporary preaggregate table
 					))))) "compute")
 
 					/* build the queryplan for the ordered limited scan on the grouped table */
-					(build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch having) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch col) dir))))) limit offset)
+					(build_queryplan schema '('(grouptbl schema grouptbl false nil)) (map_assoc fields (lambda (k v) (replace_agg_with_fetch v))) (replace_agg_with_fetch having) nil nil (if (nil? order) nil (map order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch col) dir))))) limit offset schemas)
 				)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */

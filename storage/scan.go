@@ -32,12 +32,6 @@ func (s scanError) Error() string {
 
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
-/* TODO:
-
- - LEFT JOIN handling -> emit a NULL line on certain conditions
-
-*/
-
 type emptyResult struct {}
 
 // map reduce implementation based on scheme scripts
