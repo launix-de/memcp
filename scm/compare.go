@@ -130,12 +130,7 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 			}
 		case []Scmer:
 			switch b_ := b.(type) {
-				case LazyString:
-				case string:
-				case float64:
-				case int64:
-				case bool:
-				case nil:
+				case LazyString, string, float64, int64, bool, nil:
 					return len(a_) == 0 && !ToBool(b)
 				case []Scmer:
 					if len(a_) != len(b_) {
