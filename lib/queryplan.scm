@@ -113,24 +113,29 @@ if there is a group function, create a temporary preaggregate table
 
 	/* check if we have FROM selects -> returns '(tables renamelist) */
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
-		'(alias schema (string? tbl) _ _) '('(tbldesc) '() '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
+		'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2 replace_find_column2) (begin
-			/* TODO: helper function add prefix to tblalias of every expression */
-			/* TODO: integrate tables into main query and add fields to a renamelist */
-			/* TODO: tables -> rename with prefix */
-			/* TODO: fields -> add to renamelist + rename with prefix */
+		 	/* prefix all table aliases */	
+			(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a b) '((concat id ":" alias) schema tbl a b)))))
+			/* helper function add prefix to tblalias of every expression */
+			(define replace_column_alias (lambda (expr) (match expr
+				'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+				(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
+				expr
+			)))
 			/* TODO: condition -> add to main condition list + rename with prefix */
 			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers */
 			(print "TODO: " '(schema2 tables2 fields2 condition2 group2 order2 limit2 offset2 schemas2))
-			'(tables2 '(id fields2) '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))))
+			'(tablesPrefixed '(id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) (replace_column_alias condition2) '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))))
 		) (error "non matching return value for untangle_query"))
 		(error (concat "unknown tabledesc: " tbldesc))
 	))))
-	'(tablesList renamelist schemasList) (begin /* schemas is an assoc array from alias -> columnlist */
+	'(tablesList renameList conditionList schemasList) (begin /* schemas is an assoc array from alias -> columnlist */
 		/* rewrite a flat table list according to inner selects */
-		(print "renamelist = " (merge renamelist))
+		(set renamelist (merge renameList))
 		(set tables (merge tablesList))
 		(set schemas (merge schemasList))
+		(print "tables=" tables)
 
 		/* TODO: add rename_prefix to all table names and get_column expressions */
 		/* TODO: apply renamelist to all expressions in fields condition group having order */
@@ -151,10 +156,18 @@ if there is a group function, create a temporary preaggregate table
 		/* find those columns that have no table */
 		(define replace_find_column (lambda (expr) (match expr
 			'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
-			'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) (lambda () (error (concat "column " alias "." col " does not exist in tables")))) false col false) expr) /* omit false false), otherwise freshly created columns wont be found */
+			'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) (lambda () (error (concat "column " alias "." col " does not exist in tables")))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 			expr
 		)))
+
+		/* apply renamelist */
+		(define replace_rename (lambda (expr) (match expr
+			'((symbol get_column) alias_ ti col ci) (if (has_assoc? renamelist alias_) ((renamelist alias_) col) expr)
+			(cons sym args) /* function call */ (cons sym (map args replace_rename))
+			expr
+		)))
+		
 
 		/* expand *-columns */
 		(set fields (merge (extract_assoc fields (lambda (col expr) (match col
@@ -174,7 +187,8 @@ if there is a group function, create a temporary preaggregate table
 		)))))
 
 		/* return parameter list for build_queryplan */
-		'(schema tables fields condition group having order limit offset schemas replace_find_column)
+		(set conditionAll (merge '('and (replace_rename condition)) conditionList)) /* TODO: append inner conditions to condition */
+		'(schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll group having order limit offset schemas replace_find_column)
 	))
 )))
 
