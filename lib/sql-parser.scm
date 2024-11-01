@@ -112,6 +112,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((define a sql_expression3) ">=" (define b sql_expression2)) '((quote >=) a b))
 		(parser '((define a sql_expression3) "<" (define b sql_expression2)) '((quote <) a b))
 		(parser '((define a sql_expression3) ">" (define b sql_expression2)) '((quote >) a b))
+		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b collation))
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b))
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('contains? (cons list b) a))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('not '('contains? (cons list b) a)))
@@ -501,7 +502,11 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or sql_identifier '(sql_identifier (atom "AS" true) sql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
-		(parser '((atom "COMMIT" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
+
+		/* TODO: draw transaction number, commit */
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('session "transaction" 1))
+		(parser '((atom "COMMIT" true)) '('session "transaction" nil))
+		(parser '((atom "ROLLBACK" true)) '('session "transaction" nil))
 		"" /* comment only command */
 		))) 
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)

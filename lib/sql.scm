@@ -45,6 +45,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(define formula (parse_sql schema query))
 			(define resultrow (res "jsonl"))
 			(define session (context "session"))
+			(print "execution plan: " formula)
 			(eval formula)
 		) (begin
 			((res "header") "Content-Type" "text/plain")
@@ -77,9 +78,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
 		(lambda (username schema) (list? (show schema))) /* switch schema (TODO check grants; in the moment, only the existence of the database is checked) */
 		(lambda (schema sql resultrow_sql session) (begin /* sql */
-			(print "received query: " sql)
+			(print "SQL query: " sql)
 			(define formula (parse_sql schema sql))
 			(define resultrow resultrow_sql)
+			(print "execution plan: " formula)
 			(eval (source "SQL Query" 1 1 formula))
 		))
 	)

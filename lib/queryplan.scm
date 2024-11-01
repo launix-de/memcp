@@ -189,7 +189,10 @@ if there is a group function, create a temporary preaggregate table
 		/* return parameter list for build_queryplan */
 		(set conditionAll (merge '('and (replace_rename condition)) conditionList)) /* TODO: append inner conditions to condition */
 		'(schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll group having order limit offset schemas replace_find_column)
-	))
+	)
+	/* else: empty tables list */
+	'(schema tables fields condition group having order limit offset '() (lambda (expr) expr))
+	)
 )))
 
 /* build queryplan from parsed query */

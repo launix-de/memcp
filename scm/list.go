@@ -143,6 +143,9 @@ func init_list() {
 					panic("invalid input for merge: " + fmt.Sprint(a))
 				}
 			}
+			if len(list) == 0 {
+				return []Scmer{}
+			}
 			// merge arrays into one
 			size := len(list[0].([]Scmer))
 			result := make([]Scmer, size)

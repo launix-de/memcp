@@ -143,6 +143,11 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					}
 					return true
 			}
+		case Symbol:
+			switch b_ := b.(type) {
+				case Symbol:
+					return a_ == b_
+			}
 
 	}
 	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))

@@ -164,6 +164,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			item := a[0].([]Scmer)
 			resultlock.Lock()
 			defer resultlock.Unlock()
+			updateFlags(session, scmSession) // set transaction status
 
 			newitem := make([]sqltypes.Value, len(result.Fields))
 			for i := 0; i < len(item)-1; i += 2 {
@@ -210,6 +211,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		case int64:
 			result.RowsAffected = uint64(rowcount_)
 	}
+	// update status greeting
+	updateFlags(session, scmSession)
 	// flush the rest
 	if result.State == sqltypes.RStateFields {
 		result.State = sqltypes.RStateNone // full send
@@ -221,5 +224,15 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		callback(&result)
 	}
 	return myerr
+}
+
+func updateFlags(s *driver.Session, session_ any) {
+	session := session_.(func(...Scmer) Scmer)
+	tx := session("transaction")
+	if tx == nil {
+		s.SetTransaction(false)
+	} else {
+		s.SetTransaction(true)
+	}
 }
 

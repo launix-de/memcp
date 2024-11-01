@@ -143,14 +143,15 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlike", "matches the string against a wildcard pattern (SQL compliant)",
-		2, 2,
+		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "input string"},
 			DeclarationParameter{"pattern", "string", "pattern with % and _ in them"},
+			DeclarationParameter{"collation", "string", "collation in which to compare them"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			// string
-			return StrLike(String(a[0]), String(a[1]))
+			return StrLike(String(a[0]), String(a[1])) // TODO: collation
 		},
 	})
 	Declare(&Globalenv, &Declaration{
