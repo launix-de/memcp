@@ -166,6 +166,8 @@ func EqualSQL(a, b Scmer) Scmer {
 					return ToInt(a_.GetValue()) == int(b_)
 				case bool:
 					return ToBool(a) == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 			}
 		case string:
 			switch b_ := b.(type) {
@@ -179,6 +181,8 @@ func EqualSQL(a, b Scmer) Scmer {
 					return ToInt(a_) == int(b_)
 				case bool:
 					return ToBool(a) == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 			}
 		case float64:
 			switch b_ := b.(type) {
@@ -192,6 +196,8 @@ func EqualSQL(a, b Scmer) Scmer {
 					return a_ == float64(b_)
 				case bool:
 					return ToBool(a) == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 			}
 		case int64:
 			switch b_ := b.(type) {
@@ -205,6 +211,8 @@ func EqualSQL(a, b Scmer) Scmer {
 					return a_ == b_
 				case bool:
 					return ToBool(a) == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 			}
 		case bool:
 			switch b_ := b.(type) {
@@ -218,8 +226,24 @@ func EqualSQL(a, b Scmer) Scmer {
 					return a_ == ToBool(b)
 				case bool:
 					return a_ == b_
+				case []Scmer:
+					return len(b_) == 0 && !ToBool(a)
 			}
-		// TODO: []Scmer
+		case []Scmer:
+			switch b_ := b.(type) {
+				case LazyString, string, float64, int64, bool, nil:
+					return len(a_) == 0 && !ToBool(b)
+				case []Scmer:
+					if len(a_) != len(b_) {
+						return false
+					}
+					for i, v := range a_ {
+						if !ToBool(EqualSQL(v, b_[i])) {
+							return false
+						}
+					}
+					return true
+			}
 
 	}
 	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
