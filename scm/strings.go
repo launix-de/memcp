@@ -19,6 +19,7 @@ package scm
 import "fmt"
 import "html"
 import "bytes"
+import "regexp"
 import "strings"
 import "net/url"
 import "encoding/json"
@@ -323,6 +324,34 @@ func init_strings() {
 				}
 			}
 			return transform(result)
+		},
+	})
+	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
+	Declare(&Globalenv, &Declaration{
+		"sql_unescape", "unescapes the inner part of a sql string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string to decode"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			input := String(a[0])
+			return sql_escapings.ReplaceAllStringFunc(input, func (m string) string {
+				switch m {
+					case "\\\\":
+						return "\\"
+					case "\\'":
+						return "'"
+					case "\\\"":
+						return "\""
+					case "\\n":
+						return "\n"
+					case "\\r":
+						return "\r"
+					case "\\0":
+						return string([]byte{0})
+				}
+				return m
+			})
 		},
 	})
 	Declare(&Globalenv, &Declaration{

@@ -56,8 +56,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 (define sql_number (parser (define x (regex "-?[0-9]+\.?[0-9]*(?:e-?[0-9]+)?" true)) (simplify x)))
 
 (define sql_string (parser (or
-	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (replace x "\'" "'"))
-	(parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (replace x "\\\"" "\""))
+	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
+	(parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape x))
 )))
 
 (define parse_sql (lambda (schema s) (begin
