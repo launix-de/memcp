@@ -31,7 +31,7 @@ type shardDimension struct {
 	Pivots []scm.Scmer
 }
 
-// computes the index of a datapoint in PShards
+// computes the index of a datapoint in PShards -> if item == pivot, sort left
 func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int) {
 	for i, sd := range schema {
 		// get slice idx of this dimension
@@ -39,7 +39,7 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 		max := sd.NumPartitions-1 // smaller than max
 		for min < max {
 			pivot := (min + max - 1) / 2
-			if scm.Less(values[i], sd.Pivots[pivot]) {
+			if scm.Less(sd.Pivots[pivot], values[i]) {
 				max = pivot
 			} else {
 				min = pivot + 1
@@ -121,7 +121,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 				max := schema[0].NumPartitions - 1
 				for min < max {
 					pivot := (min + max - 1) / 2
-					if b.lowerInclusive {
+					if !b.lowerInclusive {
 						if scm.Less(b.lower, schema[0].Pivots[pivot]) {
 							max = pivot
 						} else {
@@ -143,7 +143,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 				umin := min
 				for umin < max {
 					pivot := (umin + max - 1) / 2
-					if b.upperInclusive {
+					if !b.upperInclusive {
 						if scm.Less(b.upper, schema[0].Pivots[pivot]) {
 							max = pivot
 						} else {
