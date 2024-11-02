@@ -42,8 +42,8 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (define rdf_select (parser '(
 	(atom "SELECT" true)
 	(define cols (+ (or
-		(parser (define v rdf_variable) (match v '('get_var s) '((concat s) v))) /* rdf_variable */
 		(parser '((define v rdf_expression) (atom "AS" true) (define v2 rdf_variable)) (match v2 '('get_var s) '((concat s) v))) /* rdf_variable AS rdf_variable */
+		(parser (define v rdf_variable) (match v '('get_var s) '((concat s) v))) /* rdf_variable */
 	) ","))
 	(?
 		(atom "WHERE" true)
@@ -103,11 +103,11 @@ Copyright (C) 2024  Carl-Philip Hänsch
 			'() (resultfunc cols ctx)
 		)))
 		(build_scan conditions ctx)
-	))
+	) (error "wrong rdf layout " query))
 )))
 
 (define parse_sparql (lambda (schema s) (match (ttl_header s)
-       '("prefixes" definitions "rest" rest) (rdf_queryplan (rdf_select rest) definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))))
+       '("prefixes" definitions "rest" rest) (rdf_queryplan schema (rdf_select rest) definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))))
 )))
 
 

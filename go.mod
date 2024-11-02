@@ -14,17 +14,11 @@ require (
 	github.com/launix-de/NonLockingReadMap v1.0.5
 	github.com/launix-de/go-mysqlstack v0.0.0-20241101205441-bc39b4e0fb04
 	github.com/launix-de/go-packrat/v2 v2.1.11
-	github.com/lrita/numa v1.0.2
-	github.com/wasilibs/go-re2 v1.5.1
 )
 
 require (
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
-	github.com/intel-go/cpuid v0.0.0-20220614022739-219e067757cb // indirect
-	github.com/magefile/mage v1.15.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	github.com/tetratelabs/wazero v1.7.0 // indirect
 	golang.org/x/exp v0.0.0-20241009180824-f66d83c29e7c // indirect
-	golang.org/x/net v0.30.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
 )
