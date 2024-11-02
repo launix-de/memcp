@@ -350,8 +350,39 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 			t.deltaColumns[col] = colidx[i]
 		}
 	}
+	var Auto_increment uint64
+	for _, c := range t.t.Columns {
+		if c.AutoIncrement {
+			t.t.mu.Lock() // auto increment with global table lock outside the loop for a batch
+			Auto_increment = t.t.Auto_increment
+			t.t.Auto_increment = t.t.Auto_increment + uint64(len(values)) // batch reservation of new IDs
+			t.t.mu.Unlock()
+		}
+		if c.AutoIncrement || c.Default != nil {
+			// column with default or auto increment -> also add to deltacolumns
+			cidx, ok := t.deltaColumns[c.Name]
+			if !ok {
+				// add column to delta
+				cidx = len(t.deltaColumns)
+				t.deltaColumns[c.Name] = cidx
+				colidx = append(colidx, cidx)
+			}
+		}
+	}
 	for _, row := range values {
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
+		for _, c := range t.t.Columns {
+			if c.AutoIncrement {
+				// fill auto_increment col (lock-free because the lock is outside the loop)
+				cidx := t.deltaColumns[c.Name]
+				Auto_increment++ // local increase
+				newrow[cidx] = int64(Auto_increment)
+			} else if c.Default != nil {
+				// fill col with default
+				cidx := t.deltaColumns[c.Name]
+				newrow[cidx] = c.Default
+			}
+		}
 		recid := uint(len(t.inserts)) + t.main_count
 		for j, colidx := range colidx {
 			if j < len(row) {
@@ -360,7 +391,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 		}
 		t.inserts = append(t.inserts, newrow)
 
-		// notify all hashmaps
+		// notify all hashmaps (what if col is not present in newrow??)
 		for k, v := range t.hashmaps1 {
 			v[[1]scm.Scmer{
 				newrow[t.deltaColumns[k[0]]],

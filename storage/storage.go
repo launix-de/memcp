@@ -433,13 +433,8 @@ func Init(en scm.Env) {
 						for i, d := range dimensions_ {
 							dimensions[i] = scm.ToInt(d)
 						}
-						typeparams := scm.String(def[4])
+						typeparams := def[4].([]scm.Scmer)
 						t.CreateColumn(colname, typename, dimensions, typeparams)
-						// todo: not null flags, PRIMARY KEY flag usw.
-						if strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
-							// append unique key
-							t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
-						}
 					}
 				}
 				// add constraints that are added onto us
@@ -466,7 +461,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"colname", "string", "name of the new column"},
 			scm.DeclarationParameter{"type", "string", "name of the basetype"},
 			scm.DeclarationParameter{"dimensions", "list", "dimensions of the type (e.g. for decimal)"},
-			scm.DeclarationParameter{"options", "string", "further options like AUTO_INCREMENT or NOT NULL"},
+			scm.DeclarationParameter{"options", "list", "assoc list with one of the following options: primary true, unique true, auto_increment true, null bool, comment string default string collate identifier"},
 			scm.DeclarationParameter{"computorCols", "list", "list of columns that is passed into params of computor"},
 			scm.DeclarationParameter{"computor", "func", "lambda expression that can take other column values and computes the value of that column"},
 		}, "bool",
@@ -489,14 +484,8 @@ func Init(en scm.Env) {
 			for i, d := range dimensions_ {
 				dimensions[i] = scm.ToInt(d)
 			}
-			typeparams := scm.String(a[5])
-			// TODO: check if column exists (and then skip to compute)
+			typeparams := a[5].([]scm.Scmer)
 			ok := t.CreateColumn(colname, typename, dimensions, typeparams)
-			// todo: not null flags, PRIMARY KEY flag usw.
-			if ok && strings.Contains(strings.ToLower(scm.String(typeparams)), "primary") { // the condition is hacky
-				// append unique key
-				t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{colname}})
-			}
 
 			if len(a) > 7 && a[7] != nil {
 				// computed columns (interface might not be final)

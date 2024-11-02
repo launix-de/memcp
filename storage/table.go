@@ -28,12 +28,12 @@ type column struct {
 	Name string
 	Typ string
 	Typdimensions []int // type dimensions for DECIMAL(10,3) and VARCHAR(5)
-	Extrainfo string // TODO: further diversify into NOT NULL, AUTOINCREMENT etc.
 	Computor scm.Scmer `json:"-"` // TODO: marshaljson -> serialize
 	PartitioningScore int // count this up to increase the chance of partitioning for this column
 	AutoIncrement bool
-	Default scm.Scmer // TODO
+	Default scm.Scmer
 	AllowNull bool // TODO: respect this
+	IsTemp bool // columns with IsTemp may be removed without consequences
 	Collation string
 	Comment string
 	// TODO: LRU statistics for computed columns
@@ -210,7 +210,7 @@ func (d dataset) GetI(key string) (scm.Scmer, bool) { // case insensitive
 	return nil, false
 }
 
-func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo string) bool {
+func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo []scm.Scmer) bool {
 	// one early out without schemalock (especially for computed columns)
 	for _, c := range t.Columns {
 		if c.Name == name {
@@ -227,7 +227,36 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 		}
 	}
 	
-	t.Columns = append(t.Columns, column{name, typ, typdimensions, extrainfo, nil, 0, false /* TODO: auto increment */, nil /* TODO: default */, true, "utf8mb4", ""})
+	var c column
+	c.Name = name
+	c.Typ = typ
+	c.Typdimensions = typdimensions
+	c.Collation = "utf8mb4"
+	c.AllowNull = true
+	for i := 0; i < len(extrainfo); i += 2 {
+		if extrainfo[i] == "primary" {
+			// append unique key
+			t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{name}})
+		} else if extrainfo[i] == "unique" {
+			// append unique key
+			t.Unique = append(t.Unique, uniqueKey{name, []string{name}})
+		} else if extrainfo[i] == "auto_increment" {
+			c.AutoIncrement = scm.ToBool(extrainfo[i+1])
+		} else if extrainfo[i] == "null" {
+			c.AllowNull = scm.ToBool(extrainfo[i+1])
+		} else if extrainfo[i] == "default" {
+			c.Default = extrainfo[i+1]
+		} else if extrainfo[i] == "comment" {
+			c.Comment = scm.String(extrainfo[i+1])
+		} else if extrainfo[i] == "collate" {
+			c.Collation = scm.String(extrainfo[i+1])
+		} else if extrainfo[i] == "temp" {
+			c.IsTemp = scm.ToBool(extrainfo[i+1])
+		} else {
+			panic("unknown column attribute: " + scm.String(extrainfo[i]))
+		}
+	}
+	t.Columns = append(t.Columns, c)
 	for _, s := range t.Shards {
 		s.columns[name] = new (StorageSparse)
 	}

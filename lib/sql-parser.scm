@@ -416,7 +416,20 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 					(parser '("(" (define a sql_int) ")") '((quote list) a))
 					(parser empty '((quote list)))
 				))
-				(define typeparams (regex "[^,)]*")) /* TODO: rest */
+				/* column flags */
+				(define typeparams (parser (define sub (* (or
+					(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
+					(parser (atom "PRIMARY" true) '("primary" true))
+					(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
+					(parser (atom "UNIQUE" true) '("unique" true))
+					(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
+					(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
+					(parser (atom "NULL" true) '("null" true))
+					(parser '((atom "DEFAULT" true) (define default sql_expression)) '("default" default))
+					(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
+					(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
+					/* TODO: GENERATED ALWAYS AS expr */
+				) ",")) (merge sub)))
 			) '((quote list) "column" col type dimensions typeparams))
 		) ","))
 		")"

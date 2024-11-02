@@ -67,7 +67,7 @@ func LoadJSON(schema, filename string) {
 					json.Unmarshal([]byte(s), &x) // parse JSON
 					for c, _ := range x {
 						// create column with dummy storage for next rebuild
-						t.CreateColumn(c, "ANY", []int{}, "AUTO CREATED")
+						t.CreateColumn(c, "ANY", []int{}, []scm.Scmer{"comment", "json import"})
 					}
 				}
 				func (t *table, s string) {

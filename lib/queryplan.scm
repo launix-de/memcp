@@ -266,7 +266,7 @@ if there is a group function, create a temporary preaggregate table
 					'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 						(set cols (extract_columns_for_tblvar tblvar expr))
 						/* TODO: name that column (concat ag "|" condition) */
-						'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) "" (cons list (map group (lambda (col) (concat col)))) '((quote lambda) (map group (lambda (col) (symbol (concat col))))
+						'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) '(list "temp" true) (cons list (map group (lambda (col) (concat col)))) '((quote lambda) (map group (lambda (col) (symbol (concat col))))
 							(scan_wrapper 'scan schema tbl
 								(cons list (merge tblvar_cols filtercols))
 								/* check group equality AND WHERE-condition */
