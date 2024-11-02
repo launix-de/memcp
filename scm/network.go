@@ -23,6 +23,7 @@ import "mime"
 import "sync"
 import "strings"
 import "strconv"
+import "net/url"
 import "net/http"
 import "encoding/json"
 import "github.com/gorilla/websocket"
@@ -96,12 +97,51 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		"password", pass,
 		"ip", req.RemoteAddr,
 		"body", func(a ...Scmer) Scmer {
-			// read body into string (TODO: also offer other methods like reading POST fields or upload files)
-			// req.Body io.ReadCloser
 			var b strings.Builder
 			io.Copy(&b, req.Body)
 			req.Body.Close()
 			return b.String()
+		},
+		"bodyParts", func(a ...Scmer) Scmer {
+			result := []Scmer{}
+			var b strings.Builder
+			io.Copy(&b, req.Body)
+			req.Body.Close()
+			s := b.String()
+			if s == "" {
+				return result
+			}
+			state := 0 // 0 -> await =, 1 = await &
+			for i := 0; i < len(s); i++ {
+				if state == 0 && s[i] == '=' {
+					s2, err := url.QueryUnescape(s[:i])
+					if err != nil {
+						panic(err)
+					}
+					result = append(result, s2)
+					state = 1
+					s = s[i+1:]
+					i = 0
+				} else if state == 1 && s[i] == '&' {
+					s2, err := url.QueryUnescape(s[:i])
+					if err != nil {
+						panic(err)
+					}
+					result = append(result, s2)
+					state = 0
+					s = s[i+1:]
+					i = 0
+				}
+			}
+			if state != 1 {
+				panic("invalid post data")
+			}
+			s2, err := url.QueryUnescape(s)
+			if err != nil {
+				panic(err)
+			}
+			result = append(result, s2)
+			return result
 		},
 	}
 	var res_lock sync.Mutex
@@ -124,7 +164,9 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		"print", func (a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
-			io.WriteString(res, String(a[0]))
+			for _, s := range a {
+				io.WriteString(res, String(s))
+			}
 			res_lock.Unlock();
 			return "ok"
 		},
