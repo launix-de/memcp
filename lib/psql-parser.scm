@@ -56,7 +56,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 (define psql_number (parser (define x (regex "-?[0-9]+\.?[0-9]*(?:e-?[0-9]+)?" true)) (simplify x)))
 
 (define psql_string (parser (or
-	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (psql_unescape x))
+	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
 )))
 
 (define parse_psql (lambda (schema s) (begin
@@ -400,7 +400,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "TABLE" true)
 		(define ifnotexists (parser (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) true))
 		(define id psql_identifier)
-	(parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (psql_unescape x))
+	(parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape x))
 		"("
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
@@ -527,7 +527,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 (define psql_copy_def (parser '(psql_identifier /* ignore */ "." (define tbl psql_identifier) "(" (define columns (+ psql_identifier ",")) ")") '(tbl columns)))
 
-(define load_psql (lambda (load filename) (begin
+(define load_psql (lambda (schema load filename) (begin
 	(set state (newsession))
 	(define psql_line (lambda (line) (begin
 		(match line
@@ -546,8 +546,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			)
 			(concat start ";" rest) (begin
 				/* command ended -> execute (at max one command per line) */
-				(print "SQL execute")
-				(print (concat (state "sql") start))
+				(set plan (parse_psql schema (concat (state "sql") start)))
+				(print "SQL execute" plan)
 				(state "sql" rest)
 			)
 			/* otherwise: append to cache */
