@@ -196,7 +196,7 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "input string"},
 			DeclarationParameter{"separator", "string", "(optional) parameter, defaults to \" \""},
-		}, "string",
+		}, "list",
 		func(a ...Scmer) Scmer {
 			// string, sep
 			split := " "

@@ -198,10 +198,37 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 											default:
 												// panic
 										}
+									case NthLocalVar:
+										switch p2 := valueFromPattern(p[2], en).(type) {
+											case LazyString:
+												panic("TODO: implement concat pattern on lazy strings")
+											case string:
+												// Symbol string
+												if strings.HasSuffix(v, p2) {
+													// extract postfix and match
+													en.VarsNumbered[p1] = v[:len(v) - len(p2)]
+													return true
+												} else {
+													return false
+												}
+										}
+									case Symbol:
+										switch p2 := valueFromPattern(p[2], en).(type) {
+											case LazyString:
+												panic("TODO: implement concat pattern on lazy strings")
+											case string:
+												// Symbol string
+												if strings.HasSuffix(v, p2) {
+													// extract postfix and match
+													en.Vars[p1] = v[:len(v) - len(p2)]
+													return true
+												}
+												// else
+												return false
+										}
 									default:
 										// panic
 								}
-								// TODO: Symbol string
 							} else if len(p) == 4 { // concat a b c
 								switch p1 := valueFromPattern(p[1], en).(type) {
 									case NthLocalVar:
@@ -234,6 +261,41 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 													return match(v[idx + len(p2):], p[3], en)
 												} else {
 													return false
+												}
+											default:
+												// panic
+										}
+									case LazyString:
+										panic("TODO: implement concat pattern on lazy strings")
+									case string:
+										switch p2 := valueFromPattern(p[2], en).(type) {
+											case NthLocalVar:
+												switch p3 := valueFromPattern(p[3], en).(type) {
+													case LazyString:
+														panic("TODO: implement concat pattern on lazy strings")
+													case string:
+														// string Symbol string
+														if strings.HasPrefix(v, p1) && strings.HasSuffix(v, p3) {
+															// extract postfix and match
+															en.VarsNumbered[p2] = v[len(p1):len(v) - len(p3)]
+															return true
+														} else {
+															return false
+														}
+												}
+											case Symbol:
+												switch p3 := valueFromPattern(p[3], en).(type) {
+													case LazyString:
+														panic("TODO: implement concat pattern on lazy strings")
+													case string:
+														// string Symbol string
+														if strings.HasPrefix(v, p1) && strings.HasSuffix(v, p3) {
+															// extract postfix and match
+															en.Vars[p2] = v[len(p1):len(v) - len(p3)]
+															return true
+														}
+														// else
+														return false
 												}
 											default:
 												// panic

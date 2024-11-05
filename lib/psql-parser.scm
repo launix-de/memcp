@@ -40,7 +40,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "LIMIT" true)
 		(atom "DELIMITER" true)
 	)))
-(define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"])+" false false)) "\"") (psql_unescape id))) /* with double quote */
+(define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"])+" false false)) "\"") (sql_unescape id))) /* with double quote */
 (define psql_identifier (parser (define x (or psql_identifier_unquoted psql_identifier_quoted)) x))
 
 (define psql_column (parser (or
@@ -525,10 +525,25 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 	)))
 
+(define psql_copy_def (parser '(psql_identifier /* ignore */ "." (define tbl psql_identifier) "(" (define columns (+ psql_identifier ",")) ")") '(tbl columns)))
+
 (define load_psql (lambda (load filename) (begin
 	(set state (newsession))
 	(define psql_line (lambda (line) (begin
 		(match line
+			(concat "--" b) /* comment */ false
+			(concat "COPY " def " FROM stdin;\n") (begin
+				/* public.cron (name, lastrun, medianruntime, id) */
+				(match (psql_copy_def def) '(tbl columns) (begin
+					(print "TODO: insert into " tbl columns)
+					(state "line" (lambda (line) (begin
+						(match line
+							"\\.\n" /* end of input */ (state "line" psql_line)
+							(concat x "\n") (print "TODO: row " (merge (zip columns (split x "\t"))))
+						)
+					)))
+				))
+			)
 			(concat start ";" rest) (begin
 				/* command ended -> execute (at max one command per line) */
 				(print "SQL execute")
