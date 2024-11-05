@@ -16,6 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 
 (import "sql-parser.scm")
+(import "psql-parser.scm")
 (import "queryplan.scm")
 
 /* create user tables */
@@ -54,6 +55,25 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			((res "print") "Unauthorized")
 		))
 	)))
+	(define handle_query_postgres (lambda (req res schema query) (begin
+		/* check for password */
+		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(if (and pw (equal? pw (password (req "password")))) (begin
+			((res "header") "Content-Type" "text/plain")
+			((res "status") 200)
+			(print "SQL query: " query)
+			(define formula (parse_psql schema query))
+			(define resultrow (res "jsonl"))
+			(define session (context "session"))
+			(print "execution plan: " formula)
+			(eval formula)
+		) (begin
+			((res "header") "Content-Type" "text/plain")
+			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+			((res "status") 401)
+			((res "print") "Unauthorized")
+		))
+	)))
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
@@ -65,6 +85,14 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(regex "^/sql/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
 				(handle_query req res schema query)
+			)
+			(regex "^/psql/([^/]+)$" url schema) (begin
+				(set query ((req "body")))
+				(handle_query_postgres req res schema query)
+			)
+			(regex "^/psql/([^/]+)/(.*)$" url schema query_un) (begin
+				(set query (urldecode query_un))
+				(handle_query_postgres req res schema query)
 			)
 			/* default */
 			(old_handler req res))
