@@ -525,3 +525,23 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 	)))
 
+(define load_psql (lambda (load filename) (begin
+	(set state (newsession))
+	(define psql_line (lambda (line) (begin
+		(match line
+			(concat start ";" rest) (begin
+				/* command ended -> execute (at max one command per line) */
+				(print "SQL execute")
+				(print (concat (state "sql") start))
+				(state "sql" rest)
+			)
+			/* otherwise: append to cache */
+			(state "sql" (concat (state "sql") line))
+		)
+	)))
+	(state "line" psql_line)
+	(state "sql" "")
+	(load filename (lambda (line) (begin
+		((state "line") line)
+	)) "\n")
+)))

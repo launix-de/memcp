@@ -202,6 +202,46 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 										// panic
 								}
 								// TODO: Symbol string
+							} else if len(p) == 4 { // concat a b c
+								switch p1 := valueFromPattern(p[1], en).(type) {
+									case NthLocalVar:
+										// string Symbol
+										switch p2 := valueFromPattern(p[2], en).(type) {
+											case LazyString:
+												panic("TODO: implement concat pattern on lazy strings")
+											case string:
+												idx := strings.Index(v, p2)
+												if idx != -1 {
+													// extract prefix and match
+													en.VarsNumbered[p1] = v[:idx]
+													return match(v[idx + len(p2):], p[3], en)
+												} else {
+													return false
+												}
+											default:
+												// panic
+										}
+									case Symbol:
+										// string Symbol
+										switch p2 := valueFromPattern(p[2], en).(type) {
+											case LazyString:
+												panic("TODO: implement concat pattern on lazy strings")
+											case string:
+												idx := strings.Index(v, p2)
+												if idx != -1 {
+													// extract prefix and match
+													en.Vars[p1] = v[:idx]
+													return match(v[idx + len(p2):], p[3], en)
+												} else {
+													return false
+												}
+											default:
+												// panic
+										}
+									default:
+										// panic
+								}
+								// TODO: Symbol string
 							}
 							panic("unknown concat pattern: " + fmt.Sprint(p))
 						default:
