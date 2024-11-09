@@ -454,7 +454,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define psql_alter_table (parser '(
 		(atom "ALTER" true)
 		(atom "TABLE" true)
-		(define id psql_identifier) /* TODO: ignorecase */
+		(define id (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier))
 		(define alters (+ (or
 			/* TODO
 			(parser '((atom "ADD" true) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
@@ -471,6 +471,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				))
 				(define typeparams (regex "[^,)]*")) /* TODO: rest */
 			) (lambda (id) '((quote createcolumn) schema id col type dimensions typeparams)))
+			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) '((quote altertable) schema id "owner" owner)))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
