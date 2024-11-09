@@ -556,6 +556,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				/* public.cron (name, lastrun, medianruntime, id) */
 				(match (psql_copy_def def) '(tbl columns) (begin
 					(print "TODO: insert into " tbl columns)
+					/* TODO: escape b 8 f 12 n 10 r 13 t 9 v 11 \324 octal \xFF hex */
 					(state "line" (lambda (line) (begin
 						(match line
 							"\\.\n" /* end of input */ (state "line" psql_line)
