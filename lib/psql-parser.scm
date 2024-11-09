@@ -481,6 +481,16 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) schema id "collation" collation)))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) schema id "auto_increment" ai)))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier) (define body (or /* ALTER COLUMN */
+				(parser '((atom "ADD" true) (atom "GENERATED" true) (atom "ALWAYS" true) (atom "AS" true) (atom "IDENTITY") "("
+				    (atom "SEQUENCE" true) (atom "NAME" true) psql_identifier "." psql_identifier
+				    (? (atom "START" true) (atom "WITH" true) psql_expression)
+				    (? (atom "INCREMENT" true) (atom "BY" true) psql_expression)
+				    (? (atom "NO" true) (atom "MINVALUE" true))
+				    (? (atom "NO" true) (atom "MAXVALUE" true))
+				    (? (atom "CACHE" true) psql_expression)
+				")") (lambda (col) (lambda (id) '((quote altercolumn) schema id col "auto_increment" true))))
+			))) (body col))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 
@@ -550,6 +560,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			)
 			(concat start ";" rest) (begin
 				/* command ended -> execute (at max one command per line) */
+				(print (concat (state "sql") start))
 				(set plan (parse_psql schema (concat (state "sql") start)))
 				(print "SQL execute" plan)
 				(state "sql" rest)

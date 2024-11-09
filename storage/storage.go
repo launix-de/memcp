@@ -590,8 +590,8 @@ func Init(en scm.Env) {
 		4, 4,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
-			scm.DeclarationParameter{"table", "string", "name of the new table"},
-			scm.DeclarationParameter{"operation", "string", "one of drop|engine|collation|auto_increment"},
+			scm.DeclarationParameter{"table", "string", "name of the table"},
+			scm.DeclarationParameter{"operation", "string", "one of owner|drop|engine|collation"},
 			scm.DeclarationParameter{"parameter", "any", "name of the column to drop or value of the parameter"},
 		}, "bool",
 		func (a ...scm.Scmer) scm.Scmer {
@@ -608,10 +608,44 @@ func Init(en scm.Env) {
 			switch a[2] {
 			case "drop":
 				return t.DropColumn(scm.String(a[3]))
+			case "owner":
+				return false // ignore
 			default:
 				panic("unimplemented alter table operation: " + scm.String(a[2]))
 			}
-			return true
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"altercolumn", "alters a column",
+		5, 5,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"table", "string", "name of the table"},
+			scm.DeclarationParameter{"column", "string", "name of the column"},
+			scm.DeclarationParameter{"operation", "string", "one of drop|type|collation|auto_increment|comment"},
+			scm.DeclarationParameter{"parameter", "any", "name of the column to drop or value of the parameter"},
+		}, "bool",
+		func (a ...scm.Scmer) scm.Scmer {
+			// get tbl
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+			for _, c := range t.Columns {
+				if c.Name == scm.String(a[2]) {
+					switch a[3] {
+					case "drop":
+						return t.DropColumn(scm.String(a[2]))
+					default:
+						panic("unimplemented alter column operation: " + scm.String(a[3]))
+					}
+				}
+			}
+			panic("column " + scm.String(a[0]) + "." + scm.String(a[1]) + "." + scm.String(a[2]) + " does not exist")
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
