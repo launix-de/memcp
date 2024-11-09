@@ -168,10 +168,13 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "COALESCE" true) "(" (define args (* psql_expression ",")) ")") (cons (quote coalesce) args))
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" psql_expression "," psql_expression "," psql_expression ")") nil) /* ignore */
 
 		(parser (atom "NULL" true) nil)
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
+		(parser (atom "ON" true) true)
+		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var psql_identifier_unquoted)) '('session var))
 		(parser '((atom "@@" true) (define var psql_identifier_unquoted)) '('globalvars var))
 		psql_number
@@ -399,8 +402,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "CREATE" true)
 		(atom "TABLE" true)
 		(define ifnotexists (parser (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) true))
-		(define id psql_identifier)
-	(parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape x))
+		(define id (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier))
 		"("
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
@@ -418,6 +420,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				))
 				/* column flags */
 				(define typeparams (parser (define sub (* (or
+					(parser (atom "PRECISION" true) '()) /* double precision -> double (handle precision as ignored flag) */
 					(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 					(parser (atom "PRIMARY" true) '("primary" true))
 					(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
