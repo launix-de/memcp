@@ -59,6 +59,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
 )))
 
+(define psql_type (parser (or
+	'((atom "character" true) (atom "varying" true))
+	'((atom "double" true) (atom "precision" true))
+	psql_identifier
+)))
+
 (define parse_psql (lambda (schema s) (begin
 
 
@@ -412,7 +418,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "KEY" true) psql_identifier "(" (+ psql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
 			(parser '(
 				(define col psql_identifier)
-				(define type psql_identifier)
+				(define type psql_type)
 				(define dimensions (or
 					(parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b))
 					(parser '("(" (define a psql_int) ")") '((quote list) a))
@@ -482,7 +488,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) schema id "collation" collation)))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) schema id "auto_increment" ai)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier) (define body (or /* ALTER COLUMN */
-				(parser '((atom "ADD" true) (atom "GENERATED" true) (atom "ALWAYS" true) (atom "AS" true) (atom "IDENTITY") "("
+				(parser '((atom "ADD" true) (atom "GENERATED" true) (or '((atom "BY" true) (atom "DEFAULT" true)) (atom "ALWAYS" true)) (atom "AS" true) (atom "IDENTITY") "("
 				    (atom "SEQUENCE" true) (atom "NAME" true) psql_identifier "." psql_identifier
 				    (? (atom "START" true) (atom "WITH" true) psql_expression)
 				    (? (atom "INCREMENT" true) (atom "BY" true) psql_expression)
