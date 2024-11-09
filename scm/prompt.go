@@ -148,9 +148,12 @@ func init() {
 }
 func PrintError(r any) {
 	s := fmt.Sprint(r)
-	numlines := strings.Count(s, "\n") * 4 + 9 // skip those stack trace lines that peel out of the error message
+	numlines := strings.Count(s, "\nin ") * 4 + 9 // skip those stack trace lines that peel out of the error message
 	trace := string(debug.Stack())
 	for numlines > 0 {
+		if trace == "" {
+			break
+		}
 		if trace[0] == '\n' {
 			numlines--
 		}
