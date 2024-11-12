@@ -166,149 +166,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					}
 					return false
 				case Symbol("concat"):
-					switch v := val.(type) {
-						case LazyString:
-							panic("TODO: implement concat pattern on lazy strings")
-						case string: // only allowed for strings
-							// examine the pattern
-							if len(p) == 3 { // concat a b
-								switch p1 := valueFromPattern(p[1], en).(type) {
-									case LazyString:
-										panic("TODO: implement concat pattern on lazy strings")
-									case string:
-										switch p2 := valueFromPattern(p[2], en).(type) {
-											case NthLocalVar:
-												// string Symbol
-												if strings.HasPrefix(v, p1) {
-													// extract postfix and match
-													en.VarsNumbered[p2] = v[len(p1):]
-													return true
-												} else {
-													return false
-												}
-											case Symbol:
-												// string Symbol
-												if strings.HasPrefix(v, p1) {
-													// extract postfix and match
-													en.Vars[p2] = v[len(p1):]
-													return true
-												}
-												// else
-												return false
-											default:
-												// panic
-										}
-									case NthLocalVar:
-										switch p2 := valueFromPattern(p[2], en).(type) {
-											case LazyString:
-												panic("TODO: implement concat pattern on lazy strings")
-											case string:
-												// Symbol string
-												if strings.HasSuffix(v, p2) {
-													// extract postfix and match
-													en.VarsNumbered[p1] = v[:len(v) - len(p2)]
-													return true
-												} else {
-													return false
-												}
-										}
-									case Symbol:
-										switch p2 := valueFromPattern(p[2], en).(type) {
-											case LazyString:
-												panic("TODO: implement concat pattern on lazy strings")
-											case string:
-												// Symbol string
-												if strings.HasSuffix(v, p2) {
-													// extract postfix and match
-													en.Vars[p1] = v[:len(v) - len(p2)]
-													return true
-												}
-												// else
-												return false
-										}
-									default:
-										// panic
-								}
-							} else if len(p) == 4 { // concat a b c
-								switch p1 := valueFromPattern(p[1], en).(type) {
-									case NthLocalVar:
-										// string Symbol
-										switch p2 := valueFromPattern(p[2], en).(type) {
-											case LazyString:
-												panic("TODO: implement concat pattern on lazy strings")
-											case string:
-												idx := strings.Index(v, p2)
-												if idx != -1 {
-													// extract prefix and match
-													en.VarsNumbered[p1] = v[:idx]
-													return match(v[idx + len(p2):], p[3], en)
-												} else {
-													return false
-												}
-											default:
-												// panic
-										}
-									case Symbol:
-										// string Symbol
-										switch p2 := valueFromPattern(p[2], en).(type) {
-											case LazyString:
-												panic("TODO: implement concat pattern on lazy strings")
-											case string:
-												idx := strings.Index(v, p2)
-												if idx != -1 {
-													// extract prefix and match
-													en.Vars[p1] = v[:idx]
-													return match(v[idx + len(p2):], p[3], en)
-												} else {
-													return false
-												}
-											default:
-												// panic
-										}
-									case LazyString:
-										panic("TODO: implement concat pattern on lazy strings")
-									case string:
-										switch p2 := valueFromPattern(p[2], en).(type) {
-											case NthLocalVar:
-												switch p3 := valueFromPattern(p[3], en).(type) {
-													case LazyString:
-														panic("TODO: implement concat pattern on lazy strings")
-													case string:
-														// string Symbol string
-														if strings.HasPrefix(v, p1) && strings.HasSuffix(v, p3) {
-															// extract postfix and match
-															en.VarsNumbered[p2] = v[len(p1):len(v) - len(p3)]
-															return true
-														} else {
-															return false
-														}
-												}
-											case Symbol:
-												switch p3 := valueFromPattern(p[3], en).(type) {
-													case LazyString:
-														panic("TODO: implement concat pattern on lazy strings")
-													case string:
-														// string Symbol string
-														if strings.HasPrefix(v, p1) && strings.HasSuffix(v, p3) {
-															// extract postfix and match
-															en.Vars[p2] = v[len(p1):len(v) - len(p3)]
-															return true
-														}
-														// else
-														return false
-												}
-											default:
-												// panic
-										}
-									default:
-										// panic
-								}
-								// TODO: Symbol string
-							}
-							panic("unknown concat pattern: " + fmt.Sprint(p))
-						default:
-							return false // non-strings are not matching
-					}
+					return matchConcat(val, p[1:], en)
 				case Symbol("merge"):
 					switch v := val.(type) {
 						case []Scmer: // only allowed for lists
@@ -391,6 +249,124 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			}
 		default:
 			panic("unknown match pattern: " + fmt.Sprint(p))
+	}
+}
+
+func matchConcat(val Scmer, p []Scmer, en *Env) bool {
+	switch v := val.(type) {
+		case LazyString:
+			panic("TODO: implement concat pattern on lazy strings")
+		case string: // only allowed for strings
+			// examine the pattern
+			if len(p) == 0 && val == "" {
+				// empty string
+				return true
+			}
+			if len(p) == 1 {
+				switch p0 := valueFromPattern(p[0], en).(type) {
+					case NthLocalVar:
+						// string = Symbol
+						en.VarsNumbered[p0] = v
+						return true
+					case Symbol:
+						// string = Symbol
+						en.Vars[p0] = v
+						return true
+					default:
+						// otherwise
+				}
+			}
+			if len(p) >= 1 { // concat prefix rest
+				switch p0 := valueFromPattern(p[0], en).(type) {
+					case LazyString:
+						panic("TODO: implement concat pattern on lazy strings")
+					case string:
+						// string Symbol
+						if strings.HasPrefix(v, p0) {
+							return matchConcat(v[len(p0):], p[1:], en) // match rest of pattern
+						} else {
+							return false
+						}
+					default:
+				}
+			}
+			if len(p) == 2 { // var + suffix
+				switch p0 := valueFromPattern(p[0], en).(type) {
+					case NthLocalVar:
+						// symbol + delimiter + rest
+						switch p1 := valueFromPattern(p[1], en).(type) {
+							case LazyString:
+								panic("TODO: implement concat pattern on lazy strings")
+							case string:
+								// Symbol string
+								if strings.HasSuffix(v, p1) {
+									// extract postfix and match
+									en.VarsNumbered[p0] = v[:len(v) - len(p1)]
+									return true
+								} else {
+									return false
+								}
+						}
+					case Symbol:
+						switch p1 := valueFromPattern(p[1], en).(type) {
+							case LazyString:
+								panic("TODO: implement concat pattern on lazy strings")
+							case string:
+								// Symbol string
+								if strings.HasSuffix(v, p1) {
+									// extract postfix and match
+									en.Vars[p0] = v[:len(v) - len(p1)]
+									return true
+								}
+								// else
+								return false
+						}
+					default:
+						// panic
+				}
+			} else if len(p) >= 2 { // concat a b rest
+				switch p0 := valueFromPattern(p[0], en).(type) {
+					case NthLocalVar:
+						// string Symbol
+						switch p1 := valueFromPattern(p[1], en).(type) {
+							case LazyString:
+								panic("TODO: implement concat pattern on lazy strings")
+							case string:
+								idx := strings.Index(v, p1)
+								if idx != -1 {
+									// extract prefix and match rest
+									en.VarsNumbered[p0] = v[:idx]
+									return matchConcat(v[idx + len(p1):], p[2:], en)
+								} else {
+									return false
+								}
+							default:
+								// panic
+						}
+					case Symbol:
+						// string Symbol
+						switch p1 := valueFromPattern(p[1], en).(type) {
+							case LazyString:
+								panic("TODO: implement concat pattern on lazy strings")
+							case string:
+								idx := strings.Index(v, p1)
+								if idx != -1 {
+									// extract prefix and match
+									en.Vars[p0] = v[:idx]
+									return matchConcat(v[idx + len(p1):], p[2:], en)
+								} else {
+									return false
+								}
+							default:
+								// panic
+						}
+					default:
+						// panic
+				}
+			}
+			panic("unknown concat pattern: " + fmt.Sprint(p))
+		default:
+			return false // non-strings are not matching
 	}
 }
 
