@@ -501,6 +501,54 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"createkey", "creates a new key on a table",
+		5, 5,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"table", "string", "name of the new table"},
+			scm.DeclarationParameter{"keyname", "string", "name of the new key"},
+			scm.DeclarationParameter{"unique", "bool", "whether the key is unique"},
+			scm.DeclarationParameter{"columns", "list", "list of columns to include"},
+		}, "bool",
+		func (a ...scm.Scmer) scm.Scmer {
+			// get tbl
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.Tables.Get(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+
+			if !scm.ToBool(a[3]) {
+				// we don't care about non-unique keys since we build our own indices
+				return true
+			}
+
+			l := a[4].([]scm.Scmer)
+			name := scm.String(a[2])
+			cols := make([]string, len(l))
+			for i, v := range l {
+				cols[i] = scm.String(v)
+			}
+
+			db.schemalock.Lock()
+			defer db.schemalock.Unlock()
+			for _, u := range t.Unique {
+				if u.Id == name {
+					return false // key already exists
+				}
+			}
+
+			// add unique key
+			t.Unique = append(t.Unique, uniqueKey{name, cols})
+			db.save()
+
+			return true
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"shardcolumn", "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
 		3, 4,
 		[]scm.DeclarationParameter{
