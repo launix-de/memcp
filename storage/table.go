@@ -192,6 +192,28 @@ func (c *column) Show() scm.Scmer {
 	return []scm.Scmer{"Field", c.Name, "Type", typ, "Collation", c.Collation, "RawType", c.Typ, "Dimensions", dims, "Null", c.AllowNull, "Default", c.Default, "Extra", extra, "Privileges", "select,insert,update,references", "Comment", c.Comment}
 }
 
+func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
+	switch (key) {
+		case "default":
+			c.Default = val
+			return c.Default
+		case "null":
+			c.AllowNull = scm.ToBool(val)
+			return c.AllowNull
+		case "temp":
+			c.IsTemp = scm.ToBool(val)
+			return c.IsTemp
+		case "collation":
+			c.Collation = scm.String(val)
+			return c.Collation
+		case "comment":
+			c.Comment = scm.String(val)
+			return c.Comment
+		default:
+			panic("unimplemented alter column operation: " + key)
+	}
+}
+
 func (d dataset) Get(key string) (scm.Scmer, bool) {
 	for i := 0; i < len(d); i += 2 {
 		if d[i] == key {

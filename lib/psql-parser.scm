@@ -175,6 +175,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" psql_expression "," psql_expression "," psql_expression ")") nil) /* ignore */
+		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" psql_identifier "." (define key psql_identifier) "'" "," (define val psql_expression) "," psql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn schema tbl col "auto_increment" val) (error "unknown pg_catalog key: " key)))
 
 		(parser (atom "NULL" true) nil)
 		(parser (atom "TRUE" true) true)

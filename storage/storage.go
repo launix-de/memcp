@@ -640,8 +640,17 @@ func Init(en scm.Env) {
 					switch a[3] {
 					case "drop":
 						return t.DropColumn(scm.String(a[2]))
+					case "auto_increment":
+						ai := scm.ToInt(a[4])
+						if ai > 1 {
+							// set ai value
+							t.Auto_increment = uint64(ai)
+						} else {
+							// set ai flag for column
+							c.AutoIncrement = scm.ToBool(a[4])
+						}
 					default:
-						panic("unimplemented alter column operation: " + scm.String(a[3]))
+						return c.Alter(scm.String(a[3]), a[4])
 					}
 				}
 			}
