@@ -556,6 +556,64 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"createforeignkey", "creates a new foreign key on a table",
+		8, 8,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"keyname", "string", "name of the new key"},
+			scm.DeclarationParameter{"table1", "string", "name of the first table"},
+			scm.DeclarationParameter{"columns1", "list", "list of columns to include"},
+			scm.DeclarationParameter{"table2", "string", "name of the second table"},
+			scm.DeclarationParameter{"columns2", "list", "list of columns to include"},
+			scm.DeclarationParameter{"updatemode", "string", "restrict|cascade|set null"},
+			scm.DeclarationParameter{"deletemode", "string", "restrict|cascade|set null"},
+		}, "bool",
+		func (a ...scm.Scmer) scm.Scmer {
+			// get tbl
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			id := scm.String(a[1])
+			t1 := db.Tables.Get(scm.String(a[2]))
+			if t1 == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[2]) + " does not exist")
+			}
+			t2 := db.Tables.Get(scm.String(a[4]))
+			if t2 == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[4]) + " does not exist")
+			}
+
+			l1 := a[3].([]scm.Scmer)
+			cols1 := make([]string, len(l1))
+			for i, v := range l1 {
+				cols1[i] = scm.String(v)
+			}
+
+			l2 := a[5].([]scm.Scmer)
+			cols2 := make([]string, len(l2))
+			for i, v := range l2 {
+				cols2[i] = scm.String(v)
+			}
+
+			db.schemalock.Lock()
+			defer db.schemalock.Unlock()
+			for _, u := range t1.Foreign {
+				if u.Id == id {
+					return false // key already exists
+				}
+			}
+
+			// add unique key
+			k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[6]), getForeignKeyMode(a[7])}
+			t1.Foreign = append(t1.Foreign, k)
+			t2.Foreign = append(t2.Foreign, k)
+			db.save()
+
+			return true
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"shardcolumn", "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
 		3, 4,
 		[]scm.DeclarationParameter{

@@ -167,6 +167,9 @@ func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
 }
 
 func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
+	if val == nil {
+		return RESTRICT
+	}
 	switch scm.String(val) {
 		case "restrict":
 			return RESTRICT
