@@ -405,6 +405,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		)
 	)))
 
+	(define psql_foreign_key_mode (parser (or
+		(parser (atom "RESTRICT" true) "restrict")
+		(parser (atom "CASCADE" true) "cascade")
+		(parser (atom "SET NULL" true) "set null")
+	)))
+
 	(define psql_create_table (parser '(
 		(atom "CREATE" true)
 		(atom "TABLE" true)
@@ -414,7 +420,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
 			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
-			(parser '((atom "CONSTRAINT" true) (define id (? psql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 psql_identifier) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
+			(parser '((atom "CONSTRAINT" true) (define id (? psql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 psql_identifier) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
 			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? psql_identifier)) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 psql_identifier) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
 			(parser '((atom "KEY" true) psql_identifier "(" (+ psql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
 			(parser '(

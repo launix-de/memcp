@@ -49,12 +49,20 @@ type uniqueKey struct {
 	Id string
 	Cols []string
 }
+type foreignKeyMode uint8
+const (
+	RESTRICT foreignKeyMode = 0
+	CASCADE = 1
+	SETNULL = 2
+)
 type foreignKey struct {
 	Id string
 	Tbl1 string
 	Cols1 []string
 	Tbl2 string
 	Cols2 []string
+	Updatemode foreignKeyMode
+	Deletemode foreignKeyMode
 }
 /*
 unique keys:
@@ -156,6 +164,19 @@ func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	return errors.New("unknown persistency mode: " + str)
+}
+
+func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
+	switch scm.String(val) {
+		case "restrict":
+			return RESTRICT
+		case "cascade":
+			return CASCADE
+		case "set null":
+			return SETNULL
+		default:
+			panic("unknown update mode: " + scm.String(val))
+	}
 }
 
 func (t *table) ShowColumns() scm.Scmer {

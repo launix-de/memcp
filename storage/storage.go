@@ -344,7 +344,7 @@ func Init(en scm.Env) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
-			scm.DeclarationParameter{"cols", "list", "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2)"},
+			scm.DeclarationParameter{"cols", "list", "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2 updatemode deletemode of 'restrict'|'cascade'|'set null')"},
 			scm.DeclarationParameter{"options", "list", "further options like engine=safe|sloppy|memory"},
 			scm.DeclarationParameter{"ifnotexists", "bool", "don't throw an error if table already exists"},
 		}, "bool",
@@ -417,12 +417,19 @@ func Init(en scm.Env) {
 						}
 						t2name := scm.String(def[3])
 						t2 := t.schema.Tables.Get(t2name)
-						t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2})
+						var updatemode foreignKeyMode
+						if len(def) > 5 {
+							updatemode = getForeignKeyMode(def[5])
+						}
+						var deletemode foreignKeyMode
+						if len(def) > 6 {
+							deletemode = getForeignKeyMode(def[6])
+						}
+						t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode})
 						if t2 != nil {
 							// non-forward declaration
-							t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2})
+							t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode})
 						}
-						fmt.Println("!----! created foreign key")
 					} else
 					if def[0] == "column" {
 						// normal column
