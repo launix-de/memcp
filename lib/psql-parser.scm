@@ -560,18 +560,20 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 (define load_psql (lambda (schema load filename) (begin
 	(set state (newsession))
+	(set resultrow print)
+	(set session (newsession))
 	(define psql_line (lambda (line) (begin
 		(match line
 			(concat "--" b) /* comment */ false
 			(concat "COPY " def " FROM stdin;\n") (begin
 				/* public.cron (name, lastrun, medianruntime, id) */
 				(match (psql_copy_def def) '(tbl columns) (begin
-					(print "TODO: insert into " tbl columns)
+					/* (print "TODO: insert into " tbl columns) */
 					/* TODO: escape b 8 f 12 n 10 r 13 t 9 v 11 \324 octal \xFF hex */
 					(state "line" (lambda (line) (begin
 						(match line
 							"\\.\n" /* end of input */ (state "line" psql_line)
-							(concat x "\n") (print "TODO: row " (merge (zip columns (split x "\t"))))
+							(concat x "\n") (insert schema tbl columns '((merge (zip columns (split x "\t")))))
 						)
 					)))
 				))
@@ -581,6 +583,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				(print (concat (state "sql") start))
 				(set plan (parse_psql schema (concat (state "sql") start)))
 				(print "SQL execute" plan)
+				(eval plan)
 				(state "sql" rest)
 			)
 			/* otherwise: append to cache */
