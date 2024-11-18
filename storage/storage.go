@@ -758,9 +758,11 @@ func Init(en scm.Env) {
 						if ai > 1 {
 							// set ai value
 							t.Auto_increment = uint64(ai)
+							return true
 						} else {
 							// set ai flag for column
 							c.AutoIncrement = scm.ToBool(a[4])
+							return true
 						}
 					default:
 						return c.Alter(scm.String(a[3]), a[4])

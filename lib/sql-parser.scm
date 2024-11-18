@@ -436,7 +436,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 					(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
 					/* TODO: GENERATED ALWAYS AS expr */
 				) ",")) (merge sub)))
-			) '((quote list) "column" col type dimensions typeparams))
+			) '((quote list) "column" col type dimensions (cons 'list typeparams)))
 		) ","))
 		")"
 		(define options (* (or

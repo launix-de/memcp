@@ -60,8 +60,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 )))
 
 (define psql_type (parser (or
-	'((atom "character" true) (atom "varying" true))
-	'((atom "double" true) (atom "precision" true))
+	(parser '((atom "character" true) (atom "varying" true)) "varying")
+	(parser '((atom "double" true) (atom "precision" true)) "double")
 	psql_identifier
 )))
 
@@ -433,7 +433,6 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				))
 				/* column flags */
 				(define typeparams (parser (define sub (* (or
-					(parser (atom "PRECISION" true) '()) /* double precision -> double (handle precision as ignored flag) */
 					(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 					(parser (atom "PRIMARY" true) '("primary" true))
 					(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
@@ -446,7 +445,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 					(parser '((atom "COLLATE" true) (define comment psql_identifier)) '("collate" comment))
 					/* TODO: GENERATED ALWAYS AS expr */
 				) ",")) (merge sub)))
-			) '((quote list) "column" col type dimensions typeparams))
+			) '((quote list) "column" col type dimensions (cons 'list typeparams)))
 		) ","))
 		")"
 		(define options (* (or
@@ -542,7 +541,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id psql_identifier)) '((quote dropdatabase) id))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key psql_identifier) "=" (define value psql_expression)) '((quote session) key value)) ","))) (cons '!begin vars))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key psql_identifier) "=" (define value (or
+			(parser (atom "content" true) "content") /* quirks for SET xmloption = content */
+			(parser (atom "warning" true) "warning") /* quirks for SET client_min_messages = warning */
+			(parser (atom "heap" true) "heap") /* quirks for SET default_table_access_method = heap */
+			psql_expression
+		))) '((quote session) key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or psql_identifier '(psql_identifier (atom "AS" true) psql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
@@ -573,7 +577,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 					(state "line" (lambda (line) (begin
 						(match line
 							"\\.\n" /* end of input */ (state "line" psql_line)
-							(concat x "\n") (insert schema tbl columns '((merge (zip columns (split x "\t")))))
+							(concat x "\n") (insert schema tbl columns '((split x "\t")))
 						)
 					)))
 				))
