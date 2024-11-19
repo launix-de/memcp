@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 WORKDIR /memcp
 VOLUME /data
+EXPOSE 4332
+EXPOSE 3307
 
 RUN apt-get update
 RUN apt-get install -y software-properties-common
