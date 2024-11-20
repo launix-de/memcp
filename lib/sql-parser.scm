@@ -154,6 +154,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '('password p))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('parse_date p))
+		(parser '((atom "CURRENT_TIMESTAMP" true) "(" (? sql_expression /* ignore precision */) ")") '('now))
 		(parser '((atom "FLOOR" true) "(" (define p sql_expression) ")") '('floor p))
 		(parser '((atom "CEIL" true) "(" (define p sql_expression) ")") '('ceil p))
 		(parser '((atom "CEILING" true) "(" (define p sql_expression) ")") '('ceil p))
@@ -432,10 +433,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 					(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 					(parser (atom "NULL" true) '("null" true))
 					(parser '((atom "DEFAULT" true) (define default sql_expression)) '("default" default))
+					(parser '((atom "ON" true) (atom "UPDATE" true) (define default sql_expression)) '("update" default))
 					(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
 					(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
+					(parser (atom "UNSIGNED" true) '()) /* ignore */
 					/* TODO: GENERATED ALWAYS AS expr */
-				) ",")) (merge sub)))
+				))) (merge sub)))
 			) '((quote list) "column" col type dimensions (cons 'list typeparams)))
 		) ","))
 		")"
@@ -447,6 +450,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) '("engine" "safe"))
+			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) '("engine" "safe"))
+			(parser '((atom "COMMENT" true) "=" (define value sql_expression)) '("comment" value))
 			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) "=" (define id sql_identifier)) '("charset" id))
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))

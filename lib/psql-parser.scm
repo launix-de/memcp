@@ -444,7 +444,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 					(parser '((atom "COMMENT" true) (define comment psql_expression)) '("comment" comment))
 					(parser '((atom "COLLATE" true) (define comment psql_identifier)) '("collate" comment))
 					/* TODO: GENERATED ALWAYS AS expr */
-				) ",")) (merge sub)))
+				))) (merge sub)))
 			) '((quote list) "column" col type dimensions (cons 'list typeparams)))
 		) ","))
 		")"
