@@ -55,6 +55,7 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 					"__FILE__": filename,
 					"import": getImport(wd),
 					"load": getLoad(wd),
+					"stream": getStream(wd),
 					"watch": getWatch(wd),
 					"serveStatic": scm.HTTPStaticGetter(wd),
 				},
@@ -70,15 +71,26 @@ func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
 		}
 }
 
-func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
+func getStream(path string) func (a ...scm.Scmer) scm.Scmer {
 	return func (a ...scm.Scmer) scm.Scmer {
 			filename := path + "/" + scm.String(a[0])
+			stream, err := os.Open(filename)
+			if err != nil {
+				panic(err)
+			}
+			return stream // io.Reader
+		}
+}
+
+func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
+	return func (a ...scm.Scmer) scm.Scmer {
+			stream, ok := a[0].(io.Reader)
+			if !ok {
+				// not a stream? call getStream
+				stream = getStream(path)(a[0]).(io.Reader)
+			}
 			if len(a) > 2 {
-				file, err := os.Open(filename)
-				if err != nil {
-					panic(err)
-				}
-				splitter := bufio.NewReader(file)
+				splitter := bufio.NewReader(stream)
 				delimiter := scm.String(a[2])
 				if len(delimiter) != 1 {
 					panic("load delimiter must be 1 byte long")
@@ -96,7 +108,7 @@ func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
 				}
 			} else {
 				// read in whole
-				bytes, err := ioutil.ReadFile(filename)
+				bytes, err := ioutil.ReadAll(stream)
 				if err != nil {
 					panic(err)
 				}
@@ -242,14 +254,22 @@ func setupIO(wd string) {
 		(func(...scm.Scmer) scm.Scmer)(getImport(wd)),
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
-		"load", "Loads a file and returns the string",
+		"load", "Loads a file or stream and returns the string or iterates line-wise",
 		1, 3,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
+			scm.DeclarationParameter{"filenameOrStream", "string|stream", "filename relative to folder of source file or stream to read from"},
 			scm.DeclarationParameter{"linehandler", "func", "handler that reads each line; each line may end with delimiter"},
-			scm.DeclarationParameter{"delimiter", "string", "delimiter to extract"},
+			scm.DeclarationParameter{"delimiter", "string", "delimiter to extract; if no delimiter is given, the file is read as whole and returned or passed to linehandler"},
 		}, "string|bool",
 		(func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"stream", "Opens a file readonly as stream",
+		1, 1,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
+		}, "stream",
+		(func(...scm.Scmer) scm.Scmer)(getStream(wd)),
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"watch", "Loads a file and calls the callback. Whenever the file changes on disk, the file is load again.",

@@ -531,27 +531,42 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 	)))
 
-(define parse_sql_multi (lambda (schema s delimiter) (begin
-	/* TODO: DELIMITER commands, version-specific meta commands usw */
-	/* this implements a SQL preprocessor that separates multiple commands into an array and resolves SQL version macros */
-	/* TODO: work on big file streams: detect incomplete SQL queries and return them as rest, so the caller can append more lines and reparse */
-
-	/*(define parse_sql (lambda (schema s) '("SQL:" s)))*/
-	(define tailrecursiveparser (lambda (pre scan delimiter) (match scan
-		(regex "^--[^\n]+?(\n.*)" _ rest) (tailrecursiveparser pre rest delimiter)
-		(regex "(?is)^DELIMITER([^\n]+)(.*)" _ del rest) (tailrecursiveparser pre rest del)
-		(concat delimiter rest) (cons (parse_sql schema pre) (tailrecursiveparser "" rest delimiter))
-		(regex "(?s)^('(?:''|\\'|[^'])*')(.*)" _ v rest) (tailrecursiveparser (concat pre v) rest delimiter)
-		(regex "(?s)^([a-zA-Z0-9_]+)(.*)" _ v rest) (tailrecursiveparser (concat pre v) rest delimiter)
-		(regex "(?s)^([^'a-zA-Z])(.*)" _ v rest) (tailrecursiveparser (concat pre v) rest delimiter)
-		"" '((parse_sql schema pre))
-		error("failed to parse compound SQL")
+(define load_sql (lambda (schema stream) (begin
+	(set state (newsession))
+	(set resultrow print)
+	(set session (newsession))
+	(define psql_line (lambda (line) (begin
+		(match line
+			(concat "--" b) /* comment */ false
+			(concat "COPY " def " FROM stdin;\n") (begin
+				/* public.cron (name, lastrun, medianruntime, id) */
+				(match (psql_copy_def def) '(tbl columns) (begin
+					/* (print "TODO: insert into " tbl columns) */
+					/* TODO: escape b 8 f 12 n 10 r 13 t 9 v 11 \324 octal \xFF hex */
+					(state "line" (lambda (line) (begin
+						(match line
+							"\\.\n" /* end of input */ (state "line" psql_line)
+							(concat x "\n") (insert schema tbl columns '((split x "\t")))
+						)
+					)))
+				))
+			)
+			(concat start ";" rest) (begin
+				/* command ended -> execute (at max one command per line) */
+				(print (concat (state "sql") start))
+				(set plan (parse_psql schema (concat (state "sql") start)))
+				(print "SQL execute" plan)
+				(eval plan)
+				(state "sql" rest)
+			)
+			/* otherwise: append to cache */
+			(state "sql" (concat (state "sql") line))
+		)
 	)))
-	(cons '!begin (tailrecursiveparser "" s ";"))
+	(state "line" psql_line)
+	(state "sql" "")
+	(load stream (lambda (line) (begin
+		((state "line") line)
+	)) "\n")
 )))
-/*
-> (parse_sql_multi "sparse" "select * from a--man\n; 'b=4' ; moms ;\nDELIMITER foo\nafterwards" ";")
-
-
-*/
 

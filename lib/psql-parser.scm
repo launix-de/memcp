@@ -562,7 +562,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 (define psql_copy_def (parser '(psql_identifier /* ignore */ "." (define tbl psql_identifier) "(" (define columns (+ psql_identifier ",")) ")") '(tbl columns)))
 
-(define load_psql (lambda (schema load filename) (begin
+(define load_psql (lambda (schema stream) (begin
 	(set state (newsession))
 	(set resultrow print)
 	(set session (newsession))
@@ -596,7 +596,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)))
 	(state "line" psql_line)
 	(state "sql" "")
-	(load filename (lambda (line) (begin
+	(load stream (lambda (line) (begin
 		((state "line") line)
 	)) "\n")
 )))
