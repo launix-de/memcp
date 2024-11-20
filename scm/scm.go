@@ -754,6 +754,21 @@ Patterns can be any of:
 			}
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		"scheme", "parses a scheme expression into a list",
+		1, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"code", "string", "Scheme code"},
+			DeclarationParameter{"filename", "string", "optional filename"},
+		}, "any",
+		func (a ...Scmer) Scmer {
+			filename := "eval"
+			if len(a) > 1 {
+				filename = String(a[1])
+			}
+			return Read(filename, String(a[0]))
+		},
+	})
 
 	init_alu()
 	init_strings()
