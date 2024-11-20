@@ -757,6 +757,7 @@ Patterns can be any of:
 
 	init_alu()
 	init_strings()
+	init_streams()
 	init_list()
 	init_date()
 	init_parser()
