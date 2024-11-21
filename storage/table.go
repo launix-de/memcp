@@ -32,6 +32,7 @@ type column struct {
 	PartitioningScore int // count this up to increase the chance of partitioning for this column
 	AutoIncrement bool
 	Default scm.Scmer
+	OnUpdate scm.Scmer
 	AllowNull bool // TODO: respect this
 	IsTemp bool // columns with IsTemp may be removed without consequences
 	Collation string
@@ -293,6 +294,8 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 			c.AllowNull = scm.ToBool(extrainfo[i+1])
 		} else if extrainfo[i] == "default" {
 			c.Default = extrainfo[i+1]
+		} else if extrainfo[i] == "update" {
+			c.OnUpdate = extrainfo[i+1]
 		} else if extrainfo[i] == "comment" {
 			c.Comment = scm.String(extrainfo[i+1])
 		} else if extrainfo[i] == "collate" {
