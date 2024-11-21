@@ -25,7 +25,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 /* this can be overhooked */
 (define http_handler (lambda (req res) (begin
 	(print "request " req)
-	(static_files req res)
+	(if (equal? (req "path") "/") (begin
+		((res "header") "Location" "/info.html")
+		((res "status") 301)
+	) (static_files req res))
 	/*
 	((res "header") "Content-Type" "text/plain")
 	((res "status") 404)

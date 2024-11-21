@@ -49,9 +49,11 @@ func HTTPServe(a ...Scmer) Scmer {
 func HTTPStaticGetter(wd string) func (...Scmer) Scmer {
 	mime.AddExtensionType(".js", "application/javascript")
 	mime.AddExtensionType(".html", "text/html")
+
 	return func (a ...Scmer) Scmer {
 		fs := http.FileServer(http.Dir(wd + "/" + String(a[0])))
 		return func (a ...Scmer) Scmer { // req res
+			Apply(Apply(a[1], "header"), "Content-Type", "") // reset content-type so static server can overwrite it
 			fs.ServeHTTP(a[1].([]Scmer)[1].(http.ResponseWriter), a[0].([]Scmer)[1].(*http.Request))
 			return nil
 		}
