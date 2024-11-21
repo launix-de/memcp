@@ -49,6 +49,7 @@ func HTTPServe(a ...Scmer) Scmer {
 func HTTPStaticGetter(wd string) func (...Scmer) Scmer {
 	mime.AddExtensionType(".js", "application/javascript")
 	mime.AddExtensionType(".html", "text/html")
+	mime.AddExtensionType(".svg", "image/svg+xml")
 
 	return func (a ...Scmer) Scmer {
 		fs := http.FileServer(http.Dir(wd + "/" + String(a[0])))
