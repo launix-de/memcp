@@ -543,7 +543,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define sql_line (lambda (line) (begin
 		(match line
 			(concat "--" b) /* comment */ false
-			(concat start ";" rest) (begin
+			(concat "DELIMITER " d "\r\n") /* delimiter change */ (state "delimiter" d)
+			(concat "DELIMITER " d "\n") /* delimiter change */ (state "delimiter" d)
+			(concat start (eval (state "delimiter")) rest) (begin
 				/* command ended -> execute (at max one command per line) */
 				(print (concat (state "sql") start))
 				(set plan (parse_sql schema (concat (state "sql") start)))
@@ -555,6 +557,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(state "sql" (concat (state "sql") line))
 		)
 	)))
+	(state "delimiter" ";")
 	(state "line" sql_line)
 	(state "sql" "")
 	(load stream (lambda (line) (begin

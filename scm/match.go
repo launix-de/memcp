@@ -36,6 +36,10 @@ func valueFromPattern(pattern Scmer, en *Env) Scmer {
 			}
 		case NthLocalVar:
 			return en.VarsNumbered[p]
+		case []Scmer:
+			if len(p) == 2 && p[0] == Symbol("eval") {
+				return Eval(p[1], en)
+			}
 	}
 	return pattern
 }
