@@ -24,7 +24,7 @@ this is how rdf works:
 */
 
 (define handler_404 (lambda (req res) (begin
-	(print "request " req)
+	/*(print "request " req)*/
 	((res "header") "Content-Type" "text/plain")
 	((res "status") 404)
 	((res "println") "404 not found")
@@ -39,7 +39,7 @@ this is how rdf works:
 		(if (and pw (equal? pw (password (req "password")))) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
-			(print "RDF query: " query)
+			/*(print "RDF query: " query)*/
 			(define formula (parse_sparql schema query))
 			(define resultrow (res "jsonl"))
 
@@ -53,7 +53,6 @@ this is how rdf works:
 	)))
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
-			    (print "old handler" old_handler)
 		/* hooked our additional paths to it */
 		(match (req "path")
 			(regex "^/rdf/([^/]+)$" url schema) (begin
@@ -66,7 +65,6 @@ this is how rdf works:
 			)
 			/* default */
 			(!begin
-			    (print "handler" old_handler)
 			((outer old_handler) req res))
 			)
 	))

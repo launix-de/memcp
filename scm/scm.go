@@ -769,6 +769,16 @@ Patterns can be any of:
 			return Read(filename, String(a[0]))
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		"serialize", "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"code", "list", "Scheme code"},
+		}, "string",
+		func (a ...Scmer) Scmer {
+			return SerializeToString(a[0], &Globalenv)
+		},
+	})
 
 	init_alu()
 	init_strings()

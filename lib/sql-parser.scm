@@ -494,6 +494,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (define query sql_select) (apply build_queryplan (apply untangle_query query)))
+		(parser '((atom "DESCRIBE" true) (define query sql_select)) '('resultrow '('list "code" (serialize (apply build_queryplan (apply untangle_query query))))))
 		sql_insert_into
 		sql_insert_select
 		sql_create_table
