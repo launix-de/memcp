@@ -125,7 +125,6 @@ if there is a group function, create a temporary preaggregate table
 			)))
 			/* TODO: condition -> add to main condition list + rename with prefix */
 			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers */
-			(print "TODO: " '(schema2 tables2 fields2 condition2 group2 order2 limit2 offset2 schemas2))
 			'(tablesPrefixed '(id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) (replace_column_alias condition2) '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))))
 		) (error "non matching return value for untangle_query"))
 		(error (concat "unknown tabledesc: " tbldesc))
@@ -135,7 +134,7 @@ if there is a group function, create a temporary preaggregate table
 		(set renamelist (merge renameList))
 		(set tables (merge tablesList))
 		(set schemas (merge schemasList))
-		(print "tables=" tables)
+		/*(print "tables=" tables)*/
 
 		/* TODO: add rename_prefix to all table names and get_column expressions */
 		/* TODO: apply renamelist to all expressions in fields condition group having order */
@@ -161,9 +160,12 @@ if there is a group function, create a temporary preaggregate table
 			expr
 		)))
 
-		/* apply renamelist */
+		/* apply renamelist (assoc of assoc of expr) */
 		(define replace_rename (lambda (expr) (match expr
-			'((symbol get_column) alias_ ti col ci) (if (has_assoc? renamelist alias_) ((renamelist alias_) col) expr)
+			'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
+				/* no tblalias -> search the field in all tables */ (reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
+				/* tblalias -> look up the field */ (if (has_assoc? renamelist alias_) ((renamelist alias_) col) expr)
+			)
 			(cons sym args) /* function call */ (cons sym (map args replace_rename))
 			expr
 		)))
@@ -188,6 +190,9 @@ if there is a group function, create a temporary preaggregate table
 
 		/* return parameter list for build_queryplan */
 		(set conditionAll (merge '('and (replace_rename condition)) conditionList)) /* TODO: append inner conditions to condition */
+		(set group (map group replace_rename))
+		(set having (replace_rename having))
+		(set order (map order (lambda (o) (match o '(col dir) '((replace_rename col) dir)))))
 		'(schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll group having order limit offset schemas replace_find_column)
 	)
 	/* else: empty tables list */
@@ -200,6 +205,7 @@ if there is a group function, create a temporary preaggregate table
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition group having order limit offset) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
+	/*(print "build queryplan " '(schema tables fields condition group having order limit offset schemas))*/
 
 	/*
 		Query builder masterplan:
