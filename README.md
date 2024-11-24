@@ -292,3 +292,4 @@ Normally, REST applications are implemented in any programming language, make a 
 - [memcp Announcement Video](https://www.youtube.com/watch?v=DWg4nx4KVLo)
 - https://wwwdb.inf.tu-dresden.de/research-projects/eris/
 - https://hyper-db.de/
+- All Information about MemCP can be found under [memcp.org](https://memcp.org)
