@@ -42,12 +42,15 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(if (and pw (equal? pw (password (req "password")))) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
-			/*(print "SQL query: " query)*/
 			(define formula (parse_sql schema query))
 			(define resultrow (res "jsonl"))
 			(define session (context "session"))
-			/*(print "execution plan: " formula)*/
-			(eval formula)
+			(try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
+				(print "SQL query: " query)
+				(print "execution plan: " formula)
+				(print "error: " e)
+				(error e)
+			)))
 		) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
@@ -61,12 +64,15 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(if (and pw (equal? pw (password (req "password")))) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
-			/*(print "SQL query: " query)*/
 			(define formula (parse_psql schema query))
 			(define resultrow (res "jsonl"))
 			(define session (context "session"))
-			/*(print "execution plan: " formula)*/
-			(eval formula)
+			(try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
+				(print "SQL query: " query)
+				(print "execution plan: " formula)
+				(print "error: " e)
+				(error e)
+			)))
 		) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
@@ -110,13 +116,20 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(if (equal? (session "syntax") "scheme") /* TODO: check access to system.* */ (begin
 				/* scheme syntax mode */
 				(set print (lambda args (resultrow '("result" (concat args)))))
-				(resultrow '("result" (eval (scheme sql))))
+				(try (lambda () (resultrow '("result" (eval (scheme sql))))) (lambda (e) (begin
+					(print "Scheme query: " sql)
+					(print "error " e)
+					(error e)
+				)))
 			) (begin
 				/* SQL syntax mode */
-				/*(print "SQL query: " sql)*/
 				(define formula ((if (equal? (session "syntax") "postgresql") parse_psql parse_sql) schema sql))
-				/*(print "execution plan: " formula)*/
-				(eval (source "SQL Query" 1 1 formula))
+				(try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
+					(print "SQL query: " sql)
+					(print "execution plan: " formula)
+					(print "error: " e)
+					(error e)
+				)))
 			))
 		))
 	)

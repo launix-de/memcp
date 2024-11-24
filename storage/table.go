@@ -478,15 +478,16 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			// partitioning
 			allowPruning = true
 			shardlist = t.PShards
-			for i, col := range uniq.Cols {
+			for j, dim := range t.PDimensions {
 				hasPruningCol := false
-				for j, dim := range t.PDimensions {
+				for i, col := range uniq.Cols {
 					if dim.Column == col {
 						hasPruningCol = true // we found the uniq column in our partitioning schema
 						pruningMap[j] = i
 					}
 				}
 				if !hasPruningCol {
+					// a column different from the unique key is part of our partitioning schema -> we cannot prune (TODO: array pruning)
 					allowPruning = false // all unique columns must be present in the partitioning schema, otherwise a unique collision might hide in pruned shards
 				}
 			}
@@ -510,7 +511,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					pruningVals[j] = row[keyIdx[xidx]]
 				}
 				// only one shard to visit for unique check
-				shardlist2 = []*storageShard{shardlist[computeShardIndex(t.PDimensions, pruningVals)]}
+				shardlist2 = []*storageShard{shardlist[computeShardIndex(t.PDimensions, pruningVals)]} // (TODO: array pruning)
 				if len(t.Unique) == 1 {
 					lock = &shardlist2[0].uniquelock
 					lock.Lock()

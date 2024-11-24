@@ -834,7 +834,7 @@ func Init(en scm.Env) {
 			for i, row := range rows_ {
 				rows[i] = row.([]scm.Scmer)
 			}
-			return float64(db.Tables.Get(scm.String(a[1])).Insert(cols, rows, onCollisionCols, onCollision, mergeNull))
+			return int64(db.Tables.Get(scm.String(a[1])).Insert(cols, rows, onCollisionCols, onCollision, mergeNull))
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{

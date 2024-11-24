@@ -45,11 +45,11 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			case "Trace":
 				return Settings.Backtrace
 			case "PartitionMaxDimensions":
-				return float64(Settings.PartitionMaxDimensions)
+				return int64(Settings.PartitionMaxDimensions)
 			case "DefaultEngine":
 				return Settings.DefaultEngine
 			case "ShardSize":
-				return float64(Settings.ShardSize)
+				return int64(Settings.ShardSize)
 			default:
 				panic("unknown setting: " + scm.String(a[0]))
 		}
