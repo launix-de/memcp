@@ -206,7 +206,7 @@ curl --user root:admin 'http://localhost:4321/psql/system/SHOW%20TABLES'
 curl --user root:admin 'http://localhost:4321/psql/system/SELECT%20*%20FROM%20user'
 ```
 
-You can also define your own endpoints for MemCP and deploy microservices directly in the database.
+You can also define your own endpoints for MemCP and deploy microservices directly in the database (read https://www.memcp.org/wiki/MemCP_for_Microservices).
 
 <hr>
 <h1 align="center">Securing the database from external access 🔒</h1>
