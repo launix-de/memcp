@@ -18,8 +18,6 @@ package scm
 
 import "fmt"
 import "strings"
-import "unicode"
-import "unicode/utf8"
 
 func EqualScm(a, b Scmer) Scmer { // case sensitive and can compare nil
 	return Equal(a, b)
@@ -255,6 +253,9 @@ func EqualSQL(a, b Scmer) Scmer {
 }
 
 // sort function for scmer
+func LessScm(a ...Scmer) Scmer {
+	return Less(a[0], a[1])
+}
 func Less(a, b Scmer) bool {
 	switch a_ := a.(type) {
 	case nil:
@@ -270,9 +271,9 @@ func Less(a, b Scmer) bool {
 			case int64:
 				return ToInt(a) < int(b_)
 			case LazyString:
-				return StringLess(a_.GetValue(), b_.GetValue())
+				return a_.GetValue() < b_.GetValue()
 			case string:
-				return StringLess(a_.GetValue(), b_)
+				return a_.GetValue() < b_
 			case nil:
 				return false
 			default:
@@ -285,9 +286,9 @@ func Less(a, b Scmer) bool {
 			case int64:
 				return ToInt(a) < int(b_)
 			case LazyString:
-				return StringLess(a_, b_.GetValue())
+				return a_ < b_.GetValue()
 			case string:
-				return StringLess(a_, b_)
+				return a_ < b_
 			case nil:
 				return false
 			default:
@@ -298,30 +299,4 @@ func Less(a, b Scmer) bool {
 		panic("unknown type combo in comparison: " + String(a) + " < " + String(b))
 	}
 	return false
-}
-
-func StringLess(a, b string) bool {
-    for {
-        if len(a) == 0 {
-            return false
-        }
-        if len(b) == 0 {
-            return true
-        }
-        ar, sa := utf8.DecodeRuneInString(a)
-        br, sb := utf8.DecodeRuneInString(b)
-
-	// if case insensitive
-        al := unicode.ToLower(ar)
-        bl := unicode.ToLower(br)
-
-        if al < bl {
-            return true
-        } else if al > bl {
-            return false
-        } else {
-		a = a[sa:]
-		b = b[sb:]
-	}
-    }
 }

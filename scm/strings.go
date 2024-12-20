@@ -23,6 +23,8 @@ import "regexp"
 import "strings"
 import "net/url"
 import "encoding/json"
+import "golang.org/x/text/collate"
+import "golang.org/x/text/language"
 
 type LazyString struct {
 	Hash string
@@ -212,6 +214,62 @@ func init_strings() {
 		},
 	})
 
+	/* comparison */
+	collation_re := regexp.MustCompile("^([^_]+_)?(.+?)$") // caracterset_language_case
+	Declare(&Globalenv, &Declaration{
+		"collate", "returns the `<` operator for a given collation. MemCP allows natural sorting of numeric literals.",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"collation", "string", "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"},
+		}, "func",
+		func(a ...Scmer) Scmer {
+			collation := String(a[0])
+			ci := false
+			if strings.HasSuffix(collation, "_ci") {
+				ci = true
+				collation = collation[:len(collation)-3]
+			} else if strings.HasSuffix(collation, "_cs") {
+				collation = collation[:len(collation)-3]
+			}
+			if m := collation_re.FindStringSubmatch(collation); m != nil {
+				if m[2] == "bin" {
+					return LessScm // binary
+				}
+				tag, err := language.Parse(m[2]) // treat as BCP 47
+				if err != nil {
+					// language not detected, try one of the aliases
+					switch m[2] {
+						case "danish": tag = language.Danish
+						case "german1": tag = language.German
+						case "german2": tag = language.German
+						case "spanish": tag = language.Spanish
+						case "swedish": tag = language.Swedish
+						default: tag = language.Swedish // swedish seems to be the most versatile collation
+					}
+				}
+				var c *collate.Collator
+				// the following options are available:
+				// IgnoreCase -> when string ends with _ci
+				// IgnoreDiacritics -> o == ö
+				// IgnoreWidth: half width == width
+				// Numeric -> sort numbers correctly
+				if ci {
+					c = collate.New(tag, collate.Numeric, collate.IgnoreCase)
+				} else {
+					c = collate.New(tag, collate.Numeric)
+				}
+
+				// return a LESS function specialized to that language
+				return func (a ...Scmer) Scmer {
+					return c.CompareString(String(a[0]), String(a[1])) == -1
+				}
+			} else {
+				return LessScm // default: binary
+			}
+		},
+	})
+
+	/* escaping functions similar to PHP */
 	Declare(&Globalenv, &Declaration{
 		"htmlentities", "escapes the string for use in HTML",
 		1, 1,
