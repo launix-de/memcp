@@ -172,7 +172,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"filterColumns", "list", "list of columns that are fed into filter"},
 			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
 			scm.DeclarationParameter{"sortcols", "list", "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"},
-			scm.DeclarationParameter{"sortdirs", "list", "list of column directions to sort. Must be same length as sortcols. false means ASC, true means DESC"},
+			scm.DeclarationParameter{"sortdirs", "list", "list of column directions to sort. Must be same length as sortcols. < means ascending, > means descending, (collate ...) will add collations"},
 			scm.DeclarationParameter{"offset", "number", "number of items to skip before the first one is fed into map"},
 			scm.DeclarationParameter{"limit", "number", "max number of items to read"},
 			scm.DeclarationParameter{"mapColumns", "list", "list of columns that are fed into map"},
@@ -202,9 +202,9 @@ func Init(en scm.Env) {
 				neutral = a[11]
 			}
 			sortcols := a[4].([]scm.Scmer)
-			sortdirs := make([]bool, len(sortcols))
+			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcols))
 			for i, dir := range a[5].([]scm.Scmer) {
-				sortdirs[i] = scm.ToBool(dir)
+				sortdirs[i] = dir.(func(...scm.Scmer) scm.Scmer)
 			}
 
 			isOuter := false
@@ -273,10 +273,10 @@ func Init(en scm.Env) {
 					for c := 0; c < len(scols); c++ {
 						a := scols[c](uint(i))
 						b := scols[c](uint(j))
-						if scm.Less(a, b) {
-							return !sortdirs[c]
-						} else if scm.Less(b, a) {
-							return sortdirs[c]
+						if scm.ToBool(sortdirs[c](a, b)) {
+							return false
+						} else if scm.ToBool(sortdirs[c](b, a)) {
+							return true
 						} // else: go to next level
 						// otherwise: move on to c++
 					}

@@ -248,9 +248,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(atom "BY" true)
 			(define order (+
 				(parser '((define col sql_expression) (define direction_desc (or
-					(parser (atom "DESC" true) true)
-					(parser(atom "ASC" true) false)
-					(parser empty false)
+					/* TODO: collation */
+					(parser (atom "DESC" true) >)
+					(parser(atom "ASC" true) <)
+					(parser empty <)
 				))) '(col direction_desc))
 				(atom "," true)
 			))

@@ -29,7 +29,7 @@ type shardqueue struct {
 	err scanError
 	mcols []func(uint) scm.Scmer // map column reader
 	scols []func(uint) scm.Scmer // sort criteria column reader
-	sortdirs []bool
+	sortdirs []func(...scm.Scmer) scm.Scmer
 }
 
 // sort interface for shardqueue (local) (TODO: heap could be more efficient because early-out will be cheaper)
@@ -40,10 +40,10 @@ func (s *shardqueue) Less(i, j int) bool {
 	for c := 0; c < len(s.scols); c++ {
 		a := s.scols[c](s.items[i])
 		b := s.scols[c](s.items[j])
-		if scm.Less(a, b) {
-			return !s.sortdirs[c]
-		} else if scm.Less(b, a) {
-			return s.sortdirs[c]
+		if scm.ToBool(s.sortdirs[c](a, b)) {
+			return true
+		} else if scm.ToBool(s.sortdirs[c](b, a)) {
+			return false
 		} // else: go to next level
 		// otherwise: move on to c++
 	}
@@ -65,10 +65,10 @@ func (s *globalqueue) Less(i, j int) bool {
 	for c := 0; c < len(s.q[i].scols); c++ {
 		a := s.q[i].scols[c](s.q[i].items[0])
 		b :=s.q[j].scols[c](s.q[j].items[0])
-		if scm.Less(a, b) {
-			return !s.q[i].sortdirs[c]
-		} else if scm.Less(b, a) {
-			return s.q[i].sortdirs[c]
+		if scm.ToBool(s.q[i].sortdirs[c](a, b)) {
+			return true
+		} else if scm.ToBool(s.q[i].sortdirs[c](b, a)) {
+			return false
 		} // else: go to next level
 		// otherwise: move on to c++
 	}
@@ -92,7 +92,7 @@ func (s *globalqueue) Pop() any {
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
-func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
 
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
@@ -196,7 +196,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	return akkumulator
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []bool, limit int, callbackCols []string) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limit int, callbackCols []string) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 

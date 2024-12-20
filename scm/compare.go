@@ -256,6 +256,9 @@ func EqualSQL(a, b Scmer) Scmer {
 func LessScm(a ...Scmer) Scmer {
 	return Less(a[0], a[1])
 }
+func GreaterScm(a ...Scmer) Scmer {
+	return Less(a[1], a[0])
+}
 func Less(a, b Scmer) bool {
 	switch a_ := a.(type) {
 	case nil:

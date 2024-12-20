@@ -221,6 +221,7 @@ func init_strings() {
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"collation", "string", "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"},
+			DeclarationParameter{"reverse", "bool", "whether to reverse the order like in ORDER BY DESC"},
 		}, "func",
 		func(a ...Scmer) Scmer {
 			collation := String(a[0])
@@ -232,8 +233,12 @@ func init_strings() {
 				collation = collation[:len(collation)-3]
 			}
 			if m := collation_re.FindStringSubmatch(collation); m != nil {
-				if m[2] == "bin" {
-					return LessScm // binary
+				if m[2] == "bin" { // binary
+					if len(a) > 1 && ToBool(a[1]) {
+						return GreaterScm
+					} else {
+						return LessScm
+					}
 				}
 				tag, err := language.Parse(m[2]) // treat as BCP 47
 				if err != nil {
@@ -260,11 +265,22 @@ func init_strings() {
 				}
 
 				// return a LESS function specialized to that language
-				return func (a ...Scmer) Scmer {
-					return c.CompareString(String(a[0]), String(a[1])) == -1
+				if len(a) > 1 && ToBool(a[1]) {
+					// reverse order
+					return func (a ...Scmer) Scmer {
+						return c.CompareString(String(a[0]), String(a[1])) == 1
+					}
+				} else {
+					return func (a ...Scmer) Scmer {
+						return c.CompareString(String(a[0]), String(a[1])) == -1
+					}
 				}
 			} else {
-				return LessScm // default: binary
+				if len(a) > 1 && ToBool(a[1]) {
+					return GreaterScm
+				} else {
+					return LessScm
+				}
 			}
 		},
 	})
