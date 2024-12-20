@@ -36,7 +36,7 @@ memcp is written in Golang and is designed to be portable and extensible, allowi
 - <b>versatile:</b> Use it in big mainframes to gain analytical performance, use it in embedded systems to conserve flash lifetime
 - Columnar storage: Stores data column-wise instead of row-wise, which allows for better compression, faster query execution, and more efficient use of memory.
 - In-memory database: Stores all data in memory, which allows for extremely fast query execution.
-- Build fast REST APIs directly in the database (they are faster because there is no network connection / SQL layer in between)
+- Build fast REST APIs and microservices directly in the database (they are faster because there is no network connection / SQL layer in between)
 - OLAP and OLTP support: Can handle both online analytical processing (OLAP) and online transaction processing (OLTP) workloads.
 - Compression: Lots of compression formats are supported like bit-packing and dictionary encoding
 - Scalability: Designed to scale on a single node with huge NUMA memory
@@ -90,6 +90,7 @@ Make sure, `go` is installed on your computer.
 Compile the project with
 
 ```
+go get # installs dependencies
 make # executes go build
 ```
 
@@ -155,7 +156,7 @@ SELECT SUM(amount) FROM foo
 
 If you want to import whole databases from your old MySQL or MariaDB database, do the following:
 ```
-$ ./tools/mysqldump-to-json.py -H localhost -u [user] -p [password] [database] > dump.jsonl
+$ mysqldump [PARAMETERS] > dump.sql
 $ ./memcp
 memcp Copyright (C) 2023   Carl-Philip Hänsch
     This program comes with ABSOLUTELY NO WARRANTY;
@@ -167,17 +168,45 @@ MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)
 listening on http://localhost:4321
 > (createdatabase "my_database")
 "ok"
-> (loadJSON "my_database" "dump.jsonl")
+> (load_sql "my_database" (stream "dump.sql"))
+"1.454ms"
+```
+
+If you want to import whole databases from your old PostgreSQL database, do the following:
+```
+$ pgdump [PARAMETERS] > dump.sql
+$ ./memcp
+memcp Copyright (C) 2023   Carl-Philip Hänsch
+    This program comes with ABSOLUTELY NO WARRANTY;
+    This is free software, and you are welcome to redistribute it
+    under certain conditions;
+Welcome to memcp
+Hello World
+MySQL server listening on port 3307 (connect with mysql -P 3307 -u user -p)
+listening on http://localhost:4321
+> (createdatabase "my_database")
+"ok"
+> (load_psql "my_database" (stream "dump.sql"))
 "1.454ms"
 ```
 
 <h2>REST API</h2>
 
+SQL backend in MySQL syntax mode:
 ```bash
 curl --user root:admin 'http://localhost:4321/sql/system/SHOW%20DATABASES'
 curl --user root:admin 'http://localhost:4321/sql/system/SHOW%20TABLES'
 curl --user root:admin 'http://localhost:4321/sql/system/SELECT%20*%20FROM%20user'
 ```
+
+SQL backend in PostgreSQL syntax mode:
+```bash
+curl --user root:admin 'http://localhost:4321/psql/system/SHOW%20DATABASES'
+curl --user root:admin 'http://localhost:4321/psql/system/SHOW%20TABLES'
+curl --user root:admin 'http://localhost:4321/psql/system/SELECT%20*%20FROM%20user'
+```
+
+You can also define your own endpoints for MemCP and deploy microservices directly in the database.
 
 <hr>
 <h1 align="center">Securing the database from external access 🔒</h1>
