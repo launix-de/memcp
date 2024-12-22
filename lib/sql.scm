@@ -123,7 +123,13 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				)))
 			) (begin
 				/* SQL syntax mode */
-				(define formula ((if (equal? (session "syntax") "postgresql") parse_psql parse_sql) schema sql))
+				(define formula (try (lambda ()
+					((if (equal? (session "syntax") "postgresql") parse_psql parse_sql) schema sql))
+				(lambda (e) (begin
+					(print "SQL query: " sql)
+					(print "error: " e)
+					(error e)
+				))))
 				(try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
 					(print "SQL query: " sql)
 					(print "execution plan: " formula)
