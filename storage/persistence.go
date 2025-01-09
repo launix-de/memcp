@@ -48,7 +48,6 @@ type PersistenceEngine interface {
 	ReplayLog(shard string) (chan interface{}, PersistenceLogfile) // replay existing log
 	RemoveLog(shard string)
 	Remove() // delete from storage
-	// TODO
 }
 
 type PersistenceLogfile interface {

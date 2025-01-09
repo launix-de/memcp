@@ -143,7 +143,6 @@ type FileLogfile struct {
 	w *os.File
 }
 func (w FileLogfile) Write(logentry interface{}) {
-	// TODO: w.Write()
 	switch l := logentry.(type) {
 		case LogEntryDelete:
 			var b bytes.Buffer
