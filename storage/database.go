@@ -26,7 +26,7 @@ import "github.com/launix-de/NonLockingReadMap"
 
 type database struct {
 	Name string `json:"name"`
-	path string `json:"-"`
+	persistence PersistenceEngine `json:"-"`
 	Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
 	schemalock sync.RWMutex `json:"-"` // TODO: rw-locks for schemalock
 }
@@ -79,12 +79,8 @@ func LoadDatabases() {
 		if entry.IsDir() {
 			// load database from hdd
 			db := new(database)
-			db.path = Basepath + "/" + entry.Name() + "/"
-			jsonbytes, _ := os.ReadFile(db.path + "schema.json")
-			if len(jsonbytes) == 0 {
-				// try to load backup (in case of failure while save)
-				jsonbytes, _ = os.ReadFile(db.path + "schema.json.old")
-			}
+			db.persistence = &FileStorage{Basepath + "/" + entry.Name() + "/"}
+			jsonbytes := db.persistence.ReadSchema()
 			if len(jsonbytes) == 0 {
 				fmt.Println("Warning: database " + entry.Name() + " is empty")
 			} else {
@@ -100,6 +96,8 @@ func LoadDatabases() {
 				}
 				databases.Set(db)
 			}
+		} else {
+			// TODO: read .json files for S3 tables
 		}
 	}
 	// wait for all loading go routines to finish
@@ -107,18 +105,8 @@ func LoadDatabases() {
 }
 
 func (db *database) save() {
-	os.MkdirAll(db.path, 0750)
-	if stat, err := os.Stat(db.path + "schema.json"); err == nil && stat.Size() > 0 {
-		// rescue a copy of schema.json in case the schema is not serializable
-		os.Rename(db.path + "schema.json", db.path + "schema.json.old")
-	}
-	f, err := os.Create(db.path + "schema.json")
-	if err != nil {
-		panic(err)
-	}
-	defer f.Close()
 	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
-	f.Write(jsonbytes)
+	db.persistence.WriteSchema(jsonbytes)
 	// shards are written while rebuild
 }
 
@@ -178,7 +166,7 @@ func GetDatabase(schema string) *database {
 	return databases.Get(schema)
 }
 
-func CreateDatabase(schema string, ignoreexists bool) bool {
+func CreateDatabase(schema string, ignoreexists bool/*, persistence PersistenceFactory*/) bool {
 	db := databases.Get(schema)
 	if db != nil {
 		if ignoreexists {
@@ -189,7 +177,8 @@ func CreateDatabase(schema string, ignoreexists bool) bool {
 
 	db = new(database)
 	db.Name = schema
-	db.path = Basepath + "/" + schema + "/" // TODO: alternative save paths
+	persistence := FileFactory{Basepath}// TODO: remove this, use parameter instead
+	db.persistence = persistence.CreateDatabase(schema)
 	db.Tables = NonLockingReadMap.New[table, string]()
 
 	last := databases.Set(db)
@@ -210,7 +199,7 @@ func DropDatabase(schema string) {
 	}
 
 	// remove remains of the folder structure
-	os.RemoveAll(db.path)
+	db.persistence.Remove()
 }
 
 func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*table, bool) {

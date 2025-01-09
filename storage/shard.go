@@ -16,14 +16,11 @@ Copyright (C) 2023-2024  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
 import "fmt"
 import "sync"
-import "bufio"
 import "strings"
 import "reflect"
 import "runtime"
-import "crypto/sha256"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
@@ -40,7 +37,7 @@ type storageShard struct {
 	deltaColumns map[string]int
 	inserts [][]scm.Scmer // items added to storage
 	deletions NonLockingReadMap.NonBlockingBitMap // items removed from main or inserts (based on main_count + i)
-	logfile *os.File // only in safe mode
+	logfile PersistenceLogfile // only in safe mode
 	mu sync.RWMutex // delta write lock (working on main storage is lock free)
 	uniquelock sync.Mutex // unique insert lock (only used in the sharded case)
 	next *storageShard // TODO: also make a next-partition-schema
@@ -78,14 +75,6 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
 }
-func ProcessColumnName(col string) string {
-	if len(col) < 64 {
-		return col
-	} else {
-		hashsum := sha256.Sum256([]byte(col))
-		return fmt.Sprintf("%x", hashsum[:8])
-	}
-}
 func (u *storageShard) load(t *table) {
 	u.t = t
 	// load the columns
@@ -95,21 +84,16 @@ func (u *storageShard) load(t *table) {
 			u.columns[col.Name] = new(StorageSparse)
 		} else {
 			// read column from file
-			f, err := os.Open(u.t.schema.path + u.uuid.String() + "-" + ProcessColumnName(col.Name))
-			if err != nil {
-				// file does not exist -> no data available
-				u.columns[col.Name] = new(StorageSparse)
-				continue
-			}
+			f := u.t.schema.persistence.ReadColumn(u.uuid.String(), col.Name)
 			var magicbyte uint8 // type of that column
-			err = binary.Read(f, binary.LittleEndian, &magicbyte)
+			err := binary.Read(f, binary.LittleEndian, &magicbyte)
 			if err != nil {
 				// empty storage
 				u.columns[col.Name] = new(StorageSparse)
 				continue
 			}
 
-			fmt.Println("loading storage "+u.t.schema.path + u.uuid.String() + "-" + col.Name+" of type", magicbyte)
+			fmt.Println("loading storage "+u.t.schema.Name + " shard " + u.uuid.String() + " column " + col.Name+" of type", magicbyte)
 
 			columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 			u.main_count = columnstorage.Deserialize(f) // read; ownership of f goes to Deserialize, so they will free the handle
@@ -119,34 +103,22 @@ func (u *storageShard) load(t *table) {
 	}
 
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
-		f, err := os.OpenFile(u.t.schema.path + u.uuid.String() + ".log", os.O_RDWR|os.O_CREATE, 0750)
-		if err != nil {
-			panic(err)
-		}
-		u.logfile = f
-		fi, _ := u.logfile.Stat()
-		if fi.Size() > 0 {
-			fmt.Println("restoring delta storage from logfile " + u.t.schema.path + u.uuid.String() + ".log")
-			scanner := bufio.NewScanner(u.logfile)
-			for scanner.Scan() {
-				b := scanner.Bytes()
-				if string(b) == "" {
-					// nop
-				} else if string(b[0:7]) == "delete " {
-					var idx uint
-					json.Unmarshal(b[7:], &idx)
-					u.deletions.Set(idx, true) // mark deletion
-				} else if string(b[0:7]) == "insert " {
-					split := strings.Index(string(b), "][") + 1
-					var cols []string
-					var values [][]scm.Scmer
-					json.Unmarshal(b[7:split], &cols)
-					json.Unmarshal(b[split:], &values)
-					u.insertDataset(cols, values)
-				} else {
-					panic("unknown log sequence: " + string(b))
-				}
+		var log chan interface{}
+		log, u.logfile = u.t.schema.persistence.ReplayLog(u.uuid.String())
+		numEntriesRestored := 0
+		for logentry := range log {
+			numEntriesRestored++
+			switch l := logentry.(type) {
+				case LogEntryDelete:
+					u.deletions.Set(l.idx, true) // mark deletion
+				case LogEntryInsert:
+					u.insertDataset(l.cols, l.values)
+				default:
+					panic("unknown log sequence: " + fmt.Sprint(l))
 			}
+		}
+		if numEntriesRestored > 0 {
+			fmt.Println("restoring delta storage from database " + u.t.schema.Name + " shard " + u.uuid.String() + ":", numEntriesRestored, "entries")
 		}
 	}
 }
@@ -165,8 +137,7 @@ func NewShard(t *table) *storageShard {
 		result.columns[column.Name] = new (StorageSparse)
 	}
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
-		f, _ := os.Create(result.t.schema.path + result.uuid.String() + ".log")
-		result.logfile = f
+		result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 	}
 	return result
 }
@@ -242,17 +213,8 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 
 				t.insertDataset(cols, [][]scm.Scmer{d2})
 				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-					var b strings.Builder
-					b.Write([]byte("delete "))
-					tmp, _ := json.Marshal(idx)
-					b.Write(tmp)
-					b.Write([]byte("\ninsert "))
-					tmp, _ = json.Marshal(cols)
-					b.Write(tmp)
-					tmp, _ = json.Marshal(d2)
-					b.Write(tmp)
-					b.Write([]byte("\n"))
-					t.logfile.WriteString(b.String())
+					t.logfile.Write(LogEntryDelete{idx})
+					t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
 				}
 			}()
 			if t.t.PersistencyMode == Safe {
@@ -269,12 +231,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 
 				t.deletions.Set(idx, true) // mark as deleted
 				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-					var b strings.Builder
-					b.Write([]byte("delete "))
-					tmp, _ := json.Marshal(idx)
-					b.Write(tmp)
-					b.Write([]byte("\n"))
-					t.logfile.WriteString(b.String())
+					t.logfile.Write(LogEntryDelete{idx})
 				}
 				result = true
 			}()
@@ -315,14 +272,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	}
 	t.insertDataset(columns, values)
 	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-		var b strings.Builder
-		b.Write([]byte("insert "))
-		tmp, _ := json.Marshal(columns)
-		b.Write(tmp)
-		tmp, _ = json.Marshal(values)
-		b.Write(tmp)
-		b.Write([]byte("\n"))
-		t.logfile.WriteString(b.String())
+		t.logfile.Write(LogEntryInsert{columns, values})
 	}
 	if t.next != nil {
 		// also insert into next storage
@@ -554,9 +504,9 @@ func (t *storageShard) RemoveFromDisk() {
 	}
 	for _, col := range t.t.Columns {
 		// delete column from file
-		os.Remove(t.t.schema.path + t.uuid.String() + "-" + ProcessColumnName(col.Name))
+		t.t.schema.persistence.RemoveColumn(t.uuid.String(), col.Name)
 	}
-	os.Remove(t.t.schema.path + t.uuid.String() + ".log")
+	t.t.schema.persistence.RemoveLog(t.uuid.String())
 }
 
 // rebuild main storage from main+delta
@@ -608,11 +558,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.deletions.Reset()
 		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 			// safe mode: also write all deltas to disk
-			f, err := os.Create(result.t.schema.path + result.uuid.String() + ".log")
-			if err != nil {
-				panic(err)
-			}
-			t.logfile = f
+			t.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 		}
 
 		// copy column data in two phases: scan, build (if delta is non-empty)
@@ -692,10 +638,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 			// write to disc (only if required)
 			if t.t.PersistencyMode != Memory {
-				f, err := os.Create(result.t.schema.path + result.uuid.String() + "-" + ProcessColumnName(col))
-				if err != nil {
-					panic(err)
-				}
+				f := result.t.schema.persistence.WriteColumn(result.uuid.String(), col)
 				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 				f.Close()
 			}
@@ -710,7 +653,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			// remove old log file
 			t.logfile.Close()
 			t.logfile = nil
-			os.Remove(t.t.schema.path + t.uuid.String() + ".log")
+			t.t.schema.persistence.RemoveLog(t.uuid.String())
 		}
 	} else {
 		// otherwise: table stays the same

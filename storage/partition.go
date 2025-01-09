@@ -16,7 +16,6 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
 import "fmt"
 import "sort"
 import "sync"
@@ -396,10 +395,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 					// write to disc (only if required)
 					if s.t.PersistencyMode != Memory {
-						f, err := os.Create(s.t.schema.path + s.uuid.String() + "-" + ProcessColumnName(col.Name))
-						if err != nil {
-							panic(err)
-						}
+						f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
 						newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 						f.Close()
 					}
@@ -408,11 +404,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 				if s.t.PersistencyMode == Safe || s.t.PersistencyMode == Logged {
 					// open a logfile
-					f, err := os.OpenFile(s.t.schema.path + s.uuid.String() + ".log", os.O_RDWR|os.O_CREATE, 0750)
-					if err != nil {
-						panic(err)
-					}
-					s.logfile = f
+					s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
 				}
 				done.Done()
 			}
