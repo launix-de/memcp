@@ -163,10 +163,10 @@ func (w FileLogfile) Write(logentry interface{}) {
 	}
 }
 func (w FileLogfile) Sync() {
-	w.Sync()
+	w.w.Sync()
 }
 func (w FileLogfile) Close() {
-	w.Close()
+	w.w.Close()
 }
 
 func (s *FileStorage) Remove() {
