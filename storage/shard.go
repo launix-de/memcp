@@ -373,6 +373,8 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 
 func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer) (result uint, present bool) {
 	t.mu.RLock()
+	/* TODO: this all does not work since a StorageInt stores int64 while the user might have provided string or float64 with the same content; also hashmaps eat up too much space */
+	/*
 	if len(columns) == 1 {
 		columns_ := (*[1]string)(columns)
 		values_ := (*[1]scm.Scmer)(values)
@@ -477,8 +479,44 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 			return t.GetRecordidForUnique(columns, values) // retry
 		}
 		result, present = hm[*values_] // read recid from hashmap
-	}
+	} else
+	*/
 
+	// TODO: optimization potential -> canonical form is string or NULL
+	mcols := make([]ColumnStorage, len(columns))
+	dcols := make([]int, len(columns))
+	for i, col := range columns {
+		mcols[i] = t.columns[col]
+		dcols[i] = t.deltaColumns[col]
+	}
+	for i := uint(0); i < t.main_count; i++ {
+		for j, v := range values {
+			if !scm.Equal(mcols[j].GetValue(i), v) {
+				goto skipnextmain
+			}
+		}
+		result = i
+		present = true
+		goto found
+
+		skipnextmain:
+	}
+	for i := uint(0); i < uint(len(t.inserts)); i++ {
+		for j, v := range values {
+			if !scm.Equal(t.inserts[i][dcols[j]], v) {
+				goto skipnextdelta
+			}
+		}
+		result = i + t.main_count
+		present = true
+		goto found
+
+		skipnextdelta:
+	}
+	// nothing found
+	present = false
+
+	found:
 	t.mu.RUnlock()
 	return
 }
