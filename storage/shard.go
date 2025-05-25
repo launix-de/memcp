@@ -527,14 +527,12 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	t.next = result
 	result.mu.Lock() // interlock so no one will rebuild the shard twice
 	defer result.mu.Unlock()
-	t.mu.Unlock()
 
 	// now read out deletion list
-	t.mu.RLock()
 	maxInsertIndex := len(t.inserts)
 	// copy-freeze deletions so we don't have to lock anything
 	deletions := t.deletions.Copy()
-	t.mu.RUnlock()
+	t.mu.Unlock()
 	// from now on, we can rebuild with no hurry; inserts and update/deletes on the previous shard will propagate to us, too
 
 	if all || maxInsertIndex > 0 || deletions.Count() > 0 {
