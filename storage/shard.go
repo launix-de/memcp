@@ -499,7 +499,7 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 
 func (t *storageShard) RemoveFromDisk() {
 	// close logfile
-	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+	if t.logfile != nil {
 		t.logfile.Close()
 	}
 	for _, col := range t.t.Columns {
@@ -556,9 +556,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint)
 		result.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint)
 		result.deletions.Reset()
-		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+		if result.t.PersistencyMode == Safe || result.t.PersistencyMode == Logged {
 			// safe mode: also write all deltas to disk
-			t.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
+			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 		}
 
 		// copy column data in two phases: scan, build (if delta is non-empty)
