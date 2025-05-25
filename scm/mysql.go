@@ -131,8 +131,11 @@ func ScmerToMySQL(v Scmer) sqltypes.Value {
 			return sqltypes.NewVarChar(String(v2))
 	}
 }
-func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) error {
-	var myerr error = nil
+type ErrorWrapper string
+func (s ErrorWrapper) Error() string {
+	return string(s)
+}
+func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
 	if query == "select @@version_comment limit 1" {
 		callback(&sqltypes.Result {
 			Fields: []*querypb.Field {
@@ -157,6 +160,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		defer func () {
 			if r := recover(); r != nil {
 				PrintError("error in mysql connection: " + fmt.Sprint(r))
+				myerr = ErrorWrapper(fmt.Sprint(r))
 			}
 		}()
 		return Apply(m.querycallback, session.Schema(), query, func (a... Scmer) Scmer {
