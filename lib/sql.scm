@@ -17,6 +17,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 (import "sql-parser.scm")
 (import "psql-parser.scm")
+(import "sql-builtins.scm")
 (import "queryplan.scm")
 
 /* create user tables */

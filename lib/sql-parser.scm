@@ -15,6 +15,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+(define sql_builtins (coalesce sql_builtins (newsession)))
+
 (define sql_identifier_unquoted (parser (not
 		(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 		/* exceptions for things that can't be identifiers */
@@ -151,16 +153,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "MAX" true) "(" (define s sql_expression) ")") '('aggregate s 'max nil))
 
 		(parser '((atom "DATABASE" true) "(" ")") schema)
-		(parser '((atom "PASSWORD" true) "(" (define p sql_expression) ")") '('password p))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
-		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('parse_date p))
-		(parser '((atom "CURRENT_TIMESTAMP" true) "(" (? sql_expression /* ignore precision */) ")") '('now))
-		(parser '((atom "FLOOR" true) "(" (define p sql_expression) ")") '('floor p))
-		(parser '((atom "CEIL" true) "(" (define p sql_expression) ")") '('ceil p))
-		(parser '((atom "CEILING" true) "(" (define p sql_expression) ")") '('ceil p))
-		(parser '((atom "ROUND" true) "(" (define p sql_expression) ")") '('round p))
-		(parser '((atom "UPPER" true) "(" (define p sql_expression) ")") '('toUpper p))
-		(parser '((atom "LOWER" true) "(" (define p sql_expression) ")") '('toLower p))
+		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p psql_expression) ")") '('parse_date p))
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p)) /* TODO: proper implement CAST; for now make vscode work */
@@ -176,6 +170,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser (atom "FALSE" true) false)
 		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
 		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('globalvars var))
+		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
 		sql_number
 		sql_string
 		sql_column
