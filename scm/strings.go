@@ -73,6 +73,29 @@ func StrLike(str, pattern string) bool {
 	}
 }
 
+func TransformFromJSON(a_ any) Scmer {
+	switch a := a_.(type) {
+		case map[string]any:
+			result := make([]Scmer, 2 * len(a))
+			i := 0
+			for k, v := range a {
+				result[i] = k
+				result[i+1] = TransformFromJSON(v)
+				i += 2
+			}
+			return result
+		case []any:
+			// TODO: maybe rather make a JS like object with length = x, index = ...
+			result := make([]Scmer, len(a))
+			for i, v := range a {
+				result[i] = TransformFromJSON(v)
+			}
+			return result
+		default:
+			return Scmer(a_)
+	}
+}
+
 func init_strings() {
 	// string functions
 	DeclareTitle("Strings")
@@ -374,30 +397,7 @@ func init_strings() {
 			if err != nil {
 				panic(err)
 			}
-			var transform func(any) Scmer
-			transform = func(a_ any) Scmer {
-				switch a := a_.(type) {
-					case map[string]any:
-						result := make([]Scmer, 2 * len(a))
-						i := 0
-						for k, v := range a {
-							result[i] = k
-							result[i+1] = transform(v)
-							i += 2
-						}
-						return result
-					case []any:
-						// TODO: maybe rather make a JS like object with length = x, index = ...
-						result := make([]Scmer, len(a))
-						for i, v := range a {
-							result[i] = transform(v)
-						}
-						return result
-					default:
-						return Scmer(a_)
-				}
-			}
-			return transform(result)
+			return TransformFromJSON(result)
 		},
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")

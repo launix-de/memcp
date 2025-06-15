@@ -124,6 +124,11 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 				var values [][]scm.Scmer
 				json.Unmarshal(b[7:split], &cols)
 				json.Unmarshal(b[split:], &values)
+				for i := 0; i < len(values); i++ {
+					for j := 0; j < len(values[i]); j++ {
+						values[i][j] = scm.TransformFromJSON(values[i][j])
+					}
+				}
 				replay <- LogEntryInsert{cols, values}
 			} else {
 				panic("unknown log sequence: " + string(b))

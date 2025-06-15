@@ -63,7 +63,9 @@ func (s *StorageSCMER) Deserialize(f io.Reader) uint {
 	scanner := bufio.NewScanner(f)
 	for i := uint64(0); i < l; i++ {
 		if scanner.Scan() {
-			json.Unmarshal(scanner.Bytes(), &s.values[i])
+			var v any
+			json.Unmarshal(scanner.Bytes(), &v)
+			s.values[i] = scm.TransformFromJSON(v)
 		}
 	}
 	return uint(l)
