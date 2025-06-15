@@ -985,6 +985,9 @@ func (db *database) PrintMemUsage() string {
 		for _, s := range t.Shards {
 			size += s.Size()
 		}
+		for _, s := range t.PShards {
+			size += s.Size()
+		}
 		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%s\n", t.Name, len(t.Columns), len(t.Shards) + len(t.PShards), len(t.PDimensions), units.BytesSize(float64(size))));
 		dsize += size
 	}
