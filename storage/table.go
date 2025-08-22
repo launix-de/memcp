@@ -44,7 +44,7 @@ type PersistencyMode uint8
 const (
 	Safe PersistencyMode = 0
 	Logged = 1
-	Sloppy = 1
+	Sloppy = 3
 	Memory = 2
 )
 type uniqueKey struct {
