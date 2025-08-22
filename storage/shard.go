@@ -688,8 +688,10 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 			// remove old log file
-			t.logfile.Close()
+			// TODO: this should be in sync with setting the new pointer
+			logfile := t.logfile
 			t.logfile = nil
+			logfile.Close()
 			t.t.schema.persistence.RemoveLog(t.uuid.String())
 		}
 	} else {
