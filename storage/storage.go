@@ -917,7 +917,7 @@ func Init(en scm.Env) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
-			scm.DeclarationParameter{"stream", "strean", "CSV file, load with: (stream filename)"},
+			scm.DeclarationParameter{"stream", "stream", "CSV file, load with: (stream filename)"},
 			scm.DeclarationParameter{"delimiter", "string", "(optional) delimiter defaults to \";\""},
 			scm.DeclarationParameter{"firstline", "bool", "(optional) if the first line contains the column names (otherwise, the tables column order is used)"},
 		}, "string",
