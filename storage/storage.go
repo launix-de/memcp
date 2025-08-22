@@ -1012,14 +1012,14 @@ func (t *table) PrintMemUsage() string {
 			b.WriteString(fmt.Sprintf(" %s: %s, size = %s\n", c, v.String(), units.BytesSize(float64(sz))));
 			ssz += sz
 		}
-		b.WriteString(" ---");
+		b.WriteString(" ---\n");
 		insertionSize := scm.ComputeSize(s.inserts)
 		deletionSize := scm.ComputeSize(s.deletions)
 		ssz += insertionSize
 		ssz += deletionSize
 		b.WriteString(fmt.Sprintf(" + insertions %s\n", units.BytesSize(float64(insertionSize))));
 		b.WriteString(fmt.Sprintf(" + deletions %s\n", units.BytesSize(float64(deletionSize))));
-		b.WriteString(" ---");
+		b.WriteString(" ---\n");
 		b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(ssz))));
 		dsize += ssz
 	}
