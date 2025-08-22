@@ -35,9 +35,13 @@ type StorageSCMER struct {
 	last1, last2 int64 // sequence statistics
 }
 
-func (s *StorageSCMER) Size() uint {
+func (s *StorageSCMER) ComputeSize() uint {
 	// ! size of Scmer values is not considered
-	return uint(len(s.values)) * 16 + 6*8
+	var sz uint = 80 + 24
+	for _, v := range s.values {
+		sz += scm.ComputeSize(v)
+	}
+	return sz
 }
 
 func (s *StorageSCMER) String() string {

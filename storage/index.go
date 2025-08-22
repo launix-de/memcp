@@ -93,6 +93,13 @@ type StorageIndex struct {
 
 */
 
+func (idx *StorageIndex) ComputeSize() uint {
+	var sz uint = 24 * 8 // heuristic
+	sz += idx.mainIndexes.ComputeSize()
+	// TODO: deltaBtree
+	return sz
+}
+
 // iterates over items
 func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint)) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet

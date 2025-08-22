@@ -26,8 +26,8 @@ type StoragePrefix struct {
 	prefixdictionary []string // pref
 	values StorageString // only one depth (but can be cascaded!)
 }
-func (s *StoragePrefix) Size() uint {
-	return s.prefixes.Size() + 24 + s.values.Size()
+func (s *StoragePrefix) ComputeSize() uint {
+	return s.prefixes.ComputeSize() + 24 + s.values.ComputeSize()
 }
 
 func (s *StoragePrefix) String() string {

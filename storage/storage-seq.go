@@ -35,8 +35,8 @@ type StorageSeq struct {
 	lastValueFirst bool
 }
 
-func (s *StorageSeq) Size() uint {
-	return s.recordId.Size() + s.start.Size() + s.stride.Size() + 4*8
+func (s *StorageSeq) ComputeSize() uint {
+	return s.recordId.ComputeSize() + s.start.ComputeSize() + s.stride.ComputeSize() + 8*8
 }
 
 func (s *StorageSeq) String() string {

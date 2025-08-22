@@ -27,8 +27,8 @@ type StorageFloat struct {
 	values []float64
 }
 
-func (s *StorageFloat) Size() uint {
-	return 8 * uint(len(s.values)) + 24 /* a slice */
+func (s *StorageFloat) ComputeSize() uint {
+	return 16 + 8 * uint(len(s.values)) + 24 /* a slice */
 }
 
 func (s *StorageFloat) String() string {

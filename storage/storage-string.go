@@ -42,8 +42,8 @@ type StorageString struct {
 	laststr string
 }
 
-func (s *StorageString) Size() uint {
-	return s.values.Size() + 8 + uint(len(s.dictionary)) + 24 + s.starts.Size() + s.lens.Size() + 8*6
+func (s *StorageString) ComputeSize() uint {
+	return s.values.ComputeSize() + 8 + uint(len(s.dictionary)) + 24 + s.starts.ComputeSize() + s.lens.ComputeSize() + 8*8
 }
 
 func (s *StorageString) String() string {

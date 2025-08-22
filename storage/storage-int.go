@@ -101,7 +101,7 @@ func toInt(x scm.Scmer) int64 {
 	}
 }
 
-func (s *StorageInt) Size() uint {
+func (s *StorageInt) ComputeSize() uint {
 	return 8 * uint(len(s.chunk)) + 64 // management overhead
 }
 

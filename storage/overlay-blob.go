@@ -34,8 +34,12 @@ type OverlayBlob struct {
 	size uint
 }
 
-func (s *OverlayBlob) Size() uint {
-	return 48 + 48 * uint(len(s.values)) + s.size + s.Base.Size()
+func (s *OverlayBlob) ComputeSize() uint {
+	var sz uint = 48 + 48 * uint(len(s.values)) + s.size + s.Base.ComputeSize()
+	for _, v := range s.values {
+		sz += 24 + 16 + (uint(len(v)-1)/8+1)*8 + 32 // some overhead + content
+	}
+	return sz
 }
 
 func (s *OverlayBlob) String() string {

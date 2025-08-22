@@ -28,8 +28,12 @@ type StorageSparse struct {
 	values []scm.Scmer // TODO: embed other formats as values (ColumnStorage with a proposeCompression loop)
 }
 
-func (s *StorageSparse) Size() uint {
-	return 8 + 24 + s.recids.Size() + 16 * uint(len(s.values)) // heuristic
+func (s *StorageSparse) ComputeSize() uint {
+	var sz uint = 16 + 8 + 24 + s.recids.ComputeSize() + 8 * uint(len(s.values))
+	for _, v := range s.values {
+		sz += scm.ComputeSize(v)
+	}
+	return sz
 }
 
 func (s *StorageSparse) String() string {

@@ -32,7 +32,7 @@ type ColumnStorage interface {
 	// info
 	GetValue(uint) scm.Scmer // read function
 	String() string // self-description
-	Size() uint // stat
+	scm.Sizable
 
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
 	// analyze
@@ -983,10 +983,10 @@ func (db *database) PrintMemUsage() string {
 	for _, t := range db.Tables.GetAll() {
 		var size uint = 10*8 + 32 * uint(len(t.Columns))
 		for _, s := range t.Shards {
-			size += s.Size()
+			size += s.ComputeSize()
 		}
 		for _, s := range t.PShards {
-			size += s.Size()
+			size += s.ComputeSize()
 		}
 		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%s\n", t.Name, len(t.Columns), len(t.Shards) + len(t.PShards), len(t.PDimensions), units.BytesSize(float64(size))));
 		dsize += size
@@ -1004,11 +1004,11 @@ func (t *table) PrintMemUsage() string {
 		b.WriteString(fmt.Sprint("Partitioning Schema:", t.PDimensions) + "\n\n")
 	}
 	for i, s := range shards {
-		var ssz uint = 0
+		var ssz uint = 14 * 8 // overhead
 		b.WriteString(fmt.Sprintf("Shard %d\n---\n", i))
 		b.WriteString(fmt.Sprintf("main count: %d, delta count: %d, deletions: %d\n", s.main_count, len(s.inserts), s.deletions.Count()))
 		for c, v := range s.columns {
-			sz := v.Size()
+			sz := v.ComputeSize()
 			b.WriteString(fmt.Sprintf(" %s: %s, size = %s\n", c, v.String(), units.BytesSize(float64(sz))));
 			ssz += sz
 		}

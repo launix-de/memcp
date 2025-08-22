@@ -116,6 +116,17 @@ func (t table) GetKey() string {
 	return t.Name
 }
 
+func (t table) ComputeSize() uint {
+	var size uint = 10*8 + 32 * uint(len(t.Columns))
+		for _, s := range t.Shards {
+			size += s.ComputeSize()
+		}
+	for _, s := range t.PShards {
+		size += s.ComputeSize()
+	}
+	return size
+}
+
 // increases PartitioningScore for a set of columns
 func (t *table) AddPartitioningScore(cols []string) {
 	// we don't sync because we want to be fast; we ignore write-after-write hazards

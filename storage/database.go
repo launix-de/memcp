@@ -40,6 +40,14 @@ func (d database) GetKey() string {
 	return d.Name
 }
 
+func (d database) ComputeSize() uint {
+	var sz uint = 16*8 // heuristic
+	for _, t := range d.Tables.GetAll() {
+		sz += t.ComputeSize()
+	}
+	return sz
+}
+
 func Rebuild(all bool, repartition bool) string {
 	start := time.Now()
 	dbs := databases.GetAll()

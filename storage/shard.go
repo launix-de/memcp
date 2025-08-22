@@ -49,15 +49,19 @@ type storageShard struct {
 	hashmaps3 map[[3]string]map[[3]scm.Scmer]uint // hashmaps for single columned unique keys
 }
 
-func (s *storageShard) Size() uint {
-	var result uint = 14*8
+func (s *storageShard) ComputeSize() uint {
+	var result uint = 14*8 + 32*8 // heuristic for columns map
 	s.mu.RLock()
 	for _, c := range s.columns {
-		result += c.Size()
+		result += c.ComputeSize()
 	}
 	s.mu.RUnlock()
-	result += uint(s.deletions.Size()) // approximation of delete map
-	result += uint(len(s.inserts) * len(s.deltaColumns)) * 32 // heuristic
+	result += s.deletions.ComputeSize()
+	result += scm.ComputeSize(s.inserts)
+	for _, idx := range s.Indexes {
+		result += idx.ComputeSize()
+	}
+	// TODO: hashmaps for unique
 	return result
 }
 
