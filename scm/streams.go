@@ -17,6 +17,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 package scm
 
 import "io"
+import "bufio"
 import "compress/gzip"
 import "github.com/ulikunitz/xz"
 
@@ -25,9 +26,66 @@ func init_streams() {
 	// string functions
 	DeclareTitle("Streams")
 
-	// TODO: add support for writers
 	Declare(&Globalenv, &Declaration{
-		"gzip", "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
+		"streamString", "creates a stream that contains a string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"content", "string", "content to put into the stream"},
+		}, "stream",
+		func(a ...Scmer) (result Scmer) {
+			reader, writer := io.Pipe()
+			go func() {
+				io.WriteString(writer, String(a[0]))
+				writer.Close()
+			}()
+			return io.Reader(reader)
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"gzip", "compresses a stream with gzip. Create streams with (stream filename)",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"stream", "stream", "input stream"},
+		}, "stream",
+		func(a ...Scmer) (result Scmer) {
+			stream := a[0].(io.Reader)
+			reader, writer := io.Pipe()
+			bwriter := bufio.NewWriterSize(writer, 16*1024)
+			zip := gzip.NewWriter(bwriter)
+			go func() {
+				io.Copy(zip, stream)
+				zip.Close()
+				bwriter.Flush()
+				writer.Close()
+			}()
+			return (io.Reader)(reader)
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"xz", "compresses a stream with xz. Create streams with (stream filename)",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"stream", "stream", "input stream"},
+		}, "stream",
+		func(a ...Scmer) (result Scmer) {
+			stream := a[0].(io.Reader)
+			reader, writer := io.Pipe()
+			bwriter := bufio.NewWriterSize(writer, 16*1024)
+			zip, err := xz.NewWriter(bwriter)
+			go func() {
+				io.Copy(zip, stream)
+				zip.Close()
+				bwriter.Flush()
+				writer.Close()
+			}()
+			if err != nil {
+				panic(err)
+			}
+			return (io.Reader)(reader)
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		"zcat", "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"stream", "stream", "input stream"},
@@ -42,7 +100,7 @@ func init_streams() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		"xz", "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
+		"xzcat", "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"stream", "stream", "input stream"},
