@@ -1013,8 +1013,14 @@ func (t *table) PrintMemUsage() string {
 			ssz += sz
 		}
 		b.WriteString(" ---\n");
+		for _, idx := range s.Indexes {
+			indexSize := idx.ComputeSize()
+			b.WriteString(fmt.Sprintf(" index %s: %s\n", idx.String(), units.BytesSize(float64(indexSize))));
+			ssz += indexSize
+		}
+		b.WriteString(" ---\n");
 		insertionSize := scm.ComputeSize(s.inserts)
-		deletionSize := scm.ComputeSize(s.deletions)
+		deletionSize := s.deletions.ComputeSize()
 		ssz += insertionSize
 		ssz += deletionSize
 		b.WriteString(fmt.Sprintf(" + insertions %s\n", units.BytesSize(float64(insertionSize))));

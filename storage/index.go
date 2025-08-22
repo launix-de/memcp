@@ -20,6 +20,7 @@ package storage
 import "fmt"
 import "sort"
 import "sync"
+import "strings"
 import "reflect"
 import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
@@ -98,6 +99,10 @@ func (idx *StorageIndex) ComputeSize() uint {
 	sz += idx.mainIndexes.ComputeSize()
 	// TODO: deltaBtree
 	return sz
+}
+// pretty-print
+func (idx *StorageIndex) String() string {
+	return strings.Join(idx.Cols, "|")
 }
 
 // iterates over items
