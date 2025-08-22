@@ -1009,9 +1009,17 @@ func (t *table) PrintMemUsage() string {
 		b.WriteString(fmt.Sprintf("main count: %d, delta count: %d, deletions: %d\n", s.main_count, len(s.inserts), s.deletions.Count()))
 		for c, v := range s.columns {
 			sz := v.Size()
-			b.WriteString(fmt.Sprintf("%s: %s, size = %s\n", c, v.String(), units.BytesSize(float64(sz))));
+			b.WriteString(fmt.Sprintf(" %s: %s, size = %s\n", c, v.String(), units.BytesSize(float64(sz))));
 			ssz += sz
 		}
+		b.WriteString(" ---");
+		insertionSize := scm.ComputeSize(s.inserts)
+		deletionSize := scm.ComputeSize(s.deletions)
+		ssz += insertionSize
+		ssz += deletionSize
+		b.WriteString(fmt.Sprintf(" + insertions %s\n", units.BytesSize(float64(insertionSize))));
+		b.WriteString(fmt.Sprintf(" + deletions %s\n", units.BytesSize(float64(deletionSize))));
+		b.WriteString(" ---");
 		b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(ssz))));
 		dsize += ssz
 	}

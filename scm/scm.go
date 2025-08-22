@@ -529,6 +529,15 @@ func init() {
 		}, "any", nil,
 	})
 	Declare(&Globalenv, &Declaration{
+		"eval", "compute the memory size of a value",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "any", "value to examine"},
+		}, "int", func (a ...Scmer) Scmer {
+                        return int64(ComputeSize(a[0]))
+                },
+	})
+	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",
 		1, 1,
 		[]DeclarationParameter{
@@ -808,3 +817,41 @@ type Scmer interface{}
 type Symbol string  //Symbols are represented by strings
 //Numbers by float64 (but no extra type)
 
+type Sizable interface {
+	ComputeSize() uint
+}
+
+func ComputeSize(v Scmer) uint {
+	switch vv := v.(type) {
+		case Sizable:
+			return vv.ComputeSize()
+		case *Sizable:
+			return 8 /* ptr */ + 16 /* allocation header */ + (*vv).ComputeSize()
+		case []Scmer: // array
+			var sz uint = 16 /* allocation header */ + 24 /* slice */
+			for _, vi := range vv {
+				sz += ComputeSize(vi)
+			}
+			return sz
+		case [][]Scmer: // delta storage
+			var sz uint = 16 /* allocation header */ + 24 /* slice */
+			for _, vi := range vv {
+				sz += ComputeSize(vi)
+			}
+			return sz
+		case []float64: // vector
+			var sz uint = 16 /* allocation header */ + 24 /* slice */ + 8 * uint(len(vv)) /* data */
+			return sz
+		case *Scmer: // pointer
+			return 16 /* interface + data */ + ComputeSize(*vv)
+		case Symbol: // Symbol
+			return 16 /* allocation header */ + 16 /* const slice */ + 8 * ((uint(len(vv))-1)/8)
+		case string: // string
+			return 16 /* allocation header */ + 16 /* const slice */ + 8 * ((uint(len(vv))-1)/8)
+		case int, uint, int64, uint64, float64, bool: // known types
+			return 16 // 8 bytes interface ptr, 8 bytes raw data (int, float64 etc.)
+		default: // unknown -> with warning
+			fmt.Println(fmt.Sprintf("warning: unknown type %s", reflect.TypeOf(vv).Name()))
+			return 16 // 8 bytes interface ptr, 8 bytes raw data (int, float64 etc.)
+	}
+}
