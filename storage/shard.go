@@ -571,7 +571,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	maxInsertIndex := len(t.inserts)
 	// copy-freeze deletions so we don't have to lock anything
 	deletions := t.deletions.Copy()
-	t.mu.Unlock()
 	// from now on, we can rebuild with no hurry; inserts and update/deletes on the previous shard will propagate to us, too
 
 	if all || maxInsertIndex > 0 || deletions.Count() > 0 {
@@ -597,6 +596,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			// safe mode: also write all deltas to disk
 			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 		}
+		t.mu.Unlock() // release lock, from now on, deletions+inserts should work
 
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		isFirst := true
@@ -704,6 +704,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.hashmaps1 = t.hashmaps1
 		result.hashmaps2 = t.hashmaps2
 		result.hashmaps3 = t.hashmaps3
+		t.mu.Unlock()
 	}
 	return result
 }

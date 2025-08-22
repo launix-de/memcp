@@ -139,7 +139,7 @@ func (db *database) rebuild(all bool, repartition bool) {
 			var sdone sync.WaitGroup
 			sdone.Add(len(shardlist))
 			for i, s := range shardlist {
-				maincount += s.main_count + uint(len(s.inserts)) // estimate size of that table
+				maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count()) // estimate size of that table
 				go func(shardlist []*storageShard, i int, s *storageShard) {
 					shardlist[i] = s.rebuild(all)
 					sdone.Done()
