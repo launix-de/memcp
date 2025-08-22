@@ -340,7 +340,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(cons list filtercols)
 			'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
 			'(list "$update")
-			'((quote lambda) '((quote $update)) '((quote $update)))
+			'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+			(quote +)
+			0
 		)
 	)))
 

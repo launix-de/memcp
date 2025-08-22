@@ -155,6 +155,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		if len(a) > 0 {
+			// update command
 			func () {
 				t.mu.Lock() // write lock
 				defer t.mu.Unlock() // write lock
