@@ -16,14 +16,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "os"
+import "io"
 import "bufio"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 
-func LoadCSV(schema, table, filename, delimiter string) {
-	f, _ := os.Open(filename)
-	defer f.Close()
+func LoadCSV(schema, table string, f io.Reader, delimiter string, firstLine bool) {
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
 
@@ -44,9 +42,18 @@ func LoadCSV(schema, table, filename, delimiter string) {
 	if t == nil {
 		panic("table " + table + " does not exist")
 	}
-	cols := make([]string, len(t.Columns))
-	for i, col := range t.Columns {
-		cols[i] = col.Name
+	var cols []string
+	if firstLine {
+		if !scanner.Scan() {
+			panic("CSV does not contain header line")
+		}
+		cols = strings.Split(scanner.Text(), delimiter) // read headerline
+	} else {
+		// otherwise use the table's column order
+		cols = make([]string, len(t.Columns))
+		for i, col := range t.Columns {
+			cols[i] = col.Name
+		}
 	}
 	buffer := make([][]scm.Scmer, 0, 4096)
 	for s := range(lines) {

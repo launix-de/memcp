@@ -28,14 +28,12 @@ JSON storage on disk for persistence:
 
 */
 
-import "os"
+import "io"
 import "bufio"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
-func LoadJSON(schema, filename string) {
-	f, _ := os.Open(filename)
-	defer f.Close()
+func LoadJSON(schema string, f io.Reader) {
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
 

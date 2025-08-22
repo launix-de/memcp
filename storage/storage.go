@@ -912,13 +912,14 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"loadCSV", "loads a CSV file into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.",
-		3, 4,
+		"loadCSV", "loads a CSV stream into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.",
+		3, 5,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
-			scm.DeclarationParameter{"filename", "string", "filename of the CSV file (global path or relative to working directory of memcp)"},
+			scm.DeclarationParameter{"stream", "strean", "CSV file, load with: (stream filename)"},
 			scm.DeclarationParameter{"delimiter", "string", "(optional) delimiter defaults to \";\""},
+			scm.DeclarationParameter{"firstline", "bool", "(optional) if the first line contains the column names (otherwise, the tables column order is used)"},
 		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
 			// schema, table, filename, delimiter
@@ -928,23 +929,27 @@ func Init(en scm.Env) {
 			if len(a) > 3 {
 				delimiter = scm.String(a[3])
 			}
-			LoadCSV(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]), delimiter)
+			firstline := true
+			if len(a) > 4 {
+				firstline = scm.ToBool(a[4])
+			}
+			LoadCSV(scm.String(a[0]), scm.String(a[1]), a[2].(io.Reader), delimiter, firstline)
 
 			return fmt.Sprint(time.Since(start))
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"loadJSON", "loads a .jsonl file from disk into a database and returns the amount of time it took.\nJSONL is a linebreak separated file of JSON objects. Each JSON object is one dataset in the database. Before you add rows, you must declare the table in a line '#table <tablename>'. All other lines starting with # are comments. Columns are created dynamically as soon as they occur in a json object.",
+		"loadJSON", "loads a .jsonl file from stream into a database and returns the amount of time it took.\nJSONL is a linebreak separated file of JSON objects. Each JSON object is one dataset in the database. Before you add rows, you must declare the table in a line '#table <tablename>'. All other lines starting with # are comments. Columns are created dynamically as soon as they occur in a json object.",
 		2, 2,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database where you want to put the tables in"},
-			scm.DeclarationParameter{"filename", "string", "filename of the .jsonl file (global path or relative to working directory of memcp)"},
+			scm.DeclarationParameter{"stream", "stream", "stream of the .jsonl file, read with: (stream filename)"},
 		}, "string",
 		func (a ...scm.Scmer) scm.Scmer {
 			// schema, filename
 			start := time.Now()
 
-			LoadJSON(scm.String(a[0]), scm.String(a[1]))
+			LoadJSON(scm.String(a[0]), a[1].(io.Reader))
 
 			return fmt.Sprint(time.Since(start))
 		},
