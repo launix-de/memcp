@@ -11,7 +11,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jtolds/gls v4.20.0+incompatible
-	github.com/launix-de/NonLockingReadMap v1.0.7
+	github.com/launix-de/NonLockingReadMap v1.0.8
 	github.com/launix-de/go-mysqlstack v0.0.0-20241101205441-bc39b4e0fb04
 	github.com/launix-de/go-packrat/v2 v2.1.11
 	github.com/ulikunitz/xz v0.5.12
