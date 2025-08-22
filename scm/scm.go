@@ -529,7 +529,7 @@ func init() {
 		}, "any", nil,
 	})
 	Declare(&Globalenv, &Declaration{
-		"eval", "compute the memory size of a value",
+		"size", "compute the memory size of a value",
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value to examine"},
