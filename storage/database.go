@@ -88,6 +88,9 @@ func LoadDatabases() {
 				// restore back references of the tables
 				for _, t := range db.Tables.GetAll() {
 					t.schema = db // restore schema reference
+					for _, col := range t.Columns {
+						col.UpdateSanitizer()
+					}
 					func (t *table) {
 						t.iterateShards(nil, func (s *storageShard) {
 							s.load(t)

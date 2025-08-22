@@ -37,6 +37,7 @@ type column struct {
 	IsTemp bool // columns with IsTemp may be removed without consequences
 	Collation string
 	Comment string
+	sanitizer func(scm.Scmer) scm.Scmer
 	// TODO: LRU statistics for computed columns
 }
 type PersistencyMode uint8
@@ -218,6 +219,17 @@ func (c *column) Show() scm.Scmer {
 	return []scm.Scmer{"Field", c.Name, "Type", typ, "Collation", c.Collation, "RawType", c.Typ, "Dimensions", dims, "Null", c.AllowNull, "Default", c.Default, "Extra", extra, "Privileges", "select,insert,update,references", "Comment", c.Comment}
 }
 
+func (c *column) UpdateSanitizer() {
+	typ := strings.ToUpper(c.Typ)
+	switch (typ) {
+		// string to int
+		case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
+			c.sanitizer = func (v scm.Scmer) scm.Scmer {
+				return int64(scm.ToInt(v))
+			}
+	}
+}
+
 func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 	switch (key) {
 		case "default":
@@ -306,6 +318,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 			panic("unknown column attribute: " + scm.String(extrainfo[i]))
 		}
 	}
+	c.UpdateSanitizer()
 	t.Columns = append(t.Columns, c)
 	for _, s := range t.Shards {
 		s.columns[name] = new (StorageSparse)
@@ -342,6 +355,17 @@ func (t *table) DropColumn(name string) bool {
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool) int {
 	result := 0
 	// TODO: check foreign keys (new value of column must be present in referenced table)
+
+	// sanitize values
+	for i, col := range columns {
+		for _, colDesc := range t.Columns {
+			if col == colDesc.Name && colDesc.sanitizer != nil {
+				for _, row := range values {
+					row[i] = colDesc.sanitizer(row[i])
+				}
+			}
+		}
+	}
 
 	if t.Shards != nil { // unpartitioned sharding
 		shard := t.Shards[len(t.Shards)-1]
