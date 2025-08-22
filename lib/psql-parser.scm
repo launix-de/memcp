@@ -54,6 +54,22 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(parser (define col psql_identifier_unquoted) '((quote get_column) nil true col true))
 )))
 
+(define psql_column_attributes (parser (define sub (* (or
+	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
+	(parser (atom "PRIMARY" true) '("primary" true))
+	(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
+	(parser (atom "UNIQUE" true) '("unique" true))
+	(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
+	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
+	(parser (atom "NULL" true) '("null" true))
+	(parser '((atom "DEFAULT" true) (define default sql_expression)) '("default" default))
+	(parser '((atom "ON" true) (atom "UPDATE" true) (define default sql_expression)) '("update" default))
+	(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
+	(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
+	(parser (atom "UNSIGNED" true) '()) /* ignore */
+	/* TODO: GENERATED ALWAYS AS expr */
+))) (merge sub)))
+
 (define psql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
 (define psql_number (parser (define x (regex "-?[0-9]+\.?[0-9]*(?:e-?[0-9]+)?" true)) (simplify x)))
 
@@ -480,8 +496,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 					(parser '("(" (define a psql_int) ")") '((quote list) a))
 					(parser empty '((quote list)))
 				))
-				(define typeparams (regex "[^,)]*")) /* TODO: rest */
-			) (lambda (id) '((quote createcolumn) schema id col type dimensions typeparams)))
+				(define typeparams psql_column_attributes)
+			) (lambda (id) '((quote createcolumn) schema id col type dimensions (cons 'list typeparams))))
 			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) '((quote altertable) schema id "owner" owner)))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
