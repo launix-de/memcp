@@ -17,6 +17,9 @@ from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional
 
+# Global flag for connect-only mode
+is_connect_only_mode = False
+
 class SQLTestRunner:
     def __init__(self, base_url="http://localhost:4321", username="root", password="admin"):
         self.base_url = base_url
@@ -116,24 +119,24 @@ class SQLTestRunner:
             print(f"Response text: '{response.text}'")
             return None
 
-    def run_setup(self, setup_steps: List[Dict]) -> bool:
+    def run_setup(self, setup_steps: List[Dict], database: str) -> bool:
         """Execute setup steps"""
         print("🔧 Running setup...")
         for step in setup_steps:
             print(f"  - {step['action']}")
-            response = self.execute_sql("system", step['sql'])
+            response = self.execute_sql(database, step['sql'])
             if not response or response.status_code not in [200, 500]:  # 500 might be expected for CREATE DATABASE IF NOT EXISTS
                 print(f"    ❌ Setup step failed: {step['action']}")
                 return False
         print("  ✅ Setup completed")
         return True
     
-    def run_cleanup(self, cleanup_steps: List[Dict]) -> bool:
+    def run_cleanup(self, cleanup_steps: List[Dict], database: str) -> bool:
         """Execute cleanup steps"""
         print("\n🧹 Running cleanup...")
         for step in cleanup_steps:
             print(f"  - {step['action']}")
-            response = self.execute_sql("system", step['sql'])
+            response = self.execute_sql(database, step['sql'])
             # Don't fail on cleanup errors
             if response and response.status_code == 200:
                 print(f"    ✅ Cleanup step succeeded")
@@ -280,7 +283,34 @@ class SQLTestRunner:
     def cleanup_test_database(self, database: str) -> None:
         """Clean up test database between test runs"""
         try:
-            # Drop test database to ensure clean state
+            # In connect-only mode, we need gentler cleanup
+            # since multiple test files share the same MemCP instance
+            global is_connect_only_mode
+            if is_connect_only_mode:
+                # Try to clean tables within the database instead of dropping the whole database
+                try:
+                    # Try to get list of tables and drop them individually
+                    response = self.execute_sql(database, "SHOW TABLES")
+                    if response and response.status_code == 200:
+                        try:
+                            tables_data = response.json()
+                            if isinstance(tables_data, dict) and 'data' in tables_data:
+                                for row in tables_data['data']:
+                                    if isinstance(row, dict):
+                                        table_name = list(row.values())[0]  # Get first value from row
+                                        drop_table_sql = f"DROP TABLE IF EXISTS {table_name}"
+                                        self.execute_sql(database, drop_table_sql)
+                                print(f"🧹 Cleaned tables in database: {database}")
+                            else:
+                                print(f"🧹 No tables to clean in database: {database}")
+                        except:
+                            print(f"🧹 Performed basic cleanup for database: {database}")
+                except:
+                    # Database might not exist yet, which is fine - it will be created after cleanup
+                    print(f"🧹 Database will be created fresh: {database}")
+                return
+            
+            # Traditional mode: drop test database to ensure clean state  
             drop_db_sql = f"DROP DATABASE IF EXISTS {database}"
             response = self.execute_sql("system", drop_db_sql)
             if response and response.status_code == 200:
@@ -309,9 +339,17 @@ class SQLTestRunner:
         # Clean up database before starting (ensure isolation)
         self.cleanup_test_database(database)
         
+        # Ensure the test database exists (cleanup may have cleaned it)
+        create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
+        response = self.execute_sql("system", create_db_sql)
+        if not response or response.status_code != 200:
+            print(f"❌ Failed to create test database: {database}")
+            return False
+        print(f"✅ Database ready: {database}")
+        
         # Run setup
         setup_steps = spec.get('setup', [])
-        if setup_steps and not self.run_setup(setup_steps):
+        if setup_steps and not self.run_setup(setup_steps, database):
             return False
             
         # Run test cases
@@ -324,7 +362,7 @@ class SQLTestRunner:
         # Run cleanup
         cleanup_steps = spec.get('cleanup', [])
         if cleanup_steps:
-            self.run_cleanup(cleanup_steps)
+            self.run_cleanup(cleanup_steps, database)
             
         # Clean up database after tests (leave system clean)
         self.cleanup_test_database(database)
@@ -381,6 +419,10 @@ def main():
     
     base_url = f"http://localhost:{port}"
     memcp_process = None
+    
+    # Store connect_only flag globally for cleanup decisions
+    global is_connect_only_mode
+    is_connect_only_mode = connect_only
     
     if connect_only:
         # Connect-only mode: just try to connect, don't start MemCP

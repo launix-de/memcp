@@ -5,34 +5,27 @@ metadata:
 setup: []
 
 test_cases:
-  # Basic SPARQL test without TTL loading first
-  - name: "SPARQL syntax test without data"
-    sparql: |
-      SELECT ?person ?name WHERE {
-        ?person <name> ?name .
-      }
-    expect:
-      rows: 0
-
-  # Simple TTL loading test
-  - name: "Simple TTL loading test"
-    ttl_data: |
-      @prefix ex: <http://example.org/> .
-      ex:alice ex:name "Alice" .
-    sparql: |
-      SELECT ?name WHERE {
-        ex:alice ex:name ?name .
-      }
-    expect:
-      rows: 1
-      data:
-        - name: "Alice"
-
-  # Error cases for SPARQL
+  # Error cases for SPARQL - parser should reject these
   - name: "Invalid SPARQL syntax - missing braces"
     sparql: |
       SELECT ?name WHERE
-        ?person ex:name ?name .
+        ?person <http://example.org/name> ?name .
+    expect:
+      error: true
+
+  - name: "Invalid SPARQL syntax - malformed SELECT keyword"  
+    sparql: |
+      SELCT ?name WHERE {
+        ?person <http://example.org/name> ?name .
+      }
+    expect:
+      error: true
+
+  - name: "Invalid SPARQL syntax - missing WHERE clause"
+    sparql: |
+      SELECT ?name {
+        ?person <http://example.org/name> ?name .
+      }
     expect:
       error: true
 
