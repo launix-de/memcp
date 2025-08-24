@@ -316,6 +316,75 @@ func setupIO(wd string) {
 		}, "string",
 		scm.MySQLPassword,
 	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"args", "Returns command line arguments",
+		0, 0,
+		[]scm.DeclarationParameter{}, "list",
+		func (a ...scm.Scmer) scm.Scmer {
+			args := make([]scm.Scmer, len(os.Args))
+			for i, arg := range os.Args {
+				args[i] = arg
+			}
+			return args
+		},
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"arg", "Gets a command line argument value",
+		2, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"longname", "string", "long argument name (without --)"},
+			scm.DeclarationParameter{"shortname", "string", "short argument name (without -) or default value if only 2 args"},
+			scm.DeclarationParameter{"default", "any", "default value if argument not found"},
+		}, "any",
+		func (a ...scm.Scmer) scm.Scmer {
+			longname := scm.String(a[0])
+			var shortname string
+			var defaultValue scm.Scmer
+			
+			if len(a) == 2 {
+				// (arg "longname" defaultValue)
+				defaultValue = a[1]
+			} else {
+				// (arg "longname" "s" defaultValue)  
+				shortname = scm.String(a[1])
+				defaultValue = a[2]
+			}
+			
+			// Check for --longname=value or --longname value
+			longPrefix := "--" + longname
+			for i, arg := range os.Args {
+				argStr := scm.String(arg)
+				if argStr == longPrefix && i+1 < len(os.Args) {
+					return os.Args[i+1]
+				}
+				if len(argStr) > len(longPrefix) && argStr[:len(longPrefix)+1] == longPrefix+"=" {
+					return argStr[len(longPrefix)+1:]
+				}
+			}
+			
+			// Check for -shortname value if shortname provided
+			if shortname != "" {
+				shortPrefix := "-" + shortname
+				for i, arg := range os.Args {
+					if scm.String(arg) == shortPrefix && i+1 < len(os.Args) {
+						return os.Args[i+1]
+					}
+				}
+			}
+			
+			// Check for boolean flags (--longname without value means true)
+			for _, arg := range os.Args {
+				if scm.String(arg) == longPrefix {
+					return true
+				}
+				if shortname != "" && scm.String(arg) == "-" + shortname {
+					return true
+				}
+			}
+			
+			return defaultValue
+		},
+	})
 }
 
 func main() {
@@ -345,8 +414,59 @@ func main() {
 	wd, _ := os.Getwd() // libraries are relative to working directory... or change with -wd PATH
 	flag.StringVar(&wd, "wd", wd, "Working Directory for (import) and (load) (Default: .)")
 
+	// Parse only known flags, ignore unknown ones for Scheme to handle
+	flag.CommandLine.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nAdditional arguments (handled by Scheme):\n")
+		fmt.Fprintf(os.Stderr, "  --api-port=PORT        HTTP API port (default 4321)\n")
+		fmt.Fprintf(os.Stderr, "  --mysql-port=PORT      MySQL protocol port (default 3307)\n")
+		fmt.Fprintf(os.Stderr, "  --disable-api          Disable HTTP API server\n")
+		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
+	}
+	
+	// Parse until first unknown flag
+	knownArgs := []string{}
+	schemeArgs := []string{}
+	importFiles := []string{}
+	skipNext := false
+	
+	for i, arg := range os.Args[1:] {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		
+		if arg == "-c" || arg == "-data" || arg == "-profile" || arg == "-wd" {
+			knownArgs = append(knownArgs, arg)
+			if i+1 < len(os.Args[1:]) {
+				knownArgs = append(knownArgs, os.Args[i+2])
+				skipNext = true
+			}
+		} else if arg == "-h" || arg == "-help" || arg == "--help" {
+			knownArgs = append(knownArgs, arg)
+		} else if len(arg) > 2 && arg[:2] == "--" {
+			// This is a long flag for Scheme - don't treat as import file
+			schemeArgs = append(schemeArgs, arg)
+		} else if len(arg) > 1 && arg[0] == '-' {
+			// This looks like a short flag but we don't recognize it - also for Scheme
+			schemeArgs = append(schemeArgs, arg)
+		} else {
+			// This is probably an import file
+			importFiles = append(importFiles, arg)
+		}
+	}
+	
+	// Set os.Args to include all arguments for Scheme
+	fullArgs := append(append([]string{os.Args[0]}, knownArgs...), schemeArgs...)
+	
+	// Parse only known Go flags
+	os.Args = append([]string{os.Args[0]}, knownArgs...)
 	flag.Parse()
-	imports := flag.Args()
+	imports := append(flag.Args(), importFiles...)
+	
+	// Restore full args for Scheme
+	os.Args = fullArgs
 
 	// storage initialization
 	setupIO(wd)
