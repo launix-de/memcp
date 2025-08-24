@@ -51,6 +51,25 @@ this is how rdf works:
 			((res "print") "Unauthorized")
 		))
 	)))
+	(define handle_ttl_load (lambda (req res schema ttl_data) (begin
+		/* check for password */
+		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(if (and pw (equal? pw (password (req "password")))) (begin
+			((res "header") "Content-Type" "text/plain")
+			((res "status") 200)
+			/*(print "Loading TTL data into: " schema)*/
+			/* ensure rdf table exists */
+			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT)"))
+			/* load the TTL data */
+			(load_ttl schema ttl_data)
+			((res "println") "TTL data loaded successfully")
+		) (begin
+			((res "header") "Content-Type" "text/plain")
+			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+			((res "status") 401)
+			((res "print") "Unauthorized")
+		))
+	)))
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
@@ -62,6 +81,10 @@ this is how rdf works:
 			(regex "^/rdf/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
 				(handle_query req res schema query)
+			)
+			(regex "^/rdf/([^/]+)/load_ttl$" url schema) (begin
+				(set ttl_data ((req "body")))
+				(handle_ttl_load req res schema ttl_data)
 			)
 			/* default */
 			(!begin

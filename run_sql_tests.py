@@ -43,6 +43,50 @@ class SQLTestRunner:
             print(f"Error executing SQL: {e}")
             return None
     
+    def execute_sparql(self, database: str, query: str) -> Optional[requests.Response]:
+        """Execute SPARQL query via HTTP API"""
+        try:
+            url = f"{self.base_url}/rdf/{database}"
+            response = requests.post(url, data=query, headers=self.auth_header, timeout=10)
+            return response
+        except Exception as e:
+            print(f"Error executing SPARQL: {e}")
+            return None
+    
+    def execute_scheme(self, scheme_code: str) -> Optional[requests.Response]:
+        """Execute Scheme code via HTTP API"""
+        try:
+            url = f"{self.base_url}/scheme"
+            response = requests.post(url, data=scheme_code, headers=self.auth_header, timeout=10)
+            return response
+        except Exception as e:
+            print(f"Error executing Scheme: {e}")
+            return None
+    
+    def load_ttl(self, database: str, ttl_data: str) -> bool:
+        """Load TTL data into RDF table"""
+        try:
+            # First ensure database exists
+            create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
+            response = self.execute_sql("system", create_db_sql)
+            if not response or response.status_code != 200:
+                print(f"Failed to create database: {response.text if response else 'No response'}")
+                return False
+            
+            # Load TTL data using the new /rdf/{database}/load_ttl endpoint
+            url = f"{self.base_url}/rdf/{database}/load_ttl"
+            response = requests.post(url, data=ttl_data, headers=self.auth_header, timeout=10)
+            
+            if response and response.status_code == 200:
+                return True
+            else:
+                print(f"Failed to load TTL data: {response.text if response else 'No response'}")
+                return False
+            
+        except Exception as e:
+            print(f"Error loading TTL data: {e}")
+            return False
+    
     def parse_jsonl_response(self, response: requests.Response) -> Optional[List[Dict]]:
         """Parse JSONL response into list of dictionaries"""
         if not response:
@@ -162,9 +206,15 @@ class SQLTestRunner:
         return True
 
     def run_test_case(self, test_case: Dict, database: str) -> bool:
-        """Execute a single test case"""
+        """Execute a single test case (SQL or SPARQL)"""
         self.test_count += 1
         name = test_case.get('name', f'Test {self.test_count}')
+        
+        # Check if this is a SPARQL test case
+        if 'sparql' in test_case:
+            return self.run_sparql_test_case(test_case, database)
+        
+        # Regular SQL test case
         sql = test_case['sql'].strip()
         
         print(f"\n📋 Test {self.test_count}: {name}")
@@ -174,6 +224,43 @@ class SQLTestRunner:
         response = self.execute_sql(database, sql)
         if not response:
             print(f"    ❌ Failed to execute SQL")
+            self.failed_tests.append(name)
+            return False
+            
+        # Parse results
+        results = self.parse_jsonl_response(response)
+        
+        # Validate expectations
+        if self.validate_expectation(test_case, response, results):
+            print(f"    ✅ Passed")
+            self.test_passed += 1
+            return True
+        else:
+            print(f"    ❌ Failed")
+            self.failed_tests.append(name)
+            return False
+    
+    def run_sparql_test_case(self, test_case: Dict, database: str) -> bool:
+        """Execute a SPARQL test case"""
+        name = test_case.get('name', f'SPARQL Test {self.test_count}')
+        sparql = test_case['sparql'].strip()
+        
+        print(f"\n📋 Test {self.test_count}: {name}")
+        print(f"    SPARQL: {sparql[:80]}{'...' if len(sparql) > 80 else ''}")
+        
+        # Load TTL data if provided
+        if 'ttl_data' in test_case:
+            ttl_data = test_case['ttl_data'].strip()
+            print(f"    Loading TTL data ({len(ttl_data)} chars)")
+            if not self.load_ttl(database, ttl_data):
+                print(f"    ❌ Failed to load TTL data")
+                self.failed_tests.append(name)
+                return False
+        
+        # Execute SPARQL
+        response = self.execute_sparql(database, sparql)
+        if not response:
+            print(f"    ❌ Failed to execute SPARQL")
             self.failed_tests.append(name)
             return False
             

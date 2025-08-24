@@ -1,0 +1,39 @@
+metadata:
+  version: "1.0"
+  description: "RDF and SPARQL query testing with TTL data"
+
+setup: []
+
+test_cases:
+  # Basic SPARQL test without TTL loading first
+  - name: "SPARQL syntax test without data"
+    sparql: |
+      SELECT ?person ?name WHERE {
+        ?person <name> ?name .
+      }
+    expect:
+      rows: 0
+
+  # Simple TTL loading test
+  - name: "Simple TTL loading test"
+    ttl_data: |
+      @prefix ex: <http://example.org/> .
+      ex:alice ex:name "Alice" .
+    sparql: |
+      SELECT ?name WHERE {
+        ex:alice ex:name ?name .
+      }
+    expect:
+      rows: 1
+      data:
+        - name: "Alice"
+
+  # Error cases for SPARQL
+  - name: "Invalid SPARQL syntax - missing braces"
+    sparql: |
+      SELECT ?name WHERE
+        ?person ex:name ?name .
+    expect:
+      error: true
+
+cleanup: []
