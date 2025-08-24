@@ -287,7 +287,28 @@ class SQLTestRunner:
             # since multiple test files share the same MemCP instance
             global is_connect_only_mode
             if is_connect_only_mode:
-                # Try to clean tables within the database instead of dropping the whole database
+                # First, clean up any test-created databases that might interfere
+                try:
+                    # Get list of all databases
+                    response = self.execute_sql("system", "SHOW DATABASES")
+                    if response and response.status_code == 200:
+                        try:
+                            databases_data = response.json()
+                            if isinstance(databases_data, dict) and 'data' in databases_data:
+                                for row in databases_data['data']:
+                                    if isinstance(row, dict):
+                                        db_name = list(row.values())[0]  # Get first value from row
+                                        # Drop any test databases that might cause interference (except system)
+                                        if db_name not in ['system'] and db_name != database and 'test' in db_name.lower():
+                                            drop_db_sql = f"DROP DATABASE IF EXISTS {db_name}"
+                                            self.execute_sql("system", drop_db_sql)
+                                            print(f"🧹 Removed interfering test database: {db_name}")
+                        except Exception as e:
+                            print(f"⚠️  Could not cleanup interfering databases: {e}")
+                except:
+                    pass
+                
+                # Now clean tables within the main test database
                 try:
                     # Try to get list of tables and drop them individually
                     response = self.execute_sql(database, "SHOW TABLES")
