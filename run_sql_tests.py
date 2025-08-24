@@ -277,6 +277,17 @@ class SQLTestRunner:
             self.failed_tests.append(name)
             return False
 
+    def cleanup_test_database(self, database: str) -> None:
+        """Clean up test database between test runs"""
+        try:
+            # Drop test database to ensure clean state
+            drop_db_sql = f"DROP DATABASE IF EXISTS {database}"
+            response = self.execute_sql("system", drop_db_sql)
+            if response and response.status_code == 200:
+                print(f"🧹 Cleaned up database: {database}")
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to cleanup database {database}: {e}")
+
     def run_test_spec(self, spec_file: str) -> bool:
         """Run tests from a YAML specification file"""
         print(f"📖 Loading test specification: {spec_file}")
@@ -295,6 +306,9 @@ class SQLTestRunner:
         print(f"📊 Version: {metadata.get('version', 'unknown')}")
         print(f"💾 Database: {database}")
         
+        # Clean up database before starting (ensure isolation)
+        self.cleanup_test_database(database)
+        
         # Run setup
         setup_steps = spec.get('setup', [])
         if setup_steps and not self.run_setup(setup_steps):
@@ -312,6 +326,9 @@ class SQLTestRunner:
         if cleanup_steps:
             self.run_cleanup(cleanup_steps)
             
+        # Clean up database after tests (leave system clean)
+        self.cleanup_test_database(database)
+        
         # Print summary
         print(f"\n" + "="*60)
         print(f"📊 Test Results: {self.test_passed}/{self.test_count} passed")
@@ -344,7 +361,7 @@ def wait_for_memcp(port=4321, timeout=30) -> bool:
 def main():
     """Main entry point"""
     if len(sys.argv) < 2:
-        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port]")
+        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only]")
         sys.exit(1)
         
     spec_file = sys.argv[1]
@@ -353,50 +370,67 @@ def main():
         sys.exit(1)
     
     # Parse optional port parameter
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 4321
+    port = 4321
+    connect_only = False
+    
+    for i, arg in enumerate(sys.argv[2:], 2):
+        if arg == "--connect-only":
+            connect_only = True
+        elif arg.isdigit():
+            port = int(arg)
+    
     base_url = f"http://localhost:{port}"
+    memcp_process = None
     
-    # Check if MemCP is running
-    try:
-        requests.get(base_url, timeout=2)
-        print(f"✅ MemCP is already running on port {port}")
-    except:
-        print(f"🚀 Starting MemCP on port {port}...")
-        
-        process = subprocess.Popen([
-            "./memcp", 
-            "-data", f"/tmp/memcp-sql-tests-{port}",
-            f"--api-port={port}",
-            f"--mysql-port={port + 1000}",
-            "--disable-mysql"  # API-only for testing
-        ], 
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        if not wait_for_memcp(port):
-            print("❌ Failed to start MemCP")
-            if process.poll() is not None:
-                # Process has exited, show error output
-                stderr = process.stderr.read()
-                if stderr:
-                    print(f"Error: {stderr}")
-            process.terminate()
+    if connect_only:
+        # Connect-only mode: just try to connect, don't start MemCP
+        print(f"🔗 Connecting to existing MemCP on port {port}...")
+        try:
+            requests.get(base_url, timeout=2)
+            print(f"✅ Connected to MemCP on port {port}")
+        except:
+            print(f"❌ Failed to connect to MemCP on port {port}")
+            print(f"   Make sure MemCP is running first")
             sys.exit(1)
-    
-    # Store process reference for cleanup
-    global memcp_process
-    memcp_process = process if 'process' in locals() else None
+    else:
+        # Traditional mode: start MemCP if needed
+        try:
+            requests.get(base_url, timeout=2)
+            print(f"✅ MemCP is already running on port {port}")
+        except:
+            print(f"🚀 Starting MemCP on port {port}...")
+            
+            memcp_process = subprocess.Popen([
+                "./memcp", 
+                "-data", f"/tmp/memcp-sql-tests-{port}",
+                f"--api-port={port}",
+                f"--mysql-port={port + 1000}",
+                "--disable-mysql",  # API-only for testing
+                "lib/main.scm"     # Specify main script
+            ], 
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            if not wait_for_memcp(port):
+                print("❌ Failed to start MemCP")
+                if memcp_process.poll() is not None:
+                    # Process has exited, show error output
+                    stderr = memcp_process.stderr.read()
+                    if stderr:
+                        print(f"Error: {stderr}")
+                memcp_process.terminate()
+                sys.exit(1)
     
     # Run tests
     runner = SQLTestRunner(base_url)
     success = runner.run_test_spec(spec_file)
     
-    # Cleanup: Stop MemCP process
-    if memcp_process:
+    # Cleanup: Stop MemCP process only if we started it
+    if not connect_only and memcp_process:
         print("\n🛑 Stopping MemCP...")
         try:
             # Send EOF to stdin to trigger graceful shutdown
