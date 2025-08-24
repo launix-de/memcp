@@ -1,0 +1,245 @@
+# MemCP SQL Test Specification
+# Structured format for comprehensive SQL testing
+
+metadata:
+  version: "1.0"
+  description: "Comprehensive SQL test suite for MemCP"
+  database: "test_suite_db"
+
+setup:
+  - action: "CREATE DATABASE"
+    sql: "CREATE DATABASE test_suite_db"
+  - action: "CREATE TABLE users"
+    sql: |
+      CREATE TABLE users (
+        id INT PRIMARY KEY,
+        name VARCHAR(100),
+        email VARCHAR(200),
+        age INT,
+        salary DECIMAL(10,2),
+        created_at TIMESTAMP
+      )
+  - action: "CREATE TABLE orders" 
+    sql: |
+      CREATE TABLE orders (
+        id INT PRIMARY KEY,
+        user_id INT,
+        amount DECIMAL(10,2),
+        status VARCHAR(50),
+        order_date TIMESTAMP
+      )
+
+test_cases:
+
+  # Basic arithmetic and expressions
+  - name: "Simple arithmetic"
+    sql: "SELECT 1+2 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 3
+
+  - name: "Complex arithmetic" 
+    sql: "SELECT 10 * 2 + 5 AS calc, 100 / 4 AS division"
+    expect:
+      rows: 1
+      data:
+        - calc: 25
+          division: 25
+
+  - name: "String functions"
+    sql: "SELECT UPPER('hello') AS upper_case, LOWER('WORLD') AS lower_case"
+    expect:
+      rows: 1
+      data:
+        - upper_case: "HELLO"
+          lower_case: "world"
+
+  # Data insertion and validation
+  - name: "Insert sample data"
+    sql: |
+      INSERT INTO users (id, name, email, age, salary) VALUES 
+      (1, 'Alice Johnson', 'alice@example.com', 28, 75000.00),
+      (2, 'Bob Smith', 'bob@example.com', 35, 85000.00),
+      (3, 'Charlie Brown', 'charlie@example.com', 42, 95000.00)
+    expect:
+      affected_rows: 3
+
+  - name: "Verify inserted data"
+    sql: "SELECT COUNT(*) AS total_users FROM users"
+    expect:
+      rows: 1
+      data:
+        - total_users: 3
+
+  - name: "Select specific user"
+    sql: "SELECT name, email FROM users WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - name: "Alice Johnson"
+          email: "alice@example.com"
+
+  # WHERE clause variations
+  - name: "Numeric WHERE conditions"
+    sql: "SELECT name FROM users WHERE age > 30 ORDER BY name"
+    expect:
+      rows: 2
+      data:
+        - name: "Bob Smith"
+        - name: "Charlie Brown"
+
+  - name: "String LIKE patterns"
+    sql: "SELECT name FROM users WHERE email LIKE '%@example.com'"
+    expect:
+      rows: 3
+
+  - name: "BETWEEN operator"
+    sql: "SELECT name FROM users WHERE age BETWEEN 30 AND 40"
+    expect:
+      rows: 1
+      data:
+        - name: "Bob Smith"
+
+  # Aggregate functions
+  - name: "COUNT aggregate"
+    sql: "SELECT COUNT(*) AS user_count FROM users"
+    expect:
+      rows: 1
+      data:
+        - user_count: 3
+
+  - name: "Multiple aggregates"
+    sql: "SELECT COUNT(*) AS count, AVG(age) AS avg_age, MAX(salary) AS max_salary FROM users"
+    expect:
+      rows: 1
+      data:
+        - count: 3
+          avg_age: 35.0  # (28+35+42)/3
+          max_salary: 95000.00
+
+  # JOIN operations  
+  - name: "Setup orders for JOIN test"
+    sql: |
+      INSERT INTO orders (id, user_id, amount, status) VALUES
+      (1, 1, 299.99, 'completed'),
+      (2, 1, 149.50, 'pending'),  
+      (3, 2, 89.99, 'completed')
+    expect:
+      affected_rows: 3
+
+  - name: "INNER JOIN test"
+    sql: |
+      SELECT u.name, o.amount, o.status 
+      FROM users u 
+      JOIN orders o ON u.id = o.user_id 
+      ORDER BY u.name, o.amount
+    expect:
+      rows: 3
+      data:
+        - name: "Alice Johnson"
+          amount: 149.50
+          status: "pending"
+        - name: "Alice Johnson" 
+          amount: 299.99
+          status: "completed"
+        - name: "Bob Smith"
+          amount: 89.99
+          status: "completed"
+
+  # GROUP BY and HAVING
+  - name: "GROUP BY with aggregates"
+    sql: |
+      SELECT u.name, COUNT(o.id) AS order_count, SUM(o.amount) AS total_spent
+      FROM users u
+      LEFT JOIN orders o ON u.id = o.user_id
+      GROUP BY u.id, u.name
+      ORDER BY total_spent DESC
+    expect:
+      rows: 3
+
+  - name: "HAVING clause"
+    sql: |
+      SELECT u.name, COUNT(o.id) AS order_count 
+      FROM users u
+      JOIN orders o ON u.id = o.user_id  
+      GROUP BY u.id, u.name
+      HAVING COUNT(o.id) > 1
+    expect:
+      rows: 1
+      data:
+        - name: "Alice Johnson"
+          order_count: 2
+
+  # UPDATE and DELETE operations
+  - name: "UPDATE with WHERE"
+    sql: "UPDATE users SET salary = salary * 1.1 WHERE age > 40"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify UPDATE"
+    sql: "SELECT salary FROM users WHERE name = 'Charlie Brown'"
+    expect:
+      rows: 1
+      data:
+        - salary: 104500.00  # 95000 * 1.1
+
+  - name: "DELETE with WHERE"
+    sql: "DELETE FROM orders WHERE status = 'pending'"
+    expect:
+      affected_rows: 1
+
+  # Subqueries
+  - name: "Subquery in WHERE"
+    sql: |
+      SELECT name FROM users 
+      WHERE id IN (SELECT DISTINCT user_id FROM orders)
+      ORDER BY name
+    expect:
+      rows: 2
+      data:
+        - name: "Alice Johnson"
+        - name: "Bob Smith"
+
+  # Advanced SQL features
+  - name: "CASE WHEN expressions"
+    sql: |
+      SELECT name, 
+        CASE 
+          WHEN age < 30 THEN 'Young'
+          WHEN age < 40 THEN 'Middle'
+          ELSE 'Senior'
+        END AS age_group
+      FROM users ORDER BY age
+    expect:
+      rows: 3
+      data:
+        - name: "Alice Johnson"
+          age_group: "Young"
+        - name: "Bob Smith"
+          age_group: "Middle" 
+        - name: "Charlie Brown"
+          age_group: "Senior"
+
+  # Error conditions
+  - name: "Invalid syntax error"
+    sql: "INVALID SQL STATEMENT"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Non-existent table error"
+    sql: "SELECT * FROM non_existent_table"
+    expect:
+      error: true
+      error_type: "table_not_found"
+
+  - name: "Non-existent column error"
+    sql: "SELECT non_existent_column FROM users"
+    expect:
+      error: true
+      error_type: "column_not_found"
+
+cleanup:
+  - action: "DROP DATABASE"
+    sql: "DROP DATABASE test_suite_db"
