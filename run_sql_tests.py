@@ -125,10 +125,6 @@ class SQLTestRunner:
         print("🔧 Running setup...")
         for step in setup_steps:
             print(f"  - {step['action']}")
-            # Try to ensure database exists before each setup step
-            create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
-            self.execute_sql("system", create_db_sql)
-            
             response = self.execute_sql(database, step['sql'])
             if not response or response.status_code not in [200, 500]:  # 500 might be expected for CREATE DATABASE IF NOT EXISTS
                 print(f"    ❌ Setup step failed: {step['action']}")
