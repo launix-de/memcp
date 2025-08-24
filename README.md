@@ -61,6 +61,18 @@ Project Website: [memcp.org](https://www.memcp.org)
 
 <hr>
 
+<h1 align="center">Table of Contents</h1>
+
+- [🚶 Getting Started](#getting-started-)
+- [🧪 Testing](#testing-)
+- [🚀 Deployment](#deployment-)  
+- [🔒 Security](#securing-the-database-from-external-access-)
+- [🌿 Contributing](#contributing-)
+- [❓ How it Works](#how-it-works-)
+- [📚 Further Reading](#further-reading-)
+
+<hr>
+
 <h1 align="center">Getting Started 🚶</h1>
 
 <h2>Using Docker</h2>
@@ -76,6 +88,12 @@ docker run -v data:/data -it -p 4321:4321 -p 3307:3307 memcp
 # run a specific application
 docker run -e PARAMS="lib/main.scm apps/minigame.scm" -v data:/data -it -p 4321:4321 -p 3307:3307 memcp
 
+# run with custom ports
+docker run -v data:/data -it -p 8080:8080 -p 3308:3308 memcp --api-port=8080 --mysql-port=3308
+
+# run API-only (no MySQL protocol)
+docker run -v data:/data -it -p 8080:8080 memcp --api-port=8080 --disable-mysql
+
 # run for productive use
 mkdir /var/memcp
 docker run -v /var/memcp:/data -di -p 4321:4321 -p 3307:3307 --restart unless-stopped memcp
@@ -89,14 +107,53 @@ Make sure, `go` is installed on your computer.
 
 Compile the project with
 
-```
+```bash
 go get # installs dependencies
-make # executes go build
+make   # executes go build
+# or alternatively:
+go build -o memcp
 ```
 
-Run the engine with
+Run the engine with default settings:
 
+```bash
+./memcp
 ```
+
+<h3>Command Line Arguments</h3>
+
+MemCP supports various command-line arguments for flexible deployment:
+
+```bash
+# Basic usage
+./memcp [options] [script_files...]
+
+# Built-in Go flags
+./memcp -data /path/to/data           # Set data directory (default: ./data)
+./memcp -profile profile.out          # Enable CPU profiling
+./memcp -wd /working/directory        # Set working directory for imports
+./memcp -c "(print 'Hello World')"   # Execute Scheme command
+
+# MemCP-specific arguments (handled by Scheme)
+./memcp --api-port=8080              # HTTP API port (default: 4321)
+./memcp --mysql-port=3308            # MySQL protocol port (default: 3307)
+./memcp --disable-mysql              # Disable MySQL protocol server
+./memcp --disable-api                # Disable HTTP API server
+
+# Examples
+./memcp --api-port=8080 --disable-mysql        # API-only on port 8080
+./memcp --mysql-port=3308 --disable-api        # MySQL-only on port 3308
+./memcp -data /var/memcp --api-port=4322       # Custom data dir and API port
+```
+
+<h3>Environment Variables</h3>
+
+You can also use environment variables (command-line args take precedence):
+
+```bash
+export PORT=8080           # HTTP API port
+export MYSQL_PORT=3308     # MySQL protocol port  
+export DISABLE_MYSQL=true  # Disable MySQL server
 ./memcp
 ```
 
@@ -209,6 +266,239 @@ curl --user root:admin 'http://localhost:4321/psql/system/SELECT%20*%20FROM%20us
 You can also define your own endpoints for MemCP and deploy microservices directly in the database (read https://www.memcp.org/wiki/MemCP_for_Microservices).
 
 <hr>
+
+<h1 align="center">Testing 🧪</h1>
+
+MemCP includes a comprehensive test suite to ensure quality and catch regressions.
+
+<h2>Running Tests</h2>
+
+### Automated SQL Test Suite
+
+Run the comprehensive YAML-based SQL test suite:
+
+```bash
+# Run tests with default port (4321)
+python3 run_sql_tests.py tests/sql_test_spec.yaml
+
+# Run tests with custom port
+python3 run_sql_tests.py tests/sql_test_spec.yaml 4322
+
+# The test runner will:
+# 1. Automatically start MemCP on the specified port
+# 2. Run all test cases defined in the YAML spec
+# 3. Report detailed results
+# 4. Gracefully shut down MemCP
+```
+
+### Manual Testing
+
+You can also test individual components:
+
+```bash
+# Test basic connectivity
+curl --user root:admin http://localhost:4321/sql/system/SELECT%201%2B2
+
+# Test with custom MemCP instance
+./memcp --api-port=4400 --disable-mysql &
+python3 test_memcp_api.py  # Legacy Python test script
+```
+
+<h2>Writing Tests</h2>
+
+MemCP uses YAML-based test specifications for maintainable, declarative testing.
+
+### Test File Structure
+
+Create test files in the `tests/` directory following this format:
+
+```yaml
+# tests/my_feature_test.yaml
+metadata:
+  version: "1.0"
+  description: "Test suite for my new feature"
+  database: "test_db"
+
+setup:
+  - action: "CREATE DATABASE"
+    sql: "CREATE DATABASE test_db"
+  - action: "CREATE TABLE"
+    sql: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100))"
+
+test_cases:
+  - name: "Basic functionality test"
+    sql: "SELECT 1+1 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 2
+        
+  - name: "Error handling test"
+    sql: "SELECT * FROM non_existent_table" 
+    expect:
+      error: true
+      error_type: "table_not_found"
+
+cleanup:
+  - action: "DROP DATABASE"
+    sql: "DROP DATABASE test_db"
+```
+
+### Test Case Format
+
+Each test case supports:
+
+- **name**: Descriptive test name
+- **sql**: SQL query to execute
+- **expect**: Expected results
+  - **rows**: Expected number of result rows
+  - **data**: Expected row data (array of objects)
+  - **error**: Set to `true` to expect an error
+  - **error_type**: Optional error classification
+  - **affected_rows**: For INSERT/UPDATE/DELETE operations
+
+### Running Custom Tests
+
+```bash
+python3 run_sql_tests.py tests/my_feature_test.yaml 4323
+```
+
+<h2>Continuous Integration</h2>
+
+MemCP includes a pre-commit hook that automatically runs tests before allowing commits:
+
+```bash
+# The pre-commit hook will:
+# 1. Build the latest MemCP binary
+# 2. Run the complete test suite
+# 3. Block commits if tests fail
+# 4. Provide clear feedback on failures
+
+# To test the hook manually:
+.git/hooks/pre-commit
+
+# Skip hook for emergency commits (not recommended):
+git commit --no-verify
+```
+
+<hr>
+
+<h1 align="center">Deployment 🚀</h1>
+
+<h2>Production Deployment</h2>
+
+### Systemd Service
+
+Create `/etc/systemd/system/memcp.service`:
+
+```ini
+[Unit]
+Description=MemCP In-Memory Database
+After=network.target
+
+[Service]
+Type=simple
+User=memcp
+Group=memcp
+WorkingDirectory=/opt/memcp
+ExecStart=/opt/memcp/memcp -data /var/lib/memcp --api-port=4321 --mysql-port=3307
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl enable memcp
+sudo systemctl start memcp
+sudo systemctl status memcp
+```
+
+### Docker Compose
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  memcp:
+    build: .
+    ports:
+      - "4321:4321"  # HTTP API
+      - "3307:3307"  # MySQL Protocol
+    volumes:
+      - memcp_data:/data
+    environment:
+      - PORT=4321
+      - MYSQL_PORT=3307
+    restart: unless-stopped
+    
+volumes:
+  memcp_data:
+```
+
+### Kubernetes Deployment
+
+```yaml
+# memcp-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: memcp
+  template:
+    metadata:
+      labels:
+        app: memcp
+    spec:
+      containers:
+      - name: memcp
+        image: memcp:latest
+        ports:
+        - containerPort: 4321
+        - containerPort: 3307
+        env:
+        - name: PORT
+          value: "4321"
+        - name: MYSQL_PORT
+          value: "3307"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: memcp-data
+```
+
+### Load Balancing
+
+For high-availability setups, use a load balancer in front of multiple MemCP instances:
+
+```nginx
+# nginx.conf
+upstream memcp_api {
+    server 127.0.0.1:4321;
+    server 127.0.0.1:4322;
+    server 127.0.0.1:4323;
+}
+
+server {
+    listen 80;
+    location / {
+        proxy_pass http://memcp_api;
+        proxy_set_header Authorization $http_authorization;
+    }
+}
+```
+
+<hr>
 <h1 align="center">Securing the database from external access 🔒</h1>
 The standard username/password is root/admin. To change that, type the following into scheme console:
 
@@ -227,13 +517,107 @@ You can take a look at https://github.com/launix-de/rdfop which is a RDF hyperte
 
 <h1 align="center">Contributing 🌿</h1>
 
-<p align="center"> We welcome contributions to memcp. If you would like to contribute, please follow these steps:, </p>
+<p align="center"> We welcome contributions to MemCP! Please follow these guidelines to ensure quality and maintainability. </p>
 
-- Fork the repository and create a new branch for your changes.
-- Make your changes and commit them to your branch.
-- Push your branch to your fork and create a pull request.
+## 🚨 **Test Requirements - MANDATORY** 🚨
 
-<p align="center"> Before submitting a pull request, please make sure that your changes pass the existing tests and add new tests if necessary. </p>
+**ALL CONTRIBUTIONS MUST INCLUDE COMPREHENSIVE TEST CASES.** This is not optional.
+
+### For New Features:
+- Create a new YAML test file in `tests/feature_name_test.yaml`
+- Cover all major code paths and edge cases
+- Include both success and error scenarios
+- Document expected behavior clearly
+
+### For Bug Fixes:
+- Add regression tests that reproduce the original bug
+- Verify the fix resolves the issue
+- Ensure no existing functionality breaks
+
+### For API Changes:
+- Update existing tests to match new behavior
+- Add tests for new endpoints or parameters
+- Maintain backward compatibility where possible
+
+## Contributing Process
+
+1. **Fork** the repository and create a feature branch:
+   ```bash
+   git checkout -b feature/amazing-new-feature
+   ```
+
+2. **Implement** your changes with proper error handling and documentation
+
+3. **Write comprehensive tests** following our YAML test format:
+   ```bash
+   # Create tests/your_feature_test.yaml
+   # Run your tests locally
+   python3 run_sql_tests.py tests/your_feature_test.yaml 4500
+   ```
+
+4. **Ensure all tests pass**:
+   ```bash
+   # Run the full test suite
+   python3 run_sql_tests.py tests/sql_test_spec.yaml 4400
+   
+   # Test the pre-commit hook
+   .git/hooks/pre-commit
+   ```
+
+5. **Commit with descriptive messages**:
+   ```bash
+   git add .
+   git commit -m "Add feature X with comprehensive tests
+   
+   - Implements new SQL function Y
+   - Adds 15 test cases covering edge cases
+   - Fixes issue #123"
+   ```
+
+6. **Push and create a pull request**:
+   ```bash
+   git push origin feature/amazing-new-feature
+   ```
+
+## Code Quality Standards
+
+- **Test Coverage**: Every line of new code must be tested
+- **Error Handling**: Implement proper error messages and HTTP status codes
+- **Documentation**: Update README.md for user-facing changes
+- **Performance**: Consider memory usage and query performance impact
+- **Security**: Follow secure coding practices, never expose credentials
+
+## Pre-commit Hook
+
+The pre-commit hook will automatically:
+- ✅ Build your changes
+- ✅ Run the complete test suite  
+- ❌ **Block commits if ANY tests fail**
+
+This ensures the main branch always remains stable.
+
+## Review Process
+
+Pull requests will be reviewed for:
+
+1. **Test Quality**: Comprehensive coverage of new functionality
+2. **Code Quality**: Clean, readable, maintainable code
+3. **Performance**: No significant performance regressions
+4. **Documentation**: Clear explanations of changes
+5. **Compatibility**: Backward compatibility preservation
+
+## What Happens If You Don't Include Tests?
+
+**Your pull request will be rejected immediately.** No exceptions.
+
+We maintain a high-quality codebase through rigorous testing. This benefits everyone by:
+- Preventing regressions
+- Ensuring feature reliability  
+- Making debugging easier
+- Providing executable documentation
+- Enabling confident refactoring
+
+<p align="center"> <strong>Remember: Good tests are as important as good code!</strong> </p>
 
 <hr>
 
