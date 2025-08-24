@@ -110,8 +110,9 @@ class SQLTestRunner:
                     try:
                         results.append(json.loads(line))
                     except json.JSONDecodeError as json_err:
-                        # Skip lines that aren't valid JSON (might be error messages)
-                        print(f"    ⚠️  Skipping non-JSON line: {line[:50]}...")
+                        # Non-JSON lines are likely error messages - don't skip them!
+                        # The validation logic will handle them properly
+                        print(f"    ⚠️  Non-JSON response line: {line[:80]}...")
                         continue
             return results
         except Exception as e:
@@ -157,6 +158,12 @@ class SQLTestRunner:
                 print(f"        Response: {response.text[:200]}")
                 return False
         
+        # Check for unexpected errors (when we expected success)
+        if 'Error' in response.text:
+            print(f"    ❌ Unexpected error in response")
+            print(f"        Error: {response.text[:200]}")
+            return False
+            
         # Check HTTP status
         if response.status_code != 200:
             print(f"    ❌ HTTP {response.status_code}: {response.text[:100]}")
