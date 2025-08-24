@@ -20,4 +20,6 @@ test_cases:
     expect:
       rows: 1
 
-cleanup: []
+cleanup:
+  - action: "Clean up test table"
+    sql: "DROP TABLE IF EXISTS simple_test"

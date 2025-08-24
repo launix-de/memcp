@@ -108,7 +108,7 @@ class SQLTestRunner:
         """Load TTL data into RDF table"""
         try:
             # First ensure database exists
-            create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
+            create_db_sql = f"CREATE DATABASE `{database}`"
             response = self.execute_sql("system", create_db_sql)
             if not response or response.status_code != 200:
                 print(f"Failed to create database: {response.text if response else 'No response'}")
@@ -417,7 +417,7 @@ class SQLTestRunner:
         
         # Ensure the test database exists (cleanup may have cleaned it)
         # Try without backticks first - MemCP might not handle them correctly
-        create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
+        create_db_sql = f"CREATE DATABASE IF NOT EXISTS `{database}`"
         response = self.execute_sql("system", create_db_sql)
         if not response or response.status_code != 200:
             print(f"❌ Failed to create test database: {database}")

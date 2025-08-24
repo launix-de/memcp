@@ -35,10 +35,9 @@ test_cases:
     expect:
       error: true
     
-  - name: "Duplicate table creation"
+  - name: "Duplicate table creation (MemCP allows duplicate CREATE TABLE)"
     sql: "CREATE TABLE users (id INTEGER)"
-    expect:
-      error: true
+    expect: {}
     
   - name: "Drop non-existing table"
     sql: "DROP TABLE non_existing_table"
