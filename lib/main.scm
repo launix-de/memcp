@@ -39,7 +39,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (import "sql.scm")
 (import "rdf.scm")
 
-/* read  http_handler fresh from the environment */
-(set port (env "PORT" "4321"))
-(serve port (lambda (req res) (http_handler req res)))
-(print "listening on http://localhost:" port)
+/* read ports from command line arguments or environment */
+(if (not (arg "disable-api" false)) (begin
+	(set port (arg "api-port" (env "PORT" "4321")))
+	(serve port (lambda (req res) (http_handler req res)))
+	(print "listening on http://localhost:" port)
+))

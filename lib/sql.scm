@@ -114,7 +114,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 /* dedicated mysql protocol listening at specified port */
 (try (lambda () (begin
-	(set port (env "MYSQL_PORT" "3307"))
+	(if (not (arg "disable-mysql" false)) (begin
+	(set port (arg "mysql-port" (env "MYSQL_PORT" "3307")))
 	(mysql port
 		(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
 		(lambda (username schema) (list? (show schema))) /* switch schema (TODO check grants; in the moment, only the existence of the database is checked) */
@@ -147,5 +148,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			))
 		))
 	)
-	(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password 'admin'), set with envvar MYSQL_PORT")
+	(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password 'admin'), set with --mysql-port")
+	)) ; close the if for disable-mysql
 )) print)
