@@ -114,10 +114,17 @@ class SQLTestRunner:
             print(f"    ❌ HTTP {response.status_code}: {response.text[:100]}")
             return False
         
-        # Check affected rows (for INSERT/UPDATE/DELETE)
+        # Check affected rows (for INSERT/UPDATE/DELETE/DDL)
         if 'affected_rows' in expect:
-            # For modification queries, we just check they succeeded
-            return True
+            expected_affected = expect['affected_rows']
+            if results and len(results) > 0 and 'affected_rows' in results[0]:
+                actual_affected = results[0]['affected_rows']
+                if actual_affected != expected_affected:
+                    print(f"    ❌ Expected {expected_affected} affected rows, got {actual_affected}")
+                    return False
+            else:
+                # For DDL operations that don't return data, just check they succeeded
+                return True
             
         # Check result data
         if results is None:

@@ -47,7 +47,14 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(define formula (parse_sql schema query))
 				(define resultrow (res "jsonl"))
 				(define session (context "session"))
-				(eval (source "SQL Query" 1 1 formula))
+				(set resultrow_called false)
+				(set original_resultrow resultrow)
+				(define resultrow (lambda (row) (begin (set resultrow_called true) (original_resultrow row))))
+				(set query_result (eval (source "SQL Query" 1 1 formula)))
+				/* If no resultrow was called and we got a number, return it as affected_rows */
+				(if (and (not resultrow_called) (number? query_result)) (begin
+					(original_resultrow '("affected_rows" query_result))
+				))
 			)) (lambda(e) (begin
 				(print "SQL query: " query)
 				(print "error: " e)
@@ -72,7 +79,14 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(define formula (parse_psql schema query))
 				(define resultrow (res "jsonl"))
 				(define session (context "session"))
-				(eval (source "SQL Query" 1 1 formula))
+				(set resultrow_called false)
+				(set original_resultrow resultrow)
+				(define resultrow (lambda (row) (begin (set resultrow_called true) (original_resultrow row))))
+				(set query_result (eval (source "SQL Query" 1 1 formula)))
+				/* If no resultrow was called and we got a number, return it as affected_rows */
+				(if (and (not resultrow_called) (number? query_result)) (begin
+					(original_resultrow '("affected_rows" query_result))
+				))
 			)) (lambda(e) (begin
 				(print "SQL query: " query)
 				(print "error: " e)

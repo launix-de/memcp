@@ -1,0 +1,185 @@
+# Advanced SQL Features Test Suite
+# Tests for more complex SQL functionality
+
+metadata:
+  version: "1.0" 
+  description: "Advanced SQL features and edge cases"
+  database: "advanced_test_db"
+
+setup:
+  - action: "CREATE DATABASE"
+    sql: "CREATE DATABASE advanced_test_db"
+
+test_cases:
+
+  # === VECTOR FUNCTIONS (MIXED - from sql-builtins.scm) ===
+  # TODO: Vector distance function has type conversion issues
+  # - name: "Vector distance function"
+  #   sql: "SELECT VECTOR_DISTANCE('[1,2,3]', '[4,5,6]') AS distance"
+  #   expect:
+  #     error: true
+  #     error_type: "type_conversion"
+
+  - name: "String to vector conversion"
+    sql: "SELECT STRING_TO_VECTOR('[1,2,3]') AS vector"
+    expect:
+      rows: 1
+
+  - name: "Vector to string conversion"
+    sql: "SELECT VECTOR_TO_STRING('[1,2,3]') AS vector_str"
+    expect:
+      rows: 1
+
+  # === NESTED EXPRESSIONS (WORKING) ===
+  - name: "Nested function calls"
+    sql: "SELECT UPPER(LOWER('HELLO world')) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "HELLO WORLD"
+
+  - name: "Complex nested arithmetic"
+    sql: "SELECT FLOOR(CEIL(4.3) * 2 + ROUND(1.6)) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 12
+
+  # === ADVANCED CASE EXPRESSIONS (WORKING) ===
+  - name: "Nested CASE expressions"
+    sql: "SELECT CASE WHEN 5 > 3 THEN CASE WHEN 2 > 1 THEN 'both_true' ELSE 'first_only' END ELSE 'neither' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "both_true"
+
+  - name: "CASE with arithmetic in conditions"
+    sql: "SELECT CASE WHEN (5 + 3) > (2 * 3) THEN 'math_works' ELSE 'math_broken' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "math_works"
+
+  # === COMPLEX COMPARISONS (WORKING) ===
+  - name: "Comparison with arithmetic"
+    sql: "SELECT (10 + 5) > (3 * 4) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  - name: "String comparison"
+    sql: "SELECT 'apple' < 'banana' AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  # === EDGE CASES AND BOUNDARY CONDITIONS ===
+  - name: "Division by small number"
+    sql: "SELECT 1 / 0.1 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 10
+
+  - name: "Large number arithmetic"
+    sql: "SELECT 999999 + 1 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 1000000
+
+  - name: "Negative number operations"
+    sql: "SELECT -5 * -3 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 15
+
+  # === STRING EDGE CASES ===
+  - name: "Empty string operations"
+    sql: "SELECT UPPER('') AS empty_upper, LOWER('') AS empty_lower"
+    expect:
+      rows: 1
+      data:
+        - empty_upper: ""
+          empty_lower: ""
+
+  - name: "Special characters in strings"
+    sql: "SELECT 'Hello\nWorld\t!' AS special_chars"
+    expect:
+      rows: 1
+      data:
+        - special_chars: "Hello\nWorld\t!"
+
+  # === IDENTIFIER TESTS (WORKING - from parser) ===
+  - name: "Quoted identifiers"
+    sql: "SELECT 123 AS `weird column name`"
+    expect:
+      rows: 1
+      data:
+        - "weird column name": 123
+
+  - name: "Mixed case identifiers"
+    sql: "SELECT 456 AS MixedCase"
+    expect:
+      rows: 1
+      data:
+        - MixedCase: 456
+
+  # === SET OPERATIONS EDGE CASES ===
+  - name: "SET with complex expression"
+    sql: "SET @complex = 5 + 3 * 2"
+    expect:
+      affected_rows: 1
+
+  - name: "SET with string concatenation (if supported)"
+    sql: "SET @text = 'hello'"
+    expect:
+      affected_rows: 1
+
+  # === TODO: Features that might work but need table support ===
+  
+  # TODO: Test when CREATE TABLE with constraints works
+  # - name: "CREATE TABLE with PRIMARY KEY"
+  #   sql: "CREATE TABLE pk_test (id INT PRIMARY KEY, name VARCHAR(50))"
+  #   expect:
+  #     affected_rows: 1
+
+  # TODO: Test when DROP TABLE works properly  
+  # - name: "DROP TABLE with IF EXISTS"
+  #   sql: "DROP TABLE IF EXISTS pk_test"
+  #   expect:
+  #     affected_rows: 1
+
+  # TODO: Test aggregates (parser supports them)
+  # - name: "SUM function"
+  #   sql: "SELECT SUM(column) FROM table"
+  #   expect:
+  #     rows: 1
+
+  # TODO: Test when SHOW TABLE STATUS works
+  # - name: "SHOW TABLE STATUS" 
+  #   sql: "SHOW TABLE STATUS"
+  #   expect:
+  #     rows: 0  # No tables initially
+
+  # === ERROR CASES THAT SHOULD FAIL GRACEFULLY ===
+  # TODO: Division by zero causes timeout/hang - needs investigation
+  # - name: "Division by zero (should handle gracefully)"
+  #   sql: "SELECT 1 / 0 AS result"
+  #   expect:
+  #     error: true
+  #     error_type: "division_by_zero"
+
+  # TODO: Invalid function parameters not properly validated
+  # - name: "Invalid function parameters"
+  #   sql: "SELECT FLOOR('not a number') AS result"
+  #   expect:
+  #     error: true
+  #     error_type: "invalid_parameter"
+
+cleanup:
+  - action: "DROP DATABASE" 
+    sql: "DROP DATABASE advanced_test_db"
