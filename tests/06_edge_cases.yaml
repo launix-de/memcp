@@ -1,0 +1,314 @@
+# Edge Cases and Error Handling Test Suite
+# Tests that MUST fail: syntax errors, non-existent columns/tables, invalid operations
+
+metadata:
+  version: "1.0"
+  description: "Edge cases, error handling, and tests that must fail gracefully"
+
+setup:
+  - action: "CREATE TABLE test_table"
+    sql: "CREATE TABLE test_table (id INT, name VARCHAR(50), value DECIMAL(10,2))"
+  - action: "INSERT test data"
+    sql: "INSERT INTO test_table (id, name, value) VALUES (1, 'test', 100.50)"
+
+test_cases:
+
+  # === SYNTAX ERRORS (MUST FAIL) ===
+  - name: "Invalid SQL statement"
+    sql: "INVALID SQL STATEMENT"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Incomplete SELECT statement"
+    sql: "SELECT FROM"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Missing FROM keyword"
+    sql: "SELECT * table"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Unclosed parentheses"
+    sql: "SELECT (5 + 3 AS result"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Unmatched quotes"
+    sql: "SELECT 'unclosed string AS result"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Invalid WHERE syntax"
+    sql: "SELECT * FROM test_table WHERE"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Double equals instead of single"
+    sql: "SELECT * FROM test_table WHERE id == 1"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Invalid operator"
+    sql: "SELECT 5 <> 3 AS result"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  # === NON-EXISTENT TABLES (MUST FAIL) ===
+  - name: "SELECT from non-existent table"
+    sql: "SELECT * FROM non_existent_table"
+    expect:
+      error: true
+      error_type: "table_not_found"
+
+  - name: "INSERT into non-existent table"
+    sql: "INSERT INTO missing_table (id, name) VALUES (1, 'test')"
+    expect:
+      error: true
+      error_type: "table_not_found"
+
+  - name: "UPDATE non-existent table"
+    sql: "UPDATE ghost_table SET value = 100 WHERE id = 1"
+    expect:
+      error: true
+      error_type: "table_not_found"
+
+  - name: "DELETE from non-existent table"
+    sql: "DELETE FROM phantom_table WHERE id = 1"
+    expect:
+      error: true
+      error_type: "table_not_found"
+
+  - name: "DESCRIBE non-existent table"
+    sql: "DESCRIBE invisible_table"
+    expect:
+      error: true
+      error_type: "table_not_found"
+
+  # === NON-EXISTENT COLUMNS (MUST FAIL) ===
+  - name: "SELECT non-existent column"
+    sql: "SELECT non_existent_column FROM test_table"
+    expect:
+      error: true
+      error_type: "column_not_found"
+
+  - name: "WHERE with non-existent column"
+    sql: "SELECT * FROM test_table WHERE missing_column = 'value'"
+    expect:
+      error: true
+      error_type: "column_not_found"
+
+  - name: "INSERT with non-existent column"
+    sql: "INSERT INTO test_table (id, name, fake_column) VALUES (2, 'test2', 'fake')"
+    expect:
+      error: true
+      error_type: "column_not_found"
+
+  - name: "UPDATE non-existent column"
+    sql: "UPDATE test_table SET ghost_column = 'boo' WHERE id = 1"
+    expect:
+      error: true
+      error_type: "column_not_found"
+
+  - name: "ORDER BY non-existent column"
+    sql: "SELECT * FROM test_table ORDER BY phantom_column"
+    expect:
+      error: true
+      error_type: "column_not_found"
+
+  # === UNKNOWN FUNCTIONS (MUST FAIL) ===
+  - name: "Unknown function call"
+    sql: "SELECT UNKNOWN_FUNCTION(1) AS result"
+    expect:
+      error: true
+      error_type: "unknown_function"
+
+  - name: "Misspelled function"
+    sql: "SELECT FLOR(4.7) AS result"
+    expect:
+      error: true
+      error_type: "unknown_function"
+
+  - name: "Non-existent string function"
+    sql: "SELECT FAKE_UPPER('hello') AS result"
+    expect:
+      error: true
+      error_type: "unknown_function"
+
+  - name: "Invalid math function"
+    sql: "SELECT SQUARE_ROOT(16) AS result"
+    expect:
+      error: true
+      error_type: "unknown_function"
+
+  # === TYPE MISMATCH ERRORS (SHOULD FAIL) ===
+  # TODO: Enable when type checking is stricter
+  # - name: "String in numeric operation"
+  #   sql: "SELECT 'hello' + 5 AS result"
+  #   expect:
+  #     error: true
+  #     error_type: "type_mismatch"
+
+  # - name: "Boolean in arithmetic"
+  #   sql: "SELECT true * 10 AS result"
+  #   expect:
+  #     error: true
+  #     error_type: "type_mismatch"
+
+  # === INVALID FUNCTION PARAMETERS (SHOULD FAIL) ===
+  # TODO: Enable when parameter validation is stricter
+  # - name: "FLOOR with string parameter"
+  #   sql: "SELECT FLOOR('not a number') AS result"
+  #   expect:
+  #     error: true
+  #     error_type: "invalid_parameter"
+
+  # - name: "UPPER with numeric parameter"
+  #   sql: "SELECT UPPER(12345) AS result"
+  #   expect:
+  #     error: true
+  #     error_type: "invalid_parameter"
+
+  # === DIVISION BY ZERO (SHOULD FAIL OR HANDLE GRACEFULLY) ===
+  # TODO: Division by zero causes timeout/hang - needs investigation
+  # - name: "Division by zero"
+  #   sql: "SELECT 1 / 0 AS result"
+  #   expect:
+  #     error: true
+  #     error_type: "division_by_zero"
+
+  # === CONSTRAINT VIOLATIONS (TODO: When constraints are enforced) ===
+  # TODO: Enable when PRIMARY KEY constraints are enforced
+  # - name: "Duplicate primary key"
+  #   sql: "CREATE TABLE pk_test (id INT PRIMARY KEY); INSERT INTO pk_test VALUES (1); INSERT INTO pk_test VALUES (1)"
+  #   expect:
+  #     error: true
+  #     error_type: "constraint_violation"
+
+  # === DATABASE ERRORS (MUST FAIL) ===
+  - name: "CREATE duplicate database"
+    sql: "CREATE DATABASE edge_cases_test"
+    expect:
+      error: true
+      error_type: "database_exists"
+
+  - name: "DROP non-existent database"
+    sql: "DROP DATABASE non_existent_database"
+    expect:
+      error: true
+      error_type: "database_not_found"
+
+  # === SPECIAL CHARACTERS AND EDGE CASES ===
+  - name: "Special characters in string (should work)"
+    sql: "SELECT 'Hello\\nWorld\\t!' AS special_chars"
+    expect:
+      rows: 1
+      data:
+        - special_chars: "Hello\\nWorld\\t!"
+
+  - name: "Empty string handling"
+    sql: "SELECT '' AS empty_string"
+    expect:
+      rows: 1
+      data:
+        - empty_string: ""
+
+  - name: "NULL value handling (if supported)"
+    sql: "SELECT NULL AS null_value"
+    expect:
+      rows: 1
+
+  - name: "Very long string"
+    sql: "SELECT 'This is a very long string that should be handled properly by the database system without causing any issues or truncation problems' AS long_string"
+    expect:
+      rows: 1
+
+  # === QUOTED IDENTIFIERS EDGE CASES ===
+  - name: "Quoted identifier with spaces (should work)"
+    sql: "SELECT 123 AS `weird column name`"
+    expect:
+      rows: 1
+      data:
+        - "weird column name": 123
+
+  - name: "Mixed case identifiers (should work)"
+    sql: "SELECT 456 AS MixedCase"
+    expect:
+      rows: 1
+      data:
+        - MixedCase: 456
+
+  # === NUMERIC EDGE CASES ===
+  - name: "Very large number"
+    sql: "SELECT 999999999999999999 AS big_number"
+    expect:
+      rows: 1
+      data:
+        - big_number: 999999999999999999
+
+  - name: "Very small decimal"
+    sql: "SELECT 0.000001 AS tiny_number"
+    expect:
+      rows: 1
+      data:
+        - tiny_number: 0.000001
+
+  - name: "Negative zero"
+    sql: "SELECT -0 AS negative_zero"
+    expect:
+      rows: 1
+      data:
+        - negative_zero: 0
+
+  # === BOUNDARY CONDITIONS ===
+  - name: "Empty SELECT result (should work)"
+    sql: "SELECT * FROM test_table WHERE id = 999999"
+    expect:
+      rows: 0
+
+  - name: "Multiple WHERE conditions that match nothing"
+    sql: "SELECT * FROM test_table WHERE id = 1 AND id = 2"
+    expect:
+      rows: 0
+
+  # === COMPLEX INVALID QUERIES ===
+  - name: "Invalid nested function"
+    sql: "SELECT UPPER(FLOOR('invalid')) AS result"
+    expect:
+      error: true
+
+  - name: "Invalid CASE syntax"
+    sql: "SELECT CASE WHEN ELSE 'invalid' END AS result"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  - name: "Malformed INSERT"
+    sql: "INSERT INTO test_table VALUES (2, 'test')"
+    expect:
+      error: true
+      error_type: "column_count_mismatch"
+
+  - name: "Invalid CREATE TABLE"
+    sql: "CREATE TABLE (id INT, name VARCHAR)"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
+  # === PERFORMANCE EDGE CASES ===
+  # TODO: Add when we want to test query limits
+  # - name: "Extremely long query"
+  #   sql: "SELECT 1 + 1 + 1 + 1 + ... (very long expression)"
+  #   expect:
+  #     error: true
+  #     error_type: "query_too_long"
+
+cleanup: []

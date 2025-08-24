@@ -1,0 +1,156 @@
+# DDL Operations Test Suite
+# Data Definition Language: CREATE, DROP, ALTER operations with affected_rows
+
+metadata:
+  version: "1.0"
+  description: "DDL operations (CREATE, DROP, ALTER) with affected_rows validation"
+
+setup: []
+
+test_cases:
+
+  # === CREATE TABLE OPERATIONS ===
+  - name: "CREATE TABLE basic structure"
+    sql: "CREATE TABLE users (id INT, name VARCHAR(50))"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE TABLE with multiple columns"
+    sql: "CREATE TABLE products (id INT, name VARCHAR(100), price DECIMAL(10,2), description TEXT)"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE TABLE with constraints"
+    sql: "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total DECIMAL(10,2), status VARCHAR(20))"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE TABLE with IF NOT EXISTS"
+    sql: "CREATE TABLE IF NOT EXISTS customers (id INT, name VARCHAR(100))"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE TABLE with IF NOT EXISTS (already exists)"
+    sql: "CREATE TABLE IF NOT EXISTS users (id INT, email VARCHAR(200))"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE TABLE with various data types"
+    sql: |
+      CREATE TABLE test_types (
+        id INT,
+        name VARCHAR(100),
+        price DECIMAL(10,2),
+        active BOOLEAN,
+        created_at TIMESTAMP,
+        notes TEXT
+      )
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE TABLE with ENGINE specification"
+    sql: "CREATE TABLE memory_table (id INT, data VARCHAR(100)) ENGINE=MEMORY"
+    expect:
+      affected_rows: 1
+
+  # === SHOW OPERATIONS ===
+  - name: "SHOW DATABASES"
+    sql: "SHOW DATABASES"
+    expect: {}  # Environment dependent, just check it runs
+
+  - name: "SHOW TABLES"
+    sql: "SHOW TABLES"
+    expect: {}  # Environment dependent, just check it runs
+
+  - name: "SHOW TABLES FROM specific database"
+    sql: "SHOW TABLES FROM ddl_test"
+    expect: {}  # Environment dependent, just check it runs
+
+  - name: "DESCRIBE table structure"
+    sql: "DESCRIBE users"
+    expect: {}  # Just check it runs successfully
+
+  - name: "SHOW FULL COLUMNS"
+    sql: "SHOW FULL COLUMNS FROM users"
+    expect: {}  # Just check it runs successfully
+
+  - name: "SHOW TABLE STATUS"
+    sql: "SHOW TABLE STATUS"
+    expect: {}  # Just check it runs successfully
+
+  - name: "SHOW VARIABLES"
+    sql: "SHOW VARIABLES"
+    expect: {}  # Environment dependent, just check it runs
+
+  # === SESSION VARIABLES ===
+  - name: "SET session variable"
+    sql: "SET @test_var = 'hello'"
+    expect: {}  # Session variables return assigned value, not affected_rows
+
+  - name: "SET session variable with SESSION keyword"
+    sql: "SET SESSION @another_var = 42"
+    expect: {}  # Session variables return assigned value, not affected_rows
+
+  - name: "SET session variable with expression"
+    sql: "SET @calculated = 5 + 3 * 2"
+    expect: {}  # Session variables return assigned value
+
+  - name: "SET multiple session variables"
+    sql: "SET @var1 = 'test', @var2 = 123"
+    expect: {}  # Multiple session variables
+
+  # === GLOBAL VARIABLES ===
+  - name: "SET complex expression"
+    sql: "SET @complex = 5 + 3 * 2"
+    expect: {}  # Just check it runs successfully
+
+  - name: "SET string concatenation"
+    sql: "SET @text = 'hello'"
+    expect: {}  # Just check it runs successfully
+
+  # TODO: DROP TABLE operations (when DROP functionality is stable)
+  # - name: "DROP TABLE with IF EXISTS"
+  #   sql: "DROP TABLE IF EXISTS test_drop"
+  #   expect:
+  #     affected_rows: 0  # Table doesn't exist
+
+  # - name: "DROP existing TABLE"
+  #   sql: "DROP TABLE memory_table"
+  #   expect:
+  #     affected_rows: 1
+
+  # TODO: ALTER TABLE operations (when ALTER functionality is stable)
+  # - name: "ALTER TABLE add column"
+  #   sql: "ALTER TABLE users ADD COLUMN email VARCHAR(200)"
+  #   expect:
+  #     affected_rows: 1
+
+  # - name: "ALTER TABLE modify column"
+  #   sql: "ALTER TABLE users MODIFY COLUMN name VARCHAR(200)"
+  #   expect:
+  #     affected_rows: 1
+
+  # TODO: CREATE INDEX operations
+  # - name: "CREATE INDEX"
+  #   sql: "CREATE INDEX idx_name ON users (name)"
+  #   expect:
+  #     affected_rows: 1
+
+  # === CREATE USER OPERATIONS ===
+  - name: "CREATE USER basic"
+    sql: "CREATE USER testuser"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE USER with password"
+    sql: "CREATE USER testuser2 IDENTIFIED BY 'password123'"
+    expect:
+      affected_rows: 1
+
+  # TODO: ALTER USER operations
+  # - name: "ALTER USER password"
+  #   sql: "ALTER USER testuser IDENTIFIED BY 'newpassword'"
+  #   expect:
+  #     affected_rows: 1
+
+cleanup: []

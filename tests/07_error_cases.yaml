@@ -1,0 +1,53 @@
+metadata:
+  version: "1.0"
+  description: "Error cases that should fail"
+
+setup: []
+
+test_cases:
+  - name: "Syntax error - missing FROM keyword"
+    sql: "SELECT * WHERE id = 1"
+    expect:
+      error: true
+    
+  - name: "Syntax error - invalid SQL statement"
+    sql: "SELCT * FROM users"
+    expect:
+      error: true
+    
+  - name: "Non-existing table"
+    sql: "SELECT * FROM non_existing_table"
+    expect:
+      error: true
+    
+  - name: "Non-existing column"
+    sql: "SELECT non_existing_column FROM users"
+    expect:
+      error: true
+    
+  - name: "Invalid column reference in WHERE"
+    sql: "SELECT * FROM users WHERE invalid_column = 1"
+    expect:
+      error: true
+    
+  - name: "Invalid function name"
+    sql: "SELECT INVALID_FUNCTION()"
+    expect:
+      error: true
+    
+  - name: "Duplicate table creation"
+    sql: "CREATE TABLE users (id INTEGER)"
+    expect:
+      error: true
+    
+  - name: "Drop non-existing table"
+    sql: "DROP TABLE non_existing_table"
+    expect:
+      error: true
+    
+  - name: "Missing closing parenthesis"
+    sql: "SELECT * FROM (SELECT * FROM users"
+    expect:
+      error: true
+
+cleanup: []

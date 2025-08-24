@@ -1,0 +1,206 @@
+# SQL Functions Test Suite
+# Built-in functions: math, string, time, and other utility functions
+
+metadata:
+  version: "1.0"
+  description: "SQL built-in functions and expressions"
+
+setup: []
+
+test_cases:
+
+  # === MATHEMATICAL FUNCTIONS ===
+  - name: "FLOOR function"
+    sql: "SELECT FLOOR(4.7) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 4
+
+  - name: "FLOOR with negative number"
+    sql: "SELECT FLOOR(-4.7) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: -5
+
+  - name: "CEIL function"
+    sql: "SELECT CEIL(4.3) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 5
+
+  - name: "CEILING function (alias)"
+    sql: "SELECT CEILING(4.3) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 5
+
+  - name: "ROUND function"
+    sql: "SELECT ROUND(4.6) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 5
+
+  - name: "ROUND with .5 value"
+    sql: "SELECT ROUND(4.5) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 5
+
+  - name: "Nested math functions"
+    sql: "SELECT FLOOR(CEIL(4.3) * 2 + ROUND(1.6)) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 12
+
+  # === STRING FUNCTIONS ===
+  - name: "UPPER function"
+    sql: "SELECT UPPER('hello world') AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "HELLO WORLD"
+
+  - name: "LOWER function"
+    sql: "SELECT LOWER('HELLO WORLD') AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "hello world"
+
+  - name: "Nested string functions"
+    sql: "SELECT UPPER(LOWER('HELLO world')) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "HELLO WORLD"
+
+  - name: "UPPER with empty string"
+    sql: "SELECT UPPER('') AS result"
+    expect:
+      rows: 1
+      data:
+        - result: ""
+
+  - name: "LOWER with empty string"
+    sql: "SELECT LOWER('') AS result"
+    expect:
+      rows: 1
+      data:
+        - result: ""
+
+  - name: "Multiple string operations"
+    sql: "SELECT UPPER('hello') AS upper_case, LOWER('WORLD') AS lower_case"
+    expect:
+      rows: 1
+      data:
+        - upper_case: "HELLO"
+          lower_case: "world"
+
+  # === TIME FUNCTIONS ===
+  - name: "UNIX_TIMESTAMP function exists"
+    sql: "SELECT UNIX_TIMESTAMP() > 1600000000 AS recent_timestamp"
+    expect:
+      rows: 1
+      data:
+        - recent_timestamp: true
+
+  - name: "CURRENT_TIMESTAMP function exists"
+    sql: "SELECT CURRENT_TIMESTAMP() > 1600000000 AS recent_timestamp"
+    expect:
+      rows: 1
+      data:
+        - recent_timestamp: true
+
+  - name: "Time functions return numbers"
+    sql: "SELECT UNIX_TIMESTAMP() > 0 AS positive_time"
+    expect:
+      rows: 1
+      data:
+        - positive_time: true
+
+  # === VECTOR FUNCTIONS ===
+  - name: "STRING_TO_VECTOR function"
+    sql: "SELECT STRING_TO_VECTOR('[1,2,3]') AS vector"
+    expect:
+      rows: 1
+
+  - name: "VECTOR_TO_STRING function"
+    sql: "SELECT VECTOR_TO_STRING('[1,2,3]') AS vector_str"
+    expect:
+      rows: 1
+
+  # TODO: VECTOR_DISTANCE has type conversion issues
+  # - name: "VECTOR_DISTANCE function"
+  #   sql: "SELECT VECTOR_DISTANCE('[1,2,3]', '[4,5,6]') AS distance"
+  #   expect:
+  #     error: true
+  #     error_type: "type_conversion"
+
+  # === CASE EXPRESSIONS ===
+  - name: "Simple CASE expression"
+    sql: "SELECT CASE WHEN 5 > 3 THEN 'greater' ELSE 'lesser' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "greater"
+
+  - name: "CASE with multiple WHEN clauses"
+    sql: "SELECT CASE WHEN 2 > 5 THEN 'big' WHEN 2 > 1 THEN 'medium' ELSE 'small' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "medium"
+
+  - name: "Nested CASE expressions"
+    sql: "SELECT CASE WHEN 5 > 3 THEN CASE WHEN 2 > 1 THEN 'both_true' ELSE 'first_only' END ELSE 'neither' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "both_true"
+
+  - name: "CASE with arithmetic in conditions"
+    sql: "SELECT CASE WHEN (5 + 3) > (2 * 3) THEN 'math_works' ELSE 'math_broken' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "math_works"
+
+  - name: "CASE with string comparisons"
+    sql: "SELECT CASE WHEN 'apple' < 'banana' THEN 'alphabetical' ELSE 'reversed' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "alphabetical"
+
+  # === FUNCTION COMBINATIONS ===
+  - name: "Functions in arithmetic"
+    sql: "SELECT FLOOR(4.7) + CEIL(4.3) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 9
+
+  - name: "Functions with CASE"
+    sql: "SELECT CASE WHEN FLOOR(4.7) > 3 THEN UPPER('yes') ELSE LOWER('NO') END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "YES"
+
+  - name: "Multiple function types"
+    sql: "SELECT FLOOR(3.7) AS math, UPPER('test') AS string, UNIX_TIMESTAMP() > 0 AS time"
+    expect:
+      rows: 1
+      data:
+        - math: 3
+          string: "TEST"
+          time: true
+
+cleanup: []

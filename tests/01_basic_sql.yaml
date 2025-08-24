@@ -1,0 +1,196 @@
+# Basic SQL Operations Test Suite
+# Fundamental SQL functionality: arithmetic, comparisons, literals, basic expressions
+
+metadata:
+  version: "1.0"
+  description: "Basic SQL operations and expressions"
+
+setup: []
+
+test_cases:
+
+  # === ARITHMETIC EXPRESSIONS ===
+  - name: "Basic addition"
+    sql: "SELECT 5 + 3 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 8
+
+  - name: "Basic subtraction"
+    sql: "SELECT 10 - 4 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 6
+
+  - name: "Basic multiplication"
+    sql: "SELECT 6 * 7 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 42
+
+  - name: "Basic division"
+    sql: "SELECT 15 / 3 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 5
+
+  - name: "Complex arithmetic with parentheses"
+    sql: "SELECT (10 + 5) * 2 - 8 / 4 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 28
+
+  - name: "Division with decimal result"
+    sql: "SELECT 1 / 0.1 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 10
+
+  - name: "Large number arithmetic"
+    sql: "SELECT 999999 + 1 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 1000000
+
+  - name: "Negative number operations"
+    sql: "SELECT -5 * -3 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 15
+
+  # === COMPARISON OPERATORS ===
+  - name: "Greater than comparison"
+    sql: "SELECT 10 > 5 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  - name: "Less than comparison"
+    sql: "SELECT 3 < 8 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  - name: "Greater than or equal"
+    sql: "SELECT 5 >= 5 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  - name: "Less than or equal"
+    sql: "SELECT 4 <= 7 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  - name: "Equality comparison"
+    sql: "SELECT 5 = 5 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  - name: "Inequality comparison"
+    sql: "SELECT 5 != 3 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  - name: "String comparison"
+    sql: "SELECT 'apple' < 'banana' AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  - name: "Comparison with arithmetic"
+    sql: "SELECT (10 + 5) > (3 * 4) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: true
+
+  # === LITERALS AND CONSTANTS ===
+  - name: "Integer literal"
+    sql: "SELECT 42 AS number"
+    expect:
+      rows: 1
+      data:
+        - number: 42
+
+  - name: "Negative integer literal"
+    sql: "SELECT -17 AS number"
+    expect:
+      rows: 1
+      data:
+        - number: -17
+
+  - name: "Float literal"
+    sql: "SELECT 3.14159 AS pi"
+    expect:
+      rows: 1
+      data:
+        - pi: 3.14159
+
+  - name: "String literal with single quotes"
+    sql: "SELECT 'Hello World' AS message"
+    expect:
+      rows: 1
+      data:
+        - message: "Hello World"
+
+  - name: "String literal with double quotes"
+    sql: "SELECT \"Hello SQL\" AS message"
+    expect:
+      rows: 1
+      data:
+        - message: "Hello SQL"
+
+  - name: "Boolean true literal"
+    sql: "SELECT true AS bool_val"
+    expect:
+      rows: 1
+      data:
+        - bool_val: true
+
+  - name: "Boolean false literal"
+    sql: "SELECT false AS bool_val"
+    expect:
+      rows: 1
+      data:
+        - bool_val: false
+
+  # === MULTIPLE COLUMNS ===
+  - name: "Multiple column expressions"
+    sql: "SELECT 1 + 2 AS sum, 3 * 4 AS product, 'test' AS text"
+    expect:
+      rows: 1
+      data:
+        - sum: 3
+          product: 12
+          text: "test"
+
+  - name: "Mixed data types in columns"
+    sql: "SELECT 42 AS number, 'text' AS string, true AS boolean, 3.14 AS decimal"
+    expect:
+      rows: 1
+      data:
+        - number: 42
+          string: "text"
+          boolean: true
+          decimal: 3.14
+
+cleanup: []

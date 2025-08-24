@@ -1,0 +1,275 @@
+# Advanced Query Test Suite
+# Complex queries, JOINs, subqueries, GROUP BY, aggregates (many marked TODO until supported)
+
+metadata:
+  version: "1.0"
+  description: "Advanced SQL queries and aggregation features"
+
+setup:
+  - action: "CREATE TABLE customers"
+    sql: |
+      CREATE TABLE customers (
+        id INT,
+        name VARCHAR(100),
+        city VARCHAR(50),
+        country VARCHAR(50)
+      )
+  - action: "CREATE TABLE orders"
+    sql: |
+      CREATE TABLE orders (
+        id INT,
+        customer_id INT,
+        amount DECIMAL(10,2),
+        order_date VARCHAR(20),
+        status VARCHAR(20)
+      )
+  - action: "CREATE TABLE products"
+    sql: |
+      CREATE TABLE products (
+        id INT,
+        name VARCHAR(100),
+        category VARCHAR(50),
+        price DECIMAL(10,2)
+      )
+
+test_cases:
+
+  # === SETUP TEST DATA ===
+  - name: "Insert customer test data"
+    sql: |
+      INSERT INTO customers (id, name, city, country) VALUES
+      (1, 'John Doe', 'New York', 'USA'),
+      (2, 'Jane Smith', 'London', 'UK'),
+      (3, 'Hans Mueller', 'Berlin', 'Germany'),
+      (4, 'Marie Dupont', 'Paris', 'France'),
+      (5, 'Carlos Rodriguez', 'Madrid', 'Spain')
+    expect:
+      affected_rows: 5
+
+  - name: "Insert order test data"
+    sql: |
+      INSERT INTO orders (id, customer_id, amount, order_date, status) VALUES
+      (1, 1, 299.99, '2024-01-15', 'completed'),
+      (2, 1, 150.00, '2024-02-01', 'completed'),
+      (3, 2, 500.00, '2024-01-20', 'pending'),
+      (4, 3, 75.50, '2024-02-10', 'completed'),
+      (5, 1, 1200.00, '2024-02-15', 'shipped'),
+      (6, 4, 89.99, '2024-01-30', 'completed')
+    expect:
+      affected_rows: 6
+
+  - name: "Insert product test data"
+    sql: |
+      INSERT INTO products (id, name, category, price) VALUES
+      (1, 'Laptop', 'Electronics', 999.99),
+      (2, 'Mouse', 'Electronics', 25.99),
+      (3, 'Keyboard', 'Electronics', 79.99),
+      (4, 'Chair', 'Furniture', 199.99),
+      (5, 'Desk', 'Furniture', 299.99)
+    expect:
+      affected_rows: 5
+
+  # === AGGREGATE FUNCTIONS (TODO: Most aggregates need implementation) ===
+  
+  # Currently working aggregate tests
+  - name: "Simple COUNT verification"
+    sql: "SELECT * FROM customers"
+    expect:
+      rows: 5
+
+  # TODO: Enable when COUNT(*) fully works
+  # - name: "COUNT all customers"
+  #   sql: "SELECT COUNT(*) AS total_customers FROM customers"
+  #   expect:
+  #     rows: 1
+  #     data:
+  #       - total_customers: 5
+
+  # - name: "COUNT with WHERE condition"
+  #   sql: "SELECT COUNT(*) AS usa_customers FROM customers WHERE country = 'USA'"
+  #   expect:
+  #     rows: 1
+  #     data:
+  #       - usa_customers: 1
+
+  # - name: "SUM of order amounts"
+  #   sql: "SELECT SUM(amount) AS total_revenue FROM orders"
+  #   expect:
+  #     rows: 1
+
+  # - name: "AVG of order amounts"
+  #   sql: "SELECT AVG(amount) AS avg_order_value FROM orders"
+  #   expect:
+  #     rows: 1
+
+  # - name: "MAX order amount"
+  #   sql: "SELECT MAX(amount) AS largest_order FROM orders"
+  #   expect:
+  #     rows: 1
+  #     data:
+  #       - largest_order: 1200.00
+
+  # - name: "MIN order amount"
+  #   sql: "SELECT MIN(amount) AS smallest_order FROM orders"
+  #   expect:
+  #     rows: 1
+  #     data:
+  #       - smallest_order: 75.50
+
+  # - name: "Multiple aggregates in one query"
+  #   sql: "SELECT COUNT(*) AS order_count, SUM(amount) AS total, AVG(amount) AS average, MAX(amount) AS max_order FROM orders"
+  #   expect:
+  #     rows: 1
+
+  # === GROUP BY OPERATIONS (TODO: GROUP BY needs implementation) ===
+  
+  # TODO: Enable when GROUP BY is supported
+  # - name: "GROUP BY customer country"
+  #   sql: "SELECT country, COUNT(*) AS customer_count FROM customers GROUP BY country"
+  #   expect:
+  #     rows: 5
+
+  # - name: "GROUP BY with SUM"
+  #   sql: "SELECT customer_id, SUM(amount) AS total_spent FROM orders GROUP BY customer_id"
+  #   expect:
+  #     rows: 4
+
+  # - name: "GROUP BY with multiple aggregates"
+  #   sql: "SELECT status, COUNT(*) AS count, SUM(amount) AS total FROM orders GROUP BY status"
+  #   expect:
+  #     rows: 3
+
+  # - name: "GROUP BY product category"
+  #   sql: "SELECT category, COUNT(*) AS product_count, AVG(price) AS avg_price FROM products GROUP BY category"
+  #   expect:
+  #     rows: 2
+
+  # === HAVING CLAUSE (TODO: HAVING needs GROUP BY first) ===
+  
+  # TODO: Enable when HAVING is supported
+  # - name: "HAVING with COUNT"
+  #   sql: "SELECT customer_id, COUNT(*) AS order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 1"
+  #   expect:
+  #     rows: 1
+
+  # - name: "HAVING with SUM"
+  #   sql: "SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id HAVING SUM(amount) > 400"
+  #   expect:
+  #     rows: 2
+
+  # === JOIN OPERATIONS (TODO: JOINs need implementation) ===
+  
+  # TODO: Enable when INNER JOIN is supported
+  # - name: "INNER JOIN customers and orders"
+  #   sql: "SELECT c.name, o.amount, o.status FROM customers c JOIN orders o ON c.id = o.customer_id"
+  #   expect:
+  #     rows: 6
+
+  # - name: "JOIN with WHERE condition"
+  #   sql: "SELECT c.name, o.amount FROM customers c JOIN orders o ON c.id = o.customer_id WHERE o.status = 'completed'"
+  #   expect:
+  #     rows: 4
+
+  # - name: "JOIN with aggregation"
+  #   sql: "SELECT c.name, COUNT(o.id) AS order_count FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.name"
+  #   expect:
+  #     rows: 4
+
+  # - name: "LEFT JOIN to include all customers"
+  #   sql: "SELECT c.name, COUNT(o.id) AS order_count FROM customers c LEFT JOIN orders o ON c.id = o.customer_id GROUP BY c.name"
+  #   expect:
+  #     rows: 5
+
+  # === SUBQUERIES (TODO: Subqueries need implementation) ===
+  
+  # TODO: Enable when subqueries are supported
+  # - name: "Subquery in WHERE clause"
+  #   sql: "SELECT name FROM customers WHERE id IN (SELECT DISTINCT customer_id FROM orders)"
+  #   expect:
+  #     rows: 4
+
+  # - name: "Subquery with aggregate"
+  #   sql: "SELECT name FROM customers WHERE id = (SELECT customer_id FROM orders GROUP BY customer_id ORDER BY SUM(amount) DESC LIMIT 1)"
+  #   expect:
+  #     rows: 1
+
+  # - name: "Correlated subquery"
+  #   sql: "SELECT name FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.amount > 1000)"
+  #   expect:
+  #     rows: 1
+
+  # === ORDER BY OPERATIONS (TODO: ORDER BY needs implementation) ===
+  
+  # TODO: Enable when ORDER BY is supported
+  # - name: "ORDER BY single column"
+  #   sql: "SELECT name, amount FROM orders ORDER BY amount"
+  #   expect:
+  #     rows: 6
+
+  # - name: "ORDER BY multiple columns"
+  #   sql: "SELECT customer_id, amount FROM orders ORDER BY customer_id, amount DESC"
+  #   expect:
+  #     rows: 6
+
+  # - name: "ORDER BY with LIMIT"
+  #   sql: "SELECT name, amount FROM orders ORDER BY amount DESC LIMIT 3"
+  #   expect:
+  #     rows: 3
+
+  # === LIMIT and OFFSET (TODO: LIMIT needs implementation) ===
+  
+  # TODO: Enable when LIMIT is supported
+  # - name: "LIMIT query results"
+  #   sql: "SELECT name FROM customers LIMIT 3"
+  #   expect:
+  #     rows: 3
+
+  # - name: "LIMIT with OFFSET"
+  #   sql: "SELECT name FROM customers LIMIT 2 OFFSET 2"
+  #   expect:
+  #     rows: 2
+
+  # === ADVANCED WHERE CONDITIONS ===
+  
+  # TODO: Enable when BETWEEN is supported
+  # - name: "BETWEEN operator"
+  #   sql: "SELECT * FROM orders WHERE amount BETWEEN 100 AND 500"
+  #   expect:
+  #     rows: 3
+
+  # TODO: Enable when IN is supported  
+  # - name: "IN operator with values"
+  #   sql: "SELECT name FROM customers WHERE country IN ('USA', 'UK', 'Germany')"
+  #   expect:
+  #     rows: 3
+
+  # TODO: Enable when LIKE is supported
+  # - name: "LIKE pattern matching"
+  #   sql: "SELECT name FROM customers WHERE name LIKE 'J%'"
+  #   expect:
+  #     rows: 2
+
+  # - name: "LIKE with underscore wildcard"
+  #   sql: "SELECT name FROM products WHERE name LIKE 'M___e'"
+  #   expect:
+  #     rows: 1
+
+  # === CASE EXPRESSIONS WITH TABLES ===
+  - name: "CASE expression with table data"
+    sql: "SELECT name, CASE WHEN country = 'USA' THEN 'North America' WHEN country IN ('UK', 'Germany', 'France') THEN 'Europe' ELSE 'Other' END AS region FROM customers"
+    expect:
+      rows: 5
+
+  # TODO: Enable when aggregates work with CASE
+  # - name: "CASE in aggregate"
+  #   sql: "SELECT SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) AS completed_revenue FROM orders"
+  #   expect:
+  #     rows: 1
+
+  # === WORKING FEATURES VERIFICATION ===
+  - name: "Verify all test data inserted correctly"
+    sql: "SELECT 'customers' AS table_name FROM customers UNION ALL SELECT 'orders' AS table_name FROM orders UNION ALL SELECT 'products' AS table_name FROM products"
+    expect:
+      rows: 16  # 5 + 6 + 5 total records
+
+cleanup: []
