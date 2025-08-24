@@ -150,10 +150,11 @@ class SQLTestRunner:
         
         # Check for expected errors
         if expect.get('error'):
-            if response.status_code == 500 or 'Error' in response.text:
+            if response.status_code != 200 or 'Error' in response.text:
                 return True
             else:
-                print(f"    ❌ Expected error but got success")
+                print(f"    ❌ Expected error but got success (HTTP {response.status_code})")
+                print(f"        Response: {response.text[:200]}")
                 return False
         
         # Check HTTP status

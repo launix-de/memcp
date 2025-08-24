@@ -194,6 +194,12 @@ test_cases:
   #     error_type: "constraint_violation"
 
   # === DATABASE ERRORS (MUST FAIL) ===
+  # First create the database that should cause the duplicate error
+  - name: "CREATE database for duplicate test"
+    sql: "CREATE DATABASE edge_cases_test"
+    expect:
+      affected_rows: 1
+
   - name: "CREATE duplicate database"
     sql: "CREATE DATABASE edge_cases_test"
     expect:
@@ -205,6 +211,12 @@ test_cases:
     expect:
       error: true
       error_type: "database_not_found"
+      
+  # Clean up the test database we created
+  - name: "Clean up edge_cases_test database"
+    sql: "DROP DATABASE edge_cases_test"
+    expect:
+      affected_rows: 1
 
   # === SPECIAL CHARACTERS AND EDGE CASES ===
   - name: "Special characters in string (should work)"
