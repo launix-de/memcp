@@ -209,12 +209,14 @@ test_cases:
       error_type: "database_not_found"
 
   # === SPECIAL CHARACTERS AND EDGE CASES ===
-  - name: "Special characters in string (should work)"
+  - name: "Special characters in string (should work)"  
     sql: "SELECT 'Hello\\nWorld\\t!' AS special_chars"
     expect:
       rows: 1
       data:
-        - special_chars: "Hello\nWorld\t!"
+        - special_chars: |
+            Hello
+            World	!
 
   - name: "Empty string handling"
     sql: "SELECT '' AS empty_string"
