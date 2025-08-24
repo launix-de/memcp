@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional
+from urllib.parse import quote
 
 # Global flag for connect-only mode
 is_connect_only_mode = False
@@ -39,7 +40,9 @@ class SQLTestRunner:
     def execute_sql(self, database: str, query: str) -> Optional[requests.Response]:
         """Execute SQL query via HTTP API"""
         try:
-            url = f"{self.base_url}/sql/{database}"
+            # URL-encode database name to handle hyphens and special characters
+            encoded_db = quote(database, safe='')
+            url = f"{self.base_url}/sql/{encoded_db}"
             response = requests.post(url, data=query, headers=self.auth_header, timeout=10)
             return response
         except Exception as e:
@@ -49,7 +52,9 @@ class SQLTestRunner:
     def execute_sparql(self, database: str, query: str) -> Optional[requests.Response]:
         """Execute SPARQL query via HTTP API"""
         try:
-            url = f"{self.base_url}/rdf/{database}"
+            # URL-encode database name to handle hyphens and special characters
+            encoded_db = quote(database, safe='')
+            url = f"{self.base_url}/rdf/{encoded_db}"
             response = requests.post(url, data=query, headers=self.auth_header, timeout=10)
             return response
         except Exception as e:
@@ -77,7 +82,8 @@ class SQLTestRunner:
                 return False
             
             # Load TTL data using the new /rdf/{database}/load_ttl endpoint
-            url = f"{self.base_url}/rdf/{database}/load_ttl"
+            encoded_db = quote(database, safe='')
+            url = f"{self.base_url}/rdf/{encoded_db}/load_ttl"
             response = requests.post(url, data=ttl_data, headers=self.auth_header, timeout=10)
             
             if response and response.status_code == 200:
@@ -308,8 +314,8 @@ class SQLTestRunner:
                                 for row in databases_data['data']:
                                     if isinstance(row, dict):
                                         db_name = list(row.values())[0]  # Get first value from row
-                                        # Drop any test databases that might cause interference (except system)
-                                        if db_name not in ['system'] and db_name != database and 'test' in db_name.lower():
+                                        # Drop any test databases that might cause interference (except system and our main test db)
+                                        if db_name not in ['system', 'memcp-tests'] and db_name != database and ('test' in db_name.lower() or 'edge_cases' in db_name.lower()):
                                             drop_db_sql = f"DROP DATABASE IF EXISTS {db_name}"
                                             self.execute_sql("system", drop_db_sql)
                                             print(f"🧹 Removed interfering test database: {db_name}")
@@ -361,7 +367,7 @@ class SQLTestRunner:
             return False
             
         metadata = spec.get('metadata', {})
-        database = metadata.get('database', 'test_db')
+        database = metadata.get('database', 'memcp-tests')
         
         print(f"🎯 Running test suite: {metadata.get('description', 'SQL Tests')}")
         print(f"📊 Version: {metadata.get('version', 'unknown')}")
@@ -371,10 +377,13 @@ class SQLTestRunner:
         self.cleanup_test_database(database)
         
         # Ensure the test database exists (cleanup may have cleaned it)
-        create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
+        # Use backticks to handle database names with hyphens
+        create_db_sql = f"CREATE DATABASE IF NOT EXISTS `{database}`"
         response = self.execute_sql("system", create_db_sql)
         if not response or response.status_code != 200:
             print(f"❌ Failed to create test database: {database}")
+            print(f"    Response: {response.text if response else 'No response'}")
+            print(f"    SQL: {create_db_sql}")
             return False
         print(f"✅ Database ready: {database}")
         
