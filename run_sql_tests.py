@@ -31,6 +31,8 @@ class SQLTestRunner:
         self.test_count = 0
         self.test_passed = 0
         self.failed_tests = []
+        self.setup_operations = []  # Track setup operations for recovery
+        self.current_database = None  # Track current database for recovery
         
     def _create_auth_header(self):
         """Create HTTP Basic Auth header"""
@@ -48,7 +50,7 @@ class SQLTestRunner:
             
             # Check if database was lost due to MemCP bug - attempt recovery
             if response and 'database ' + database + ' does not exist' in response.text:
-                print(f"    🔧 Database {database} was lost! Attempting recovery...")
+                print(f"    🔧 Database {database} was lost! Attempting full recovery...")
                 # Try to recreate the database
                 create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
                 recovery_response = requests.post(f"{self.base_url}/sql/system", 
@@ -56,7 +58,20 @@ class SQLTestRunner:
                                                 headers=self.auth_header, 
                                                 timeout=10)
                 if recovery_response and recovery_response.status_code == 200:
-                    print(f"    ✅ Database {database} recovered - retrying query...")
+                    print(f"    ✅ Database {database} recovered")
+                    
+                    # Also recreate setup operations (tables, etc.)
+                    if self.setup_operations and self.current_database == database:
+                        print(f"    🔧 Recreating {len(self.setup_operations)} setup operations...")
+                        for step in self.setup_operations:
+                            setup_response = requests.post(url, data=step['sql'], 
+                                                         headers=self.auth_header, timeout=10)
+                            if setup_response and setup_response.status_code == 200:
+                                print(f"    ✅ Recreated: {step['action']}")
+                            else:
+                                print(f"    ⚠️  Failed to recreate: {step['action']}")
+                    
+                    print(f"    🔄 Retrying original query...")
                     # Retry the original query
                     response = requests.post(url, data=query, headers=self.auth_header, timeout=10)
                 else:
@@ -147,8 +162,14 @@ class SQLTestRunner:
     def run_setup(self, setup_steps: List[Dict], database: str) -> bool:
         """Execute setup steps"""
         print("🔧 Running setup...")
+        self.setup_operations = []  # Reset setup operations for new test file
+        self.current_database = database
+        
         for step in setup_steps:
             print(f"  - {step['action']}")
+            # Store setup operation for potential recovery
+            self.setup_operations.append(step)
+            
             response = self.execute_sql(database, step['sql'])
             if not response or response.status_code not in [200, 500]:  # 500 might be expected for CREATE DATABASE IF NOT EXISTS
                 print(f"    ❌ Setup step failed: {step['action']}")
