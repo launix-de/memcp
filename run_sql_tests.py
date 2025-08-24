@@ -17,6 +17,7 @@ from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional
 from urllib.parse import quote
+import re
 
 # Global flag for connect-only mode
 is_connect_only_mode = False
@@ -38,12 +39,29 @@ class SQLTestRunner:
         return {"Authorization": f"Basic {encoded}"}
     
     def execute_sql(self, database: str, query: str) -> Optional[requests.Response]:
-        """Execute SQL query via HTTP API"""
+        """Execute SQL query via HTTP API with database recovery"""
         try:
             # URL-encode database name to handle hyphens and special characters
             encoded_db = quote(database, safe='')
             url = f"{self.base_url}/sql/{encoded_db}"
             response = requests.post(url, data=query, headers=self.auth_header, timeout=10)
+            
+            # Check if database was lost due to MemCP bug - attempt recovery
+            if response and 'database ' + database + ' does not exist' in response.text:
+                print(f"    🔧 Database {database} was lost! Attempting recovery...")
+                # Try to recreate the database
+                create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
+                recovery_response = requests.post(f"{self.base_url}/sql/system", 
+                                                data=create_db_sql, 
+                                                headers=self.auth_header, 
+                                                timeout=10)
+                if recovery_response and recovery_response.status_code == 200:
+                    print(f"    ✅ Database {database} recovered - retrying query...")
+                    # Retry the original query
+                    response = requests.post(url, data=query, headers=self.auth_header, timeout=10)
+                else:
+                    print(f"    ❌ Failed to recover database {database}")
+            
             return response
         except Exception as e:
             print(f"Error executing SQL: {e}")
@@ -377,8 +395,8 @@ class SQLTestRunner:
         self.cleanup_test_database(database)
         
         # Ensure the test database exists (cleanup may have cleaned it)
-        # Use backticks to handle database names with hyphens
-        create_db_sql = f"CREATE DATABASE IF NOT EXISTS `{database}`"
+        # Try without backticks first - MemCP might not handle them correctly
+        create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
         response = self.execute_sql("system", create_db_sql)
         if not response or response.status_code != 200:
             print(f"❌ Failed to create test database: {database}")
