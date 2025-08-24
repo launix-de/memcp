@@ -48,6 +48,23 @@ class MemCPTester:
             print(f"Error executing SQL: {e}")
             return None
     
+    def parse_jsonl_response(self, response):
+        """Parse JSONL response into list of dictionaries"""
+        if not response or response.status_code != 200:
+            return None
+        
+        try:
+            lines = response.text.strip().split('\n')
+            results = []
+            for line in lines:
+                if line.strip():
+                    results.append(json.loads(line))
+            return results
+        except Exception as e:
+            print(f"Error parsing JSONL response: {e}")
+            print(f"Response text: {response.text}")
+            return None
+    
     def test_basic_connectivity(self):
         """Test basic API connectivity"""
         print("Testing basic connectivity...")
@@ -58,16 +75,20 @@ class MemCPTester:
             self.assert_test(False, f"API endpoint reachable (Error: {e})")
     
     def test_sql_parsing(self):
-        """Test SQL parsing and basic queries"""
+        """Test SQL parsing and execution with result validation"""
         print("\nTesting SQL parsing and execution...")
         
-        # Test simple SELECT
-        response = self.execute_sql("system", "SELECT 1 as test_value")
-        self.assert_test(response and response.status_code == 200, "Simple SELECT query")
+        # Test simple arithmetic SELECT
+        response = self.execute_sql("system", "SELECT 1+2 AS result")
+        results = self.parse_jsonl_response(response)
+        self.assert_test(response and response.status_code == 200, "Simple SELECT query executes")
+        self.assert_test(results and len(results) == 1 and results[0].get("result") == 3, "SELECT 1+2 returns correct result")
         
         # Test SELECT from system table
-        response = self.execute_sql("system", "SELECT COUNT(*) FROM user")
-        self.assert_test(response and response.status_code == 200, "SELECT COUNT from system.user")
+        response = self.execute_sql("system", "SELECT COUNT(*) AS user_count FROM user")
+        results = self.parse_jsonl_response(response)
+        self.assert_test(response and response.status_code == 200, "SELECT COUNT from system.user executes")
+        self.assert_test(results and len(results) == 1 and results[0].get("user_count") >= 1, "COUNT(*) returns valid user count")
         
         # Test CREATE DATABASE
         response = self.execute_sql("system", "CREATE DATABASE test_db")
@@ -77,43 +98,84 @@ class MemCPTester:
         response = self.execute_sql("test_db", "CREATE TABLE test_users (id INT PRIMARY KEY, name VARCHAR(100), age INT)")
         self.assert_test(response and response.status_code == 200, "CREATE TABLE")
         
-        # Test INSERT
+        # Test INSERT and verify insertion
         response = self.execute_sql("test_db", "INSERT INTO test_users (id, name, age) VALUES (1, 'Alice', 25)")
         self.assert_test(response and response.status_code == 200, "INSERT single row")
         
         response = self.execute_sql("test_db", "INSERT INTO test_users (id, name, age) VALUES (2, 'Bob', 30), (3, 'Charlie', 35)")
         self.assert_test(response and response.status_code == 200, "INSERT multiple rows")
         
-        # Test SELECT with data
-        response = self.execute_sql("test_db", "SELECT * FROM test_users ORDER BY id")
-        self.assert_test(response and response.status_code == 200, "SELECT with ORDER BY")
+        # Verify data was inserted correctly
+        response = self.execute_sql("test_db", "SELECT COUNT(*) AS total FROM test_users")
+        results = self.parse_jsonl_response(response)
+        self.assert_test(results and results[0].get("total") == 3, "INSERT operations created 3 rows")
         
-        # Test aggregate functions
-        response = self.execute_sql("test_db", "SELECT COUNT(*) FROM test_users")
-        self.assert_test(response and response.status_code == 200, "SELECT COUNT(*)")
+        # Test SELECT with specific data validation
+        response = self.execute_sql("test_db", "SELECT name, age FROM test_users WHERE id = 1")
+        results = self.parse_jsonl_response(response)
+        expected = {"name": "Alice", "age": 25}
+        self.assert_test(results and len(results) == 1, "SELECT specific user returns one row")
+        self.assert_test(results and results[0].get("name") == "Alice" and results[0].get("age") == 25, "SELECT returns correct user data")
         
-        response = self.execute_sql("test_db", "SELECT MAX(age) FROM test_users")
-        self.assert_test(response and response.status_code == 200, "SELECT MAX()")
+        # Test ORDER BY with result validation
+        response = self.execute_sql("test_db", "SELECT name FROM test_users ORDER BY age")
+        results = self.parse_jsonl_response(response)
+        expected_order = ["Alice", "Bob", "Charlie"]
+        actual_order = [row.get("name") for row in results] if results else []
+        self.assert_test(results and len(results) == 3, "ORDER BY returns all rows")
+        self.assert_test(actual_order == expected_order, "ORDER BY sorts correctly by age")
         
-        # Test WHERE clause
+        # Test aggregate functions with validation
+        response = self.execute_sql("test_db", "SELECT MAX(age) AS max_age, MIN(age) AS min_age FROM test_users")
+        results = self.parse_jsonl_response(response)
+        self.assert_test(results and results[0].get("max_age") == 35, "MAX(age) returns correct maximum")
+        self.assert_test(results and results[0].get("min_age") == 25, "MIN(age) returns correct minimum")
+        
+        # Test WHERE clause with result validation
         response = self.execute_sql("test_db", "SELECT name FROM test_users WHERE age > 25")
-        self.assert_test(response and response.status_code == 200, "SELECT with WHERE")
+        results = self.parse_jsonl_response(response)
+        names = [row.get("name") for row in results] if results else []
+        self.assert_test("Bob" in names and "Charlie" in names and "Alice" not in names, "WHERE clause filters correctly")
         
-        # Test UPDATE
+        # Test UPDATE and verify change
         response = self.execute_sql("test_db", "UPDATE test_users SET age = 26 WHERE name = 'Alice'")
-        self.assert_test(response and response.status_code == 200, "UPDATE query")
+        self.assert_test(response and response.status_code == 200, "UPDATE query executes")
         
-        # Test DELETE
-        response = self.execute_sql("test_db", "DELETE FROM test_users WHERE age > 35")
-        self.assert_test(response and response.status_code == 200, "DELETE query")
+        response = self.execute_sql("test_db", "SELECT age FROM test_users WHERE name = 'Alice'")
+        results = self.parse_jsonl_response(response)
+        self.assert_test(results and results[0].get("age") == 26, "UPDATE modified the correct record")
         
-        # Test LIKE operator
-        response = self.execute_sql("test_db", "SELECT name FROM test_users WHERE name LIKE 'A%'")
-        self.assert_test(response and response.status_code == 200, "SELECT with LIKE")
+        # Test arithmetic expressions
+        response = self.execute_sql("test_db", "SELECT name, age * 2 AS double_age FROM test_users WHERE name = 'Bob'")
+        results = self.parse_jsonl_response(response)
+        self.assert_test(results and results[0].get("double_age") == 60, "Arithmetic expressions work correctly")
         
-        # Test LIMIT
-        response = self.execute_sql("test_db", "SELECT * FROM test_users LIMIT 2")
-        self.assert_test(response and response.status_code == 200, "SELECT with LIMIT")
+        # Test DELETE and verify deletion
+        initial_response = self.execute_sql("test_db", "SELECT COUNT(*) AS count_before FROM test_users")
+        initial_results = self.parse_jsonl_response(initial_response)
+        initial_count = initial_results[0].get("count_before") if initial_results else 0
+        
+        response = self.execute_sql("test_db", "DELETE FROM test_users WHERE age > 30")
+        self.assert_test(response and response.status_code == 200, "DELETE query executes")
+        
+        final_response = self.execute_sql("test_db", "SELECT COUNT(*) AS count_after FROM test_users")
+        final_results = self.parse_jsonl_response(final_response)
+        final_count = final_results[0].get("count_after") if final_results else 0
+        self.assert_test(final_count < initial_count, "DELETE removed records")
+        
+        # Test LIKE operator with result validation
+        response = self.execute_sql("test_db", "INSERT INTO test_users (id, name, age) VALUES (4, 'Alexander', 28)")
+        self.assert_test(response and response.status_code == 200, "INSERT for LIKE test")
+        
+        response = self.execute_sql("test_db", "SELECT name FROM test_users WHERE name LIKE 'Al%'")
+        results = self.parse_jsonl_response(response)
+        names = [row.get("name") for row in results] if results else []
+        self.assert_test(any("Al" in name for name in names), "LIKE pattern matching works")
+        
+        # Test LIMIT with result validation
+        response = self.execute_sql("test_db", "SELECT name FROM test_users ORDER BY name LIMIT 2")
+        results = self.parse_jsonl_response(response)
+        self.assert_test(results and len(results) == 2, "LIMIT restricts result count correctly")
         
         # Cleanup
         response = self.execute_sql("system", "DROP DATABASE test_db")
