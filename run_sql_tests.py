@@ -112,7 +112,7 @@ class SQLTestRunner:
                     except json.JSONDecodeError as json_err:
                         # Non-JSON lines are likely error messages - don't skip them!
                         # The validation logic will handle them properly
-                        print(f"    ⚠️  Non-JSON response line: {line[:80]}...")
+                        # Only show verbose errors if this is an unexpected error
                         continue
             return results
         except Exception as e:
@@ -125,9 +125,14 @@ class SQLTestRunner:
         print("🔧 Running setup...")
         for step in setup_steps:
             print(f"  - {step['action']}")
+            # Try to ensure database exists before each setup step
+            create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
+            self.execute_sql("system", create_db_sql)
+            
             response = self.execute_sql(database, step['sql'])
             if not response or response.status_code not in [200, 500]:  # 500 might be expected for CREATE DATABASE IF NOT EXISTS
                 print(f"    ❌ Setup step failed: {step['action']}")
+                print(f"        Response: {response.text if response else 'No response'}")
                 return False
         print("  ✅ Setup completed")
         return True
@@ -152,6 +157,7 @@ class SQLTestRunner:
         # Check for expected errors
         if expect.get('error'):
             if response.status_code != 200 or 'Error' in response.text:
+                # Expected error - pass silently
                 return True
             else:
                 print(f"    ❌ Expected error but got success (HTTP {response.status_code})")
