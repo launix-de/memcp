@@ -41,16 +41,19 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (begin
-			((res "header") "Content-Type" "text/plain")
-			((res "status") 200)
-			(define formula (parse_sql schema query))
-			(define resultrow (res "jsonl"))
-			(define session (context "session"))
-			(try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
+			(try (lambda () (begin
+				((res "header") "Content-Type" "text/plain")
+				((res "status") 200)
+				(define formula (parse_sql schema query))
+				(define resultrow (res "jsonl"))
+				(define session (context "session"))
+				(eval (source "SQL Query" 1 1 formula))
+			)) (lambda(e) (begin
 				(print "SQL query: " query)
-				(print "execution plan: " formula)
 				(print "error: " e)
-				(error e)
+				((res "header") "Content-Type" "text/plain")
+				((res "status") 500)
+				((res "print") "SQL Error: " e)
 			)))
 		) (begin
 			((res "header") "Content-Type" "text/plain")
@@ -63,16 +66,19 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (begin
-			((res "header") "Content-Type" "text/plain")
-			((res "status") 200)
-			(define formula (parse_psql schema query))
-			(define resultrow (res "jsonl"))
-			(define session (context "session"))
-			(try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
+			(try (lambda () (begin
+				((res "header") "Content-Type" "text/plain")
+				((res "status") 200)
+				(define formula (parse_psql schema query))
+				(define resultrow (res "jsonl"))
+				(define session (context "session"))
+				(eval (source "SQL Query" 1 1 formula))
+			)) (lambda(e) (begin
 				(print "SQL query: " query)
-				(print "execution plan: " formula)
 				(print "error: " e)
-				(error e)
+				((res "header") "Content-Type" "text/plain")
+				((res "status") 500)
+				((res "print") "SQL Error: " e)
 			)))
 		) (begin
 			((res "header") "Content-Type" "text/plain")
@@ -120,7 +126,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(try (lambda () (resultrow '("result" (eval (scheme sql))))) (lambda (e) (begin
 					(print "Scheme query: " sql)
 					(print "error " e)
-					(error e)
+					(resultrow '("error" e))
 				)))
 			) (begin
 				/* SQL syntax mode */
@@ -129,14 +135,15 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(lambda (e) (begin
 					(print "SQL query: " sql)
 					(print "error: " e)
-					(error e)
+					(resultrow '("error" e))
+					nil
 				))))
-				(try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
+				(if formula (try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
 					(print "SQL query: " sql)
 					(print "execution plan: " formula)
 					(print "error: " e)
-					(error e)
-				)))
+					(resultrow '("error" e))
+				))) nil)
 			))
 		))
 	)
