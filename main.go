@@ -388,7 +388,7 @@ func setupIO(wd string) {
 }
 
 func main() {
-	fmt.Print(`memcp Copyright (C) 2023, 2024   Carl-Philip Hänsch
+	fmt.Print(`memcp Copyright (C) 2023 - 2025   Carl-Philip Hänsch
     This program comes with ABSOLUTELY NO WARRANTY;
     This is free software, and you are welcome to redistribute it
     under certain conditions;
@@ -414,6 +414,9 @@ func main() {
 	wd, _ := os.Getwd() // libraries are relative to working directory... or change with -wd PATH
 	flag.StringVar(&wd, "wd", wd, "Working Directory for (import) and (load) (Default: .)")
 
+	writeDocu := ""
+	flag.StringVar(&writeDocu, "write-docu", "", "Write documentation as .md documents to that folder and exit")
+
 	// Parse only known flags, ignore unknown ones for Scheme to handle
 	flag.CommandLine.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -423,6 +426,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --mysql-port=PORT      MySQL protocol port (default 3307)\n")
 		fmt.Fprintf(os.Stderr, "  --disable-api          Disable HTTP API server\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
+		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}
 	
 	// Parse until first unknown flag
@@ -437,7 +441,7 @@ func main() {
 			continue
 		}
 		
-		if arg == "-c" || arg == "-data" || arg == "-profile" || arg == "-wd" {
+		if arg == "-c" || arg == "-data" || arg == "-profile" || arg == "-wd" || arg == "-write-docu" {
 			knownArgs = append(knownArgs, arg)
 			if i+1 < len(os.Args[1:]) {
 				knownArgs = append(knownArgs, os.Args[i+2])
@@ -471,6 +475,12 @@ func main() {
 	// storage initialization
 	setupIO(wd)
 	storage.Init(scm.Globalenv)
+
+	if writeDocu != "" {
+		scm.WriteDocumentation(writeDocu)
+		os.Exit(0)
+	}
+
 	storage.Basepath = basepath
 	storage.LoadDatabases()
 	// scripts initialization

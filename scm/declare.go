@@ -16,8 +16,10 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package scm
 
+import "os"
 import "fmt"
 import "strings"
+import "path/filepath"
 
 type Declaration struct {
 	Name string
@@ -50,6 +52,145 @@ func Declare(env *Env, def *Declaration) {
 		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
 		env.Vars[Symbol(def.Name)] = def.Fn
 	}
+}
+
+// slugify makes a filesystem-safe, lowercase slug from a chapter title.
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	// Replace spaces with dashes
+	s = strings.ReplaceAll(s, " ", "-")
+	// Keep only a–z, 0–9, -, _
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if out == "" {
+		out = "chapter"
+	}
+	return out
+}
+
+// WriteDocumentation generates Markdown docs:
+// - index.md with links to chapters
+// - one <chapter>.md file per chapter, containing all functions of that chapter
+func WriteDocumentation(folder string) error {
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		return fmt.Errorf("failed to create folder %q: %w", folder, err)
+	}
+
+	type Chapter struct {
+		Title string
+		Slug  string
+		Fns   []*Declaration
+	}
+
+	var chapters []*Chapter
+	var current *Chapter
+
+	// We’ll add a default "General" chapter if we see functions before any heading.
+	defaultChapter := &Chapter{Title: "General", Slug: slugify("General")}
+	usedSlugs := map[string]int{}
+
+	uniqSlug := func(s string) string {
+		base := slugify(s)
+		if usedSlugs[base] == 0 {
+			usedSlugs[base] = 1
+			return base
+		}
+		for i := 2; ; i++ {
+			candidate := fmt.Sprintf("%s-%d", base, i)
+			if usedSlugs[candidate] == 0 {
+				usedSlugs[candidate] = 1
+				return candidate
+			}
+		}
+	}
+
+	// Build chapter -> functions from the ordered declaration_titles
+	for _, t := range declaration_titles {
+		if len(t) > 0 && t[0] == '#' {
+			title := strings.TrimSpace(t[1:])
+			ch := &Chapter{Title: title, Slug: uniqSlug(title)}
+			chapters = append(chapters, ch)
+			current = ch
+			continue
+		}
+		// function name
+		def, ok := declarations[t]
+		if !ok {
+			// unknown entry — ignore gracefully
+			continue
+		}
+		if current == nil {
+			// First functions before any chapter title: create/use "General".
+			if usedSlugs[defaultChapter.Slug] == 0 {
+				usedSlugs[defaultChapter.Slug] = 1
+				chapters = append(chapters, defaultChapter)
+			}
+			current = defaultChapter
+		}
+		current.Fns = append(current.Fns, def)
+	}
+
+	// Write index.md (chapters only)
+	indexPath := filepath.Join(folder, "index.md")
+	indexFile, err := os.Create(indexPath)
+	if err != nil {
+		return fmt.Errorf("failed to create %s: %w", indexPath, err)
+	}
+	defer indexFile.Close()
+
+	fmt.Fprintln(indexFile, "# Documentation\n")
+	for _, ch := range chapters {
+		if len(ch.Fns) == 0 {
+			// Skip empty chapters
+			continue
+		}
+		fmt.Fprintf(indexFile, "- [%s](%s.md)\n", ch.Title, ch.Slug)
+	}
+
+	// Write one file per chapter
+	for _, ch := range chapters {
+		if len(ch.Fns) == 0 {
+			continue
+		}
+		fp := filepath.Join(folder, ch.Slug+".md")
+		f, err := os.Create(fp)
+		if err != nil {
+			return fmt.Errorf("failed to create %s: %w", fp, err)
+		}
+
+		// Chapter header
+		fmt.Fprintf(f, "# %s\n\n", ch.Title)
+
+		// Functions in this chapter
+		for _, def := range ch.Fns {
+			fmt.Fprintf(f, "## %s\n\n", def.Name)
+			if def.Desc != "" {
+				fmt.Fprintf(f, "%s\n\n", def.Desc)
+			}
+			fmt.Fprintf(f, "**Allowed number of parameters:** %d–%d\n\n", def.MinParameter, def.MaxParameter)
+
+			fmt.Fprintln(f, "### Parameters\n")
+			if len(def.Params) == 0 {
+				fmt.Fprintln(f, "_This function has no parameters._\n")
+			} else {
+				for _, p := range def.Params {
+					fmt.Fprintf(f, "- **%s** (`%s`): %s\n", p.Name, p.Type, p.Desc)
+				}
+				fmt.Fprintln(f)
+			}
+
+			fmt.Fprintf(f, "### Returns\n\n`%s`\n\n", def.Returns)
+		}
+
+		_ = f.Close()
+	}
+
+	return nil
 }
 
 func types_match(given string, required string) bool {
