@@ -5,6 +5,10 @@ metadata:
   version: "1.0"
   description: "Minimal table operations test for debugging"
 
+cleanup:
+  - action: "Clean up test table"
+    sql: "DROP TABLE IF EXISTS simple_test"
+
 setup:
   - action: "CREATE TABLE simple_test"
     sql: "CREATE TABLE simple_test (id INT, name VARCHAR(50))"
@@ -19,7 +23,3 @@ test_cases:
     sql: "SELECT * FROM simple_test"
     expect:
       rows: 1
-
-cleanup:
-  - action: "Clean up test table"
-    sql: "DROP TABLE IF EXISTS simple_test"
