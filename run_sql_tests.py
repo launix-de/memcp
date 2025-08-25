@@ -47,7 +47,7 @@ class SQLTestRunner:
         self.test_passed += 1
         print(f"✅ {name}")
 
-    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], results: Optional[List[Dict]]):
+    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect):
         self.failed_tests.append(name)
         print(f"❌ {name}")
         print(f"    Reason: {reason}")
@@ -55,8 +55,8 @@ class SQLTestRunner:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
         if response:
             print(f"    HTTP {response.status_code}: {response.text[:500]}{'...' if len(response.text) > 500 else ''}")
-        if results is not None:
-            print(f"    Parsed results: {results}")
+        if expect is not None:
+            print(f"    Expected: {expect}\n")
 
     # ----------------------
     # Core execution
@@ -137,7 +137,7 @@ class SQLTestRunner:
             self._record_success(name)
             return True
         else:
-            return self._record_fail(name, "Expectation mismatch", query, response, results)
+            return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"))
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
         expect = test_case.get("expect", {})
