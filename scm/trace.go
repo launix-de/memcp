@@ -31,6 +31,7 @@ type Tracefile struct {
 }
 
 var Trace *Tracefile // default trace: set to not nil if you want to trace
+var TracePrint bool // whether to print traces to stdout
 
 func SetTrace(on bool) { // sets Trace to nil or a value
 	if Trace != nil {

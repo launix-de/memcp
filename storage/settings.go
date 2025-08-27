@@ -22,17 +22,19 @@ import "github.com/launix-de/memcp/scm"
 type SettingsT struct {
 	Backtrace bool
 	Trace bool
+	TracePrint bool
 	PartitionMaxDimensions int
 	DefaultEngine string
 	ShardSize uint
 }
 
-var Settings SettingsT = SettingsT{false, false, 10, "safe", 60000}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000}
 
 // call this after you filled Settings
 func InitSettings() {
 	scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 	scm.SetTrace(Settings.Trace)
+	scm.TracePrint = Settings.TracePrint
 	onexit.Register(func() { scm.SetTrace(false) }) // close trace file on exit
 }
 
@@ -44,6 +46,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 				return Settings.Backtrace
 			case "Trace":
 				return Settings.Trace
+			case "TracePrint":
+				return Settings.TracePrint
 			case "PartitionMaxDimensions":
 				return int64(Settings.PartitionMaxDimensions)
 			case "DefaultEngine":
@@ -61,6 +65,9 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			case "Trace":
 				Settings.Trace = scm.ToBool(a[1])
 				scm.SetTrace(Settings.Trace)
+			case "TracePrint":
+				Settings.TracePrint = scm.ToBool(a[1])
+				scm.TracePrint = Settings.TracePrint
 			case "PartitionMaxDimensions":
 				Settings.PartitionMaxDimensions = scm.ToInt(a[1])
 			case "DefaultEngine":

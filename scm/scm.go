@@ -27,6 +27,7 @@ package scm
 
 import (
 	"fmt"
+	"time"
 	"reflect"
 	"strings"
 	"github.com/jtolds/gls"
@@ -102,6 +103,10 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				goto restart
 			case "time":
 				// measure the time a step has taken
+				var start time.Time
+				if TracePrint {
+					start = time.Now()
+				}
 				if Trace != nil {
 					if len(e) > 2 { // with label
 						Trace.Duration(String(Eval(e[2], en)), "scm", func() {
@@ -114,6 +119,14 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 					}
 				} else {
 					value = Eval(e[1], en)
+				}
+				if TracePrint {
+					d := time.Now().Sub(start).String()
+					if len(e) > 2 { // with label
+						fmt.Println("trace", d, String(Eval(e[2], en)))
+					} else {
+						fmt.Println("trace", d)
+					}
 				}
 				return
 			case "if":
