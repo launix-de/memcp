@@ -18,6 +18,7 @@
 
 ## Coding Style & Naming
 - Go: format with `go fmt ./...`; keep idiomatic Go (short, cohesive funcs). Tabs and gofmt defaults are expected.
+- Go imports: sort imports by path length ascending within each import block.
 - Scheme (`.scm`): follow existing patterns; filenames are kebab-case; keep code self-explanatory with minimal comments.
 - Tests: YAML files use lower_snake_case keys and `NN_description.yaml` naming.
 - Avoid introducing new tools; prefer editing existing files over adding new ones.
@@ -77,3 +78,18 @@
 ## Memory & CPU Efficiency
 - Design principle: Cache misses are more expensive than lightweight compression. Prefer compact encodings (e.g., bit-packing 3/5‑bit integers) and sequential scans over scattered, cache‑cold access.
 - Use columnar storage and vectorized compute to keep footprints small and hot; compress where it reduces cache lines touched even if it adds tiny (de)compression overhead.
+
+## Optimizer Roadmap (scm/optimizer.go)
+- Constant Folding: fold pure calls with constant args (arith, logic, concat, quote/list) during OptimizeEx.
+- Inline Use-Once: inline variables defined in a begin when used < 2× and not arrays; already partially present — re-enable with safety checks.
+- Elide set/define: where a symbol is set once and consumed once, replace the read with the value and drop the set.
+- Numbered Params: reactivate lambda parameter indexing (NthLocalVar) once nested-scope bugs are fixed; enables faster param access.
+- In-place Variants: add map_inplace/filter_inplace and let optimizer switch when the first argument is disposable.
+- Producer Pipelines: pure imperative versions (produce_map, produceN_map) and chaining (produce+map+filter) to avoid intermediate lists.
+- Cons/Merge→Append: normalize construction patterns to append for fewer allocations.
+- Currying/Specialization: partial-evaluate functions with const masks to generate specialized lambdas.
+- Prefetch/outer: safely replace env lookups with prebound values when no shadowing occurs; propagate (outer ...) through subtrees.
+- Parser Optimizations: number parser parameters and precompile eligible patterns via parseSyntax.
+
+Testing Optimizer Changes
+- Add unit tests for: constant folding, use-once inlining, set-elision, lambda param indexing, in-place map/filter behavior, and parser precompilation.
