@@ -1,0 +1,40 @@
+# Unnesting: Derived Tables (Basic)
+
+metadata:
+  version: "1.0"
+  description: "Unnesting arbitrary queries: basic derived table"
+
+setup: []
+
+test_cases:
+  - name: "Select from simple derived table"
+    sql: "SELECT * FROM (SELECT 1 AS a) t"
+    expect:
+      rows: 1
+      data:
+        - a: 1
+
+  # TODO: add correlated subselect in FROM (LATERAL-style)
+  # - name: "Derived table with correlation"
+  #   sql: |
+  #     SELECT x, y
+  #     FROM (SELECT 1 AS x) d
+  #     JOIN (SELECT x+1 AS y) t
+  #   expect:
+  #     rows: 1
+
+  # TODO: ORDER BY in subquery ignored without LIMIT
+  # - name: "ORDER ignored without LIMIT in derived table"
+  #   sql: "SELECT * FROM (SELECT 2 AS a UNION ALL SELECT 1 AS a ORDER BY a DESC) t"
+  #   expect: {}
+
+  # TODO: ORDER BY with LIMIT in derived table affects rows
+  # - name: "ORDER with LIMIT in derived table"
+  #   sql: "SELECT * FROM (SELECT 2 AS a UNION ALL SELECT 1 AS a ORDER BY a DESC LIMIT 1) t"
+  #   expect:
+  #     rows: 1
+  #     data:
+  #       - a: 2
+
+cleanup: []
+
