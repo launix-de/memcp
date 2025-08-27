@@ -1,0 +1,33 @@
+# GROUP BY SUM Test Suite
+
+metadata:
+  version: "1.0"
+  description: "Validate SELECT a, SUM(b) FROM tbl GROUP BY a"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS tbl"
+  - sql: "CREATE TABLE tbl (a INT, b INT)"
+  - sql: |
+      INSERT INTO tbl (a, b) VALUES
+      (1, 10), (1, 20), (2, 5), (3, 7)
+
+test_cases:
+  - name: "Group sum by a (exact query)"
+    sql: "SELECT a, SUM(b) FROM tbl GROUP BY a"
+    expect:
+      rows: 3
+
+  - name: "Group sum by a with ORDER"
+    sql: "SELECT a, SUM(b) AS s FROM tbl GROUP BY a ORDER BY a"
+    expect:
+      rows: 3
+      data:
+        - a: 1
+          s: 30
+        - a: 2
+          s: 5
+        - a: 3
+          s: 7
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS tbl"

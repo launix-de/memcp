@@ -271,9 +271,28 @@ if there is a group function, create a temporary preaggregate table
 					/* INSERT IGNORE group cols into preaggregate */
 					/* TODO: use bulk insert in scan reduce phase (and filter duplicates from a bulk!) */
 					'('time '('begin
-						/* the optimizer will optimize and group this */
-						'('set 'resultrow '('lambda '('item) '('insert schema grouptbl (cons list (map group (lambda (col) (concat col)))) '(list '('extract_assoc 'item '('lambda '('key 'value) 'value))) '(list) '('lambda '() true) true)))
-						(if (equal? group '(1)) '('resultrow '(list "1" 1)) (build_queryplan schema tables (merge (map group (lambda (expr) '((concat expr) expr)))) condition nil nil nil nil nil schemas replace_find_column)) /* INSERT INTO grouptbl SELECT group-attributes FROM tbl */
+						/* Build group keys via scan: shard-local (set_assoc) then flush per-shard into grouptbl */
+						(begin
+							/* key columns */
+							(set keycols (merge_unique (map group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
+							(scan_wrapper 'scan schema tbl
+								(cons list filtercols)
+								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr condition))
+								(cons list keycols)
+								'((quote lambda)
+									(map keycols (lambda (col) (symbol (concat tblvar "." col))))
+									(cons (quote list) (map group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
+								'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
+								'(list) /* empty dict */
+								'((quote lambda) '('acc 'sharddict) '('begin
+									'('insert
+										schema grouptbl
+										(cons 'list (map group (lambda (col) (concat col))))
+										'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
+										'(list) '('lambda '() true) true)
+									'acc))
+								isOuter)
+						)
 					) "collect")
 
 					/* compute aggregates */

@@ -22,6 +22,26 @@
 - Tests: YAML files use lower_snake_case keys and `NN_description.yaml` naming.
 - Avoid introducing new tools; prefer editing existing files over adding new ones.
 
+### Scheme AST Quoting (lib/queryplan.scm)
+- Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
+- Lambdas: embed as `'((quote lambda) (param-list) body)` where:
+  - `param-list`: a list of symbols. Follow existing patterns like `(map cols (lambda (col) (symbol (concat tblvar "." col))))` rather than constructing `(cons 'list ...)` for params.
+  - `body`: if you want to produce a list value at runtime, construct it explicitly with `(cons (quote list) ...)` instead of a bare literal like `(1 "x")` which would be treated as a call.
+- Reduce/reduce2: quote bodies so they are embedded correctly, e.g. `'(set_assoc acc rowvals true)` inside `'((quote lambda) '(acc rowvals) ...)`.
+- Quote operator symbols, not variables: keep identifiers like `schema`, `grouptbl`, and `rows` unquoted so they bind at runtime; quote only procedure names and constructors inside quoted ASTs.
+
+### Codegen Quoting Patterns
+- Lambda params: always emit a quoted list of symbols, e.g. `'((quote lambda) '(acc rowvals) body)`. Do not synthesize params from strings; never leave them as `(nil nil)`.
+- Reducers: embed bodies quoted, e.g. `'(set_assoc acc rowvals true)` so set_assoc is emitted, not executed at build time.
+- Neutral values: choose a proper literal, e.g. `'(list)` for assoc reducers; avoid `nil` when callee expects a list/FastDict.
+- Runtime tuples: construct with `(list ...)` using bound symbols, not `'(sym1 sym2)` — the latter is a literal tuple and collapses all rows to one key.
+- Column-name lists: functions like `insert` expecting column names take quoted string lists, e.g. `'("col1" "col2")`.
+- Outer refs and variables: leave `schema`, `grouptbl`, and `(outer ...)` unquoted inside emitted code to bind at evaluation time; quote only syntactic operators.
+
+### Functional Semantics
+- This Scheme dialect is purely functional; procedures have no side effects and are fully parallelizable.
+- `(set symbol value)` is scope-local. To communicate outside scope, use sessions via `(newsession)` which are threadsafe.
+
 ## Testing Guidelines
 - Framework: YAML specs executed via `run_sql_tests.py` against HTTP endpoints.
 - Expectations: use `expect: { rows: N, data: [...] }` or `expect: { error: true }`.
