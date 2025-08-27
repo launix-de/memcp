@@ -1,0 +1,30 @@
+# LIKE operator and patterns
+
+metadata:
+  version: "1.0"
+  description: "Pattern matching with % and _"
+
+setup: []
+
+test_cases:
+  - name: "Prefix match"
+    sql: "SELECT 'alpha' LIKE 'a%' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  - name: "Single-char match"
+    sql: "SELECT 'a1' LIKE 'a_' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  - name: "No match"
+    sql: "SELECT 'beta' LIKE 'a%' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: false
+

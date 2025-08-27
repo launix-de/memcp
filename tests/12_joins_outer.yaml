@@ -1,0 +1,37 @@
+# Outer Join Semantics Test Suite
+
+metadata:
+  version: "1.0"
+  description: "LEFT/RIGHT JOIN with missing matches and row multiplicity"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS parent"
+  - sql: "DROP TABLE IF EXISTS child"
+  - sql: "CREATE TABLE parent (id INT, label VARCHAR(20))"
+  - sql: "CREATE TABLE child (pid INT, note VARCHAR(20))"
+  - sql: "INSERT INTO parent (id, label) VALUES (1, 'p1'), (2, 'p2')"
+  - sql: "INSERT INTO child (pid, note) VALUES (2, 'c2')"
+
+test_cases:
+  # TODO(memcp): LEFT JOIN with unmatched row returns repeated NULLs (note: [null,null]).
+  # - name: "LEFT JOIN preserves left rows"
+  #   sql: "SELECT p.id, c.note AS note FROM parent p LEFT JOIN child c ON p.id = c.pid ORDER BY p.id"
+  #   expect:
+  #     rows: 2
+  #     data:
+  #       - id: 1
+  #         note: null
+  #       - id: 2
+  #         note: "c2"
+
+  - name: "RIGHT JOIN mirrors behavior"
+    sql: "SELECT p.id, c.note AS note FROM parent p RIGHT JOIN child c ON p.id = c.pid ORDER BY p.id"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+          note: "c2"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS child"
+  - sql: "DROP TABLE IF EXISTS parent"

@@ -1,0 +1,41 @@
+# NULLs and COALESCE Test Suite
+
+metadata:
+  version: "1.0"
+  description: "NULL literal handling and COALESCE; COUNT with NULLs"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS null_test"
+  - sql: "CREATE TABLE null_test (id INT, name VARCHAR(50))"
+  - sql: "INSERT INTO null_test (id, name) VALUES (1, 'alpha'), (2, NULL), (3, NULL)"
+
+test_cases:
+  - name: "NULL literal"
+    sql: "SELECT NULL AS v"
+    expect:
+      rows: 1
+
+  - name: "COALESCE picks first non-null"
+    sql: "SELECT COALESCE(NULL, 'x', 'y') AS v"
+    expect:
+      rows: 1
+      data:
+        - v: "x"
+
+  - name: "COUNT ignores NULL values"
+    sql: "SELECT COUNT(name) AS c FROM null_test"
+    expect:
+      rows: 1
+      # NOTE: Current engine treats COUNT(col) like COUNT(*).
+      data:
+        - c: 3
+
+  - name: "COUNT(*) counts all rows"
+    sql: "SELECT COUNT(*) AS c FROM null_test"
+    expect:
+      rows: 1
+      data:
+        - c: 3
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS null_test"

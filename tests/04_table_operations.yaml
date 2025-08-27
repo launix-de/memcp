@@ -10,6 +10,8 @@ cleanup:
     sql: "DROP TABLE IF EXISTS simple_test"
 
 setup:
+  - action: "Drop pre-existing table"
+    sql: "DROP TABLE IF EXISTS simple_test"
   - action: "CREATE TABLE simple_test"
     sql: "CREATE TABLE simple_test (id INT, name VARCHAR(50))"
 

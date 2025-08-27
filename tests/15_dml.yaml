@@ -1,0 +1,32 @@
+# DML: UPDATE and DELETE
+
+metadata:
+  version: "1.0"
+  description: "Verify affected_rows and row changes for UPDATE/DELETE"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dml_t"
+  - sql: "CREATE TABLE dml_t (id INT, x INT, flag INT)"
+  - sql: "INSERT INTO dml_t (id, x, flag) VALUES (1, 10, 1), (2, 20, 0), (3, 30, 0)"
+
+test_cases:
+  - name: "UPDATE with predicate"
+    sql: "UPDATE dml_t SET x = x + 1 WHERE id < 3"
+    expect:
+      affected_rows: 2
+
+  - name: "DELETE with predicate"
+    sql: "DELETE FROM dml_t WHERE flag = 0"
+    expect:
+      affected_rows: 2
+
+  - name: "Remaining row count"
+    sql: "SELECT COUNT(*) AS c FROM dml_t"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dml_t"
+

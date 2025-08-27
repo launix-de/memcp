@@ -1,0 +1,29 @@
+# GROUP BY and HAVING Test Suite
+
+metadata:
+  version: "1.0"
+  description: "Aggregation with GROUP BY and HAVING"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sales"
+  - sql: "CREATE TABLE sales (dept VARCHAR(20), amount INT)"
+  - sql: |
+      INSERT INTO sales (dept, amount) VALUES
+      ('A', 10), ('A', 20), ('B', 5)
+
+test_cases:
+  - name: "Group and count with HAVING"
+    sql: "SELECT dept, COUNT(*) AS c FROM sales GROUP BY dept HAVING COUNT(*) > 1 ORDER BY dept"
+    expect:
+      rows: 1
+      data:
+        - dept: "A"
+          c: 2
+
+  - name: "Group with SUM and ORDER"
+    sql: "SELECT dept, SUM(amount) AS s FROM sales GROUP BY dept ORDER BY SUM(amount) DESC"
+    expect:
+      rows: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sales"

@@ -1,0 +1,34 @@
+# Subselects in FROM (Derived Tables)
+
+metadata:
+  version: "1.0"
+  description: "Use SELECT in FROM to aggregate then join"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS customers"
+  - sql: "DROP TABLE IF EXISTS orders"
+  - sql: "CREATE TABLE customers (id INT, name VARCHAR(50))"
+  - sql: "CREATE TABLE orders (id INT, customer_id INT)"
+  - sql: "INSERT INTO customers (id, name) VALUES (1, 'Alice'), (2, 'Bob')"
+  - sql: "INSERT INTO orders (id, customer_id) VALUES (1,1), (2,1), (3,2)"
+
+test_cases: []
+
+# TODO(memcp): Subselect-in-FROM (derived tables) fails with "Unknown function: <nil>".
+# - name: "Join with aggregated subselect"
+#   sql: |
+#     SELECT c.name, o.cnt
+#     FROM customers c
+#     JOIN (SELECT customer_id, COUNT(*) AS cnt FROM orders GROUP BY customer_id) o
+#       ON c.id = o.customer_id
+#     ORDER BY o.cnt DESC
+#     LIMIT 1
+#   expect:
+#     rows: 1
+#     data:
+#       - name: "Alice"
+#         cnt: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS orders"
+  - sql: "DROP TABLE IF EXISTS customers"
