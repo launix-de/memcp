@@ -269,30 +269,33 @@ if there is a group function, create a temporary preaggregate table
 				'('begin
 					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
 					/* INSERT IGNORE group cols into preaggregate */
-					'('time '('begin
-						/* Build group keys via scan: shard-local (set_assoc) then flush per-shard into grouptbl */
-						(begin
-							/* key columns */
-							(set keycols (merge_unique (map group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
-							(scan_wrapper 'scan schema tbl
-								(cons list filtercols)
-								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr condition))
-								(cons list keycols)
-								'((quote lambda)
-									(map keycols (lambda (col) (symbol (concat tblvar "." col))))
-									(cons (quote list) (map group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
-								'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
-								'(list) /* empty dict */
-								'((quote lambda) '('acc 'sharddict)
-									'('insert
-										schema grouptbl
-										(cons 'list (map group (lambda (col) (concat col))))
-										'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
-										'(list) '('lambda '() true) true)
+						'('time '('begin
+							/* If grouping is global (group='(1)), avoid base scan and insert one key row */
+							(if (equal? group '(1))
+								'('insert schema grouptbl '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
+								(begin
+									/* key columns */
+									(set keycols (merge_unique (map group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
+									(scan_wrapper 'scan schema tbl
+										(cons list filtercols)
+										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr condition))
+										(cons list keycols)
+										'((quote lambda)
+											(map keycols (lambda (col) (symbol (concat tblvar "." col))))
+											(cons (quote list) (map group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
+										'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
+										'(list) /* empty dict */
+										'((quote lambda) '('acc 'sharddict)
+											'('insert
+												schema grouptbl
+												(cons 'list (map group (lambda (col) (concat col))))
+												'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
+												'(list) '('lambda '() true) true)
+										)
+										isOuter)
 								)
-								isOuter)
-						)
-					) "collect")
+							)
+						) "collect")
 
 					/* compute aggregates */
 					'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
