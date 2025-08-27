@@ -84,6 +84,10 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 	case NthLocalVar:
 		value = en.VarsNumbered[e]
 	case []Scmer:
+		if len(e) == 0 {
+			value = e
+			return
+		}
 		if car, ok := e[0].(Symbol); ok {
 			// switch-case through all special symbols
 			switch car {
@@ -338,7 +342,12 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 						return p[i] // default value on n+1
 					}
 					return nil // no default value
-				}
+					}
+				case *FastDict:
+					arg := Eval(operands[0], en)
+					if v, ok := p.Get(arg); ok { return v }
+					if ln := len(p.Pairs); ln%2 == 1 && ln > 0 { return p.Pairs[ln-1] }
+					return nil
 			case nil:
 				panic("Unknown function: " + fmt.Sprint(e[0]))
 			default:
@@ -410,7 +419,7 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		case nil:
 		}
 		return Eval(p.Body, en)
-	case []Scmer: // associative list
+			case []Scmer: // associative list
 		// format: (key value key value ... default)
 		if i, ok := args[0].(NthLocalVar); ok {
 			// indexed access generated through optimizer
@@ -426,8 +435,12 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 			if i < len(p) {
 				return p[i] // default value on n+1
 			}
-			return nil // no default value
-		}
+					return nil // no default value
+				}
+	case *FastDict: // associative dict
+		if v, ok := p.Get(args[0]); ok { return v }
+		if ln := len(p.Pairs); ln%2 == 1 && ln > 0 { return p.Pairs[ln-1] }
+		return nil
 	case nil:
 		panic("Unknown function")
 	default:

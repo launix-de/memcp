@@ -374,6 +374,12 @@ func init_strings() {
 							result[String(a[i])] = transform(a[i+1])
 						}
 						return result
+					case *FastDict:
+						result := make(map[string]Scmer)
+						for i := 0; i < len(a.Pairs)-1; i += 2 {
+							result[String(a.Pairs[i])] = transform(a.Pairs[i+1])
+						}
+						return result
 					default:
 						return a_
 				}
@@ -447,4 +453,3 @@ func init_strings() {
 	})
 
 }
-

@@ -133,6 +133,64 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (equal? (round 3.7) 4) true "round of 3.7 should be 4")
 (assert (equal? (round 3.2) 3) true "round of 3.2 should be 3")
 
+/* Dictionaries / Assoc lists (with FastDict auto-upgrade) */
+(print "testing dictionaries ...")
+
+/* small assoc basic ops */
+(define d ())
+(set d (set_assoc d "a" 1))
+(set d (set_assoc d "b" 2))
+(assert (has_assoc? d "a") true "assoc has a")
+(assert (has_assoc? d "x") false "assoc no x")
+(assert (equal? (reduce_assoc d (lambda (acc k v) (+ acc v)) 0) 3) true "reduce sum small")
+(define la (list "a" 1 "b" 2))
+(assert (equal? (la "a") 1) true "call assoc as func(list)")
+(assert (equal? (d "b") 2) true "call assoc as func(dict)")
+
+/* merge + map + filter */
+(define d1 (list "x" 10 "y" 20))
+(define d2 (list "y" 5  "z" 7))
+(define dm (merge_assoc d1 d2))
+(assert (equal? (dm "y") 5) true "merge overwrites second wins")
+(define dmap (map_assoc dm (lambda (k v) (+ v 1))))
+(assert (equal? (dmap "z") 8) true "map increments values")
+(define df (filter_assoc dmap (lambda (k v) (> v 10))))
+(assert (has_assoc? df "x") true "filter keeps x")
+(assert (has_assoc? df "z") false "filter drops z")
+
+/* big assoc to test auto switch to FastDict */
+(define big (reduce (produceN 2000) (lambda (acc i) (set_assoc acc (concat "k" i) i)) ()))
+(assert (equal? (reduce_assoc big (lambda (acc k v) (+ acc v)) 0) 1999000) true "reduce sum big (0..1999)")
+
+
+/* Strings / JSON */
+(print "testing strings ...")
+(assert (equal? (strlen "abc") 3) true "strlen counts bytes")
+(assert (equal? (replace "a-b-c" "-" ":") "a:b:c") true "replace replaces all")
+(assert (equal? (split "a,b,c" ",") '("a" "b" "c")) true "split splits on sep")
+(assert (strlike (htmlentities "<tag>") "&lt;tag&gt;") true "htmlentities encodes angle brackets")
+(assert (equal? (urldecode (urlencode "a b")) "a b") true "url roundtrip")
+(assert (strlike (json_encode_assoc (list "x" 1)) "%\"x\":1%") true "json_encode_assoc contains key and value")
+
+/* Lambda / apply_assoc */
+(print "testing lambdas and apply_assoc ...")
+(assert (equal? ((lambda (x y) (+ x y)) 2 3) 5) true "lambda call")
+(assert (equal? (apply_assoc (lambda (x y) (+ x y)) (list "x" 2 "y" 3)) 5) true "apply_assoc maps assoc args")
+
+/* Assoc merge with custom merge function */
+(print "testing assoc merge ...")
+(define m1 (list "x" 1))
+(set m1 (set_assoc m1 "x" 2 (lambda (old new) (+ old new))))
+(assert (equal? (m1 "x") 3) true "set_assoc merge function")
+(define m2 (merge_assoc (list "a" 1) (list "a" 5) (lambda (old new) (+ old new))))
+(assert (equal? (m2 "a") 6) true "merge_assoc merge function")
+
+/* FastDict vs assoc equality */
+(print "testing dict equality ...")
+(define ld '("k0" 0 "k1" 1 "k2" 2 "k3" 3 "k4" 4 "k5" 5))
+(define dd (reduce (produceN 6) (lambda (acc i) (set_assoc acc (concat "k" i) i)) ()))
+(assert (equal? ld dd) true "list vs dict equal content")
+
 (print "finished unit tests")
 (print "test result: " (teststat "success") "/" (teststat "count"))
 (if (< (teststat "success") (teststat "count")) (begin

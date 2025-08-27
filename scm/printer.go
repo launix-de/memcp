@@ -26,17 +26,22 @@ import (
 )
 
 func String(v Scmer) string {
-	switch v := v.(type) {
+    switch v := v.(type) {
 	case SourceInfo:
 		return String(v.value)
 	case NthLocalVar:
 		return fmt.Sprintf("(var %d)", v)
-	case []Scmer:
-		l := make([]string, len(v))
-		for i, x := range v {
-			l[i] = String(x)
-		}
-		return "(" + strings.Join(l, " ") + ")"
+    case []Scmer:
+        l := make([]string, len(v))
+        for i, x := range v {
+            l[i] = String(x)
+        }
+        return "(" + strings.Join(l, " ") + ")"
+    case *FastDict:
+        // print like a normal assoc list
+        l := make([]string, len(v.Pairs))
+        for i, x := range v.Pairs { l[i] = String(x) }
+        return "(" + strings.Join(l, " ") + ")"
 	case Proc:
 		return fmt.Sprintf("[func %s]", v.Body)
 	case func(...Scmer) Scmer:
@@ -48,9 +53,9 @@ func String(v Scmer) string {
 		return v // this is not valid scm code! (but we need it to convert strings)
 	case nil:
 		return "nil"
-	default:
-		return fmt.Sprint(v)
-	}
+    default:
+        return fmt.Sprint(v)
+    }
 }
 func SerializeToString(v Scmer, glob *Env) string {
 	var b bytes.Buffer
@@ -78,10 +83,10 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(")")
 		return
 	}
-	switch v := v.(type) {
+    switch v := v.(type) {
 	case SourceInfo:
 		SerializeEx(b, v.value, en, glob, p)
-	case []Scmer:
+    case []Scmer:
 		if len(v) == 2 && v[0] == Symbol("outer") {
 			b.WriteString("(outer ")
 			SerializeEx(b, v[1], en, glob, nil)
@@ -99,8 +104,8 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 				SerializeEx(b, x, en, glob, p)
 			}
 			b.WriteByte(')')
-		}
-	case func(...Scmer) Scmer:
+        }
+        case func(...Scmer) Scmer:
 		// native func serialization is the hardest; reverse the env!
 		// when later functional JIT is done, this must also handle deoptimization
 		en2 := en
@@ -169,7 +174,18 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteByte('"')
 	case nil:
 		b.WriteString("nil")
-	default:
-		b.WriteString(fmt.Sprint(v))
-	}
+    default:
+        switch vv := v.(type) {
+        case *FastDict:
+            // serialize as assoc list
+            b.WriteByte('(')
+            for i, x := range vv.Pairs {
+                if i != 0 { b.WriteByte(' ') }
+                SerializeEx(b, x, en, glob, p)
+            }
+            b.WriteByte(')')
+        default:
+            b.WriteString(fmt.Sprint(v))
+        }
+    }
 }

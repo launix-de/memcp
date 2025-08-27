@@ -126,8 +126,8 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 				case []Scmer:
 					return len(b_) == 0 && !ToBool(a)
 			}
-		case []Scmer:
-			switch b_ := b.(type) {
+	case []Scmer:
+		switch b_ := b.(type) {
 				case LazyString, string, float64, int64, bool, nil:
 					return len(a_) == 0 && !ToBool(b)
 				case []Scmer:
@@ -140,7 +140,24 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 						}
 					}
 					return true
+				case *FastDict:
+					if len(a_) != len(b_.Pairs) { return false }
+					for i := 0; i < len(a_); i++ { if !Equal(a_[i], b_.Pairs[i]) { return false } }
+					return true
 			}
+	case *FastDict:
+		switch b_ := b.(type) {
+			case LazyString, string, float64, int64, bool, nil:
+				return len(a_.Pairs) == 0 && !ToBool(b)
+			case []Scmer:
+				if len(a_.Pairs) != len(b_) { return false }
+				for i := 0; i < len(a_.Pairs); i++ { if !Equal(a_.Pairs[i], b_[i]) { return false } }
+				return true
+			case *FastDict:
+				if len(a_.Pairs) != len(b_.Pairs) { return false }
+				for i := 0; i < len(a_.Pairs); i++ { if !Equal(a_.Pairs[i], b_.Pairs[i]) { return false } }
+				return true
+		}
 		case Symbol:
 			switch b_ := b.(type) {
 				case Symbol:
@@ -245,6 +262,23 @@ func EqualSQL(a, b Scmer) Scmer {
 							return false
 						}
 					}
+					return true
+				case *FastDict:
+					if len(a_) != len(b_.Pairs) { return false }
+					for i := 0; i < len(a_); i++ { if !ToBool(EqualSQL(a_[i], b_.Pairs[i])) { return false } }
+					return true
+			}
+		case *FastDict:
+			switch b_ := b.(type) {
+				case LazyString, string, float64, int64, bool, nil:
+					return len(a_.Pairs) == 0 && !ToBool(b)
+				case []Scmer:
+					if len(a_.Pairs) != len(b_) { return false }
+					for i := 0; i < len(a_.Pairs); i++ { if !ToBool(EqualSQL(a_.Pairs[i], b_[i])) { return false } }
+					return true
+				case *FastDict:
+					if len(a_.Pairs) != len(b_.Pairs) { return false }
+					for i := 0; i < len(a_.Pairs); i++ { if !ToBool(EqualSQL(a_.Pairs[i], b_.Pairs[i])) { return false } }
 					return true
 			}
 
