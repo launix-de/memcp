@@ -23,6 +23,13 @@ import (
     "reflect"
 )
 
+// Stable seed for hashing to ensure consistent indices across Set/Get calls.
+var fastDictSeed maphash.Seed
+
+func init() {
+    fastDictSeed = maphash.MakeSeed()
+}
+
 // FastDict: shard-local assoc optimized for frequent set/merge operations.
 // Implementation uses a flat pairs array plus a lightweight hash index
 // to avoid O(N^2) behavior as it grows.
@@ -48,6 +55,7 @@ func (d *FastDict) Iterate(fn func(k, v Scmer) bool) {
 // recursively hashing their elements with structural markers.
 func HashKey(k Scmer) uint64 {
     var h maphash.Hash
+    h.SetSeed(fastDictSeed)
     var writeScmer func(v Scmer)
     writeScmer = func(v Scmer) {
         switch x := v.(type) {
