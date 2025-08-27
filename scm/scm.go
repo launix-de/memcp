@@ -545,14 +545,14 @@ func init() {
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"symbol", "symbol", "symbol to quote"},
-		}, "symbol", nil,
+		}, "symbol", nil, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"eval", "executes the given scheme program in the current environment",
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"code", "list", "list with head and optional parameters"},
-		}, "any", nil,
+		}, "any", nil, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"size", "compute the memory size of a value",
@@ -561,7 +561,7 @@ func init() {
 			DeclarationParameter{"value", "any", "value to examine"},
 		}, "int", func (a ...Scmer) Scmer {
                         return int64(ComputeSize(a[0]))
-                },
+                }, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",
@@ -570,7 +570,7 @@ func init() {
 			DeclarationParameter{"code", "list", "list with head and optional parameters"},
 		}, "any", func (a ...Scmer) Scmer {
 			return Optimize(a[0], &Globalenv)
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"time", "measures the time it takes to compute the first argument",
@@ -578,7 +578,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"code", "any", "code to execute"},
 			DeclarationParameter{"label", "string", "label to print in the log or trace"},
-		}, "any", nil,
+		}, "any", nil, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"if", "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
@@ -587,35 +587,35 @@ func init() {
 			DeclarationParameter{"condition...", "bool", "condition to evaluate"},
 			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true"},
 			DeclarationParameter{"false-branch", "returntype", "code to evaluate if condition is false"},
-		}, "returntype", nil,
+		}, "returntype", nil, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"and", "returns true if all conditions evaluate to true",
 		1, 1000,
 		[]DeclarationParameter{
 			DeclarationParameter{"condition", "bool", "condition to evaluate"},
-		}, "bool", nil,
+		}, "bool", nil, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"or", "returns true if at least one condition evaluates to true",
 		1, 1000,
 		[]DeclarationParameter{
 			DeclarationParameter{"condition", "any", "condition to evaluate"},
-		}, "bool", nil,
+		}, "bool", nil, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"coalesce", "returns the first value that has a non-zero value",
 		1, 1000,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "returntype", "value to examine"},
-		}, "returntype", nil,
+		}, "returntype", nil, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"coalesceNil", "returns the first value that has a non-nil value",
 		1, 1000,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "returntype", "value to examine"},
-		}, "returntype", nil,
+		}, "returntype", nil, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"define", "defines or sets a variable in the current environment",
@@ -623,7 +623,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"variable", "symbol", "variable to set"},
 			DeclarationParameter{"value", "returntype", "value to set the variable to"},
-		}, "bool", nil,
+		}, "bool", nil, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"set", "defines or sets a variable in the current environment",
@@ -631,7 +631,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"variable", "symbol", "variable to set"},
 			DeclarationParameter{"value", "returntype", "value to set the variable to"},
-		}, "bool", nil,
+		}, "bool", nil, false,
 	})
 
 	// basic
@@ -651,7 +651,7 @@ func init() {
 				}
 				panic(b.String())
 			}
-		},
+		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
@@ -669,7 +669,7 @@ func init() {
 			}()
 			result = Apply(a[0])
 			return
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply", "runs the function with its arguments",
@@ -680,7 +680,7 @@ func init() {
 		}, "any",
 		func (a ...Scmer) Scmer {
 			return Apply(a[0], a[1].([]Scmer)...)
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
@@ -691,7 +691,7 @@ func init() {
 		}, "symbol",
 		func (a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], a[1].([]Scmer))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
@@ -701,7 +701,7 @@ func init() {
 		}, "symbol",
 		func (a ...Scmer) Scmer {
 			return Symbol(String(a[0]))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list", "returns a list containing the parameters as alements",
@@ -709,7 +709,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "value for the list"},
 		}, "list",
-		nil,
+		nil, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
@@ -719,7 +719,7 @@ func init() {
 		}, "string",
 		func (a ...Scmer) Scmer {
 			return String(a[0])
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"match", `takes a value evaluates the branch that first matches the given pattern
@@ -740,7 +740,7 @@ Patterns can be any of:
 			DeclarationParameter{"result...", "returntype", "result value when the pattern matches; this code can use the variables matched in the pattern"},
 			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches"}, /* TODO: turn to returntype as soon as pattern+result are properly repeaded in Validate */
 		}, "any", // TODO: returntype as soon as repead validate is implemented */
-		nil,
+		nil, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"lambda", "returns a function (func) constructed from the given code",
@@ -750,7 +750,7 @@ Patterns can be any of:
 			DeclarationParameter{"code", "any", "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"},
 			DeclarationParameter{"numvars", "number", "number of unnamed variables that can be accessed via (var 0) (var 1) etc."},
 		}, "func", // TODO: func(...)->returntype as soon as function types are implemented
-		nil,
+		nil, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"begin", "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
@@ -759,7 +759,7 @@ Patterns can be any of:
 			DeclarationParameter{"expression...", "any", "expressions to evaluate"},
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any", // TODO: returntype as soon as repeat is implemented
-		nil,
+		nil, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"parallel", "executes all parameters in parallel and returns nil if they are finished",
@@ -768,7 +768,7 @@ Patterns can be any of:
 			DeclarationParameter{"expression...", "any", "expressions to evaluate in parallel"},
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any", // TODO: returntype as soon as repeat is implemented
-		nil,
+		nil, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"source", "annotates the node with filename and line information for better backtraces",
@@ -787,7 +787,7 @@ Patterns can be any of:
 				ToInt(a[2]),
 				a[3],
 			}
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"scheme", "parses a scheme expression into a list",
@@ -802,7 +802,7 @@ Patterns can be any of:
 				filename = String(a[1])
 			}
 			return Read(filename, String(a[0]))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"serialize", "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
@@ -812,7 +812,7 @@ Patterns can be any of:
 		}, "string",
 		func (a ...Scmer) Scmer {
 			return SerializeToString(a[0], &Globalenv)
-		},
+		}, false,
 	})
 
 	init_alu()

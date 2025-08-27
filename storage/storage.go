@@ -161,7 +161,7 @@ func Init(en scm.Env) {
 			}
 			result := t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
 			return result
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
@@ -310,7 +310,7 @@ func Init(en scm.Env) {
 			}
 			result := t.scan_order(filtercols, a[3], sortcols, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
 			return result
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createdatabase", "creates a new database",
@@ -325,7 +325,7 @@ func Init(en scm.Env) {
 				ignoreexists = true
 			}
 			return CreateDatabase(scm.String(a[0]), ignoreexists)
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"dropdatabase", "creates a new database",
@@ -336,7 +336,7 @@ func Init(en scm.Env) {
 		func (a ...scm.Scmer) scm.Scmer {
 			DropDatabase(scm.String(a[0]))
 			return true
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createtable", "creates a new database",
@@ -461,7 +461,7 @@ func Init(en scm.Env) {
 				}
 			}
 			return true
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createcolumn", "creates a new column in table",
@@ -509,7 +509,7 @@ func Init(en scm.Env) {
 			}
 			
 			return ok
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createkey", "creates a new key on a table",
@@ -557,7 +557,7 @@ func Init(en scm.Env) {
 			db.save()
 
 			return true
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createforeignkey", "creates a new foreign key on a table",
@@ -615,7 +615,7 @@ func Init(en scm.Env) {
 			db.save()
 
 			return true
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"shardcolumn", "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
@@ -656,7 +656,7 @@ func Init(en scm.Env) {
 			// calculate them anew
 			return t.NewShardDimension(scm.String(a[2]), numPartitions).Pivots
 			
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"partitiontable", "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
@@ -700,7 +700,7 @@ func Init(en scm.Env) {
 				}
 				return false
 			}
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"altertable", "alters a table",
@@ -730,7 +730,7 @@ func Init(en scm.Env) {
 			default:
 				panic("unimplemented alter table operation: " + scm.String(a[2]))
 			}
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"altercolumn", "alters a column",
@@ -774,7 +774,7 @@ func Init(en scm.Env) {
 				}
 			}
 			panic("column " + scm.String(a[0]) + "." + scm.String(a[1]) + "." + scm.String(a[2]) + " does not exist")
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"droptable", "removes a table",
@@ -791,7 +791,7 @@ func Init(en scm.Env) {
 				DropTable(scm.String(a[0]), scm.String(a[1]), false)
 			}
 			return true
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table and returns the number of successful items",
@@ -835,7 +835,7 @@ func Init(en scm.Env) {
 				rows[i] = row.([]scm.Scmer)
 			}
 			return int64(db.Tables.Get(scm.String(a[1])).Insert(cols, rows, onCollisionCols, onCollision, mergeNull))
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"stat", "return memory statistics",
@@ -854,7 +854,7 @@ func Init(en scm.Env) {
 			} else {
 				return nil
 			}
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"show", "show databases/tables/columns\n\n(show) will list all databases as a list of strings\n(show schema) will list all tables as a list of strings\n(show schema tbl) will list all columns as a list of dictionaries with the keys (name type dimensions)",
@@ -889,7 +889,7 @@ func Init(en scm.Env) {
 			} else {
 				panic("invalid call of show")
 			}
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"rebuild", "rebuilds all main storages and returns the amount of time it took",
@@ -909,7 +909,7 @@ func Init(en scm.Env) {
 			}
 
 			return Rebuild(all, repartition)
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"loadCSV", "loads a CSV stream into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.",
@@ -936,7 +936,7 @@ func Init(en scm.Env) {
 			LoadCSV(scm.String(a[0]), scm.String(a[1]), a[2].(io.Reader), delimiter, firstline)
 
 			return fmt.Sprint(time.Since(start))
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"loadJSON", "loads a .jsonl file from stream into a database and returns the amount of time it took.\nJSONL is a linebreak separated file of JSON objects. Each JSON object is one dataset in the database. Before you add rows, you must declare the table in a line '#table <tablename>'. All other lines starting with # are comments. Columns are created dynamically as soon as they occur in a json object.",
@@ -952,7 +952,7 @@ func Init(en scm.Env) {
 			LoadJSON(scm.String(a[0]), a[1].(io.Reader))
 
 			return fmt.Sprint(time.Since(start))
-		},
+		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"settings", "reads or writes a global settings value. This modifies your data/settings.json.",
@@ -961,7 +961,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"key", "string", "name of the key to set or get (for reference, rts)"},
 			scm.DeclarationParameter{"value", "any", "new value of that setting"},
 		}, "any",
-		ChangeSettings,
+		ChangeSettings, false,
 	})
 }
 

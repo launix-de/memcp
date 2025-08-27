@@ -128,7 +128,7 @@ func init_sync() {
 		0, 0,
 		[]DeclarationParameter{
 		}, "func",
-		NewSession,
+		NewSession, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"context", "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
@@ -136,7 +136,7 @@ func init_sync() {
 		[]DeclarationParameter{
 			DeclarationParameter{"args...", "any", "depends on the usage"},
 		}, "any",
-		Context,
+		Context, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sleep", "sleeps the amount of seconds",
@@ -152,7 +152,7 @@ func init_sync() {
 				case <- time.After(time.Duration(ToFloat(a[0]) * float64(time.Second))):
 					return true
 			}
-		},
+		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
@@ -169,7 +169,7 @@ func init_sync() {
 				params = a
 				return once()
 			}
-		},
+		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
@@ -192,6 +192,6 @@ func init_sync() {
 				// execute serially
 				return Apply(a[0])
 			}
-		},
+		}, false,
 	})
 }

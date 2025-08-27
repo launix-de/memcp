@@ -209,7 +209,7 @@ func setupIO(wd string) {
 			}
 			fmt.Println()
 			return true
-		},
+		}, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"env", "returns the content of a environment variable",
@@ -228,7 +228,7 @@ func setupIO(wd string) {
 			} else {
 				return os.Getenv(scm.String(a[0]))
 			}
-		},
+		}, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"help", "Lists all functions or print help for a specific function",
@@ -243,7 +243,7 @@ func setupIO(wd string) {
 				scm.Help(a[0])
 			}
 			return nil
-		},
+		}, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"import", "Imports a file .scm file into current namespace",
@@ -251,7 +251,7 @@ func setupIO(wd string) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
 		}, "any",
-		(func(...scm.Scmer) scm.Scmer)(getImport(wd)),
+		(func(...scm.Scmer) scm.Scmer)(getImport(wd)), false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"load", "Loads a file or stream and returns the string or iterates line-wise",
@@ -261,7 +261,7 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"linehandler", "func", "handler that reads each line; each line may end with delimiter"},
 			scm.DeclarationParameter{"delimiter", "string", "delimiter to extract; if no delimiter is given, the file is read as whole and returned or passed to linehandler"},
 		}, "string|bool",
-		(func(...scm.Scmer) scm.Scmer)(getLoad(wd)),
+		(func(...scm.Scmer) scm.Scmer)(getLoad(wd)), false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"stream", "Opens a file readonly as stream",
@@ -269,7 +269,7 @@ func setupIO(wd string) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
 		}, "stream",
-		(func(...scm.Scmer) scm.Scmer)(getStream(wd)),
+		(func(...scm.Scmer) scm.Scmer)(getStream(wd)), false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"watch", "Loads a file and calls the callback. Whenever the file changes on disk, the file is load again.",
@@ -278,7 +278,7 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"filename", "string", "filename relative to folder of source file"},
 			scm.DeclarationParameter{"updatehandler", "func", "handler that receives the file content func(content)"},
 		}, "bool",
-		(func(...scm.Scmer) scm.Scmer)(getWatch(wd)),
+		(func(...scm.Scmer) scm.Scmer)(getWatch(wd)), false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"serve", "Opens a HTTP server at a given port",
@@ -287,7 +287,7 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"port", "number", "port number for HTTP server"},
 			scm.DeclarationParameter{"handler", "func", "handler: lambda(req res) that handles the http request (TODO: detailed documentation)"},
 		}, "bool",
-		scm.HTTPServe,
+		scm.HTTPServe, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"serveStatic", "creates a static handler for use as a callback in (serve) - returns a handler lambda(req res)",
@@ -295,7 +295,7 @@ func setupIO(wd string) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"directory", "string", "folder with the files to serve"},
 		}, "func",
-		(func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)),
+		(func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)), false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"mysql", "Imports a file .scm file into current namespace",
@@ -306,7 +306,7 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"schemacallback", "func", "lambda(username schema) bool handler check whether user is allowed to schem (string) - you should check access rights here"},
 			scm.DeclarationParameter{"handler", "func", "lambda(schema sql resultrow session) handler to process sql query (string) in schema (string). resultrow is a lambda(list)"},
 		}, "bool",
-		scm.MySQLServe,
+		scm.MySQLServe, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"password", "Hashes a password with sha1 (for mysql user authentication)",
@@ -314,7 +314,7 @@ func setupIO(wd string) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"password", "string", "plain text password to hash"},
 		}, "string",
-		scm.MySQLPassword,
+		scm.MySQLPassword, true,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"args", "Returns command line arguments",
@@ -326,7 +326,7 @@ func setupIO(wd string) {
 				args[i] = arg
 			}
 			return args
-		},
+		}, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"arg", "Gets a command line argument value",
@@ -383,7 +383,7 @@ func setupIO(wd string) {
 			}
 			
 			return defaultValue
-		},
+		}, false,
 	})
 }
 

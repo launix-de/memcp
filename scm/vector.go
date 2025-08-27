@@ -56,7 +56,7 @@ func init_vector() {
 				}
 			}
 			return result
-		},
+		}, true,
 	})
 }
 

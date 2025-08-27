@@ -109,7 +109,7 @@ func init_strings() {
 		func(a ...Scmer) (result Scmer) {
 			_, ok := a[0].(string)
 			return ok
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"concat", "concatenates stringable values and returns a string",
@@ -124,7 +124,7 @@ func init_strings() {
 				b.WriteString(String(s))
 			}
 			return b.String()
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"substr", "returns a substring",
@@ -143,7 +143,7 @@ func init_strings() {
 			} else {
 				return s[i:]
 			}
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"simplify", "turns a stringable input value in the easiest-most value (e.g. turn strings into numbers if they are numeric",
@@ -154,7 +154,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// turn string to number or so
 			return Simplify(String(a[0]))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlen", "returns the length of a string",
@@ -165,7 +165,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// string
 			return float64(len(String(a[0])))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlike", "matches the string against a wildcard pattern (SQL compliant)",
@@ -178,7 +178,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// string
 			return StrLike(String(a[0]), String(a[1])) // TODO: collation
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"toLower", "turns a string into lower case",
@@ -189,7 +189,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// string
 			return strings.ToLower(String(a[0]))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"toUpper", "turns a string into upper case",
@@ -200,7 +200,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// string
 			return strings.ToUpper(String(a[0]))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"replace", "replaces all occurances in a string with another string",
@@ -213,7 +213,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// string
 			return strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2]))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"split", "splits a string using a separator or space",
@@ -234,7 +234,7 @@ func init_strings() {
 				result[i] = v
 			}
 			return result
-		},
+		}, true,
 	})
 
 	/* comparison */
@@ -305,7 +305,7 @@ func init_strings() {
 					return LessScm
 				}
 			}
-		},
+		}, true,
 	})
 
 	/* escaping functions similar to PHP */
@@ -318,7 +318,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// string
 			return html.EscapeString(String(a[0]))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"urlencode", "encodes a string according to URI coding schema",
@@ -328,7 +328,7 @@ func init_strings() {
 		}, "string",
 		func (a ...Scmer) Scmer {
 			return url.QueryEscape(String(a[0]))
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"urldecode", "decodes a string according to URI coding schema",
@@ -342,7 +342,7 @@ func init_strings() {
 			} else {
 				panic("error while decoding URL: " + fmt.Sprint(err))
 			}
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode", "encodes a value in JSON, treats lists as lists",
@@ -356,7 +356,7 @@ func init_strings() {
 				panic(err)
 			}
 			return string(b)
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode_assoc", "encodes a value in JSON, treats lists as associative arrays",
@@ -389,7 +389,7 @@ func init_strings() {
 				panic(err)
 			}
 			return string(b)
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_decode", "parses JSON into a map",
@@ -404,7 +404,7 @@ func init_strings() {
 				panic(err)
 			}
 			return TransformFromJSON(result)
-		},
+		}, true,
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
 	Declare(&Globalenv, &Declaration{
@@ -432,7 +432,7 @@ func init_strings() {
 				}
 				return m
 			})
-		},
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"bin2hex", "turns binary data into hex with lowercase letters",
@@ -449,7 +449,7 @@ func init_strings() {
 				result[2*i+1] = hexmap[input[i] % 16]
 			}
 			return string(result);
-		},
+		}, true,
 	})
 
 }
