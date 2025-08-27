@@ -123,6 +123,15 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		total_limit = offset + limit
 	}
 
+	// TODO(memcp): Parallel braking
+	// - Introduce a shared (atomic) global threshold for the k-th element (k = total_limit) in multi-key space.
+	// - Option 1 (preferred): implement ordered per-shard iteration (iterateIndexSorted by sortcols). Each shard streams next-best tuple; if next-best >= threshold, early-stop shard.
+	// - Option 2 (interim): keep a per-shard local top-k heap while scanning unsorted; prune using global threshold; sort local top-k only.
+
+	// TODO(memcp): Selection vectors & vectorization
+	// - Batch predicate evaluation into a selection vector; compact indices; then project/aggregate only selected rows.
+	// - Pre-bind ASC/DESC comparators; reuse argument slices to avoid allocations.
+
 	var q globalqueue
 	q_ := make(chan *shardqueue, 1)
 	gls.Go(func() {
@@ -267,7 +276,8 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		maxInsertIndex = len(t.inserts)
 
 		// iterate over items (indexed)
-		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint) { // TODO: iterateIndexSorted
+		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
+		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint) {
 			if t.deletions.Get(idx) {
 				return // item is on delete list
 			}

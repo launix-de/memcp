@@ -115,7 +115,8 @@ if there is a group function, create a temporary preaggregate table
 	   - Prefer flattening nested SELECTs: prefix aliases (alias:tbl), add inner condition to outer condition, remember SELECT-title renames in renamelist.
 	   - Only materialize when necessary: inner GROUP/HAVING, LIMIT/OFFSET, or incompatible ORDER.
 	   - Before createtable materialization, detect FK/PK grouping and switch to a hidden computed column path instead of temp tables.
-	   - For ORDER+LIMIT: if compatible with outer ORDER, annotate node for range-based braking (k = offset+limit) and avoid inner materialization.
+	   - For ORDER+LIMIT: if compatible with outer ORDER, annotate node for range-based braking (k = offset+limit) and avoid inner materialization; drop inner ORDER if no LIMIT.
+	   - TODO: Implement free_vars(expr) and should_materialize(meta) helpers; add (order_brake k) annotation passed down to scan_order.
 	*/
 
 	/* check if we have FROM selects -> returns '(tables renamelist) */
