@@ -147,6 +147,11 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (equal? (la "a") 1) true "call assoc as func(list)")
 (assert (equal? (d "b") 2) true "call assoc as func(dict)")
 
+/* overwrite should not grow list length */
+(set d (set_assoc d "a" 11))
+(assert (equal? (d "a") 11) true "overwrite list assoc value")
+(assert (equal? (count d) 4) true "list length unchanged on overwrite")
+
 /* merge + map + filter */
 (define d1 (list "x" 10 "y" 20))
 (define d2 (list "y" 5  "z" 7))
@@ -174,7 +179,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 
 /* extract_assoc produces all keys (sanity: count) */
 (define countkeys (reduce (extract_assoc big (lambda (k v) 1)) (lambda (a b) (+ a b)) 0))
-(assert (> countkeys 1000) true "fastdict extract returns many keys")
+(assert (equal? countkeys 2000) true "fastdict extract returns all keys (2000)")
 
 /* map_assoc and filter_assoc over FastDict */
 (define biginc (map_assoc big (lambda (k v) (+ v 1))))
