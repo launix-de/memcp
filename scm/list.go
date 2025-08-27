@@ -40,7 +40,16 @@ func init_list() {
 		func(a ...Scmer) Scmer {
 			// append a b ...: append item b to list a (construct list from item + tail)
 			return float64(len(a[0].([]Scmer)))
+			switch dict := a[0].(type) {
+			case []Scmer:
+				return int64(len(dict))
+			case *FastDict:
+				return int64(len(dict.Pairs))
+			default:
+				panic("count expects a list")
+			}
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nth", "get the nth item of a list",
@@ -52,6 +61,7 @@ func init_list() {
 		func(a ...Scmer) Scmer {
 			return a[0].([]Scmer)[ToInt(a[1])]
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
@@ -64,6 +74,7 @@ func init_list() {
 			// append a b ...: append item b to list a (construct list from item + tail)
 			return append(a[0].([]Scmer), a[1:]...)
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
@@ -83,10 +94,11 @@ func init_list() {
 					}
 				}
 				list = append(list, el)
-				skipItem:
+			skipItem:
 			}
 			return list
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cons", "constructs a list from a head and a tail list",
@@ -104,6 +116,7 @@ func init_list() {
 				return []Scmer{car, cdr}
 			}
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"car", "extracts the head of a list",
@@ -115,6 +128,7 @@ func init_list() {
 			// head of tuple
 			return a[0].([]Scmer)[0]
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cdr", "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
@@ -126,6 +140,7 @@ func init_list() {
 			// rest of tuple
 			return a[0].([]Scmer)[1:]
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
@@ -133,7 +148,7 @@ func init_list() {
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list of lists of items"},
 		}, "list",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			list := a
 			if len(a) == 1 {
 				// one parameter: interpret as list of lists
@@ -158,6 +173,7 @@ func init_list() {
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge", "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
@@ -165,7 +181,7 @@ func init_list() {
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list of lists of items"},
 		}, "list",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			list := a
 			if len(a) == 1 {
 				// one parameter: interpret as list of lists
@@ -189,6 +205,7 @@ func init_list() {
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge_unique", "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
@@ -196,7 +213,7 @@ func init_list() {
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list of lists of items"},
 		}, "list",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			list := a
 			if len(a) == 1 {
 				// one parameter: interpret as list of lists
@@ -217,11 +234,12 @@ func init_list() {
 						}
 					}
 					result = append(result, el)
-					skipNext:
+				skipNext:
 				}
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"has?", "checks if a list has a certain item (equal?)",
@@ -240,6 +258,7 @@ func init_list() {
 			}
 			return false
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"filter", "returns a list that only contains elements that pass the filter function",
@@ -258,6 +277,7 @@ func init_list() {
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"map", "returns a list that contains the results of a map function that is applied to the list",
@@ -275,6 +295,7 @@ func init_list() {
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
@@ -292,6 +313,7 @@ func init_list() {
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce", "returns a list that contains the result of a map function",
@@ -321,6 +343,7 @@ func init_list() {
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"produce", "returns a list that contains produced items - it works like for(state = startstate, condition(state), state = iterator(state)) {yield state}",
@@ -342,6 +365,7 @@ func init_list() {
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"produceN", "returns a list with numbers from 0..n-1",
@@ -358,6 +382,7 @@ func init_list() {
 			}
 			return result
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list?", "checks if a value is a list",
@@ -370,6 +395,7 @@ func init_list() {
 			_, ok := a[0].([]Scmer)
 			return ok
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"contains?", "checks if a value is in a list; uses the equal?? operator",
@@ -388,40 +414,44 @@ func init_list() {
 			}
 			return false
 		},
+		true,
 	})
 
 	// dictionary functions
 	DeclareTitle("Associative Lists / Dictionaries")
 
-    Declare(&Globalenv, &Declaration{
-        "filter_assoc", "returns a filtered dictionary according to a filter function",
-        2, 2,
-        []DeclarationParameter{
-            DeclarationParameter{"dict", "list", "dictionary that has to be filtered"},
-            DeclarationParameter{"condition", "func", "filter function func(string any)->bool where the first parameter is the key, the second is the value"},
-        }, "list",
-        func(a ...Scmer) Scmer {
-            // dict, fn(key, value)
-            result := make([]Scmer, 0)
-            fn := OptimizeProcToSerialFunction(a[1])
-            switch dict := a[0].(type) {
-            case []Scmer:
-                for i := 0; i < len(dict); i += 2 {
-                    if ToBool(fn(dict[i], dict[i+1])) {
-                        result = append(result, dict[i], dict[i+1])
-                    }
-                }
-            case *FastDict:
-                dict.Iterate(func(k, v Scmer) bool {
-                    if ToBool(fn(k, v)) { result = append(result, k, v) }
-                    return true
-                })
-            default:
-                panic("filter_assoc expects a list or FastDict")
-            }
-            return result
-        },
-    })
+	Declare(&Globalenv, &Declaration{
+		"filter_assoc", "returns a filtered dictionary according to a filter function",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"dict", "list", "dictionary that has to be filtered"},
+			DeclarationParameter{"condition", "func", "filter function func(string any)->bool where the first parameter is the key, the second is the value"},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			// dict, fn(key, value)
+			result := make([]Scmer, 0)
+			fn := OptimizeProcToSerialFunction(a[1])
+			switch dict := a[0].(type) {
+			case []Scmer:
+				for i := 0; i < len(dict); i += 2 {
+					if ToBool(fn(dict[i], dict[i+1])) {
+						result = append(result, dict[i], dict[i+1])
+					}
+				}
+			case *FastDict:
+				dict.Iterate(func(k, v Scmer) bool {
+					if ToBool(fn(k, v)) {
+						result = append(result, k, v)
+					}
+					return true
+				})
+			default:
+				panic("filter_assoc expects a list")
+			}
+			return result
+		},
+		true,
+	})
 	Declare(&Globalenv, &Declaration{
 		"map_assoc", "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
 		2, 2,
@@ -431,26 +461,32 @@ func init_list() {
 		}, "list",
 		func(a ...Scmer) Scmer {
 			// apply fn(key value) to each assoc item and return mapped dict
-            result := make([]Scmer, 0)
-            fn := OptimizeProcToSerialFunction(a[1])
-            switch dict := a[0].(type) {
-            case []Scmer:
-                result = make([]Scmer, len(dict))
-                var k Scmer
-                for i, v := range dict {
-                    if i % 2 == 0 { result[i] = v; k = v } else { result[i] = fn(k, v) }
-                }
-            case *FastDict:
-                // allocate to same size
-                result = make([]Scmer, len(dict.Pairs))
-                i := 0
-                dict.Iterate(func(k, v Scmer) bool { result[i] = k; result[i+1] = fn(k, v); i+=2; return true })
-            default:
-                panic("map_assoc expects a list or FastDict")
-            }
-            return result
-        },
-    })
+			result := make([]Scmer, 0)
+			fn := OptimizeProcToSerialFunction(a[1])
+			switch dict := a[0].(type) {
+			case []Scmer:
+				result = make([]Scmer, len(dict))
+				var k Scmer
+				for i, v := range dict {
+					if i%2 == 0 {
+						result[i] = v
+						k = v
+					} else {
+						result[i] = fn(k, v)
+					}
+				}
+			case *FastDict:
+				// allocate to same size
+				result = make([]Scmer, len(dict.Pairs))
+				i := 0
+				dict.Iterate(func(k, v Scmer) bool { result[i] = k; result[i+1] = fn(k, v); i += 2; return true })
+			default:
+				panic("map_assoc expects a list")
+			}
+			return result
+		},
+		true,
+	})
 	Declare(&Globalenv, &Declaration{
 		"reduce_assoc", "reduces a dictionary according to a reduce function",
 		3, 3,
@@ -461,19 +497,22 @@ func init_list() {
 		}, "any",
 		func(a ...Scmer) Scmer {
 			// dict, reducefn(a, key, value), neutral
-            result := a[2]
-            reduce := OptimizeProcToSerialFunction(a[1])
-            switch dict := a[0].(type) {
-            case []Scmer:
-                for i := 0; i < len(dict); i += 2 { result = reduce(result, dict[i], dict[i+1]) }
-            case *FastDict:
-                dict.Iterate(func(k, v Scmer) bool { result = reduce(result, k, v); return true })
-            default:
-                panic("reduce_assoc expects a list or FastDict")
-            }
-            return result
-        },
-    })
+			result := a[2]
+			reduce := OptimizeProcToSerialFunction(a[1])
+			switch dict := a[0].(type) {
+			case []Scmer:
+				for i := 0; i < len(dict); i += 2 {
+					result = reduce(result, dict[i], dict[i+1])
+				}
+			case *FastDict:
+				dict.Iterate(func(k, v Scmer) bool { result = reduce(result, k, v); return true })
+			default:
+				panic("reduce_assoc expects a list")
+			}
+			return result
+		},
+		true,
+	})
 	Declare(&Globalenv, &Declaration{
 		"has_assoc?", "checks if a dictionary has a key present",
 		2, 2,
@@ -483,17 +522,24 @@ func init_list() {
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			// dict, element
-            switch dict := a[0].(type) {
-            case []Scmer:
-                for i := 0; i < len(dict); i += 2 { if Equal(dict[i], a[1]) { return true } }
-            case *FastDict:
-                if _, ok := dict.Get(a[1]); ok { return true }
-            default:
-                panic("has_assoc? expects a list or FastDict")
-            }
-            return false
-        },
-    })
+			switch dict := a[0].(type) {
+			case []Scmer:
+				for i := 0; i < len(dict); i += 2 {
+					if Equal(dict[i], a[1]) {
+						return true
+					}
+				}
+			case *FastDict:
+				if _, ok := dict.Get(a[1]); ok {
+					return true
+				}
+			default:
+				panic("has_assoc? expects a list")
+			}
+			return false
+		},
+		true,
+	})
 	Declare(&Globalenv, &Declaration{
 		"extract_assoc", "applies a function (key value) on the dictionary and returns the results as a flat list",
 		2, 2,
@@ -503,23 +549,30 @@ func init_list() {
 		}, "list",
 		func(a ...Scmer) Scmer {
 			// apply fn(key value) to each assoc item and return results as array
-            result := make([]Scmer, 0)
-            fn := OptimizeProcToSerialFunction(a[1])
-            switch dict := a[0].(type) {
-            case []Scmer:
-                result = make([]Scmer, len(dict)/2)
-                var k Scmer
-                for i, v := range dict { if i%2==0 { k=v } else { result[i/2] = fn(k, v) } }
-            case *FastDict:
-                tmp := make([]Scmer, 0, len(dict.Pairs)/2)
-                dict.Iterate(func(k, v Scmer) bool { tmp = append(tmp, fn(k, v)); return true })
-                result = tmp
-            default:
-                panic("extract_assoc expects a list or FastDict")
-            }
-            return result
-        },
-    })
+			result := make([]Scmer, 0)
+			fn := OptimizeProcToSerialFunction(a[1])
+			switch dict := a[0].(type) {
+			case []Scmer:
+				result = make([]Scmer, len(dict)/2)
+				var k Scmer
+				for i, v := range dict {
+					if i%2 == 0 {
+						k = v
+					} else {
+						result[i/2] = fn(k, v)
+					}
+				}
+			case *FastDict:
+				tmp := make([]Scmer, 0, len(dict.Pairs)/2)
+				dict.Iterate(func(k, v Scmer) bool { tmp = append(tmp, fn(k, v)); return true })
+				result = tmp
+			default:
+				panic("extract_assoc expects a list")
+			}
+			return result
+		},
+		true,
+	})
 	Declare(&Globalenv, &Declaration{
 		"set_assoc", "returns a dictionary where a single value has been changed.\nThis function may destroy the input value for the sake of performance. You must not use the input value again.",
 		3, 4,
@@ -530,41 +583,48 @@ func init_list() {
 			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be pysically stored in the new dictionary."},
 		}, "list",
 		func(a ...Scmer) Scmer {
-            // dict, key, value, [merge]
-            var fn func(a ...Scmer) Scmer
-            if len(a) > 3 {
-                fn = OptimizeProcToSerialFunction(a[3])
-            }
-            switch dict := a[0].(type) {
-            case []Scmer:
-                list := dict
-                for i := 0; i < len(list); i += 2 {
-                    if Equal(list[i], a[1]) {
-                        if len(a) > 3 { list[i+1] = fn(list[i+1], a[2]) } else { list[i+1] = a[2] }
-                        return list
-                    }
-                }
-                // append; if list gets big, transparently switch to FastDict
-                list = append(list, a[1], a[2])
-                if len(list) >= 10 { // threshold: 5 pairs
-                    fd := NewFastDict(len(list)/2 + 4)
-                    for i := 0; i < len(list); i += 2 { fd.Set(list[i], list[i+1], nil) }
-                    return fd
-                }
-                return list
-            case *FastDict:
-                var merge func(Scmer, Scmer) Scmer
-                if len(a) > 3 {
-                    mfn := fn
-                    merge = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
-                }
-                dict.Set(a[1], a[2], merge)
-                return dict
-            default:
-                panic("set_assoc expects a list or FastDict")
-            }
-        },
-    })
+			// dict, key, value, [merge]
+			var fn func(a ...Scmer) Scmer
+			if len(a) > 3 {
+				fn = OptimizeProcToSerialFunction(a[3])
+			}
+			switch dict := a[0].(type) {
+			case []Scmer:
+				list := dict
+				for i := 0; i < len(list); i += 2 {
+					if Equal(list[i], a[1]) {
+						if len(a) > 3 {
+							list[i+1] = fn(list[i+1], a[2])
+						} else {
+							list[i+1] = a[2]
+						}
+						return list
+					}
+				}
+				// append; if list gets big, transparently switch to FastDict
+				list = append(list, a[1], a[2])
+				if len(list) >= 10 { // threshold: 5 pairs
+					fd := NewFastDict(len(list)/2 + 4)
+					for i := 0; i < len(list); i += 2 {
+						fd.Set(list[i], list[i+1], nil)
+					}
+					return fd
+				}
+				return list
+			case *FastDict:
+				var merge func(Scmer, Scmer) Scmer
+				if len(a) > 3 {
+					mfn := fn
+					merge = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
+				}
+				dict.Set(a[1], a[2], merge)
+				return dict
+			default:
+				panic("set_assoc expects a list")
+			}
+		},
+		true,
+	})
 	Declare(&Globalenv, &Declaration{
 		"merge_assoc", "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
 		2, 3,
@@ -574,25 +634,30 @@ func init_list() {
 			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary."},
 		}, "list",
 		func(a ...Scmer) Scmer {
-            set_assoc := Globalenv.Vars["set_assoc"].(func(...Scmer) Scmer)
-            dst := a[0]
-            switch src := a[1].(type) {
-            case []Scmer:
-                if len(a) > 2 {
-                    for i := 0; i < len(src); i += 2 { dst = set_assoc(dst, src[i], src[i+1], a[2]) }
-                } else {
-                    for i := 0; i < len(src); i += 2 { dst = set_assoc(dst, src[i], src[i+1]) }
-                }
-            case *FastDict:
-                if len(a) > 2 {
-                    src.Iterate(func(k, v Scmer) bool { dst = set_assoc(dst, k, v, a[2]); return true })
-                } else {
-                    src.Iterate(func(k, v Scmer) bool { dst = set_assoc(dst, k, v); return true })
-                }
-            default:
-                panic("merge_assoc expects a list or FastDict as dict2")
-            }
-            return dst
-        },
-    })
+			set_assoc := Globalenv.Vars["set_assoc"].(func(...Scmer) Scmer)
+			dst := a[0]
+			switch src := a[1].(type) {
+			case []Scmer:
+				if len(a) > 2 {
+					for i := 0; i < len(src); i += 2 {
+						dst = set_assoc(dst, src[i], src[i+1], a[2])
+					}
+				} else {
+					for i := 0; i < len(src); i += 2 {
+						dst = set_assoc(dst, src[i], src[i+1])
+					}
+				}
+			case *FastDict:
+				if len(a) > 2 {
+					src.Iterate(func(k, v Scmer) bool { dst = set_assoc(dst, k, v, a[2]); return true })
+				} else {
+					src.Iterate(func(k, v Scmer) bool { dst = set_assoc(dst, k, v); return true })
+				}
+			default:
+				panic("merge_assoc expects a list as dict2")
+			}
+			return dst
+		},
+		true,
+	})
 }

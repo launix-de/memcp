@@ -118,6 +118,7 @@ func init_alu() {
 			_, ok2 := a[0].(int64)
 			return ok2
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"number?", "tells if the value is a number",
@@ -133,6 +134,7 @@ func init_alu() {
 			_, ok2 := a[0].(int64)
 			return ok2
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"+", "adds two or more numbers",
@@ -150,6 +152,7 @@ func init_alu() {
 			}
 			return v
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"-", "subtracts two or more numbers from the first one",
@@ -164,6 +167,7 @@ func init_alu() {
 			}
 			return v
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"*", "multiplies two or more numbers",
@@ -178,6 +182,7 @@ func init_alu() {
 			}
 			return v
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"/", "divides two or more numbers from the first one",
@@ -192,6 +197,7 @@ func init_alu() {
 			}
 			return v
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<=", "compares two numbers or strings",
@@ -202,6 +208,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return !Less(a[1], a[0])
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<", "compares two numbers or strings",
@@ -212,6 +219,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return Less(a[0], a[1])
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		">", "compares two numbers or strings",
@@ -222,6 +230,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return Less(a[1], a[0])
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		">=", "compares two numbers or strings",
@@ -232,6 +241,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return !Less(a[0], a[1])
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal?", "compares two values of the same type, (equal? nil nil) is true",
@@ -242,6 +252,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return Equal(a[0], a[1])
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal??", "performs a SQL compliant sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive, (equal? nil nil) is nil",
@@ -252,6 +263,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return EqualSQL(a[0], a[1])
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"!", "negates the boolean value",
@@ -262,6 +274,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return !ToBool(a[0]);
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"not", "negates the boolean value",
@@ -272,6 +285,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return !ToBool(a[0]);
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nil?", "returns true if value is nil",
@@ -282,6 +296,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return a[0] == nil;
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"min", "returns the smallest value",
@@ -299,6 +314,7 @@ func init_alu() {
 			}
 			return
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"max", "returns the highest value",
@@ -316,6 +332,7 @@ func init_alu() {
 			}
 			return
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"floor", "rounds the number down",
@@ -326,6 +343,7 @@ func init_alu() {
 		func(a ...Scmer) (result Scmer) {
 			return math.Floor(ToFloat(a[0]))
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"ceil", "rounds the number up",
@@ -336,6 +354,7 @@ func init_alu() {
 		func(a ...Scmer) (result Scmer) {
 			return math.Ceil(ToFloat(a[0]))
 		},
+		true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"round", "rounds the number",
@@ -346,5 +365,6 @@ func init_alu() {
 		func(a ...Scmer) (result Scmer) {
 			return math.Round(ToFloat(a[0]))
 		},
+		true,
 	})
 }

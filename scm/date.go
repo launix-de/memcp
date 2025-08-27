@@ -41,6 +41,7 @@ func init_date() {
 		func(a ...Scmer) (result Scmer) {
 			return int64(time.Now().Unix())
 		},
+		false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"parse_date", "parses unix date from a string",
@@ -56,6 +57,7 @@ func init_date() {
 			}
 			return nil
 		},
+		true,
 	})
 }
 
