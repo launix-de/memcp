@@ -314,8 +314,9 @@ if there is a group function, create a temporary preaggregate table
 							/* extract order cols for this tblvar */
 							/* TODO: match case insensitive column */
 							/* TODO: non-trivial columns to computed columns */
-							(set ordercols (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (cons col a) a)) '()))
-							(set dirs      (reduce order (lambda(a o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (cons dir a) a)) '()))
+							/* preserve ORDER BY key order (first key has highest priority) */
+							(set ordercols (merge (map order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list col) '())))))
+							(set dirs      (merge (map order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list dir) '())))))
 
 							(scan_wrapper 'scan_order schema tbl
 								/* condition */
