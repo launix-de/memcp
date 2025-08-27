@@ -162,6 +162,27 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (define big (reduce (produceN 2000) (lambda (acc i) (set_assoc acc (concat "k" i) i)) ()))
 (assert (equal? (reduce_assoc big (lambda (acc k v) (+ acc v)) 0) 1999000) true "reduce sum big (0..1999)")
 
+/* FastDict getter correctness on many keys */
+(assert (has_assoc? big "k0") true "fastdict has k0")
+(assert (has_assoc? big "k1234") true "fastdict has k1234")
+(assert (equal? (big "k1999") 1999) true "fastdict getter last key")
+(assert (equal? (big "k1") 1) true "fastdict getter small key")
+
+/* Overwrite existing key in FastDict and get updated value */
+(set big (set_assoc big "k100" 555))
+(assert (equal? (big "k100") 555) true "fastdict overwrite value")
+
+/* extract_assoc produces all keys (sanity: count) */
+(define countkeys (reduce (extract_assoc big (lambda (k v) 1)) (lambda (a b) (+ a b)) 0))
+(assert (> countkeys 1000) true "fastdict extract returns many keys")
+
+/* map_assoc and filter_assoc over FastDict */
+(define biginc (map_assoc big (lambda (k v) (+ v 1))))
+(assert (equal? (biginc "k0") 1) true "map fastdict increments")
+(define bigf (filter_assoc biginc (lambda (k v) (> v 1000))))
+(assert (has_assoc? bigf "k1500") true "filter keeps large values")
+(assert (has_assoc? bigf "k1") false "filter drops small values")
+
 
 /* Strings / JSON */
 (print "testing strings ...")
