@@ -43,7 +43,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			case "Backtrace":
 				return Settings.Backtrace
 			case "Trace":
-				return Settings.Backtrace
+				return Settings.Trace
 			case "PartitionMaxDimensions":
 				return int64(Settings.PartitionMaxDimensions)
 			case "DefaultEngine":
