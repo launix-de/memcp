@@ -269,7 +269,6 @@ if there is a group function, create a temporary preaggregate table
 				'('begin
 					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
 					/* INSERT IGNORE group cols into preaggregate */
-					/* TODO: use bulk insert in scan reduce phase (and filter duplicates from a bulk!) */
 					'('time '('begin
 						/* Build group keys via scan: shard-local (set_assoc) then flush per-shard into grouptbl */
 						(begin
@@ -284,13 +283,13 @@ if there is a group function, create a temporary preaggregate table
 									(cons (quote list) (map group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
 								'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
 								'(list) /* empty dict */
-								'((quote lambda) '('acc 'sharddict) '('begin
+								'((quote lambda) '('acc 'sharddict)
 									'('insert
 										schema grouptbl
 										(cons 'list (map group (lambda (col) (concat col))))
 										'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
 										'(list) '('lambda '() true) true)
-									'acc))
+								)
 								isOuter)
 						)
 					) "collect")
