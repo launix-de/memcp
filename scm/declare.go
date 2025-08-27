@@ -29,6 +29,7 @@ type Declaration struct {
 	Params []DeclarationParameter
 	Returns string // any | string | number | int | bool | func | list | symbol | nil
 	Fn func(...Scmer) Scmer
+	Foldable bool // safe to constant-fold when all args are literals
 }
 
 type DeclarationParameter struct {
