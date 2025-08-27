@@ -217,6 +217,35 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (define dd (reduce (produceN 6) (lambda (acc i) (set_assoc acc (concat "k" i) i)) ()))
 (assert (equal? ld dd) true "list vs dict equal content")
 
+/* Optimizer semantics (constant folding, shadowing, set behavior) */
+(print "testing optimizer semantics ...")
+
+/* Constant folding candidates (boolean/arithmetic inside lambdas) */
+(assert ((lambda () (and (and true) true))) true "const and true -> true")
+(assert ((lambda () (and true false))) false "const and false -> false")
+(assert ((lambda () (+ 1 2 3))) 6 "const arith folds to 6")
+(assert ((lambda () (if (and true (equal? 1 1)) 1 2))) 1 "const condition -> 1")
+
+/* Lambda params overshadow outer variables */
+(define y 10)
+(assert ((lambda (y) (+ y 1)) 5) 6 "param shadows outer value")
+(assert y 10 "outer y unchanged after lambda")
+
+/* set should affect current scope/param, not outer */
+(define sx 1)
+(assert ((lambda (sx) (begin (set sx 3) sx)) 7) 3 "set updates local param")
+(assert sx 1 "outer sx unchanged after local set")
+
+/* Shadowing via inner define does not leak */
+(define dz 2)
+(define dz_inner (begin (define dz 9) dz))
+(assert dz_inner 9 "inner define returns its value")
+(assert dz 2 "outer dz unchanged after inner define")
+
+/* Use-once inlining safety: begin with unused define should not change result */
+(assert (begin (define tmp_unused 42) 7) 7 "unused define eliminated")
+
+
 (print "finished unit tests")
 (print "test result: " (teststat "success") "/" (teststat "count"))
 (if (< (teststat "success") (teststat "count")) (begin
