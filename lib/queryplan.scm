@@ -111,6 +111,13 @@ if there is a group function, create a temporary preaggregate table
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 
+	/* TODO(memcp): Unnesting strategy
+	   - Prefer flattening nested SELECTs: prefix aliases (alias:tbl), add inner condition to outer condition, remember SELECT-title renames in renamelist.
+	   - Only materialize when necessary: inner GROUP/HAVING, LIMIT/OFFSET, or incompatible ORDER.
+	   - Before createtable materialization, detect FK/PK grouping and switch to a hidden computed column path instead of temp tables.
+	   - For ORDER+LIMIT: if compatible with outer ORDER, annotate node for range-based braking (k = offset+limit) and avoid inner materialization.
+	*/
+
 	/* check if we have FROM selects -> returns '(tables renamelist) */
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */

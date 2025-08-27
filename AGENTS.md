@@ -35,3 +35,15 @@
 ## Security & Configuration
 - Do not expose development instances publicly. Use `--api-port`, `--mysql-port`, `--disable-mysql`, and `-data <path>` to isolate local runs.
 - Large datasets should not be added to Git; use local paths under `data/`.
+
+## Unnesting Strategy
+- Principle: avoid materialization whenever possible. Nested `SELECT` are flattened as a rename of columns into a single FROM tableset.
+- Materialize only when required (e.g., inner `GROUP BY/HAVING`, `LIMIT/OFFSET`, or correlation). Use hidden temp tables prefixed with `.` containing grouped column names.
+- FK/PK optimization: when grouping by a foreign key that references a primary key, do not create a temp table—add a hidden computed column (prefixed with `.`) on the primary-key table and compute there.
+
+## Execution Hints (Pipelines & Braking)
+- Operator pipelines: fuse filter → project → aggregate in a single scan to reduce overhead (vectorize where possible).
+- Selection vectors: evaluate predicates in batches, compact indices, then project/aggregate only selected rows.
+- Late materialization: read only referenced columns; assemble rows at the edge (joins/output), not in the hot path.
+- Range-based braking: for ORDER BY + LIMIT, maintain a top-k threshold and stop scanning when next-best keys cannot beat it; prefer braking over inner materialization if orders are compatible.
+- Join pipelines: drive ordered/filtered side; hash/range-probe the other; keep fuse-friendly structure; precompute hidden computed columns for FK/PK group reuse.
