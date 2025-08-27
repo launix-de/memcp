@@ -16,6 +16,9 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
+import "sync"
+import "runtime"
 import "runtime/debug"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
@@ -39,7 +42,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 								done <- scanError{r, string(debug.Stack())}
 							}
 						}()
-						for !s.ComputeColumn(name, inputCols, computor) {
+						for !s.ComputeColumn(name, inputCols, computor, len(shardlist) == 1) {
 							// couldn't compute column because delta is still active
 							t.mu.Lock()
 							s = s.rebuild(false)
@@ -62,12 +65,11 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 	panic("column "+t.Name+"."+name+" does not exist")
 }
 
-func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer) bool {
+func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, parallel bool) bool {
+	fmt.Println("start compute on", s.t.Name, "parallel", parallel)
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		return false // can't compute in shards with delta storage
 	}
-
-	fn := scm.OptimizeProcToSerialFunction(computor)
 
 	cols := make([]ColumnStorage, len(inputCols))
 	s.mu.Lock()
@@ -82,11 +84,34 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	colvalues := make([]scm.Scmer, len(cols))
 
 	vals := make([]scm.Scmer, s.main_count) // build the stretchy value array
-	for i := uint(0); i < s.main_count; i++ {
-		for j, col := range cols {
-			colvalues[j] = col.GetValue(i) // read values from main storage into lambda params
+	if parallel {
+		var done sync.WaitGroup
+		done.Add(int(s.main_count))
+		progress := make(chan uint, runtime.NumCPU() / 2) // don't go all at once, we don't have enough RAM
+		for i := 0; i < runtime.NumCPU() / 2; i++ {
+			gls.Go(func() { // threadpool with half of the cores
+				for i := range progress {
+					for j, col := range cols {
+						colvalues[j] = col.GetValue(i) // read values from main storage into lambda params
+					}
+					vals[i] = scm.Apply(computor, colvalues...) // execute computor kernel (but the onoptimized version for non-serial use)
+					done.Done()
+				}
+			})
 		}
-		vals[i] = fn(colvalues...) // execute computor kernel
+		// add all items to the queue
+		for i := uint(0); i < s.main_count; i++ {
+			progress <- i
+		}
+		done.Wait()
+	} else {
+		fn := scm.OptimizeProcToSerialFunction(computor) // optimize for serial application
+		for i := uint(0); i < s.main_count; i++ {
+			for j, col := range cols {
+				colvalues[j] = col.GetValue(i) // read values from main storage into lambda params
+			}
+			vals[i] = fn(colvalues...) // execute computor kernel
+		}
 	}
 
 	s.mu.Lock() // don't defer because we unlock inbetween
