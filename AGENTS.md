@@ -20,6 +20,9 @@
 - Go: format with `go fmt ./...`; keep idiomatic Go (short, cohesive funcs). Tabs and gofmt defaults are expected.
 - Go imports: sort imports by path length ascending within each import block.
 - Scheme (`.scm`): follow existing patterns; filenames are kebab-case; keep code self-explanatory with minimal comments.
+- Indentation:
+  - Go: use tabs; do not mix spaces; rely on gofmt to normalize.
+  - Scheme: indent nested forms with tabs; align continuation lines to opening form where helpful; avoid mixing tabs and spaces.
 - Tests: YAML files use lower_snake_case keys and `NN_description.yaml` naming.
 - Avoid introducing new tools; prefer editing existing files over adding new ones.
 

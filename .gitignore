@@ -7,3 +7,5 @@ memcp
 .memcp-history.tmp
 data
 memcp.sif
+trace*.json
+*.diff

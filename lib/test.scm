@@ -226,6 +226,15 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert ((lambda () (+ 1 2 3))) 6 "const arith folds to 6")
 (assert ((lambda () (if (and true (equal? 1 1)) 1 2))) 1 "const condition -> 1")
 
+/* Setting and calling lambdas via set */
+(assert (begin (set fn (lambda (x) (+ x 1))) (fn 4)) 5 "set lambda then call")
+(assert (begin (set add2 (lambda (a b) (+ a b))) (add2 2 5)) 7 "set 2-param lambda then call")
+
+/* Optimize should fold constants */
+(assert (optimize '(+ 1 2)) 3 "optimize folds +")
+(assert (optimize '(and true (equal? 2 2))) true "optimize folds and/equal")
+(assert (optimize '(begin (define x 4) (+ x 1))) 5 "optimize inlines define use-once")
+
 /* Lambda params overshadow outer variables */
 (define y 10)
 (assert ((lambda (y) (+ y 1)) 5) 6 "param shadows outer value")
