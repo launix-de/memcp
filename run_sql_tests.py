@@ -216,7 +216,7 @@ class SQLTestRunner:
             spec = yaml.safe_load(f)
 
         metadata = spec.get('metadata', {})
-        database = metadata.get('database', 'memcp-tests')
+        database = 'memcp-tests'
 
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
         print(f"💾 Database: {database}")
