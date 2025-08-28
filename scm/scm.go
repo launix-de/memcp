@@ -701,7 +701,7 @@ func init() {
 		}, "symbol",
 		func (a ...Scmer) Scmer {
 			return Symbol(String(a[0]))
-		}, true,
+		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list", "returns a list containing the parameters as alements",

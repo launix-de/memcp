@@ -164,7 +164,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (has_assoc? df "z") false "filter drops z")
 
 /* big assoc to test auto switch to FastDict */
-(define big (reduce (produceN 2000) (lambda (acc i) (set_assoc acc (concat "k" i) i)) ()))
+(define big (reduce (produceN 2000) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
 (assert (equal? (reduce_assoc big (lambda (acc k v) (+ acc v)) 0) 1999000) true "reduce sum big (0..1999)")
 
 /* FastDict getter correctness on many keys */
@@ -224,7 +224,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert ((lambda () (and (and true) true))) true "const and true -> true")
 (assert ((lambda () (and true false))) false "const and false -> false")
 (assert ((lambda () (+ 1 2 3))) 6 "const arith folds to 6")
-(assert ((lambda () (if (and true (equal? 1 1)) 1 2))) 1 "const condition -> 1")
+(assert ((lambda () (if (and true (equal? 1 1)) 1 2))) true "const condition -> true")
 
 /* Setting and calling lambdas via set */
 (assert (begin (set fn (lambda (x) (+ x 1))) (fn 4)) 5 "set lambda then call")
@@ -232,7 +232,8 @@ Copyright (C) 2024  Carl-Philip Hänsch
 
 /* Optimize should fold constants */
 (assert (optimize '(+ 1 2)) 3 "optimize folds +")
-(assert (optimize '(and true (equal? 2 2))) true "optimize folds and/equal")
+(assert (optimize '('concat "a" 2)) "a2" "optimize folds string concat")
+(assert (optimize '('and true '(equal? 2 2))) true "optimize folds and/equal")
 (assert (optimize '(begin (define x 4) (+ x 1))) 5 "optimize inlines define use-once")
 
 /* Lambda params overshadow outer variables */

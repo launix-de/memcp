@@ -16,6 +16,8 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package scm
 
+import "fmt"
+
 var SettingsHaveGoodBacktraces bool
 
 // to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
@@ -88,7 +90,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 // do preprocessing and optimization (Optimize is allowed to edit the value in-place)
 func Optimize(val Scmer, env *Env) Scmer {
 	ome := newOptimizerMetainfo()
-	v, _ := OptimizeEx(val, env, &ome, true)
+	v, _, _ := OptimizeEx(val, env, &ome, true)
 	//fmt.Println(SerializeToString(v, env))
 	return v
 }
@@ -110,7 +112,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.setBlacklist = ome.setBlacklist
 	return
 }
-func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool) {
+func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
 	// TODO: static code analysis like escape analysis + replace memory-safe functions with in-place memory manipulating versions (e.g. in set_assoc)
 	// TODO: inline use-once
 	// TODO: inplace functions (map -> map_inplace, filter -> filter_inplace) will manipulate the first parameter instead of allocating something new
@@ -120,11 +122,16 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 	// TODO: constant folding -> functions with constant parameters can be tagged that they are safe to execute AOT
 	// TODO: currify -> functions can be partially executed (constmask -> specialized functions that return a func/lambda)
 	switch v := val.(type) {
+	case int64, float64, string, bool:
+		return v, true, true // constants
 	case SourceInfo:
 		if SettingsHaveGoodBacktraces {
 			// in debug mode, we have better backtraces
-			v.value, transferOwnership = OptimizeEx(v.value, env, ome, useResult)
-			return v, transferOwnership
+			v.value, transferOwnership, isConstant = OptimizeEx(v.value, env, ome, useResult)
+			if isConstant { // strip SourceInfo from constants
+				return v.value, transferOwnership, isConstant
+			}
+			return v, transferOwnership, isConstant
 		} else {
 			// strip SourceInfo from lambda declarations
 			return OptimizeEx(v.value, env, ome, useResult)
@@ -132,17 +139,17 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 	case Symbol:
 		// replace variables with their counterparts
 		if replacement, ok := ome.variableReplacement[v]; ok {
-			return replacement, false
+			return replacement, false, false // TODO: replacements can be constant, too
 		}
-		return val, true // TODO: remove this return once there is a solution to mask out prefetch variables
+		return val, true, false // TODO: remove this return once there is a solution to mask out prefetch variables
 
 		// prefetch system functions (not working yet -> sometimes lambdas redefine variables which are not allowed to replace)
 		xen := env.FindRead(v)
 		if xen != nil {
 			if v, ok := xen.Vars[v]; ok {
-				return v, false
+				return v, false, false // TODO: vars can be constant, too
 			} else {
-				return val, false
+				return val, false, false
 			}
 		}
 	case []Scmer:
@@ -229,19 +236,22 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 						}
 					}
 				}
+				isConstant = true
 				for i := 1; i < len(v); i++ {
-					v[i], transferOwnership = OptimizeEx(v[i], env, &ome2, i == len(v)-1)
+					var isConstant2 bool
+					v[i], transferOwnership, isConstant2 = OptimizeEx(v[i], env, &ome2, i == len(v)-1)
+					isConstant = isConstant && isConstant2
 				}
-				return v, transferOwnership
+				return v, transferOwnership, isConstant
 			}
 			// (var i) is a serialization artifact
 			if v[0] == Symbol("var") && len(v) == 2 {
-				return NthLocalVar(ToInt(v[1])), false
+				return NthLocalVar(ToInt(v[1])), false, false
 			}
 			// (unquote s) is a serialization artifact
 			if v[0] == Symbol("unquote") && len(v) == 2 {
 				if s, ok := v[1].(string); ok {
-					return Symbol(s), true // replace with the symbol directly
+					return Symbol(s), true, false // replace with the symbol directly
 				}
 			}
 			// analyze lambdas (but don't pack them into *Proc since they need a fresh env)
@@ -285,8 +295,8 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 				}
 				*/
 				// p.Params = nil do not replace parameter list with nil, the execution engine must handle it different
-				v[2], transferOwnership = OptimizeEx(v[2], env, &ome2, true) // optimize body
-				return v, transferOwnership
+				v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true) // optimize body
+				return v, transferOwnership, false // TODO: lambdas may be constant if their scope is kinda constant and they contain only foldable functions
 			}
 
 			if v[0] == Symbol("outer") {
@@ -301,9 +311,9 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 					for _, sym := range ome.setBlacklist {
 						if sym == s {
 							if useResult {
-								return ome.variableReplacement[s], false // omit SET; use the value
+								return ome.variableReplacement[s], false, false // omit SET; use the value, TODO: replacements can be constant, too
 							} else {
-								return nil, true // omit SET; don't use the value
+								return nil, true, true // omit SET; don't use the value
 							}
 						}
 					}
@@ -317,34 +327,79 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 					// change symbol of set/define to setN
 					v[0] = Symbol("setN")
 				}
-				v[2], _ = OptimizeEx(v[2], env, ome, true)
+				v[2], _, isConstant = OptimizeEx(v[2], env, ome, true)
 				// TODO: check if we could remove the set instruction and inline the value if it occurs only once
 			} else if v[0] == Symbol("match") {
-				v[1], _ = OptimizeEx(v[1], env, ome, true)
+				v[1], _, _ = OptimizeEx(v[1], env, ome, true)
 				/* code is deactivated since variables can be overwritten! */
 				for i := 3; i < len(v); i += 2 {
 					// for each pattern
 					ome2 := ome.Copy()
 					v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2) // optimize pattern and collect overwritten variables
-					v[i], _ = OptimizeEx(v[i], env, &ome2, useResult)            // optimize result and apply overwritten variables
+					v[i], _, _ = OptimizeEx(v[i], env, &ome2, useResult)         // optimize result and apply overwritten variables
 				}
 				if len(v)%2 == 1 {
 					// last item
-					v[len(v)-1], _ = OptimizeEx(v[len(v)-1], env, ome, useResult)
+					v[len(v)-1], _, _ = OptimizeEx(v[len(v)-1], env, ome, useResult)
 				}
 			} else if v[0] == Symbol("parser") {
-				return OptimizeParser(v, env, ome, false), true
+				return OptimizeParser(v, env, ome, false), true, false // TODO: may parsers be constant?
 
 				// last but not least: recurse over the arguments when we aren't a special case
 			} else if v[0] != Symbol("quote") {
-				// optimize all other parameters
+				// optimize all other parameters and track constness
+				allConstArgs := true
 				for i := 0; i < len(v); i++ {
-					v[i], _ = OptimizeEx(v[i], env, ome, true)
+					var c bool
+					v[i], _, c = OptimizeEx(v[i], env, ome, true)
+					if i > 0 && !c {
+						allConstArgs = false
+					}
+				}
+				// constant folding: fold pure functions with literal args
+				if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
+					for i, arg := range v {
+						if l, ok := arg.([]Scmer); ok {
+							if fn, ok := l[0].(func(...Scmer) Scmer); ok && fmt.Sprintf("%p", fn) == fmt.Sprintf("%p", List) || l[0] == Symbol("list") {
+								//fmt.Println("list arg input", SerializeToString(v, env))
+								v[i] = l[1:] // constant lists as arguments -> unpack
+							}
+						}
+					}
+					result, transferOwnership, isConstant = d.Fn(v[1:]...), true, true
+					if l, ok := result.([]Scmer); ok {
+						result = append([]Scmer{List}, l...) // constant lists -> pack into list constructor
+						//fmt.Println("list arg output", SerializeToString(result, env))
+					}
+					return
+				}
+				// fold (and ...) special form using const flags
+				if sym, ok := v[0].(Symbol); ok && sym == Symbol("and") {
+					allTrue := true
+					for i, a := range v[1:] {
+						// if any is a known constant false, result is false
+						switch a.(type) {
+						case nil, bool, int64, float64, string:
+							if !ToBool(a) {
+								// whole expr is false
+								return false, true, true
+							} else {
+								// remove that true constant from the and list and optimize again
+								return OptimizeEx(append(v[0:i+1], v[i+2:]...), env, ome, useResult)
+							}
+						default:
+							allTrue = false
+						}
+					}
+					if allTrue {
+						return true, true, true
+					}
+					return v, transferOwnership, false
 				}
 			}
 		}
 	}
-	return val, transferOwnership
+	return val, transferOwnership, false
 }
 func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMetainfo, ome2 *optimizerMetainfo) Scmer {
 	// TODO: Prune patterns that are not matched by the value (happens mostly during inlining)
@@ -357,7 +412,7 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 	case []Scmer:
 		if p[0] == Symbol("eval") {
 			// optimize inner value
-			p[1], _ = OptimizeEx(p[1], env, ome, true)
+			p[1], _, _ = OptimizeEx(p[1], env, ome, true)
 			return p
 		} else if p[0] == Symbol("var") {
 			// expand (it is faster)
@@ -381,10 +436,10 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 			ome2 := ome.Copy()
 			v[1] = OptimizeParser(v[1], env, &ome2, ign2) // syntax expr -> collect new variables
 			if len(v) > 2 {
-				v[2], _ = OptimizeEx(v[2], env, &ome2, !ignoreResult) // generator expr -> use variables
+				v[2], _, _ = OptimizeEx(v[2], env, &ome2, !ignoreResult) // generator expr -> use variables
 			}
 			if len(v) > 3 {
-				v[3], _ = OptimizeEx(v[3], env, ome, true) // delimiter expr
+				v[3], _, _ = OptimizeEx(v[3], env, ome, true) // delimiter expr
 			}
 		} else if v[0] == Symbol("define") {
 			v[2] = OptimizeParser(v[2], env, ome, false)
