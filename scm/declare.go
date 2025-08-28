@@ -335,19 +335,7 @@ func Help(fn Scmer) {
 		fmt.Println("")
 		fmt.Println("get further information by typing (help \"functionname\") to get more info")
 	} else {
-		var def *Declaration
-		if s, ok := fn.(string); ok {
-			if def2, ok := declarations[s]; ok {
-				def = def2
-			} else {
-				panic("function not found: " + s)
-			}
-		} else if f, ok := fn.(func(...Scmer) Scmer); ok {
-			if def2, ok := declarations_hash[fmt.Sprintf("%p", f)]; ok {
-				def = def2
-			}
-		}
-
+		def := DeclarationForValue(fn)
 		if def != nil {
 			fmt.Println("Help for: " + def.Name)
 			fmt.Println("===")
@@ -364,4 +352,17 @@ func Help(fn Scmer) {
 			panic("function not found: " + fmt.Sprint(fn))
 		}
 	}
+}
+
+// DeclarationForValue resolves a callable head (symbol or native func) to its Declaration.
+func DeclarationForValue(v Scmer) *Declaration {
+    switch h := v.(type) {
+    case string:
+        if d, ok := declarations[h]; ok { return d }
+    case Symbol:
+        if d, ok := declarations[string(h)]; ok { return d }
+    case func(...Scmer) Scmer:
+        if d, ok := declarations_hash[fmt.Sprintf("%p", h)]; ok { return d }
+    }
+    return nil
 }
