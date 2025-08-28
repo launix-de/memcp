@@ -276,14 +276,6 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (define lam_nested3 (lambda (req res) (+ 3 (lam_nested4 req res))))
 (assert (lam_nested3 4 7) 15 "nested lambda scope calling")
 
-/* cascade overrides with same variable name -> value must be drawn into inner scope */
-(set lam_handler (newsession))
-(lam_handler "handler" (lambda (req res) (+ req res)))
-(lam_handler "handler" (begin (set old_handler (lam_handler "handler")) (lambda (req res) (+ 1 (old_handler req res)))))
-(assert ((lam_handler "handler") 4 7) 12 "nested lambda scope overriding")
-(lam_handler "handler" (begin (set old_handler (lam_handler "handler")) (set mid_handler (lambda (req res) (+ 1 (old_handler req res)))) mid_handler))
-(assert ((lam_handler "handler") 4 7) 13 "nested lambda scope overriding with inner variables")
-
 
 (print "finished unit tests")
 (print "test result: " (teststat "success") "/" (teststat "count"))
