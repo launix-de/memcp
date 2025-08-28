@@ -19,6 +19,7 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import (
+	"io"
 	"fmt"
 	"bytes"
 	"strings"
@@ -51,6 +52,10 @@ func String(v Scmer) string {
 		return "[native func]"
 	case string:
 		return v // this is not valid scm code! (but we need it to convert strings)
+	case io.Reader: // streams
+		var sb strings.Builder
+		io.Copy(&sb, v)
+		return sb.String()
 	case nil:
 		return "nil"
     default:

@@ -1,24 +1,24 @@
 /*
 Copyright (C) 2023-2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package scm
 
+import "io"
 import "fmt"
 import "html"
-import "bytes"
 import "regexp"
 import "strings"
 import "net/url"
@@ -27,7 +27,7 @@ import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
 
 type LazyString struct {
-	Hash string
+	Hash     string
 	GetValue func() string
 }
 
@@ -51,7 +51,7 @@ func StrLike(str, pattern string) bool {
 				return true // string ends with wildcard
 			}
 			// otherwise: match against all possible endings
-			for i := len(str)-1; i >= 0; i-- { // run from right to left to be as greedy and performant as possible
+			for i := len(str) - 1; i >= 0; i-- { // run from right to left to be as greedy and performant as possible
 				if str[i] == pattern[0] {
 					// check if this caracter matches the rest
 					if StrLike(str[i:], pattern) {
@@ -75,24 +75,24 @@ func StrLike(str, pattern string) bool {
 
 func TransformFromJSON(a_ any) Scmer {
 	switch a := a_.(type) {
-		case map[string]any:
-			result := make([]Scmer, 2 * len(a))
-			i := 0
-			for k, v := range a {
-				result[i] = k
-				result[i+1] = TransformFromJSON(v)
-				i += 2
-			}
-			return result
-		case []any:
-			// TODO: maybe rather make a JS like object with length = x, index = ...
-			result := make([]Scmer, len(a))
-			for i, v := range a {
-				result[i] = TransformFromJSON(v)
-			}
-			return result
-		default:
-			return Scmer(a_)
+	case map[string]any:
+		result := make([]Scmer, 2*len(a))
+		i := 0
+		for k, v := range a {
+			result[i] = k
+			result[i+1] = TransformFromJSON(v)
+			i += 2
+		}
+		return result
+	case []any:
+		// TODO: maybe rather make a JS like object with length = x, index = ...
+		result := make([]Scmer, len(a))
+		for i, v := range a {
+			result[i] = TransformFromJSON(v)
+		}
+		return result
+	default:
+		return Scmer(a_)
 	}
 }
 
@@ -119,11 +119,15 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			// concat strings
-			var b bytes.Buffer
+			var sb strings.Builder
 			for _, s := range a {
-				b.WriteString(String(s))
+				if stream, ok := s.(io.Reader); ok {
+					io.Copy(&sb, stream) // copy streams directly
+				} else {
+					sb.WriteString(String(s))
+				}
 			}
-			return b.String()
+			return sb.String()
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -139,7 +143,7 @@ func init_strings() {
 			s := String(a[0])
 			i := ToInt(a[1])
 			if len(a) > 2 {
-				return s[i:i+ToInt(a[2])]
+				return s[i : i+ToInt(a[2])]
 			} else {
 				return s[i:]
 			}
@@ -267,12 +271,18 @@ func init_strings() {
 				if err != nil {
 					// language not detected, try one of the aliases
 					switch m[2] {
-						case "danish": tag = language.Danish
-						case "german1": tag = language.German
-						case "german2": tag = language.German
-						case "spanish": tag = language.Spanish
-						case "swedish": tag = language.Swedish
-						default: tag = language.Swedish // swedish seems to be the most versatile collation
+					case "danish":
+						tag = language.Danish
+					case "german1":
+						tag = language.German
+					case "german2":
+						tag = language.German
+					case "spanish":
+						tag = language.Spanish
+					case "swedish":
+						tag = language.Swedish
+					default:
+						tag = language.Swedish // swedish seems to be the most versatile collation
 					}
 				}
 				var c *collate.Collator
@@ -290,11 +300,11 @@ func init_strings() {
 				// return a LESS function specialized to that language
 				if len(a) > 1 && ToBool(a[1]) {
 					// reverse order
-					return func (a ...Scmer) Scmer {
+					return func(a ...Scmer) Scmer {
 						return c.CompareString(String(a[0]), String(a[1])) == 1
 					}
 				} else {
-					return func (a ...Scmer) Scmer {
+					return func(a ...Scmer) Scmer {
 						return c.CompareString(String(a[0]), String(a[1])) == -1
 					}
 				}
@@ -326,7 +336,7 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "string to encode"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			return url.QueryEscape(String(a[0]))
 		}, true,
 	})
@@ -336,7 +346,7 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "string to decode"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			if result, err := url.QueryUnescape(String(a[0])); err == nil {
 				return result
 			} else {
@@ -350,7 +360,7 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value to encode"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			b, err := json.Marshal(a[0])
 			if err != nil {
 				panic(err)
@@ -364,24 +374,24 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value to encode"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			var transform func(Scmer) Scmer
 			transform = func(a_ Scmer) Scmer {
 				switch a := a_.(type) {
-					case []Scmer:
-						result := make(map[string]Scmer)
-						for i := 0; i < len(a)-1; i += 2 {
-							result[String(a[i])] = transform(a[i+1])
-						}
-						return result
-					case *FastDict:
-						result := make(map[string]Scmer)
-						for i := 0; i < len(a.Pairs)-1; i += 2 {
-							result[String(a.Pairs[i])] = transform(a.Pairs[i+1])
-						}
-						return result
-					default:
-						return a_
+				case []Scmer:
+					result := make(map[string]Scmer)
+					for i := 0; i < len(a)-1; i += 2 {
+						result[String(a[i])] = transform(a[i+1])
+					}
+					return result
+				case *FastDict:
+					result := make(map[string]Scmer)
+					for i := 0; i < len(a.Pairs)-1; i += 2 {
+						result[String(a.Pairs[i])] = transform(a.Pairs[i+1])
+					}
+					return result
+				default:
+					return a_
 				}
 			}
 			b, err := json.Marshal(transform(a[0]))
@@ -397,7 +407,7 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "string to decode"},
 		}, "any",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			var result any
 			err := json.Unmarshal([]byte(String(a[0])), &result)
 			if err != nil {
@@ -413,22 +423,22 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "string to decode"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			input := String(a[0])
-			return sql_escapings.ReplaceAllStringFunc(input, func (m string) string {
+			return sql_escapings.ReplaceAllStringFunc(input, func(m string) string {
 				switch m {
-					case "\\\\":
-						return "\\"
-					case "\\'":
-						return "'"
-					case "\\\"":
-						return "\""
-					case "\\n":
-						return "\n"
-					case "\\r":
-						return "\r"
-					case "\\0":
-						return string([]byte{0})
+				case "\\\\":
+					return "\\"
+				case "\\'":
+					return "'"
+				case "\\\"":
+					return "\""
+				case "\\n":
+					return "\n"
+				case "\\r":
+					return "\r"
+				case "\\0":
+					return string([]byte{0})
 				}
 				return m
 			})
@@ -440,15 +450,15 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "string to decode"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			input := String(a[0])
-			result := make([]byte, 2 * len(input))
+			result := make([]byte, 2*len(input))
 			hexmap := "0123456789abcdef"
 			for i := 0; i < len(input); i++ {
-				result[2*i] = hexmap[input[i] / 16]
-				result[2*i+1] = hexmap[input[i] % 16]
+				result[2*i] = hexmap[input[i]/16]
+				result[2*i+1] = hexmap[input[i]%16]
 			}
-			return string(result);
+			return string(result)
 		}, true,
 	})
 
