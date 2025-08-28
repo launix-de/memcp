@@ -36,7 +36,7 @@ this is how rdf works:
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
-		(if (and pw (equal? pw (password (req "password")))) (begin
+		(if (and pw (equal? pw (password (req "password")))) (time (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
 			/*(print "RDF query: " query)*/
@@ -44,7 +44,7 @@ this is how rdf works:
 			(define resultrow (res "jsonl"))
 
 			(eval formula)
-		) (begin
+		) query) (begin
 			((res "header") "Content-Type" "text/plain")
 			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
 			((res "status") 401)

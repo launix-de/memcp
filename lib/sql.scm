@@ -41,7 +41,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (begin
-			(try (lambda () (begin
+			(try (lambda () (time (begin
 				((res "header") "Content-Type" "text/plain")
 				((res "status") 200)
 				(define formula (parse_sql schema query))
@@ -55,7 +55,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(if (and (not resultrow_called) (number? query_result)) (begin
 					(original_resultrow '("affected_rows" query_result))
 				))
-			)) (lambda(e) (begin
+			) query)) (lambda(e) (begin
 				(print "SQL query: " query)
 				(print "error: " e)
 				((res "header") "Content-Type" "text/plain")
@@ -73,7 +73,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (begin
-			(try (lambda () (begin
+			(try (lambda () (time (begin
 				((res "header") "Content-Type" "text/plain")
 				((res "status") 200)
 				(define formula (parse_psql schema query))
@@ -87,7 +87,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(if (and (not resultrow_called) (number? query_result)) (begin
 					(original_resultrow '("affected_rows" query_result))
 				))
-			)) (lambda(e) (begin
+			) query)) (lambda(e) (begin
 				(print "SQL query: " query)
 				(print "error: " e)
 				((res "header") "Content-Type" "text/plain")
@@ -143,7 +143,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					(print "error " e)
 					(resultrow '("error" e))
 				)))
-			) (begin
+			) (time (begin
 				/* SQL syntax mode */
 				(define formula (try (lambda ()
 					((if (equal? (session "syntax") "postgresql") parse_psql parse_sql) schema sql))
@@ -159,7 +159,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					(print "error: " e)
 					(resultrow '("error" e))
 				))) nil)
-			))
+			) sql))
 		))
 	)
 	(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password 'admin'), set with --mysql-port")
