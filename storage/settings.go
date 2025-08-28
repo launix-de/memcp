@@ -40,7 +40,16 @@ func InitSettings() {
 
 func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 	// schema, filename
-	if len(a) == 1 {
+	if len(a) == 0 {
+		return []scm.Scmer{
+			"Backtrace", Settings.Backtrace,
+			"Trace", Settings.Trace,
+			"TracePrint", Settings.TracePrint,
+			"PartitionMaxDimensions", int64(Settings.PartitionMaxDimensions),
+			"DefaultEngine", Settings.DefaultEngine,
+			"ShardSize", int64(Settings.ShardSize),
+		}
+	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
 			case "Backtrace":
 				return Settings.Backtrace
