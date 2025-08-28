@@ -823,6 +823,8 @@ Patterns can be any of:
 	init_vector()
 	init_parser()
 	init_sync()
+
+	RunJitTest()
 }
 
 /* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt
