@@ -35,8 +35,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (set globalvars '("lower_case_table_names" 0))
 
 /* http hook for handling SQL */
-(http_handler "handler" (begin
-	(set old_handler (http_handler "handler"))
+(define http_handler (begin
+	(set old_handler http_handler)
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
