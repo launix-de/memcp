@@ -238,7 +238,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 				}
 				var isConstant2 bool
 				for i := 1; i < len(v); i++ {
-					v[i], transferOwnership, isConstant2 = OptimizeEx(v[i], env, &ome2, i == len(v)-1)
+					v[i], transferOwnership, isConstant2 = OptimizeEx(v[i], env, &ome2, i == len(v)-1 && useResult)
 					if isConstant2 {
 						// constants in begin
 						if i == len(v)-1 {
@@ -251,6 +251,10 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 						}
 					}
 				}
+				if v[0] == Symbol("!begin") && len(v) == 2 {
+					return OptimizeEx(v[1], env, &ome2, useResult) // strip away empty blocks
+				}
+				// TODO: Symbol("begin"), too, but peel out one "outer" shell
 				return v, transferOwnership, isConstant
 			}
 			// (var i) is a serialization artifact
