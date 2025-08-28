@@ -255,6 +255,27 @@ Copyright (C) 2024  Carl-Philip Hänsch
 /* Use-once inlining safety: begin with unused define should not change result */
 (assert (begin (define tmp_unused 42) 7) 7 "unused define eliminated")
 
+/* Numbered parameter semantics (NthLocalVar / NumVars) */
+(print "testing numbered parameters ...")
+
+/* Correct case: body uses (var i), NumVars covers indices */
+(define lam_ok '('lambda '('a 'b) '('+ '('var 0) '('var 1)) 2))
+(assert ((eval (optimize lam_ok)) 2 3) 5 "numbered params add correctly (NumVars=2)")
+
+/* Broken case: body references (var 1) but NumVars too small -> must raise error */
+(define lam_bad '(lambda '('a 'b) '('+ '('var 0) '('var 1)) 1))
+(define panicked (newsession))
+(try (lambda () ((eval (optimize lam_bad)) 2 3)) (lambda (e) (panicked "panic" true)))
+(assert (panicked "panic") true "insufficient NumVars must panic (guards optimizer bug)")
+
+/* cascade override */
+(define lam_nested1 (lambda (req res) (+ req res)))
+(define lam_nested2 (lambda (req res) (+ 1 (lam_nested1 req res))))
+(define lam_nested3 (lambda (req res) (lam_nested2 req res)))
+(define lam_nested4 lam_nested3)
+(define lam_nested3 (lambda (req res) (+ 3 (lam_nested4 req res))))
+(assert (lam_nested3 4 7) 15 "nested lambda scope calling")
+
 
 (print "finished unit tests")
 (print "test result: " (teststat "success") "/" (teststat "count"))
