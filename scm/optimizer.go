@@ -236,11 +236,20 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 						}
 					}
 				}
-				isConstant = true
+				var isConstant2 bool
 				for i := 1; i < len(v); i++ {
-					var isConstant2 bool
 					v[i], transferOwnership, isConstant2 = OptimizeEx(v[i], env, &ome2, i == len(v)-1)
-					isConstant = isConstant && isConstant2
+					if isConstant2 {
+						// constants in begin
+						if i == len(v)-1 {
+							// end -> everything is constant
+							isConstant = isConstant2
+						} else {
+							// middle -> remove that value
+							v = append(v[0:i], v[i+1:]...)
+							i--
+						}
+					}
 				}
 				return v, transferOwnership, isConstant
 			}

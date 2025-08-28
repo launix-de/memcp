@@ -234,7 +234,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (optimize '(+ 1 2)) 3 "optimize folds +")
 (assert (optimize '('concat "a" 2)) "a2" "optimize folds string concat")
 (assert (optimize '('and true '(equal? 2 2))) true "optimize folds and/equal")
-(assert (optimize '(begin (define x 4) (+ x 1))) 5 "optimize inlines define use-once")
+(assert (optimize '('begin '('define 'x 4) '(+ 'x 1))) 5 "optimize inlines define use-once")
 
 /* Lambda params overshadow outer variables */
 (define y 10)
