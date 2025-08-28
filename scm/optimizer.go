@@ -139,7 +139,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 	case Symbol:
 		// replace variables with their counterparts
 		if replacement, ok := ome.variableReplacement[v]; ok {
-			return replacement, false, false // TODO: replacements can be constant, too
+			return OptimizeEx(replacement, env, ome, useResult)
 		}
 		return val, true, false // TODO: remove this return once there is a solution to mask out prefetch variables
 
