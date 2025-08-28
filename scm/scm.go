@@ -851,6 +851,8 @@ type Sizable interface {
 
 func ComputeSize(v Scmer) uint {
 	switch vv := v.(type) {
+		case nil:
+			return 16
 		case Sizable:
 			return vv.ComputeSize()
 		case *Sizable:
