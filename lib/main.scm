@@ -22,18 +22,22 @@ Copyright (C) 2023  Carl-Philip Hänsch
 
 (set static_files (serveStatic "../assets"))
 
-/* this can be overhooked */
-(define http_handler (lambda (req res) (begin
+/* this can be overhooked; the overloader must save the underlying handler and call if afterwards if he does not match the route */
+(set http_handler (newsession))
+(http_handler "handler" (lambda (req res) (begin
 	(print "request " req)
 	(if (equal? (req "path") "/") (begin
 		((res "header") "Location" "/info.html")
 		((res "status") 301)
 	) (static_files req res))
-	/*
+)))
+
+/* you can use this handler to serve a 404 */
+(define handler_404 (lambda (req res) (begin
+	/*(print "request " req)*/
 	((res "header") "Content-Type" "text/plain")
 	((res "status") 404)
 	((res "println") "404 not found")
-	*/
 )))
 
 (import "sql.scm")
@@ -42,6 +46,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 /* read ports from command line arguments or environment */
 (if (not (arg "disable-api" false)) (begin
 	(set port (arg "api-port" (env "PORT" "4321")))
-	(serve port (lambda (req res) (http_handler req res)))
+	(serve port (lambda (req res) ((http_handler "handler") req res)))
 	(print "listening on http://localhost:" port)
 ))

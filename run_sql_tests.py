@@ -150,9 +150,25 @@ class SQLTestRunner:
 
         if "affected_rows" in expect:
             expected = expect["affected_rows"]
-            if results and results and "affected_rows" in results[0]:
-                return results[0]["affected_rows"] == expected
-            return True
+            # New behavior: read from HTTP header set by lib/sql.scm
+            hdr = response.headers.get("Affected-Rows") if response is not None else None
+            actual = None
+            if hdr is not None:
+                try:
+                    actual = int(hdr)
+                except ValueError:
+                    # Sometimes returned as float or string; attempt coercion
+                    try:
+                        actual = int(float(hdr))
+                    except Exception:
+                        actual = None
+            # Backward compatibility: older versions may return JSONL with affected_rows
+            if actual is None and results and isinstance(results[0], dict) and "affected_rows" in results[0]:
+                try:
+                    actual = int(results[0]["affected_rows"])  # type: ignore
+                except Exception:
+                    pass
+            return actual == expected
 
         if results is None:
             return False

@@ -35,8 +35,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (set globalvars '("lower_case_table_names" 0))
 
 /* http hook for handling SQL */
-(define http_handler (begin
-	(set old_handler http_handler)
+(http_handler "handler" (begin
+	(set old_handler (http_handler "handler"))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
@@ -47,14 +47,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(define formula (parse_sql schema query))
 				(define resultrow (res "jsonl"))
 				(define session (context "session"))
-				(set resultrow_called false)
-				(set original_resultrow resultrow)
-				(define resultrow (lambda (row) (begin (set resultrow_called true) (original_resultrow row))))
 				(set query_result (eval (source "SQL Query" 1 1 formula)))
-				/* If no resultrow was called and we got a number, return it as affected_rows */
-				(if (and (not resultrow_called) (number? query_result)) (begin
-					(original_resultrow '("affected_rows" query_result))
-				))
+				((res "header") "Affected-Rows" query_result)
 			) query)) (lambda(e) (begin
 				(print "SQL query: " query)
 				(print "error: " e)
@@ -79,13 +73,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				(define formula (parse_psql schema query))
 				(define resultrow (res "jsonl"))
 				(define session (context "session"))
-				(set resultrow_called false)
-				(set original_resultrow resultrow)
-				(define resultrow (lambda (row) (begin (set resultrow_called true) (original_resultrow row))))
 				(set query_result (eval (source "SQL Query" 1 1 formula)))
-				/* If no resultrow was called and we got a number, return it as affected_rows */
-				(if (and (not resultrow_called) (number? query_result)) (begin
-					(original_resultrow '("affected_rows" query_result))
+				((res "header") "Affected-Rows" query_result)
 				))
 			) query)) (lambda(e) (begin
 				(print "SQL query: " query)
@@ -101,7 +90,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			((res "print") "Unauthorized")
 		))
 	)))
-	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
 		(match (req "path")
