@@ -14,43 +14,9 @@ Copyright (C) 2024  Carl-Philip Hänsch
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-// Package rjit implements a small prototype of a reflective JIT for
-// functions of the form: func(Scmer...) Scmer
-//
-// This prototype demonstrates the full pipeline at a minimal level:
-//  - Locate the original Go source of a runtime function value
-//  - Parse the AST and build a tiny SSA view (via go/ast + go/types + x/tools/go/ssa)
-//  - Detect a very small pattern (return arg0 + Const) and, if found,
-//  - Constant-specialize and emit x86-64 machine code into an RWX buffer
-//  - Expose the specialized function as a Go func(Scmer...) Scmer by calling
-//    a small cgo trampoline.
-//
-// This is intentionally minimal — it is a starting point you can extend.
-// Limitations / assumptions in this prototype:
-//  - Scmer is treated at runtime as int64 for both args and return value.
-//  - The function must be a top-level function in a file we can read.
-//  - Only recognizes a body that returns `arg0 + <const>` (int literal).
-//  - Generated code follows the SysV AMD64 calling convention for int64.
-//  - Uses cgo to call machine code pointer via a C typedef.
-//
-// Usage example:
-//   f := func(a Scmer) Scmer {
-//       return a.(int64) + 7
-//   }
-//   g := optimize(f, []bool{false}, nil) // no consts -> returns original
-//   h := optimize(f, []bool{true}, []Scmer{int64(7)}) // specialized
-//   fmt.Println(h(int64(35))) // -> 42
 
 package scm
 
-/*
-#include <stdint.h>
-typedef int64_t (*fn_i1i)(int64_t);
-static inline int64_t call_i1i(void* p, int64_t x) {
-    return ((fn_i1i)p)(x);
-}
-*/
-import "C"
 import (
     "fmt"
     "go/ast"
@@ -59,7 +25,6 @@ import (
     "io/ioutil"
     "reflect"
     "runtime"
-    //"strconv"
     "syscall"
     "unsafe"
 )
@@ -75,9 +40,9 @@ func RunJitTest() {
 	return // dont output that in production
 	// disassemble /r 'github.com/launix-de/memcp/scm.RunJitTest'
 	fmt.Println("run JIT test")
-	fn2 := OptimizeForValues(myAdd, []bool{true}, []Scmer{4})
+	fn2 := OptimizeForValues(myAdd, []int{2}, []Scmer{4})
 	fmt.Println("fn=",fn2)
-	fmt.Println("result",fn2(3)) // should return 4
+	fmt.Println("result",fn2(3, 7)) // should return 4
 }
 
 /*
@@ -104,17 +69,17 @@ mov    0x8(%rax),%rbx // second return value (value)
 */
 
 // optimize takes a runtime function value `fn` (of type func(Scmer...) Scmer),
-// a constMask where constMask[i] == true means the i-th parameter is a known
+// a constMask where constMask[i] > 0 means the i-th parameter is a known
 // compile-time constant, and constValues providing those constant values in
 // the same order. It returns a new function func(Scmer...) Scmer which will
 // call into specialized machine code if we recognized the pattern and
 // successfully emitted native code. Otherwise it will return a wrapper that
 // calls the original Go function.
-func OptimizeForValues(fn func(...Scmer) Scmer, constMask []bool, constValues []Scmer) func(...Scmer) Scmer {
+func OptimizeForValues(fn func(...Scmer) Scmer, constMask []int /* 0=unknown, 1=type, 2=value */, constValues []Scmer) func(...Scmer) Scmer {
     // quick validation
     allVariable := true
     for _, c := range constMask {
-	    if c {
+	    if c > 0 {
 		    allVariable = false
 	    }
     }
@@ -190,29 +155,13 @@ func OptimizeForValues(fn func(...Scmer) Scmer, constMask []bool, constValues []
     // ast.AssignStmt.Rhs[] ersetzen
     // ast.IndexExpr{X: firstParam, Index: ast.BasicLit}
     // ast.BasicLit{Kind: token.Int, Value: strconv.ParseInt(Value, 0, 64)}
+    // *ast.ReturnStmt.Results[0]
     if stmts[0].(*ast.AssignStmt).Rhs[0].(*ast.IndexExpr).X.(*ast.Ident).Obj.Decl == firstParam {
 	    fmt.Println("bingo")
     }
     
-    code := []byte{
-	0x55 /* stack frame */,
-
-	0x48, 0x8b, 0x08, // mov    (%rax),%rcx
-	0x48, 0x8b, 0x58, 0x08, // mov    0x8(%rax),%rbx
-	0x48, 0x89, 0xc8, // mov    %rcx,%rax
-
-	//0x48, 0x83, 0xC3, 0x03, // add rbx, 3
-	//0x48, 0x83, 0xC0, 0x03, // add rax, 3
-	0x48, 0xB8, 7,0,0,0,0,0,0,0, // mov rax, 7
-	0x48, 0xBB, 7,0,0,0,0,0,0,0, // mov rbx, 7
-	//0x48, 0xB8, 7,0,0,0,0,0,0,0, // mov rxx, 7
-
-    	0x5d /* pop */,
-	0xC3, /* ret */
-    }
-    // replace the literal in code!
-    *(*unsafe.Pointer)(unsafe.Pointer(&code[13])) = *(*unsafe.Pointer)(unsafe.Pointer(&constValues[0]))
-    *(*unsafe.Pointer)(unsafe.Pointer(&code[23])) = *((*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&constValues[0]), 8)))
+    //code := jitReturnLiteral(constValues[0]) // TODO: compose the real code
+    code := jitNthArgument(1) // TODO: compose the real code
 
     // allocate executable buffer
     buf, err := allocExec(len(code))
