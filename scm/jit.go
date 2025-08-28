@@ -29,6 +29,27 @@ import (
     "unsafe"
 )
 
+/*
+memcp JIT compiler
+------------------
+ - compiles faster JIT
+ - composes functions from primitives
+ - analyzes go functions and removes type checks, stack frames, jumps and so on
+
+there are multiple approaches to speed up memcp with JIT:
+ - the most promising is to instead of calling Apply() compose a func, so we can save memory allocations
+ - a more advanced approach is to fuse the scan operator loop (getValue of a fixed Storage) with the parameter building and the calling of the map/aggregate function
+ - helper functions like ToBool, ToFloat, ToString can be specialized to certain input parameters
+
+ - either by parsing the assembly and peepholing it (my favourite)
+ - or by reading the AST and regenerating the code
+
+TODO:
+ - create a type descriptor map for the most common types (int64, string, bool etc.)
+ - helper functions to compose code (no-copy ideally) - platform specific
+
+*/
+
 // cache for specializations: key -> mmap pointer
 func myAdd(a ...Scmer) Scmer {
 	// disassemble /r 'github.com/launix-de/memcp/scm.myAdd'
