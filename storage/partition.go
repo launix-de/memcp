@@ -27,7 +27,7 @@ import "github.com/launix-de/memcp/scm"
 type shardDimension struct {
 	Column string
 	NumPartitions int
-	Pivots []scm.Scmer
+	Pivots []scm.Scmer // pivot semantics: a pivot is between two shards. shard[0] contains all values less than or equal pivot[0]; pivots are ordered from lowest to highest
 }
 
 // computes the index of a datapoint in PShards -> if item == pivot, sort left
@@ -39,9 +39,9 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 		for min < max {
 			pivot := (min + max - 1) / 2
 			if scm.Less(sd.Pivots[pivot], values[i]) {
-				max = pivot
-			} else {
 				min = pivot + 1
+			} else {
+				max = pivot
 			}
 		}
 		result = result * sd.NumPartitions + min // accumulate
@@ -144,15 +144,15 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 					pivot := (umin + max - 1) / 2
 					if !b.upperInclusive {
 						if scm.Less(b.upper, schema[0].Pivots[pivot]) {
-							max = pivot
-						} else {
 							umin = pivot + 1
+						} else {
+							max = pivot
 						}
 					} else {
 						if !scm.Less(schema[0].Pivots[pivot], b.upper) {
-							max = pivot
-						} else {
 							umin = pivot + 1
+						} else {
+							max = pivot
 						}
 					}
 				}
@@ -244,7 +244,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 		}
 	}
 	if len(shardCandidates) == 0 || Settings.PartitionMaxDimensions == 0 {
-		return
+		return nil, true
 	}
 
 	// sort for highest ranking column
