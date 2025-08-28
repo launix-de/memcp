@@ -172,20 +172,17 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 							if sym, ok := sub[1].(Symbol); ok {
 								visitNode(sub[2], depth+1, append(blacklist, sym))
 							} else if symlist, ok := sub[1].([]Scmer); ok {
-								// build blacklist2 which overshadows overwritten variables
 								blacklist2 := blacklist
 								for _, s := range symlist {
 									blacklist2 = append(blacklist2, s.(Symbol))
 								}
 								visitNode(sub[2], depth+1, blacklist2)
 							}
-						} else if sub[0] == Symbol("outer") {
-							visitNode(sub[1], depth-1, blacklist) // one depth less
-						} else if sub[0] == Symbol("begin") {
+						} else if sub[0] != Symbol("begin") {
 							for i := 1; i < len(sub); i++ {
 								visitNode(sub[i], depth+1, blacklist)
 							}
-						} else if sub[0] == Symbol("eval") {
+						} else if sub[0] != Symbol("eval") {
 							usedVariables[Symbol("eval")] = 1 // environments around eval must be preserved
 							for i := 2; i < len(sub); i++ {
 								visitNode(sub[i], depth, blacklist)
@@ -229,47 +226,8 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 						ome2.variableReplacement[sym] = content
 					}
 				}
-				if len(usedVariables) == 0 {
+				if len(usedVariables) == 0 { // TODO: this feature is deactivated because of bugs. See overloading of request handler
 					v[0] = Symbol("!begin") // make them env-free
-					// but strip out one (outer) layer
-					var removeOuter func(x Scmer, depth int, blacklist []Symbol) Scmer
-					removeOuter = func(x Scmer, depth int, blacklist []Symbol) Scmer {
-						if sub, ok := x.([]Scmer); ok {
-							if sub[0] == Symbol("define") || sub[0] == Symbol("set") {
-								sub[2] = removeOuter(sub[2], depth, blacklist)
-								// TODO: keep track that this variable is overshadowed, too; but this should not happen
-							} else if sub[0] == Symbol("lambda") {
-								if sym, ok := sub[1].(Symbol); ok {
-									sub[2] = removeOuter(sub[2], depth+1, append(blacklist, sym))
-								} else if symlist, ok := sub[1].([]Scmer); ok {
-									// build blacklist2 which overshadows overwritten variables
-									blacklist2 := blacklist
-									for _, s := range symlist {
-										blacklist2 = append(blacklist2, s.(Symbol))
-									}
-									sub[2] = removeOuter(sub[2], depth+1, blacklist2)
-								}
-							} else if sub[0] == Symbol("outer") {
-								return sub[1] // one depth less, don't dive in
-							} else if sub[0] == Symbol("begin") {
-								for i := 1; i < len(sub); i++ {
-									sub[i] = removeOuter(sub[i], depth+1, blacklist)
-								}
-							} else if sub[0] == Symbol("eval") {
-								for i := 2; i < len(sub); i++ {
-									sub[i] = removeOuter(sub[i], depth, blacklist)
-								}
-							} else {
-								for i := 1; i < len(sub); i++ {
-									sub[i] = removeOuter(sub[i], depth, blacklist)
-								}
-							}
-						}
-						return x
-					}
-					for i := 1; i < len(v); i++ {
-						v[i] = removeOuter(v[i], 0, nil)
-					}
 					for sym, content := range ome2.variableReplacement {
 						if ar, ok := content.([]Scmer); ok {
 							if ar[0] == Symbol("outer") {
@@ -294,10 +252,10 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 					}
 				}
 				if v[0] == Symbol("!begin") && len(v) == 2 {
-					return v[1], transferOwnership, isConstant2 // strip away empty blocks
+					return OptimizeEx(v[1], env, &ome2, useResult) // strip away empty blocks
 				}
 				// TODO: Symbol("begin"), too, but peel out one "outer" shell
-				return v, transferOwnership, false
+				return v, transferOwnership, isConstant
 			}
 			// (var i) is a serialization artifact
 			if v[0] == Symbol("var") && len(v) == 2 {

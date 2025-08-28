@@ -23,9 +23,16 @@ this is how rdf works:
  - import formats are: xml, ttl
 */
 
+(define handler_404 (lambda (req res) (begin
+	/*(print "request " req)*/
+	((res "header") "Content-Type" "text/plain")
+	((res "status") 404)
+	((res "println") "404 not found")
+)))
+
 /* http hook for handling SparQL */
-(http_handler "handler" (begin
-	(set old_handler (coalesce (http_handler "handler") handler_404))
+(define http_handler (begin
+	(set old_handler (coalesce http_handler handler_404))
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
@@ -63,6 +70,7 @@ this is how rdf works:
 			((res "print") "Unauthorized")
 		))
 	)))
+	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
 		(match (req "path")
