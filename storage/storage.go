@@ -754,24 +754,30 @@ func Init(en scm.Env) {
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
-			for _, c := range t.Columns {
+			for i, c := range t.Columns {
 				if c.Name == scm.String(a[2]) {
 					switch a[3] {
 					case "drop":
-						return t.DropColumn(scm.String(a[2]))
+						ok := t.DropColumn(scm.String(a[2]))
+						db.save()
+						return ok
 					case "auto_increment":
 						ai := scm.ToInt(a[4])
 						if ai > 1 {
 							// set ai value
 							t.Auto_increment = uint64(ai)
+							db.save()
 							return true
 						} else {
 							// set ai flag for column
-							c.AutoIncrement = scm.ToBool(a[4])
+							t.Columns[i].AutoIncrement = scm.ToBool(a[4])
+							db.save()
 							return true
 						}
 					default:
-						return c.Alter(scm.String(a[3]), a[4])
+						ok := t.Columns[i].Alter(scm.String(a[3]), a[4])
+						db.save()
+						return ok
 					}
 				}
 			}

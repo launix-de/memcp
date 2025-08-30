@@ -34,5 +34,42 @@ test_cases:
         - { id: 1, flag: false }
         - { id: 2, flag: true }
 
+  - name: "Alter default to TRUE via ALTER COLUMN"
+    sql: "ALTER TABLE default_test ALTER COLUMN flag SET DEFAULT TRUE"
+    expect: {}
+
+  - name: "Insert after default changed to TRUE"
+    sql: "INSERT INTO default_test (id) VALUES (3)"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify defaults after change to TRUE"
+    sql: "SELECT id, flag FROM default_test ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, flag: false }
+        - { id: 2, flag: true }
+        - { id: 3, flag: true }
+
+  - name: "Alter default to FALSE via ALTER COLUMN"
+    sql: "ALTER TABLE default_test ALTER COLUMN flag SET DEFAULT FALSE"
+    expect: {}
+
+  - name: "Insert after default changed to FALSE"
+    sql: "INSERT INTO default_test (id) VALUES (4)"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify defaults after change to FALSE"
+    sql: "SELECT id, flag FROM default_test ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - { id: 1, flag: false }
+        - { id: 2, flag: true }
+        - { id: 3, flag: true }
+        - { id: 4, flag: false }
+
 cleanup:
   - { sql: "DROP TABLE IF EXISTS default_test" }

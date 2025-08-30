@@ -54,28 +54,21 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(parser (define col sql_identifier_unquoted) '((quote get_column) nil true col true))
 )))
 
-(define sql_column_attributes (parser (define sub (* (or
-	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
-	(parser (atom "PRIMARY" true) '("primary" true))
-	(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
-	(parser (atom "UNIQUE" true) '("unique" true))
-	(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
-	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
-	(parser (atom "NULL" true) '("null" true))
-	(parser '((atom "DEFAULT" true) (define default sql_expression)) '("default" default))
-	(parser '((atom "ON" true) (atom "UPDATE" true) (define default sql_expression)) '("update" default))
-	(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
-	(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
-	(parser (atom "UNSIGNED" true) '()) /* ignore */
-	/* TODO: GENERATED ALWAYS AS expr */
-))) (merge sub)))
-
 (define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
 (define sql_number (parser (define x (regex "-?[0-9]+\.?[0-9]*(?:e-?[0-9]+)?" true)) (simplify x)))
 
 (define sql_string (parser (or
-	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
-	(parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape x))
+    (parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
+    (parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape x))
+)))
+
+/* lightweight literal parser for top-level contexts (before sql_expression is defined) */
+(define sql_literal (parser (or
+    (parser (atom "NULL" true) nil)
+    (parser (atom "TRUE" true) true)
+    (parser (atom "FALSE" true) false)
+    sql_number
+    sql_string
 )))
 
 (define parse_sql (lambda (schema s) (begin
@@ -109,8 +102,23 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
 	)))
+
+	(define sql_column_attributes (parser (define sub (* (or
+		(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
+		(parser (atom "PRIMARY" true) '("primary" true))
+		(parser '((atom "UNIQUE" true) (atom "KEY" true)) '("unique" true))
+		(parser (atom "UNIQUE" true) '("unique" true))
+		(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
+		(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
+		(parser (atom "NULL" true) '("null" true))
+		(parser '((atom "DEFAULT" true) (define default sql_literal)) '("default" default))
+		(parser '((atom "ON" true) (atom "UPDATE" true) (define default sql_literal)) '("update" default))
+		(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
+		(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
+		(parser (atom "UNSIGNED" true) '()) /* ignore */
+		/* TODO: GENERATED ALWAYS AS expr */
+	))) (merge sub)))
 	
-	/* TODO: (expr), a + b, a - b, a * b, a / b */
 	(define sql_expression (parser (or
 		(parser '((atom "@" true) (define var sql_identifier_unquoted) (atom ":=" true) (define value sql_expression)) '((quote session) var value))
 		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (cons a b)))
@@ -450,7 +458,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) '("engine" "safe"))
 			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) '("engine" "safe"))
-			(parser '((atom "COMMENT" true) "=" (define value sql_expression)) '("comment" value))
+			(parser '((atom "COMMENT" true) "=" (define value sql_string)) '("comment" value))
 			(parser '((atom "DEFAULT" true) (atom "CHARSET" false) "=" (define id sql_identifier)) '("charset" id))
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
@@ -462,8 +470,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "ALTER" true)
 		(atom "TABLE" true)
 		(define id sql_identifier) /* TODO: ignorecase */
-		(define alters (+ (or
-			/* TODO
+        (define alters (+ (or
+            /* TODO
 			(parser '((atom "ADD" true) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
 			(parser '((atom "ADD" true) (atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ sql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "ADD" true) (atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2))) */
@@ -487,6 +495,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) schema id "collation" collation)))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) schema id "auto_increment" ai)))
+				/* ALTER COLUMN operations for defaults */
+				(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) schema id col "default" def)))
+				(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) schema id col "default" nil)))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 

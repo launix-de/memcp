@@ -1,0 +1,30 @@
+# Schema-qualified DELETE and DROP DATABASE IF EXISTS
+
+metadata:
+  version: "1.0"
+  description: "Ensure DELETE FROM schema.tbl works and DROP DATABASE IF EXISTS is accepted"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dmlq"
+  - sql: "CREATE TABLE dmlq (id INT, v INT)"
+  - sql: "INSERT INTO dmlq (id, v) VALUES (1, 10), (2, 20), (3, 30)"
+
+test_cases:
+  - name: "DELETE using schema-qualified table"
+    sql: "DELETE FROM `memcp-tests`.dmlq WHERE v >= 20"
+    expect:
+      affected_rows: 2
+
+  - name: "Remaining rows after schema-qualified delete"
+    sql: "SELECT COUNT(*) AS c FROM dmlq"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+  - name: "DROP DATABASE IF EXISTS on non-existent db"
+    sql: "DROP DATABASE IF EXISTS `surely_nonexistent_db_xyz`"
+    expect: {}
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dmlq"

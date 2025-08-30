@@ -483,8 +483,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "TABLE" true)
 		(? (atom "ONLY" true))
 		(define id (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier))
-		(define alters (+ (or
-			/* TODO */
+        (define alters (+ (or
+            /* TODO */
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") (lambda (tbl) '('createkey schema tbl id true (cons (quote list) cols))))
 			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode))) (lambda (tbl) '('createforeignkey schema id tbl (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode)))
 			/*
@@ -519,6 +519,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				    (? (atom "NO" true) (atom "MAXVALUE" true))
 				    (? (atom "CACHE" true) psql_expression)
 				")") (lambda (col) (lambda (id) '((quote altercolumn) schema id col "auto_increment" true))))
+				/* Type and default changes */
+				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions)))))
+				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) schema id col "default" def))))
+				(parser '((atom "DROP" true) (atom "DEFAULT" true)) (lambda (col) (lambda (id) '((quote altercolumn) schema id col "default" nil))))
 			))) (body col))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
@@ -663,5 +667,6 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(state "sql" "")
 	(load stream (lambda (line) (begin
 		((state "line") line)
-	)) "\n")
-)))
+		)) "\n")
+	)))
+)
