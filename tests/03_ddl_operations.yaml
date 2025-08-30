@@ -5,7 +5,10 @@ metadata:
   version: "1.0"
   description: "DDL operations (CREATE, DROP, ALTER) with affected_rows validation"
 
-setup: []
+setup:
+  # Ensure user rows don't pre-exist from earlier runs
+  - sql: "DELETE FROM system.user WHERE username = 'testuser'"
+  - sql: "DELETE FROM system.user WHERE username = 'testuser2'"
 
 test_cases:
 
@@ -153,4 +156,7 @@ test_cases:
   #   expect:
   #     affected_rows: 1
 
-cleanup: []
+cleanup:
+  # Clean up created users to keep suite idempotent
+  - sql: "DELETE FROM system.user WHERE username = 'testuser'"
+  - sql: "DELETE FROM system.user WHERE username = 'testuser2'"
