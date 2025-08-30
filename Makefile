@@ -8,7 +8,8 @@ perf:
 	perf record --call-graph fp -- ./memcp
 
 test:
-	.git/hooks/pre-commit
+	# run `cp git-pre-commit .git/hooks/pre-commit` to activate the trigger
+	./git-pre-commit
 
 memcp.sif:
 	sudo singularity build memcp.sif memcp.singularity.recipe

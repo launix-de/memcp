@@ -1,0 +1,111 @@
+#!/bin/bash
+#
+# MemCP Pre-commit Hook
+# Runs SQL tests before allowing commits using a single MemCP instance
+#
+
+echo "🔍 Running MemCP pre-commit tests..."
+
+# Build memcp to ensure latest changes are included
+echo "🔨 Building memcp..."
+if ! go build -o memcp; then
+    echo "❌ Build failed, commit aborted"
+    exit 1
+fi
+
+# Find all numbered test files (01_*.yaml, 02_*.yaml, etc.)
+test_files=$(find tests/ -name "[0-9][0-9]_*.yaml" | sort)
+
+if [ -z "$test_files" ]; then
+    echo "❌ No test files found in tests/ directory"
+    exit 1
+fi
+
+echo "Found test files:"
+echo "$test_files"
+echo ""
+
+# Start a single MemCP instance for all tests
+test_port=4400
+echo "🚀 Starting single MemCP instance on port $test_port..."
+
+# Kill any existing instance first
+pkill -f "memcp.*--api-port=$test_port" || true
+sleep 1
+
+# Start MemCP in the background with stdin kept open
+mkfifo /tmp/memcp-stdin-$test_port
+exec 3<> /tmp/memcp-stdin-$test_port
+
+./memcp -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm < /tmp/memcp-stdin-$test_port > /tmp/memcp-test.log 2>&1 &
+memcp_pid=$!
+
+# Wait for MemCP to start
+echo "⏳ Waiting for MemCP to be ready..."
+for i in {1..60}; do
+    if curl -s "http://localhost:$test_port" >/dev/null 2>&1; then
+        echo "✅ MemCP is ready!"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "❌ MemCP failed to start within 60 seconds"
+        echo "MemCP log:"
+        cat /tmp/memcp-test.log 2>/dev/null || echo "No log available"
+        kill $memcp_pid 2>/dev/null || true
+        exit 1
+    fi
+    # Check if process is still running
+    if ! kill -0 $memcp_pid 2>/dev/null; then
+        echo "❌ MemCP process died during startup"
+        echo "MemCP log:"
+        cat /tmp/memcp-test.log 2>/dev/null || echo "No log available"
+        exit 1
+    fi
+    sleep 1
+done
+
+# Function to cleanup MemCP on exit
+cleanup() {
+    echo ""
+    echo "🛑 Stopping MemCP..."
+    kill $memcp_pid 2>/dev/null || true
+    exec 3>&- # Close the fifo
+    rm -f /tmp/memcp-stdin-$test_port 2>/dev/null || true
+    wait $memcp_pid 2>/dev/null || true
+    echo "✅ MemCP stopped"
+}
+
+# Set trap to cleanup on script exit
+trap cleanup EXIT
+
+echo "🧪 Running SQL tests using single MemCP instance..."
+
+# Run each test file using --connect-only mode
+all_passed=true
+failed_files=""
+
+for test_file in $test_files; do
+    echo "🔍 Running $test_file..."
+    if python3 run_sql_tests.py "$test_file" $test_port --connect-only; then
+        echo "✅ Tests in $test_file passed"
+    else
+        echo "❌ Tests in $test_file failed"
+        all_passed=false
+        failed_files="$failed_files $test_file"
+    fi
+    echo ""
+done
+
+if [ "$all_passed" = true ]; then
+    echo "🎉 All tests passed, commit allowed"
+    exit 0
+else
+    echo "❌ Some tests failed, commit aborted"
+    echo ""
+    echo "Failed test files:$failed_files"
+    echo ""
+    echo "You can run individual test files manually with:"
+    echo "  python3 run_sql_tests.py <test_file.yaml> $test_port --connect-only"
+    echo "  (Make sure to start MemCP first: ./memcp --api-port=$test_port --disable-mysql)"
+    exit 1
+fi
