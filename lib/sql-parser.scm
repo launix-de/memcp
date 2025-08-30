@@ -505,7 +505,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote createdatabase) id (if ifnot true false)))
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
-			'('insert "system" "user" '('list "username" "password") '('list '('list username '('password password)))))
+			'('insert "system" "user" '('list "username" "password" "admin") '('list '('list username '('password password) false))))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password))))))

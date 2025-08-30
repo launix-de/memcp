@@ -27,9 +27,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(createdatabase "system")
 ))
 (if (has? (show "system") "user") true (begin
-	(print "creating table system.user")
-	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean) ENGINE=SAFE"))
-	(insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password "admin") true)))
+    (print "creating table system.user")
+    (eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE"))
+    (insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password "admin") true)))
 ))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */

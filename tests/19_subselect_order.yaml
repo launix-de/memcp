@@ -1,0 +1,31 @@
+# ORDER BY on derived-table alias
+
+metadata:
+  version: "1.0"
+  description: "ORDER BY t.col where t is a subselect alias"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS temperature"
+  - sql: "CREATE TABLE temperature (date INT, sensor INT, temp INT)"
+  - sql: |
+      INSERT INTO temperature (date, sensor, temp) VALUES
+      (10, 1, 21),
+      (20, 1, 22),
+      (15, 2, 23)
+
+test_cases:
+  - name: "Order by alias-qualified column"
+    sql: |
+      SELECT `t`.*
+      FROM (SELECT `date` AS `date` FROM `temperature`) AS `t`
+      ORDER BY `t`.`date` DESC
+      LIMIT 2 OFFSET 0
+    expect:
+      rows: 2
+      data:
+        - date: 20
+        - date: 15
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS temperature"
+

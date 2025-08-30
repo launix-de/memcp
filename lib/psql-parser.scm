@@ -54,6 +54,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(parser (define col psql_identifier_unquoted) '((quote get_column) nil true col true))
 )))
 
+
 (define psql_column_attributes (parser (define sub (* (or
 	(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 	(parser (atom "PRIMARY" true) '("primary" true))
@@ -62,9 +63,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(parser (atom "AUTO_INCREMENT" true) '("auto_increment" true))
 	(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 	(parser (atom "NULL" true) '("null" true))
-	(parser '((atom "DEFAULT" true) (define default sql_expression)) '("default" default))
-	(parser '((atom "ON" true) (atom "UPDATE" true) (define default sql_expression)) '("update" default))
-	(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
+	(parser '((atom "DEFAULT" true) (define default psql_expression)) '("default" default))
+	(parser '((atom "ON" true) (atom "UPDATE" true) (define default psql_expression)) '("update" default))
+	(parser '((atom "COMMENT" true) (define comment psql_expression)) '("comment" comment))
 	(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
 	(parser (atom "UNSIGNED" true) '()) /* ignore */
 	/* TODO: GENERATED ALWAYS AS expr */
@@ -195,7 +196,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var psql_identifier_unquoted)) '('session var))
 		(parser '((atom "@@" true) (define var psql_identifier_unquoted)) '('globalvars var))
-		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
+		(parser '((define fn sql_identifier_unquoted) "(" (define args (* psql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
 		psql_number
 		psql_string
 		psql_column
@@ -536,7 +537,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote createdatabase) id (if ifnot true false)))
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username psql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
-			'('insert "system" "user" '('list "username" "password") '('list '('list username '('password password)))))
+			'('insert "system" "user" '('list "username" "password" "admin") '('list '('list username '('password password) false))))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
 			'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password))))))
