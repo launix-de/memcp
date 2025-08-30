@@ -6,12 +6,18 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS temperature"
+  - sql: "DROP TABLE IF EXISTS sensor"
   - sql: "CREATE TABLE temperature (date INT, sensor INT, temp INT)"
+  - sql: "CREATE TABLE sensor (ID INT, name VARCHAR(64))"
   - sql: |
       INSERT INTO temperature (date, sensor, temp) VALUES
       (10, 1, 21),
       (20, 1, 22),
       (15, 2, 23)
+  - sql: |
+      INSERT INTO sensor (ID, name) VALUES
+      (1, 'S1'),
+      (2, 'S2')
 
 test_cases:
   - name: "Order by alias-qualified column"
@@ -26,6 +32,33 @@ test_cases:
         - date: 20
         - date: 15
 
+  - name: "Order by alias with inner join + subselect"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT /* ID */ `sensor` AS `sensor`,
+               /* date */ `date` AS `date`,
+               /* temp */ `temp` AS `temp`
+        FROM `temperature` `temperature`
+        LEFT JOIN (
+          SELECT `ID` AS `sensor:ID`, `sensor`.`name` AS `sensor:description`, (TRUE) AS `sensor:canView`
+          FROM `sensor`
+        ) `ref:sensor` ON `ref:sensor`.`sensor:ID` = `sensor`
+        WHERE (`sensor` = 1)
+      ) AS t
+      WHERE TRUE
+      ORDER BY `t`.`date` DESC
+      LIMIT 2 OFFSET 0
+    expect:
+      rows: 2
+      data:
+        - sensor: 1
+          date: 20
+          temp: 22
+        - sensor: 1
+          date: 10
+          temp: 21
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS temperature"
-
+  - sql: "DROP TABLE IF EXISTS sensor"
