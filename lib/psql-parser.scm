@@ -541,6 +541,18 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
 			'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password))))))
 
+		/* GRANT syntax (PostgreSQL-style) -> reflect only admin and database-level access */
+		/* GRANT <any> ON DATABASE db TO user */
+		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
+			'('insert "system" "access" '('list "username" "database") '('list '('list username db))))
+		/* GRANT <any> ON SCHEMA db TO user */
+		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
+			'('insert "system" "access" '('list "username" "database") '('list '('list username db))))
+		/* GRANT ALL PRIVILEGES ON ALL DATABASES is non-standard; ignore */
+		/* Treat GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA db TO user as db-level access */
+		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
+			'('insert "system" "access" '('list "username" "database") '('list '('list username db))))
+
 		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (atom "USING" true) psql_identifier "(" (define cols (+ psql_identifier ",")) ")") '('createkey schema tbl id unique (cons (quote list) cols)))
 
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))

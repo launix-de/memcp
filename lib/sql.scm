@@ -28,8 +28,27 @@ Copyright (C) 2023  Carl-Philip Hänsch
 ))
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
-	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text) ENGINE=SAFE"))
-	(insert "system" "user" '("id" "username" "password") '('(1 "root" (password "admin"))))
+	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean) ENGINE=SAFE"))
+	(insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password "admin") true)))
+))
+
+/* migration: older instances may miss the admin column; add it and mark all existing users as admin */
+(try (lambda () (begin
+	(if (has? (show "system") "user") (begin
+		(if (has? (show "system" "user") "admin")
+			true
+			(begin
+				(createcolumn "system" "user" "admin" "boolean" '() '())
+				(scan "system" "user" '() (lambda () true) '("$update") (lambda ($update) ($update '("admin" true))))
+			)
+		)
+	) true)
+)) (lambda (e) true))
+
+/* access control: which user can access which database */
+(if (has? (show "system") "access") true (begin
+	(print "creating table system.access")
+	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE"))
 ))
 
 (set globalvars '("lower_case_table_names" 0))
