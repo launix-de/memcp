@@ -14,7 +14,7 @@ require (
 	github.com/launix-de/NonLockingReadMap v1.0.8
 	github.com/launix-de/go-mysqlstack v0.0.0-20241101205441-bc39b4e0fb04
 	github.com/launix-de/go-packrat/v2 v2.1.11
-	github.com/ulikunitz/xz v0.5.12
+	github.com/ulikunitz/xz v0.5.15
 	golang.org/x/text v0.21.0
 )
 
