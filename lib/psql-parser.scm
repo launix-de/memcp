@@ -329,32 +329,30 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	(define psql_delete (parser '(
 		(atom "DELETE" true)
 		(atom "FROM" true)
-		/* TODO: DELETE tbl FROM tbl, tbl, tbl */
-		/* TODO: DELETE schema.tbl */
-		(define tbl psql_identifier) /* TODO: ignorecase */
+		/* schema-qualified */
+		(? (define schema2 psql_identifier) ".") (define tbl psql_identifier)
 		(? '(
 			(atom "WHERE" true)
 			(define condition psql_expression)
-		))
-	) (begin
-		(define replace_find_column (lambda (expr) (match expr
-			'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
-			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-			expr
-		)))
-		replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-		(set condition (replace_find_column (coalesce condition true)))
-		(set filtercols (extract_columns_for_tblvar tbl condition))
-		'((quote scan)
-			schema
-			tbl
-			(cons list filtercols)
-			'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
-			'(list "$update")
-			'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-			(quote +)
-			0
-		)
+		))) (begin
+			(define replace_find_column (lambda (expr) (match expr
+				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
+				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+				expr
+			)))
+			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
+			(set condition (replace_find_column (coalesce condition true)))
+			(set filtercols (extract_columns_for_tblvar tbl condition))
+			'((quote scan)
+				(coalesce schema2 schema)
+				tbl
+				(cons list filtercols)
+				'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
+				'(list "$update")
+				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+				(quote +)
+				0
+			)
 	)))
 
 	(define psql_insert_into (parser '(
