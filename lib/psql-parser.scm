@@ -533,7 +533,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		psql_update
 		psql_delete
 
-		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define id psql_identifier)) '((quote createdatabase) id))
+		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote createdatabase) id (if ifnot true false)))
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username psql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
 			'('insert "system" "user" '('list "username" "password") '('list '('list username '('password password)))))
