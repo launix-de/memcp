@@ -2,19 +2,37 @@
 """
 MemCP SQL Test Runner (Optimized)
 
-Runs structured SQL/SPARQL tests from YAML files. 
+Runs structured SQL/SPARQL tests from YAML files.
 - Declarative tests
 - Unified execution path
 - Compact success logging, verbose failure logging
+
+Requirements (pip): requests, PyYAML
+If missing, create a venv and install, e.g.:
+  python3 -m venv .venv && . .venv/bin/activate && pip install -U requests PyYAML
 """
 
-import yaml
-import json
-import requests
-import subprocess
-import time
 import sys
 import os
+
+# Dependency checks with clear install hints
+try:
+    import yaml  # PyYAML
+except Exception as e:
+    print("Missing dependency: PyYAML (module 'yaml').")
+    print("Install with: pip install -U PyYAML")
+    sys.exit(2)
+
+try:
+    import requests
+except Exception as e:
+    print("Missing dependency: requests.")
+    print("Install with: pip install -U requests")
+    sys.exit(2)
+
+import json
+import subprocess
+import time
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional
@@ -34,6 +52,7 @@ class SQLTestRunner:
         self.failed_tests = []
         self.setup_operations = []
         self.current_database = None
+        self._ensured_dbs = set()
 
     # ----------------------
     # Helpers
@@ -61,20 +80,31 @@ class SQLTestRunner:
     # ----------------------
     # Core execution
     # ----------------------
+    def ensure_database(self, database: str) -> None:
+        if not database or database == "system" or database in self._ensured_dbs:
+            return
+        try:
+            url = f"{self.base_url}/sql/system"
+            create_db_sql = f"CREATE DATABASE IF NOT EXISTS `{database}`"
+            requests.post(url, data=create_db_sql, headers=self.auth_header, timeout=10)
+            # verify availability with a lightweight call
+            check_url = f"{self.base_url}/sql/{quote(database, safe='')}"
+            for _ in range(3):
+                resp = requests.post(check_url, data="SHOW TABLES", headers=self.auth_header, timeout=10)
+                if resp is not None and "database" not in resp.text.lower():
+                    self._ensured_dbs.add(database)
+                    break
+                time.sleep(0.1)
+        except Exception:
+            pass
+
     def execute_sql(self, database: str, query: str) -> Optional[requests.Response]:
         try:
+            # proactively ensure database exists (works for connect-only too)
+            self.ensure_database(database)
             encoded_db = quote(database, safe='')
             url = f"{self.base_url}/sql/{encoded_db}"
-            response = requests.post(url, data=query, headers=self.auth_header, timeout=10)
-
-            if response and f"database {database} does not exist" in response.text:
-                create_db_sql = f"CREATE DATABASE IF NOT EXISTS {database}"
-                recovery = requests.post(f"{self.base_url}/sql/system", data=create_db_sql, headers=self.auth_header, timeout=10)
-                if recovery and recovery.status_code == 200:
-                    for step in self.setup_operations:
-                        requests.post(url, data=step['sql'], headers=self.auth_header, timeout=10)
-                    response = requests.post(url, data=query, headers=self.auth_header, timeout=10)
-            return response
+            return requests.post(url, data=query, headers=self.auth_header, timeout=10)
         except Exception as e:
             print(f"Error executing SQL: {e}")
             return None
@@ -90,7 +120,7 @@ class SQLTestRunner:
 
     def load_ttl(self, database: str, ttl_data: str) -> bool:
         try:
-            self.execute_sql("system", f"CREATE DATABASE `{database}`")
+            self.ensure_database(database)
             url = f"{self.base_url}/rdf/{quote(database, safe='')}/load_ttl"
             response = requests.post(url, data=ttl_data, headers=self.auth_header, timeout=10)
             return response and response.status_code == 200
@@ -205,6 +235,12 @@ class SQLTestRunner:
                         pass
                 return
             self.execute_sql("system", f"DROP DATABASE IF EXISTS {database}")
+            # drop ensures next ensure_database will recreate
+            if database in self._ensured_dbs:
+                try:
+                    self._ensured_dbs.remove(database)
+                except KeyError:
+                    pass
         except:
             pass
 
@@ -221,11 +257,9 @@ class SQLTestRunner:
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
         print(f"💾 Database: {database}")
 
+        # fresh DB for this suite; ensure exists after cleanup
         self.cleanup_test_database(database)
-        resp = self.execute_sql("system", f"CREATE DATABASE IF NOT EXISTS `{database}`")
-        if not resp or resp.status_code != 200:
-            print(f"❌ Could not create test DB {database}")
-            return False
+        self.ensure_database(database)
 
         if spec.get('setup') and not self.run_setup(spec['setup'], database):
             print("❌ Setup failed")
