@@ -242,12 +242,31 @@ func (c *column) UpdateSanitizer() {
 }
 
 func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
-	switch (key) {
-		case "default":
-			c.Default = val
-			return c.Default
-		case "null":
-			c.AllowNull = scm.ToBool(val)
+    switch (key) {
+        case "type":
+            c.Typ = scm.String(val)
+            c.UpdateSanitizer()
+            return c.Typ
+        case "dimensions":
+            // expect val to be a list of numbers
+            if val == nil {
+                c.Typdimensions = nil
+                return nil
+            }
+            if l, ok := val.([]scm.Scmer); ok {
+                dims := make([]int, len(l))
+                for i, v := range l {
+                    dims[i] = scm.ToInt(v)
+                }
+                c.Typdimensions = dims
+                return val
+            }
+            panic("invalid dimensions value for alter column")
+        case "default":
+            c.Default = val
+            return c.Default
+        case "null":
+            c.AllowNull = scm.ToBool(val)
 			return c.AllowNull
 		case "temp":
 			c.IsTemp = scm.ToBool(val)
@@ -258,9 +277,9 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 		case "comment":
 			c.Comment = scm.String(val)
 			return c.Comment
-		default:
-			panic("unimplemented alter column operation: " + key)
-	}
+        default:
+            panic("unimplemented alter column operation: " + key)
+    }
 }
 
 func (d dataset) Get(key string) (scm.Scmer, bool) {

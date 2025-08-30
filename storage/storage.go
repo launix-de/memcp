@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -31,7 +31,7 @@ import units "github.com/docker/go-units"
 type ColumnStorage interface {
 	// info
 	GetValue(uint) scm.Scmer // read function
-	String() string // self-description
+	String() string          // self-description
 	scm.Sizable
 
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
@@ -45,13 +45,13 @@ type ColumnStorage interface {
 	finish()
 
 	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
-	Serialize(io.Writer) // write content to Writer
+	Serialize(io.Writer)        // write content to Writer
 	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)
 }
 
-var storages = map[uint8]reflect.Type {
-	 1: reflect.TypeOf(StorageSCMER{}),
-	 2: reflect.TypeOf(StorageSparse{}),
+var storages = map[uint8]reflect.Type{
+	1:  reflect.TypeOf(StorageSCMER{}),
+	2:  reflect.TypeOf(StorageSparse{}),
 	10: reflect.TypeOf(StorageInt{}),
 	11: reflect.TypeOf(StorageSeq{}),
 	12: reflect.TypeOf(StorageFloat{}),
@@ -79,7 +79,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"reduce2", "func", "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator"},
 			scm.DeclarationParameter{"isOuter", "bool", "(optional) if true, in case of no hits, call map once anyway with NULL values"},
 		}, "any",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			filtercols_ := a[2].([]scm.Scmer)
 			filtercols := make([]string, len(filtercols_))
 			for i, c := range filtercols_ {
@@ -181,7 +181,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed"},
 			scm.DeclarationParameter{"isOuter", "bool", "(optional) if true, in case of no hits, call map once anyway with NULL values"},
 		}, "any",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			filtercols_ := a[2].([]scm.Scmer)
 			filtercols := make([]string, len(filtercols_))
 			for i, c := range filtercols_ {
@@ -241,7 +241,7 @@ func Init(en scm.Env) {
 				for i, scol := range sortcols {
 					if colname, ok := scol.(string); ok {
 						// naive column sort
-						scols[i] = func (i uint) scm.Scmer {
+						scols[i] = func(i uint) scm.Scmer {
 							v, _ := dataset(list2[i].([]scm.Scmer)).GetI(colname)
 							return v
 						}
@@ -249,7 +249,7 @@ func Init(en scm.Env) {
 						// complex lambda columns (TODO: either remove lambda columns or add colname mapping)
 						largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer))) // allocate only once, reuse in loop
 						for j, param := range proc.Params.([]scm.Scmer) {
-							largs[j] = func (i uint) scm.Scmer {
+							largs[j] = func(i uint) scm.Scmer {
 								v, _ := dataset(list2[i].([]scm.Scmer)).GetI(string(param.(scm.Symbol)))
 								return v
 							}
@@ -268,7 +268,7 @@ func Init(en scm.Env) {
 						panic("unknown sort criteria: " + fmt.Sprint(scol))
 					}
 				}
-				sort.Slice(list2, func (i, j int) bool {
+				sort.Slice(list2, func(i, j int) bool {
 					// sort list2
 					for c := 0; c < len(scols); c++ {
 						a := scols[c](uint(i))
@@ -319,7 +319,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"schema", "string", "name of the new database"},
 			scm.DeclarationParameter{"ignoreexists", "bool", "if true, return false instead of throwing an error"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			ignoreexists := false
 			if len(a) > 1 && scm.ToBool(a[1]) {
 				ignoreexists = true
@@ -328,14 +328,18 @@ func Init(en scm.Env) {
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"dropdatabase", "creates a new database",
-		1, 1,
+		"dropdatabase", "drops a database",
+		1, 2,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the new database"},
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"ifexists", "bool", "if true, don't throw an error if it doesn't exist"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
-			DropDatabase(scm.String(a[0]))
-			return true
+		func(a ...scm.Scmer) scm.Scmer {
+			ifexists := false
+			if len(a) > 1 {
+				ifexists = scm.ToBool(a[1])
+			}
+			return DropDatabase(scm.String(a[0]), ifexists)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -348,7 +352,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"options", "list", "further options like engine=safe|sloppy|memory"},
 			scm.DeclarationParameter{"ifnotexists", "bool", "don't throw an error if table already exists"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// parse options
 			var pm PersistencyMode = Safe
 			options := a[3].([]scm.Scmer)
@@ -396,7 +400,7 @@ func Init(en scm.Env) {
 			t.Auto_increment = auto_increment
 			if created {
 				// add columns and constraints
-				for _, coldef := range(a[2].([]scm.Scmer)) {
+				for _, coldef := range a[2].([]scm.Scmer) {
 					def := coldef.([]scm.Scmer)
 					if len(def) == 0 {
 						continue
@@ -408,8 +412,7 @@ func Init(en scm.Env) {
 							cols[i] = scm.String(v)
 						}
 						t.Unique = append(t.Unique, uniqueKey{scm.String(def[1]), cols})
-					} else
-					if def[0] == "foreign" {
+					} else if def[0] == "foreign" {
 						// id cols tbl cols2
 						cols1 := make([]string, len(def[2].([]scm.Scmer)))
 						for i, v := range def[2].([]scm.Scmer) {
@@ -434,8 +437,7 @@ func Init(en scm.Env) {
 							// non-forward declaration
 							t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode})
 						}
-					} else
-					if def[0] == "column" {
+					} else if def[0] == "column" {
 						// normal column
 						colname := scm.String(def[1])
 						typename := scm.String(def[2])
@@ -476,7 +478,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"computorCols", "list", "list of columns that is passed into params of computor"},
 			scm.DeclarationParameter{"computor", "func", "lambda expression that can take other column values and computes the value of that column"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -507,7 +509,7 @@ func Init(en scm.Env) {
 				}
 				t.ComputeColumn(colname, param_names, a[7])
 			}
-			
+
 			return ok
 		}, false,
 	})
@@ -521,7 +523,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"unique", "bool", "whether the key is unique"},
 			scm.DeclarationParameter{"columns", "list", "list of columns to include"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -572,7 +574,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"updatemode", "string", "restrict|cascade|set null"},
 			scm.DeclarationParameter{"deletemode", "string", "restrict|cascade|set null"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -626,7 +628,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"colname", "string", "name of the column"},
 			scm.DeclarationParameter{"numpartitions", "number", "number of partitions; optional. leave 0 if you want to detect the partiton number automatically or copy the partition schema of the table"},
 		}, "list",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -655,7 +657,7 @@ func Init(en scm.Env) {
 			}
 			// calculate them anew
 			return t.NewShardDimension(scm.String(a[2]), numPartitions).Pivots
-			
+
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -666,7 +668,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"table", "string", "name of the new table"},
 			scm.DeclarationParameter{"columns", "list", "associative list of string -> list representing column name -> pivots. You can compute pivots by (shardcolumn ...)"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -679,7 +681,7 @@ func Init(en scm.Env) {
 			cols := dataset(a[2].([]scm.Scmer))
 			if t.PDimensions == nil {
 				// apply partitioning schema
-				ps := make([]shardDimension, len(cols) / 2)
+				ps := make([]shardDimension, len(cols)/2)
 				for i := 0; i < len(ps); i++ {
 					ps[i].Column = scm.String(cols[2*i])
 					ps[i].Pivots = cols[2*i+1].([]scm.Scmer)
@@ -711,7 +713,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"operation", "string", "one of owner|drop|engine|collation"},
 			scm.DeclarationParameter{"parameter", "any", "name of the column to drop or value of the parameter"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -742,7 +744,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"operation", "string", "one of drop|type|collation|auto_increment|comment"},
 			scm.DeclarationParameter{"parameter", "any", "name of the column to drop or value of the parameter"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -784,7 +786,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"table", "string", "name of the table"},
 			scm.DeclarationParameter{"ifexists", "bool", "if true, don't throw an error if it already exists"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) > 2 {
 				DropTable(scm.String(a[0]), scm.String(a[1]), scm.ToBool(a[2]))
 			} else {
@@ -805,7 +807,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"onCollision", "func", "the function that is called on each collision dataset. The first parameter is filled with the $update function, the second parameter is the dataset as associative list. If not set, an error is thrown in case of a collision."},
 			scm.DeclarationParameter{"mergeNull", "bool", "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)"},
 		}, "number",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
@@ -821,7 +823,7 @@ func Init(en scm.Env) {
 				onCollision = a[5]
 			}
 			mergeNull := false
-			if (len(a) > 6 && scm.ToBool(a[6])) {
+			if len(a) > 6 && scm.ToBool(a[6]) {
 				mergeNull = true
 			}
 			cols_ := a[2].([]scm.Scmer)
@@ -844,7 +846,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"schema", "string", "name of the database (optional: all databases)"},
 			scm.DeclarationParameter{"table", "string", "name of the table (if table is set, print the detailled storage stats)"},
 		}, "string",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				return PrintMemUsage()
 			} else if len(a) == 1 {
@@ -863,7 +865,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"schema", "string", "(optional) name of the database if you want to list tables or columns"},
 			scm.DeclarationParameter{"table", "string", "(optional) name of the table if you want to list columns"},
 		}, "any",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				// show databases
 				dbs := databases.GetAll()
@@ -898,7 +900,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"all", "bool", "if true, rebuild all shards, even if nothing has changed (default: false)"},
 			scm.DeclarationParameter{"repartition", "bool", "if true, also repartition (default: true)"},
 		}, "string",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			all := false
 			if len(a) > 0 && scm.ToBool(a[0]) {
 				all = true
@@ -921,7 +923,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"delimiter", "string", "(optional) delimiter defaults to \";\""},
 			scm.DeclarationParameter{"firstline", "bool", "(optional) if the first line contains the column names (otherwise, the tables column order is used)"},
 		}, "string",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// schema, table, filename, delimiter
 			start := time.Now()
 
@@ -945,7 +947,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"schema", "string", "name of the database where you want to put the tables in"},
 			scm.DeclarationParameter{"stream", "stream", "stream of the .jsonl file, read with: (stream filename)"},
 		}, "string",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			// schema, filename
 			start := time.Now()
 
@@ -967,11 +969,11 @@ func Init(en scm.Env) {
 
 func PrintMemUsage() string {
 	runtime.GC()
-        var m runtime.MemStats
-        runtime.ReadMemStats(&m)
-        // For info on each, see: https://golang.org/pkg/runtime/#MemStats
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
-        b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", units.BytesSize(float64(m.Alloc)), units.BytesSize(float64(m.TotalAlloc)), units.BytesSize(float64(m.Sys)), m.NumGC))
+	b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", units.BytesSize(float64(m.Alloc)), units.BytesSize(float64(m.TotalAlloc)), units.BytesSize(float64(m.Sys)), m.NumGC))
 
 	for _, db := range databases.GetAll() {
 		b.WriteString("\n\n" + db.Name + "\n======\n")
@@ -981,22 +983,22 @@ func PrintMemUsage() string {
 }
 
 func (db *database) PrintMemUsage() string {
-        // For info on each, see: https://golang.org/pkg/runtime/#MemStats
+	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
 	b.WriteString("Table                    \tColumns\tShards\tDims\tSize/Bytes\n")
 	var dsize uint
 	for _, t := range db.Tables.GetAll() {
-		var size uint = 10*8 + 32 * uint(len(t.Columns))
+		var size uint = 10*8 + 32*uint(len(t.Columns))
 		for _, s := range t.Shards {
 			size += s.ComputeSize()
 		}
 		for _, s := range t.PShards {
 			size += s.ComputeSize()
 		}
-		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%s\n", t.Name, len(t.Columns), len(t.Shards) + len(t.PShards), len(t.PDimensions), units.BytesSize(float64(size))));
+		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%s\n", t.Name, len(t.Columns), len(t.Shards)+len(t.PShards), len(t.PDimensions), units.BytesSize(float64(size))))
 		dsize += size
 	}
-	b.WriteString(fmt.Sprintf("\ntotal size = %s\n", units.BytesSize(float64(dsize))));
+	b.WriteString(fmt.Sprintf("\ntotal size = %s\n", units.BytesSize(float64(dsize))))
 	return b.String()
 }
 
@@ -1014,26 +1016,26 @@ func (t *table) PrintMemUsage() string {
 		b.WriteString(fmt.Sprintf("main count: %d, delta count: %d, deletions: %d\n", s.main_count, len(s.inserts), s.deletions.Count()))
 		for c, v := range s.columns {
 			sz := v.ComputeSize()
-			b.WriteString(fmt.Sprintf(" %s: %s, size = %s\n", c, v.String(), units.BytesSize(float64(sz))));
+			b.WriteString(fmt.Sprintf(" %s: %s, size = %s\n", c, v.String(), units.BytesSize(float64(sz))))
 			ssz += sz
 		}
-		b.WriteString(" ---\n");
+		b.WriteString(" ---\n")
 		for _, idx := range s.Indexes {
 			indexSize := idx.ComputeSize()
-			b.WriteString(fmt.Sprintf(" index %s: %s\n", idx.String(), units.BytesSize(float64(indexSize))));
+			b.WriteString(fmt.Sprintf(" index %s: %s\n", idx.String(), units.BytesSize(float64(indexSize))))
 			ssz += indexSize
 		}
-		b.WriteString(" ---\n");
+		b.WriteString(" ---\n")
 		insertionSize := scm.ComputeSize(s.inserts)
 		deletionSize := s.deletions.ComputeSize()
 		ssz += insertionSize
 		ssz += deletionSize
-		b.WriteString(fmt.Sprintf(" + insertions %s\n", units.BytesSize(float64(insertionSize))));
-		b.WriteString(fmt.Sprintf(" + deletions %s\n", units.BytesSize(float64(deletionSize))));
-		b.WriteString(" ---\n");
-		b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(ssz))));
+		b.WriteString(fmt.Sprintf(" + insertions %s\n", units.BytesSize(float64(insertionSize))))
+		b.WriteString(fmt.Sprintf(" + deletions %s\n", units.BytesSize(float64(deletionSize))))
+		b.WriteString(" ---\n")
+		b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(ssz))))
 		dsize += ssz
 	}
-	b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(dsize))));
+	b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(dsize))))
 	return b.String()
 }

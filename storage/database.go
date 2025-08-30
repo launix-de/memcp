@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -25,11 +25,12 @@ import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 
 type database struct {
-	Name string `json:"name"`
-	persistence PersistenceEngine `json:"-"`
-	Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
-	schemalock sync.RWMutex `json:"-"` // TODO: rw-locks for schemalock
+	Name        string                                             `json:"name"`
+	persistence PersistenceEngine                                  `json:"-"`
+	Tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+	schemalock  sync.RWMutex                                       `json:"-"` // TODO: rw-locks for schemalock
 }
+
 // TODO: replace databases map everytime something changes, so we don't run into read-while-write
 // e.g. a table of databases
 var databases NonLockingReadMap.NonLockingReadMap[database, string] = NonLockingReadMap.New[database, string]()
@@ -41,7 +42,7 @@ func (d database) GetKey() string {
 }
 
 func (d database) ComputeSize() uint {
-	var sz uint = 16*8 // heuristic
+	var sz uint = 16 * 8 // heuristic
 	for _, t := range d.Tables.GetAll() {
 		sz += t.ComputeSize()
 	}
@@ -61,7 +62,7 @@ func Rebuild(all bool, repartition bool) string {
 func UnloadDatabases() {
 	fmt.Println("table compression done in ", Rebuild(false, false))
 	data, _ := json.Marshal(Settings)
-	if settings, err := os.OpenFile(Basepath + "/settings.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640); err == nil {
+	if settings, err := os.OpenFile(Basepath+"/settings.json", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640); err == nil {
 		defer settings.Close()
 		settings.Write(data)
 	}
@@ -99,8 +100,8 @@ func LoadDatabases() {
 					for _, col := range t.Columns {
 						col.UpdateSanitizer()
 					}
-					func (t *table) {
-						t.iterateShards(nil, func (s *storageShard) {
+					func(t *table) {
+						t.iterateShards(nil, func(s *storageShard) {
 							s.load(t)
 						})
 					}(t)
@@ -177,7 +178,7 @@ func GetDatabase(schema string) *database {
 	return databases.Get(schema)
 }
 
-func CreateDatabase(schema string, ignoreexists bool/*, persistence PersistenceFactory*/) bool {
+func CreateDatabase(schema string, ignoreexists bool /*, persistence PersistenceFactory*/) bool {
 	db := databases.Get(schema)
 	if db != nil {
 		if ignoreexists {
@@ -188,7 +189,7 @@ func CreateDatabase(schema string, ignoreexists bool/*, persistence PersistenceF
 
 	db = new(database)
 	db.Name = schema
-	persistence := FileFactory{Basepath}// TODO: remove this, use parameter instead
+	persistence := FileFactory{Basepath} // TODO: remove this, use parameter instead
 	db.persistence = persistence.CreateDatabase(schema)
 	db.Tables = NonLockingReadMap.New[table, string]()
 
@@ -203,14 +204,18 @@ func CreateDatabase(schema string, ignoreexists bool/*, persistence PersistenceF
 	return true
 }
 
-func DropDatabase(schema string) {
+func DropDatabase(schema string, ifexists bool) bool {
 	db := databases.Remove(schema)
 	if db == nil {
+		if ifexists {
+			return false
+		}
 		panic("Database " + schema + " does not exist")
 	}
 
 	// remove remains of the folder structure
 	db.persistence.Remove()
+	return true
 }
 
 func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*table, bool) {
@@ -270,4 +275,3 @@ func DropTable(schema, name string, ifexists bool) {
 		s.RemoveFromDisk()
 	}
 }
-
