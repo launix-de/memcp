@@ -45,6 +45,13 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	) true)
 )) (lambda (e) true))
 
+/* ensure unique username constraint to avoid duplicates */
+(try (lambda () (begin
+	(if (has? (show "system") "user")
+		(createkey "system" "user" "uniq_username" true '("username"))
+		true)
+)) (lambda (e) true))
+
 /* access control: which user can access which database */
 (if (has? (show "system") "access") true (begin
 	(print "creating table system.access")

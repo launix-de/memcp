@@ -1,0 +1,62 @@
+# GRANT/REVOKE Test Suite
+
+metadata:
+  version: "1.0"
+  description: "User privileges: GRANT and REVOKE"
+
+setup:
+  - sql: "DELETE FROM `system`.`access` WHERE username='alice'"
+    expect: {}
+  - sql: "DELETE FROM `system`.`user` WHERE username='alice'"
+    expect: {}
+
+test_cases:
+  - name: "CREATE USER alice"
+    sql: "CREATE USER alice IDENTIFIED BY 'pw'"
+    expect:
+      affected_rows: 1
+
+  - name: "GRANT ALL ON *.* sets admin"
+    sql: "GRANT ALL ON *.* TO alice"
+    expect: {}
+
+  - name: "admin flag is true after grant"
+    sql: "SELECT admin FROM system.user WHERE username = 'alice'"
+    expect:
+      rows: 1
+      data:
+        - { admin: true }
+
+  - name: "REVOKE ALL ON *.* clears admin"
+    sql: "REVOKE ALL ON *.* FROM alice"
+    expect: {}
+
+  - name: "admin flag is false after revoke"
+    sql: "SELECT admin FROM system.user WHERE username = 'alice'"
+    expect:
+      rows: 1
+      data:
+        - { admin: false }
+
+  - name: "GRANT db access creates system.access entry"
+    sql: "GRANT ALL PRIVILEGES ON `memcp-tests`.* TO alice"
+    expect: {}
+
+  - name: "Verify access entry exists"
+    sql: "SELECT database FROM system.access WHERE username='alice' AND database='memcp-tests'"
+    expect:
+      rows: 1
+      data:
+        - { database: "memcp-tests" }
+
+  - name: "REVOKE db access removes entry"
+    sql: "REVOKE ALL PRIVILEGES ON `memcp-tests`.* FROM alice"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify access entry removed"
+    sql: "SELECT database FROM system.access WHERE username='alice' AND database='memcp-tests'"
+    expect:
+      rows: 0
+
+cleanup: []

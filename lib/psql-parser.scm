@@ -330,6 +330,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "DELETE" true)
 		(atom "FROM" true)
 		/* TODO: DELETE tbl FROM tbl, tbl, tbl */
+		/* TODO: DELETE schema.tbl */
 		(define tbl psql_identifier) /* TODO: ignorecase */
 		(? '(
 			(atom "WHERE" true)
@@ -537,7 +538,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote createdatabase) id (if ifnot true false)))
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username psql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
-			'('insert "system" "user" '('list "username" "password" "admin") '('list '('list username '('password password) false))))
+			'('insert "system" "user" '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists"))))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
 			'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password))))))
@@ -553,6 +554,44 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		/* Treat GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA db TO user as db-level access */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			'('insert "system" "access" '('list "username" "database") '('list '('list username db))))
+
+		/* REVOKE syntax (PostgreSQL-style) -> mirror GRANT behavior */
+		/* REVOKE <any> ON DATABASE db FROM user */
+		(parser '((atom "REVOKE" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
+			'((quote scan)
+				"system"
+				"access"
+				'(list "username" "database")
+				'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
+				'(list "$update")
+				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+				(quote +)
+				0
+			))
+		/* REVOKE <any> ON SCHEMA db FROM user */
+		(parser '((atom "REVOKE" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
+			'((quote scan)
+				"system"
+				"access"
+				'(list "username" "database")
+				'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
+				'(list "$update")
+				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+				(quote +)
+				0
+			))
+		/* REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA db FROM user -> treat as db-level */
+		(parser '((atom "REVOKE" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
+			'((quote scan)
+				"system"
+				"access"
+				'(list "username" "database")
+				'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
+				'(list "$update")
+				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+				(quote +)
+				0
+			))
 
 		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (atom "USING" true) psql_identifier "(" (define cols (+ psql_identifier ",")) ")") '('createkey schema tbl id unique (cons (quote list) cols)))
 
