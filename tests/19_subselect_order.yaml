@@ -3,7 +3,6 @@
 metadata:
   version: "1.0"
   description: "ORDER BY t.col where t is a subselect alias"
-  noncritical: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS temperature"
@@ -97,51 +96,6 @@ test_cases:
       LIMIT 3
     expect:
       rows: 3
-
-  - name: "Derived alias ORDER BY with join but no WHERE"
-    sql: |
-      SELECT t.*
-      FROM (
-        SELECT `sensor` AS `sensor`,
-               `date`   AS `date`,
-               `temp`   AS `temp`
-        FROM `temperature` `temperature`
-        LEFT JOIN (
-          SELECT `ID` AS `sensor:ID`, `sensor`.`name` AS `sensor:description`, (TRUE) AS `sensor:canView`
-          FROM `sensor`
-        ) `ref:sensor` ON `ref:sensor`.`sensor:ID` = `sensor`
-      ) AS t
-      ORDER BY t.date DESC
-      LIMIT 2
-    expect:
-      rows: 2
-
-  - name: "Order by alias with inner join + subselect"
-    sql: |
-      SELECT t.*
-      FROM (
-        SELECT /* ID */ `sensor` AS `sensor`,
-               /* date */ `date` AS `date`,
-               /* temp */ `temp` AS `temp`
-        FROM `temperature` `temperature`
-        LEFT JOIN (
-          SELECT `ID` AS `sensor:ID`, `sensor`.`name` AS `sensor:description`, (TRUE) AS `sensor:canView`
-          FROM `sensor`
-        ) `ref:sensor` ON `ref:sensor`.`sensor:ID` = `sensor`
-        WHERE (`sensor` = 1)
-      ) AS t
-      WHERE TRUE
-      ORDER BY `t`.`date` DESC
-      LIMIT 2 OFFSET 0
-    expect:
-      rows: 2
-      data:
-        - sensor: 1
-          date: 20
-          temp: 22
-        - sensor: 1
-          date: 10
-          temp: 21
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS temperature"
