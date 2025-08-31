@@ -26,9 +26,8 @@ test_cases:
     sql: "SELECT COUNT(name) AS c FROM null_test"
     expect:
       rows: 1
-      # NOTE: Current engine treats COUNT(col) like COUNT(*).
       data:
-        - c: 3
+        - c: 1
 
   - name: "COUNT(*) counts all rows"
     sql: "SELECT COUNT(*) AS c FROM null_test"
