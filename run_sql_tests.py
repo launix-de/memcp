@@ -49,7 +49,11 @@ class SQLTestRunner:
         self.auth_header = self._create_auth_header()
         self.test_count = 0
         self.test_passed = 0
-        self.failed_tests = []
+        self.failed_tests = []  # list of (name, is_noncritical)
+        self.failed_critical = 0
+        self.failed_noncritical = 0
+        self.noncritical_count = 0
+        self.noncritical_passed = 0
         self.setup_operations = []
         self.current_database = None
         self._ensured_dbs = set()
@@ -72,13 +76,20 @@ class SQLTestRunner:
         encoded = b64encode(credentials.encode()).decode()
         return {"Authorization": f"Basic {encoded}"}
 
-    def _record_success(self, name: str):
+    def _record_success(self, name: str, is_noncritical: bool = False):
         self.test_passed += 1
         print(f"✅ {name}")
+        if is_noncritical:
+            self.noncritical_passed += 1
+            print(f"   ⚠️  Passed but flagged noncritical — enable soon")
 
-    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect):
-        self.failed_tests.append(name)
-        print(f"❌ {name}")
+    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect, is_noncritical: bool = False):
+        self.failed_tests.append((name, is_noncritical))
+        if is_noncritical:
+            self.failed_noncritical += 1
+        else:
+            self.failed_critical += 1
+        print(f"❌ {name}{' (noncritical)' if is_noncritical else ''}")
         print(f"    Reason: {reason}")
         if query:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
@@ -160,6 +171,9 @@ class SQLTestRunner:
     def run_test_case(self, test_case: Dict, database: str) -> bool:
         self.test_count += 1
         name = test_case.get("name", f"Test {self.test_count}")
+        is_noncritical = bool(test_case.get("noncritical"))
+        if is_noncritical:
+            self.noncritical_count += 1
         query = test_case.get("sql") or test_case.get("sparql")
         is_sparql = "sparql" in test_case
         # auth: allow per-test overrides, fallback to suite metadata, then runner defaults
@@ -181,10 +195,10 @@ class SQLTestRunner:
         results = self.parse_jsonl_response(response)
 
         if self.validate_expectation(test_case, response, results):
-            self._record_success(name)
+            self._record_success(name, is_noncritical)
             return True
         else:
-            return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"))
+            return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical)
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
         expect = test_case.get("expect", {})
@@ -291,18 +305,23 @@ class SQLTestRunner:
         self.cleanup_test_database(database)
 
         print("="*60)
-        print(f"📊 Results: {self.test_passed}/{self.test_count} passed")
+        total = self.test_count
+        passed = self.test_passed
+        failed_total = len(self.failed_tests)
+        failed_noncrit = self.failed_noncritical
+        failed_crit = self.failed_critical
+        print(f"📊 Results: {passed}/{total} passed | Failures: {failed_total} | Noncritical failures: {failed_noncrit}")
         if self.failed_tests:
             print("❌ Failed:")
-            for t in self.failed_tests:
-                print(f"   - {t}")
+            for name, is_noncrit in self.failed_tests:
+                suffix = " (noncritical)" if is_noncrit else ""
+                print(f"   - {name}{suffix}")
         else:
             print("🎉 All tests passed!")
-        if self.failed_tests and self.suite_metadata.get('noncritical'):
-            print("⚠️  although this error, the testsuite will still pass")
         print("="*60)
 
-        return (self.test_passed == self.test_count) or bool(self.suite_metadata.get('noncritical'))
+        # Suite success is determined solely by critical tests
+        return failed_crit == 0
 
 def wait_for_memcp(port=4321, timeout=30) -> bool:
     for _ in range(timeout):
