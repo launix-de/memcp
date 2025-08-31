@@ -55,6 +55,15 @@ class SQLTestRunner:
         self._ensured_dbs = set()
 
     # ----------------------
+    # SQL identifier quoting
+    # ----------------------
+    def _quote_ident(self, name: str) -> str:
+        if name is None:
+            return "``"
+        # Escape backticks by doubling them
+        return f"`{str(name).replace('`', '``')}`"
+
+    # ----------------------
     # Helpers
     # ----------------------
     def _create_auth_header(self):
@@ -85,7 +94,7 @@ class SQLTestRunner:
             return
         try:
             url = f"{self.base_url}/sql/system"
-            create_db_sql = f"CREATE DATABASE IF NOT EXISTS `{database}`"
+            create_db_sql = f"CREATE DATABASE IF NOT EXISTS {self._quote_ident(database)}"
             requests.post(url, data=create_db_sql, headers=self.auth_header, timeout=10)
             # verify availability with a lightweight call
             check_url = f"{self.base_url}/sql/{quote(database, safe='')}"
@@ -230,11 +239,11 @@ class SQLTestRunner:
                         tables = resp.json().get('data', [])
                         for row in tables:
                             tbl = list(row.values())[0]
-                            self.execute_sql(database, f"DROP TABLE IF EXISTS {tbl}")
+                            self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(tbl)}")
                     except:
                         pass
                 return
-            self.execute_sql("system", f"DROP DATABASE IF EXISTS {database}")
+            self.execute_sql("system", f"DROP DATABASE IF EXISTS {self._quote_ident(database)}")
             # drop ensures next ensure_database will recreate
             if database in self._ensured_dbs:
                 try:
