@@ -82,6 +82,7 @@ func (s *FileStorage) ReadColumn(shard string, column string) io.ReadCloser {
 }
 
 func (s *FileStorage) WriteColumn(shard string, column string) io.WriteCloser {
+	os.MkdirAll(s.path, 0750)
 	f, err := os.Create(s.path + shard + "-" + ProcessColumnName(column))
 	if err != nil {
 		panic(err)
@@ -94,6 +95,7 @@ func (s *FileStorage) RemoveColumn(shard string, column string) {
 }
 
 func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
+	os.MkdirAll(s.path, 0750)
 	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	if err != nil {
 		panic(err)
@@ -102,6 +104,7 @@ func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
 }
 
 func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogfile) {
+	os.MkdirAll(s.path, 0750)
 	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	if err != nil {
 		panic(err)
