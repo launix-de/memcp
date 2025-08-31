@@ -20,15 +20,15 @@ package scm
 
 import (
 	"fmt"
-	"strings"
 	"strconv"
+	"strings"
 )
 
 type SourceInfo struct {
 	source string
-	line int
-	col int
-	value Scmer
+	line   int
+	col    int
+	value  Scmer
 }
 
 func (source_info SourceInfo) String() string {
@@ -68,62 +68,70 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 	token := (*tokens)[0]
 	*tokens = (*tokens)[1:]
 	switch t := token.(type) {
-		case SourceInfo:
-			source_info = t
-			token = t.value
+	case SourceInfo:
+		source_info = t
+		token = t.value
 	}
 	switch t := token.(type) {
-		case Symbol:
-			if t == Symbol("(") {
-				L := make([]Scmer, 0)
-				for { // read params until )
-					if len(*tokens) == 0 {
-						panic("expecting matching )")
-					}
-					if (*tokens)[0] == Symbol(")") {
-						// eat )
-						*tokens = (*tokens)[1:]
-						// return L // finish read process
-						source_info.value = L // append to source info
-						return source_info
-					}
-					// add param
-					L = append(L, readFrom(tokens))
+	case Symbol:
+		if t == Symbol("(") {
+			L := make([]Scmer, 0)
+			for { // read params until )
+				if len(*tokens) == 0 {
+					// include source location of the opening parenthesis
+					panic(source_info.String() + ": expecting matching )")
 				}
-			} else if t == Symbol("'") && len(*tokens) > 0 {
-				token = (*tokens)[0]
-				switch t := token.(type) {
-					case SourceInfo:
-						source_info = t
-						token = t.value
-				}
-				if token == Symbol("(") {
+				if (*tokens)[0] == Symbol(")") {
+					// eat )
 					*tokens = (*tokens)[1:]
-					// list literal
-					L := make([]Scmer, 1)
-					L[0] = Symbol("list")
-					for (*tokens)[0] != Symbol(")") {
-						L = append(L, readFrom(tokens))
-					}
-					*tokens = (*tokens)[1:]
-					// return L
+					// return L // finish read process
 					source_info.value = L // append to source info
 					return source_info
-				} else {
-					// quote symbol
-					*tokens = (*tokens)[1:]
-					return []Scmer{Symbol("quote"), token}
 				}
-			} else {
-				return token
+				// add param
+				L = append(L, readFrom(tokens))
 			}
-		default:
-			// string, Number
+		} else if t == Symbol("'") && len(*tokens) > 0 {
+			token = (*tokens)[0]
+			switch t := token.(type) {
+			case SourceInfo:
+				source_info = t
+				token = t.value
+			}
+			if token == Symbol("(") {
+				*tokens = (*tokens)[1:]
+				// list literal
+				L := make([]Scmer, 1)
+				L[0] = Symbol("list")
+				for {
+					if len(*tokens) == 0 {
+						// include source location of the opening parenthesis
+						panic(source_info.String() + ": expecting matching )")
+					}
+					if (*tokens)[0] == Symbol(")") {
+						break
+					}
+					L = append(L, readFrom(tokens))
+				}
+				*tokens = (*tokens)[1:]
+				// return L
+				source_info.value = L // append to source info
+				return source_info
+			} else {
+				// quote symbol
+				*tokens = (*tokens)[1:]
+				return []Scmer{Symbol("quote"), token}
+			}
+		} else {
 			return token
+		}
+	default:
+		// string, Number
+		return token
 	}
 }
 
-//Lexical Analysis
+// Lexical Analysis
 func tokenize(source, s string) []Scmer {
 	/* tokenizer state machine:
 		0 = expecting next item
@@ -133,13 +141,13 @@ func tokenize(source, s string) []Scmer {
 		4 = inside escaping sequence of string
 		5 = inside comment
 		6 = comment ending * from * /
-	
+
 	tokens are either Number, Symbol, string or Symbol('(') or Symbol(')')
 	*/
 
 	/* TODO:
-	 - count lines, track line+col
-	 - for certain symbols (mostly only '(') store a position object in the token array (consisting of source, line, col)
+	- count lines, track line+col
+	- for certain symbols (mostly only '(') store a position object in the token array (consisting of source, line, col)
 	*/
 	line := 1
 	col := 0

@@ -19,18 +19,18 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import (
-	"os"
+	"bytes"
+	"fmt"
+	"github.com/chzyer/readline"
 	"io"
 	"log"
-	"fmt"
-	"bytes"
+	"os"
 	"regexp"
-	"strings"
 	"runtime/debug"
-	"github.com/chzyer/readline"
+	"strings"
 )
 
-const newprompt  = "\033[32m>\033[0m "
+const newprompt = "\033[32m>\033[0m "
 const contprompt = "\033[32m.\033[0m "
 const resultprompt = "\033[31m=\033[0m "
 
@@ -78,12 +78,12 @@ func (en *Env) Do(line []rune, pos int) (newLine [][]rune, offset int) {
 var ReplInstance *readline.Instance
 
 func Repl(en *Env) {
-	l, err := readline.NewEx(&readline.Config {
-		Prompt: newprompt,
-		HistoryFile: ".memcp-history.tmp",
-		AutoComplete: en,
-		InterruptPrompt: "^C",
-		EOFPrompt: "exit",
+	l, err := readline.NewEx(&readline.Config{
+		Prompt:            newprompt,
+		HistoryFile:       ".memcp-history.tmp",
+		AutoComplete:      en,
+		InterruptPrompt:   "^C",
+		EOFPrompt:         "exit",
 		HistorySearchFold: true,
 	})
 	if err != nil {
@@ -113,10 +113,11 @@ func Repl(en *Env) {
 		}
 
 		// anti-panic func
-		func () {
-			defer func () {
+		func() {
+			defer func() {
 				if r := recover(); r != nil {
-					if r == "expecting matching )" {
+					rs := fmt.Sprint(r)
+					if strings.Contains(rs, "expecting matching )") {
 						// keep oldline
 						oldline = line + "\n"
 						l.SetPrompt(contprompt)
@@ -143,12 +144,13 @@ func Repl(en *Env) {
 }
 
 var errorlog *log.Logger
+
 func init() {
 	errorlog = log.New(os.Stderr, "", 0)
 }
 func PrintError(r any) {
 	s := fmt.Sprint(r)
-	numlines := strings.Count(s, "\nin ") * 4 + 9 // skip those stack trace lines that peel out of the error message
+	numlines := strings.Count(s, "\nin ")*4 + 9 // skip those stack trace lines that peel out of the error message
 	trace := string(debug.Stack())
 	for numlines > 0 {
 		if trace == "" {
