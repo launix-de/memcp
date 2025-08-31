@@ -189,11 +189,16 @@ func (u *storageShard) ensureMainCount() {
 	if u.t == nil {
 		return
 	}
-	// try to load columns in table order until we get a non-zero main_count
+	// Load the first column (if not yet loaded); Deserialize will set main_count.
 	for _, c := range u.t.Columns {
-		u.ensureColumnLoaded(c.Name)
-		if u.main_count != 0 {
-			return
+		u.mu.RLock()
+		cs, ok := u.columns[c.Name]
+		u.mu.RUnlock()
+		if ok && cs == nil {
+			u.ensureColumnLoaded(c.Name)
+			if u.main_count != 0 {
+				return
+			}
 		}
 	}
 }
@@ -245,6 +250,8 @@ func NewShard(t *table) *storageShard {
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 	}
+	// Newly created shards are live/writable, not cold
+	result.srState = WRITE
 	return result
 }
 

@@ -288,6 +288,8 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 	persistence := FileFactory{Basepath} // TODO: remove this, use parameter instead
 	db.persistence = persistence.CreateDatabase(schema)
 	db.tables = NonLockingReadMap.New[table, string]()
+	// Newly created database is live for writes
+	db.srState = WRITE
 
 	last := databases.Set(db)
 	if last != nil {

@@ -70,17 +70,14 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		return false // can't compute in shards with delta storage
 	}
-
+	// We are going to mutate this shard's columns: mark shard as WRITE (not COLD)
+	s.srState = WRITE
+	// Ensure main_count and input storages are initialized before compute
+	s.ensureMainCount()
 	cols := make([]ColumnStorage, len(inputCols))
-	s.mu.Lock()
 	for i, col := range inputCols {
-		var ok bool
-		cols[i], ok = s.columns[col]
-		if !ok {
-			panic("column " + s.t.Name + "." + col + " does not exist")
-		}
+		cols[i] = s.getColumnStorageOrPanic(col)
 	}
-	s.mu.Unlock()
 	colvalues := make([]scm.Scmer, len(cols))
 
 	vals := make([]scm.Scmer, s.main_count) // build the stretchy value array
