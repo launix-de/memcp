@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -28,7 +28,7 @@ type StorageFloat struct {
 }
 
 func (s *StorageFloat) ComputeSize() uint {
-	return 16 + 8 * uint(len(s.values)) + 24 /* a slice */
+	return 16 + 8*uint(len(s.values)) + 24 /* a slice */
 }
 
 func (s *StorageFloat) String() string {
@@ -37,10 +37,10 @@ func (s *StorageFloat) String() string {
 
 func (s *StorageFloat) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(12)) // 12 = StorageFloat
-	io.WriteString(f, "1234567") // fill up to 64 bit alignment
+	io.WriteString(f, "1234567")                    // fill up to 64 bit alignment
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	// now at offset 16 begin data
-	rawdata := unsafe.Slice((*byte)(unsafe.Pointer(&s.values[0])), 8 * len(s.values))
+	rawdata := unsafe.Slice((*byte)(unsafe.Pointer(&s.values[0])), 8*len(s.values))
 	f.Write(rawdata)
 	// free allocated memory and mmap
 	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) {f.Close()})
@@ -56,7 +56,7 @@ func (s *StorageFloat) Deserialize(f io.Reader) uint {
 	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) { f.Close() })
 	rawdata := mmap.Map(f, RDWR, 0)
 	*/
-	rawdata := make([]byte, 8 * l)
+	rawdata := make([]byte, 8*l)
 	f.Read(rawdata)
 	s.values = unsafe.Slice((*float64)(unsafe.Pointer(&rawdata[0])), l)
 	return uint(l)
@@ -94,4 +94,3 @@ func (s *StorageFloat) proposeCompression(i uint) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }
-

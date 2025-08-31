@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -26,13 +26,13 @@ type StorageSeq struct {
 	recordId,
 	start,
 	stride StorageInt
-	count uint // number of values
+	count    uint // number of values
 	seqCount uint // number of sequences
 
 	// analysis
 	lastValue, lastStride int64
-	lastValueNil bool
-	lastValueFirst bool
+	lastValueNil          bool
+	lastValueFirst        bool
 }
 
 func (s *StorageSeq) ComputeSize() uint {
@@ -45,7 +45,7 @@ func (s *StorageSeq) String() string {
 
 func (s *StorageSeq) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(11)) // 11 = StorageSeq
-	io.WriteString(f, "1234567") // dummy
+	io.WriteString(f, "1234567")                    // dummy
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(s.seqCount))
 	s.recordId.Serialize(f)
@@ -109,7 +109,7 @@ func (s *StorageSeq) GetValue(i uint) scm.Scmer {
 	}
 	stride = int64(s.stride.GetValueUInt(min)) + s.stride.offset
 	recid := int64(s.recordId.GetValueUInt(min)) + s.recordId.offset
-	return float64(value + int64(int64(i) - recid) * stride)
+	return float64(value + int64(int64(i)-recid)*stride)
 
 }
 
@@ -147,7 +147,7 @@ func (s *StorageSeq) scan(i uint, value scm.Scmer) {
 			s.lastStride = v - s.lastValue
 			s.lastValue = v
 			s.stride.scan(s.seqCount-1, s.lastStride)
-		} else if i != 0 && v == s.lastValue + s.lastStride {
+		} else if i != 0 && v == s.lastValue+s.lastStride {
 			// sequence stays the same
 			s.lastValue = v
 		} else {
@@ -201,7 +201,7 @@ func (s *StorageSeq) build(i uint, value scm.Scmer) {
 			s.lastStride = v - s.lastValue
 			s.lastValue = v
 			s.stride.build(s.seqCount-1, s.lastStride)
-		} else if i != 0 && v == s.lastValue + s.lastStride {
+		} else if i != 0 && v == s.lastValue+s.lastStride {
 			// sequence stays the same
 			s.lastValue = v
 		} else {
@@ -231,4 +231,3 @@ func (s *StorageSeq) proposeCompression(i uint) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }
-

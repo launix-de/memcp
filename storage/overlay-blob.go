@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -31,11 +31,11 @@ type OverlayBlob struct {
 	Base ColumnStorage
 	// values
 	values map[[32]byte]string // gzipped contents content addressable
-	size uint
+	size   uint
 }
 
 func (s *OverlayBlob) ComputeSize() uint {
-	var sz uint = 48 + 48 * uint(len(s.values)) + s.size + s.Base.ComputeSize()
+	var sz uint = 48 + 48*uint(len(s.values)) + s.size + s.Base.ComputeSize()
 	for _, v := range s.values {
 		sz += 24 + 16 + (uint(len(v)-1)/8+1)*8 + 32 // some overhead + content
 	}
@@ -48,13 +48,13 @@ func (s *OverlayBlob) String() string {
 
 func (s *OverlayBlob) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(31)) // 31 = OverlayBlob
-	io.WriteString(f, "1234567") // dummy
+	io.WriteString(f, "1234567")                    // dummy
 	var size uint64 = uint64(len(s.values))
 	binary.Write(f, binary.LittleEndian, size) // write number of overlay items
 	for k, v := range s.values {
 		f.Write(k[:])
 		binary.Write(f, binary.LittleEndian, uint64(len(v))) // write length
-		io.WriteString(f, v) // write content
+		io.WriteString(f, v)                                 // write content
 	}
 	s.Base.Serialize(f) // serialize base
 }
@@ -87,29 +87,29 @@ func (s *OverlayBlob) Deserialize(f io.Reader) uint {
 func (s *OverlayBlob) GetValue(i uint) scm.Scmer {
 	v := s.Base.GetValue(i)
 	switch v_ := v.(type) {
-		case string:
-			if v_ != "" && v_[0] == '!' {
-				if v_[1] == '!' {
-					return v_[1:] // escaped string
-				} else {
-					// unpack from storage
-					if v, ok := s.values[*(*[32]byte)(unsafe.Pointer(unsafe.StringData(v_[1:])))]; ok {
-						var b strings.Builder
-						reader, err := gzip.NewReader(strings.NewReader(v))
-						if err != nil {
-							panic(err)
-						}
-						io.Copy(&b, reader)
-						reader.Close()
-						return b.String()
-					}
-					return nil // value was lost (this should not happen)
-				}
+	case string:
+		if v_ != "" && v_[0] == '!' {
+			if v_[1] == '!' {
+				return v_[1:] // escaped string
 			} else {
-				return v
+				// unpack from storage
+				if v, ok := s.values[*(*[32]byte)(unsafe.Pointer(unsafe.StringData(v_[1:])))]; ok {
+					var b strings.Builder
+					reader, err := gzip.NewReader(strings.NewReader(v))
+					if err != nil {
+						panic(err)
+					}
+					io.Copy(&b, reader)
+					reader.Close()
+					return b.String()
+				}
+				return nil // value was lost (this should not happen)
 			}
-		default:
+		} else {
 			return v
+		}
+	default:
+		return v
 	}
 }
 
@@ -119,26 +119,26 @@ func (s *OverlayBlob) prepare() {
 }
 func (s *OverlayBlob) scan(i uint, value scm.Scmer) {
 	switch v_ := value.(type) {
-		case scm.LazyString:
-			if v_.Hash != "" {
-				s.Base.scan(i, "!" + v_.Hash)
+	case scm.LazyString:
+		if v_.Hash != "" {
+			s.Base.scan(i, "!"+v_.Hash)
+		} else {
+			s.Base.scan(i, v_.GetValue())
+		}
+	case string:
+		if len(v_) > 255 {
+			h := sha256.New()
+			io.WriteString(h, v_)
+			s.Base.scan(i, fmt.Sprintf("!%s", h.Sum(nil)))
+		} else {
+			if v_ != "" && v_[0] == '!' {
+				s.Base.scan(i, "!"+v_) // escape strings that start with !
 			} else {
-				s.Base.scan(i, v_.GetValue())
+				s.Base.scan(i, value)
 			}
-		case string:
-			if len(v_) > 255 {
-				h := sha256.New()
-				io.WriteString(h, v_)
-				s.Base.scan(i, fmt.Sprintf("!%s", h.Sum(nil)))
-			} else {
-				if v_ != "" && v_[0] == '!' {
-					s.Base.scan(i, "!" + v_) // escape strings that start with !
-				} else {
-					s.Base.scan(i, value)
-				}
-			}
-		default:
-			s.Base.scan(i, value)
+		}
+	default:
+		s.Base.scan(i, value)
 	}
 }
 func (s *OverlayBlob) init(i uint) {
@@ -148,27 +148,27 @@ func (s *OverlayBlob) init(i uint) {
 }
 func (s *OverlayBlob) build(i uint, value scm.Scmer) {
 	switch v_ := value.(type) {
-		case string:
-			if len(v_) > 255 {
-				h := sha256.New()
-				io.WriteString(h, v_)
-				hashsum := h.Sum(nil)
-				s.Base.build(i, fmt.Sprintf("!%s", hashsum))
-				var b strings.Builder
-				z := gzip.NewWriter(&b)
-				io.Copy(z, strings.NewReader(v_))
-				z.Close()
-				s.size += uint(b.Len())
-				s.values[*(*[32]byte)(unsafe.Pointer(&hashsum[0]))] = b.String()
+	case string:
+		if len(v_) > 255 {
+			h := sha256.New()
+			io.WriteString(h, v_)
+			hashsum := h.Sum(nil)
+			s.Base.build(i, fmt.Sprintf("!%s", hashsum))
+			var b strings.Builder
+			z := gzip.NewWriter(&b)
+			io.Copy(z, strings.NewReader(v_))
+			z.Close()
+			s.size += uint(b.Len())
+			s.values[*(*[32]byte)(unsafe.Pointer(&hashsum[0]))] = b.String()
+		} else {
+			if v_ != "" && v_[0] == '!' {
+				s.Base.build(i, "!"+v_) // escape strings that start with !
 			} else {
-				if v_ != "" && v_[0] == '!' {
-					s.Base.build(i, "!" + v_) // escape strings that start with !
-				} else {
-					s.Base.build(i, value)
-				}
+				s.Base.build(i, value)
 			}
-		default:
-			s.Base.build(i, value)
+		}
+	default:
+		s.Base.build(i, value)
 	}
 }
 func (s *OverlayBlob) finish() {
@@ -178,5 +178,3 @@ func (s *OverlayBlob) proposeCompression(i uint) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }
-
-

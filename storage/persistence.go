@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -44,7 +44,7 @@ type PersistenceEngine interface {
 	ReadColumn(shard string, column string) io.ReadCloser
 	WriteColumn(shard string, column string) io.WriteCloser
 	RemoveColumn(shard string, column string)
-	OpenLog(shard string) PersistenceLogfile // open for writing
+	OpenLog(shard string) PersistenceLogfile                       // open for writing
 	ReplayLog(shard string) (chan interface{}, PersistenceLogfile) // replay existing log
 	RemoveLog(shard string)
 	Remove() // delete from storage
@@ -59,7 +59,7 @@ type LogEntryDelete struct {
 	idx uint
 }
 type LogEntryInsert struct {
-	cols []string
+	cols   []string
 	values [][]scm.Scmer
 }
 
@@ -78,6 +78,7 @@ func MoveDatabase(src PersistenceEngine, dst PersistenceEngine) {
 type ErrorReader struct {
 	e error
 }
+
 func (e ErrorReader) Read([]byte) (int, error) {
 	// reflects the error (e.g. file not found)
 	return 0, e.e

@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -24,13 +24,13 @@ import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 type StorageInt struct {
-	chunk []uint64
+	chunk   []uint64
 	bitsize uint8
-	offset int64
-	max int64 // only of statistic use
-	count uint64 // only stored for serialization purposes
+	offset  int64
+	max     int64  // only of statistic use
+	count   uint64 // only stored for serialization purposes
 	hasNull bool
-	null uint64 // which value is null
+	null    uint64 // which value is null
 }
 
 func (s *StorageInt) Serialize(f io.Writer) {
@@ -38,17 +38,17 @@ func (s *StorageInt) Serialize(f io.Writer) {
 	if s.hasNull {
 		hasNull = 1
 	}
-	binary.Write(f, binary.LittleEndian, uint8(10)) // 10 = StorageInt
-	binary.Write(f, binary.LittleEndian, uint8(s.bitsize)) // len=2
-	binary.Write(f, binary.LittleEndian, uint8(hasNull)) // len=3
-	binary.Write(f, binary.LittleEndian, uint8(0)) // len=4
-	binary.Write(f, binary.LittleEndian, uint32(0)) // len=8
+	binary.Write(f, binary.LittleEndian, uint8(10))            // 10 = StorageInt
+	binary.Write(f, binary.LittleEndian, uint8(s.bitsize))     // len=2
+	binary.Write(f, binary.LittleEndian, uint8(hasNull))       // len=3
+	binary.Write(f, binary.LittleEndian, uint8(0))             // len=4
+	binary.Write(f, binary.LittleEndian, uint32(0))            // len=8
 	binary.Write(f, binary.LittleEndian, uint64(len(s.chunk))) // chunk size so we know how many data is left
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(s.offset))
 	binary.Write(f, binary.LittleEndian, uint64(s.null))
 	if len(s.chunk) > 0 {
-		f.Write(unsafe.Slice((*byte)(unsafe.Pointer(&s.chunk[0])), 8 * len(s.chunk)))
+		f.Write(unsafe.Slice((*byte)(unsafe.Pointer(&s.chunk[0])), 8*len(s.chunk)))
 	}
 }
 func (s *StorageInt) Deserialize(f io.Reader) uint {
@@ -76,7 +76,7 @@ func (s *StorageInt) DeserializeEx(f io.Reader, readMagicbyte bool) uint {
 	binary.Read(f, binary.LittleEndian, &s.offset)
 	binary.Read(f, binary.LittleEndian, &s.null)
 	if chunkcount > 0 {
-		rawdata := make([]byte, chunkcount * 8)
+		rawdata := make([]byte, chunkcount*8)
 		f.Read(rawdata)
 		s.chunk = unsafe.Slice((*uint64)(unsafe.Pointer(&rawdata[0])), chunkcount)
 	}
@@ -85,24 +85,24 @@ func (s *StorageInt) DeserializeEx(f io.Reader, readMagicbyte bool) uint {
 
 func toInt(x scm.Scmer) int64 {
 	switch v := x.(type) {
-		case float64:
-			return int64(v)
-		case int:
-			return int64(v)
-		case uint:
-			return int64(v)
-		case uint64:
-			return int64(v)
-		case int64:
-			return v
-		// TODO: 8 bit, 16 bit, 32 bit
-		default:
-			return 0
+	case float64:
+		return int64(v)
+	case int:
+		return int64(v)
+	case uint:
+		return int64(v)
+	case uint64:
+		return int64(v)
+	case int64:
+		return v
+	// TODO: 8 bit, 16 bit, 32 bit
+	default:
+		return 0
 	}
 }
 
 func (s *StorageInt) ComputeSize() uint {
-	return 8 * uint(len(s.chunk)) + 64 // management overhead
+	return 8*uint(len(s.chunk)) + 64 // management overhead
 }
 
 func (s *StorageInt) String() string {
@@ -124,9 +124,9 @@ func (s *StorageInt) GetValue(i uint) scm.Scmer {
 func (s *StorageInt) GetValueUInt(i uint) uint64 {
 	bitpos := i * uint(s.bitsize)
 
-	v := s.chunk[bitpos / 64] << (bitpos % 64) // align to leftmost position
-	if bitpos % 64 + uint(s.bitsize) > 64 {
-		v = v | s.chunk[bitpos / 64 + 1] >> (64 - bitpos % 64)
+	v := s.chunk[bitpos/64] << (bitpos % 64) // align to leftmost position
+	if bitpos%64+uint(s.bitsize) > 64 {
+		v = v | s.chunk[bitpos/64+1]>>(64-bitpos%64)
 	}
 
 	return uint64(v) >> (64 - uint(s.bitsize)) // shift right without sign
@@ -135,7 +135,7 @@ func (s *StorageInt) GetValueUInt(i uint) uint64 {
 func (s *StorageInt) prepare() {
 	// set up scan
 	s.bitsize = 0
-	s.offset = int64(1 << 63 - 1)
+	s.offset = int64(1<<63 - 1)
 	s.max = -s.offset - 1
 	s.hasNull = false
 }
@@ -171,7 +171,7 @@ func (s *StorageInt) init(i uint) {
 		s.bitsize = 1
 	}
 	// allocate
-	s.chunk = make([]uint64, ((i-1) * uint(s.bitsize) + 65) / 64 + 1)
+	s.chunk = make([]uint64, ((i-1)*uint(s.bitsize)+65)/64+1)
 	s.count = uint64(i)
 	// fmt.Println("storing bitsize", s.bitsize,"null",s.null,"offset",s.offset)
 }
@@ -188,10 +188,10 @@ func (s *StorageInt) build(i uint, value scm.Scmer) {
 		vi = vi - s.offset
 	}
 	bitpos := i * uint(s.bitsize)
-	v := uint64(vi) << (64 - uint(s.bitsize)) // shift value to the leftmost position of 64bit int
-	s.chunk[bitpos / 64] = s.chunk[bitpos / 64] | (v >> (bitpos % 64)) // first chunk
-	if (bitpos % 64 + uint(s.bitsize) > 64) {
-		s.chunk[bitpos / 64 + 1] = s.chunk[bitpos / 64 + 1] | v << (64 - bitpos % 64) // second chunk
+	v := uint64(vi) << (64 - uint(s.bitsize))                      // shift value to the leftmost position of 64bit int
+	s.chunk[bitpos/64] = s.chunk[bitpos/64] | (v >> (bitpos % 64)) // first chunk
+	if bitpos%64+uint(s.bitsize) > 64 {
+		s.chunk[bitpos/64+1] = s.chunk[bitpos/64+1] | v<<(64-bitpos%64) // second chunk
 	}
 }
 func (s *StorageInt) finish() {

@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -28,18 +28,18 @@ type StorageString struct {
 	values StorageInt
 	// the dictionary: bitcompress all start+end markers; use one big string for all values that is sliced of from
 	dictionary string
-	starts StorageInt
-	lens StorageInt
-	nodict bool // disable values array
+	starts     StorageInt
+	lens       StorageInt
+	nodict     bool // disable values array
 
 	// helpers
-	sb strings.Builder
+	sb         strings.Builder
 	reverseMap map[string][3]uint
-	count uint
-	allsize int
+	count      uint
+	allsize    int
 	// prefix statistics
 	prefixstat map[string]int
-	laststr string
+	laststr    string
 }
 
 func (s *StorageString) ComputeSize() uint {
@@ -104,7 +104,7 @@ func (s *StorageString) GetValue(i uint) scm.Scmer {
 			return nil
 		}
 		len_ := uint64(int64(s.lens.GetValueUInt(i)) + s.lens.offset)
-		return s.dictionary[start:start+len_]
+		return s.dictionary[start : start+len_]
 	} else {
 		idx := uint(int64(s.values.GetValueUInt(i)) + s.values.offset)
 		if s.values.hasNull && idx == uint(s.values.null) {
@@ -112,7 +112,7 @@ func (s *StorageString) GetValue(i uint) scm.Scmer {
 		}
 		start := int64(s.starts.GetValueUInt(idx)) + s.starts.offset
 		len_ := int64(s.lens.GetValueUInt(idx)) + s.lens.offset
-		return s.dictionary[start:start+len_]
+		return s.dictionary[start : start+len_]
 	}
 }
 
@@ -128,16 +128,16 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
 	var v string
 	switch v_ := value.(type) {
-		case scm.LazyString:
-			v = v_.GetValue()
-		case string:
-			v = v_
-		default:
-			// NULL
-			if !s.nodict {
-				s.values.scan(i, nil)
-			}
-			return
+	case scm.LazyString:
+		v = v_.GetValue()
+	case string:
+		v = v_
+	default:
+		// NULL
+		if !s.nodict {
+			s.values.scan(i, nil)
+		}
+		return
 	}
 
 	// check if we have common prefix (but ignore duplicates because they are compressed by dictionary)
@@ -194,7 +194,7 @@ func (s *StorageString) init(i uint) {
 	} else {
 		// allocate
 		s.dictionary = s.sb.String() // extract one big slice with all strings (no extra memory structure)
-		s.sb.Reset() // free the memory
+		s.sb.Reset()                 // free the memory
 		// prefixed strings are not accounted with that, but maybe this could be checked later??
 		s.values.init(i)
 		// take over dictionary
@@ -211,18 +211,18 @@ func (s *StorageString) build(i uint, value scm.Scmer) {
 	// store
 	var v string
 	switch v_ := value.(type) {
-		case scm.LazyString:
-			v = v_.GetValue()
-		case string:
-			v = v_
-		default:
-			// NULL = 1 1
-			if s.nodict {
-				s.starts.build(i, nil)
-			} else {
-				s.values.build(i, nil)
-			}
-			return
+	case scm.LazyString:
+		v = v_.GetValue()
+	case string:
+		v = v_
+	default:
+		// NULL = 1 1
+		if s.nodict {
+			s.starts.build(i, nil)
+		} else {
+			s.values.build(i, nil)
+		}
+		return
 	}
 	if s.nodict {
 		s.starts.build(i, s.sb.Len())
@@ -290,4 +290,3 @@ func (s *StorageString) proposeCompression(i uint) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }
-

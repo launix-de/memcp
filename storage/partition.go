@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -25,17 +25,17 @@ import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 type shardDimension struct {
-	Column string
+	Column        string
 	NumPartitions int
-	Pivots []scm.Scmer // pivot semantics: a pivot is between two shards. shard[0] contains all values less than or equal pivot[0]; pivots are ordered from lowest to highest
+	Pivots        []scm.Scmer // pivot semantics: a pivot is between two shards. shard[0] contains all values less than or equal pivot[0]; pivots are ordered from lowest to highest
 }
 
 // computes the index of a datapoint in PShards -> if item == pivot, sort left
 func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int) {
 	for i, sd := range schema {
 		// get slice idx of this dimension
-		min := 0 // greater equal min
-		max := sd.NumPartitions-1 // smaller than max
+		min := 0                    // greater equal min
+		max := sd.NumPartitions - 1 // smaller than max
 		for min < max {
 			pivot := (min + max - 1) / 2
 			if scm.Less(sd.Pivots[pivot], values[i]) {
@@ -44,7 +44,7 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 				max = pivot
 			}
 		}
-		result = result * sd.NumPartitions + min // accumulate
+		result = result*sd.NumPartitions + min // accumulate
 	}
 	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
 }
@@ -54,7 +54,7 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 	if scm.Trace != nil {
 		// hook on tracing
 		callback = func(s *storageShard) {
-			scm.Trace.Duration(fmt.Sprintf("%p", s), "shard", func () {
+			scm.Trace.Duration(fmt.Sprintf("%p", s), "shard", func() {
 				callback_old(s)
 			})
 		}
@@ -65,7 +65,7 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 		done.Add(len(shards))
 		for _, s := range shards {
 			// iterateShardIndex will go
-			gls.Go(func(s *storageShard) func () {
+			gls.Go(func(s *storageShard) func() {
 				return func() {
 					if s == nil {
 						fmt.Println("Warning: a shard is missing")
@@ -180,7 +180,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	result.Pivots = make([]scm.Scmer, 0, n-1)
 
 	// pivots are extracted from sampling
-	pivotSamples := make([]scm.Scmer, 0, 2 * (len(t.Shards) + len(t.PShards)))
+	pivotSamples := make([]scm.Scmer, 0, 2*(len(t.Shards)+len(t.PShards)))
 
 	shardlist := t.Shards
 	if shardlist == nil {
@@ -195,7 +195,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 			}
 			// sample last element
 			if s.main_count > 3 {
-				pivotSamples = append(pivotSamples, stor.GetValue(s.main_count - 1))
+				pivotSamples = append(pivotSamples, stor.GetValue(s.main_count-1))
 			}
 			// sample some elements inbetween
 			for i := uint(50); i < s.main_count; i += 101 {
@@ -209,12 +209,12 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	}
 
 	// sort samplelist
-	sort.Slice(pivotSamples, func (i, j int) bool {
+	sort.Slice(pivotSamples, func(i, j int) bool {
 		return scm.Less(pivotSamples[i], pivotSamples[j])
 	})
 	// extract n-1 pivots
 	for i := 1; i < n; i++ {
-		sample := pivotSamples[(i * len(pivotSamples)) / n]
+		sample := pivotSamples[(i*len(pivotSamples))/n]
 		// only add new items
 		if sample != nil && (len(result.Pivots) == 0 || scm.Less(result.Pivots[len(result.Pivots)-1], sample)) {
 			result.Pivots = append(result.Pivots, sample)
@@ -233,7 +233,7 @@ type uintrange struct {
 
 type partitioningSet struct {
 	shardid int
-	items map[int][]uint // TODO: use uintrange instead, so we don't need so much allocations
+	items   map[int][]uint // TODO: use uintrange instead, so we don't need so much allocations
 }
 
 func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimension, shouldChange bool) { // this happens inside t.mu.Lock()
@@ -248,7 +248,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	}
 
 	// sort for highest ranking column
-	sort.Slice(shardCandidates, func (i, j int) bool { // Less
+	sort.Slice(shardCandidates, func(i, j int) bool { // Less
 		return shardCandidates[i].NumPartitions > shardCandidates[j].NumPartitions
 	})
 	// prune shard candidates to max dimensions
@@ -259,8 +259,8 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	sf := 0.01 // scale factor
 	best := 100000000
 	bestSf := sf
-	desiredNumberOfShards := (2 * maincount) / Settings.ShardSize + 1 // TODO: find a balancing mechanism
-	for iter := 2; iter < 300; iter++ { // find perfect scale factor such that we get the best number of shards
+	desiredNumberOfShards := (2*maincount)/Settings.ShardSize + 1 // TODO: find a balancing mechanism
+	for iter := 2; iter < 300; iter++ {                           // find perfect scale factor such that we get the best number of shards
 		deviation := 1
 		for _, sc := range shardCandidates {
 			deviation *= int(float64(sc.NumPartitions) * sf)
@@ -271,17 +271,17 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 				best, bestSf = deviation, sf
 			}
 			// too few shards: increase sf
-			sf = sf * (1.0+1.0/float64(iter))
+			sf = sf * (1.0 + 1.0/float64(iter))
 		} else {
 			if deviation < best {
 				best, bestSf = deviation, sf
 			}
 			// too much shards: decrease sf
-			sf = sf * (1.0-1.0/float64(iter))
+			sf = sf * (1.0 - 1.0/float64(iter))
 		}
 	}
 	for i, sc := range shardCandidates {
-		shardCandidates[i] = t.NewShardDimension(sc.Column, int(float64(sc.NumPartitions) * bestSf))
+		shardCandidates[i] = t.NewShardDimension(sc.Column, int(float64(sc.NumPartitions)*bestSf))
 	}
 	// remove empty dimensions
 	for len(shardCandidates) > 0 && shardCandidates[len(shardCandidates)-1].NumPartitions <= 1 {
@@ -306,7 +306,7 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 			}
 		}
 		// deviation of >50% of shardsize
-		if 2 * totalShards1 > 3 * totalShards2 || 2 * totalShards2 > 3 * totalShards1 {
+		if 2*totalShards1 > 3*totalShards2 || 2*totalShards2 > 3*totalShards1 {
 			shouldChange = true
 		}
 	}
@@ -343,12 +343,12 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		}
 	}
 	// put values into shards
-	fmt.Println("moving data from", t.Name, len(oldshards), "into", totalShards,"shards")
+	fmt.Println("moving data from", t.Name, len(oldshards), "into", totalShards, "shards")
 	newshards := make([]*storageShard, totalShards)
 	var done sync.WaitGroup
 	done.Add(totalShards)
-	progress := make(chan int, runtime.NumCPU() / 2) // don't go all at once, we don't have enough RAM
-	for i := 0; i < runtime.NumCPU() / 2; i++ {
+	progress := make(chan int, runtime.NumCPU()/2) // don't go all at once, we don't have enough RAM
+	for i := 0; i < runtime.NumCPU()/2; i++ {
 		go func() { // threadpool with half of the cores
 			for si := range progress {
 				// create a new shard and put all data in
@@ -493,7 +493,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 		}
 		shardnum := computeShardIndex(schema, values)
 		oldlist, _ := result[shardnum]
-		result[shardnum] = append(oldlist, s.main_count + uint(idx))
+		result[shardnum] = append(oldlist, s.main_count+uint(idx))
 	}
 
 	return

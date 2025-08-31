@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -24,11 +24,11 @@ import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 type shardqueue struct {
-	shard *storageShard
-	items []uint // TODO: refactor to chan, so we can block generating too much entries
-	err scanError
-	mcols []func(uint) scm.Scmer // map column reader
-	scols []func(uint) scm.Scmer // sort criteria column reader
+	shard    *storageShard
+	items    []uint // TODO: refactor to chan, so we can block generating too much entries
+	err      scanError
+	mcols    []func(uint) scm.Scmer // map column reader
+	scols    []func(uint) scm.Scmer // sort criteria column reader
 	sortdirs []func(...scm.Scmer) scm.Scmer
 }
 
@@ -64,7 +64,7 @@ func (s *globalqueue) Len() int {
 func (s *globalqueue) Less(i, j int) bool {
 	for c := 0; c < len(s.q[i].scols); c++ {
 		a := s.q[i].scols[c](s.q[i].items[0])
-		b :=s.q[j].scols[c](s.q[j].items[0])
+		b := s.q[j].scols[c](s.q[j].items[0])
 		if scm.ToBool(s.q[i].sortdirs[c](a, b)) {
 			return true
 		} else if scm.ToBool(s.q[i].sortdirs[c](b, a)) {
@@ -84,10 +84,9 @@ func (s *globalqueue) Push(x_ any) {
 func (s *globalqueue) Pop() any {
 	result := s.q[len(s.q)-1]
 	s.q[len(s.q)-1] = nil // already free the memory, so GC can also run during an uncompleted ordered scan
-	s.q = s.q[0:len(s.q)-1]
+	s.q = s.q[0 : len(s.q)-1]
 	return result
 }
-
 
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
@@ -112,7 +111,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	}
 
 	callbackFn := scm.OptimizeProcToSerialFunction(callback)
-	aggregateFn := func(...scm.Scmer) scm.Scmer {return nil}
+	aggregateFn := func(...scm.Scmer) scm.Scmer { return nil }
 	if aggregate != nil {
 		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
@@ -135,9 +134,9 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	var q globalqueue
 	q_ := make(chan *shardqueue, 1)
 	gls.Go(func() {
-		t.iterateShards(boundaries, func (s *storageShard) {
+		t.iterateShards(boundaries, func(s *storageShard) {
 			// parallel scan over shards
-			defer func () {
+			defer func() {
 				if r := recover(); r != nil {
 					// fmt.Println("panic during scan:", r, string(debug.Stack()))
 					q_ <- &shardqueue{s, nil, scanError{r, string(debug.Stack())}, nil, nil, nil}
@@ -269,8 +268,8 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// scan loop in read lock
 	var maxInsertIndex int
-	func () {
-		t.mu.RLock() // lock whole shard for reading since we frequently read deletions
+	func() {
+		t.mu.RLock()         // lock whole shard for reading since we frequently read deletions
 		defer t.mu.RUnlock() // finished reading
 		// remember current insert status (so don't scan things that are inserted during map)
 		maxInsertIndex = len(t.inserts)
@@ -292,11 +291,11 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				// value from delta storage
 				// prepare&call condition function
 				for i, k := range conditionCols { // iterate over columns
-					cdataset[i] = t.getDelta(int(idx - t.main_count), k) // fill value
+					cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
 				}
 			}
 			// check condition
-			if (!scm.ToBool(conditionFn(cdataset...))) {
+			if !scm.ToBool(conditionFn(cdataset...)) {
 				return // condition did not match
 			}
 

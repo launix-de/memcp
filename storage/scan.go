@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -22,7 +22,7 @@ import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
-	r interface{}
+	r     interface{}
 	stack string
 }
 
@@ -32,7 +32,7 @@ func (s scanError) Error() string {
 
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
-type emptyResult struct {}
+type emptyResult struct{}
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
@@ -46,9 +46,9 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 
 	values := make(chan scm.Scmer, 4)
 	gls.Go(func() {
-		t.iterateShards(boundaries, func (s *storageShard) {
+		t.iterateShards(boundaries, func(s *storageShard) {
 			// parallel scan over shards
-			defer func () {
+			defer func() {
 				if r := recover(); r != nil {
 					//fmt.Println("panic during scan:", r, string(debug.Stack()))
 					values <- scanError{r, string(debug.Stack())}
@@ -66,14 +66,14 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		for intermediate := range values {
 			// eat value
 			switch x := intermediate.(type) {
-				case scanError:
-					panic(x) // cascade panic
-				case emptyResult:
-					// do nothing
-					hadValue = hadValue // do not delete this line, otherwise it will fall through to default
-				default:
-					akkumulator = fn(akkumulator, intermediate)
-					hadValue = true
+			case scanError:
+				panic(x) // cascade panic
+			case emptyResult:
+				// do nothing
+				hadValue = hadValue // do not delete this line, otherwise it will fall through to default
+			default:
+				akkumulator = fn(akkumulator, intermediate)
+				hadValue = true
 			}
 		}
 		if !hadValue && isOuter {
@@ -85,14 +85,14 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		for intermediate := range values {
 			// eat value
 			switch x := intermediate.(type) {
-				case scanError:
-					panic(x) // cascade panic
-				case emptyResult:
-					// do nothing
-					hadValue = hadValue // do not delete this line, otherwise it will fall through to default
-				default:
-					akkumulator = fn(akkumulator, intermediate)
-					hadValue = true
+			case scanError:
+				panic(x) // cascade panic
+			case emptyResult:
+				// do nothing
+				hadValue = hadValue // do not delete this line, otherwise it will fall through to default
+			default:
+				akkumulator = fn(akkumulator, intermediate)
+				hadValue = true
 			}
 		}
 		if !hadValue && isOuter {
@@ -103,13 +103,13 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		for intermediate := range values {
 			// eat value
 			switch intermediate.(type) { // eat up values and forget
-				case scanError:
-					panic(intermediate) // cascade panic
-				case emptyResult:
-					// do nothing
-					hadValue = hadValue // do not delete this line, otherwise it will fall through to default
-				default:
-					hadValue = true
+			case scanError:
+				panic(intermediate) // cascade panic
+			case emptyResult:
+				// do nothing
+				hadValue = hadValue // do not delete this line, otherwise it will fall through to default
+			default:
+				hadValue = true
 			}
 		}
 		if !hadValue && isOuter {
@@ -124,7 +124,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	callbackFn := scm.OptimizeProcToSerialFunction(callback)
-	aggregateFn := func(...scm.Scmer) scm.Scmer {return nil}
+	aggregateFn := func(...scm.Scmer) scm.Scmer { return nil }
 	if aggregate != nil {
 		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
@@ -161,7 +161,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 
 	// iterate over items (indexed)
 	hadValue := false
-	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func (idx uint) {
+	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint) {
 		if t.deletions.Get(idx) {
 			return // item is on delete list
 		}
@@ -173,7 +173,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			for i, k := range ccols { // iterate over columns
 				cdataset[i] = k.GetValue(idx)
 			}
-			if (!scm.ToBool(conditionFn(cdataset...))) {
+			if !scm.ToBool(conditionFn(cdataset...)) {
 				return // condition did not match
 			}
 
@@ -190,10 +190,10 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			// value from delta storage
 			// prepare&call condition function
 			for i, k := range conditionCols { // iterate over columns
-				cdataset[i] = t.getDelta(int(idx - t.main_count), k)
+				cdataset[i] = t.getDelta(int(idx-t.main_count), k)
 			}
 			// check condition
-			if (!scm.ToBool(conditionFn(cdataset...))) {
+			if !scm.ToBool(conditionFn(cdataset...)) {
 				return // condition did not match
 			}
 
@@ -204,7 +204,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				} else if len(k) >= 4 && k[:4] == "NEW." {
 					// ignore NEW.
 				} else {
-					mdataset[i] = t.getDelta(int(idx - t.main_count), k) // fill value
+					mdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
 				}
 			}
 		}

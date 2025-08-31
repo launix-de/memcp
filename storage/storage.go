@@ -802,7 +802,7 @@ func Init(en scm.Env) {
 			return true
 		}, false,
 	})
-scm.Declare(&en, &scm.Declaration{
+	scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table and returns the number of successful items",
 		4, 8,
 		[]scm.DeclarationParameter{

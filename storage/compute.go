@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -34,9 +34,9 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 				shardlist = t.PShards
 			}
 			for i, s := range shardlist {
-				gls.Go(func(i int, s *storageShard) func () {
+				gls.Go(func(i int, s *storageShard) func() {
 					return func() {
-						defer func () {
+						defer func() {
 							if r := recover(); r != nil {
 								//fmt.Println("panic during compute:", r, string(debug.Stack()))
 								done <- scanError{r, string(debug.Stack())}
@@ -54,7 +54,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 				}(i, s))
 			}
 			for range shardlist {
-				err := <- done // collect finish signal before return
+				err := <-done // collect finish signal before return
 				if err != nil {
 					panic(err)
 				}
@@ -62,7 +62,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 			return
 		}
 	}
-	panic("column "+t.Name+"."+name+" does not exist")
+	panic("column " + t.Name + "." + name + " does not exist")
 }
 
 func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, parallel bool) bool {
@@ -77,7 +77,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		var ok bool
 		cols[i], ok = s.columns[col]
 		if !ok {
-			panic("column "+s.t.Name+"."+col+" does not exist")
+			panic("column " + s.t.Name + "." + col + " does not exist")
 		}
 	}
 	s.mu.Unlock()
@@ -87,8 +87,8 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	if parallel {
 		var done sync.WaitGroup
 		done.Add(int(s.main_count))
-		progress := make(chan uint, runtime.NumCPU() / 2) // don't go all at once, we don't have enough RAM
-		for i := 0; i < runtime.NumCPU() / 2; i++ {
+		progress := make(chan uint, runtime.NumCPU()/2) // don't go all at once, we don't have enough RAM
+		for i := 0; i < runtime.NumCPU()/2; i++ {
 			gls.Go(func() { // threadpool with half of the cores
 				for i := range progress {
 					for j, col := range cols {

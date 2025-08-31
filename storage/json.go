@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -39,7 +39,7 @@ func LoadJSON(schema string, f io.Reader) {
 
 	lines := make(chan string, 512)
 
-	go func () {
+	go func() {
 		for scanner.Scan() {
 			lines <- scanner.Text()
 		}
@@ -47,7 +47,7 @@ func LoadJSON(schema string, f io.Reader) {
 	}()
 
 	var t *table
-	for s := range(lines) {
+	for s := range lines {
 		if s == "" {
 			// ignore
 		} else if s[0:7] == "#table " {
@@ -68,7 +68,7 @@ func LoadJSON(schema string, f io.Reader) {
 						t.CreateColumn(c, "ANY", []int{}, []scm.Scmer{"comment", "json import"})
 					}
 				}
-				func (t *table, s string) {
+				func(t *table, s string) {
 					var y map[string]scm.Scmer
 					json.Unmarshal([]byte(s), &y) // parse JSON
 					cols := make([]string, len(y))

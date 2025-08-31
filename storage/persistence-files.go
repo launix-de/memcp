@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -61,7 +61,7 @@ func (s *FileStorage) WriteSchema(jsonbytes []byte) {
 	os.MkdirAll(s.path, 0750)
 	if stat, err := os.Stat(s.path + "schema.json"); err == nil && stat.Size() > 0 {
 		// rescue a copy of schema.json in case the schema is not serializable
-		os.Rename(s.path + "schema.json", s.path + "schema.json.old")
+		os.Rename(s.path+"schema.json", s.path+"schema.json.old")
 	}
 	f, err := os.Create(s.path + "schema.json")
 	if err != nil {
@@ -94,7 +94,7 @@ func (s *FileStorage) RemoveColumn(shard string, column string) {
 }
 
 func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
-	f, err := os.OpenFile(s.path + shard + ".log", os.O_RDWR|os.O_CREATE, 0750)
+	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	if err != nil {
 		panic(err)
 	}
@@ -102,7 +102,7 @@ func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
 }
 
 func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogfile) {
-	f, err := os.OpenFile(s.path + shard + ".log", os.O_RDWR|os.O_CREATE, 0750)
+	f, err := os.OpenFile(s.path+shard+".log", os.O_RDWR|os.O_CREATE, 0750)
 	if err != nil {
 		panic(err)
 	}
@@ -147,24 +147,25 @@ func (s *FileStorage) RemoveLog(shard string) {
 type FileLogfile struct {
 	w *os.File
 }
+
 func (w FileLogfile) Write(logentry interface{}) {
 	switch l := logentry.(type) {
-		case LogEntryDelete:
-			var b bytes.Buffer
-			b.WriteString("delete ")
-			tmp, _ := json.Marshal(l.idx)
-			b.Write(tmp)
-			b.WriteString("\n")
-			w.w.Write(b.Bytes())
-		case LogEntryInsert:
-			var b bytes.Buffer
-			b.WriteString("insert ")
-			tmp, _ := json.Marshal(l.cols)
-			b.Write(tmp)
-			tmp, _ = json.Marshal(l.values)
-			b.Write(tmp)
-			b.WriteString("\n")
-			w.w.Write(b.Bytes())
+	case LogEntryDelete:
+		var b bytes.Buffer
+		b.WriteString("delete ")
+		tmp, _ := json.Marshal(l.idx)
+		b.Write(tmp)
+		b.WriteString("\n")
+		w.w.Write(b.Bytes())
+	case LogEntryInsert:
+		var b bytes.Buffer
+		b.WriteString("insert ")
+		tmp, _ := json.Marshal(l.cols)
+		b.Write(tmp)
+		tmp, _ = json.Marshal(l.values)
+		b.Write(tmp)
+		b.WriteString("\n")
+		w.w.Write(b.Bytes())
 	}
 }
 func (w FileLogfile) Sync() {

@@ -27,17 +27,17 @@ import "github.com/launix-de/memcp/scm"
 
 type indexPair struct {
 	itemid int // -1 for reference items
-	data []scm.Scmer
+	data   []scm.Scmer
 }
 
 type StorageIndex struct {
-	Cols []string // sort equal-cols alphabetically, so similar conditions are canonical
-	Savings float64 // store the amount of time savings here -> add selectivity (outputted / size) on each
+	Cols        []string   // sort equal-cols alphabetically, so similar conditions are canonical
+	Savings     float64    // store the amount of time savings here -> add selectivity (outputted / size) on each
 	mainIndexes StorageInt // we can do binary searches here
-	deltaBtree *btree.BTreeG[indexPair]
-	t *storageShard
-	active bool
-	mu sync.Mutex
+	deltaBtree  *btree.BTreeG[indexPair]
+	t           *storageShard
+	active      bool
+	mu          sync.Mutex
 }
 
 /*
@@ -100,6 +100,7 @@ func (idx *StorageIndex) ComputeSize() uint {
 	// TODO: deltaBtree
 	return sz
 }
+
 // pretty-print
 func (idx *StorageIndex) String() string {
 	return strings.Join(idx.Cols, "|")
@@ -113,7 +114,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 	if len(lower) > 0 {
 		// find an index that has at least the columns in that order we're searching for
 		// if the index is inactive, use the other one
-		retry_indexscan:
+	retry_indexscan:
 		old_indexes := t.Indexes
 		for _, index := range old_indexes {
 			// naive index search algo; TODO: improve
@@ -127,7 +128,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 				index.iterate(lower, upperLast, maxInsertIndex, callback)
 				return
 			}
-			skip_index:
+		skip_index:
 		}
 
 		// otherwise: create new index
@@ -141,7 +142,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		for i := range lower {
 			index.Cols[i] = cols[i].col
 		}
-		index.Savings = 0.0 // count how many cost we wasted so we decide when to build the index
+		index.Savings = 0.0  // count how many cost we wasted so we decide when to build the index
 		index.active = false // tell the engine that index has to be built first
 		index.t = t
 		t.Indexes = append(t.Indexes, index)
@@ -178,7 +179,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		cols[i] = s.t.columns[c]
 	}
 
-	savings_threshold := 2.0 // building an index costs 1x the time as traversing the list
+	savings_threshold := 2.0    // building an index costs 1x the time as traversing the list
 	s.Savings = s.Savings + 1.0 // mark that we could save time
 	if !s.active {
 		// index is not built yet
@@ -207,7 +208,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 				tmp[i] = i // fill with natural order
 			}
 			// sort indexes
-			sort.Slice(tmp, func (i, j int) bool {
+			sort.Slice(tmp, func(i, j int) bool {
 				for _, c := range cols {
 					a := c.GetValue(tmp[i])
 					b := c.GetValue(tmp[j])
@@ -232,7 +233,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			s.mainIndexes.finish()
 
 			// delta storage
-			s.deltaBtree = btree.NewG[indexPair](8, func (i, j indexPair) bool {
+			s.deltaBtree = btree.NewG[indexPair](8, func(i, j indexPair) bool {
 				for _, col := range s.Cols {
 					colpos, ok := s.t.deltaColumns[col]
 					if !ok {
@@ -263,15 +264,15 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			s.mu.Unlock()
 		}
 	}
-	start_scan:
+start_scan:
 
 	// bisect where the lower bound is found
-	idx := sort.Search(int(s.t.main_count), func (idx int) bool {
+	idx := sort.Search(int(s.t.main_count), func(idx int) bool {
 		idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
 		for i, c := range cols {
 			a := lower[i]
 			b := c.GetValue(uint(idx2))
-			 // TODO: respect !lowerEqual
+			// TODO: respect !lowerEqual
 			if scm.Less(a, b) {
 				return true // less
 			} else if scm.Less(b, a) {
@@ -282,7 +283,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		return true // fully equal
 	})
 	// now iterate over all items as long as we stay in sync
-	iteration:
+iteration:
 	for {
 		// check for array bounds
 		if uint(idx) >= s.t.main_count {
@@ -292,7 +293,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		// check for index bounds
 		for i, c := range cols {
 			a := c.GetValue(uint(idx2))
-			if i == len(cols) - 1 {
+			if i == len(cols)-1 {
 				if upperLast != nil && scm.Less(upperLast, a) { // TODO: respect !upperEqual
 					break iteration // stop traversing when we exceed the < part of last col
 				}
@@ -310,7 +311,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 
 	// delta storage -> scan btree (but we can also eject all items, it won't break the code)
 	if len(s.t.inserts) > 0 { // avoid building objects if there is no delta
-/* TODO: use our own compressed delta Bheap-tree
+		/* TODO: use our own compressed delta Bheap-tree
 		delta_lower := make(dataset, 2 * len(s.Cols))
 		delta_upper := make(dataset, 2 * len(s.Cols))
 		for i := 0; i < len(s.Cols); i++ {
@@ -330,7 +331,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
 			callback(s.t.main_count + uint(p.itemid))
 		}
-*/
+		*/
 		// fallback: output all items
 		for i := 0; i < maxInsertIndex; i++ {
 			callback(s.t.main_count + uint(i))

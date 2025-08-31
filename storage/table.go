@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package storage
 
@@ -25,77 +25,83 @@ import "github.com/launix-de/memcp/scm"
 
 type dataset []scm.Scmer
 type column struct {
-	Name string
-	Typ string
-	Typdimensions []int // type dimensions for DECIMAL(10,3) and VARCHAR(5)
-	Computor scm.Scmer `json:"-"` // TODO: marshaljson -> serialize
-	PartitioningScore int // count this up to increase the chance of partitioning for this column
-	AutoIncrement bool
-	Default scm.Scmer
-	OnUpdate scm.Scmer
-	AllowNull bool // TODO: respect this
-	IsTemp bool // columns with IsTemp may be removed without consequences
-	Collation string
-	Comment string
-	sanitizer func(scm.Scmer) scm.Scmer
+	Name              string
+	Typ               string
+	Typdimensions     []int     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
+	Computor          scm.Scmer `json:"-"` // TODO: marshaljson -> serialize
+	PartitioningScore int       // count this up to increase the chance of partitioning for this column
+	AutoIncrement     bool
+	Default           scm.Scmer
+	OnUpdate          scm.Scmer
+	AllowNull         bool // TODO: respect this
+	IsTemp            bool // columns with IsTemp may be removed without consequences
+	Collation         string
+	Comment           string
+	sanitizer         func(scm.Scmer) scm.Scmer
 	// TODO: LRU statistics for computed columns
 }
 type PersistencyMode uint8
+
 const (
-	Safe PersistencyMode = 0
-	Logged = 1
-	Sloppy = 3
-	Memory = 2
+	Safe   PersistencyMode = 0
+	Logged                 = 1
+	Sloppy                 = 3
+	Memory                 = 2
 )
+
 type uniqueKey struct {
-	Id string
+	Id   string
 	Cols []string
 }
 type foreignKeyMode uint8
+
 const (
 	RESTRICT foreignKeyMode = 0
-	CASCADE = 1
-	SETNULL = 2
+	CASCADE                 = 1
+	SETNULL                 = 2
 )
+
 type foreignKey struct {
-	Id string
-	Tbl1 string
-	Cols1 []string
-	Tbl2 string
-	Cols2 []string
+	Id         string
+	Tbl1       string
+	Cols1      []string
+	Tbl2       string
+	Cols2      []string
 	Updatemode foreignKeyMode
 	Deletemode foreignKeyMode
 }
+
 /*
 unique keys:
+
 	insert: check all columns of all unique keys (--> index scan!), if it is unique, deny insert
 	update: check all columns of all unique keys (--> index scan!), if it is unique, deny deletion, deny insert
 	delete: -
 
 foreign keys:
+
 	insert: I am tbl1 -> check all cols1 : do the values exist in tbl2.cols2? if not, deny insert
 	update: I am tbl1 -> check all cols1 (new values): do the values exist in tbl2.cols2? if not, deny insert
 	update: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE an update in tbl1, SET NULL in tbl1 or RESTRICT
 	delete: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE a delete in tbl1, SET NULL in tbl1 or RESTRICT
-
 */
 type table struct {
-	schema *database
-	Name string
-	Columns []column
-	Unique []uniqueKey // unique keys
-	Foreign []foreignKey // foreign keys
+	schema          *database
+	Name            string
+	Columns         []column
+	Unique          []uniqueKey     // unique keys
+	Foreign         []foreignKey    // foreign keys
 	PersistencyMode PersistencyMode /* 0 = safe (default), 1 = sloppy, 2 = memory */
-	mu sync.Mutex // schema/sharding lock
-	uniquelock sync.Mutex // unique insert lock
-	Auto_increment uint64 // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
-	Collation string
-	Charset string
-	Comment string
+	mu              sync.Mutex      // schema/sharding lock
+	uniquelock      sync.Mutex      // unique insert lock
+	Auto_increment  uint64          // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
+	Collation       string
+	Charset         string
+	Comment         string
 
 	// storage: if both arrays Shards and PShards are present, Shards is the single point of truth
-	Shards []*storageShard // unordered shards; as long as this value is not nil, use shards instead of pshards
-	PShards []*storageShard // partitioned shards according to PDimensions
+	Shards      []*storageShard // unordered shards; as long as this value is not nil, use shards instead of pshards
+	PShards     []*storageShard // partitioned shards according to PDimensions
 	PDimensions []shardDimension
 	// TODO: move rows from Shards to PShards according to PDimensions
 }
@@ -117,10 +123,10 @@ func (t table) GetKey() string {
 }
 
 func (t table) ComputeSize() uint {
-	var size uint = 10*8 + 32 * uint(len(t.Columns))
-		for _, s := range t.Shards {
-			size += s.ComputeSize()
-		}
+	var size uint = 10*8 + 32*uint(len(t.Columns))
+	for _, s := range t.Shards {
+		size += s.ComputeSize()
+	}
 	for _, s := range t.PShards {
 		size += s.ComputeSize()
 	}
@@ -140,16 +146,16 @@ func (t *table) AddPartitioningScore(cols []string) {
 }
 
 func (m *PersistencyMode) MarshalJSON() ([]byte, error) {
-	if (*m == Memory) {
+	if *m == Memory {
 		return []byte("\"memory\""), nil
 	}
-	if (*m == Sloppy) {
+	if *m == Sloppy {
 		return []byte("\"sloppy\""), nil
 	}
-	if (*m == Logged) {
+	if *m == Logged {
 		return []byte("\"logged\""), nil
 	}
-	if (*m == Safe) {
+	if *m == Safe {
 		return []byte("\"safe\""), nil
 	}
 	return nil, errors.New("unknown persistency mode")
@@ -161,19 +167,19 @@ func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if (str == "memory") {
+	if str == "memory" {
 		*m = Memory
 		return nil
 	}
-	if (str == "sloppy") {
+	if str == "sloppy" {
 		*m = Sloppy
 		return nil
 	}
-	if (str == "logged") {
+	if str == "logged" {
 		*m = Logged
 		return nil
 	}
-	if (str == "safe") {
+	if str == "safe" {
 		*m = Safe
 		return nil
 	}
@@ -185,14 +191,14 @@ func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
 		return RESTRICT
 	}
 	switch scm.String(val) {
-		case "restrict":
-			return RESTRICT
-		case "cascade":
-			return CASCADE
-		case "set null":
-			return SETNULL
-		default:
-			panic("unknown update mode: " + scm.String(val))
+	case "restrict":
+		return RESTRICT
+	case "cascade":
+		return CASCADE
+	case "set null":
+		return SETNULL
+	default:
+		panic("unknown update mode: " + scm.String(val))
 	}
 }
 
@@ -232,54 +238,54 @@ func (c *column) Show() scm.Scmer {
 
 func (c *column) UpdateSanitizer() {
 	typ := strings.ToUpper(c.Typ)
-	switch (typ) {
-		// string to int
-		case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
-			c.sanitizer = func (v scm.Scmer) scm.Scmer {
-				return int64(scm.ToInt(v))
-			}
+	switch typ {
+	// string to int
+	case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
+		c.sanitizer = func(v scm.Scmer) scm.Scmer {
+			return int64(scm.ToInt(v))
+		}
 	}
 }
 
 func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
-    switch (key) {
-        case "type":
-            c.Typ = scm.String(val)
-            c.UpdateSanitizer()
-            return c.Typ
-        case "dimensions":
-            // expect val to be a list of numbers
-            if val == nil {
-                c.Typdimensions = nil
-                return nil
-            }
-            if l, ok := val.([]scm.Scmer); ok {
-                dims := make([]int, len(l))
-                for i, v := range l {
-                    dims[i] = scm.ToInt(v)
-                }
-                c.Typdimensions = dims
-                return val
-            }
-            panic("invalid dimensions value for alter column")
-        case "default":
-            c.Default = val
-            return c.Default
-        case "null":
-            c.AllowNull = scm.ToBool(val)
-			return c.AllowNull
-		case "temp":
-			c.IsTemp = scm.ToBool(val)
-			return c.IsTemp
-		case "collation":
-			c.Collation = scm.String(val)
-			return c.Collation
-		case "comment":
-			c.Comment = scm.String(val)
-			return c.Comment
-        default:
-            panic("unimplemented alter column operation: " + key)
-    }
+	switch key {
+	case "type":
+		c.Typ = scm.String(val)
+		c.UpdateSanitizer()
+		return c.Typ
+	case "dimensions":
+		// expect val to be a list of numbers
+		if val == nil {
+			c.Typdimensions = nil
+			return nil
+		}
+		if l, ok := val.([]scm.Scmer); ok {
+			dims := make([]int, len(l))
+			for i, v := range l {
+				dims[i] = scm.ToInt(v)
+			}
+			c.Typdimensions = dims
+			return val
+		}
+		panic("invalid dimensions value for alter column")
+	case "default":
+		c.Default = val
+		return c.Default
+	case "null":
+		c.AllowNull = scm.ToBool(val)
+		return c.AllowNull
+	case "temp":
+		c.IsTemp = scm.ToBool(val)
+		return c.IsTemp
+	case "collation":
+		c.Collation = scm.String(val)
+		return c.Collation
+	case "comment":
+		c.Comment = scm.String(val)
+		return c.Comment
+	default:
+		panic("unimplemented alter column operation: " + key)
+	}
 }
 
 func (d dataset) Get(key string) (scm.Scmer, bool) {
@@ -300,7 +306,7 @@ func (d dataset) GetI(key string) (scm.Scmer, bool) { // case insensitive
 	return nil, false
 }
 
-func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extrainfo []scm.Scmer) bool {
+func (t *table) CreateColumn(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) bool {
 	// one early out without schemalock (especially for computed columns)
 	for _, c := range t.Columns {
 		if c.Name == name {
@@ -316,7 +322,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 			return false // column already exists
 		}
 	}
-	
+
 	var c column
 	c.Name = name
 	c.Typ = typ
@@ -351,10 +357,10 @@ func (t *table) CreateColumn(name string, typ string, typdimensions[] int, extra
 	c.UpdateSanitizer()
 	t.Columns = append(t.Columns, c)
 	for _, s := range t.Shards {
-		s.columns[name] = new (StorageSparse)
+		s.columns[name] = new(StorageSparse)
 	}
 	for _, s := range t.PShards {
-		s.columns[name] = new (StorageSparse)
+		s.columns[name] = new(StorageSparse)
 	}
 	t.schema.save()
 	return true
@@ -411,7 +417,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					t.Shards[i] = s.rebuild(false)
 					// write new uuids to disk
 					t.schema.save()
-				}(len(t.Shards)-1)
+				}(len(t.Shards) - 1)
 				shard = NewShard(t)
 				fmt.Println("started new shard for table", t.Name)
 				t.Shards = append(t.Shards, shard)
@@ -421,15 +427,15 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 
 		// check unique constraints in a thread safe manner
 		if len(t.Unique) > 0 {
-			t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
+			t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer) {
 				// physically insert
 				shard.Insert(columns, values, false, onFirstInsertId)
 				result += len(values)
-			}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
+			}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 				if onCollision != nil {
 					scm.Apply(onCollision, data...)
 				} else {
-					panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
+					panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
 				}
 			}, 0)
 		} else {
@@ -455,15 +461,15 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			// check unique constraints in a thread safe manner
 			if len(t.Unique) > 0 {
 				// this function will do the locking for us
-				t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
-				// physically insert
-				s.Insert(columns, values, false, onFirstInsertId)
+				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer) {
+					// physically insert
+					s.Insert(columns, values, false, onFirstInsertId)
 					result += len(values)
-				}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
+				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 					if onCollision != nil {
 						scm.Apply(onCollision, data...)
 					} else {
-						panic("Unique key constraint violated in table "+t.Name+": " + errmsg)
+						panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
 					}
 				}, 0)
 			} else {
@@ -500,9 +506,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 }
 
 /*
-	checks a number of datasets for unique collisions.
-	For each block of datasets that pass, success is called.
-	For each single unique collision that fails, failure is called.
+checks a number of datasets for unique collisions.
+For each block of datasets that pass, success is called.
+For each single unique collision that fails, failure is called.
 */
 func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int) {
 	// check for duplicates
@@ -576,9 +582,9 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if present && !s.deletions.Get(uid) {
 					// found a unique collision
 					if j != last_j {
-						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx + 1) // flush
+						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1) // flush
 					}
-					last_j = j+1
+					last_j = j + 1
 					lock.Unlock()
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {
@@ -599,7 +605,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					goto nextrow
 				}
 			}
-			nextrow:
+		nextrow:
 			if allowPruning {
 				if len(t.Unique) == 1 {
 					lock.Unlock()
@@ -607,7 +613,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 		}
 		if len(values) != last_j {
-			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx + 1) // flush the rest
+			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1) // flush the rest
 		}
 		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
 			lock.Unlock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
@@ -627,20 +633,20 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				}
 			}
 		}
-		conditionBody := make([]scm.Scmer, len(uniq.Cols) + 1)
+		conditionBody := make([]scm.Scmer, len(uniq.Cols)+1)
 		conditionBody[0] = scm.Symbol("and")
 		last_j := 0
 		for j, row := range values {
 			for i, colidx := range colidx {
 				value := row[colidx]
 				if !mergeNull && value == nil {
-					conditionBody[i + 1] = false // NULL can be there multiple times
+					conditionBody[i+1] = false // NULL can be there multiple times
 				} else {
-					conditionBody[i + 1] = []scm.Scmer{scm.Symbol("equal??"), scm.NthLocalVar(i), value}
+					conditionBody[i+1] = []scm.Scmer{scm.Symbol("equal??"), scm.NthLocalVar(i), value}
 				}
 			}
-			condition := scm.Proc {cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-			updatefn := t.scan(uniq.Cols, condition, onCollisionCols, func (args ...scm.Scmer) scm.Scmer {
+			condition := scm.Proc{cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
+			updatefn := t.scan(uniq.Cols, condition, onCollisionCols, func(args ...scm.Scmer) scm.Scmer {
 				t.uniquelock.Unlock()
 				for i, p := range onCollisionCols {
 					if len(p) >= 4 && p[:4] == "NEW." {
@@ -654,17 +660,17 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				failure(uniq.Id, args) // call collision function
 				t.uniquelock.Lock()
 				return true // feedback that there was a collision
-			}, func(a ...scm.Scmer) scm.Scmer {return a[1]}, nil, nil, false)
+			}, func(a ...scm.Scmer) scm.Scmer { return a[1] }, nil, nil, false)
 			if updatefn != nil {
 				// found a unique collision: flush the successing items and skip this one
 				if j != last_j {
-					t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx + 1) // flush
+					t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1) // flush
 				}
-				last_j = j+1
+				last_j = j + 1
 			}
 		}
 		if len(values) != last_j {
-			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx + 1) // flush the rest
+			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1) // flush the rest
 		}
 		if idx == 0 {
 			t.uniquelock.Unlock()
