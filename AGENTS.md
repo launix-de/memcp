@@ -26,6 +26,21 @@
 - Tests: YAML files use lower_snake_case keys and `NN_description.yaml` naming.
 - Avoid introducing new tools; prefer editing existing files over adding new ones.
 
+### Concurrency Rules (Storage Engine)
+- Never access shard internals without the shard lock:
+  - `storageShard.columns`, `deltaColumns`, `inserts`, `deletions`, and `Indexes` must only be read/written while holding `t.mu`.
+  - Use `RLock` for read-only snapshots and `Lock` for mutations. Do not read Go maps without a lock.
+- Avoid lock upgrades. Do not acquire `t.mu.Lock()` while holding `t.mu.RLock()`.
+  - Pattern for lazy-load under concurrency:
+    1. `RLock` → check if value is present; `RUnlock`.
+    2. If missing, `Lock` → re-check → compute/store → `Unlock`.
+- Prefer helper APIs that encapsulate locking:
+  - Use `getColumnStorageOrPanic(name)` to obtain a stable `ColumnStorage` pointer (loads on demand) without racing writers.
+  - Use `ColumnReader(name)` rather than reading `t.columns[name]` directly.
+- Scan/plan code must not read from `t.columns[...]` directly. Fetch storages with helpers outside of long-held locks; then take `RLock` only for index iteration and reading `inserts`/`deletions`/`deltaColumns`.
+- Log replay and rebuild mutate shard state and must hold `t.mu.Lock()` for their critical sections. They must not take table locks inside shard locks to avoid cycles.
+- When adding new storage fields, document the locking discipline and update this section.
+
 ### Scheme AST Quoting (lib/queryplan.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:

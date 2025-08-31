@@ -176,10 +176,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 	// find columns in storage
 	cols := make([]ColumnStorage, len(s.Cols))
 	for i, c := range s.Cols {
-		cols[i] = s.t.columns[c]
-		if cols[i] == nil {
-			cols[i] = s.t.ensureColumnLoaded(c)
-		}
+		cols[i] = s.t.getColumnStorageOrPanic(c)
 	}
 
 	savings_threshold := 2.0    // building an index costs 1x the time as traversing the list

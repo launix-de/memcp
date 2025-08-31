@@ -135,14 +135,8 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	mcols := make([]ColumnStorage, len(callbackCols))
 	for i, k := range conditionCols { // iterate over columns
-		var ok bool
-		ccols[i], ok = t.columns[k] // find storage
-		if !ok {
-			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
-		}
-		if ccols[i] == nil {
-			ccols[i] = t.ensureColumnLoaded(k)
-		}
+		// obtain a safe pointer to column storage (loads on demand)
+		ccols[i] = t.getColumnStorageOrPanic(k)
 	}
 	for i, k := range callbackCols { // iterate over columns
 		if string(k) == "$update" {
@@ -151,14 +145,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			// ignore NEW.
 			mcols[i] = nil
 		} else {
-			var ok bool
-			mcols[i], ok = t.columns[k] // find storage
-			if !ok {
-				panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
-			}
-			if mcols[i] == nil {
-				mcols[i] = t.ensureColumnLoaded(k)
-			}
+			mcols[i] = t.getColumnStorageOrPanic(k)
 		}
 	}
 	// initialize main_count lazily if needed
