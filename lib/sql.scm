@@ -20,6 +20,27 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (import "sql-builtins.scm")
 (import "queryplan.scm")
 
+/* helper: build a policy function for table-level access checks */
+(define sql_policy (lambda (username)
+    (begin
+        (define is_admin (scan "system" "user"
+            '("username") (lambda (u) (equal?? u username))
+            '("admin") (lambda (a) a)
+            (lambda (a b) (or a b))
+            false))
+        (lambda (schema table write)
+            (begin
+                (if is_admin true (begin
+                    (define access_count (scan "system" "access"
+                        '("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
+                        '() (lambda () 1)
+                        + 0))
+                    (if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." table)))
+                ))
+            ))
+    )
+))
+
 /* create user tables */
 (print "Initializing SQL frontend")
 (if (has? (show) "system") true (begin
@@ -28,7 +49,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 ))
 (if (has? (show "system") "user") true (begin
     (print "creating table system.user")
-    (eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE"))
+    (eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" nil))
     (insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password "admin") true)))
 ))
 
@@ -55,7 +76,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 /* access control: which user can access which database */
 (if (has? (show "system") "access") true (begin
 	(print "creating table system.access")
-	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE"))
+    (eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" nil))
 ))
 
 (set globalvars '("lower_case_table_names" 0))
@@ -70,12 +91,17 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(try (lambda () (time (begin
 				((res "header") "Content-Type" "text/plain")
 				((res "status") 200)
-				(define formula (parse_sql schema query))
+				(define formula (parse_sql schema query (sql_policy (req "username"))))
 				(define resultrow (res "jsonl"))
 				(define session (context "session"))
 				(set resultrow_called false)
 				(set original_resultrow resultrow)
-				(define resultrow (lambda (row) (begin (set resultrow_called true) (original_resultrow row))))
+				(set last_row nil)
+				(define resultrow (lambda (row) (begin
+					(set resultrow_called true)
+					(if (equal? row last_row)
+						true
+						(begin (set last_row row) (original_resultrow row))))))
 				(set query_result (eval (source "SQL Query" 1 1 formula)))
 				/* If no resultrow was called and we got a number, return it as affected_rows */
 				(if (and (not resultrow_called) (number? query_result)) (begin
@@ -102,12 +128,17 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			(try (lambda () (time (begin
 				((res "header") "Content-Type" "text/plain")
 				((res "status") 200)
-				(define formula (parse_psql schema query))
+				(define formula (parse_psql schema query (sql_policy (req "username"))))
 				(define resultrow (res "jsonl"))
 				(define session (context "session"))
 				(set resultrow_called false)
 				(set original_resultrow resultrow)
-				(define resultrow (lambda (row) (begin (set resultrow_called true) (original_resultrow row))))
+				(set last_row nil)
+				(define resultrow (lambda (row) (begin
+					(set resultrow_called true)
+					(if (equal? row last_row)
+						true
+						(begin (set last_row row) (original_resultrow row))))))
 				(set query_result (eval (source "SQL Query" 1 1 formula)))
 				/* If no resultrow was called and we got a number, return it as affected_rows */
 				(if (and (not resultrow_called) (number? query_result)) (begin
@@ -172,7 +203,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			) (time (begin
 				/* SQL syntax mode */
 				(define formula (try (lambda ()
-					((if (equal? (session "syntax") "postgresql") parse_psql parse_sql) schema sql))
+					((if (equal? (session "syntax") "postgresql") (lambda (schema sql) (parse_psql schema sql nil)) (lambda (schema sql) (parse_sql schema sql nil))) schema sql))
 				(lambda (e) (begin
 					(print "SQL query: " sql)
 					(print "error: " e)

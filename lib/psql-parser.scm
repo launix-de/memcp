@@ -84,7 +84,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	psql_identifier
 )))
 
-(define parse_psql (lambda (schema s) (begin
+(define parse_psql (lambda (schema s policy) (begin
 
 
 	/* derive the description of a column from its expression */
@@ -216,12 +216,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "(" true) (define query psql_select) (atom ")" true) (atom "AS" true) (define id psql_identifier)) '(id schema query false nil)) /* inner select as from */
 		(parser '((atom "(" true) (define query psql_select) (atom ")" true) (define id psql_identifier)) '(id schema query false nil)) /* inner select as from */
 		/* TODO: case insensititive table search */
-		(parser '((define schema psql_identifier) (atom "." true) (define tbl psql_identifier) (atom "AS" true) (define id psql_identifier)) '(id schema tbl false nil))
-		(parser '((define schema psql_identifier) (atom "." true) (define tbl psql_identifier) (define id psql_identifier)) '(id schema tbl false nil))
-		(parser '((define schema psql_identifier) (atom "." true) (define tbl psql_identifier)) '(tbl schema tbl false nil))
-		(parser '((define tbl psql_identifier) (atom "AS" true) (define id psql_identifier)) '(id schema tbl false nil))
-		(parser '((define tbl psql_identifier) (define id psql_identifier)) '(id schema tbl false nil))
-		(parser '((define tbl psql_identifier)) '(tbl schema tbl false nil))
+		(parser '((define schema psql_identifier) (atom "." true) (define tbl psql_identifier) (atom "AS" true) (define id psql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema psql_identifier) (atom "." true) (define tbl psql_identifier) (define id psql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema psql_identifier) (atom "." true) (define tbl psql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
+		(parser '((define tbl psql_identifier) (atom "AS" true) (define id psql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define tbl psql_identifier) (define id psql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define tbl psql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
 	)))
 
 	/* bring those variables into a defined state */
@@ -301,6 +301,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define condition psql_expression)
 		))
 	) (begin
+		/* policy: write access check */
+		(if policy (policy schema tbl true) true)
 		(define replace_find_column (lambda (expr) (match expr
 			'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
@@ -334,7 +336,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(? '(
 			(atom "WHERE" true)
 			(define condition psql_expression)
-		))) (begin
+	))) (begin
+			/* policy: write access check */
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define replace_find_column (lambda (expr) (match expr
 				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
@@ -380,6 +384,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define updaterows (+ (parser '((define col psql_identifier) (atom "=" false) (define value psql_expression)) '(col value)) ","))
 		) updaterows)))
 	) (begin
+		/* policy: write access check */
+		(if policy (policy schema tbl true) true)
 		(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "Field")))))
@@ -411,6 +417,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define updaterows (+ (parser '((define col psql_identifier) (atom "=" false) (define value psql_expression)) '(col value)) ","))
 		) updaterows)))
 	) (begin
+		/* policy: write access check */
+		(if policy (policy schema tbl true) true)
 		(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "Field")))))
@@ -564,7 +572,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				"system"
 				"access"
 				'(list "username" "database")
-				'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
+				'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 				'(list "$update")
 				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 				(quote +)
@@ -576,7 +584,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				"system"
 				"access"
 				'(list "username" "database")
-				'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
+				'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 				'(list "$update")
 				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 				(quote +)
@@ -631,7 +639,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 (define psql_copy_def (parser '(psql_identifier /* ignore */ "." (define tbl psql_identifier) "(" (define columns (+ psql_identifier ",")) ")") '(tbl columns)))
 
-(define load_psql (lambda (schema stream) (begin
+(define load_psql (lambda (schema stream policy) (begin
 	(set state (newsession))
 	(set resultrow print)
 	(set session (newsession))
@@ -654,7 +662,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(concat start ";" rest) (begin
 				/* command ended -> execute (at max one command per line) */
 				(print (concat (state "sql") start))
-				(set plan (parse_psql schema (concat (state "sql") start)))
+				(set plan (parse_psql schema (concat (state "sql") start) policy))
 				(print "SQL execute" plan)
 				(eval plan)
 				(state "sql" rest)

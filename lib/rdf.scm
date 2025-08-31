@@ -59,7 +59,7 @@ this is how rdf works:
 			((res "status") 200)
 			/*(print "Loading TTL data into: " schema)*/
 			/* ensure rdf table exists */
-			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT)"))
+			(eval (parse_sql schema "CREATE TABLE IF NOT EXISTS rdf (s TEXT, p TEXT, o TEXT)" nil))
 			/* load the TTL data */
 			(load_ttl schema ttl_data)
 			((res "println") "TTL data loaded successfully")
@@ -92,4 +92,3 @@ this is how rdf works:
 			)
 	))
 ))
-

@@ -71,7 +71,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
     sql_string
 )))
 
-(define parse_sql (lambda (schema s) (begin
+(define parse_sql (lambda (schema s policy) (begin
 
 
 	/* derive the description of a column from its expression */
@@ -214,12 +214,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
 		/* TODO: case insensititive table search */
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl false nil))
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) '(id schema tbl false nil))
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) '(tbl schema tbl false nil))
-		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) '(id schema tbl false nil))
-		(parser '((define tbl sql_identifier) (define id sql_identifier)) '(id schema tbl false nil))
-		(parser '((define tbl sql_identifier)) '(tbl schema tbl false nil))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
+		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
+		(parser '((define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
 	)))
 
 	/* bring those variables into a defined state */
@@ -299,6 +299,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define condition sql_expression)
 		))
 	) (begin
+		/* policy: write access check */
+		(if policy (policy schema tbl true) true)
 		(define replace_find_column (lambda (expr) (match expr
 			'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
 			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
@@ -332,7 +334,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(? '(
 			(atom "WHERE" true)
 			(define condition sql_expression)
-		))) (begin
+	))) (begin
+			/* policy: write access check */
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define replace_find_column (lambda (expr) (match expr
 				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensititive column */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
@@ -378,6 +382,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 		) updaterows)))
 	) (begin
+		/* policy: write access check */
+		(if policy (policy schema tbl true) true)
 		(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "Field")))))
@@ -409,6 +415,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 		) updaterows)))
 	) (begin
+		/* policy: write access check */
+		(if policy (policy schema tbl true) true)
 		(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "Field")))))
@@ -541,7 +549,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				"system"
 				"access"
 				'(list "username" "database")
-				'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
+				'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 				'(list "$update")
 				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 				(quote +)
@@ -553,7 +561,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				"system"
 				"access"
 				'(list "username" "database")
-				'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
+				'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 				'(list "$update")
 				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 				(quote +)
@@ -599,7 +607,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(concat start (eval (state "delimiter")) rest) (begin
 				/* command ended -> execute (at max one command per line) */
 				(print (concat (state "sql") start))
-				(set plan (parse_sql schema (concat (state "sql") start)))
+				(set plan (parse_sql schema (concat (state "sql") start) nil))
 				(print "SQL execute" plan)
 				(eval plan)
 				(state "sql" rest)

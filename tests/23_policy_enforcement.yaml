@@ -1,0 +1,67 @@
+# Policy enforcement across SELECT/INSERT/UPDATE/DELETE
+
+metadata:
+  version: "1.0"
+  description: "Policy checks for all CRUD operations"
+
+setup:
+  - sql: "DELETE FROM `system`.`access` WHERE username='alice'"
+  - sql: "DELETE FROM `system`.`user` WHERE username='alice'"
+  - sql: "CREATE USER alice IDENTIFIED BY 'pw'"
+  - sql: "DROP TABLE IF EXISTS t"
+  - sql: "CREATE TABLE t(id INT, name TEXT)"
+
+test_cases:
+  - name: "alice cannot SELECT without grant"
+    username: "alice"
+    password: "pw"
+    sql: "SELECT * FROM t"
+    expect: { error: true }
+
+  - name: "alice cannot INSERT without grant"
+    username: "alice"
+    password: "pw"
+    sql: "INSERT INTO t(id, name) VALUES (1, 'x')"
+    expect: { error: true }
+
+  - name: "grant ALL on db to alice"
+    sql: "GRANT ALL ON `memcp-tests`.* TO alice"
+    expect: {}
+
+  - name: "alice INSERT allowed after grant"
+    username: "alice"
+    password: "pw"
+    sql: "INSERT INTO t(id, name) VALUES (2, 'y')"
+    expect: { affected_rows: 1 }
+
+  - name: "alice UPDATE allowed after grant"
+    username: "alice"
+    password: "pw"
+    sql: "UPDATE t SET name='z' WHERE id=2"
+    expect: { affected_rows: 1 }
+
+  - name: "alice DELETE allowed after grant"
+    username: "alice"
+    password: "pw"
+    sql: "DELETE FROM t WHERE id=2"
+    expect: { affected_rows: 1 }
+
+  - name: "revoke ALL on db from alice"
+    sql: "REVOKE ALL ON `memcp-tests`.* FROM alice"
+    expect: {}
+
+  - name: "alice cannot SELECT after revoke"
+    username: "alice"
+    password: "pw"
+    sql: "SELECT * FROM t"
+    expect: { error: true }
+
+  - name: "alice cannot DELETE after revoke"
+    username: "alice"
+    password: "pw"
+    sql: "DELETE FROM t"
+    expect: { error: true }
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS t"
+

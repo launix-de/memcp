@@ -59,4 +59,37 @@ test_cases:
     expect:
       rows: 0
 
+  # Policy enforcement tests (per-user auth)
+  - name: "prepare table t as root (create)"
+    sql: "CREATE TABLE t(id INT, name TEXT)"
+    expect: {}
+
+  - name: "prepare table t as root (insert)"
+    sql: "INSERT INTO t(id, name) VALUES (1, 'x')"
+    expect: { affected_rows: 1 }
+
+  - name: "alice cannot read without grant"
+    username: "alice"
+    password: "pw"
+    sql: "SELECT * FROM t"
+    expect:
+      error: true
+
+  - name: "grant db access to alice"
+    sql: "GRANT SELECT ON `memcp-tests`.* TO alice"
+    expect: {}
+
+  - name: "alice can read after grant"
+    username: "alice"
+    password: "pw"
+    sql: "SELECT id, name FROM t"
+    expect:
+      rows: 1
+      data:
+        - { id: 1, name: "x" }
+
+  - name: "revoke db access from alice"
+    sql: "REVOKE SELECT ON `memcp-tests`.* FROM alice"
+    expect: { affected_rows: 1 }
+
 cleanup: []
