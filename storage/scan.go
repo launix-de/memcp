@@ -140,6 +140,9 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		if !ok {
 			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
 		}
+		if ccols[i] == nil {
+			ccols[i] = t.ensureColumnLoaded(k)
+		}
 	}
 	for i, k := range callbackCols { // iterate over columns
 		if string(k) == "$update" {
@@ -153,8 +156,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			if !ok {
 				panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
 			}
+			if mcols[i] == nil {
+				mcols[i] = t.ensureColumnLoaded(k)
+			}
 		}
 	}
+	// initialize main_count lazily if needed
+	t.ensureMainCount()
 	// remember current insert status (so don't scan things that are inserted during map)
 	t.mu.RLock() // lock whole shard for reading since we frequently read deletions
 	maxInsertIndex := len(t.inserts)

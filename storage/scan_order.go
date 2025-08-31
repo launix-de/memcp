@@ -266,6 +266,8 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		}
 	}
 
+	// initialize main_count lazily if needed
+	t.ensureMainCount()
 	// scan loop in read lock
 	var maxInsertIndex int
 	func() {
