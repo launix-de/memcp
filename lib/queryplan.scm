@@ -126,16 +126,27 @@ if there is a group function, create a temporary preaggregate table
 		 	/* prefix all table aliases */	
 			(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a b) '((concat id ":" alias) schema tbl a b)))))
 			/* helper function add prefix to tblalias of every expression */
-			(define replace_column_alias (lambda (expr) (match expr
-				'((symbol get_column) nil ti col ci) '('get_column (concat id ":" (error "table not given for column " col)) ti col ci) /* TODO: walk through schemas2 to find col */
-				'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
-				(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
-				expr
-			)))
+				(define replace_column_alias (lambda (expr) (match expr
+					'((symbol get_column) nil ti col ci) (begin
+						/* resolve unqualified column against inner schemas2; must match exactly one table */
+						(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
+							(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
+								(cons alias acc)
+								acc)) '()))
+						(match matches
+							(cons only '()) '('get_column (concat id ":" only) ti col ci)
+							'() (error (concat "column " col " does not exist in subquery"))
+							(cons _ _) (error (concat "ambiguous column " col " in subquery"))
+						)
+					)
+					'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+					(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
+					expr
+				)))
 			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 			(if group2 (error "group is not supported yet in subqueries"))
 			(if limit2 (error "limit is not supported yet in subqueries"))
-			'(tablesPrefixed '(id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) (replace_column_alias condition2) '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))))
+			'(tablesPrefixed '(id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) (replace_column_alias condition2) (merge '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) '((concat id ":" k) v))))))
 		) (error "non matching return value for untangle_query"))
 		(error (concat "unknown tabledesc: " tbldesc))
 	))))
@@ -145,6 +156,7 @@ if there is a group function, create a temporary preaggregate table
 		(set tables (merge tablesList))
 		(set schemas (merge schemasList))
 		/*(print "tables=" tables)*/
+		/*(print "schemas=" schemas)*/
 
 		/* TODO: add rename_prefix to all table names and get_column expressions */
 		/* TODO: apply renamelist to all expressions in fields condition group having order */

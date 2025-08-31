@@ -57,6 +57,8 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return len(b_) == 0 && !ToBool(a)
 				case nil:
 					return !ToBool(a)
+				case SourceInfo:
+					return Equal(a, b_.value)
 			}
 		case float64:
 			switch b_ := b.(type) {
@@ -164,6 +166,8 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return a_ == b_
 			}
 
+	case SourceInfo:
+		return Equal(a_.value, b)
 	}
 	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
 }
@@ -203,6 +207,8 @@ func EqualSQL(a, b Scmer) Scmer {
 					return ToBool(a) == b_
 				case []Scmer:
 					return len(b_) == 0 && !ToBool(a)
+				case SourceInfo:
+					return EqualSQL(a, b_.value)
 			}
 		case float64:
 			switch b_ := b.(type) {
@@ -281,6 +287,8 @@ func EqualSQL(a, b Scmer) Scmer {
 					for i := 0; i < len(a_.Pairs); i++ { if !ToBool(EqualSQL(a_.Pairs[i], b_.Pairs[i])) { return false } }
 					return true
 			}
+		case SourceInfo:
+			return Equal(a_.value, b)
 
 	}
 	panic("unknown SQL comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
