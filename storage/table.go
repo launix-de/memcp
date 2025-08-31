@@ -382,7 +382,7 @@ func (t *table) DropColumn(name string) bool {
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
-func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool) int {
+func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64)) int {
 	result := 0
 	// TODO: check foreign keys (new value of column must be present in referenced table)
 
@@ -423,7 +423,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		if len(t.Unique) > 0 {
 			t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
 				// physically insert
-				shard.Insert(columns, values, false)
+				shard.Insert(columns, values, false, onFirstInsertId)
 				result += len(values)
 			}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
 				if onCollision != nil {
@@ -434,7 +434,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			}, 0)
 		} else {
 			// physically insert (parallel)
-			shard.Insert(columns, values, false)
+			shard.Insert(columns, values, false, onFirstInsertId)
 			result += len(values)
 		}
 	} else {
@@ -456,8 +456,8 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			if len(t.Unique) > 0 {
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func (values [][]scm.Scmer) {
-					// physically insert
-					s.Insert(columns, values, false)
+				// physically insert
+				s.Insert(columns, values, false, onFirstInsertId)
 					result += len(values)
 				}, onCollisionCols, func (errmsg string, data []scm.Scmer) {
 					if onCollision != nil {
@@ -468,7 +468,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				}, 0)
 			} else {
 				// physically insert (parallel)
-				s.Insert(columns, values, false)
+				s.Insert(columns, values, false, onFirstInsertId)
 				result += len(values)
 			}
 		}

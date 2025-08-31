@@ -17,6 +17,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 package storage
 
 import "io"
+import "sync"
 import "fmt"
 import "time"
 import "sort"
@@ -801,9 +802,9 @@ func Init(en scm.Env) {
 			return true
 		}, false,
 	})
-	scm.Declare(&en, &scm.Declaration{
+scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table and returns the number of successful items",
-		4, 7,
+		4, 8,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
@@ -812,6 +813,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"onCollisionCols", "list", "list of columns of the old dataset that have to be passed to onCollision. Can also request $update."},
 			scm.DeclarationParameter{"onCollision", "func", "the function that is called on each collision dataset. The first parameter is filled with the $update function, the second parameter is the dataset as associative list. If not set, an error is thrown in case of a collision."},
 			scm.DeclarationParameter{"mergeNull", "bool", "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)"},
+			scm.DeclarationParameter{"onInsertid", "func", "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT"},
 		}, "number",
 		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
@@ -832,6 +834,13 @@ func Init(en scm.Env) {
 			if len(a) > 6 && scm.ToBool(a[6]) {
 				mergeNull = true
 			}
+			// optional onInsertid callback
+			var onFirst func(int64)
+			if len(a) > 7 && a[7] != nil {
+				cb := a[7]
+				var once sync.Once
+				onFirst = func(id int64) { once.Do(func() { scm.Apply(cb, id) }) }
+			}
 			cols_ := a[2].([]scm.Scmer)
 			cols := make([]string, len(cols_))
 			for i, col := range cols_ {
@@ -842,7 +851,10 @@ func Init(en scm.Env) {
 			for i, row := range rows_ {
 				rows[i] = row.([]scm.Scmer)
 			}
-			return int64(db.Tables.Get(scm.String(a[1])).Insert(cols, rows, onCollisionCols, onCollision, mergeNull))
+			// perform insert
+			t := db.Tables.Get(scm.String(a[1]))
+			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
+			return int64(inserted)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{

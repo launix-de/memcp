@@ -79,10 +79,9 @@ func LoadJSON(schema string, f io.Reader) {
 						x[i] = v
 						i++
 					}
-					t.Insert(cols, [][]scm.Scmer{x}, nil, nil, false) // put into table
+					t.Insert(cols, [][]scm.Scmer{x}, nil, nil, false, nil) // put into table
 				}(t, s)
 			}
 		}
 	}
 }
-

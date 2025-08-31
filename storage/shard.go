@@ -116,7 +116,7 @@ func (u *storageShard) load(t *table) {
 				case LogEntryDelete:
 					u.deletions.Set(l.idx, true) // mark deletion
 				case LogEntryInsert:
-					u.insertDataset(l.cols, l.values)
+					u.insertDataset(l.cols, l.values, nil)
 				default:
 					panic("unknown log sequence: " + fmt.Sprint(l))
 			}
@@ -216,7 +216,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					t.deletions.Set(idx, true) // mark as deleted
 				}
 
-				t.insertDataset(cols, [][]scm.Scmer{d2})
+				t.insertDataset(cols, [][]scm.Scmer{d2}, nil)
 				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 					t.logfile.Write(LogEntryDelete{idx})
 					t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
@@ -271,21 +271,21 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 	}
 }
 
-func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool) {
-	if !alreadyLocked {
-		t.mu.Lock()
-	}
-	t.insertDataset(columns, values)
-	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-		t.logfile.Write(LogEntryInsert{columns, values})
-	}
-	if t.next != nil {
-		// also insert into next storage
-		t.next.Insert(columns, values, false)
-	}
-	if !alreadyLocked {
-		t.mu.Unlock()
-	}
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64)) {
+    if !alreadyLocked {
+        t.mu.Lock()
+    }
+    t.insertDataset(columns, values, onFirstInsertId)
+    if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+        t.logfile.Write(LogEntryInsert{columns, values})
+    }
+    if t.next != nil {
+        // also insert into next storage
+        t.next.Insert(columns, values, false, nil)
+    }
+    if !alreadyLocked {
+        t.mu.Unlock()
+    }
 	if t.t.PersistencyMode == Safe {
 		t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 	}
@@ -293,7 +293,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
-func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
+func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64)) {
 	colidx := make([]int, len(columns))
 	for i, col := range columns {
 		// copy all dataset entries into packed array
@@ -305,14 +305,16 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 			t.deltaColumns[col] = colidx[i]
 		}
 	}
-	var Auto_increment uint64
-	for _, c := range t.t.Columns {
-		if c.AutoIncrement {
-			t.t.mu.Lock() // auto increment with global table lock outside the loop for a batch
-			Auto_increment = t.t.Auto_increment
-			t.t.Auto_increment = t.t.Auto_increment + uint64(len(values)) // batch reservation of new IDs
-			t.t.mu.Unlock()
-		}
+    var Auto_increment uint64
+    var hasAI bool
+    for _, c := range t.t.Columns {
+        if c.AutoIncrement {
+            hasAI = true
+            t.t.mu.Lock() // auto increment with global table lock outside the loop for a batch
+            Auto_increment = t.t.Auto_increment
+            t.t.Auto_increment = t.t.Auto_increment + uint64(len(values)) // batch reservation of new IDs
+            t.t.mu.Unlock()
+        }
 		if c.AutoIncrement || c.Default != nil {
 			// column with default or auto increment -> also add to deltacolumns
 			cidx, ok := t.deltaColumns[c.Name]
@@ -324,7 +326,14 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer) {
 			}
 		}
 	}
-	for _, row := range values {
+    // if requested, notify the first assigned id once per statement
+    if hasAI && onFirstInsertId != nil {
+        onFirstInsertId(int64(Auto_increment) + 1)
+        // do not call again for this shard; table-level wrapper ensures only first shard triggers
+        onFirstInsertId = nil
+    }
+
+    for _, row := range values {
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
 		for _, c := range t.t.Columns {
 			if c.AutoIncrement {
