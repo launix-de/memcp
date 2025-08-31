@@ -37,6 +37,7 @@ sleep 1
 mkfifo /tmp/memcp-stdin-$test_port
 exec 3<> /tmp/memcp-stdin-$test_port
 
+rm -rf /tmp/memcp-pre-commit-tests || true
 ./memcp -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm < /tmp/memcp-stdin-$test_port > /tmp/memcp-test.log 2>&1 &
 memcp_pid=$!
 
