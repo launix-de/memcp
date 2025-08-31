@@ -283,7 +283,7 @@ func EqualSQL(a, b Scmer) Scmer {
 			}
 
 	}
-	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
+	panic("unknown SQL comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
 }
 
 // sort function for scmer
