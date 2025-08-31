@@ -32,6 +32,53 @@ test_cases:
         - date: 20
         - date: 15
 
+  - name: "Derived alias WHERE on base column"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT `date` AS `date`, `sensor` AS `sensor`
+        FROM `temperature`
+      ) AS t
+      WHERE t.sensor = 1
+      ORDER BY t.date DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - date: 20
+          sensor: 1
+        - date: 10
+          sensor: 1
+
+  - name: "Derived alias simple star without ORDER"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT `date` AS `date`
+        FROM `temperature`
+      ) AS t
+      LIMIT 3
+    expect:
+      rows: 3
+
+  - name: "Derived alias ORDER BY with join but no WHERE"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT `sensor` AS `sensor`,
+               `date`   AS `date`,
+               `temp`   AS `temp`
+        FROM `temperature` `temperature`
+        LEFT JOIN (
+          SELECT `ID` AS `sensor:ID`, `sensor`.`name` AS `sensor:description`, (TRUE) AS `sensor:canView`
+          FROM `sensor`
+        ) `ref:sensor` ON `ref:sensor`.`sensor:ID` = `sensor`
+      ) AS t
+      ORDER BY t.date DESC
+      LIMIT 2
+    expect:
+      rows: 2
+
   - name: "Order by alias with inner join + subselect"
     sql: |
       SELECT t.*
