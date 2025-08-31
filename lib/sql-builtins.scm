@@ -7,6 +7,7 @@
 (sql_builtins "UNIX_TIMESTAMP" now)
 (sql_builtins "UNIX_TIMESTAMP" parse_date)
 (sql_builtins "CURRENT_TIMESTAMP" now)
+(sql_builtins "NOW" now)
 
 /* math */
 (sql_builtins "FLOOR" floor)

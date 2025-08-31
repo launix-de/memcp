@@ -1,0 +1,39 @@
+# MySQL Compatibility v1 — Foreign Key DDL acceptance
+
+metadata:
+  version: "1.0"
+  description: "MySQL v1: accept FK DDL (metadata/no-op)"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS child"
+  - sql: "DROP TABLE IF EXISTS parent"
+
+test_cases:
+  - name: "CREATE parent/child with FK"
+    sql: |
+      CREATE TABLE parent (id INT PRIMARY KEY, name VARCHAR(50))
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE child with FK references"
+    sql: |
+      CREATE TABLE child (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        CONSTRAINT fk_p FOREIGN KEY (parent_id) REFERENCES parent(id)
+      )
+    expect: {}
+
+  - name: "INSERT matching FK"
+    sql: |
+      INSERT INTO parent (id, name) VALUES (1, 'p1')
+    expect:
+      affected_rows: 1
+
+  - name: "Insert child referencing parent"
+    sql: "INSERT INTO child (id, parent_id) VALUES (10, 1)"
+    expect: {}
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS child"
+  - sql: "DROP TABLE IF EXISTS parent"

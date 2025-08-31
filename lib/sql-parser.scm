@@ -112,6 +112,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 		(parser (atom "NULL" true) '("null" true))
 		(parser '((atom "DEFAULT" true) (define default sql_literal)) '("default" default))
+		(parser '((atom "DEFAULT" true) (atom "CURRENT_TIMESTAMP" true)) '("default" '('now)))
 		(parser '((atom "ON" true) (atom "UPDATE" true) (define default sql_literal)) '("update" default))
 		(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
 		(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
@@ -186,6 +187,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
+		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */
+		(parser '((atom "IF" true) "(" (define cond sql_expression) "," (define t sql_expression) "," (define f sql_expression) ")") '((quote if) cond t f))
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 
@@ -585,6 +588,19 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or sql_identifier '(sql_identifier (atom "AS" true) sql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
+
+		/* CREATE INDEX syntax acceptance (no-op; MemCP auto-indexes) */
+		(parser '((atom "CREATE" true)
+			(or (atom "INDEX" true) '((atom "UNIQUE" true) (atom "INDEX" true)))
+			(define idx sql_identifier)
+			(atom "ON" true)
+			(define tbl (or
+				(parser '((define schema sql_identifier) (atom "." true) (define t sql_identifier)) '(schema t))
+				(parser (define t sql_identifier) '(schema t))
+			))
+			"(" (define cols (+ sql_identifier ",")) ")"
+			(? (atom "USING" true) (atom "BTREE" true))
+		) "ignore")
 
 		/* TODO: draw transaction number, commit */
 		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('session "transaction" 1))

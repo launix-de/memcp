@@ -1,0 +1,77 @@
+# MySQL Compatibility v1 — Basics
+
+metadata:
+  version: "1.0"
+  description: "MySQL v1: identifiers, casts, NULL/booleans, escapes"
+  noncritical: true
+
+setup: []
+
+test_cases:
+  - name: "CREATE TABLE with backticked identifiers"
+    sql: |
+      CREATE TABLE `users` (
+        `id` INT PRIMARY KEY,
+        `name` VARCHAR(100),
+        `active` BOOLEAN
+      )
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT respects backticks"
+    sql: |
+      INSERT INTO `users` (`id`, `name`, `active`) VALUES (1, 'Ada', true)
+    expect:
+      affected_rows: 1
+
+  - name: "SELECT with backticks"
+    sql: |
+      SELECT `id`, `name`, `active` FROM `users`
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          name: "Ada"
+          active: true
+
+  - name: "Implicit numeric cast: string to int comparison"
+    sql: |
+      SELECT '1' = 1 AS eq
+    expect:
+      rows: 1
+      data:
+        - eq: true
+
+  - name: "Implicit boolean truthiness"
+    sql: |
+      SELECT IF(1, 't', 'f') AS v
+    expect:
+      rows: 1
+      data:
+        - v: "t"
+
+  - name: "NULL truthiness (WHERE filters out)"
+    sql: |
+      SELECT COUNT(*) AS c FROM (SELECT NULL AS x) t WHERE x
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
+  - name: "String escape single quote"
+    sql: |
+      SELECT 'can\'t' AS s
+    expect:
+      rows: 1
+      data:
+        - s: "can't"
+
+  - name: "Backslash escape"
+    sql: |
+      SELECT 'line\\nbreak' AS s
+    expect:
+      rows: 1
+      data:
+        - s: "line\nbreak"
+
+cleanup: []

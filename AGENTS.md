@@ -96,3 +96,59 @@
 
 Testing Optimizer Changes
 - Add unit tests for: constant folding, use-once inlining, set-elision, lambda param indexing, in-place map/filter behavior, and parser precompilation.
+## MySQL ↔ MemCP Parallel Run Plan
+- Goal: operate MemCP alongside MySQL for months with minimal risk, validating correctness and performance before cutover.
+
+### Recommended Approach
+- Change Data Capture via MySQL binlogs: implement a binlog client/applier that follows the MySQL replication stream (row-based events) and applies mutations to MemCP.
+  - Pros: proven pattern, no app changes, near real-time, selective tables, simpler than a full replica with GTID state negotiation.
+  - Cons: needs robust schema mapping and idempotent, transactional apply.
+- Keep MySQL primary: all writes land in MySQL; MemCP is a near-real-time mirror for reads and validation.
+- Progressive read rollout: start with shadow reads (compare results), then portion of read traffic, then latency-critical paths.
+
+### When (Not Yet) to Implement Full MySQL Replica Protocol
+- Implementing the full MySQL replication slave protocol (including GTID/autorejoin, semi-sync, heartbeats) is a larger surface. For the validation phase, prefer a binlog client (CDC) that covers ROW events, DDL, and GTID tracking without committing to full replica semantics.
+
+### CDC Implementation Sketch
+- Ingestion: connect to MySQL via replication protocol, request ROW-based binlogs with GTID enabled; handle rotate, format, table map, write/update/delete rows, and DDL events.
+- Schema mapping: translate MySQL types and column sets to MemCP schemas; maintain a mapping cache keyed by (db, table, table_id, column bitmap).
+- Apply pipeline: buffer event groups per transaction; apply atomically to MemCP with retries; ensure idempotency using GTID set checkpoints persisted in MemCP `system.cdc_state`.
+- DDL handling: best-effort translate CREATE/ALTER/DROP to MemCP; accept FKs as metadata-only if not enforced.
+- Backfill: initial snapshot via consistent `mysqldump`/`CLONE`-like read or parallel SELECTs; once complete, switch to live binlog apply.
+
+### Cutover and Safety
+- Shadow validation: run representative reads against both backends; record row diffs and latency deltas.
+- Checksums: periodic `CHECKSUM TABLE`/count+sum-of-columns approximations to catch drift.
+- Rollout gates: (1) schema parity validated; (2) CDC lag SLO met; (3) query diff rate below threshold; (4) error budget healthy.
+- Cutover: switch writes behind a feature flag to MemCP; keep CDC in reverse (MemCP→MySQL) temporarily for fast rollback, or maintain dual-writes for a short window.
+
+### Operational Notes
+- Credentials: use a MySQL REPLICATION SLAVE user with minimal grants.
+- Failure modes: on apply error, quarantine table/GTID and alert; do not silently skip.
+- Observability: metrics for CDC lag, events/sec, apply errors, MemCP write latency; GTID watermark in logs and `system.cdc_state`.
+
+## Near-Term TODOs (Adoption Focus)
+
+- MySQL compatibility v1
+  - Protocol: auth/handshake, prepared statements, multi-stmt, transactions, `affected_rows`, `last_insert_id()`.
+  - Dialect/semantics: backticks, implicit casts, NULL/boolean truthiness, string escapes, date/time basics.
+  - DDL essentials: CREATE/ALTER TABLE, PK/UK, indexes; accept FKs (warn/no-op).
+  - UPSERT: `INSERT ... ON DUPLICATE KEY UPDATE` baseline.
+  - Error codes/messages: approximate MySQL 8 for common cases.
+
+- CDC (MySQL→MemCP)
+  - Binlog client (ROW events, GTID, rotate, table map, DDL).
+  - Type/charset mapping; column bitmap handling.
+  - Transactional applier with idempotency; GTID checkpointing.
+  - Snapshot + catch-up orchestration; observability.
+
+- Tooling & Docs
+  - 10‑minute “Run alongside MySQL” guide and cutover checklist.
+  - Docker image with MySQL port enabled by default for non-test runs.
+  - Compatibility harness that diffs MemCP vs MySQL for a query corpus.
+
+## General Knowledge Highlights
+- MemCP is a functional, vectorized execution engine with Scheme-driven planning; avoid side effects and prefer fused pipelines.
+- SQL is parsed/planned in `lib/*.scm`; runtime/server glue is in `scm/`; storage and indexes live in `storage/`.
+- Tests are YAML specs executed over HTTP; mark exploratory/compat suites `noncritical: true` until stable.
+- Unnesting and braking strategies prioritize minimal materialization and early-stop for ORDER BY + LIMIT.

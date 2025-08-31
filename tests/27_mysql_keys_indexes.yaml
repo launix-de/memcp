@@ -1,0 +1,36 @@
+# MySQL Compatibility v1 — Keys and Indexes (acceptance)
+
+metadata:
+  version: "1.0"
+  description: "MySQL v1: PK/UK creation and basic behavior"
+  noncritical: true
+
+setup: []
+
+test_cases:
+  - name: "CREATE TABLE with PK and UNIQUE"
+    sql: "CREATE TABLE k (id INT PRIMARY KEY, email VARCHAR(100) UNIQUE)"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE INDEX accepted"
+    sql: "CREATE INDEX idx_email ON k (email)"
+    expect: {}
+
+  - name: "Insert row"
+    sql: "INSERT INTO k (id, email) VALUES (1, 'a@example.com')"
+    expect:
+      affected_rows: 1
+
+  - name: "Duplicate PK should error"
+    sql: "INSERT INTO k (id, email) VALUES (1, 'b@example.com')"
+    expect:
+      error: true
+
+  - name: "Duplicate UNIQUE should error"
+    sql: "INSERT INTO k (id, email) VALUES (2, 'a@example.com')"
+    expect:
+      error: true
+
+cleanup: []
+

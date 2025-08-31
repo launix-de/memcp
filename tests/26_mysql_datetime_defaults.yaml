@@ -1,0 +1,33 @@
+# MySQL Compatibility v1 — Date/Time semantics
+
+metadata:
+  version: "1.0"
+  description: "MySQL v1: CURRENT_TIMESTAMP defaults, NOW(), comparisons"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS tstamp"
+
+test_cases:
+  - name: "CREATE TABLE with default CURRENT_TIMESTAMP"
+    sql: "CREATE TABLE tstamp (id INT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT row without timestamp uses default"
+    sql: "INSERT INTO tstamp (id) VALUES (1)"
+    expect:
+      affected_rows: 1
+
+  - name: "NOW() returns a value"
+    sql: "SELECT NOW() AS nowv"
+    expect: {}
+
+  - name: "Default timestamp is not null"
+    sql: "SELECT created_at IS NOT NULL AS ok FROM tstamp WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - ok: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS tstamp"
