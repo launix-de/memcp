@@ -129,7 +129,7 @@ if there is a group function, create a temporary preaggregate table
 	   - TODO: Implement free_vars(expr) and should_materialize(meta) helpers; add (order_brake k) annotation passed down to scan_order.
 	*/
 
-	/* check if we have FROM selects -> returns '(tables renamelist) */
+	/* check if we have FROM selects -> returns '(tables renamelist conditionList, schemasList) */
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2 replace_find_column2) (begin
@@ -141,8 +141,9 @@ if there is a group function, create a temporary preaggregate table
 				(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
 				expr
 			)))
-			/* TODO: condition -> add to main condition list + rename with prefix */
-			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers */
+			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
+			(if group2 (error "group is not supported yet in subqueries"))
+			(if limit2 (error "limit is not supported yet in subqueries"))
 			'(tablesPrefixed '(id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) (replace_column_alias condition2) '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))))
 		) (error "non matching return value for untangle_query"))
 		(error (concat "unknown tabledesc: " tbldesc))
