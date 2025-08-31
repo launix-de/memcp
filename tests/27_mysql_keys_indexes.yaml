@@ -3,9 +3,9 @@
 metadata:
   version: "1.0"
   description: "MySQL v1: PK/UK creation and basic behavior"
-  noncritical: true
 
-setup: []
+setup:
+  - sql: "DROP TABLE IF EXISTS k"
 
 test_cases:
   - name: "CREATE TABLE with PK and UNIQUE"
@@ -32,5 +32,5 @@ test_cases:
     expect:
       error: true
 
-cleanup: []
-
+cleanup:
+  - sql: "DROP TABLE IF EXISTS k"
