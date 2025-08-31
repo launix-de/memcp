@@ -129,7 +129,7 @@ if there is a group function, create a temporary preaggregate table
 	   - TODO: Implement free_vars(expr) and should_materialize(meta) helpers; add (order_brake k) annotation passed down to scan_order.
 	*/
 
-	/* check if we have FROM selects -> returns '(tables renamelist conditionList, schemasList) */
+	/* check if we have FROM selects -> returns '(tables renamelist condition schemas) */
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2 replace_find_column2) (begin
@@ -215,7 +215,7 @@ if there is a group function, create a temporary preaggregate table
 		'(schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll group having order limit offset schemas replace_find_column)
 	)
 	/* else: empty tables list */
-	'(schema tables fields condition group having order limit offset '() (lambda (expr) expr))
+	'(schema tables fields (optimize condition) group having order limit offset '() (lambda (expr) expr))
 	)
 )))
 

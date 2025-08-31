@@ -388,6 +388,9 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 				}
 				// fold (and ...) special form using const flags
 				if sym, ok := v[0].(Symbol); ok && sym == Symbol("and") {
+					if len(v) == 2 {
+						return OptimizeEx(v[1], env, ome, useResult) // (and true)
+					}
 					allTrue := true
 					for i, a := range v[1:] {
 						// if any is a known constant false, result is false

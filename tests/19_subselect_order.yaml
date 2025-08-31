@@ -51,7 +51,25 @@ test_cases:
         - date: 10
           sensor: 1
 
-  - name: "Derived alias WHERE inside subselect"
+  - name: "Derived alias WHERE inside subselect (qualified table)"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT `date` AS `date`, `sensor` AS `sensor`
+        FROM `temperature`
+        WHERE temperature.`sensor` = 1
+      ) AS t
+      ORDER BY t.date DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - date: 20
+          sensor: 1
+        - date: 10
+          sensor: 1
+
+  - name: "Derived alias WHERE inside subselect (unqualified table)"
     sql: |
       SELECT t.*
       FROM (
