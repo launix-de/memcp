@@ -104,7 +104,17 @@ if there is a group function, create a temporary preaggregate table
 
 (import "sql-metadata.scm")
 
-/* recursively preprocess a query and return the flattened query */
+/* recursively preprocess a query and return the flattened query. The returned parameterset will be passed to build_queryplan
+   TODO(memcp): Subquery handling (FROM (SELECT ...) AS id)
+   - Flatten inner tables, prefix their aliases with "id:" to avoid collisions.
+   - Build renamelist[id] mapping exported column names to prefixed inner expressions.
+   - Populate schemas for:
+       * id (derived alias) with exported Field descriptors, so SELECT id.* and unqualified lookups work.
+       * each prefixed base table id:alias with (get_schema schema tbl), so ORDER/GROUP refs resolve after renaming.
+   - Preserve nil alias semantics in replace_column_alias: unqualified get_column must remain unqualified and be resolved against schemas at runtime.
+   - Drop inner ORDER unless limited; propagate inner WHERE into outer condition via AND.
+   - Note: Current implementation prefixes columns in expressions and returns a minimal schemas list; it’s enough for simple derived queries, but ORDER BY on derived alias with inner JOIN (test 19) still needs the full schema wiring above.
+*/
 (define untangle_query (lambda (schema tables fields condition group having order limit offset) (begin
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
 	/* TODO: when FROM: spill tables and conditions into main query but rename all tables and columns with a prepended rename_prefix
