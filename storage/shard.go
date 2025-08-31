@@ -47,15 +47,29 @@ type storageShard struct {
 	hashmaps1  map[[1]string]map[[1]scm.Scmer]uint // hashmaps for single columned unique keys
 	hashmaps2  map[[2]string]map[[2]scm.Scmer]uint // hashmaps for single columned unique keys
 	hashmaps3  map[[3]string]map[[3]scm.Scmer]uint // hashmaps for single columned unique keys
+
+	// lazy-loading/shared-resource state
+	srState SharedState
 }
 
 func (s *storageShard) ComputeSize() uint {
 	var result uint = 14*8 + 32*8 // heuristic for columns map
-	s.mu.RLock()
-	for _, c := range s.columns {
-		result += c.ComputeSize()
+	if s.srState != COLD {
+		s.mu.RLock()
+		for _, c := range s.columns {
+			if c != nil {
+				result += c.ComputeSize()
+			}
+		}
+		s.mu.RUnlock()
+		result += s.deletions.ComputeSize()
+		result += scm.ComputeSize(s.inserts)
+		for _, idx := range s.Indexes {
+			result += idx.ComputeSize()
+		}
+		// TODO: hashmaps for unique
+		return result
 	}
-	s.mu.RUnlock()
 	result += s.deletions.ComputeSize()
 	result += scm.ComputeSize(s.inserts)
 	for _, idx := range s.Indexes {
@@ -70,43 +84,27 @@ func (u *storageShard) MarshalJSON() ([]byte, error) {
 }
 func (u *storageShard) UnmarshalJSON(data []byte) error {
 	u.uuid.UnmarshalText(data)
+	// do not load heavy fields here; delay until first access
 	u.columns = make(map[string]ColumnStorage)
 	u.deltaColumns = make(map[string]int)
 	u.hashmaps1 = make(map[[1]string]map[[1]scm.Scmer]uint)
 	u.hashmaps2 = make(map[[2]string]map[[2]scm.Scmer]uint)
 	u.hashmaps3 = make(map[[3]string]map[[3]scm.Scmer]uint)
 	u.deletions.Reset()
+	u.srState = COLD
 	// the rest of the unmarshalling is done in the caller because u.t is nil in the moment
 	return nil
 }
 func (u *storageShard) load(t *table) {
 	u.t = t
-	// load the columns
+	// mark columns for lazy loading
 	for _, col := range u.t.Columns {
-		if t.PersistencyMode == Memory {
-			// recreate the shards empty (because in memory-mode we forget all data)
-			u.columns[col.Name] = new(StorageSparse)
-		} else {
-			// read column from file
-			f := u.t.schema.persistence.ReadColumn(u.uuid.String(), col.Name)
-			var magicbyte uint8 // type of that column
-			err := binary.Read(f, binary.LittleEndian, &magicbyte)
-			if err != nil {
-				// empty storage
-				u.columns[col.Name] = new(StorageSparse)
-				continue
-			}
-
-			fmt.Println("loading storage "+u.t.schema.Name+" shard "+u.uuid.String()+" column "+col.Name+" of type", magicbyte)
-
-			columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
-			u.main_count = columnstorage.Deserialize(f) // read; ownership of f goes to Deserialize, so they will free the handle
-			u.columns[col.Name] = columnstorage
-			f.Close()
-		}
+		u.columns[col.Name] = nil
 	}
 
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
+		// Replaying the log mutates inserts/deletions; use shard write lock
+		u.mu.Lock()
 		var log chan interface{}
 		log, u.logfile = u.t.schema.persistence.ReplayLog(u.uuid.String())
 		numEntriesRestored := 0
@@ -116,7 +114,7 @@ func (u *storageShard) load(t *table) {
 			case LogEntryDelete:
 				u.deletions.Set(l.idx, true) // mark deletion
 			case LogEntryInsert:
-				u.insertDataset(l.cols, l.values, nil)
+				u.insertDatasetFromLog(l.cols, l.values)
 			default:
 				panic("unknown log sequence: " + fmt.Sprint(l))
 			}
@@ -124,6 +122,115 @@ func (u *storageShard) load(t *table) {
 		if numEntriesRestored > 0 {
 			fmt.Println("restoring delta storage from database "+u.t.schema.Name+" shard "+u.uuid.String()+":", numEntriesRestored, "entries")
 		}
+		u.mu.Unlock()
+	}
+}
+
+// ensureColumnLoaded loads a single column storage when first accessed.
+func (u *storageShard) ensureColumnLoaded(colName string) ColumnStorage {
+	// read path under RLock
+	u.mu.RLock()
+	cs, present := u.columns[colName]
+	u.mu.RUnlock()
+	if !present {
+		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+	}
+	if cs != nil {
+		return cs
+	}
+	// serialize competing loads and map writes via shard lock (without lock upgrade)
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if cs = u.columns[colName]; cs != nil { // re-check after acquiring lock
+		return cs
+	}
+	if u.t.PersistencyMode == Memory {
+		u.columns[colName] = new(StorageSparse)
+		return u.columns[colName]
+	}
+	f := u.t.schema.persistence.ReadColumn(u.uuid.String(), colName)
+	var magicbyte uint8
+	if err := binary.Read(f, binary.LittleEndian, &magicbyte); err != nil {
+		u.columns[colName] = new(StorageSparse)
+		return u.columns[colName]
+	}
+	fmt.Println("loading storage "+u.t.schema.Name+" shard "+u.uuid.String()+" column "+colName+" of type", magicbyte)
+	columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
+	cnt := columnstorage.Deserialize(f)
+	f.Close()
+	if cnt > u.main_count {
+		u.main_count = cnt
+	}
+	u.columns[colName] = columnstorage
+	return columnstorage
+}
+
+// getColumnStorageOrPanic returns a stable pointer to a column's storage.
+// It never reads u.columns without holding the shard lock and loads on demand.
+func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
+	// try under read lock
+	u.mu.RLock()
+	cs, present := u.columns[colName]
+	u.mu.RUnlock()
+	if !present {
+		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+	}
+	if cs != nil {
+		return cs
+	}
+	return u.ensureColumnLoaded(colName)
+}
+
+// ensureMainCount guarantees main_count is initialized by loading one column if needed.
+func (u *storageShard) ensureMainCount() {
+	if u.main_count != 0 {
+		return
+	}
+	if u.t == nil {
+		return
+	}
+	// Load the first column (if not yet loaded); Deserialize will set main_count.
+	for _, c := range u.t.Columns {
+		u.mu.RLock()
+		cs, ok := u.columns[c.Name]
+		u.mu.RUnlock()
+		if ok && cs == nil {
+			u.ensureColumnLoaded(c.Name)
+			if u.main_count != 0 {
+				return
+			}
+		}
+	}
+}
+
+// SharedResource impl for shard with lazy load
+func (s *storageShard) GetState() SharedState { return s.srState }
+func (s *storageShard) GetRead() func() {
+	s.ensureLoaded()
+	// Ensure main_count is initialized by loading at least one column
+	s.ensureMainCount()
+	if s.srState == COLD {
+		s.srState = SHARED
+	}
+	return func() {}
+}
+func (s *storageShard) GetExclusive() func() {
+	s.ensureLoaded()
+	s.srState = WRITE
+	return func() {}
+}
+
+func (s *storageShard) ensureLoaded() {
+	if s.srState != COLD {
+		return
+	}
+	// materialize shard from disk
+	s.load(s.t)
+	// memory engine shards stay WRITE to bypass LRU later
+	if s.t != nil && s.t.PersistencyMode == Memory {
+		s.srState = WRITE
+	} else {
+		s.srState = SHARED
 	}
 }
 
@@ -143,6 +250,8 @@ func NewShard(t *table) *storageShard {
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 	}
+	// Newly created shards are live/writable, not cold
+	result.srState = WRITE
 	return result
 }
 
@@ -258,10 +367,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 }
 
 func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
-	cstorage, ok := t.columns[col]
-	if !ok {
-		panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + col + "`")
-	}
+	cstorage := t.getColumnStorageOrPanic(col)
 	return func(idx uint) scm.Scmer {
 		if idx < t.main_count {
 			return cstorage.GetValue(idx)
@@ -385,9 +491,61 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	}
 }
 
+// insertDatasetFromLog appends delta rows from a persisted log without applying
+// defaults or auto-increment logic. Must only be called while holding t.mu.
+func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scmer) {
+	// map provided column names to delta positions, extending deltaColumns if needed
+	colidx := make([]int, len(columns))
+	for i, col := range columns {
+		if idx, ok := t.deltaColumns[col]; ok {
+			colidx[i] = idx
+		} else {
+			idx := len(t.deltaColumns)
+			t.deltaColumns[col] = idx
+			colidx[i] = idx
+		}
+	}
+	for _, row := range values {
+		newrow := make([]scm.Scmer, len(t.deltaColumns))
+		recid := uint(len(t.inserts)) + t.main_count
+		for j, pos := range colidx {
+			if j < len(row) {
+				newrow[pos] = row[j]
+			}
+		}
+		t.inserts = append(t.inserts, newrow)
+
+		// notify temporary unique hashmaps
+		for k, v := range t.hashmaps1 {
+			v[[1]scm.Scmer{newrow[t.deltaColumns[k[0]]]}] = recid
+		}
+		for k, v := range t.hashmaps2 {
+			v[[2]scm.Scmer{newrow[t.deltaColumns[k[0]]], newrow[t.deltaColumns[k[1]]]}] = recid
+		}
+		for k, v := range t.hashmaps3 {
+			v[[3]scm.Scmer{newrow[t.deltaColumns[k[0]]], newrow[t.deltaColumns[k[1]]], newrow[t.deltaColumns[k[2]]]}] = recid
+		}
+
+		// update delta indexes
+		for _, index := range t.Indexes {
+			if index.deltaBtree != nil {
+				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+			}
+		}
+	}
+}
+
 func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer) (result uint, present bool) {
-	t.mu.RLock()
 	/* TODO: this all does not work since a StorageInt stores int64 while the user might have provided string or float64 with the same content; also hashmaps eat up too much space */
+	// Preload main storages and establish main_count without holding any shard lock
+	t.ensureMainCount()
+	mcols := make([]ColumnStorage, len(columns))
+	for i, col := range columns {
+		mcols[i] = t.getColumnStorageOrPanic(col)
+	}
+
+	// From here on, read under shard read lock for a consistent snapshot of deletions/inserts/deltaColumns
+	t.mu.RLock()
 	/*
 		if len(columns) == 1 {
 			columns_ := (*[1]string)(columns)
@@ -496,12 +654,17 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 		} else
 	*/
 
-	// TODO: optimization potential -> canonical form is string or NULL
-	mcols := make([]ColumnStorage, len(columns))
+	// Build delta column index mapping under lock to match current inserts layout
 	dcols := make([]int, len(columns))
+	dcolPresent := make([]bool, len(columns))
 	for i, col := range columns {
-		mcols[i] = t.columns[col]
-		dcols[i] = t.deltaColumns[col]
+		if idx, ok := t.deltaColumns[col]; ok {
+			dcols[i] = idx
+			dcolPresent[i] = true
+		} else {
+			dcols[i] = -1
+			dcolPresent[i] = false
+		}
 	}
 	for i := uint(0); i < t.main_count; i++ {
 		for j, v := range values {
@@ -516,9 +679,23 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	skipnextmain:
 	}
 	for i := uint(0); i < uint(len(t.inserts)); i++ {
+		item := t.inserts[i]
 		for j, v := range values {
-			if !scm.Equal(t.inserts[i][dcols[j]], v) {
-				goto skipnextdelta
+			if dcolPresent[j] {
+				idx := dcols[j]
+				var got scm.Scmer
+				if idx >= 0 && idx < len(item) {
+					got = item[idx]
+				} else {
+					got = nil
+				}
+				if !scm.Equal(got, v) {
+					goto skipnextdelta
+				}
+			} else {
+				if !scm.Equal(nil, v) {
+					goto skipnextdelta
+				}
 			}
 		}
 		result = i + t.main_count

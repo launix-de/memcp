@@ -20,6 +20,7 @@ import "os"
 import "fmt"
 import "sync"
 import "time"
+import "runtime"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
@@ -27,8 +28,34 @@ import "github.com/launix-de/NonLockingReadMap"
 type database struct {
 	Name        string                                             `json:"name"`
 	persistence PersistenceEngine                                  `json:"-"`
-	Tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+	tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"-"`
 	schemalock  sync.RWMutex                                       `json:"-"` // TODO: rw-locks for schemalock
+
+	// lazy-loading/shared-resource state (not serialized)
+	srState SharedState `json:"-"`
+}
+
+// Custom JSON to persist private tables field
+func (d *database) MarshalJSON() ([]byte, error) {
+	type persist struct {
+		Name   string                                             `json:"name"`
+		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+	}
+	return json.Marshal(persist{Name: d.Name, Tables: d.tables})
+}
+
+func (d *database) UnmarshalJSON(data []byte) error {
+	type persist struct {
+		Name   string                                             `json:"name"`
+		Tables NonLockingReadMap.NonLockingReadMap[table, string] `json:"tables"`
+	}
+	var p persist
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	d.Name = p.Name
+	d.tables = p.Tables
+	return nil
 }
 
 // TODO: replace databases map everytime something changes, so we don't run into read-while-write
@@ -43,7 +70,7 @@ func (d database) GetKey() string {
 
 func (d database) ComputeSize() uint {
 	var sz uint = 16 * 8 // heuristic
-	for _, t := range d.Tables.GetAll() {
+	for _, t := range d.tables.GetAll() {
 		sz += t.ComputeSize()
 	}
 	return sz
@@ -81,49 +108,87 @@ func LoadDatabases() {
 	}
 	InitSettings()
 
-	// load dbs
-	var done sync.WaitGroup
+	// enumerate dbs; do not load schemas/shards yet (lazy-load on demand)
 	entries, _ := os.ReadDir(Basepath)
 	for _, entry := range entries {
 		if entry.IsDir() {
-			// load database from hdd
 			db := new(database)
+			db.Name = entry.Name()
 			db.persistence = &FileStorage{Basepath + "/" + entry.Name() + "/"}
-			jsonbytes := db.persistence.ReadSchema()
-			if len(jsonbytes) == 0 {
-				fmt.Println("Warning: database " + entry.Name() + " is empty")
-			} else {
-				json.Unmarshal(jsonbytes, db) // json import
-				// restore back references of the tables
-				for _, t := range db.Tables.GetAll() {
-					t.schema = db // restore schema reference
-					for _, col := range t.Columns {
-						col.UpdateSanitizer()
-					}
-					func(t *table) {
-						t.iterateShards(nil, func(s *storageShard) {
-							s.load(t)
-						})
-					}(t)
-				}
-				databases.Set(db)
-			}
+			db.srState = COLD
+			databases.Set(db)
 		} else {
 			// TODO: read .json files for S3 tables
 		}
 	}
-	// wait for all loading go routines to finish
-	done.Wait()
 }
 
 func (db *database) save() {
+	if db.srState == COLD {
+		// Do not serialize a cold database; keep existing schema.json intact
+		return
+	}
 	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
 	db.persistence.WriteSchema(jsonbytes)
 	// shards are written while rebuild
 }
 
+// ensureLoaded loads schema.json into the database struct exactly once.
+func (db *database) ensureLoaded() {
+	if db.srState != COLD {
+		return
+	}
+	jsonbytes := db.persistence.ReadSchema()
+	if len(jsonbytes) == 0 {
+		// fresh/empty database
+		db.tables = NonLockingReadMap.New[table, string]()
+		db.srState = SHARED
+		return
+	}
+	tmp := new(database)
+	if err := json.Unmarshal(jsonbytes, tmp); err != nil {
+		panic(err)
+	}
+	db.tables = tmp.tables
+	// restore back-references; do not touch on-disk columns yet
+	for _, t := range db.tables.GetAll() {
+		t.schema = db
+		for _, col := range t.Columns {
+			col.UpdateSanitizer()
+		}
+		// attach table pointer to existing shard stubs without loading them
+		if t.Shards != nil {
+			for _, s := range t.Shards {
+				if s != nil {
+					s.t = t
+				}
+			}
+		}
+		if t.PShards != nil {
+			for _, s := range t.PShards {
+				if s != nil {
+					s.t = t
+				}
+			}
+		}
+	}
+	db.srState = SHARED
+}
+
+// SharedResource impl for database
+func (db *database) GetState() SharedState { return db.srState }
+func (db *database) GetRead() func()       { db.ensureLoaded(); return func() {} }
+func (db *database) GetExclusive() func()  { db.ensureLoaded(); db.srState = WRITE; return func() {} }
+
+// helper to fetch a table with lazy db load
+func (db *database) GetTable(name string) *table {
+	db.ensureLoaded()
+	return db.tables.Get(name)
+}
+
 func (db *database) ShowTables() scm.Scmer {
-	tables := db.Tables.GetAll()
+	db.ensureLoaded()
+	tables := db.tables.GetAll()
 	result := make([]scm.Scmer, len(tables))
 	i := 0
 	for _, t := range tables {
@@ -134,8 +199,12 @@ func (db *database) ShowTables() scm.Scmer {
 }
 
 func (db *database) rebuild(all bool, repartition bool) {
+	if db.srState == COLD {
+		// do nothing for cold databases; avoid loading during rebuild
+		return
+	}
 	var done sync.WaitGroup
-	dbs := db.Tables.GetAll()
+	dbs := db.tables.GetAll()
 	done.Add(len(dbs))
 	for _, t := range dbs {
 		go func(t *table) {
@@ -150,12 +219,39 @@ func (db *database) rebuild(all bool, repartition bool) {
 			maincount := uint(0)
 			var sdone sync.WaitGroup
 			sdone.Add(len(shardlist))
-			for i, s := range shardlist {
-				maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count()) // estimate size of that table
-				go func(shardlist []*storageShard, i int, s *storageShard) {
-					shardlist[i] = s.rebuild(all)
-					sdone.Done()
-				}(shardlist, i, s)
+			// throttle concurrent shard rebuilds by CPU count
+			workers := runtime.NumCPU()
+			if workers < 1 {
+				workers = 1
+			}
+			type job struct {
+				i int
+				s *storageShard
+			}
+			if len(shardlist) <= workers {
+				for i, s := range shardlist {
+					maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
+					go func(i int, s *storageShard) {
+						shardlist[i] = s.rebuild(all)
+						sdone.Done()
+					}(i, s)
+				}
+			} else {
+				jobs := make(chan job, workers)
+				// launch workers
+				for w := 0; w < workers; w++ {
+					go func() {
+						for j := range jobs {
+							shardlist[j.i] = j.s.rebuild(all)
+							sdone.Done()
+						}
+					}()
+				}
+				for i, s := range shardlist {
+					maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
+					jobs <- job{i: i, s: s}
+				}
+				close(jobs)
 			}
 			sdone.Wait()
 
@@ -191,7 +287,9 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 	db.Name = schema
 	persistence := FileFactory{Basepath} // TODO: remove this, use parameter instead
 	db.persistence = persistence.CreateDatabase(schema)
-	db.Tables = NonLockingReadMap.New[table, string]()
+	db.tables = NonLockingReadMap.New[table, string]()
+	// Newly created database is live for writes
+	db.srState = WRITE
 
 	last := databases.Set(db)
 	if last != nil {
@@ -223,9 +321,10 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	db.ensureLoaded()
 	db.schemalock.Lock()
 	defer db.schemalock.Unlock()
-	t := db.Tables.Get(name)
+	t := db.tables.Get(name)
 	if t != nil {
 		if ifnotexists {
 			return t, false // return the table found
@@ -239,7 +338,7 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	t.Auto_increment = 1
-	t2 := db.Tables.Set(t)
+	t2 := db.tables.Set(t)
 	if t2 != nil {
 		// concurrent create
 		panic("Table " + name + " already exists")
@@ -254,8 +353,9 @@ func DropTable(schema, name string, ifexists bool) {
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
+	db.ensureLoaded()
 	db.schemalock.Lock()
-	t := db.Tables.Get(name)
+	t := db.tables.Get(name)
 	if t == nil {
 		db.schemalock.Unlock()
 		if ifexists {
@@ -263,7 +363,7 @@ func DropTable(schema, name string, ifexists bool) {
 		}
 		panic("Table " + schema + "." + name + " does not exist")
 	}
-	db.Tables.Remove(name)
+	db.tables.Remove(name)
 	db.save()
 	db.schemalock.Unlock()
 

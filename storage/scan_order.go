@@ -259,13 +259,11 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// main storage
 	ccols := make([]ColumnStorage, len(conditionCols))
 	for i, k := range conditionCols { // iterate over columns
-		var ok bool
-		ccols[i], ok = t.columns[k] // find storage
-		if !ok {
-			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
-		}
+		ccols[i] = t.getColumnStorageOrPanic(k)
 	}
 
+	// initialize main_count lazily if needed
+	t.ensureMainCount()
 	// scan loop in read lock
 	var maxInsertIndex int
 	func() {

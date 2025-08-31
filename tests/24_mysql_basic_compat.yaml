@@ -5,7 +5,8 @@ metadata:
   description: "MySQL v1: identifiers, casts, NULL/booleans, escapes"
   # Suite is now expected to pass fully
 
-setup: []
+setup:
+  - sql: DROP TABLE IF EXISTS `users`
 
 test_cases:
   - name: "CREATE TABLE with backticked identifiers"

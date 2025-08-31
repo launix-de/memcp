@@ -405,6 +405,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 
 	if t.Shards != nil { // unpartitioned sharding
 		shard := t.Shards[len(t.Shards)-1]
+		// ensure the active shard is loaded and writable for upcoming insert
+		release := shard.GetExclusive()
+		defer release()
 		// load balance: if bucket is full, create new one; if bucket is busy (trylock), try another one
 		if shard.Count() >= Settings.ShardSize {
 			t.mu.Lock()
@@ -458,6 +461,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		}
 
 		checkUniqueForShard := func(s *storageShard, values [][]scm.Scmer) {
+			// ensure shard is loaded and writable for inserts
+			rel := s.GetExclusive()
+			defer rel()
 			// check unique constraints in a thread safe manner
 			if len(t.Unique) > 0 {
 				// this function will do the locking for us
@@ -578,6 +584,8 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				}
 			}
 			for _, s := range shardlist2 {
+				// ensure shard is loaded for read during unique check
+				r := s.GetRead()
 				uid, present := s.GetRecordidForUnique(uniq.Cols, key)
 				if present && !s.deletions.Get(uid) {
 					// found a unique collision
@@ -602,8 +610,10 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					}
 					failure(uniq.Id, params) // notify about failure
 					lock.Lock()
+					r()
 					goto nextrow
 				}
+				r()
 			}
 		nextrow:
 			if allowPruning {

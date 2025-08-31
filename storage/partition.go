@@ -62,22 +62,58 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 	shards := t.Shards
 	var done sync.WaitGroup
 	if shards != nil {
-		done.Add(len(shards))
-		for _, s := range shards {
-			// iterateShardIndex will go
-			gls.Go(func(s *storageShard) func() {
-				return func() {
-					if s == nil {
-						fmt.Println("Warning: a shard is missing")
-						return
+		// throttle by CPU cores to avoid massive goroutine fan-out
+		workers := runtime.NumCPU()
+		if workers < 1 {
+			workers = 1
+		}
+		if len(shards) <= workers {
+			done.Add(len(shards))
+			for _, s := range shards {
+				gls.Go(func(s *storageShard) func() {
+					return func() {
+						if s == nil {
+							fmt.Println("Warning: a shard is missing")
+							return
+						}
+						release := s.GetRead()
+						callback(s)
+						release()
+						done.Done()
 					}
-					callback(s)
-					done.Done()
-				}
-			}(s))
+				}(s))
+			}
+		} else {
+			jobs := make(chan *storageShard, workers)
+			done.Add(len(shards))
+			for i := 0; i < workers; i++ {
+				gls.Go(func() func() {
+					return func() {
+						for s := range jobs {
+							if s == nil {
+								fmt.Println("Warning: a shard is missing")
+								done.Done()
+								continue
+							}
+							release := s.GetRead()
+							callback(s)
+							release()
+							done.Done()
+						}
+					}
+				}())
+			}
+			for _, s := range shards {
+				jobs <- s
+			}
+			close(jobs)
 		}
 	} else {
-		iterateShardIndex(t.PDimensions, boundaries, t.PShards, callback, &done, false)
+		iterateShardIndex(t.PDimensions, boundaries, t.PShards, func(s *storageShard) {
+			release := s.GetRead()
+			callback(s)
+			release()
+		}, &done, false)
 	}
 	done.Wait()
 }
@@ -87,21 +123,56 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 	if len(schema) == 0 {
 		if len(shards) == 1 && !parallel {
 			// execute without go
+			release := shards[0].GetRead()
 			callback(shards[0])
+			release()
 		} else {
-			done.Add(len(shards))
-			for _, s := range shards {
-				// iterateShardIndex will go
-				gls.Go(func(s *storageShard) func() {
-					return func() {
-						if s == nil {
-							fmt.Println("Warning: a shard is missing")
-							return
+			// throttle high fan-out to avoid spawning excessive goroutines
+			workers := runtime.NumCPU()
+			if workers < 1 {
+				workers = 1
+			}
+			if len(shards) <= workers {
+				done.Add(len(shards))
+				for _, s := range shards {
+					gls.Go(func(s *storageShard) func() {
+						return func() {
+							if s == nil {
+								fmt.Println("Warning: a shard is missing")
+								return
+							}
+							release := s.GetRead()
+							callback(s)
+							release()
+							done.Done()
 						}
-						callback(s)
-						done.Done()
-					}
-				}(s))
+					}(s))
+				}
+			} else {
+				// worker pool
+				jobs := make(chan *storageShard, workers)
+				done.Add(len(shards))
+				for i := 0; i < workers; i++ {
+					gls.Go(func() func() {
+						return func() {
+							for s := range jobs {
+								if s == nil {
+									fmt.Println("Warning: a shard is missing")
+									done.Done()
+									continue
+								}
+								release := s.GetRead()
+								callback(s)
+								release()
+								done.Done()
+							}
+						}
+					}())
+				}
+				for _, s := range shards {
+					jobs <- s
+				}
+				close(jobs)
 			}
 		}
 		return

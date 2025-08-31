@@ -144,7 +144,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -305,7 +305,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -424,7 +424,7 @@ func Init(en scm.Env) {
 							cols2[i] = scm.String(v)
 						}
 						t2name := scm.String(def[3])
-						t2 := t.schema.Tables.Get(t2name)
+						t2 := t.schema.GetTable(t2name)
 						var updatemode foreignKeyMode
 						if len(def) > 5 {
 							updatemode = getForeignKeyMode(def[5])
@@ -452,7 +452,7 @@ func Init(en scm.Env) {
 					}
 				}
 				// add constraints that are added onto us
-				for _, t2 := range t.schema.Tables.GetAll() {
+				for _, t2 := range t.schema.tables.GetAll() {
 					if t2 != t {
 						for _, foreign := range t2.Foreign {
 							if foreign.Tbl2 == t.Name {
@@ -485,7 +485,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -530,7 +530,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -582,11 +582,11 @@ func Init(en scm.Env) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
 			id := scm.String(a[1])
-			t1 := db.Tables.Get(scm.String(a[2]))
+			t1 := db.GetTable(scm.String(a[2]))
 			if t1 == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[2]) + " does not exist")
 			}
-			t2 := db.Tables.Get(scm.String(a[4]))
+			t2 := db.GetTable(scm.String(a[4]))
 			if t2 == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[4]) + " does not exist")
 			}
@@ -635,7 +635,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -675,7 +675,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -720,7 +720,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -751,7 +751,7 @@ func Init(en scm.Env) {
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -852,7 +852,7 @@ func Init(en scm.Env) {
 				rows[i] = row.([]scm.Scmer)
 			}
 			// perform insert
-			t := db.Tables.Get(scm.String(a[1]))
+			t := db.GetTable(scm.String(a[1]))
 			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
 			return int64(inserted)
 		}, false,
@@ -870,7 +870,7 @@ func Init(en scm.Env) {
 			} else if len(a) == 1 {
 				return GetDatabase(scm.String(a[0])).PrintMemUsage()
 			} else if len(a) == 2 {
-				return GetDatabase(scm.String(a[0])).Tables.Get(scm.String(a[1])).PrintMemUsage()
+				return GetDatabase(scm.String(a[0])).GetTable(scm.String(a[1])).PrintMemUsage()
 			} else {
 				return nil
 			}
@@ -905,7 +905,7 @@ func Init(en scm.Env) {
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-				return db.Tables.Get(scm.String(a[1])).ShowColumns()
+				return db.GetTable(scm.String(a[1])).ShowColumns()
 			} else {
 				panic("invalid call of show")
 			}
@@ -994,18 +994,35 @@ func PrintMemUsage() string {
 	b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", units.BytesSize(float64(m.Alloc)), units.BytesSize(float64(m.TotalAlloc)), units.BytesSize(float64(m.Sys)), m.NumGC))
 
 	for _, db := range databases.GetAll() {
-		b.WriteString("\n\n" + db.Name + "\n======\n")
+		b.WriteString("\n\n" + db.Name + " [" + sharedStateStr(db.srState) + "]\n======\n")
 		b.WriteString(db.PrintMemUsage())
 	}
 	return b.String()
 }
 
+func sharedStateStr(s SharedState) string {
+	switch s {
+	case COLD:
+		return "COLD"
+	case SHARED:
+		return "SHARED"
+	case WRITE:
+		return "WRITE"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 func (db *database) PrintMemUsage() string {
 	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
+	if db.srState == COLD {
+		b.WriteString("State: COLD (no schema loaded)\n")
+		return b.String()
+	}
 	b.WriteString("Table                    \tColumns\tShards\tDims\tSize/Bytes\n")
 	var dsize uint
-	for _, t := range db.Tables.GetAll() {
+	for _, t := range db.tables.GetAll() {
 		var size uint = 10*8 + 32*uint(len(t.Columns))
 		for _, s := range t.Shards {
 			size += s.ComputeSize()
@@ -1030,9 +1047,18 @@ func (t *table) PrintMemUsage() string {
 	}
 	for i, s := range shards {
 		var ssz uint = 14 * 8 // overhead
-		b.WriteString(fmt.Sprintf("Shard %d\n---\n", i))
+		if s.srState == COLD {
+			b.WriteString(fmt.Sprintf("Shard %d [COLD] (no content loaded)\n---\n\n", i))
+			dsize += ssz
+			continue
+		}
+		b.WriteString(fmt.Sprintf("Shard %d [%s]\n---\n", i, sharedStateStr(s.srState)))
 		b.WriteString(fmt.Sprintf("main count: %d, delta count: %d, deletions: %d\n", s.main_count, len(s.inserts), s.deletions.Count()))
 		for c, v := range s.columns {
+			if v == nil {
+				b.WriteString(fmt.Sprintf(" %s: COLD\n", c))
+				continue
+			}
 			sz := v.ComputeSize()
 			b.WriteString(fmt.Sprintf(" %s: %s, size = %s\n", c, v.String(), units.BytesSize(float64(sz))))
 			ssz += sz

@@ -38,7 +38,7 @@ func LoadCSV(schema, table string, f io.Reader, delimiter string, firstLine bool
 	if db == nil {
 		panic("database " + schema + " does not exist")
 	}
-	t := db.Tables.Get(table)
+	t := db.GetTable(table)
 	if t == nil {
 		panic("table " + table + " does not exist")
 	}
