@@ -168,7 +168,8 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(parser '((atom "CASE" true) (define conditions (* (parser '((atom "WHEN" true) (define a psql_expression) (atom "THEN" true) (define b psql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch psql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
-		(parser '((atom "COUNT" true) "(" psql_expression ")") '((quote aggregate) 1 (quote +) 0))
+		/* COUNT(expr): count non-NULL values -> map to (if (nil? expr) 0 1), reduce +, neutral 0 */
+		(parser '((atom "COUNT" true) "(" (define e psql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
 		(parser '((atom "SUM" true) "(" (define s psql_expression) ")") '('aggregate s (quote +) 0))
 		(parser '((atom "AVG" true) "(" (define s psql_expression) ")") '((quote /) '('aggregate s (quote +) 0) '('aggregate 1 (quote +) 0)))
 		(parser '((atom "MIN" true) "(" (define s psql_expression) ")") '('aggregate s 'min nil))
