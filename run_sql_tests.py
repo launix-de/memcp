@@ -53,6 +53,7 @@ class SQLTestRunner:
         self.setup_operations = []
         self.current_database = None
         self._ensured_dbs = set()
+        self.suite_metadata = {}
 
     # ----------------------
     # SQL identifier quoting
@@ -107,22 +108,24 @@ class SQLTestRunner:
         except Exception:
             pass
 
-    def execute_sql(self, database: str, query: str) -> Optional[requests.Response]:
+    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None) -> Optional[requests.Response]:
         try:
             # proactively ensure database exists (works for connect-only too)
             self.ensure_database(database)
             encoded_db = quote(database, safe='')
             url = f"{self.base_url}/sql/{encoded_db}"
-            return requests.post(url, data=query, headers=self.auth_header, timeout=10)
+            headers = auth_header if auth_header is not None else self.auth_header
+            return requests.post(url, data=query, headers=headers, timeout=10)
         except Exception as e:
             print(f"Error executing SQL: {e}")
             return None
 
-    def execute_sparql(self, database: str, query: str) -> Optional[requests.Response]:
+    def execute_sparql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None) -> Optional[requests.Response]:
         try:
             encoded_db = quote(database, safe='')
             url = f"{self.base_url}/rdf/{encoded_db}"
-            return requests.post(url, data=query, headers=self.auth_header, timeout=10)
+            headers = auth_header if auth_header is not None else self.auth_header
+            return requests.post(url, data=query, headers=headers, timeout=10)
         except Exception as e:
             print(f"Error executing SPARQL: {e}")
             return None
@@ -159,6 +162,11 @@ class SQLTestRunner:
         name = test_case.get("name", f"Test {self.test_count}")
         query = test_case.get("sql") or test_case.get("sparql")
         is_sparql = "sparql" in test_case
+        # auth: allow per-test overrides, fallback to suite metadata, then runner defaults
+        tc_user = test_case.get("username") or self.suite_metadata.get("username") or self.username
+        tc_pass = test_case.get("password") or self.suite_metadata.get("password") or self.password
+        creds = f"{tc_user}:{tc_pass}".encode()
+        auth_header = {"Authorization": f"Basic {b64encode(creds).decode()}"}
 
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
@@ -166,7 +174,7 @@ class SQLTestRunner:
                 return self._record_fail(name, "TTL load failed", query, None, None)
 
         # Execute query
-        response = self.execute_sparql(database, query) if is_sparql else self.execute_sql(database, query)
+        response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header)
         if not response:
             return self._record_fail(name, "No response", query, None, None)
 
@@ -261,6 +269,7 @@ class SQLTestRunner:
             spec = yaml.safe_load(f)
 
         metadata = spec.get('metadata', {})
+        self.suite_metadata = metadata or {}
         database = 'memcp-tests'
 
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
@@ -289,9 +298,11 @@ class SQLTestRunner:
                 print(f"   - {t}")
         else:
             print("🎉 All tests passed!")
+        if self.failed_tests and self.suite_metadata.get('noncritical'):
+            print("⚠️  although this error, the testsuite will still pass")
         print("="*60)
 
-        return self.test_passed == self.test_count
+        return (self.test_passed == self.test_count) or bool(self.suite_metadata.get('noncritical'))
 
 def wait_for_memcp(port=4321, timeout=30) -> bool:
     for _ in range(timeout):

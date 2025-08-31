@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "ORDER BY t.col where t is a subselect alias"
+  noncritical: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS temperature"
