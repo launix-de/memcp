@@ -103,6 +103,8 @@ func (u *storageShard) load(t *table) {
 	}
 
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
+		// Replaying the log mutates inserts/deletions; use shard write lock
+		u.mu.Lock()
 		var log chan interface{}
 		log, u.logfile = u.t.schema.persistence.ReplayLog(u.uuid.String())
 		numEntriesRestored := 0
@@ -112,7 +114,7 @@ func (u *storageShard) load(t *table) {
 			case LogEntryDelete:
 				u.deletions.Set(l.idx, true) // mark deletion
 			case LogEntryInsert:
-				u.insertDataset(l.cols, l.values, nil)
+				u.insertDatasetFromLog(l.cols, l.values)
 			default:
 				panic("unknown log sequence: " + fmt.Sprint(l))
 			}
@@ -120,13 +122,20 @@ func (u *storageShard) load(t *table) {
 		if numEntriesRestored > 0 {
 			fmt.Println("restoring delta storage from database "+u.t.schema.Name+" shard "+u.uuid.String()+":", numEntriesRestored, "entries")
 		}
+		u.mu.Unlock()
 	}
 }
 
 // ensureColumnLoaded loads a single column storage when first accessed.
 func (u *storageShard) ensureColumnLoaded(colName string) ColumnStorage {
-	if u.columns[colName] != nil {
-		return u.columns[colName]
+	if cs := u.columns[colName]; cs != nil {
+		return cs
+	}
+	// serialize competing loads and map writes via shard lock
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if cs := u.columns[colName]; cs != nil { // re-check after acquiring lock
+		return cs
 	}
 	if u.t.PersistencyMode == Memory {
 		u.columns[colName] = new(StorageSparse)
@@ -453,6 +462,50 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		// also notify indices
 		for _, index := range t.Indexes {
 			// add to delta indexes
+			if index.deltaBtree != nil {
+				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+			}
+		}
+	}
+}
+
+// insertDatasetFromLog appends delta rows from a persisted log without applying
+// defaults or auto-increment logic. Must only be called while holding t.mu.
+func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scmer) {
+	// map provided column names to delta positions, extending deltaColumns if needed
+	colidx := make([]int, len(columns))
+	for i, col := range columns {
+		if idx, ok := t.deltaColumns[col]; ok {
+			colidx[i] = idx
+		} else {
+			idx := len(t.deltaColumns)
+			t.deltaColumns[col] = idx
+			colidx[i] = idx
+		}
+	}
+	for _, row := range values {
+		newrow := make([]scm.Scmer, len(t.deltaColumns))
+		recid := uint(len(t.inserts)) + t.main_count
+		for j, pos := range colidx {
+			if j < len(row) {
+				newrow[pos] = row[j]
+			}
+		}
+		t.inserts = append(t.inserts, newrow)
+
+		// notify temporary unique hashmaps
+		for k, v := range t.hashmaps1 {
+			v[[1]scm.Scmer{newrow[t.deltaColumns[k[0]]]}] = recid
+		}
+		for k, v := range t.hashmaps2 {
+			v[[2]scm.Scmer{newrow[t.deltaColumns[k[0]]], newrow[t.deltaColumns[k[1]]]}] = recid
+		}
+		for k, v := range t.hashmaps3 {
+			v[[3]scm.Scmer{newrow[t.deltaColumns[k[0]]], newrow[t.deltaColumns[k[1]]], newrow[t.deltaColumns[k[2]]]}] = recid
+		}
+
+		// update delta indexes
+		for _, index := range t.Indexes {
 			if index.deltaBtree != nil {
 				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
 			}

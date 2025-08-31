@@ -264,6 +264,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		if !ok {
 			panic("Column does not exist: `" + t.t.schema.Name + "`.`" + t.t.Name + "`.`" + k + "`")
 		}
+		if ccols[i] == nil {
+			ccols[i] = t.ensureColumnLoaded(k)
+		}
 	}
 
 	// initialize main_count lazily if needed
