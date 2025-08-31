@@ -173,16 +173,16 @@ python3 run_sql_tests.py tests/01_basic_sql.yaml 4400
 - **Driver development** - Language-specific database drivers
 - **Documentation examples** - Real-world usage scenarios
 
-### 📋 **Development Guidelines**
-See [CLAUDE.md](./CLAUDE.md) for detailed development guidelines, testing procedures, and coding standards.
-
 ## Testing 🧪
 
 MemCP includes a comprehensive test framework:
 
 ```bash
 # Run all tests
-git commit  # Pre-commit hook runs all tests automatically
+make test
+
+# Or if you want to contribute, deploy this as a Pre-commit hook:
+cp git-pre-commit .git/hooks/pre-commit
 
 # Run specific test suites
 python3 run_sql_tests.py tests/01_basic_sql.yaml 4400      # Basic operations
