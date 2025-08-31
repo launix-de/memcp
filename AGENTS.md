@@ -3,7 +3,7 @@
 ## Project Structure & Modules
 - `main.go`: entrypoint and CLI flags.
 - `scm/`: Scheme runtime (REPL, HTTP/MySQL servers, builtins).
-- `storage/`: core engine (tables, shards, indexes, persistence).
+- `storage/`: core storage engine (tables, shards, indexes, persistence).
 - `lib/`: Scheme modules; SQL parsers and planner live here (`lib/sql-parser.scm`, `lib/psql-parser.scm`, `lib/queryplan.scm`); `lib/main.scm` bootstraps the API.
 - `tests/`: YAML suites named `NN_description.yaml` (e.g., `01_basic_sql.yaml`).
 - `run_sql_tests.py`: test runner (HTTP-based); starts `memcp` when needed.
@@ -19,7 +19,7 @@
 ## Coding Style & Naming
 - Go: format with `go fmt ./...`; keep idiomatic Go (short, cohesive funcs). Tabs and gofmt defaults are expected.
 - Go imports: sort imports by path length ascending within each import block.
-- Scheme (`.scm`): follow existing patterns; filenames are kebab-case; keep code self-explanatory with minimal comments.
+- Scheme (`.scm`): follow existing patterns; filenames are kebab-case; keep code self-explanatory, add comments for more complex code parts.
 - Indentation:
   - Go: use tabs; do not mix spaces; rely on gofmt to normalize.
   - Scheme: indent nested forms with tabs; align continuation lines to opening form where helpful; avoid mixing tabs and spaces.
@@ -29,10 +29,10 @@
 ### Scheme AST Quoting (lib/queryplan.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:
-  - `param-list`: a list of symbols. Follow existing patterns like `(map cols (lambda (col) (symbol (concat tblvar "." col))))` rather than constructing `(cons 'list ...)` for params.
+  - `param-list`: a list of (quoted) symbols. Follow existing patterns like `(map cols (lambda (col) (symbol (concat tblvar "." col))))` rather than constructing `(cons 'list ...)` for params.
   - `body`: if you want to produce a list value at runtime, construct it explicitly with `(cons (quote list) ...)` instead of a bare literal like `(1 "x")` which would be treated as a call.
-- Reduce/reduce2: quote bodies so they are embedded correctly, e.g. `'(set_assoc acc rowvals true)` inside `'((quote lambda) '(acc rowvals) ...)`.
-- Quote operator symbols, not variables: keep identifiers like `schema`, `grouptbl`, and `rows` unquoted so they bind at runtime; quote only procedure names and constructors inside quoted ASTs.
+- Reduce/reduce2: quote bodies so they are embedded correctly, e.g. `'(set_assoc acc rowvals true)` inside `'((quote lambda) '('acc 'rowvals) ...)`.
+- Quote operator symbols, not variables: keep identifiers like `schema`, `grouptbl`, and `rows` unquoted so they bind at runtime; quote only procedure names and constructors inside quoted ASTs as well as your own lambda definitions.
 
 ### Codegen Quoting Patterns
 - Lambda params: always emit a quoted list of symbols, e.g. `'((quote lambda) '(acc rowvals) body)`. Do not synthesize params from strings; never leave them as `(nil nil)`.
@@ -48,9 +48,11 @@
 
 ## Testing Guidelines
 - Framework: YAML specs executed via `run_sql_tests.py` against HTTP endpoints.
+- Create one YAML file per topic; prefer adding new tests to existing files instead of adding files
 - Expectations: use `expect: { rows: N, data: [...] }` or `expect: { error: true }`.
 - One statement per test case. Use `setup: []`/`cleanup: []` unless needed.
 - No explicit coverage threshold; add tests for every feature/bugfix.
+- Don't forget to also add must-fail tests with expect: { error: true }
 
 ## Commit & Pull Requests
 - Commits: small, incremental, and descriptive (what/why). Run tests before pushing. If an agent co-authored changes, include a `Co-Authored-By:` trailer.
@@ -83,31 +85,20 @@
 - Use columnar storage and vectorized compute to keep footprints small and hot; compress where it reduces cache lines touched even if it adds tiny (de)compression overhead.
 
 ## Optimizer Roadmap (scm/optimizer.go)
-- Constant Folding: fold pure calls with constant args (arith, logic, concat, quote/list) during OptimizeEx.
 - Inline Use-Once: inline variables defined in a begin when used < 2× and not arrays; already partially present — re-enable with safety checks.
 - Elide set/define: where a symbol is set once and consumed once, replace the read with the value and drop the set.
 - Numbered Params: reactivate lambda parameter indexing (NthLocalVar) once nested-scope bugs are fixed; enables faster param access.
 - In-place Variants: add map_inplace/filter_inplace and let optimizer switch when the first argument is disposable.
-- Producer Pipelines: pure imperative versions (produce_map, produceN_map) and chaining (produce+map+filter) to avoid intermediate lists.
+- Producer Pipelines: introduce secret pure imperative versions of functions like map, produce etc. that are based on loops and change variables; lower pure functional code to imperative one
 - Cons/Merge→Append: normalize construction patterns to append for fewer allocations.
 - Currying/Specialization: partial-evaluate functions with const masks to generate specialized lambdas.
 - Prefetch/outer: safely replace env lookups with prebound values when no shadowing occurs; propagate (outer ...) through subtrees.
 - Parser Optimizations: number parser parameters and precompile eligible patterns via parseSyntax.
+- JIT: chain together scanner loop (main+delta), map function and reduce function
+- JIT: specialize functions like "+" according to lhs and rhs operator types, remove type checks and so on
 
-Testing Optimizer Changes
-- Add unit tests for: constant folding, use-once inlining, set-elision, lambda param indexing, in-place map/filter behavior, and parser precompilation.
 ## MySQL ↔ MemCP Parallel Run Plan
 - Goal: operate MemCP alongside MySQL for months with minimal risk, validating correctness and performance before cutover.
-
-### Recommended Approach
-- Change Data Capture via MySQL binlogs: implement a binlog client/applier that follows the MySQL replication stream (row-based events) and applies mutations to MemCP.
-  - Pros: proven pattern, no app changes, near real-time, selective tables, simpler than a full replica with GTID state negotiation.
-  - Cons: needs robust schema mapping and idempotent, transactional apply.
-- Keep MySQL primary: all writes land in MySQL; MemCP is a near-real-time mirror for reads and validation.
-- Progressive read rollout: start with shadow reads (compare results), then portion of read traffic, then latency-critical paths.
-
-### When (Not Yet) to Implement Full MySQL Replica Protocol
-- Implementing the full MySQL replication slave protocol (including GTID/autorejoin, semi-sync, heartbeats) is a larger surface. For the validation phase, prefer a binlog client (CDC) that covers ROW events, DDL, and GTID tracking without committing to full replica semantics.
 
 ### CDC Implementation Sketch
 - Ingestion: connect to MySQL via replication protocol, request ROW-based binlogs with GTID enabled; handle rotate, format, table map, write/update/delete rows, and DDL events.
@@ -151,4 +142,3 @@ Testing Optimizer Changes
 - MemCP is a functional, vectorized execution engine with Scheme-driven planning; avoid side effects and prefer fused pipelines.
 - SQL is parsed/planned in `lib/*.scm`; runtime/server glue is in `scm/`; storage and indexes live in `storage/`.
 - Tests are YAML specs executed over HTTP; mark exploratory/compat suites `noncritical: true` until stable.
-- Unnesting and braking strategies prioritize minimal materialization and early-stop for ORDER BY + LIMIT.
