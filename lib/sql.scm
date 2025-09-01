@@ -50,7 +50,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (if (has? (show "system") "user") true (begin
     (print "creating table system.user")
     (eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" nil))
-    (insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password "admin") true)))
+    (insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password (arg "root-password" "admin")) true)))
 ))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
@@ -219,6 +219,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			) sql))
 		))
 	)
-	(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password 'admin'), set with --mysql-port")
+	(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password '" (arg "root-password" "admin") "'), set with --mysql-port")
 	)) ; close the if for disable-mysql
 )) print)

@@ -14,4 +14,7 @@ test:
 memcp.sif:
 	sudo singularity build memcp.sif memcp.singularity.recipe
 
-.PHONY: memcp.sif
+docs:
+	./memcp -write-docu docs
+
+.PHONY: memcp.sif docs

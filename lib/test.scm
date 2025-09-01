@@ -198,6 +198,19 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (equal? (urldecode (urlencode "a b")) "a b") true "url roundtrip")
 (assert (strlike (json_encode_assoc (list "x" 1)) "%\"x\":1%") true "json_encode_assoc contains key and value")
 
+/* hex/bin encode-decode */
+(assert (equal? (bin2hex "AB") "4142") true "bin2hex encodes bytes to hex")
+(assert (equal? (hex2bin "414243") "ABC") true "hex2bin decodes hex to bytes")
+(assert (equal? (hex2bin (bin2hex "Hello")) "Hello") true "hex/bin roundtrip")
+
+/* randomBytes properties */
+(assert (equal? (strlen (randomBytes 0)) 0) true "randomBytes 0 length")
+(assert (equal? (strlen (randomBytes 16)) 16) true "randomBytes length 16")
+/* two independently generated strings should differ (overwhelmingly likely) */
+(assert (equal? (randomBytes 32) (randomBytes 32)) false "two random strings must be unequal")
+
+/* error cases intentionally omitted in unit tests to avoid compile-time constant folding side-effects */
+
 /* Lambda / apply_assoc */
 (print "testing lambdas and apply_assoc ...")
 (assert (equal? ((lambda (x y) (+ x y)) 2 3) 5) true "lambda call")

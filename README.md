@@ -96,10 +96,11 @@ GRANT ALL PRIVILEGES...
 
 ```bash
 # 1. Build MemCP
-go build -o memcp
+go get
+make
 
 # 2. Start with REST API
-./memcp --api-port=4321
+./memcp --api-port=4321 --mysql-port=3307
 
 # 3. Create your first database
 curl -X POST http://localhost:4321/sql/system \
@@ -109,6 +110,17 @@ curl -X POST http://localhost:4321/sql/system \
 # 4. Start building lightning-fast apps!
 curl -X POST http://localhost:4321/sql/myapp \
   -d "CREATE TABLE products (id INT, name VARCHAR(100), price DECIMAL(10,2))" \
+  -u root:admin
+
+```
+
+### Authentication
+- Default credentials: `root` / `admin`.
+- Set the initial root password via CLI: `--root-password=supersecret` at the first run (on a fresh -data folder).
+- Change the credentials with:
+```
+curl -X POST http://localhost:4321/sql/system \
+  -d "ALTER USER root IDENTIFIED BY 'supersecret'" \
   -u root:admin
 ```
 

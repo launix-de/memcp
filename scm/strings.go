@@ -23,6 +23,8 @@ import "regexp"
 import "strings"
 import "net/url"
 import "encoding/json"
+import "encoding/hex"
+import crand "crypto/rand"
 import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
 
@@ -459,6 +461,41 @@ func init_strings() {
 				result[2*i+1] = hexmap[input[i]%16]
 			}
 			return string(result)
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"hex2bin", "decodes a hex string into binary data",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "hex string (even length)"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			decoded, err := hex.DecodeString(String(a[0]))
+			if err != nil {
+				panic("error while decoding hex: " + fmt.Sprint(err))
+			}
+			return string(decoded)
+		}, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"randomBytes", "returns a string with numBytes cryptographically secure random bytes",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"numBytes", "number", "number of random bytes"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			n := ToInt(a[0])
+			if n < 0 {
+				panic("randomBytes: numBytes must be non-negative")
+			}
+			buf := make([]byte, n)
+			if n > 0 {
+				if _, err := crand.Read(buf); err != nil {
+					panic("error generating random bytes: " + fmt.Sprint(err))
+				}
+			}
+			return string(buf)
 		}, true,
 	})
 
