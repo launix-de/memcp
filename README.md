@@ -116,7 +116,23 @@ curl -X POST http://localhost:4321/sql/myapp \
 
 ### Authentication
 - Default credentials: `root` / `admin`.
-- Set the initial root password via CLI: `--root-password=supersecret` at the first run (on a fresh -data folder).
+- Set the initial root password via CLI: `--root-password=supersecret` at the first run (on a fresh -data folder), or via Docker env `ROOT_PASSWORD`.
+- Docker Compose example:
+```yaml
+services:
+  memcp:
+    image: yourrepo/memcp:latest
+    environment:
+      - ROOT_PASSWORD=supersecret
+      - PARAMS=--api-port=4321
+    ports:
+      - "4321:4321"  # HTTP API
+      - "3307:3307"  # MySQL protocol
+    volumes:
+      - memcp_data:/data
+volumes:
+  memcp_data: {}
+```
 - Change the credentials with:
 ```
 curl -X POST http://localhost:4321/sql/system \
