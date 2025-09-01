@@ -148,6 +148,9 @@ func (u *storageShard) ensureColumnLoaded(colName string) ColumnStorage {
 		u.columns[colName] = new(StorageSparse)
 		return u.columns[colName]
 	}
+	// Limit concurrent file-backed loads to avoid exhausting OS file descriptors
+	release := acquireLoadSlot()
+	defer release()
 	f := u.t.schema.persistence.ReadColumn(u.uuid.String(), colName)
 	var magicbyte uint8
 	if err := binary.Read(f, binary.LittleEndian, &magicbyte); err != nil {
