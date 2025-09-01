@@ -9,3 +9,4 @@ data
 memcp.sif
 trace*.json
 *.diff
+go.sum

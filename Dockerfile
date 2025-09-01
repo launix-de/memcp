@@ -16,6 +16,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
+RUN CGO_ENABLED=0 GOOS=linux go get
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o memcp .
 
 # Runtime stage
@@ -40,9 +41,11 @@ EXPOSE 4332
 EXPOSE 3307
 
 # Set environment variables (overridable via docker-compose)
+# ROOT_PASSWORD is only considered in the first run
 ENV PARAMS=
-ENV ROOT_PASSWORD=
+ENV ROOT_PASSWORD=admin
+ENV APP=lib/main.scm
 
 # Run the application (load default Scheme entrypoint)
 # If ROOT_PASSWORD is set, pass it as --root-password; otherwise rely on default in lib/sql.scm
-CMD ["sh", "-c", "RP_OPT=; [ -n \"$ROOT_PASSWORD\" ] && RP_OPT=\"--root-password=$ROOT_PASSWORD\"; exec ./memcp -data /data $RP_OPT ${PARAMS} lib/main.scm"]
+CMD ./memcp -data /data --root-password="$ROOT_PASSWORD" $PARAMS $APP

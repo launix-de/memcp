@@ -68,16 +68,10 @@ MySQL (with network + disk):  10-50ms
 MemCP (in-memory):           0.1-1ms  // 50x faster!
 ```
 
-### **⚡ Zero Configuration**
+### **⚡ Docker**
 ```bash
-# Traditional MySQL setup
-sudo mysql_secure_installation
-mysql -u root -p
-CREATE DATABASE myapp;
-GRANT ALL PRIVILEGES...
-
-# MemCP setup
-./memcp  # That's it!
+docker pull carli2/memcp
+docker run -it -p 4321:4321 -p 3307:3307 carli2/memcp
 ```
 
 ### **🧠 Smart Memory Management**

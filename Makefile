@@ -17,4 +17,8 @@ memcp.sif:
 docs:
 	./memcp -write-docu docs
 
+docker-release:
+	sudo docker build -t carli2/memcp:latest .
+	sudo docker push carli2/memcp:latest
+
 .PHONY: memcp.sif docs
