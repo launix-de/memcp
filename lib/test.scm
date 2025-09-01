@@ -203,6 +203,11 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (equal? (hex2bin "414243") "ABC") true "hex2bin decodes hex to bytes")
 (assert (equal? (hex2bin (bin2hex "Hello")) "Hello") true "hex/bin roundtrip")
 
+/* base64 encode/decode */
+(assert (equal? (base64_encode "foo") "Zm9v") true "base64_encode encodes correctly")
+(assert (equal? (base64_decode "Zm9v") "foo") true "base64_decode decodes correctly")
+(assert (equal? (base64_decode (base64_encode "Hello, world!")) "Hello, world!") true "base64 roundtrip")
+
 /* randomBytes properties */
 (assert (equal? (strlen (randomBytes 0)) 0) true "randomBytes 0 length")
 (assert (equal? (strlen (randomBytes 16)) 16) true "randomBytes length 16")

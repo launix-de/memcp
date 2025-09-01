@@ -23,6 +23,7 @@ import "regexp"
 import "strings"
 import "net/url"
 import "encoding/json"
+import "encoding/base64"
 import "encoding/hex"
 import crand "crypto/rand"
 import "golang.org/x/text/collate"
@@ -416,6 +417,31 @@ func init_strings() {
 				panic(err)
 			}
 			return TransformFromJSON(result)
+		}, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"base64_encode", "encodes a string as Base64 (standard encoding)",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "binary string to encode"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			return base64.StdEncoding.EncodeToString([]byte(String(a[0])))
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"base64_decode", "decodes a Base64 string (standard encoding)",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "base64-encoded string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			decoded, err := base64.StdEncoding.DecodeString(String(a[0]))
+			if err != nil {
+				panic("error while decoding base64: " + fmt.Sprint(err))
+			}
+			return string(decoded)
 		}, true,
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")

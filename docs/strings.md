@@ -246,6 +246,34 @@ parses JSON into a map
 
 `any`
 
+## base64_encode
+
+encodes a string as Base64 (standard encoding)
+
+**Allowed number of parameters:** 1–1
+
+### Parameters
+
+- **value** (`string`): binary string to encode
+
+### Returns
+
+`string`
+
+## base64_decode
+
+decodes a Base64 string (standard encoding)
+
+**Allowed number of parameters:** 1–1
+
+### Parameters
+
+- **value** (`string`): base64-encoded string
+
+### Returns
+
+`string`
+
 ## sql_unescape
 
 unescapes the inner part of a sql string
