@@ -204,6 +204,94 @@ func ensureSystemStatistic() {
 			}
 		}
 	}
+
+	// --- New: ensure system_statistic.table_histogram exists ---
+	// Schema: table_histogram(schema TEXT, table TEXT, model BLOB, UNIQUE(schema, table))
+	ensureTable := func(db *database, name string, pm PersistencyMode) *table {
+		tt, _ := CreateTable(dbName, name, pm, true)
+		if tt == nil {
+			tt = db.GetTable(name)
+		}
+		if tt == nil {
+			return nil
+		}
+		if tt.PersistencyMode != pm {
+			tt.PersistencyMode = pm
+			tt.schema.save()
+		}
+		return tt
+	}
+
+	// helper: ensure columns exist by name/type
+	ensureCols := func(tt *table, cols []struct{ name, typ string }) {
+		if tt == nil {
+			return
+		}
+		have := make(map[string]bool)
+		for _, c := range tt.Columns {
+			have[strings.ToLower(c.Name)] = true
+		}
+		for _, c := range cols {
+			if !have[strings.ToLower(c.name)] {
+				tt.CreateColumn(c.name, c.typ, nil, nil)
+			}
+		}
+	}
+
+	// helper: ensure a unique key with the exact set of columns exists
+	ensureUnique := func(tt *table, id string, cols []string) {
+		if tt == nil {
+			return
+		}
+		// check if unique with same columns already exists (order-insensitive)
+		has := false
+		want := make(map[string]bool, len(cols))
+		for _, c := range cols {
+			want[strings.ToLower(c)] = true
+		}
+		for _, u := range tt.Unique {
+			if len(u.Cols) != len(cols) {
+				continue
+			}
+			ok := true
+			for _, c := range u.Cols {
+				if !want[strings.ToLower(c)] {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				has = true
+				break
+			}
+		}
+		if !has {
+			// append unique and persist
+			tt.schema.schemalock.Lock()
+			tt.Unique = append(tt.Unique, uniqueKey{Id: id, Cols: cols})
+			tt.schema.save()
+			tt.schema.schemalock.Unlock()
+		}
+	}
+
+	// table_histogram
+	th := ensureTable(db, "table_histogram", Sloppy)
+	ensureCols(th, []struct{ name, typ string }{
+		{"schema", "TEXT"},
+		{"table", "TEXT"},
+		{"model", "BLOB"}, // stored as string/blob; overlay handles long data
+	})
+	ensureUnique(th, "uniq_table_histogram_schema_table", []string{"schema", "table"})
+
+	// base_models: base_models(id PRIMARY KEY, model)
+	bm := ensureTable(db, "base_models", Sloppy)
+	ensureCols(bm, []struct{ name, typ string }{
+		{"id", "TEXT"},
+		{"model", "BLOB"},
+	})
+	// ensure PRIMARY KEY(id)
+	// treat any unique on [id] as sufficient; otherwise add PRIMARY
+	ensureUnique(bm, "PRIMARY", []string{"id"})
 }
 
 // safeLogScan writes a single row into system_statistic.scans. Failures are ignored.
