@@ -86,10 +86,11 @@ test_cases:
       error: true
       error_type: "table_not_found"
 
-  - name: "DESCRIBE non-existent table (returns empty in MemCP)"
+  - name: "DESCRIBE non-existent table (must fail)"
     sql: "DESCRIBE invisible_table"
     expect:
-      rows: 0
+      error: true
+      error_type: "table_not_found"
 
   # === NON-EXISTENT COLUMNS (MUST FAIL) ===
   - name: "SELECT non-existent column"

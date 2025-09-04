@@ -1,0 +1,30 @@
+# Schema-qualified INSERT
+
+metadata:
+  version: "1.0"
+  description: "Support INSERT INTO schema.tbl(...) in memcp-tests"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS `memcp-tests`.base_models"
+  - sql: |
+      CREATE TABLE `memcp-tests`.base_models (
+        id INT PRIMARY KEY,
+        model VARCHAR(100)
+      )
+
+test_cases:
+  - name: "INSERT into schema-qualified table"
+    sql: "INSERT INTO `memcp-tests`.base_models(id, model) VALUES (1, 'gpt')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify insert via schema-qualified name"
+    sql: "SELECT id, model FROM `memcp-tests`.base_models WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          model: "gpt"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS `memcp-tests`.base_models"

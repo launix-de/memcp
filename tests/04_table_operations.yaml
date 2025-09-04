@@ -25,3 +25,27 @@ test_cases:
     sql: "SELECT * FROM simple_test"
     expect:
       rows: 1
+
+  - name: "Schema-qualified INSERT"
+    sql: "INSERT INTO `memcp-tests`.simple_test (id, name) VALUES (2, 'q')"
+    expect:
+      affected_rows: 1
+
+  - name: "Row count after qualified INSERT"
+    sql: "SELECT COUNT(*) AS c FROM simple_test"
+    expect:
+      rows: 1
+      data:
+        - c: 2
+
+  - name: "INSERT with trailing semicolon"
+    sql: "INSERT INTO simple_test (id, name) VALUES (3, 'semi');"
+    expect:
+      affected_rows: 1
+
+  - name: "Row count after trailing-semicolon INSERT"
+    sql: "SELECT COUNT(*) AS c FROM simple_test"
+    expect:
+      rows: 1
+      data:
+        - c: 3
