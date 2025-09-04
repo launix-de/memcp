@@ -235,6 +235,8 @@ func (db *database) rebuild(all bool, repartition bool) {
 				shardlist = t.PShards
 			}
 			maincount := uint(0)
+			// Track if any shard is still COLD to avoid triggering repartition logic
+			hasColdShard := false
 			var sdone sync.WaitGroup
 			sdone.Add(len(shardlist))
 			// throttle concurrent shard rebuilds by CPU count
@@ -248,6 +250,10 @@ func (db *database) rebuild(all bool, repartition bool) {
 			}
 			if len(shardlist) <= workers {
 				for i, s := range shardlist {
+					// Collect counters without forcing a load. If shard is COLD, mark to skip repartition.
+					if s != nil && s.GetState() == COLD {
+						hasColdShard = true
+					}
 					maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
 					go func(i int, s *storageShard) {
 						defer func() {
@@ -278,6 +284,9 @@ func (db *database) rebuild(all bool, repartition bool) {
 					}()
 				}
 				for i, s := range shardlist {
+					if s != nil && s.GetState() == COLD {
+						hasColdShard = true
+					}
 					maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
 					jobs <- job{i: i, s: s}
 				}
@@ -286,7 +295,7 @@ func (db *database) rebuild(all bool, repartition bool) {
 			sdone.Wait()
 
 			// check if we should do the repartitioning
-			if repartition {
+			if repartition && !hasColdShard {
 				shardCandidates, shouldChange := t.proposerepartition(maincount)
 				if shouldChange || (t.PShards != nil && t.Shards != nil) {
 					t.repartition(shardCandidates) // perform the repartitioning
