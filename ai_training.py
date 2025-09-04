@@ -356,21 +356,35 @@ def fetch_scans(port: int, username: str, password: str) -> List[ScanRow]:
         print(f"Warning: failed to fetch scans: {e}")
     return rows
 
-def upload_model_blob(port: int, username: str, password: str, table: str, schema: str, blob_b64: str):
+def exec_sql(port: int, username: str, password: str, sql: str) -> str:
+    # Always target the system_statistic database endpoint
     url = SQL_ENDPOINT_TEMPLATE.format(port=port)
-    b64_escaped = blob_b64.replace("'", "''")
-    sql = f"INSERT INTO system_statistic.table_histogram(`schema`,`table`,`model`) VALUES ('{schema}','{table}','{b64_escaped}') ON DUPLICATE KEY UPDATE model=VALUES(model);"
-    resp = requests.post(url, auth=(username, password), data=sql, timeout=30)
+    resp = requests.post(url, auth=(username, password), data=sql, timeout=60)
     resp.raise_for_status()
     return resp.text
 
-def upload_base_model(port: int, username: str, password: str, model_id: str, blob_b64: str):
-    url = SQL_ENDPOINT_TEMPLATE.format(port=port)
-    b64_escaped = blob_b64.replace("'", "''")
-    sql = f"INSERT INTO system_statistic.base_models(id,model) VALUES ('{model_id}','{b64_escaped}') ON DUPLICATE KEY UPDATE model=VALUES(model);"
-    resp = requests.post(url, auth=(username, password), data=sql, timeout=30)
-    resp.raise_for_status()
-    return resp.text
+# Tables are expected to exist; do not create here.
+
+def upload_model_blob(port: int, username: str, password: str, table: str, schema: str, blob_bytes: bytes):
+    # Store as base64 string for now (MemCP hex literal unsupported)
+    b64 = base64.b64encode(blob_bytes).decode("ascii")
+    b64_escaped = b64.replace("'", "''")
+    sql = (
+        f"INSERT INTO table_histogram(`schema`,`table`,`model`) "
+        f"VALUES ('{schema.replace("'","''")}','{table.replace("'","''")}', '{b64_escaped}') "
+        f"ON DUPLICATE KEY UPDATE model=VALUES(model)"
+    )
+    return exec_sql(port, username, password, sql)
+
+def upload_base_model(port: int, username: str, password: str, model_id: str, blob_bytes: bytes):
+    b64 = base64.b64encode(blob_bytes).decode("ascii")
+    b64_escaped = b64.replace("'", "''")
+    sql = (
+        f"INSERT INTO base_models(id,model) "
+        f"VALUES ('{model_id.replace("'","''")}', '{b64_escaped}') "
+        f"ON DUPLICATE KEY UPDATE model=VALUES(model)"
+    )
+    return exec_sql(port, username, password, sql)
 
 # ---------- Training ----------
 def train_model(rows: List[ScanRow], port: int, username: str, password: str, epochs=EPOCHS):
@@ -443,32 +457,59 @@ def train_model(rows: List[ScanRow], port: int, username: str, password: str, ep
     ratio_head_script = torch.jit.script(ratio_mod)
 
     # Upload base encoder
-    buf = io.BytesIO(); base_encoder_script.save(buf)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    upload_base_model(port, username, password, model_id="base_encoder_v1", blob_b64=b64)
+    def module_to_bytes(mod: torch.jit.ScriptModule) -> bytes:
+        # Always use a real temporary file to avoid accidental file creation
+        # with names like "<_io.BytesIO object at ...>".
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            tmp = tf.name
+        try:
+            torch.jit.save(mod, tmp)
+            with open(tmp, 'rb') as f:
+                data = f.read()
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        return data
+
+    data = module_to_bytes(base_encoder_script)
+    if not data:
+        print("Warning: base_encoder_v1 produced empty bytes; skipping upload")
+    else:
+        upload_base_model(port, username, password, model_id="base_encoder_v1", blob_bytes=data)
 
     # Upload ordered layer
-    buf = io.BytesIO(); ordered_layer_script.save(buf)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    upload_base_model(port, username, password, model_id="ordered_layer_v1", blob_b64=b64)
+    data = module_to_bytes(ordered_layer_script)
+    if not data:
+        print("Warning: ordered_layer_v1 produced empty bytes; skipping upload")
+    else:
+        upload_base_model(port, username, password, model_id="ordered_layer_v1", blob_bytes=data)
 
     # Upload output head
-    buf = io.BytesIO(); output_head_script.save(buf)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    upload_base_model(port, username, password, model_id="output_head_v1", blob_b64=b64)
+    data = module_to_bytes(output_head_script)
+    if not data:
+        print("Warning: output_head_v1 produced empty bytes; skipping upload")
+    else:
+        upload_base_model(port, username, password, model_id="output_head_v1", blob_bytes=data)
 
     # Upload ratio head (auxiliary)
-    buf = io.BytesIO(); ratio_head_script.save(buf)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    upload_base_model(port, username, password, model_id="ratio_head_v1", blob_b64=b64)
+    data = module_to_bytes(ratio_head_script)
+    if not data:
+        print("Warning: ratio_head_v1 produced empty bytes; skipping upload")
+    else:
+        upload_base_model(port, username, password, model_id="ratio_head_v1", blob_bytes=data)
 
     # Upload per-table histogram models
     for idx, (schema, table) in enumerate(dataset.table_keys):
         th = model.table_histograms[idx].cpu()
         th_script = torch.jit.script(th)
-        buf = io.BytesIO(); th_script.save(buf)
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        upload_model_blob(port, username, password, table=table, schema=schema, blob_b64=b64)
+        data = module_to_bytes(th_script)
+        if not data:
+            print(f"Warning: table_histogram {schema}.{table} empty; skipping")
+        else:
+            upload_model_blob(port, username, password, table=table, schema=schema, blob_bytes=data)
 
 # ---------- Main ----------
 def main():
