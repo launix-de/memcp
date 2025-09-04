@@ -446,7 +446,23 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				result += len(values)
 			}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 				if onCollision != nil {
-					scm.Apply(onCollision, data...)
+					// Evaluate onCollision and add to affected rows per MySQL semantics
+					// - inserted rows already counted above
+					// - on duplicate: count 2 if changed, 1 if no-op
+					ret := scm.Apply(onCollision, data...)
+					switch v := ret.(type) {
+					case bool:
+						if v {
+							result += 2
+						} else {
+							result += 1
+						}
+					case int64:
+						result += int(v)
+					default:
+						// Fallback: consider as one affected row
+						result += 1
+					}
 				} else {
 					panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
 				}
@@ -483,7 +499,20 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					result += len(values)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 					if onCollision != nil {
-						scm.Apply(onCollision, data...)
+						// Evaluate onCollision and add to affected rows per MySQL semantics
+						ret := scm.Apply(onCollision, data...)
+						switch v := ret.(type) {
+						case bool:
+							if v {
+								result += 2
+							} else {
+								result += 1
+							}
+						case int64:
+							result += int(v)
+						default:
+							result += 1
+						}
 					} else {
 						panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
 					}
