@@ -73,7 +73,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	// We are going to mutate this shard's columns: mark shard as WRITE (not COLD)
 	s.srState = WRITE
 	// Ensure main_count and input storages are initialized before compute
-	s.ensureMainCount()
+	s.ensureMainCount(false)
 	cols := make([]ColumnStorage, len(inputCols))
 	for i, col := range inputCols {
 		cols[i] = s.getColumnStorageOrPanic(col)

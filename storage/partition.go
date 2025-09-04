@@ -429,17 +429,18 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		if s == nil {
 			continue
 		}
+		// Load shard state first (may acquire locks internally)
 		s.ensureLoaded()
+		// Now lock exclusively and perform critical loads without internal locking
+		s.mu.Lock()
 		for _, sd := range shardCandidates {
-			s.ensureColumnLoaded(sd.Column)
+			s.ensureColumnLoaded(sd.Column, true)
 		}
-		// Load all columns used by the table to prevent lock upgrades
-		// during the copy step while RLocks are held.
 		for _, col := range t.Columns {
-			s.ensureColumnLoaded(col.Name)
+			s.ensureColumnLoaded(col.Name, true)
 		}
-		// also ensure main_count is initialized
-		s.ensureMainCount()
+		s.ensureMainCount(true)
+		s.mu.Unlock()
 	}
 
 	// collect all dataset IDs (this is done sequentially and takes ~4s for 8G of data)

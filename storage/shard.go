@@ -127,8 +127,47 @@ func (u *storageShard) load(t *table) {
 }
 
 // ensureColumnLoaded loads a single column storage when first accessed.
-func (u *storageShard) ensureColumnLoaded(colName string) ColumnStorage {
-	// read path under RLock
+// If alreadyLocked is true, the caller must hold u.mu.Lock() and no locks
+// are taken inside this function. Otherwise, it acquires the appropriate
+// locks internally.
+func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) ColumnStorage {
+	// Shared critical path which assumes u.mu is held (write).
+	loadLocked := func() ColumnStorage {
+		cs, present := u.columns[colName]
+		if !present {
+			panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+		}
+		if cs != nil {
+			return cs
+		}
+		if u.t.PersistencyMode == Memory {
+			u.columns[colName] = new(StorageSparse)
+			return u.columns[colName]
+		}
+		release := acquireLoadSlot()
+		defer release()
+		f := u.t.schema.persistence.ReadColumn(u.uuid.String(), colName)
+		var magicbyte uint8
+		if err := binary.Read(f, binary.LittleEndian, &magicbyte); err != nil {
+			u.columns[colName] = new(StorageSparse)
+			return u.columns[colName]
+		}
+		fmt.Println("loading storage "+u.t.schema.Name+" shard "+u.uuid.String()+" column "+colName+" of type", magicbyte)
+		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
+		cnt := columnstorage.Deserialize(f)
+		f.Close()
+		if cnt > u.main_count {
+			u.main_count = cnt
+		}
+		u.columns[colName] = columnstorage
+		return columnstorage
+	}
+
+	if alreadyLocked {
+		return loadLocked()
+	}
+
+	// Fast path under RLock
 	u.mu.RLock()
 	cs, present := u.columns[colName]
 	u.mu.RUnlock()
@@ -138,34 +177,14 @@ func (u *storageShard) ensureColumnLoaded(colName string) ColumnStorage {
 	if cs != nil {
 		return cs
 	}
-	// serialize competing loads and map writes via shard lock (without lock upgrade)
+	// Acquire write lock and load
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if cs = u.columns[colName]; cs != nil { // re-check after acquiring lock
+	// Re-check after acquiring lock
+	if cs = u.columns[colName]; cs != nil {
 		return cs
 	}
-	if u.t.PersistencyMode == Memory {
-		u.columns[colName] = new(StorageSparse)
-		return u.columns[colName]
-	}
-	// Limit concurrent file-backed loads to avoid exhausting OS file descriptors
-	release := acquireLoadSlot()
-	defer release()
-	f := u.t.schema.persistence.ReadColumn(u.uuid.String(), colName)
-	var magicbyte uint8
-	if err := binary.Read(f, binary.LittleEndian, &magicbyte); err != nil {
-		u.columns[colName] = new(StorageSparse)
-		return u.columns[colName]
-	}
-	fmt.Println("loading storage "+u.t.schema.Name+" shard "+u.uuid.String()+" column "+colName+" of type", magicbyte)
-	columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
-	cnt := columnstorage.Deserialize(f)
-	f.Close()
-	if cnt > u.main_count {
-		u.main_count = cnt
-	}
-	u.columns[colName] = columnstorage
-	return columnstorage
+	return loadLocked()
 }
 
 // getColumnStorageOrPanic returns a stable pointer to a column's storage.
@@ -181,24 +200,47 @@ func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
 	if cs != nil {
 		return cs
 	}
-	return u.ensureColumnLoaded(colName)
+	return u.ensureColumnLoaded(colName, false)
+}
+
+func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked bool) ColumnStorage {
+	if alreadyLocked {
+		cs, present := u.columns[colName]
+		if !present {
+			panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+		}
+		if cs != nil {
+			return cs
+		}
+		return u.ensureColumnLoaded(colName, true)
+	}
+	return u.getColumnStorageOrPanic(colName)
 }
 
 // ensureMainCount guarantees main_count is initialized by loading one column if needed.
-func (u *storageShard) ensureMainCount() {
-	if u.main_count != 0 {
-		return
-	}
-	if u.t == nil {
+func (u *storageShard) ensureMainCount(alreadyLocked bool) {
+	if u.main_count != 0 || u.t == nil {
 		return
 	}
 	// Load the first column (if not yet loaded); Deserialize will set main_count.
+	if alreadyLocked {
+		for _, c := range u.t.Columns {
+			cs, ok := u.columns[c.Name]
+			if ok && cs == nil {
+				u.ensureColumnLoaded(c.Name, true)
+				if u.main_count != 0 {
+					return
+				}
+			}
+		}
+		return
+	}
 	for _, c := range u.t.Columns {
 		u.mu.RLock()
 		cs, ok := u.columns[c.Name]
 		u.mu.RUnlock()
 		if ok && cs == nil {
-			u.ensureColumnLoaded(c.Name)
+			u.ensureColumnLoaded(c.Name, false)
 			if u.main_count != 0 {
 				return
 			}
@@ -211,7 +253,7 @@ func (s *storageShard) GetState() SharedState { return s.srState }
 func (s *storageShard) GetRead() func() {
 	s.ensureLoaded()
 	// Ensure main_count is initialized by loading at least one column
-	s.ensureMainCount()
+	s.ensureMainCount(false)
 	if s.srState == COLD {
 		s.srState = SHARED
 	}
@@ -541,7 +583,7 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer) (result uint, present bool) {
 	/* TODO: this all does not work since a StorageInt stores int64 while the user might have provided string or float64 with the same content; also hashmaps eat up too much space */
 	// Preload main storages and establish main_count without holding any shard lock
-	t.ensureMainCount()
+	t.ensureMainCount(false)
 	mcols := make([]ColumnStorage, len(columns))
 	for i, col := range columns {
 		mcols[i] = t.getColumnStorageOrPanic(col)

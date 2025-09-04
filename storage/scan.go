@@ -205,7 +205,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		}
 	}
 	// initialize main_count lazily if needed
-	t.ensureMainCount()
+	t.ensureMainCount(false)
 	// remember current insert status (so don't scan things that are inserted during map)
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	t.mu.RLock() // lock whole shard for reading since we frequently read deletions
