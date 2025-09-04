@@ -166,6 +166,13 @@ func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 					return a_ == b_
 			}
 
+	case func(...Scmer) Scmer:
+		switch b_ := b.(type) {
+			case func(...Scmer) Scmer:
+				return fmt.Sprintf("%p", a_) == fmt.Sprintf("%p", b_)
+			default:
+				return false
+		}
 	case SourceInfo:
 		return Equal(a_.value, b)
 	}
