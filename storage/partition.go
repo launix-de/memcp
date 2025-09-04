@@ -21,6 +21,7 @@ import "sort"
 import "sync"
 import "time"
 import "runtime"
+import "strings"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
@@ -253,25 +254,49 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	// pivots are extracted from sampling
 	pivotSamples := make([]scm.Scmer, 0, 2*(len(t.Shards)+len(t.PShards)))
 
+	// validate column exists in schema; if corrupted name, bail out gracefully
+	hasCol := false
+	for _, c := range t.Columns {
+		if strings.EqualFold(c.Name, col) {
+			hasCol = true
+			col = c.Name // normalize to actual case
+			break
+		}
+	}
+	if !hasCol {
+		// corrupted schema or invalid column reference: disable partitioning on this dimension
+		result.NumPartitions = 1
+		return
+	}
+
 	shardlist := t.Shards
 	if shardlist == nil {
 		shardlist = t.PShards
 	}
 	for _, s := range shardlist {
-		// collect samples from all the shards
-		if stor, ok := s.columns[col]; ok {
-			// sample first element
-			if s.main_count > 0 {
-				pivotSamples = append(pivotSamples, stor.GetValue(0))
-			}
-			// sample last element
-			if s.main_count > 3 {
-				pivotSamples = append(pivotSamples, stor.GetValue(s.main_count-1))
-			}
-			// sample some elements inbetween
-			for i := uint(50); i < s.main_count; i += 101 {
-				pivotSamples = append(pivotSamples, stor.GetValue(i))
-			}
+		if s == nil || s.t == nil {
+			continue
+		}
+		// collect samples from all the shards; ensure storage is loaded safely
+		var stor ColumnStorage
+		// getColumnStorageOrPanic will panic on inconsistent metadata; wrap defensively
+		func() {
+			defer func() { _ = recover() }() // corrupted state: skip this shard gracefully
+			stor = s.getColumnStorageOrPanic(col)
+		}()
+		if stor == nil {
+			continue
+		}
+		// snapshot main_count without holding lock; guard indices and skip if inconsistent
+		mc := s.main_count
+		if mc > 0 {
+			pivotSamples = append(pivotSamples, stor.GetValue(0))
+		}
+		if mc > 3 {
+			pivotSamples = append(pivotSamples, stor.GetValue(mc-1))
+		}
+		for i := uint(50); i < mc; i += 101 {
+			pivotSamples = append(pivotSamples, stor.GetValue(i))
 		}
 	}
 	if len(pivotSamples) == 0 {
