@@ -121,6 +121,9 @@ func LoadDatabases() {
 			// TODO: read .json files for S3 tables
 		}
 	}
+
+	// Ensure system_statistic.scans exists for scan logging
+	ensureSystemStatistic()
 }
 
 func (db *database) save() {

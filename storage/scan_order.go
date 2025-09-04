@@ -17,9 +17,12 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "time"
 import "sort"
+import "strings"
 import "runtime/debug"
 import "container/heap"
+import "sync/atomic"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
@@ -30,6 +33,8 @@ type shardqueue struct {
 	mcols    []func(uint) scm.Scmer // map column reader
 	scols    []func(uint) scm.Scmer // sort criteria column reader
 	sortdirs []func(...scm.Scmer) scm.Scmer
+	// inputCount carries the shard's total input rows to avoid t.Count()
+	inputCount int64
 }
 
 // sort interface for shardqueue (local) (TODO: heap could be more efficient because early-out will be cheaper)
@@ -92,6 +97,8 @@ func (s *globalqueue) Pop() any {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+	// Measure analysis time
+	analyzeStart := time.Now()
 	/* TODO(memcp): Range-based braking & vectorization
 	   - Maintain a top-k threshold (k = offset+limit) on the global queue and stop scanning when no shard's next-best key can beat threshold.
 	   - Vectorize predicate/key evaluation with selection vectors to reduce branching and allocations (batch evaluate condition, compact indices, then project/aggregate).
@@ -109,8 +116,16 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	for _, b := range boundaries {
 		t.AddPartitioningScore([]string{b.col})
 	}
+	analyzeNs := time.Since(analyzeStart).Nanoseconds()
 
 	callbackFn := scm.OptimizeProcToSerialFunction(callback)
+	// wrap map callback to count outputs
+	var outCount int64
+	innerCallback := callbackFn
+	callbackFn = func(args ...scm.Scmer) scm.Scmer {
+		atomic.AddInt64(&outCount, 1)
+		return innerCallback(args...)
+	}
 	aggregateFn := func(...scm.Scmer) scm.Scmer { return nil }
 	if aggregate != nil {
 		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
@@ -131,15 +146,18 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	// - Batch predicate evaluation into a selection vector; compact indices; then project/aggregate only selected rows.
 	// - Pre-bind ASC/DESC comparators; reuse argument slices to avoid allocations.
 
+	// Measure execution time of the ordered scan
+	execStart := time.Now()
 	var q globalqueue
 	q_ := make(chan *shardqueue, 1)
+	var inputCount int64
 	gls.Go(func() {
 		t.iterateShards(boundaries, func(s *storageShard) {
 			// parallel scan over shards
 			defer func() {
 				if r := recover(); r != nil {
 					// fmt.Println("panic during scan:", r, string(debug.Stack()))
-					q_ <- &shardqueue{s, nil, scanError{r, string(debug.Stack())}, nil, nil, nil}
+					q_ <- &shardqueue{s, nil, scanError{r, string(debug.Stack())}, nil, nil, nil, 0}
 				}
 			}()
 			q_ <- s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
@@ -154,6 +172,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		if len(qe.items) > 0 {
 			heap.Push(&q, qe) // add to heap
 		}
+		inputCount += qe.inputCount
 	}
 
 	// collect values from parallel scan
@@ -205,12 +224,41 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	if !hadValue && isOuter {
 		akkumulator = aggregateFn(akkumulator, callbackFn(make([]scm.Scmer, len(callbackCols)))) // outer join: call once with NULLs
 	}
+	execNs := time.Since(execStart).Nanoseconds()
+	// log statistics for ordered scan (best-effort, async) if threshold met
+	if inputCount > int64(Settings.AnalyzeMinItems) {
+		go func(anNs, exNs int64) {
+			defer func() { _ = recover() }()
+			filterEnc := ""
+			if p, ok := condition.(scm.Proc); ok {
+				filterEnc = encodeScmerToString(p.Body, conditionCols, p.Params.([]scm.Scmer))
+			}
+			var sb strings.Builder
+			for i, sc := range sortcols {
+				if i > 0 {
+					sb.WriteByte('|')
+				}
+				switch v := sc.(type) {
+				case string:
+					// Plain column name
+					sb.WriteString(v)
+				default:
+					// Use helper to encode unknowns/lambdas as '?'
+					encodeScmer(sc, &sb, nil, nil)
+				}
+			}
+			orderEnc := sb.String()
+			safeLogScan(t.schema.Name, t.Name, true, filterEnc, orderEnc, inputCount, outCount, anNs, exNs)
+		}(analyzeNs, execNs)
+	}
 	return akkumulator
 }
 
 func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limit int, callbackCols []string) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
+	// collect per-shard input size for thresholding
+	result.inputCount = int64(t.Count())
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 

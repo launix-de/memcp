@@ -38,4 +38,3 @@ func acquireLoadSlot() func() {
 	<-loadSemaphore
 	return func() { loadSemaphore <- struct{}{} }
 }
-

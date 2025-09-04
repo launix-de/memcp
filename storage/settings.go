@@ -26,9 +26,10 @@ type SettingsT struct {
 	PartitionMaxDimensions int
 	DefaultEngine          string
 	ShardSize              uint
+	AnalyzeMinItems        int
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -48,6 +49,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			"PartitionMaxDimensions", int64(Settings.PartitionMaxDimensions),
 			"DefaultEngine", Settings.DefaultEngine,
 			"ShardSize", int64(Settings.ShardSize),
+			"AnalyzeMinItems", int64(Settings.AnalyzeMinItems),
 		}
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -63,6 +65,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return Settings.DefaultEngine
 		case "ShardSize":
 			return int64(Settings.ShardSize)
+		case "AnalyzeMinItems":
+			return int64(Settings.AnalyzeMinItems)
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -83,6 +87,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.DefaultEngine = scm.String(a[1])
 		case "ShardSize":
 			Settings.ShardSize = uint(scm.ToInt(a[1]))
+		case "AnalyzeMinItems":
+			Settings.AnalyzeMinItems = scm.ToInt(a[1])
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
