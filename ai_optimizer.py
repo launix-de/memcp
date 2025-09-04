@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ai_training.py
+ai_optimizer.py
 
 Usage:
-  python ai_training.py --port=4321 --username=root --password=admin
+  python ai_optimizer.py --port=4321 --username=root --password=admin [--duration=300] [--reset] [--prompt]
 
 What it does:
  - Downloads all rows from system_statistic.scans via POST SQL query.
@@ -13,6 +13,7 @@ What it does:
  - Trains to predict outputCount (log1p(outputCount) for stability).
  - Periodically prints training loss.
  - Serializes models (base_encoder, ordered_layer, output_head, per-table histograms) to database.
+ - Interactive mode (--prompt): load models from MemCP and predict outputCount for user-entered (schema, table, filter, order, ordered, inputCount) repeatedly.
 """
 
 import argparse
@@ -22,6 +23,7 @@ import json
 import math
 import re
 import sys
+import time
 from typing import List
 
 import requests
@@ -38,7 +40,7 @@ SQL_ENDPOINT_TEMPLATE = "http://localhost:{port}/sql/system_statistic"
 BATCH_SIZE = 32
 EPOCHS = 6
 PRINT_EVERY = 50
-LR = 1e-4
+LR = 1e-5
 MAX_TOKENS = 512
 EMBED_DIM = 256
 TRANSFORMER_LAYERS = 4
@@ -144,12 +146,14 @@ class ScansDataset(Dataset):
 
     def __getitem__(self, idx):
         r = self.rows[idx]
-        tokens = ["<CLS>"] + tokenize_filter_order(r.filter_s, r.order_s if r.ordered else "") + ["<SEP>"]
+        # Derive ordered from order string (non-empty => ordered)
+        derived_order = r.order_s or ""
+        tokens = ["<CLS>"] + tokenize_filter_order(r.filter_s, derived_order) + ["<SEP>"]
         table_idx = self.table_to_idx[(r.schema, r.table)]
         return {
             "tokens": tokens,
             "table_idx": torch.tensor(table_idx, dtype=torch.long),
-            "ordered": torch.tensor(1.0 if r.ordered else 0.0, dtype=torch.float32),
+            "ordered": torch.tensor(1.0 if bool(derived_order) else 0.0, dtype=torch.float32),
             "inputCount": torch.tensor(r.inputCount, dtype=torch.float32),
             "outputCount": torch.tensor(r.outputCount, dtype=torch.float32),
             "schema": r.schema,
@@ -357,6 +361,88 @@ def fetch_scans(port: int, username: str, password: str) -> List[ScanRow]:
         print(f"Warning: failed to fetch scans: {e}")
     return rows
 
+def _load_script_by_id(port: int, username: str, password: str, model_id: str):
+    obj = _first_json_row(port, username, password, f"SELECT model FROM base_models WHERE id='{model_id.replace("'","''")}' LIMIT 1")
+    if not obj or 'model' not in obj:
+        raise RuntimeError(f"Model {model_id} not found")
+    b = _decode_model_field(obj['model'])
+    if not b:
+        raise RuntimeError(f"Model {model_id} empty/undecodable")
+    return torch.jit.load(io.BytesIO(b), map_location='cpu')
+
+def _load_hist_for_table(port: int, username: str, password: str, schema: str, table: str):
+    sql = (
+        "SELECT model FROM table_histogram WHERE `schema`='" + schema.replace("'","''") +
+        "' AND `table`='" + table.replace("'","''") + "' LIMIT 1"
+    )
+    obj = _first_json_row(port, username, password, sql)
+    if not obj or 'model' not in obj:
+        raise RuntimeError(f"Histogram for {schema}.{table} not found")
+    b = _decode_model_field(obj['model'])
+    if not b:
+        raise RuntimeError(f"Histogram for {schema}.{table} empty/undecodable")
+    return torch.jit.load(io.BytesIO(b), map_location='cpu')
+
+def _predict_one(base_encoder, ordered_layer, output_head, hist_layer, schema: str, table: str, filter_s: str, order_s: str, input_count: float) -> float:
+    # Build features
+    tokens = tokenize_filter_order(filter_s or "", order_s or "")
+    feats = token_features(tokens)
+    if feats.size(0) < MAX_TOKENS:
+        pad = torch.zeros((MAX_TOKENS - feats.size(0), FEATURE_DIM), dtype=torch.float32)
+        feats = torch.cat([feats, pad], dim=0)
+    else:
+        feats = feats[:MAX_TOKENS]
+    tok = feats.unsqueeze(0)  # (1, T, F)
+    sch = token_features([schema]).squeeze(0).unsqueeze(0)  # (1, F)
+    tab = token_features([table]).squeeze(0).unsqueeze(0)   # (1, F)
+    inC = torch.tensor([float(input_count)], dtype=torch.float32)
+
+    with torch.no_grad():
+        base_vec = base_encoder(tok, sch, tab, inC)
+        out = hist_layer(base_vec)
+        if bool(order_s):
+            out = ordered_layer(out)
+        logp = output_head(out)
+        val = float(torch.expm1(logp).item())
+    return max(0.0, val)
+
+def run_prompt_loop(port: int, username: str, password: str):
+    print("Loading models from MemCP...")
+    try:
+        base_encoder = _load_script_by_id(port, username, password, 'base_encoder_v1')
+        ordered_layer = _load_script_by_id(port, username, password, 'ordered_layer_v1')
+        output_head  = _load_script_by_id(port, username, password, 'output_head_v1')
+    except Exception as e:
+        print(f"Error: {e}")
+        return
+    print("Ready. Press Enter on schema to exit.")
+    while True:
+        try:
+            schema = input("schema: ").strip()
+        except EOFError:
+            break
+        if not schema:
+            break
+        table = input("table: ").strip()
+        filter_s = input("filter (e.g., true or (and (> COL 10) (equal? 1 ?))): ").strip()
+        order_s  = input("order  (e.g., C_CUSTKEY|C_NAME) [empty for unordered]: ").strip()
+        inc_s    = input("inputCount (int): ").strip()
+        try:
+            input_count = float(inc_s)
+        except Exception:
+            print("invalid inputCount; try again")
+            continue
+        try:
+            hist_layer = _load_hist_for_table(port, username, password, schema, table)
+        except Exception as e:
+            print(f"Error loading histogram for {schema}.{table}: {e}")
+            continue
+        try:
+            pred = _predict_one(base_encoder, ordered_layer, output_head, hist_layer, schema, table, filter_s, order_s, input_count)
+            print(f"predicted outputCount: {pred:.0f}")
+        except Exception as e:
+            print(f"prediction error: {e}")
+
 def _first_json_row(port: int, username: str, password: str, sql: str):
     url = SQL_ENDPOINT_TEMPLATE.format(port=port)
     try:
@@ -530,7 +616,7 @@ def upload_base_model(port: int, username: str, password: str, model_id: str, bl
     return exec_sql(port, username, password, sql)
 
 # ---------- Training ----------
-def train_model(rows: List[ScanRow], port: int, username: str, password: str, epochs=EPOCHS, reset: bool=False):
+def train_model(rows: List[ScanRow], port: int, username: str, password: str, epochs=EPOCHS, reset: bool=False, duration_secs: int | None = None):
     dataset = ScansDataset(rows)
     n_tables = len(dataset.table_keys)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
@@ -546,7 +632,13 @@ def train_model(rows: List[ScanRow], port: int, username: str, password: str, ep
     loss_fn = nn.MSELoss()
 
     global_step = 0
-    for ep in range(epochs):
+    start_time = time.time()
+    ep = 0
+    done = False
+    while True:
+        ep += 1
+        if duration_secs is None and ep > epochs:
+            break
         model.train()
         epoch_loss = 0.0
         for batch in dataloader:
@@ -587,7 +679,12 @@ def train_model(rows: List[ScanRow], port: int, username: str, password: str, ep
             global_step += 1
             if global_step % PRINT_EVERY == 0:
                 print(f"Epoch {ep+1} step {global_step} loss {loss.item():.6f}")
-        print(f"Epoch {ep+1} completed. Avg loss: {epoch_loss/max(1,len(dataloader)):.6f}")
+            if duration_secs is not None and (time.time() - start_time) >= duration_secs:
+                done = True
+                break
+        print(f"Epoch {ep} completed. Avg loss: {epoch_loss/max(1,len(dataloader)):.6f}")
+        if done:
+            break
 
     # --- Export models ---
     base_encoder_script = torch.jit.script(model.base_encoder.cpu())
@@ -667,11 +764,17 @@ def main():
     parser.add_argument("--username", type=str, default=DEFAULT_USER)
     parser.add_argument("--password", type=str, default=DEFAULT_PASSWORD)
     parser.add_argument("--reset", action="store_true", help="Ignore existing models; start fresh")
+    parser.add_argument("--duration", type=int, default=0, help="Timebox training to N seconds (0=disabled)")
+    parser.add_argument("--prompt", action="store_true", help="Interactive prediction loop (no training)")
     parser.add_argument("--debug", action="store_true", help="Verbose debug prints")
     args = parser.parse_args()
 
     global DEBUG
     DEBUG = bool(args.debug)
+
+    if args.prompt:
+        run_prompt_loop(args.port, args.username, args.password)
+        return
 
     print("Fetching scan data...")
     rows = fetch_scans(args.port, args.username, args.password)
@@ -679,7 +782,8 @@ def main():
         print("No scan rows found, exiting.")
         return
 
-    train_model(rows, args.port, args.username, args.password, epochs=EPOCHS, reset=bool(args.reset))
+    duration = int(args.duration) if getattr(args, 'duration', 0) else 0
+    train_model(rows, args.port, args.username, args.password, epochs=EPOCHS, reset=bool(args.reset), duration_secs=(duration or None))
 
     # Deployment notes:
     # - This script trains daily and uploads TorchScript models into system_statistic.base_models and system_statistic.table_histogram.
