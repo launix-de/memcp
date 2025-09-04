@@ -1,0 +1,178 @@
+# MySQL Compatibility v1 — INSERT ... ON DUPLICATE KEY UPDATE
+
+metadata:
+  version: "1.0"
+  description: "MySQL v1: upsert semantics for PK/UNIQUE keys"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS upsert_t"
+  - sql: |
+      CREATE TABLE upsert_t (
+        id INT PRIMARY KEY,
+        x INT,
+        y INT,
+        email VARCHAR(100) UNIQUE
+      )
+
+test_cases:
+  - name: "Insert initial row"
+    sql: "INSERT INTO upsert_t (id, x, y, email) VALUES (1, 10, 5, 'a@example.com')"
+    expect:
+      affected_rows: 1
+
+  - name: "Select initial state"
+    sql: "SELECT id, x, y, email FROM upsert_t ORDER BY id"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          x: 10
+          y: 5
+          email: "a@example.com"
+
+  - name: "Simple overwrite: x = VALUES(x) on PK conflict"
+    sql: |
+      INSERT INTO upsert_t (id, x, y, email)
+      VALUES (1, 42, 99, 'a@example.com')
+      ON DUPLICATE KEY UPDATE x = VALUES(x)
+    expect: {}
+
+  - name: "Verify overwrite changed only x (not y/email)"
+    sql: "SELECT id, x, y, email FROM upsert_t WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          x: 42
+          y: 5
+          email: "a@example.com"
+
+  - name: "Increment: x = x + 1 on PK conflict"
+    sql: |
+      INSERT INTO upsert_t (id, x, y, email)
+      VALUES (1, 0, 0, 'a@example.com')
+      ON DUPLICATE KEY UPDATE x = x + 1
+    expect: {}
+
+  - name: "Verify increment"
+    sql: "SELECT id, x FROM upsert_t WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          x: 43
+
+  - name: "Add incoming: x = x + VALUES(x)"
+    sql: |
+      INSERT INTO upsert_t (id, x, y, email)
+      VALUES (1, 7, 0, 'a@example.com')
+      ON DUPLICATE KEY UPDATE x = x + VALUES(x)
+    expect: {}
+
+  - name: "Verify add incoming"
+    sql: "SELECT id, x FROM upsert_t WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          x: 50
+
+  - name: "Use VALUES(y) in expression: x = x + VALUES(y)"
+    sql: |
+      INSERT INTO upsert_t (id, x, y, email)
+      VALUES (1, 123, 4, 'a@example.com')
+      ON DUPLICATE KEY UPDATE x = x + VALUES(y)
+    expect: {}
+
+  - name: "Verify VALUES(y) usage"
+    sql: "SELECT id, x FROM upsert_t WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          x: 54
+
+  - name: "Seed second row"
+    sql: "INSERT INTO upsert_t (id, x, y, email) VALUES (2, 7, 0, 'b@example.com')"
+    expect:
+      affected_rows: 1
+
+  - name: "Upsert via UNIQUE(email) conflict; update x = VALUES(x)"
+    sql: |
+      INSERT INTO upsert_t (id, x, y, email)
+      VALUES (3, 8, 9, 'b@example.com')
+      ON DUPLICATE KEY UPDATE x = VALUES(x)
+    expect: {}
+
+  - name: "Verify UNIQUE conflict updated row with email b@example.com"
+    sql: "SELECT id, x, y, email FROM upsert_t WHERE email = 'b@example.com'"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+          x: 8
+          y: 0
+          email: "b@example.com"
+
+  - name: "Row count remains 2"
+    sql: "SELECT COUNT(*) AS c FROM upsert_t"
+    expect:
+      rows: 1
+      data:
+        - c: 2
+
+  - name: "No-op overwrite: x = VALUES(x) with same value"
+    sql: |
+      INSERT INTO upsert_t (id, x, y, email)
+      VALUES (2, 8, 111, 'b@example.com')
+      ON DUPLICATE KEY UPDATE x = VALUES(x)
+    expect: {}
+
+  - name: "Verify no-op did not change y"
+    sql: "SELECT id, x, y FROM upsert_t WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+          x: 8
+          y: 0
+
+  - name: "Delete row id=1"
+    sql: "DELETE FROM upsert_t WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Reinsert same PK+email after delete"
+    sql: "INSERT INTO upsert_t (id, x, y, email) VALUES (1, 100, 0, 'a@example.com')"
+    expect:
+      affected_rows: 1
+
+  - name: "Row count back to 2"
+    sql: "SELECT COUNT(*) AS c FROM upsert_t"
+    expect:
+      rows: 1
+      data:
+        - c: 2
+
+  - name: "Verify reinserted row"
+    sql: "SELECT id, x, y, email FROM upsert_t WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          x: 100
+          y: 0
+          email: "a@example.com"
+
+  - name: "Illegal duplicate PK insert errors"
+    sql: "INSERT INTO upsert_t (id, x, y, email) VALUES (2, 9, 9, 'new@example.com')"
+    expect:
+      error: true
+
+  - name: "Illegal duplicate UNIQUE(email) insert errors"
+    sql: "INSERT INTO upsert_t (id, x, y, email) VALUES (3, 1, 1, 'b@example.com')"
+    expect:
+      error: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS upsert_t"

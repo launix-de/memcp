@@ -669,15 +669,19 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 			dcolPresent[i] = false
 		}
 	}
+	var recid uint
 	for i := uint(0); i < t.main_count; i++ {
 		for j, v := range values {
 			if !scm.Equal(mcols[j].GetValue(i), v) {
 				goto skipnextmain
 			}
 		}
-		result = i
-		present = true
-		goto found
+		// prefer non-deleted main rows; if deleted, keep searching
+		if !t.deletions.Get(i) {
+			result = i
+			present = true
+			goto found
+		}
 
 	skipnextmain:
 	}
@@ -701,9 +705,13 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 				}
 			}
 		}
-		result = i + t.main_count
-		present = true
-		goto found
+		// prefer non-deleted delta rows
+		recid = i + t.main_count
+		if !t.deletions.Get(recid) {
+			result = recid
+			present = true
+			goto found
+		}
 
 	skipnextdelta:
 	}
