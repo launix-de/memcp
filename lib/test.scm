@@ -253,6 +253,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (optimize '('concat "a" 2)) "a2" "optimize folds string concat")
 (assert (optimize '('and true '(equal? 2 2))) true "optimize folds and/equal")
 (assert (optimize '('begin '('define 'x 4) '(+ 'x 1))) 5 "optimize inlines define use-once")
+(assert (optimize '('and '('and '('and '(> 'LINEITEM.L_QUANTITY 10)) true) '('equal? 1 '('outer 1)))) '(> 'LINEITEM.L_QUANTITY 10) "SQL filter optimization")
 
 /* Lambda params overshadow outer variables */
 (define y 10)
@@ -281,7 +282,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert ((eval (optimize lam_ok)) 2 3) 5 "numbered params add correctly (NumVars=2)")
 
 /* Broken case: body references (var 1) but NumVars too small -> must raise error */
-(define lam_bad '(lambda '('a 'b) '('+ '('var 0) '('var 1)) 1))
+(define lam_bad '('lambda '('a 'b) '('+ '('var 0) '('var 1)) 1))
 (define panicked (newsession))
 (try (lambda () ((eval (optimize lam_bad)) 2 3)) (lambda (e) (panicked "panic" true)))
 (assert (panicked "panic") true "insufficient NumVars must panic (guards optimizer bug)")

@@ -569,6 +569,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"code", "list", "list with head and optional parameters"},
 		}, "any", func (a ...Scmer) Scmer {
+			//fmt.Println("optimize", SerializeToString(a[0], &Globalenv), " -> ", SerializeToString(Optimize(a[0], &Globalenv), &Globalenv))
 			return Optimize(a[0], &Globalenv)
 		}, true,
 	})

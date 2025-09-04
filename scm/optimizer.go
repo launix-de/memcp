@@ -154,6 +154,18 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 		}
 	case []Scmer:
 		if len(v) > 0 {
+			// (outer CONST) -> CONST  (fold away environment indirection for literals)
+			if v[0] == Symbol("outer") && len(v) == 2 {
+				// TODO: (outer (lambda (vars) body)) can pull the outer into all symbols and lambdas
+
+				// Optimize the inner value; if it is a constant, return it directly
+				inner, _, isConst := OptimizeEx(v[1], env, ome, useResult) // TODO: ome.parent
+				if isConst {
+					return inner, true, true
+				}
+				// otherwise keep (outer ...) for runtime
+				return v, transferOwnership, false
+			}
 			// TODO: if v[0] == list -> check if children are constant -> use quote instead
 			if v[0] == Symbol("begin") {
 				// analyze which variables are to be used
@@ -312,10 +324,6 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 				return v, transferOwnership, false // TODO: lambdas may be constant if their scope is kinda constant and they contain only foldable functions
 			}
 
-			if v[0] == Symbol("outer") {
-				// TODO: (outer (lambda (vars) body)) can pull the outer into all symbols and lambdas
-			}
-
 			// now all the special cases
 
 			// set/define
@@ -368,6 +376,9 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 					if i > 0 && !c {
 						allConstArgs = false
 					}
+				}
+				if v[0] == Symbol("!begin") && allConstArgs {
+					return v[len(v)-1], true, true
 				}
 				// constant folding: fold pure functions with literal args
 				if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
