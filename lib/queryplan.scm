@@ -292,7 +292,7 @@ if there is a group function, create a temporary preaggregate table
 									(set keycols (merge_unique (map group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
 									(scan_wrapper 'scan schema tbl
 										(cons list filtercols)
-										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr condition))
+										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
 										(cons list keycols)
 										'((quote lambda)
 											(map keycols (lambda (col) (symbol (concat tblvar "." col))))
@@ -319,7 +319,7 @@ if there is a group function, create a temporary preaggregate table
 							(scan_wrapper 'scan schema tbl
 								(cons list (merge tblvar_cols filtercols))
 								/* check group equality AND WHERE-condition */
-								'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (cons (quote and) (cons (replace_columns_from_expr condition) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col)))))))))
+								'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))))
 								(cons list cols)
 								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))/* TODO: (build_scan tables condition)*/
 								reduce
@@ -364,7 +364,7 @@ if there is a group function, create a temporary preaggregate table
 							(scan_wrapper 'scan_order schema tbl
 								/* condition */
 								(cons list filtercols)
-								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr now_condition))
+								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 								/* sortcols, sortdirs */
 								(cons list ordercols)
 								(cons list dirs)
@@ -403,7 +403,7 @@ if there is a group function, create a temporary preaggregate table
 							(scan_wrapper 'scan schema tbl
 								/* condition */
 								(cons list filtercols)
-								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr now_condition))
+								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
 								/* extract columns and store them into variables */
 								(cons list cols)
 								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
