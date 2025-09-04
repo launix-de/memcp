@@ -905,7 +905,11 @@ func Init(en scm.Env) {
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-				return db.GetTable(scm.String(a[1])).ShowColumns()
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				return t.ShowColumns()
 			} else {
 				panic("invalid call of show")
 			}
