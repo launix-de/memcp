@@ -166,4 +166,3 @@ func (cm *CacheManager) cleanup() {
 		cm.indexMap[item.pointer] = idx
 	}
 }
-
