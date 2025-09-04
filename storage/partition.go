@@ -404,6 +404,8 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 // this runs inside a t.mu.Lock()
 func (t *table) repartition(shardCandidates []shardDimension) {
 	// rebuild sharding schema
+	// TODO: check if we can own the table (don't repartition small tables whose shards we don't own)
+	// TODO: in case of big tables: search for other nodes who own shards and do the work together, otherwise we run out of ram
 	totalShards := 1
 	for _, sc := range shardCandidates {
 		totalShards *= sc.NumPartitions
@@ -420,7 +422,9 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	// Before repartitioning, make sure all shards are loaded and the
 	// columns required for partitioning are present in memory. Doing this
 	// outside of shard locks avoids lock upgrades inside partition() when
-	// reading main storages.
+	// reading main storages. Also eagerly load all table columns so that
+	// later ColumnReader() calls do not attempt to acquire a write lock
+	// while repartition holds long-lived RLocks on the shards.
 	for _, s := range oldshards {
 		if s == nil {
 			continue
@@ -428,6 +432,11 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		s.ensureLoaded()
 		for _, sd := range shardCandidates {
 			s.ensureColumnLoaded(sd.Column)
+		}
+		// Load all columns used by the table to prevent lock upgrades
+		// during the copy step while RLocks are held.
+		for _, col := range t.Columns {
+			s.ensureColumnLoaded(col.Name)
 		}
 		// also ensure main_count is initialized
 		s.ensureMainCount()
