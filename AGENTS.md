@@ -26,6 +26,10 @@
 - Tests: YAML files use lower_snake_case keys and `NN_description.yaml` naming.
 - Avoid introducing new tools; prefer editing existing files over adding new ones.
 
+### API Stability
+- Avoid "Ex"-suffixed helper variants (e.g., `FooEx`); prefer a single, clear API that accepts parameters like `alreadyLocked bool` when needed.
+- When changing function signatures, update all call sites in the repository in one pass; do not leave temporary wrappers.
+
 ### Concurrency Rules (Storage Engine)
 - Never access shard internals without the shard lock:
   - `storageShard.columns`, `deltaColumns`, `inserts`, `deletions`, and `Indexes` must only be read/written while holding `t.mu`.
