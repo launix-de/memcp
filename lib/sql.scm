@@ -197,7 +197,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(set port (arg "mysql-port" (env "MYSQL_PORT" "3307")))
 	(mysql port
 		(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
-		(lambda (username schema) (list? (show schema))) /* switch schema (TODO check grants; in the moment, only the existence of the database is checked) */
+		(lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))) /* allow virtual INFORMATION_SCHEMA, otherwise check db existence */
 		(lambda (schema sql resultrow_sql session) (begin /* sql */
 			(define resultrow resultrow_sql)
 			(if (equal? (session "syntax") "scheme") /* TODO: check access to system.* */ (begin

@@ -78,6 +78,28 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		'("Field" "table_name")
 		'("Field" "referenced_table_name")
 	)
+
+	/* Minimal compatibility for mysqldump probes */
+	'((ignorecase "information_schema") (ignorecase "files")) '(
+		'("Field" "file_name")
+		'("Field" "file_type")
+		'("Field" "tablespace_name")
+		'("Field" "logfile_group_name")
+		'("Field" "total_extents")
+		'("Field" "initial_size")
+		'("Field" "engine")
+		'("Field" "extra")
+	)
+	'((ignorecase "information_schema") (ignorecase "partitions")) '(
+		'("Field" "table_schema")
+		'("Field" "table_name")
+		'("Field" "partition_name")
+		'("Field" "tablespace_name")
+	)
+
+	/* Unknown INFORMATION_SCHEMA table → clear SCM-side error */
+	'((ignorecase "information_schema") _)
+		(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
 	(show schema tbl) /* otherwise: fetch from metadata */
 )))
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
@@ -97,7 +119,10 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
 		(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
+	'((ignorecase "information_schema") (ignorecase "files"))
+		(merge '(scanfn schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
+	'((ignorecase "information_schema") (ignorecase "partitions"))
+		(merge '(scanfn schema '(list)) rest) /* empty: no MySQL partitions */
 	'(schema tbl) /* normal case */
 		(merge '(scanfn schema tbl) rest)
 ))))
-
