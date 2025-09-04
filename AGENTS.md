@@ -111,6 +111,60 @@
 - Parser Optimizations: number parser parameters and precompile eligible patterns via parseSyntax.
 - JIT: chain together scanner loop (main+delta), map function and reduce function
 - JIT: specialize functions like "+" according to lhs and rhs operator types, remove type checks and so on
+- JIT: inspect the inner logic of getValue on compressed columns such that some operators like (equal??) can directly operate on compressed data, e.g. for BLOB storages on the hash or on integer storages: rather compress the equal?? value that we want to search instead of decompressing the whole table
+
+## Query plan roadmap
+
+- **TODO:** This document outlines a strategic roadmap for integrating a learned query optimizer into our database engine, `memcp`. The goal is to replace or augment the traditional heuristic-based join reordering mechanism with a deep learning model, likely a Transformer, to achieve higher performance and adaptivity. The core idea is to learn optimal join orderings from query patterns and data statistics, moving towards a "hands-free" optimizer. [7]
+
+### Phase 1: Foundational Data Collection and Representation
+
+1.  **Feature Engineering & Encoding:** The first step is to define a comprehensive feature set that can represent a query and its context. This involves:
+    *   **Table & Column Statistics:** Collect fundamental statistics like table cardinality, number of distinct values (NDV), and presence of indexes. [1, 26]
+    *   **Predicate & Join Information:** Encode filter predicates (e.g., `WHERE a > 10`) and join predicates (`a.id = b.id`). This includes the tables, columns, operators, and constants involved.
+    *   **Learned Cardinality Estimation:** The most critical feature is cardinality (the size of intermediate results). Instead of relying on traditional, often inaccurate, histogram-based estimates [26], we will implement a learned model.
+        *   **Histogram Encoding with CNNs:** We will represent column data distributions (histograms) as vectors. A 1D-Convolutional Neural Network (CNN) will be trained to process these histogram vectors and produce a rich, learned embedding. [22, 27] This approach is superior to using a single, manually calculated selectivity value as it captures the entire data distribution, including skew. [21, 26]
+        *   **End-to-End Training:** This "Histogram-Encoder-CNN" will be trained end-to-end with the main query planning model. This allows it to learn the most relevant features from the distribution for the specific task of predicting join costs. [3, 20]
+
+2.  **Query Representation for the Model:** The encoded features must be structured into a format a Transformer can process.
+    *   **Graph-to-Sequence:** A query can be seen as a graph where tables are nodes and joins are edges. We need to represent this graph as a sequence of vectors.
+    *   **Input Tensors:** We will use two main inputs for the model:
+        1.  **Table Feature Tensor `(N, F)`:** A sequence of N vectors, where each vector represents a table and its associated filters, including the learned histogram embeddings.
+        2.  **Join Relation Tensor `(N, N, J)`:** An adjacency matrix-like tensor where the entry `(i, j)` is a vector describing the join between table `i` and `j` (e.g., join selectivity, join type). This explicitly provides the graph structure to the model. [15]
+
+### Phase 2: Model Architecture and Training
+
+1.  **Core Model: Graph-Aware Transformer:**
+    *   We will implement a Transformer encoder architecture. The key innovation is to inject the `Join Relation Tensor` directly into the self-attention mechanism. This creates a "bias" in the attention scores, forcing the model to pay more attention to tables that are directly and selectively joined. This architecture is effectively a **Graph Transformer**. [15]
+    *   The iterative nature of Transformer layers allows the model to simulate message passing, where each table progressively learns about its multi-hop neighborhood in the join graph. [8, 19]
+
+2.  **Training Strategy:**
+    *   **Objective:** The model's output will be a priority score (a float) for each table. The final join order is determined by sorting the tables based on these scores.
+    *   **Data Generation:** We will generate a large and diverse set of training queries. For each query, we will execute multiple join permutations and record their *actual execution latency*. This provides the ground truth.
+    *   **Loss Function (Learning-to-Rank):** Instead of simple regression on latency (which can be noisy), we will use a **ranking loss**. Given two join plans for the same query, the loss function will penalize the model if it assigns a better score to the slower plan. This directly optimizes for the *relative order* of plans, which is more robust. [15]
+    *   **Reinforcement Learning (Future Work):** A more advanced alternative is to frame the problem as a Markov Decision Process and use Deep Reinforcement Learning (DRL). The model (agent) would build a join plan step-by-step, receiving a reward based on the final plan's cost. [7, 15] This is more complex but has shown great promise in academic research.
+
+### Phase 3: Integration and Deployment
+
+1.  **Inference Workflow:**
+    *   When a new query arrives, the `memcp` engine will extract its features and construct the `Table Feature` and `Join Relation` tensors.
+    *   These tensors are fed into the trained Transformer model for a fast forward pass.
+    *   The model outputs the priority scores.
+    *   The engine sorts the tables according to these scores to get the proposed join order.
+    *   This order is then used to construct the final physical execution plan.
+
+2.  **Continuous Improvement & Feedback Loop:**
+    *   The system will operate in a "shadow" mode initially, comparing the learned plan's predicted cost against the heuristic planner's choice.
+    *   We will continuously log query performance and feed it back into the training pipeline. This allows the model to adapt to changes in the data distribution and query workload over time, a key advantage over static optimizers. [7, 13]
+
+### Key Research Insights & Best Practices:
+
+*   **Learned Cardinality is Key:** The biggest source of error in traditional optimizers is inaccurate cardinality estimation. Using deep learning models (like MSCN, Naru, NeuroCard) to learn the joint data distribution is a proven way to achieve orders-of-magnitude improvements in accuracy. [4, 6, 18]
+*   **Representing Plans, Not Just Queries:** The model should learn from the structure of the *plan*. Architectures like Tree-LSTMs or plan-structured neural networks are effective. Our Graph Transformer approach is a state-of-the-art implementation of this principle. [11, 29]
+*   **Data-Driven vs. Query-Driven:** Our approach is a hybrid. We use data-driven models (CNNs on histograms) to learn data distributions [2] and a query-driven model (the Transformer) to learn plan structures.
+*   **Start with Supervised Learning:** While Reinforcement Learning is powerful, it's harder to train and stabilize. Starting with a supervised, learning-to-rank approach is more pragmatic and provides a strong baseline. [14, 15]
+
+
 
 ## MySQL ↔ MemCP Parallel Run Plan
 - Goal: operate MemCP alongside MySQL for months with minimal risk, validating correctness and performance before cutover.
