@@ -164,18 +164,26 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(match (req "path")
 			(regex "^/sql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
+				/* tolerate an optional trailing ';' using multiline group */
+				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
 				(handle_query req res schema query)
 			)
 			(regex "^/sql/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
+				/* tolerate an optional trailing ';' using multiline group */
+				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
 				(handle_query req res schema query)
 			)
 			(regex "^/psql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
+				/* tolerate an optional trailing ';' using multiline group */
+				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
 				(handle_query_postgres req res schema query)
 			)
 			(regex "^/psql/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
+				/* tolerate an optional trailing ';' using multiline group */
+				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
 				(handle_query_postgres req res schema query)
 			)
 			/* default */
@@ -202,6 +210,8 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				)))
 			) (time (begin
 				/* SQL syntax mode */
+				/* tolerate an optional trailing ';' using multiline group */
+				(set sql (match sql (regex "^((?s:.*));\\s*" _ body) body sql))
 				(define formula (try (lambda ()
 					((if (equal? (session "syntax") "postgresql") (lambda (schema sql) (parse_psql schema sql nil)) (lambda (schema sql) (parse_sql schema sql nil))) schema sql))
 				(lambda (e) (begin

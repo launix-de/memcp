@@ -364,6 +364,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
 		(atom "INTO" true)
+		(? (define schema2 psql_identifier) ".")
 		(define tbl psql_identifier) /* TODO: ignorecase */
 		(? "("
 			(define coldesc (*
@@ -386,17 +387,18 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		) updaterows)))
 	) (begin
 		/* policy: write access check */
-		(if policy (policy schema tbl true) true)
+		(if policy (policy (coalesce schema2 schema) tbl true) true)
 		(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "Field")))))
-		'('insert schema tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
+		(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+		'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
 	)))
 
 	(define psql_insert_select (parser '(
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
 		(atom "INTO" true)
+		(? (define schema2 psql_identifier) ".")
 		(define tbl psql_identifier) /* TODO: ignorecase */
 		(? "("
 			(define coldesc (*
@@ -419,12 +421,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		) updaterows)))
 	) (begin
 		/* policy: write access check */
-		(if policy (policy schema tbl true) true)
+		(if policy (policy (coalesce schema2 schema) tbl true) true)
 		(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 		(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-		(define coldesc (coalesce coldesc (map (show schema tbl) (lambda (col) (col "Field")))))
+		(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 		'('begin
-			'('set 'resultrow '('lambda '('item) '('insert schema tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))))
+			'('set 'resultrow '('lambda '('item) '('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))))
 			(apply build_queryplan (apply untangle_query inner))
 		)
 	)))
@@ -439,7 +441,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(atom "CREATE" true)
 		(atom "TABLE" true)
 		(define ifnotexists (parser (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) true))
-		(define id (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier))
+		(define id (or (parser '((define schema2 psql_identifier) "." (define id psql_identifier)) id) psql_identifier))
 		"("
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
@@ -485,7 +487,7 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define collation (regex "[0-9]+"))) '("auto_increment" collation))
 		)))
-	) '((quote createtable) schema id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists)))
+	) '((quote createtable) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists)))
 
 	(define psql_alter_table (parser '(
 		(atom "ALTER" true)
