@@ -66,6 +66,62 @@ func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
 	scm.Declare(&en, &scm.Declaration{
+		"scan_estimate", "estimate output row count for a scan or ordered scan using the AI estimator if available",
+		4, 5,
+		[]scm.DeclarationParameter{
+			{"schema", "string", "database where the table is located"},
+			{"table", "string", "name of the table"},
+			{"filterColumns", "list", "list of columns that are fed into filter"},
+			{"filter", "func", "lambda predicate to evaluate (same as scan)"},
+			// optional fifth parameter: order columns (list of column names or lambda procs)
+		}, "int",
+		func(a ...scm.Scmer) scm.Scmer {
+			schema := scm.String(a[0])
+			table := scm.String(a[1])
+			filtercols_ := a[2].([]scm.Scmer)
+			filtercols := make([]string, len(filtercols_))
+			for i, c := range filtercols_ {
+				filtercols[i] = scm.String(c)
+			}
+			filter := a[3]
+			var sortcols []scm.Scmer
+			if len(a) > 4 {
+				if lst, ok := a[4].([]scm.Scmer); ok {
+					sortcols = lst
+				}
+			}
+			// default output when estimator is not available: CountEstimate
+			globalEstimatorMu.Lock()
+			est := globalEstimator
+			globalEstimatorMu.Unlock()
+			db := GetDatabase(schema)
+			if db == nil {
+				return int64(0)
+			}
+			t := db.GetTable(table)
+			if t == nil {
+				return int64(0)
+			}
+			inputEstimate := int64(t.CountEstimate())
+			if est == nil {
+				return inputEstimate
+			}
+			// Query estimator for output count with inputEstimate
+			out, err := est.ScanEstimate(schema, table, filtercols, filter, sortcols, inputEstimate, 50*time.Millisecond)
+			if err != nil {
+				fmt.Println("AIEstimator: call failed:", err, "— falling back to CountEstimate and disabling estimator")
+				StopGlobalEstimator()
+				return inputEstimate
+			}
+			if out < 0 {
+				return inputEstimate
+			}
+			return out
+		},
+		false,
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		"scan", "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
 		6, 10,
 		[]scm.DeclarationParameter{

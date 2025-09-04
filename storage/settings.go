@@ -27,9 +27,10 @@ type SettingsT struct {
 	DefaultEngine          string
 	ShardSize              uint
 	AnalyzeMinItems        int
+	AIEstimator            bool
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, false}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -50,6 +51,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			"DefaultEngine", Settings.DefaultEngine,
 			"ShardSize", int64(Settings.ShardSize),
 			"AnalyzeMinItems", int64(Settings.AnalyzeMinItems),
+			"AIEstimator", Settings.AIEstimator,
 		}
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -67,6 +69,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return int64(Settings.ShardSize)
 		case "AnalyzeMinItems":
 			return int64(Settings.AnalyzeMinItems)
+		case "AIEstimator":
+			return Settings.AIEstimator
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -89,6 +93,25 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.ShardSize = uint(scm.ToInt(a[1]))
 		case "AnalyzeMinItems":
 			Settings.AnalyzeMinItems = scm.ToInt(a[1])
+		case "AIEstimator":
+			prev := Settings.AIEstimator
+			Settings.AIEstimator = scm.ToBool(a[1])
+			if prev != Settings.AIEstimator {
+				// start/stop estimator on change
+				if Settings.AIEstimator {
+					StartGlobalEstimator()
+				} else {
+					StopGlobalEstimator()
+				}
+			} else if Settings.AIEstimator {
+				// Setting already true; if estimator not running, try to (re)start
+				globalEstimatorMu.Lock()
+				est := globalEstimator
+				globalEstimatorMu.Unlock()
+				if est == nil {
+					StartGlobalEstimator()
+				}
+			}
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}

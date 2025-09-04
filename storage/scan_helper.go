@@ -18,12 +18,27 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
+
+// syscall mmap wrappers using the standard library (deprecated but sufficient).
+func syscallMmap(fd int, length int) ([]byte, error) {
+	return syscall.Mmap(fd, 0, length, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+}
+
+func syscallMunmap(b []byte) error { return syscall.Munmap(b) }
 
 // encodeScmer prints a compact textual encoding of a Scheme AST to w.
 // Unknowns print as "?".
@@ -310,4 +325,213 @@ func safeLogScan(schema, table string, ordered bool, filter, order string, input
 	cols := []string{"schema", "table", "ordered", "filter", "order", "inputCount", "outputCount", "analyze_ns", "exec_ns"}
 	row := []scm.Scmer{schema, table, ordered, filter, order, inputCount, outputCount, analyzeNs, execNs}
 	t.Insert(cols, [][]scm.Scmer{row}, nil, nil, false, nil)
+}
+
+// ---- AI IPC (shared-memory) estimator ----
+
+// Estimator provides scan selectivity estimation via shared-memory IPC with ai_optimizer.py.
+type Estimator struct {
+	path      string
+	cmd       *exec.Cmd
+	mmap      []byte
+	mu        sync.Mutex
+	connected bool
+}
+
+// Shared memory layout (little endian):
+// Request header:
+// [0..7]   reqSeq (uint64)
+// [8..15]  respSeq (uint64)   // set by Python when ready
+// [16..23] inputCount (uint64)
+// [24..27] schemaLen (uint32)
+// [28..31] tableLen  (uint32)
+// [32..35] filterLen (uint32)
+// [36..39] orderLen  (uint32)
+// [40..47] respOutput (float64) // set by Python
+// [48..63] reserved
+// Payload (UTF-8):
+// [64..]    schema | table | filter | order (concatenated)
+const (
+	shmHeaderSize = 64
+	reqMax        = 512 * 1024
+)
+
+// NewEstimator creates a shared memory file, mmaps it, and spawns the Python helper.
+func NewEstimator(pythonPath string) (*Estimator, error) {
+	// choose a tmpfs path if available
+	base := "/dev/shm"
+	if st, err := os.Stat(base); err != nil || !st.IsDir() {
+		base = os.TempDir()
+	}
+	fn := filepath.Join(base, fmt.Sprintf("memcp-ai-%d-%d.shm", os.Getpid(), time.Now().UnixNano()))
+	f, err := os.OpenFile(fn, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0600)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// set size
+	if err := f.Truncate(int64(shmHeaderSize + reqMax)); err != nil {
+		return nil, err
+	}
+	b, err := mmapFile(f)
+	if err != nil {
+		return nil, err
+	}
+
+	// spawn python helper
+	pp := pythonPath
+	if pp == "" {
+		pp = "./ai_optimizer.py"
+	}
+	cmd := exec.Command(pp, "--ipc", fn)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		unmapFile(b)
+		return nil, err
+	}
+	// NOTE: unlink after helper connects; without a handshake we keep it for now
+	return &Estimator{path: fn, cmd: cmd, mmap: b}, nil
+}
+
+// Close terminates the helper and unmaps the shared memory.
+func (e *Estimator) Close() {
+	if e == nil {
+		return
+	}
+	if e.cmd != nil && e.cmd.Process != nil {
+		_ = e.cmd.Process.Kill()
+	}
+	if e.mmap != nil {
+		unmapFile(e.mmap)
+	}
+	_ = os.Remove(e.path)
+}
+
+var globalEstimatorMu sync.Mutex
+var globalEstimator *Estimator
+
+// StartGlobalEstimator starts the estimator if not already running.
+func StartGlobalEstimator() {
+	globalEstimatorMu.Lock()
+	defer globalEstimatorMu.Unlock()
+	if globalEstimator != nil {
+		return
+	}
+	fmt.Println("AIEstimator: starting...")
+	est, err := NewEstimator("./ai_optimizer.py")
+	if err != nil {
+		fmt.Println("AIEstimator: failed to start:", err)
+		return
+	}
+	if est != nil && est.cmd != nil && est.cmd.Process != nil {
+		fmt.Println("AIEstimator: started (pid=", est.cmd.Process.Pid, ")")
+	} else {
+		fmt.Println("AIEstimator: started")
+	}
+	globalEstimator = est
+}
+
+// StopGlobalEstimator stops and frees the estimator.
+func StopGlobalEstimator() {
+	globalEstimatorMu.Lock()
+	defer globalEstimatorMu.Unlock()
+	if globalEstimator != nil {
+		fmt.Println("AIEstimator: stopping...")
+		globalEstimator.Close()
+		globalEstimator = nil
+		fmt.Println("AIEstimator: stopped")
+	}
+}
+
+// ScanEstimate encodes condition and sortcols similar to scan/scan_order logging helpers
+// and queries the Python estimator via shared memory. If sortcols is empty, treats as unordered.
+func (e *Estimator) ScanEstimate(schema, table string, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, inputCount int64, timeout time.Duration) (int64, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.mmap == nil {
+		return -1, fmt.Errorf("estimator not initialized")
+	}
+
+	// Encode filter string
+	filter := ""
+	if p, ok := condition.(scm.Proc); ok {
+		filter = encodeScmerToString(p.Body, conditionCols, p.Params.([]scm.Scmer))
+	}
+	// Encode order string from sortcols
+	var sb strings.Builder
+	for i, sc := range sortcols {
+		if i > 0 {
+			sb.WriteByte('|')
+		}
+		switch v := sc.(type) {
+		case string:
+			sb.WriteString(v)
+		default:
+			encodeScmer(sc, &sb, nil, nil)
+		}
+	}
+	order := sb.String()
+	// Build contiguous payload
+	sSchema := []byte(schema)
+	sTable := []byte(table)
+	sFilter := []byte(filter)
+	sOrder := []byte(order)
+	total := len(sSchema) + len(sTable) + len(sFilter) + len(sOrder)
+	if total > reqMax {
+		return -1, fmt.Errorf("request too large: %d", total)
+	}
+
+	buf := e.mmap
+	// Next sequence
+	seq := binary.LittleEndian.Uint64(buf[0:8]) + 1
+	// Header
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(inputCount))
+	binary.LittleEndian.PutUint32(buf[24:28], uint32(len(sSchema)))
+	binary.LittleEndian.PutUint32(buf[28:32], uint32(len(sTable)))
+	binary.LittleEndian.PutUint32(buf[32:36], uint32(len(sFilter)))
+	binary.LittleEndian.PutUint32(buf[36:40], uint32(len(sOrder)))
+	// Payload
+	off := shmHeaderSize
+	copy(buf[off:off+len(sSchema)], sSchema)
+	off += len(sSchema)
+	copy(buf[off:off+len(sTable)], sTable)
+	off += len(sTable)
+	copy(buf[off:off+len(sFilter)], sFilter)
+	off += len(sFilter)
+	copy(buf[off:off+len(sOrder)], sOrder)
+	// Publish seq last
+	binary.LittleEndian.PutUint64(buf[0:8], seq)
+
+	// Wait for respSeq == seq
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		respSeq := binary.LittleEndian.Uint64(buf[8:16])
+		if respSeq == seq {
+			bits := binary.LittleEndian.Uint64(buf[40:48])
+			out := math.Float64frombits(bits)
+			if out < 0 {
+				out = 0
+			}
+			return int64(out + 0.5), nil
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+	return -1, fmt.Errorf("timeout waiting for AI response")
+}
+
+// mmap helpers (portable enough)
+func mmapFile(f *os.File) ([]byte, error) {
+	sz, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	// Use syscall.Mmap (deprecated) to avoid extra deps
+	//goland:noinspection ALL
+	b, err := syscallMmap(int(f.Fd()), int(sz))
+	return b, err
+}
+
+func unmapFile(b []byte) {
+	_ = syscallMunmap(b)
 }

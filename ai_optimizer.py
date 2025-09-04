@@ -24,6 +24,8 @@ import math
 import re
 import sys
 import time
+import mmap
+import struct
 from typing import List
 
 import requests
@@ -443,6 +445,61 @@ def run_prompt_loop(port: int, username: str, password: str):
         except Exception as e:
             print(f"prediction error: {e}")
 
+def run_ipc_loop(ipc_path: str, port: int, username: str, password: str):
+    # Load core models once; if unavailable, fall back to passthrough (output = input)
+    base_encoder = None
+    ordered_layer = None
+    output_head  = None
+    try:
+        base_encoder = _load_script_by_id(port, username, password, 'base_encoder_v1')
+        ordered_layer = _load_script_by_id(port, username, password, 'ordered_layer_v1')
+        output_head  = _load_script_by_id(port, username, password, 'output_head_v1')
+    except Exception as e:
+        print(f"AIEstimator(py): core models not available ({e}); running passthrough mode")
+    # Cache per-table histogram modules
+    hist_cache: dict[tuple[str,str], torch.jit.ScriptModule] = {}
+    with open(ipc_path, 'r+b') as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE)
+        try:
+            last_seq = 0
+            while True:
+                # Read reqSeq
+                reqSeq = struct.unpack_from('<Q', mm, 0)[0]
+                if reqSeq != 0 and reqSeq != last_seq:
+                    # Read header
+                    inputCount = struct.unpack_from('<Q', mm, 16)[0]
+                    schemaLen, tableLen, filterLen, orderLen = struct.unpack_from('<IIII', mm, 24)
+                    off = 64
+                    schema = mm[off:off+schemaLen].decode('utf-8', 'ignore'); off += schemaLen
+                    table  = mm[off:off+tableLen].decode('utf-8', 'ignore');  off += tableLen
+                    filter_s = mm[off:off+filterLen].decode('utf-8', 'ignore'); off += filterLen
+                    order_s  = mm[off:off+orderLen].decode('utf-8', 'ignore');  off += orderLen
+                    # Load histogram
+                    key = (schema, table)
+                    hist = hist_cache.get(key)
+                    if hist is None:
+                        try:
+                            hist = _load_hist_for_table(port, username, password, schema, table)
+                            hist_cache[key] = hist
+                        except Exception:
+                            hist = None
+                    # Predict or fallback
+                    if (base_encoder is None) or (output_head is None) or (hist is None):
+                        out = float(inputCount)
+                    else:
+                        try:
+                            out = _predict_one(base_encoder, ordered_layer, output_head, hist, schema, table, filter_s, order_s, float(inputCount))
+                        except Exception:
+                            out = float(inputCount)
+                    # Write outputCount directly as float64 then respSeq
+                    struct.pack_into('<d', mm, 40, float(out))
+                    struct.pack_into('<Q', mm, 8, int(reqSeq))
+                    last_seq = reqSeq
+                else:
+                    time.sleep(0.0002)
+        finally:
+            mm.close()
+
 def _first_json_row(port: int, username: str, password: str, sql: str):
     url = SQL_ENDPOINT_TEMPLATE.format(port=port)
     try:
@@ -766,12 +823,16 @@ def main():
     parser.add_argument("--reset", action="store_true", help="Ignore existing models; start fresh")
     parser.add_argument("--duration", type=int, default=0, help="Timebox training to N seconds (0=disabled)")
     parser.add_argument("--prompt", action="store_true", help="Interactive prediction loop (no training)")
+    parser.add_argument("--ipc", type=str, default="", help="Run shared-memory IPC server at given path")
     parser.add_argument("--debug", action="store_true", help="Verbose debug prints")
     args = parser.parse_args()
 
     global DEBUG
     DEBUG = bool(args.debug)
 
+    if args.ipc:
+        run_ipc_loop(args.ipc, args.port, args.username, args.password)
+        return
     if args.prompt:
         run_prompt_loop(args.port, args.username, args.password)
         return

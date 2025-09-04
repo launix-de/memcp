@@ -272,7 +272,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		shardlist = t.PShards
 	}
 	for _, s := range shardlist {
-		if s == nil || s.t == nil {
+		if s == nil {
 			continue
 		}
 		// Ensure shard and column are loaded. If metadata is corrupted, panic early
