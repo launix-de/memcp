@@ -1,0 +1,32 @@
+# LENGTH(str) function
+
+metadata:
+  version: "1.0"
+  description: "Implement LENGTH(str) with NULL handling"
+
+setup: []
+
+test_cases:
+  - name: "LENGTH of literal"
+    sql: "SELECT LENGTH('abc') AS n"
+    expect:
+      rows: 1
+      data:
+        - n: 3
+
+  - name: "LENGTH of empty string"
+    sql: "SELECT LENGTH('') AS n"
+    expect:
+      rows: 1
+      data:
+        - n: 0
+
+  - name: "LENGTH of NULL is NULL"
+    sql: "SELECT LENGTH(NULL) AS n"
+    expect:
+      rows: 1
+      data:
+        - n: null
+
+cleanup: []
+

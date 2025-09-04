@@ -19,6 +19,8 @@
 (sql_builtins "UPPER" toUpper)
 (sql_builtins "LOWER" toLower)
 (sql_builtins "PASSWORD" password)
+/* SQL LENGTH(str): NULL-safe wrapper around strlen */
+(sql_builtins "LENGTH" (lambda (x) (if (nil? x) nil (strlen x))))
 
 /* vectors */
 (sql_builtins "VECTOR_DISTANCE" dot)
