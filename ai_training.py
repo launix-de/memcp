@@ -50,6 +50,7 @@ ORDERED_LAYER_HIDDEN = 128
 OUTPUT_HIDDEN = 128
 RATIO_LOSS_WEIGHT = 0.3
 SEED = 42
+DEBUG = False
 
 torch.manual_seed(SEED)
 
@@ -356,6 +357,148 @@ def fetch_scans(port: int, username: str, password: str) -> List[ScanRow]:
         print(f"Warning: failed to fetch scans: {e}")
     return rows
 
+def _first_json_row(port: int, username: str, password: str, sql: str):
+    url = SQL_ENDPOINT_TEMPLATE.format(port=port)
+    try:
+        # Non-streaming to avoid chunking issues on large base64 fields
+        resp = requests.post(url, data=sql, auth=(username, password), timeout=120)
+        resp.raise_for_status()
+        text = resp.text
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return None
+        # Use first non-empty JSONL line
+        try:
+            return json.loads(lines[0])
+        except json.JSONDecodeError:
+            if DEBUG:
+                print(f"DEBUG: failed to parse JSON from first line, trying last line; text prefix={text[:80]!r}")
+            try:
+                return json.loads(lines[-1])
+            except Exception:
+                return None
+    except Exception as e:
+        print(f"Warning: SQL fetch failed: {e} sql={sql[:80]!r}")
+    return None
+
+def _decode_model_field(field) -> bytes | None:
+    if field is None:
+        return None
+    if isinstance(field, (bytes, bytearray)):
+        return bytes(field)
+    if isinstance(field, str):
+        try:
+            return base64.b64decode(field, validate=True)
+        except Exception:
+            # Retry without strict validation (line breaks, url-safe, etc.)
+            try:
+                return base64.b64decode(field)
+            except Exception:
+                # Not base64; treat as raw text bytes
+                try:
+                    return field.encode('utf-8')
+                except Exception:
+                    return None
+    return None
+
+def load_existing_models(port: int, username: str, password: str, model: nn.Module, table_keys: list[tuple[str,str]]):
+    """Load weights from DB if present into the eager training model.
+    - Base encoder: base_encoder_v1
+    - Ordered layer: ordered_layer_v1 (strip 'layer.' prefix)
+    - Output head: output_head_v1 (strip 'head.' prefix)
+    - Ratio head: ratio_head_v1
+    - Table histograms: system_statistic.table_histogram per (schema, table)
+    """
+    # Base encoder
+    obj = _first_json_row(port, username, password,
+        "SELECT model FROM base_models WHERE id='base_encoder_v1' LIMIT 1")
+    if obj and 'model' in obj:
+        b = _decode_model_field(obj['model'])
+        if b:
+            try:
+                sm = torch.jit.load(io.BytesIO(b), map_location='cpu')
+                model.base_encoder.load_state_dict(sm.state_dict())
+                if DEBUG:
+                    print(f"DEBUG: loaded base_encoder_v1 bytes={len(b)}")
+                else:
+                    print("Loaded base_encoder_v1 from DB")
+            except Exception as e:
+                print(f"Warning: failed to load base_encoder_v1: {e}")
+
+    # Ordered layer
+    obj = _first_json_row(port, username, password,
+        "SELECT model FROM base_models WHERE id='ordered_layer_v1' LIMIT 1")
+    if obj and 'model' in obj:
+        b = _decode_model_field(obj['model'])
+        if b:
+            try:
+                sm = torch.jit.load(io.BytesIO(b), map_location='cpu')
+                sd = {}
+                for k, v in sm.state_dict().items():
+                    if k.startswith('layer.'):
+                        sd[k[len('layer.'):]] = v
+                model.ordered_layer.load_state_dict(sd)
+                if DEBUG:
+                    print(f"DEBUG: loaded ordered_layer_v1 bytes={len(b)}")
+                else:
+                    print("Loaded ordered_layer_v1 from DB")
+            except Exception as e:
+                print(f"Warning: failed to load ordered_layer_v1: {e}")
+
+    # Output head
+    obj = _first_json_row(port, username, password,
+        "SELECT model FROM base_models WHERE id='output_head_v1' LIMIT 1")
+    if obj and 'model' in obj:
+        b = _decode_model_field(obj['model'])
+        if b:
+            try:
+                sm = torch.jit.load(io.BytesIO(b), map_location='cpu')
+                sd = {}
+                for k, v in sm.state_dict().items():
+                    if k.startswith('head.'):
+                        sd[k[len('head.'):]] = v
+                model.output_head.load_state_dict(sd)
+                if DEBUG:
+                    print(f"DEBUG: loaded output_head_v1 bytes={len(b)}")
+                else:
+                    print("Loaded output_head_v1 from DB")
+            except Exception as e:
+                print(f"Warning: failed to load output_head_v1: {e}")
+
+    # Ratio head
+    obj = _first_json_row(port, username, password,
+        "SELECT model FROM base_models WHERE id='ratio_head_v1' LIMIT 1")
+    if obj and 'model' in obj:
+        b = _decode_model_field(obj['model'])
+        if b:
+            try:
+                sm = torch.jit.load(io.BytesIO(b), map_location='cpu')
+                model.ratio_head.load_state_dict(sm.state_dict())
+                if DEBUG:
+                    print(f"DEBUG: loaded ratio_head_v1 bytes={len(b)}")
+                else:
+                    print("Loaded ratio_head_v1 from DB")
+            except Exception as e:
+                print(f"Warning: failed to load ratio_head_v1: {e}")
+
+    # Table histograms per (schema, table)
+    for idx, (schema, table) in enumerate(table_keys):
+        sql = (
+            "SELECT model FROM table_histogram WHERE `schema`='" + schema.replace("'","''") +
+            "' AND `table`='" + table.replace("'","''") + "' LIMIT 1"
+        )
+        obj = _first_json_row(port, username, password, sql)
+        if obj and 'model' in obj:
+            b = _decode_model_field(obj['model'])
+            if b:
+                try:
+                    sm = torch.jit.load(io.BytesIO(b), map_location='cpu')
+                    model.table_histograms[idx].load_state_dict(sm.state_dict())
+                    if DEBUG:
+                        print(f"DEBUG: loaded histogram {schema}.{table} bytes={len(b)}")
+                except Exception as e:
+                    print(f"Warning: failed to load histogram {schema}.{table}: {e}")
+
 def exec_sql(port: int, username: str, password: str, sql: str) -> str:
     # Always target the system_statistic database endpoint
     url = SQL_ENDPOINT_TEMPLATE.format(port=port)
@@ -387,12 +530,18 @@ def upload_base_model(port: int, username: str, password: str, model_id: str, bl
     return exec_sql(port, username, password, sql)
 
 # ---------- Training ----------
-def train_model(rows: List[ScanRow], port: int, username: str, password: str, epochs=EPOCHS):
+def train_model(rows: List[ScanRow], port: int, username: str, password: str, epochs=EPOCHS, reset: bool=False):
     dataset = ScansDataset(rows)
     n_tables = len(dataset.table_keys)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
     device = "cpu"
     model = FullTrainingModel(n_tables=n_tables, embed_dim=EMBED_DIM).to(device)
+    # Initialize from DB if present unless reset requested
+    if not reset:
+        try:
+            load_existing_models(port, username, password, model, dataset.table_keys)
+        except Exception as e:
+            print(f"Warning: failed to load existing models: {e}")
     opt = optim.Adam(model.parameters(), lr=LR)
     loss_fn = nn.MSELoss()
 
@@ -517,7 +666,12 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--username", type=str, default=DEFAULT_USER)
     parser.add_argument("--password", type=str, default=DEFAULT_PASSWORD)
+    parser.add_argument("--reset", action="store_true", help="Ignore existing models; start fresh")
+    parser.add_argument("--debug", action="store_true", help="Verbose debug prints")
     args = parser.parse_args()
+
+    global DEBUG
+    DEBUG = bool(args.debug)
 
     print("Fetching scan data...")
     rows = fetch_scans(args.port, args.username, args.password)
@@ -525,7 +679,7 @@ def main():
         print("No scan rows found, exiting.")
         return
 
-    train_model(rows, args.port, args.username, args.password, epochs=EPOCHS)
+    train_model(rows, args.port, args.username, args.password, epochs=EPOCHS, reset=bool(args.reset))
 
     # Deployment notes:
     # - This script trains daily and uploads TorchScript models into system_statistic.base_models and system_statistic.table_histogram.
