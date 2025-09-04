@@ -357,10 +357,16 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	c.UpdateSanitizer()
 	t.Columns = append(t.Columns, c)
 	for _, s := range t.Shards {
+		// mutate shard column map under shard lock to avoid races with readers
+		s.mu.Lock()
 		s.columns[name] = new(StorageSparse)
+		s.mu.Unlock()
 	}
 	for _, s := range t.PShards {
+		// mutate shard column map under shard lock to avoid races with readers
+		s.mu.Lock()
 		s.columns[name] = new(StorageSparse)
+		s.mu.Unlock()
 	}
 	t.schema.save()
 	return true
@@ -373,10 +379,14 @@ func (t *table) DropColumn(name string) bool {
 			// found the column
 			t.Columns = append(t.Columns[:i], t.Columns[i+1:]...) // remove from slice
 			for _, s := range t.Shards {
+				s.mu.Lock()
 				delete(s.columns, name)
+				s.mu.Unlock()
 			}
 			for _, s := range t.PShards {
+				s.mu.Lock()
 				delete(s.columns, name)
+				s.mu.Unlock()
 			}
 
 			t.schema.save()

@@ -78,8 +78,6 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	for i, col := range inputCols {
 		cols[i] = s.getColumnStorageOrPanic(col)
 	}
-	colvalues := make([]scm.Scmer, len(cols))
-
 	vals := make([]scm.Scmer, s.main_count) // build the stretchy value array
 	if parallel {
 		var done sync.WaitGroup
@@ -87,6 +85,8 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		progress := make(chan uint, runtime.NumCPU()/2) // don't go all at once, we don't have enough RAM
 		for i := 0; i < runtime.NumCPU()/2; i++ {
 			gls.Go(func() { // threadpool with half of the cores
+				// allocate a private parameter buffer per worker to avoid data races
+				colvalues := make([]scm.Scmer, len(cols))
 				for i := range progress {
 					for j, col := range cols {
 						colvalues[j] = col.GetValue(i) // read values from main storage into lambda params
@@ -100,8 +100,11 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		for i := uint(0); i < s.main_count; i++ {
 			progress <- i
 		}
+		close(progress) // signal workers to exit
 		done.Wait()
 	} else {
+		// allocate a common param buffer to save allocations
+		colvalues := make([]scm.Scmer, len(cols))
 		fn := scm.OptimizeProcToSerialFunction(computor) // optimize for serial application
 		for i := uint(0); i < s.main_count; i++ {
 			for j, col := range cols {
