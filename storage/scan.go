@@ -207,7 +207,15 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// initialize main_count lazily if needed
 	t.ensureMainCount()
 	// remember current insert status (so don't scan things that are inserted during map)
+	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	t.mu.RLock() // lock whole shard for reading since we frequently read deletions
+	locked := true
+	defer func() {
+		if locked {
+			// Ensure lock is not leaked on early return/panic
+			t.mu.RUnlock()
+		}
+	}()
 	maxInsertIndex := len(t.inserts)
 
 	// iterate over items (indexed)
@@ -259,14 +267,19 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				}
 			}
 		}
-		t.mu.RUnlock() // unlock while map callback, so we don't get into deadlocks when a user is updating
+		// unlock while map callback, so we don't get into deadlocks when a user is updating
+		t.mu.RUnlock()
+		locked = false
 		intermediate := callbackFn(mdataset...)
 		akkumulator = aggregateFn(akkumulator, intermediate)
 		hadValue = true
 		outCount++
 		t.mu.RLock()
+		locked = true
 	})
-	t.mu.RUnlock() // finished reading
+	// finished reading
+	t.mu.RUnlock()
+	locked = false
 	if !hadValue {
 		return emptyResult{}, outCount
 	} else {

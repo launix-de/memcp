@@ -105,6 +105,7 @@ func (u *storageShard) load(t *table) {
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		// Replaying the log mutates inserts/deletions; use shard write lock
 		u.mu.Lock()
+		defer u.mu.Unlock()
 		var log chan interface{}
 		log, u.logfile = u.t.schema.persistence.ReplayLog(u.uuid.String())
 		numEntriesRestored := 0
@@ -122,7 +123,6 @@ func (u *storageShard) load(t *table) {
 		if numEntriesRestored > 0 {
 			fmt.Println("restoring delta storage from database "+u.t.schema.Name+" shard "+u.uuid.String()+":", numEntriesRestored, "entries")
 		}
-		u.mu.Unlock()
 	}
 }
 
@@ -746,8 +746,15 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 	// concurrency! when rebuild is run in background, inserts and deletions into and from old delta storage must be duplicated to the ongoing process
 	t.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			t.mu.Unlock()
+		}
+	}()
 	if t.next != nil {
 		t.mu.Unlock()
+		locked = false
 		// lock+unlock the next shard so we don't return too early (sync hazards)
 		t.next.mu.Lock()
 		t.next.mu.Unlock()
@@ -790,6 +797,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 		}
 		t.mu.Unlock() // release lock, from now on, deletions+inserts should work
+		locked = false
 
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		isFirst := true
@@ -900,6 +908,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.hashmaps2 = t.hashmaps2
 		result.hashmaps3 = t.hashmaps3
 		t.mu.Unlock()
+		locked = false
 	}
 	return result
 }
