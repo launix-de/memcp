@@ -44,88 +44,88 @@ import "github.com/launix-de/memcp/storage"
 
 var IOEnv scm.Env
 
-func getImport(path string) func (a ...scm.Scmer) scm.Scmer {
-	return func (a ...scm.Scmer) scm.Scmer {
-			filename := path + "/" + scm.String(a[0])
-			// TODO: filepath.Walk for wildcards
-			wd := filepath.Dir(filename)
-			otherPath := scm.Env {
-				scm.Vars {
-					"__DIR__": path,
-					"__FILE__": filename,
-					"import": getImport(wd),
-					"load": getLoad(wd),
-					"stream": getStream(wd),
-					"watch": getWatch(wd),
-					"serveStatic": scm.HTTPStaticGetter(wd),
-				},
-				nil,
-				&IOEnv,
-				true,
-			}
-			bytes, err := ioutil.ReadFile(filename)
-			if err != nil {
-				panic(err)
-			}
-			return scm.EvalAll(filename, string(bytes), &otherPath)
+func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
+	return func(a ...scm.Scmer) scm.Scmer {
+		filename := path + "/" + scm.String(a[0])
+		// TODO: filepath.Walk for wildcards
+		wd := filepath.Dir(filename)
+		otherPath := scm.Env{
+			scm.Vars{
+				"__DIR__":     path,
+				"__FILE__":    filename,
+				"import":      getImport(wd),
+				"load":        getLoad(wd),
+				"stream":      getStream(wd),
+				"watch":       getWatch(wd),
+				"serveStatic": scm.HTTPStaticGetter(wd),
+			},
+			nil,
+			&IOEnv,
+			true,
 		}
+		bytes, err := ioutil.ReadFile(filename)
+		if err != nil {
+			panic(err)
+		}
+		return scm.EvalAll(filename, string(bytes), &otherPath)
+	}
 }
 
-func getStream(path string) func (a ...scm.Scmer) scm.Scmer {
-	return func (a ...scm.Scmer) scm.Scmer {
-			filename := path + "/" + scm.String(a[0])
-			stream, err := os.Open(filename)
-			if err != nil {
-				panic(err)
-			}
-			return stream // io.Reader
+func getStream(path string) func(a ...scm.Scmer) scm.Scmer {
+	return func(a ...scm.Scmer) scm.Scmer {
+		filename := path + "/" + scm.String(a[0])
+		stream, err := os.Open(filename)
+		if err != nil {
+			panic(err)
 		}
+		return stream // io.Reader
+	}
 }
 
-func getLoad(path string) func (a ...scm.Scmer) scm.Scmer {
-	return func (a ...scm.Scmer) scm.Scmer {
-			stream, ok := a[0].(io.Reader)
-			if !ok {
-				// not a stream? call getStream
-				stream = getStream(path)(a[0]).(io.Reader)
+func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
+	return func(a ...scm.Scmer) scm.Scmer {
+		stream, ok := a[0].(io.Reader)
+		if !ok {
+			// not a stream? call getStream
+			stream = getStream(path)(a[0]).(io.Reader)
+		}
+		if len(a) > 2 {
+			splitter := bufio.NewReader(stream)
+			delimiter := scm.String(a[2])
+			if len(delimiter) != 1 {
+				panic("load delimiter must be 1 byte long")
 			}
-			if len(a) > 2 {
-				splitter := bufio.NewReader(stream)
-				delimiter := scm.String(a[2])
-				if len(delimiter) != 1 {
-					panic("load delimiter must be 1 byte long")
+			for {
+				str, err := splitter.ReadString(delimiter[0])
+				if err == io.EOF {
+					break // file is finished
 				}
-				for {
-					str, err := splitter.ReadString(delimiter[0])
-					if err == io.EOF {
-						break // file is finished
-					}
-					if err != nil {
-						panic(err)
-					}
-					// go??
-					scm.Apply(a[1], str);
-				}
-			} else {
-				// read in whole
-				bytes, err := ioutil.ReadAll(stream)
 				if err != nil {
 					panic(err)
 				}
-				if len(a) > 1 {
-					scm.Apply(a[1], string(bytes));
-				} else {
-					return string(bytes)
-				}
+				// go??
+				scm.Apply(a[1], str)
 			}
-			return true
+		} else {
+			// read in whole
+			bytes, err := ioutil.ReadAll(stream)
+			if err != nil {
+				panic(err)
+			}
+			if len(a) > 1 {
+				scm.Apply(a[1], string(bytes))
+			} else {
+				return string(bytes)
+			}
 		}
+		return true
+	}
 }
 
-func getWatch(path string) func (a ...scm.Scmer) scm.Scmer {
-	return func (a ...scm.Scmer) scm.Scmer {
+func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
+	return func(a ...scm.Scmer) scm.Scmer {
 		filename := path + "/" + scm.String(a[0])
-		reread := func () {
+		reread := func() {
 			// read in whole
 			bytes, err := ioutil.ReadFile(filename)
 			if err != nil {
@@ -142,20 +142,20 @@ func getWatch(path string) func (a ...scm.Scmer) scm.Scmer {
 		go func() {
 			for {
 				select {
-				case /*event :=*/ <- watcher.Events:
+				case /*event :=*/ <-watcher.Events:
 					// flush all other events
 					for {
 						time.Sleep(10 * time.Millisecond) // delay a bit, so we don't read empty files
 						select {
-						case <- watcher.Events:
+						case <-watcher.Events:
 							// ignore
 						default:
 							goto to_reread
 						}
 					}
-					to_reread:
+				to_reread:
 					// now reread the file
-					func () {
+					func() {
 						defer func() {
 							if err := recover(); err != nil {
 								// error happens during reload: log to console
@@ -180,18 +180,18 @@ func getWatch(path string) func (a ...scm.Scmer) scm.Scmer {
 type arrayFlags []string
 
 func (i *arrayFlags) String() string {
-    return "dummy"
+	return "dummy"
 }
 
 func (i *arrayFlags) Set(value string) error {
-    *i = append(*i, value)
-    return nil
+	*i = append(*i, value)
+	return nil
 }
 
 func setupIO(wd string) {
 	// define some IO functions (scm will not provide them since it is sandboxable)
-	IOEnv = scm.Env {
-		scm.Vars {},
+	IOEnv = scm.Env{
+		scm.Vars{},
 		nil,
 		&scm.Globalenv,
 		true, // other defines go into Globalenv
@@ -203,7 +203,7 @@ func setupIO(wd string) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"value...", "any", "values to print"},
 		}, "bool",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			for _, s := range a {
 				fmt.Print(scm.String(s))
 			}
@@ -218,7 +218,7 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"var", "string", "envvar"},
 			scm.DeclarationParameter{"default", "string", "default if the env is not found"},
 		}, "string",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) > 1 {
 				if val, ok := os.LookupEnv(scm.String(a[0])); ok {
 					return val
@@ -236,7 +236,7 @@ func setupIO(wd string) {
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"topic", "string", "function to print help about"},
 		}, "nil",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				scm.Help(nil)
 			} else {
@@ -320,7 +320,7 @@ func setupIO(wd string) {
 		"args", "Returns command line arguments",
 		0, 0,
 		[]scm.DeclarationParameter{}, "list",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			args := make([]scm.Scmer, len(os.Args))
 			for i, arg := range os.Args {
 				args[i] = arg
@@ -336,20 +336,20 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"shortname", "string", "short argument name (without -) or default value if only 2 args"},
 			scm.DeclarationParameter{"default", "any", "default value if argument not found"},
 		}, "any",
-		func (a ...scm.Scmer) scm.Scmer {
+		func(a ...scm.Scmer) scm.Scmer {
 			longname := scm.String(a[0])
 			var shortname string
 			var defaultValue scm.Scmer
-			
+
 			if len(a) == 2 {
 				// (arg "longname" defaultValue)
 				defaultValue = a[1]
 			} else {
-				// (arg "longname" "s" defaultValue)  
+				// (arg "longname" "s" defaultValue)
 				shortname = scm.String(a[1])
 				defaultValue = a[2]
 			}
-			
+
 			// Check for --longname=value or --longname value
 			longPrefix := "--" + longname
 			for i, arg := range os.Args {
@@ -361,7 +361,7 @@ func setupIO(wd string) {
 					return argStr[len(longPrefix)+1:]
 				}
 			}
-			
+
 			// Check for -shortname value if shortname provided
 			if shortname != "" {
 				shortPrefix := "-" + shortname
@@ -371,17 +371,17 @@ func setupIO(wd string) {
 					}
 				}
 			}
-			
+
 			// Check for boolean flags (--longname without value means true)
 			for _, arg := range os.Args {
 				if scm.String(arg) == longPrefix {
 					return true
 				}
-				if shortname != "" && scm.String(arg) == "-" + shortname {
+				if shortname != "" && scm.String(arg) == "-"+shortname {
 					return true
 				}
 			}
-			
+
 			return defaultValue
 		}, false,
 	})
@@ -428,19 +428,19 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}
-	
+
 	// Parse until first unknown flag
 	knownArgs := []string{}
 	schemeArgs := []string{}
 	importFiles := []string{}
 	skipNext := false
-	
+
 	for i, arg := range os.Args[1:] {
 		if skipNext {
 			skipNext = false
 			continue
 		}
-		
+
 		if arg == "-c" || arg == "-data" || arg == "-profile" || arg == "-wd" || arg == "-write-docu" {
 			knownArgs = append(knownArgs, arg)
 			if i+1 < len(os.Args[1:]) {
@@ -460,15 +460,15 @@ func main() {
 			importFiles = append(importFiles, arg)
 		}
 	}
-	
+
 	// Set os.Args to include all arguments for Scheme
 	fullArgs := append(append([]string{os.Args[0]}, knownArgs...), schemeArgs...)
-	
+
 	// Parse only known Go flags
 	os.Args = append([]string{os.Args[0]}, knownArgs...)
 	flag.Parse()
 	imports := append(flag.Args(), importFiles...)
-	
+
 	// Restore full args for Scheme
 	os.Args = fullArgs
 
@@ -486,12 +486,12 @@ func main() {
 	// scripts initialization
 	if len(imports) == 0 {
 		// load default script
-		IOEnv.Vars["import"].(func(...scm.Scmer)scm.Scmer)("lib/main.scm")
+		IOEnv.Vars["import"].(func(...scm.Scmer) scm.Scmer)("lib/main.scm")
 	} else {
 		// load scripts from command line
 		for _, scmfile := range imports {
 			fmt.Println("Loading " + scmfile + " ...")
-			IOEnv.Vars["import"].(func(...scm.Scmer)scm.Scmer)(scmfile)
+			IOEnv.Vars["import"].(func(...scm.Scmer) scm.Scmer)(scmfile)
 		}
 	}
 	for _, command := range commands {
@@ -505,7 +505,7 @@ func main() {
 	// install exit handler
 	cancelChan := make(chan os.Signal, 1)
 	signal.Notify(cancelChan, syscall.SIGTERM, syscall.SIGINT)
-	go (func () {
+	go (func() {
 		<-cancelChan
 		exitroutine()
 		os.Exit(1)
@@ -539,17 +539,18 @@ func main() {
 
 var exitsignal chan bool = make(chan bool, 1) // set true to start shutdown routine and wait for all jobs
 var exitable sync.WaitGroup
+
 func cronroutine() {
 	exitable.Add(1)
 	for {
 		// wait first
 		select {
-			case <- exitsignal:
-				// memcp is about to exit; confirm the waitgroup and exit
-				exitable.Done()
-				return
-			case <- time.After(time.Minute * 15): // rebuild shards for all 15 minutes
-				// continue
+		case <-exitsignal:
+			// memcp is about to exit; confirm the waitgroup and exit
+			exitable.Done()
+			return
+		case <-time.After(time.Minute * 15): // rebuild shards for all 15 minutes
+			// continue
 		}
 
 		fmt.Println("running 15min cron ...")
@@ -566,7 +567,15 @@ func exitroutine() {
 		scm.ReplInstance.Close()
 	}
 	fmt.Println("finalizing storage...")
-	storage.UnloadDatabases()
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// ensure shutdown continues even if saving panics
+				fmt.Println("error: UnloadDatabases failed:", r)
+			}
+		}()
+		storage.UnloadDatabases()
+	}()
 	fmt.Println("finalizing memory...")
 	runtime.GC() // this will call the finalizers on shards
 	fmt.Println("Exit procedure finished")

@@ -80,8 +80,15 @@ func Rebuild(all bool, repartition bool) string {
 	start := time.Now()
 	dbs := databases.GetAll()
 	for _, db := range dbs {
-		db.rebuild(all, repartition)
-		db.save()
+		func(db *database) {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Println("error: rebuild/save failed for database", db.Name, ":", r)
+				}
+			}()
+			db.rebuild(all, repartition)
+			db.save()
+		}(db)
 	}
 	return fmt.Sprint(time.Since(start))
 }
@@ -211,6 +218,14 @@ func (db *database) rebuild(all bool, repartition bool) {
 	done.Add(len(dbs))
 	for _, t := range dbs {
 		go func(t *table) {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Println("error: rebuild failed for table", db.Name+".", t.Name, ":", r)
+					// best-effort unlock if still locked
+					func() { defer func() { _ = recover() }(); t.mu.Unlock() }()
+				}
+				done.Done()
+			}()
 			t.mu.Lock() // table lock
 			// TODO: check LRU statistics and remove unused computed columns
 
@@ -235,8 +250,13 @@ func (db *database) rebuild(all bool, repartition bool) {
 				for i, s := range shardlist {
 					maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
 					go func(i int, s *storageShard) {
+						defer func() {
+							if r := recover(); r != nil {
+								fmt.Println("error: shard rebuild failed for", db.Name+".", t.Name, "shard", i, ":", r)
+							}
+							sdone.Done()
+						}()
 						shardlist[i] = s.rebuild(all)
-						sdone.Done()
 					}(i, s)
 				}
 			} else {
@@ -245,8 +265,15 @@ func (db *database) rebuild(all bool, repartition bool) {
 				for w := 0; w < workers; w++ {
 					go func() {
 						for j := range jobs {
-							shardlist[j.i] = j.s.rebuild(all)
-							sdone.Done()
+							func(j job) {
+								defer func() {
+									if r := recover(); r != nil {
+										fmt.Println("error: shard rebuild failed for", db.Name+".", t.Name, "shard", j.i, ":", r)
+									}
+									sdone.Done()
+								}()
+								shardlist[j.i] = j.s.rebuild(all)
+							}(j)
 						}
 					}()
 				}
@@ -267,7 +294,6 @@ func (db *database) rebuild(all bool, repartition bool) {
 			}
 
 			t.mu.Unlock()
-			done.Done()
 		}(t)
 	}
 	done.Wait()

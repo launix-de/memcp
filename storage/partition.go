@@ -254,7 +254,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	// pivots are extracted from sampling
 	pivotSamples := make([]scm.Scmer, 0, 2*(len(t.Shards)+len(t.PShards)))
 
-	// validate column exists in schema; if corrupted name, bail out gracefully
+	// validate column exists in schema; if corrupted, abort loudly rather than proceeding
 	hasCol := false
 	for _, c := range t.Columns {
 		if strings.EqualFold(c.Name, col) {
@@ -264,9 +264,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		}
 	}
 	if !hasCol {
-		// corrupted schema or invalid column reference: disable partitioning on this dimension
-		result.NumPartitions = 1
-		return
+		panic("partition column does not exist: `" + t.schema.Name + "." + t.Name + "`.`" + col + "`")
 	}
 
 	shardlist := t.Shards
@@ -277,16 +275,10 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		if s == nil || s.t == nil {
 			continue
 		}
-		// collect samples from all the shards; ensure storage is loaded safely
-		var stor ColumnStorage
-		// getColumnStorageOrPanic will panic on inconsistent metadata; wrap defensively
-		func() {
-			defer func() { _ = recover() }() // corrupted state: skip this shard gracefully
-			stor = s.getColumnStorageOrPanic(col)
-		}()
-		if stor == nil {
-			continue
-		}
+		// Ensure shard and column are loaded. If metadata is corrupted, panic early
+		// instead of proceeding with potentially destructive repartitioning.
+		s.ensureLoaded()
+		stor := s.getColumnStorageOrPanic(col)
 		// snapshot main_count without holding lock; guard indices and skip if inconsistent
 		mc := s.main_count
 		if mc > 0 {
@@ -425,6 +417,22 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		oldshards = t.PShards
 	}
 
+	// Before repartitioning, make sure all shards are loaded and the
+	// columns required for partitioning are present in memory. Doing this
+	// outside of shard locks avoids lock upgrades inside partition() when
+	// reading main storages.
+	for _, s := range oldshards {
+		if s == nil {
+			continue
+		}
+		s.ensureLoaded()
+		for _, sd := range shardCandidates {
+			s.ensureColumnLoaded(sd.Column)
+		}
+		// also ensure main_count is initialized
+		s.ensureMainCount()
+	}
+
 	// collect all dataset IDs (this is done sequentially and takes ~4s for 8G of data)
 	datasetids := make([][][]uint, totalShards) // newshard, oldshard, item
 	total_count := uint64(0)
@@ -438,6 +446,8 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 			datasetids[idx][si] = items
 		}
 	}
+	// TODO: On large tables, perform distributed repartitioning across nodes
+	//       instead of local single-node rebuild to reduce downtime and memory pressure.
 	// put values into shards
 	fmt.Println("moving data from", t.Name, len(oldshards), "into", totalShards, "shards")
 	newshards := make([]*storageShard, totalShards)
