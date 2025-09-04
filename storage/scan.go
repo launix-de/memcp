@@ -35,11 +35,13 @@ func (s scanError) Error() string {
 
 type emptyResult struct{}
 
-// scanCount is sent alongside shard results to report the number of matched rows per shard.
-type scanCount struct{ n int64 }
-
-// scanInputCount carries the per-shard input row count to avoid calling t.Count().
-type scanInputCount struct{ n int64 }
+// scanResult bundles per-shard outputs to minimize allocations and type assertions.
+type scanResult struct {
+	res        scm.Scmer
+	outCount   int64
+	inputCount int64
+	err        scanError // err.r != nil indicates an error
+}
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
@@ -53,7 +55,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		t.AddPartitioningScore([]string{b.col})
 	}
 
-	values := make(chan scm.Scmer, 4)
+	values := make(chan scanResult, 4)
 	analyzeNs := time.Since(analyzeStart).Nanoseconds()
 	// Measure execution time (parallel shard scans + collection)
 	execStart := time.Now()
@@ -64,15 +66,11 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			// parallel scan over shards
 			defer func() {
 				if r := recover(); r != nil {
-					//fmt.Println("panic during scan:", r, string(debug.Stack()))
-					values <- scanError{r, string(debug.Stack())}
+					values <- scanResult{err: scanError{r, string(debug.Stack())}}
 				}
 			}()
-			// collect per-shard input size to avoid t.Count()
-			values <- scanInputCount{n: int64(s.Count())}
 			res, cnt := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral)
-			values <- scanCount{cnt}
-			values <- res
+			values <- scanResult{res: res, outCount: cnt, inputCount: int64(s.Count())}
 		})
 		close(values) // last scan is finished
 	})
@@ -81,20 +79,18 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	hadValue := false
 	if aggregate2 != nil {
 		fn := scm.OptimizeProcToSerialFunction(aggregate2)
-		for intermediate := range values {
-			// eat value
-			switch x := intermediate.(type) {
-			case scanError:
-				panic(x) // cascade panic
-			case scanInputCount:
-				inputCount += x.n
-			case scanCount:
-				outCount += x.n
+		for msg := range values {
+			if msg.err.r != nil {
+				panic(msg.err)
+			}
+			inputCount += msg.inputCount
+			outCount += msg.outCount
+			switch msg.res.(type) {
 			case emptyResult:
-				// do nothing
-				hadValue = hadValue // do not delete this line, otherwise it will fall through to default
+				// no-op
+				hadValue = hadValue
 			default:
-				akkumulator = fn(akkumulator, intermediate)
+				akkumulator = fn(akkumulator, msg.res)
 				hadValue = true
 			}
 		}
@@ -117,20 +113,18 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		return akkumulator
 	} else if aggregate != nil {
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
-		for intermediate := range values {
-			// eat value
-			switch x := intermediate.(type) {
-			case scanError:
-				panic(x) // cascade panic
-			case scanInputCount:
-				inputCount += x.n
-			case scanCount:
-				outCount += x.n
+		for msg := range values {
+			if msg.err.r != nil {
+				panic(msg.err)
+			}
+			inputCount += msg.inputCount
+			outCount += msg.outCount
+			switch msg.res.(type) {
 			case emptyResult:
-				// do nothing
-				hadValue = hadValue // do not delete this line, otherwise it will fall through to default
+				// no-op
+				hadValue = hadValue
 			default:
-				akkumulator = fn(akkumulator, intermediate)
+				akkumulator = fn(akkumulator, msg.res)
 				hadValue = true
 			}
 		}
@@ -151,19 +145,13 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		}
 		return akkumulator
 	} else {
-		for intermediate := range values {
-			// eat value
-			switch x := intermediate.(type) { // eat up values and forget
-			case scanError:
-				panic(intermediate) // cascade panic
-			case scanInputCount:
-				inputCount += x.n
-			case scanCount:
-				outCount += x.n
-			case emptyResult:
-				// do nothing
-				hadValue = hadValue // do not delete this line, otherwise it will fall through to default
-			default:
+		for msg := range values {
+			if msg.err.r != nil {
+				panic(msg.err)
+			}
+			inputCount += msg.inputCount
+			outCount += msg.outCount
+			if _, empty := msg.res.(emptyResult); !empty {
 				hadValue = true
 			}
 		}

@@ -33,8 +33,14 @@ type shardqueue struct {
 	mcols    []func(uint) scm.Scmer // map column reader
 	scols    []func(uint) scm.Scmer // sort criteria column reader
 	sortdirs []func(...scm.Scmer) scm.Scmer
-	// inputCount carries the shard's total input rows to avoid t.Count()
+}
+
+// scanOrderResult bundles per-shard outputs for ordered scans.
+type scanOrderResult struct {
+	res        *shardqueue
+	err        scanError // err.r != nil indicates an error
 	inputCount int64
+	scanCount  int64
 }
 
 // sort interface for shardqueue (local) (TODO: heap could be more efficient because early-out will be cheaper)
@@ -149,7 +155,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	// Measure execution time of the ordered scan
 	execStart := time.Now()
 	var q globalqueue
-	q_ := make(chan *shardqueue, 1)
+	q_ := make(chan scanOrderResult, 1)
 	var inputCount int64
 	gls.Go(func() {
 		t.iterateShards(boundaries, func(s *storageShard) {
@@ -157,22 +163,23 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 			defer func() {
 				if r := recover(); r != nil {
 					// fmt.Println("panic during scan:", r, string(debug.Stack()))
-					q_ <- &shardqueue{s, nil, scanError{r, string(debug.Stack())}, nil, nil, nil, 0}
+					q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 				}
 			}()
-			q_ <- s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
+			res := s.scan_order(boundaries, lower, upperLast, conditionCols, condition, sortcols, sortdirs, total_limit, callbackCols)
+			q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), scanCount: int64(len(res.items))}
 		})
 		close(q_)
 	})
 	// collect all subchans
-	for qe := range q_ {
-		if qe.err.r != nil {
-			panic(qe.err) // propagate errors that occur inside inner scan
+	for msg := range q_ {
+		if msg.err.r != nil {
+			panic(msg.err) // propagate errors that occur inside inner scan
 		}
-		if len(qe.items) > 0 {
-			heap.Push(&q, qe) // add to heap
+		if msg.res != nil && len(msg.res.items) > 0 {
+			heap.Push(&q, msg.res) // add to heap
 		}
-		inputCount += qe.inputCount
+		inputCount += msg.inputCount
 	}
 
 	// collect values from parallel scan
@@ -257,8 +264,6 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limit int, callbackCols []string) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
-	// collect per-shard input size for thresholding
-	result.inputCount = int64(t.Count())
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
