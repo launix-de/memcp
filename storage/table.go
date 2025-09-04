@@ -117,6 +117,24 @@ func (t *table) Count() (result uint) {
 	return
 }
 
+// CountEstimate returns a quick estimate of the number of items by taking the
+// first shard's count and multiplying it by the number of shards. This avoids
+// iterating all shards and can be used as an inputCount estimate for planning.
+func (t *table) CountEstimate() (result uint) {
+	shards := t.Shards
+	if shards == nil {
+		shards = t.PShards
+	}
+	if len(shards) == 0 {
+		return 0
+	}
+	// Ensure shard is loaded and main_count initialized
+	unlock := shards[0].GetRead()
+	defer unlock()
+	c := shards[0].Count()
+	return c * uint(len(shards))
+}
+
 /* Implement NonLockingReadMap */
 func (t table) GetKey() string {
 	return t.Name

@@ -219,7 +219,7 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 
 // ensureMainCount guarantees main_count is initialized by loading one column if needed.
 func (u *storageShard) ensureMainCount(alreadyLocked bool) {
-	if u.main_count != 0 || u.t == nil {
+	if u.main_count != 0 {
 		return
 	}
 	// Load the first column (if not yet loaded); Deserialize will set main_count.
@@ -272,7 +272,7 @@ func (s *storageShard) ensureLoaded() {
 	// materialize shard from disk
 	s.load(s.t)
 	// memory engine shards stay WRITE to bypass LRU later
-	if s.t != nil && s.t.PersistencyMode == Memory {
+	if s.t.PersistencyMode == Memory {
 		s.srState = WRITE
 	} else {
 		s.srState = SHARED
