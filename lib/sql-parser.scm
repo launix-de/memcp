@@ -131,6 +131,9 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)))
 
 	(define sql_expression2 (parser (or
+		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
+		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '(inner_select_in a sub))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") '(not (inner_select_in a sub)))
 		(parser '((define a sql_expression3) "==" (define b sql_expression2)) '((quote equal??) a b))
 		(parser '((define a sql_expression3) "=" (define b sql_expression2)) '((quote equal??) a b))
 		(parser '((define a sql_expression3) "<>" (define b sql_expression2)) '((quote not) '((quote equal?) a b)))
@@ -166,8 +169,12 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 	)))
 
 	(define sql_expression6 (parser (or
+		/* Scalar subselect in expressions: (SELECT ...) */
+		(parser '("(" (define sub sql_select) ")") '(inner_select sub))
 		(parser '("(" (define a sql_expression) ")") a)
 
+		/* EXISTS (SELECT ...) */
+		(parser '((atom "EXISTS" true) "(" (define sub sql_select) ")") '(inner_select_exists sub))
 		(parser '((atom "CASE" true) (define conditions (* (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
@@ -249,11 +256,11 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(?
 			(atom "FROM" true)
 			(define from (+ tabledefs ","))
-			(?
-				(atom "WHERE" true)
-				(define condition sql_expression)
-			)
 		)
+		(define condition (or (parser '(
+			(atom "WHERE" true)
+			(define condition2 sql_expression)
+		) condition2) (empty true)))
 		/* GROUP BY + HAVING */
 		(?
 			(atom "GROUP" true)

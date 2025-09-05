@@ -231,6 +231,8 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 						value = n[4]
 					}
 					return packrat.NewAtomParser(parserResult{value, nil}, String(n[1]), caseinsensitive, skipws)
+				case Symbol("empty"):
+					return packrat.NewEmptyParser(parserResult{n[1], nil})
 				case Symbol("regex"):
 					caseinsensitive := false
 					if len(n) > 2 {
