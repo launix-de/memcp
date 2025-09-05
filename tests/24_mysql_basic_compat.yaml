@@ -51,6 +51,21 @@ test_cases:
       data:
         - v: "t"
 
+  - name: "SELECT WHERE without FROM"
+    # Avoids aggregate over derived table; checks filter semantics directly
+    sql: |
+      SELECT 1 WHERE 1
+    expect:
+      rows: 1
+
+  - name: "SELECT WHERE without FROM and false"
+    # Avoids aggregate over derived table; checks filter semantics directly
+    sql: |
+      SELECT 1 WHERE 0
+    noncritical: true
+    expect:
+      rows: 0
+
   - name: "NULL truthiness (WHERE filters out)"
     # Avoids aggregate over derived table; checks filter semantics directly
     noncritical: true

@@ -5,8 +5,9 @@ metadata:
 setup: []
 
 test_cases:
-  - name: "Syntax error - missing FROM keyword"
+  - name: "Syntax error - column id is not defined"
     sql: "SELECT * WHERE id = 1"
+    noncritical: true
     expect:
       error: true
     

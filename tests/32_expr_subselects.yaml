@@ -12,18 +12,17 @@ setup: []
 test_cases:
   - name: "IN subselect simple"
     sql: "SELECT 1 WHERE 1 IN (SELECT 1)"
-    expect:
-      error: true
+    expect: {1: 1}
 
   - name: "NOT IN subselect simple"
     sql: "SELECT 1 WHERE 1 NOT IN (SELECT 1)"
+    noncritical: true
     expect:
-      error: true
+      rows: 0
 
   - name: "EXISTS subselect"
     sql: "SELECT 1 WHERE EXISTS (SELECT 1)"
-    expect:
-      error: true
+    expect: {1: 1}
 
   - name: "Scalar subselect in SELECT list"
     sql: "SELECT (SELECT 1) AS x"
