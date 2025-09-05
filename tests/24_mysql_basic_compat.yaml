@@ -62,13 +62,11 @@ test_cases:
     # Avoids aggregate over derived table; checks filter semantics directly
     sql: |
       SELECT 1 WHERE 0
-    noncritical: true
     expect:
       rows: 0
 
   - name: "NULL truthiness (WHERE filters out)"
     # Avoids aggregate over derived table; checks filter semantics directly
-    noncritical: true
     sql: |
       SELECT 1 WHERE NULL
     expect:
