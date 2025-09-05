@@ -235,16 +235,29 @@ func (db *database) rebuild(all bool, repartition bool) {
 			t.mu.Lock() // table lock
 			// TODO: check LRU statistics and remove unused computed columns
 
-			// rebuild shards
-			shardlist := t.Shards // if Shards AND PShards are present, Shards is the single point of truth
-			if shardlist == nil {
-				shardlist = t.PShards
+			// rebuild shards without mutating the live shard list; swap when complete
+			origShardList := t.Shards // if Shards AND PShards are present, Shards is the single point of truth
+			targetIsP := false
+			if origShardList == nil {
+				origShardList = t.PShards
+				targetIsP = true
 			}
-			maincount := uint(0)
+			newShardList := make([]*storageShard, len(origShardList))
 			// Track if any shard is still COLD to avoid triggering repartition logic
 			hasColdShard := false
+			// Count items using shard read locks to avoid races
+			getShardCount := func(s *storageShard) uint {
+				if s == nil {
+					return 0
+				}
+				s.mu.RLock()
+				c := s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
+				s.mu.RUnlock()
+				return c
+			}
+			maincount := uint(0)
 			var sdone sync.WaitGroup
-			sdone.Add(len(shardlist))
+			sdone.Add(len(origShardList))
 			// throttle concurrent shard rebuilds by CPU count
 			workers := runtime.NumCPU()
 			if workers < 1 {
@@ -254,13 +267,12 @@ func (db *database) rebuild(all bool, repartition bool) {
 				i int
 				s *storageShard
 			}
-			if len(shardlist) <= workers {
-				for i, s := range shardlist {
-					// Collect counters without forcing a load. If shard is COLD, mark to skip repartition.
+			if len(origShardList) <= workers {
+				for i, s := range origShardList {
 					if s != nil && s.GetState() == COLD {
 						hasColdShard = true
 					}
-					maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
+					maincount += getShardCount(s)
 					go func(i int, s *storageShard) {
 						defer func() {
 							if r := recover(); r != nil {
@@ -268,7 +280,7 @@ func (db *database) rebuild(all bool, repartition bool) {
 							}
 							sdone.Done()
 						}()
-						shardlist[i] = s.rebuild(all)
+						newShardList[i] = s.rebuild(all)
 					}(i, s)
 				}
 			} else {
@@ -284,21 +296,35 @@ func (db *database) rebuild(all bool, repartition bool) {
 									}
 									sdone.Done()
 								}()
-								shardlist[j.i] = j.s.rebuild(all)
+								newShardList[j.i] = j.s.rebuild(all)
 							}(j)
 						}
 					}()
 				}
-				for i, s := range shardlist {
+				for i, s := range origShardList {
 					if s != nil && s.GetState() == COLD {
 						hasColdShard = true
 					}
-					maincount += s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
+					maincount += getShardCount(s)
 					jobs <- job{i: i, s: s}
 				}
 				close(jobs)
 			}
 			sdone.Wait()
+
+			// Publish the new shard list only after completion.
+			// To avoid slice header races for concurrent readers, update in place.
+			if targetIsP {
+				for i := range newShardList {
+					origShardList[i] = newShardList[i]
+				}
+				t.PShards = origShardList
+			} else {
+				for i := range newShardList {
+					origShardList[i] = newShardList[i]
+				}
+				t.Shards = origShardList
+			}
 
 			// check if we should do the repartitioning
 			if repartition && !hasColdShard {

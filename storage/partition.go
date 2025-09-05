@@ -548,14 +548,12 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	}
 
 	// now take over the new sharding schema
-	if t.Shards == nil {
-		t.Shards = t.PShards // move shard list over to unordered shardlist
-		// warning! = on slices may not be atomic and thus dangerous
-	}
+	// Publish the new partitioned shard list directly to PShards and
+	// keep Shards nil so readers consistently prefer PShards.
 	t.PShards = newshards
 	t.PDimensions = shardCandidates
 
-	t.Shards = nil // now it's live!
+	t.Shards = nil // partitioned layout is live
 	fmt.Println("activated new partitioning schema for ", t.Name, "after", time.Since(start))
 
 	t.schema.schemalock.Lock()

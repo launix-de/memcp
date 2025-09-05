@@ -324,7 +324,10 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				// build the whole dataset from storage
 				cols := make([]string, len(t.columns))
 				d2 := make([]scm.Scmer, 0, len(t.columns))
-				for k, v := range t.columns {
+				for k := range t.columns {
+					// Access to t.columns is protected by t.mu and storages may be
+					// lazily loaded; ensure we obtain a non-nil storage pointer.
+					cs := t.getColumnStorageOrPanicEx(k, true)
 					colidx, ok := t.deltaColumns[k]
 					if !ok {
 						colidx = len(t.deltaColumns)
@@ -335,7 +338,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					}
 					cols[colidx] = k
 					if idx < t.main_count {
-						d2[colidx] = v.GetValue(idx)
+						d2[colidx] = cs.GetValue(idx)
 					} else {
 						d2[colidx] = t.getDelta(int(idx-t.main_count), k)
 					}
@@ -935,7 +938,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		b.WriteString(fmt.Sprint(result.main_count))
 		fmt.Println(b.String())
 		rebuildIndexes(t, result)
-		result.t.schema.save()
+		// Do not persist schema from inside shard rebuild; callers
+		// publish the new shard pointer and then save atomically at the
+		// table/database level to avoid transient, inconsistent schemas.
 
 		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 			// remove old log file
