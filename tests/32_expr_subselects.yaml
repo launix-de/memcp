@@ -1,0 +1,39 @@
+# Subselects in expressions (IN/EXISTS/scalar)
+
+metadata:
+  version: "1.0"
+  description: "Parse IN (SELECT ...), EXISTS (SELECT ...), scalar (SELECT ...) but reject in planner"
+
+setup: []
+
+# TODO: turn error: true into what we expect according to SQL standard
+# TODO: also add complex cases with (SELECT FROM )
+
+test_cases:
+  - name: "IN subselect simple"
+    sql: "SELECT 1 WHERE 1 IN (SELECT 1)"
+    expect:
+      error: true
+
+  - name: "NOT IN subselect simple"
+    sql: "SELECT 1 WHERE 1 NOT IN (SELECT 1)"
+    expect:
+      error: true
+
+  - name: "EXISTS subselect"
+    sql: "SELECT 1 WHERE EXISTS (SELECT 1)"
+    expect:
+      error: true
+
+  - name: "Scalar subselect in SELECT list"
+    sql: "SELECT (SELECT 1) AS x"
+    expect:
+      error: true
+
+  - name: "IN constant list still supported"
+    sql: "SELECT 1 WHERE 1 IN (1,2,3)"
+    expect:
+      rows: 1
+
+cleanup: []
+

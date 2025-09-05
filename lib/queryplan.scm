@@ -111,6 +111,27 @@ if there is a group function, create a temporary preaggregate table
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 
+	/* Guard: reject subselects in expressions for now.
+	   TODO(memcp): Transform inner_select{,_in,_exists} into LEFT JOINs on a derived table-set.
+	   Strategy sketch: first, recurse over untangle_query, then add a LEFT JOIN'd tableset,
+	   driven by the outer side; GROUP by (1) if no columns from the outer scope are bound
+	   or GROUP BY distinct dependent columns if correlated.
+	   We'll need a dependent-variable collector to detect correlations.
+	   We'll also need a multi-stage group/sort/limit operator (no idea how yet) */
+	(define reject_inner_selects (lambda (expr) (match expr
+		'((symbol inner_select) _) (error "not supported: (SELECT ...)")
+		'((symbol inner_select_in) _ _) (error "not supported: expr IN (SELECT ...)")
+		'((symbol inner_select_exists) _) (error "not supported: EXISTS (SELECT ...)")
+		(cons sym args) (map args reject_inner_selects)
+		_ _
+	)))
+	/* walk WHERE, ORDER BY, SELECT fields, GROUP, HAVING */
+	(map_assoc fields (lambda (k v) (reject_inner_selects v)))
+	(if condition (reject_inner_selects condition) true)
+	(if group (map group reject_inner_selects) true)
+	(if having (reject_inner_selects having) true)
+	(if order (map order (lambda (o) (match o '(col dir) (reject_inner_selects col)))) true)
+
 	/* TODO(memcp): Unnesting strategy
 	   - Prefer flattening nested SELECTs: prefix aliases (alias:tbl), add inner condition to outer condition, remember SELECT-title renames in renamelist.
 	   - Only materialize when necessary: inner GROUP/HAVING, LIMIT/OFFSET, or incompatible ORDER.
