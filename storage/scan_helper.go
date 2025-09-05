@@ -18,6 +18,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -299,7 +300,8 @@ func ensureSystemStatistic() {
 	ensureUnique(th, "uniq_table_histogram_schema_table", []string{"schema", "table"})
 
 	// base_models: base_models(id PRIMARY KEY, model)
-	bm := ensureTable(db, "base_models", Sloppy)
+	// Use Safe persistence to protect valuable models (logged + durable).
+	bm := ensureTable(db, "base_models", Safe)
 	ensureCols(bm, []struct{ name, typ string }{
 		{"id", "TEXT"},
 		{"model", "BLOB"},
@@ -331,11 +333,12 @@ func safeLogScan(schema, table string, ordered bool, filter, order string, input
 
 // Estimator provides scan selectivity estimation via shared-memory IPC with ai_optimizer.py.
 type Estimator struct {
-	path      string
-	cmd       *exec.Cmd
-	mmap      []byte
-	mu        sync.Mutex
-	connected bool
+	path       string
+	cmd        *exec.Cmd
+	mmap       []byte
+	mu         sync.Mutex
+	connected  bool
+	lastStatus uint64
 }
 
 // Shared memory layout (little endian):
@@ -348,12 +351,16 @@ type Estimator struct {
 // [32..35] filterLen (uint32)
 // [36..39] orderLen  (uint32)
 // [40..47] respOutput (float64) // set by Python
-// [48..63] reserved
-// Payload (UTF-8):
-// [64..]    schema | table | filter | order (concatenated)
+// [48..55] statusSeq (uint64) // incremented by Python on new status message
+// [56..59] statusLen (uint32)
+// [60..63] statusCode (uint32) // 1=READY, 2=INFO, 3=ERROR
+// Payloads:
+// [64..64+REQ_MAX)   request payload: schema | table | filter | order (UTF-8)
+// [64+REQ_MAX..end)  status payload: arbitrary UTF-8 status message
 const (
 	shmHeaderSize = 64
 	reqMax        = 512 * 1024
+	statMax       = 64 * 1024
 )
 
 // NewEstimator creates a shared memory file, mmaps it, and spawns the Python helper.
@@ -370,7 +377,7 @@ func NewEstimator(pythonPath string) (*Estimator, error) {
 	}
 	defer f.Close()
 	// set size
-	if err := f.Truncate(int64(shmHeaderSize + reqMax)); err != nil {
+	if err := f.Truncate(int64(shmHeaderSize + reqMax + statMax)); err != nil {
 		return nil, err
 	}
 	b, err := mmapFile(f)
@@ -390,8 +397,24 @@ func NewEstimator(pythonPath string) (*Estimator, error) {
 		unmapFile(b)
 		return nil, err
 	}
-	// NOTE: unlink after helper connects; without a handshake we keep it for now
-	return &Estimator{path: fn, cmd: cmd, mmap: b}, nil
+	e := &Estimator{path: fn, cmd: cmd, mmap: b}
+	// Wait up to 5s for READY; print any INFO/ERROR status lines
+	_ = e.awaitReady(5 * time.Second)
+	// Start background status pump for asynchronous INFO/ERROR logs
+	go func() {
+		for {
+			e.mu.Lock()
+			alive := e.mmap != nil
+			e.mu.Unlock()
+			if !alive {
+				return
+			}
+			if !e.pollStatusOnce(true) {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}()
+	return e, nil
 }
 
 // Close terminates the helper and unmaps the shared memory.
@@ -406,6 +429,70 @@ func (e *Estimator) Close() {
 		unmapFile(e.mmap)
 	}
 	_ = os.Remove(e.path)
+}
+
+// awaitReady polls status messages and marks the estimator connected when READY is received.
+// It also prints INFO/ERROR messages received during the wait.
+func (e *Estimator) awaitReady(d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if e.pollStatusOnce(true) {
+			return e.connected
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !e.connected {
+		fmt.Println("AIEstimator: not ready yet; continuing in background")
+	}
+	return e.connected
+}
+
+// pollStatusOnce reads a single status update (if any). When printMsgs is true, prints messages.
+// Returns true if any status was consumed.
+func (e *Estimator) pollStatusOnce(printMsgs bool) bool {
+	if e.mmap == nil {
+		return false
+	}
+	buf := e.mmap
+	sseq := binary.LittleEndian.Uint64(buf[48:56])
+	if sseq == 0 || sseq == e.lastStatus {
+		return false
+	}
+	slen := int(binary.LittleEndian.Uint32(buf[56:60]))
+	scode := binary.LittleEndian.Uint32(buf[60:64])
+	if slen < 0 || slen > statMax {
+		slen = 0
+	}
+	base := shmHeaderSize + reqMax
+	var msg string
+	if slen > 0 {
+		msg = string(buf[base : base+slen])
+	}
+	e.lastStatus = sseq
+	switch scode {
+	case 1: // READY
+		e.connected = true
+		if printMsgs {
+			if msg != "" {
+				fmt.Println("AIEstimator:", msg)
+			} else {
+				fmt.Println("AIEstimator: ready")
+			}
+		}
+	case 2: // INFO
+		if printMsgs && msg != "" {
+			fmt.Println("AIEstimator:", msg)
+		}
+	case 3: // ERROR
+		if printMsgs && msg != "" {
+			fmt.Println("AIEstimator ERROR:", msg)
+		}
+	default:
+		if printMsgs && msg != "" {
+			fmt.Println("AIEstimator status:", msg)
+		}
+	}
+	return true
 }
 
 var globalEstimatorMu sync.Mutex
@@ -450,7 +537,13 @@ func (e *Estimator) ScanEstimate(schema, table string, conditionCols []string, c
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.mmap == nil {
-		return -1, fmt.Errorf("estimator not initialized")
+		return inputCount, fmt.Errorf("estimator not initialized")
+	}
+	// Drain pending statuses to keep logs flowing; if not connected, fallback
+	for e.pollStatusOnce(true) {
+	}
+	if !e.connected {
+		return inputCount, fmt.Errorf("estimator not ready")
 	}
 
 	// Encode filter string
@@ -517,7 +610,76 @@ func (e *Estimator) ScanEstimate(schema, table string, conditionCols []string, c
 		}
 		time.Sleep(200 * time.Microsecond)
 	}
-	return -1, fmt.Errorf("timeout waiting for AI response")
+	return inputCount, fmt.Errorf("timeout waiting for AI response")
+}
+
+// sendGeneric sends an opcode and payload via the shared memory request area
+// using a generic request (schemaLen/tableLen/filterLen/orderLen all zero).
+// It returns the raw response payload.
+func (e *Estimator) sendGeneric(op byte, payload []byte, timeout time.Duration) ([]byte, error) {
+    if e == nil {
+        return nil, errors.New("estimator not initialized")
+    }
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    if e.mmap == nil {
+        return nil, errors.New("estimator not initialized")
+    }
+    buf := e.mmap
+    // Next sequence
+    seq := binary.LittleEndian.Uint64(buf[0:8]) + 1
+    // zero normal header lengths and inputCount to signal generic op
+    binary.LittleEndian.PutUint64(buf[16:24], 0)
+    binary.LittleEndian.PutUint32(buf[24:28], 0)
+    binary.LittleEndian.PutUint32(buf[28:32], 0)
+    binary.LittleEndian.PutUint32(buf[32:36], 0)
+    binary.LittleEndian.PutUint32(buf[36:40], 0)
+    // write opcode + payload length + payload
+    off := shmHeaderSize
+    if off+1+4+len(payload) > shmHeaderSize+reqMax {
+        return nil, errors.New("payload too large")
+    }
+    buf[off] = op
+    off++
+    binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(payload)))
+    off += 4
+    copy(buf[off:off+len(payload)], payload)
+    // publish seq last
+    binary.LittleEndian.PutUint64(buf[0:8], seq)
+    // wait for response
+    deadline := time.Now().Add(timeout)
+    for time.Now().Before(deadline) {
+        respSeq := binary.LittleEndian.Uint64(buf[8:16])
+        if respSeq == seq {
+            roff := shmHeaderSize
+            rlen := int(binary.LittleEndian.Uint32(buf[roff : roff+4]))
+            roff += 4
+            if roff+rlen > len(buf) || rlen < 0 {
+                return nil, errors.New("invalid response length")
+            }
+            out := make([]byte, rlen)
+            copy(out, buf[roff:roff+rlen])
+            return out, nil
+        }
+        time.Sleep(200 * time.Microsecond)
+    }
+    return nil, errors.New("timeout waiting for response")
+}
+
+// SQL executes a SQL query via the estimator IPC (generic opcode 3) and
+// returns the raw response string (as returned by the Python helper).
+func (e *Estimator) SQL(sql string, timeout time.Duration) (string, error) {
+    resp, err := e.sendGeneric(3, []byte(sql), timeout)
+    if err != nil {
+        return "", err
+    }
+    return string(resp), nil
+}
+
+// FetchModel requests a binary model blob by ID via opcode 2. The Python
+// helper responds with raw bytes of the model or empty on not found.
+func (e *Estimator) FetchModel(id string, timeout time.Duration) ([]byte, error) {
+    return e.sendGeneric(2, []byte(id), timeout)
 }
 
 // mmap helpers (portable enough)

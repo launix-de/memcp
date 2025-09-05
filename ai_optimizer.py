@@ -461,8 +461,40 @@ def run_ipc_loop(ipc_path: str, port: int, username: str, password: str):
     with open(ipc_path, 'r+b') as f:
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE)
         try:
+            # Status helpers
+            def write_status(code: int, message: str = ""):
+                # code: 1=READY, 2=INFO, 3=ERROR
+                try:
+                    msgb = message.encode('utf-8') if message else b''
+                    # Write payload to status region (header+reqMax)
+                    base = 64 + 512*1024
+                    if len(msgb) > 64*1024:
+                        msgb = msgb[:64*1024]
+                    if msgb:
+                        mm[base:base+len(msgb)] = msgb
+                    # Bump statusSeq and publish
+                    prev = struct.unpack_from('<Q', mm, 48)[0]
+                    struct.pack_into('<I', mm, 56, len(msgb))
+                    struct.pack_into('<I', mm, 60, int(code))
+                    struct.pack_into('<Q', mm, 48, int(prev+1))
+                except Exception:
+                    pass
+
+            write_status(2, "python: up and listening")
             last_seq = 0
+            # Try loading base models; report status
             while True:
+                # Emit READY once base load work is done
+                if last_seq == 0:
+                    try:
+                        if base_encoder is not None and output_head is not None:
+                            write_status(2, "python: core models loaded")
+                        else:
+                            write_status(2, "python: core models missing; passthrough mode")
+                    except Exception as e:
+                        write_status(3, f"core models error: {e}")
+                    write_status(1, "ready")
+                    last_seq = -1  # mark ready announced
                 # Read reqSeq
                 reqSeq = struct.unpack_from('<Q', mm, 0)[0]
                 if reqSeq != 0 and reqSeq != last_seq:
@@ -470,31 +502,81 @@ def run_ipc_loop(ipc_path: str, port: int, username: str, password: str):
                     inputCount = struct.unpack_from('<Q', mm, 16)[0]
                     schemaLen, tableLen, filterLen, orderLen = struct.unpack_from('<IIII', mm, 24)
                     off = 64
-                    schema = mm[off:off+schemaLen].decode('utf-8', 'ignore'); off += schemaLen
-                    table  = mm[off:off+tableLen].decode('utf-8', 'ignore');  off += tableLen
-                    filter_s = mm[off:off+filterLen].decode('utf-8', 'ignore'); off += filterLen
-                    order_s  = mm[off:off+orderLen].decode('utf-8', 'ignore');  off += orderLen
-                    # Load histogram
-                    key = (schema, table)
-                    hist = hist_cache.get(key)
-                    if hist is None:
-                        try:
-                            hist = _load_hist_for_table(port, username, password, schema, table)
-                            hist_cache[key] = hist
-                        except Exception:
-                            hist = None
-                    # Predict or fallback
-                    if (base_encoder is None) or (output_head is None) or (hist is None):
-                        out = float(inputCount)
+                    if schemaLen == 0 and tableLen == 0 and filterLen == 0 and orderLen == 0:
+                        # Generic opcode mode: [op:1][len:4][payload]
+                        op = mm[off]
+                        off += 1
+                        plen = struct.unpack_from('<I', mm, off)[0]
+                        off += 4
+                        payload = mm[off:off+plen]
+                        # Handle opcodes
+                        if op == 2:  # FetchModel by ID (base model)
+                            model_id = payload.decode('utf-8', 'ignore')
+                            try:
+                                obj = _first_json_row(port, username, password,
+                                    "SELECT model FROM base_models WHERE id='" + model_id.replace("'","''") + "' LIMIT 1")
+                                data = b''
+                                if obj and 'model' in obj:
+                                    b = _decode_model_field(obj['model'])
+                                    if b:
+                                        data = b
+                                # Respond: [len][bytes]
+                                struct.pack_into('<I', mm, 64, len(data))
+                                if data:
+                                    mm[68:68+len(data)] = data
+                            except Exception as e:
+                                write_status(3, f"fetch model error: {e}")
+                                struct.pack_into('<I', mm, 64, 0)
+                            struct.pack_into('<Q', mm, 8, int(reqSeq))
+                            last_seq = reqSeq
+                        elif op == 3:  # SQL text via system_statistic endpoint
+                            sql = payload.decode('utf-8', 'ignore')
+                            outb = b''
+                            try:
+                                txt = exec_sql(port, username, password, sql)
+                                outb = txt.encode('utf-8')
+                            except Exception as e:
+                                msg = f"sql error: {e}"
+                                write_status(3, msg)
+                                outb = msg.encode('utf-8')
+                            struct.pack_into('<I', mm, 64, len(outb))
+                            if outb:
+                                mm[68:68+len(outb)] = outb
+                            struct.pack_into('<Q', mm, 8, int(reqSeq))
+                            last_seq = reqSeq
+                        else:
+                            # Unknown opcode: respond empty
+                            struct.pack_into('<I', mm, 64, 0)
+                            struct.pack_into('<Q', mm, 8, int(reqSeq))
+                            last_seq = reqSeq
                     else:
-                        try:
-                            out = _predict_one(base_encoder, ordered_layer, output_head, hist, schema, table, filter_s, order_s, float(inputCount))
-                        except Exception:
+                        # Legacy estimate mode: payload is schema|table|filter|order
+                        schema = mm[off:off+schemaLen].decode('utf-8', 'ignore'); off += schemaLen
+                        table  = mm[off:off+tableLen].decode('utf-8', 'ignore');  off += tableLen
+                        filter_s = mm[off:off+filterLen].decode('utf-8', 'ignore'); off += filterLen
+                        order_s  = mm[off:off+orderLen].decode('utf-8', 'ignore');  off += orderLen
+                        # Load histogram
+                        key = (schema, table)
+                        hist = hist_cache.get(key)
+                        if hist is None:
+                            try:
+                                hist = _load_hist_for_table(port, username, password, schema, table)
+                                hist_cache[key] = hist
+                                write_status(2, f"loaded histogram {schema}.{table}")
+                            except Exception:
+                                hist = None
+                        # Predict or fallback
+                        if (base_encoder is None) or (output_head is None) or (hist is None):
                             out = float(inputCount)
-                    # Write outputCount directly as float64 then respSeq
-                    struct.pack_into('<d', mm, 40, float(out))
-                    struct.pack_into('<Q', mm, 8, int(reqSeq))
-                    last_seq = reqSeq
+                        else:
+                            try:
+                                out = _predict_one(base_encoder, ordered_layer, output_head, hist, schema, table, filter_s, order_s, float(inputCount))
+                            except Exception:
+                                out = float(inputCount)
+                        # Write outputCount directly as float64 then respSeq
+                        struct.pack_into('<d', mm, 40, float(out))
+                        struct.pack_into('<Q', mm, 8, int(reqSeq))
+                        last_seq = reqSeq
                 else:
                     time.sleep(0.0002)
         finally:
