@@ -42,7 +42,7 @@ func MySQLServe(a ...Scmer) Scmer {
 	if err != nil {
 		panic(err)
 	}
-	go func () {
+	go func() {
 		defer mysql.Close()
 		mysql.Accept()
 	}()
@@ -55,10 +55,10 @@ func MySQLPassword(a ...Scmer) Scmer {
 }
 
 type MySQLWrapper struct {
-	log *xlog.Log
-	authcallback Scmer
+	log            *xlog.Log
+	authcallback   Scmer
 	schemacallback Scmer
-	querycallback Scmer
+	querycallback  Scmer
 }
 
 /* session storage -> map from session id to SCM session object */
@@ -103,9 +103,9 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	return nil
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
-	m.log.Info("db "+database)
+	m.log.Info("db " + database)
 	allowed := Apply(m.schemacallback, session.User(), database)
-	if (!ToBool(allowed)) {
+	if !ToBool(allowed) {
 		return errors.New("access denied for database " + database)
 	}
 	session.SetSchema(database)
@@ -113,36 +113,38 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 }
 func ScmerToMySQL(v Scmer) sqltypes.Value {
 	switch v2 := v.(type) {
-		case nil:
-			return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
-		case float64:
-			return sqltypes.NewFloat64(v2)
-		case int64:
-			return sqltypes.NewInt64(v2)
-		case bool:
-			if v2 {
-				return sqltypes.NewInt32(1)
-			} else {
-				return sqltypes.NewInt32(0)
-			}
-		case string:
-			return sqltypes.NewVarChar(v2) // TODO: also consider NewVarBinary
-		default:
-			return sqltypes.NewVarChar(String(v2))
+	case nil:
+		return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
+	case float64:
+		return sqltypes.NewFloat64(v2)
+	case int64:
+		return sqltypes.NewInt64(v2)
+	case bool:
+		if v2 {
+			return sqltypes.NewInt32(1)
+		} else {
+			return sqltypes.NewInt32(0)
+		}
+	case string:
+		return sqltypes.NewVarChar(v2) // TODO: also consider NewVarBinary
+	default:
+		return sqltypes.NewVarChar(String(v2))
 	}
 }
+
 type ErrorWrapper string
+
 func (s ErrorWrapper) Error() string {
 	return string(s)
 }
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
 	if query == "select @@version_comment limit 1" {
-		callback(&sqltypes.Result {
-			Fields: []*querypb.Field {
-				{ Name: "@@version_comment", Type: querypb.Type_TEXT },
+		callback(&sqltypes.Result{
+			Fields: []*querypb.Field{
+				{Name: "@@version_comment", Type: querypb.Type_TEXT},
 			},
-			Rows: [][]sqltypes.Value {
-				{ sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(runtime.GOOS)) },
+			Rows: [][]sqltypes.Value{
+				{sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(runtime.GOOS))},
 			},
 		})
 		return nil
@@ -156,14 +158,14 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	// load scm session object
 	scmSession, _ := mysqlsessions.Load(session.ID())
 	// result from scheme
-	rowcount := func () Scmer {
-		defer func () {
+	rowcount := func() Scmer {
+		defer func() {
 			if r := recover(); r != nil {
 				PrintError("error in mysql connection: " + fmt.Sprint(r))
 				myerr = ErrorWrapper(fmt.Sprint(r))
 			}
 		}()
-		return Apply(m.querycallback, session.Schema(), query, func (a... Scmer) Scmer {
+		return Apply(m.querycallback, session.Schema(), query, func(a ...Scmer) Scmer {
 			// function resultrow(item)
 			item := a[0].([]Scmer)
 			resultlock.Lock()
@@ -203,17 +205,17 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			result.Rows = append(result.Rows, newitem)
 			return true
 		},
-		scmSession)
+			scmSession)
 	}()
 	if myerr != nil {
 		return myerr
 	}
 	// TODO: also set result.InsertID (maybe as a callback as 4th parameter to m.querycallback?)
 	switch rowcount_ := rowcount.(type) {
-		case float64:
-			result.RowsAffected = uint64(rowcount_)
-		case int64:
-			result.RowsAffected = uint64(rowcount_)
+	case float64:
+		result.RowsAffected = uint64(rowcount_)
+	case int64:
+		result.RowsAffected = uint64(rowcount_)
 	}
 	// update status greeting
 	updateFlags(session, scmSession)
@@ -239,4 +241,3 @@ func updateFlags(s *driver.Session, session_ any) {
 		s.SetTransaction(true)
 	}
 }
-

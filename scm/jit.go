@@ -18,15 +18,15 @@ Copyright (C) 2024  Carl-Philip Hänsch
 package scm
 
 import (
-    "fmt"
-    "go/ast"
-    "go/parser"
-    "go/token"
-    "io/ioutil"
-    "reflect"
-    "runtime"
-    "syscall"
-    "unsafe"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/ioutil"
+	"reflect"
+	"runtime"
+	"syscall"
+	"unsafe"
 )
 
 /*
@@ -62,8 +62,8 @@ func RunJitTest() {
 	// disassemble /r 'github.com/launix-de/memcp/scm.RunJitTest'
 	fmt.Println("run JIT test")
 	fn2 := OptimizeForValues(myAdd, []int{2}, []Scmer{4})
-	fmt.Println("fn=",fn2)
-	fmt.Println("result",fn2(3, 7)) // should return 4
+	fmt.Println("fn=", fn2)
+	fmt.Println("result", fn2(3, 7)) // should return 4
 }
 
 /*
@@ -97,131 +97,129 @@ mov    0x8(%rax),%rbx // second return value (value)
 // successfully emitted native code. Otherwise it will return a wrapper that
 // calls the original Go function.
 func OptimizeForValues(fn func(...Scmer) Scmer, constMask []int /* 0=unknown, 1=type, 2=value */, constValues []Scmer) func(...Scmer) Scmer {
-    // quick validation
-    allVariable := true
-    for _, c := range constMask {
-	    if c > 0 {
-		    allVariable = false
-	    }
-    }
-    if allVariable {
-	    // nothing to optimize
-	    return fn
-    }
+	// quick validation
+	allVariable := true
+	for _, c := range constMask {
+		if c > 0 {
+			allVariable = false
+		}
+	}
+	if allVariable {
+		// nothing to optimize
+		return fn
+	}
 
-    //hash := fmt.Sprint("%p", fn) // TODO: cache targetDecl
+	//hash := fmt.Sprint("%p", fn) // TODO: cache targetDecl
 
-    // locate source file from runtime info
-    pc := reflect.ValueOf(fn).Pointer()
-    f := runtime.FuncForPC(pc)
-    fmt.Println("func", f)
-    if f == nil {
-        return fn
-    }
-    file, _ := f.FileLine(pc) // TODO: find relative path
-    fmt.Println("file", file)
-    // file may include ":<line>" from FileLine; but runtime.FuncForPC gives file path
-    // attempt to read file
-    src, err := ioutil.ReadFile(file)
-    //fmt.Println("src", string(src))
-    if err != nil {
-        // fallback: try to use the function's name to locate file in GOPATH
-        return fn
-    }
+	// locate source file from runtime info
+	pc := reflect.ValueOf(fn).Pointer()
+	f := runtime.FuncForPC(pc)
+	fmt.Println("func", f)
+	if f == nil {
+		return fn
+	}
+	file, _ := f.FileLine(pc) // TODO: find relative path
+	fmt.Println("file", file)
+	// file may include ":<line>" from FileLine; but runtime.FuncForPC gives file path
+	// attempt to read file
+	src, err := ioutil.ReadFile(file)
+	//fmt.Println("src", string(src))
+	if err != nil {
+		// fallback: try to use the function's name to locate file in GOPATH
+		return fn
+	}
 
-    // parse file and find the func declaration that contains the runtime line
-    fs := token.NewFileSet()
-    fileAst, err := parser.ParseFile(fs, file, src, parser.ParseComments)
-    if err != nil {
-        return func(args ...Scmer) Scmer { return fn(args...) }
-    }
+	// parse file and find the func declaration that contains the runtime line
+	fs := token.NewFileSet()
+	fileAst, err := parser.ParseFile(fs, file, src, parser.ParseComments)
+	if err != nil {
+		return func(args ...Scmer) Scmer { return fn(args...) }
+	}
 
-    // get line number
-    _, line := f.FileLine(pc)
-    fmt.Println("line", line)
+	// get line number
+	_, line := f.FileLine(pc)
+	fmt.Println("line", line)
 
-    var targetDecl *ast.FuncDecl
-    for _, d := range fileAst.Decls {
-        fd, ok := d.(*ast.FuncDecl)
-        if !ok || fd.Body == nil {
-            continue
-        }
-        start := fs.Position(fd.Pos()).Line
-        end := fs.Position(fd.End()).Line
-        if line >= start && line <= end {
-            targetDecl = fd
-            break
-        }
-    }
-    fmt.Println("targetDecl", targetDecl)
-    if targetDecl == nil {
-        return fn
-    }
-    // TODO: store targetDecl with hash
+	var targetDecl *ast.FuncDecl
+	for _, d := range fileAst.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		start := fs.Position(fd.Pos()).Line
+		end := fs.Position(fd.End()).Line
+		if line >= start && line <= end {
+			targetDecl = fd
+			break
+		}
+	}
+	fmt.Println("targetDecl", targetDecl)
+	if targetDecl == nil {
+		return fn
+	}
+	// TODO: store targetDecl with hash
 
-    // grab the first param name
-    firstParam := targetDecl.Type.Params.List[0]
-    fmt.Println("param: ----------")
-    ast.Print(nil, firstParam)
+	// grab the first param name
+	firstParam := targetDecl.Type.Params.List[0]
+	fmt.Println("param: ----------")
+	ast.Print(nil, firstParam)
 
-    // statements
-    stmts := targetDecl.Body.List
-    fmt.Println("stmts", stmts)
+	// statements
+	stmts := targetDecl.Body.List
+	fmt.Println("stmts", stmts)
 
-    for i, s := range stmts {
-	    fmt.Println("-----",i,"-----")
-	    ast.Print(nil, s)
-    }
-    // TODO: recurse over the AST
-    // ast.AssignStmt.Rhs[] ersetzen
-    // ast.IndexExpr{X: firstParam, Index: ast.BasicLit}
-    // ast.BasicLit{Kind: token.Int, Value: strconv.ParseInt(Value, 0, 64)}
-    // *ast.ReturnStmt.Results[0]
-    if stmts[0].(*ast.AssignStmt).Rhs[0].(*ast.IndexExpr).X.(*ast.Ident).Obj.Decl == firstParam {
-	    fmt.Println("bingo")
-    }
-    
-    //code := jitReturnLiteral(constValues[0]) // TODO: compose the real code
-    code := jitNthArgument(1) // TODO: compose the real code
+	for i, s := range stmts {
+		fmt.Println("-----", i, "-----")
+		ast.Print(nil, s)
+	}
+	// TODO: recurse over the AST
+	// ast.AssignStmt.Rhs[] ersetzen
+	// ast.IndexExpr{X: firstParam, Index: ast.BasicLit}
+	// ast.BasicLit{Kind: token.Int, Value: strconv.ParseInt(Value, 0, 64)}
+	// *ast.ReturnStmt.Results[0]
+	if stmts[0].(*ast.AssignStmt).Rhs[0].(*ast.IndexExpr).X.(*ast.Ident).Obj.Decl == firstParam {
+		fmt.Println("bingo")
+	}
 
-    // allocate executable buffer
-    buf, err := allocExec(len(code))
-    if err != nil {
-        return fn
-    }
-    // copy code
-    dst := (*[1 << 30]byte)(buf.ptr)[:len(code):len(code)]
-    copy(dst, code)
-    if err := buf.makeRX(); err != nil {
-        // free
-        syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
-        return fn
-    }
+	//code := jitReturnLiteral(constValues[0]) // TODO: compose the real code
+	code := jitNthArgument(1) // TODO: compose the real code
 
-    fn2 := unsafe.Pointer(&struct{*byte}{&dst[0]})
-    return *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2)) // struct { fnptr, closure1, closure2, ... }
+	// allocate executable buffer
+	buf, err := allocExec(len(code))
+	if err != nil {
+		return fn
+	}
+	// copy code
+	dst := (*[1 << 30]byte)(buf.ptr)[:len(code):len(code)]
+	copy(dst, code)
+	if err := buf.makeRX(); err != nil {
+		// free
+		syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
+		return fn
+	}
+
+	fn2 := unsafe.Pointer(&struct{ *byte }{&dst[0]})
+	return *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2)) // struct { fnptr, closure1, closure2, ... }
 }
 
 // execBuf is a small wrapper for mmap'd memory
 type execBuf struct {
-    ptr unsafe.Pointer
-    n   int // size
+	ptr unsafe.Pointer
+	n   int // size
 }
 
 func allocExec(size int) (*execBuf, error) {
-    page := syscall.Getpagesize()
-    n := (size + page - 1) & ^(page - 1)
-    b, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
-    if err != nil {
-        return nil, err
-    }
-    return &execBuf{ptr: unsafe.Pointer(&b[0]), n: n}, nil
+	page := syscall.Getpagesize()
+	n := (size + page - 1) & ^(page - 1)
+	b, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
+	if err != nil {
+		return nil, err
+	}
+	return &execBuf{ptr: unsafe.Pointer(&b[0]), n: n}, nil
 }
 
 func (e *execBuf) makeRX() error {
-    // change to PROT_READ|PROT_EXEC
-    data := (*[1 << 30]byte)(e.ptr)[:e.n:e.n]
-    return syscall.Mprotect(data, syscall.PROT_READ|syscall.PROT_EXEC)
+	// change to PROT_READ|PROT_EXEC
+	data := (*[1 << 30]byte)(e.ptr)[:e.n:e.n]
+	return syscall.Mprotect(data, syscall.PROT_READ|syscall.PROT_EXEC)
 }
-
-

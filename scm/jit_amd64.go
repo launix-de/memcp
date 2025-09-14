@@ -1,19 +1,20 @@
 //go:build amd64
+
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package scm
 
@@ -23,51 +24,50 @@ import "unsafe"
 
 // all code snippets fill rax+rbx with the return value
 func jitReturnLiteral(value Scmer) []byte {
-    code := []byte{
-	0x48, 0xB8, 7,0,0,0,0,0,0,0, // mov rax, 7
-	0x48, 0xBB, 7,0,0,0,0,0,0,0, // mov rbx, 7
-	0xC3,
-    }
-    // insert the literal into the immediate values
-    *(*unsafe.Pointer)(unsafe.Pointer(&code[ 2])) = *(*unsafe.Pointer)(unsafe.Pointer(&value))
-    *(*unsafe.Pointer)(unsafe.Pointer(&code[12])) = *((*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&value), 8)))
-    return code
+	code := []byte{
+		0x48, 0xB8, 7, 0, 0, 0, 0, 0, 0, 0, // mov rax, 7
+		0x48, 0xBB, 7, 0, 0, 0, 0, 0, 0, 0, // mov rbx, 7
+		0xC3,
+	}
+	// insert the literal into the immediate values
+	*(*unsafe.Pointer)(unsafe.Pointer(&code[2])) = *(*unsafe.Pointer)(unsafe.Pointer(&value))
+	*(*unsafe.Pointer)(unsafe.Pointer(&code[12])) = *((*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&value), 8)))
+	return code
 }
 
 func jitNthArgument(idx int) []byte { // up to 16 params
-    // TODO: corner case 0, corner case >=16
-    code := []byte{
+	// TODO: corner case 0, corner case >=16
+	code := []byte{
 
-	0x48, 0x83, 0xC0, byte(idx*16), // add rax, 16*value
-	0x48, 0x8b, 0x08, // mov    (%rax),%rcx -> type descriptor
-	0x48, 0x8b, 0x58, 0x08, // mov    0x8(%rax),%rbx -> value
-	0x48, 0x89, 0xc8, // mov    %rcx,%rax -> type=return value
+		0x48, 0x83, 0xC0, byte(idx * 16), // add rax, 16*value
+		0x48, 0x8b, 0x08, // mov    (%rax),%rcx -> type descriptor
+		0x48, 0x8b, 0x58, 0x08, // mov    0x8(%rax),%rbx -> value
+		0x48, 0x89, 0xc8, // mov    %rcx,%rax -> type=return value
 
-	0xC3, /* ret */
-    }
-    return code
+		0xC3, /* ret */
+	}
+	return code
 }
-
 
 func jitStackFrame(size uint8) []byte {
 	return []byte{
-		0x55,                 	//push   %rbp
-		0x48, 0x89, 0xe5,           	//mov    %rsp,%rbp
-		0x48, 0x83, 0xec, size,        	//sub    $0x10,%rsp
+		0x55,             //push   %rbp
+		0x48, 0x89, 0xe5, //mov    %rsp,%rbp
+		0x48, 0x83, 0xec, size, //sub    $0x10,%rsp
 		// TODO: inner code
 		// TODO: getter/setter mov    %rax,0x20(%rsp)
-		0x48, 0x83, 0xc4, size,        	//add    $0x10,%rsp
-		0x5d,                 	//pop    %rbp
-		0xc3,                 	//ret
+		0x48, 0x83, 0xc4, size, //add    $0x10,%rsp
+		0x5d, //pop    %rbp
+		0xc3, //ret
 	}
 }
 
 /* TODO: peephole optimizer:
- - remove argument checks (test rbx,rbx 48 85 db 76 xx)
- - shorten immediate values
- - constant-fold operations 
- - inline functions
- - jump to other functions
+- remove argument checks (test rbx,rbx 48 85 db 76 xx)
+- shorten immediate values
+- constant-fold operations
+- inline functions
+- jump to other functions
 */
 
 /*

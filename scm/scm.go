@@ -27,10 +27,10 @@ package scm
 
 import (
 	"fmt"
-	"time"
+	"github.com/jtolds/gls"
 	"reflect"
 	"strings"
-	"github.com/jtolds/gls"
+	"time"
 )
 
 // TODO: (unquote string) -> symbol
@@ -51,7 +51,7 @@ import (
 */
 
 func Eval(expression Scmer, en *Env) (value Scmer) {
-	restart: // goto label because golang is lacking tail recursion, so just overwrite params and goto restart
+restart: // goto label because golang is lacking tail recursion, so just overwrite params and goto restart
 	switch e := expression.(type) {
 	case SourceInfo:
 		// omit source info
@@ -225,9 +225,9 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				}
 			case "lambda":
 				switch si := e[1].(type) {
-					case SourceInfo:
-						// strip SourceInfo from lambda declarations
-						e[1] = si.value
+				case SourceInfo:
+					// strip SourceInfo from lambda declarations
+					e[1] = si.value
 				}
 				numVars := 0
 				if len(e) > 3 {
@@ -237,7 +237,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			case "begin":
 				// execute begin.. in own environment
 				en2 := Env{make(Vars), en.VarsNumbered, en, false}
-				for _, i := range e[1:len(e)-1] {
+				for _, i := range e[1 : len(e)-1] {
 					Eval(i, &en2)
 				}
 				// tail call optimized version: last begin part will be tailed
@@ -246,7 +246,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 				goto restart
 			case "!begin":
 				// execute begin.. in parent environment
-				for _, i := range e[1:len(e)-1] {
+				for _, i := range e[1 : len(e)-1] {
 					Eval(i, en)
 				}
 				// tail call optimized version: last begin part will be tailed
@@ -267,7 +267,7 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 					}(i))
 				}
 				for range e[1:] {
-					if err := <- errs; err != nil {
+					if err := <-errs; err != nil {
 						panic(err)
 					}
 				}
@@ -277,94 +277,98 @@ func Eval(expression Scmer, en *Env) (value Scmer) {
 			}
 			return
 		}
-		to_apply:
+	to_apply:
 		// apply
 		operands := e[1:]
 		procedure := Eval(e[0], en)
 		switch p := procedure.(type) {
-			case func(...Scmer) Scmer:
-				args := make([]Scmer, len(operands))
-				for i, x := range operands {
-					args[i] = Eval(x, en)
+		case func(...Scmer) Scmer:
+			args := make([]Scmer, len(operands))
+			for i, x := range operands {
+				args[i] = Eval(x, en)
+			}
+			return p(args...)
+		case func(*Env, ...Scmer) Scmer:
+			args := make([]Scmer, len(operands))
+			for i, x := range operands {
+				args[i] = Eval(x, en)
+			}
+			return p(en, args...)
+		case *ScmParser:
+			return p.Execute(String(Eval(e[1], en)), en)
+		case Proc:
+			en2 := Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
+			switch params := p.Params.(type) {
+			case []Scmer:
+				if len(params) < len(operands) {
+					panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
 				}
-				return p(args...)
-			case func(*Env, ...Scmer) Scmer:
-				args := make([]Scmer, len(operands))
-				for i, x := range operands {
-					args[i] = Eval(x, en)
-				}
-				return p(en, args...)
-			case *ScmParser:
-				return p.Execute(String(Eval(e[1], en)), en)
-			case Proc:
-				en2 := Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
-				switch params := p.Params.(type) {
-				case []Scmer:
-					if len(params) < len(operands) {
-						panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
-					}
-					if p.NumVars > 0 {
-						for i, _ := range params {
-							if i < len(operands) {
-								en2.VarsNumbered[i] = Eval(operands[i], en)
-							}
-						}
-					} else {
-						for i, param := range params {
-							if param != Symbol("_") {
-								if i < len(operands) {
-									en2.Vars[param.(Symbol)] = Eval(operands[i], en)
-								} else {
-									en2.Vars[param.(Symbol)] = nil
-								}
-							}
+				if p.NumVars > 0 {
+					for i, _ := range params {
+						if i < len(operands) {
+							en2.VarsNumbered[i] = Eval(operands[i], en)
 						}
 					}
-				case Symbol:
-					args := make([]Scmer, len(operands))
-					for i, x := range operands {
-						args[i] = Eval(x, en)
-					}
-					if p.NumVars > 0 {
-						en2.VarsNumbered[0] = args
-					} else {
-						en2.Vars[params] = args
-					}
-				case nil:
-					// no arguments
-				default:
-				}
-				en = &en2
-				expression = p.Body
-				goto restart // tail call optimized
-			case []Scmer: // associative list
-				// format: (key value key value ... default)
-				if i, ok := operands[0].(NthLocalVar); ok {
-					// indexed access generated through optimizer
-					return p[i]
 				} else {
-					arg := Eval(operands[0], en)
-					i := 0
-					for i < len(p)-1 {
-						if Equal(arg, p[i]) {
-							return p[i+1]
+					for i, param := range params {
+						if param != Symbol("_") {
+							if i < len(operands) {
+								en2.Vars[param.(Symbol)] = Eval(operands[i], en)
+							} else {
+								en2.Vars[param.(Symbol)] = nil
+							}
 						}
-						i += 2
 					}
-					if i < len(p) {
-						return p[i] // default value on n+1
-					}
-					return nil // no default value
-					}
-				case *FastDict:
-					arg := Eval(operands[0], en)
-					if v, ok := p.Get(arg); ok { return v }
-					if ln := len(p.Pairs); ln%2 == 1 && ln > 0 { return p.Pairs[ln-1] }
-					return nil
+				}
+			case Symbol:
+				args := make([]Scmer, len(operands))
+				for i, x := range operands {
+					args[i] = Eval(x, en)
+				}
+				if p.NumVars > 0 {
+					en2.VarsNumbered[0] = args
+				} else {
+					en2.Vars[params] = args
+				}
 			case nil:
-				panic("Unknown function: " + fmt.Sprint(e[0]))
+				// no arguments
 			default:
-				panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
+			}
+			en = &en2
+			expression = p.Body
+			goto restart // tail call optimized
+		case []Scmer: // associative list
+			// format: (key value key value ... default)
+			if i, ok := operands[0].(NthLocalVar); ok {
+				// indexed access generated through optimizer
+				return p[i]
+			} else {
+				arg := Eval(operands[0], en)
+				i := 0
+				for i < len(p)-1 {
+					if Equal(arg, p[i]) {
+						return p[i+1]
+					}
+					i += 2
+				}
+				if i < len(p) {
+					return p[i] // default value on n+1
+				}
+				return nil // no default value
+			}
+		case *FastDict:
+			arg := Eval(operands[0], en)
+			if v, ok := p.Get(arg); ok {
+				return v
+			}
+			if ln := len(p.Pairs); ln%2 == 1 && ln > 0 {
+				return p.Pairs[ln-1]
+			}
+			return nil
+		case nil:
+			panic("Unknown function: " + fmt.Sprint(e[0]))
+		default:
+			panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 		}
 	default:
 		panic("Unknown expression type - EVAL " + fmt.Sprint(e))
@@ -432,7 +436,7 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		case nil:
 		}
 		return Eval(p.Body, en)
-			case []Scmer: // associative list
+	case []Scmer: // associative list
 		// format: (key value key value ... default)
 		if i, ok := args[0].(NthLocalVar); ok {
 			// indexed access generated through optimizer
@@ -448,11 +452,15 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 			if i < len(p) {
 				return p[i] // default value on n+1
 			}
-					return nil // no default value
-				}
+			return nil // no default value
+		}
 	case *FastDict: // associative dict
-		if v, ok := p.Get(args[0]); ok { return v }
-		if ln := len(p.Pairs); ln%2 == 1 && ln > 0 { return p.Pairs[ln-1] }
+		if v, ok := p.Get(args[0]); ok {
+			return v
+		}
+		if ln := len(p.Pairs); ln%2 == 1 && ln > 0 {
+			return p.Pairs[ln-1]
+		}
 		return nil
 	case nil:
 		panic("Unknown function")
@@ -480,10 +488,10 @@ type NthLocalVar uint8 // equals to (var i)
 
 type Vars map[Symbol]Scmer
 type Env struct {
-	Vars Vars
+	Vars         Vars
 	VarsNumbered []Scmer // <- for the optimizer
-	Outer *Env
-	Nodefine bool // define will write to Outer
+	Outer        *Env
+	Nodefine     bool // define will write to Outer
 }
 
 func (e *Env) FindRead(s Symbol) *Env {
@@ -517,7 +525,7 @@ var Globalenv Env
 func List(a ...Scmer) Scmer {
 	return a
 }
-func isList(v Scmer)  bool {
+func isList(v Scmer) bool {
 	f, ok := v.(func(...Scmer) Scmer)
 	if !ok {
 		return false
@@ -527,7 +535,7 @@ func isList(v Scmer)  bool {
 func init() {
 	Globalenv = Env{
 		Vars{ //aka an incomplete set of compiled-in functions
-			"true": true,
+			"true":  true,
 			"false": false,
 
 			// basic
@@ -559,16 +567,16 @@ func init() {
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value to examine"},
-		}, "int", func (a ...Scmer) Scmer {
-                        return int64(ComputeSize(a[0]))
-                }, true,
+		}, "int", func(a ...Scmer) Scmer {
+			return int64(ComputeSize(a[0]))
+		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"code", "list", "list with head and optional parameters"},
-		}, "any", func (a ...Scmer) Scmer {
+		}, "any", func(a ...Scmer) Scmer {
 			//fmt.Println("optimize", SerializeToString(a[0], &Globalenv), " -> ", SerializeToString(Optimize(a[0], &Globalenv), &Globalenv))
 			return Optimize(a[0], &Globalenv)
 		}, true,
@@ -642,7 +650,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "value or message to throw"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			if len(a) == 1 {
 				panic(a[0])
 			} else {
@@ -661,7 +669,7 @@ func init() {
 			DeclarationParameter{"func", "func", "function with no parameters that will be called"},
 			DeclarationParameter{"errorhandler", "func", "function that takes the error as parameter"},
 		}, "any",
-		func (a ...Scmer) (result Scmer) {
+		func(a ...Scmer) (result Scmer) {
 			defer func() {
 				err := recover()
 				if err != nil {
@@ -679,7 +687,7 @@ func init() {
 			DeclarationParameter{"function", "func", "function to execute"},
 			DeclarationParameter{"arguments", "list", "list of arguments to apply"},
 		}, "any",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			return Apply(a[0], a[1].([]Scmer)...)
 		}, true,
 	})
@@ -690,7 +698,7 @@ func init() {
 			DeclarationParameter{"function", "func", "function to execute (must be a lambda)"},
 			DeclarationParameter{"arguments", "list", "assoc list of arguments to apply"},
 		}, "symbol",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], a[1].([]Scmer))
 		}, true,
 	})
@@ -700,7 +708,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "string value that will be converted into a symbol"},
 		}, "symbol",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			return Symbol(String(a[0]))
 		}, false,
 	})
@@ -713,12 +721,42 @@ func init() {
 		nil, false,
 	})
 	Declare(&Globalenv, &Declaration{
+		"for", "Sequential loop over a list state; applies a condition and step function and returns the final state list.\nUse only when iterations have strong data dependencies and must run sequentially.\n\nExamples:\n- Count to 10: (for '(0) (lambda (x) (< x 10)) (lambda (x) (list (+ x 1))))  => '(10)\n- Sum 0..9:   (for '(0 0) (lambda (x sum) (< x 10)) (lambda (x sum) (list (+ x 1) (+ sum x)))) => '(10 45)",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"init", "list", "initial state as a list"},
+			DeclarationParameter{"condition", "func", "func that receives the current state as parameters and must return true if the loop shall be continued"},
+			DeclarationParameter{"step", "func", "step func that returns the next state as a list"},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			state, ok := a[0].([]Scmer)
+			if !ok {
+				panic("for expects init to be a list")
+			}
+			cond := OptimizeProcToSerialFunction(a[1])
+			next := OptimizeProcToSerialFunction(a[2])
+			for ToBool(cond(state...)) {
+				v := next(state...)
+				if v == nil {
+					state = []Scmer{}
+					continue
+				}
+				state2, ok := v.([]Scmer)
+				if !ok {
+					panic("for step must return a list")
+				}
+				state = state2
+			}
+			return state
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
 		1, 1,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "any value"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			return String(a[0])
 		}, true,
 	})
@@ -781,7 +819,7 @@ Patterns can be any of:
 			DeclarationParameter{"code", "returntype", "code"},
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "returntype",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			return SourceInfo{
 				String(a[0]),
 				ToInt(a[1]),
@@ -797,7 +835,7 @@ Patterns can be any of:
 			DeclarationParameter{"code", "string", "Scheme code"},
 			DeclarationParameter{"filename", "string", "optional filename"},
 		}, "any",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			filename := "eval"
 			if len(a) > 1 {
 				filename = String(a[1])
@@ -811,7 +849,7 @@ Patterns can be any of:
 		[]DeclarationParameter{
 			DeclarationParameter{"code", "list", "Scheme code"},
 		}, "string",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			return SerializeToString(a[0], &Globalenv)
 		}, false,
 	})
@@ -840,10 +878,10 @@ integer?, rational?, real?, complex?, number?
  Parsing
 */
 
-//Symbols, numbers, expressions, procedures, lists, ... all implement this interface, which enables passing them along in the interpreter
+// Symbols, numbers, expressions, procedures, lists, ... all implement this interface, which enables passing them along in the interpreter
 type Scmer interface{}
 
-type Symbol string  //Symbols are represented by strings
+type Symbol string //Symbols are represented by strings
 //Numbers by float64 (but no extra type)
 
 type Sizable interface {
@@ -852,37 +890,37 @@ type Sizable interface {
 
 func ComputeSize(v Scmer) uint {
 	switch vv := v.(type) {
-		case nil:
-			return 16
-		case Sizable:
-			return vv.ComputeSize()
-		case *Sizable:
-			return 8 /* ptr */ + 16 /* allocation header */ + (*vv).ComputeSize()
-		case []Scmer: // array
-			var sz uint = 16 /* allocation header */ + 24 /* slice */
-			for _, vi := range vv {
-				sz += ComputeSize(vi)
-			}
-			return sz
-		case [][]Scmer: // delta storage
-			var sz uint = 16 /* allocation header */ + 24 /* slice */
-			for _, vi := range vv {
-				sz += ComputeSize(vi)
-			}
-			return sz
-		case []float64: // vector
-			var sz uint = 16 /* allocation header */ + 24 /* slice */ + 8 * uint(len(vv)) /* data */
-			return sz
-		case *Scmer: // pointer
-			return 16 /* interface + data */ + ComputeSize(*vv)
-		case Symbol: // Symbol
-			return 16 /* allocation header */ + 16 /* const slice */ + 8 * ((uint(len(vv))-1)/8)
-		case string: // string
-			return 16 /* allocation header */ + 16 /* const slice */ + 8 * ((uint(len(vv))-1)/8)
-		case int, uint, int64, uint64, float64, bool: // known types
-			return 16 // 8 bytes interface ptr, 8 bytes raw data (int, float64 etc.)
-		default: // unknown -> with warning
-			fmt.Println(fmt.Sprintf("warning: unknown type %s", reflect.TypeOf(vv).Name()))
-			return 16 // 8 bytes interface ptr, 8 bytes raw data (int, float64 etc.)
+	case nil:
+		return 16
+	case Sizable:
+		return vv.ComputeSize()
+	case *Sizable:
+		return 8 /* ptr */ + 16 /* allocation header */ + (*vv).ComputeSize()
+	case []Scmer: // array
+		var sz uint = 16 /* allocation header */ + 24 /* slice */
+		for _, vi := range vv {
+			sz += ComputeSize(vi)
+		}
+		return sz
+	case [][]Scmer: // delta storage
+		var sz uint = 16 /* allocation header */ + 24 /* slice */
+		for _, vi := range vv {
+			sz += ComputeSize(vi)
+		}
+		return sz
+	case []float64: // vector
+		var sz uint = 16 /* allocation header */ + 24 /* slice */ + 8*uint(len(vv)) /* data */
+		return sz
+	case *Scmer: // pointer
+		return 16 /* interface + data */ + ComputeSize(*vv)
+	case Symbol: // Symbol
+		return 16 /* allocation header */ + 16 /* const slice */ + 8*((uint(len(vv))-1)/8)
+	case string: // string
+		return 16 /* allocation header */ + 16 /* const slice */ + 8*((uint(len(vv))-1)/8)
+	case int, uint, int64, uint64, float64, bool: // known types
+		return 16 // 8 bytes interface ptr, 8 bytes raw data (int, float64 etc.)
+	default: // unknown -> with warning
+		fmt.Println(fmt.Sprintf("warning: unknown type %s", reflect.TypeOf(vv).Name()))
+		return 16 // 8 bytes interface ptr, 8 bytes raw data (int, float64 etc.)
 	}
 }

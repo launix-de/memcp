@@ -25,7 +25,7 @@ import "github.com/jtolds/gls"
 /* threadsafe session storage */
 
 type session struct {
-	Mu sync.RWMutex
+	Mu  sync.RWMutex
 	Map map[string]Scmer
 }
 
@@ -34,7 +34,7 @@ func NewSession(a ...Scmer) Scmer {
 	// params: port, authcallback, schemacallback, querycallback
 	sess := new(session)
 	sess.Map = make(map[string]Scmer)
-	return func (a ...Scmer) (result Scmer) {
+	return func(a ...Scmer) (result Scmer) {
 		if len(a) == 2 {
 			// set
 			sess.Mu.Lock()
@@ -126,8 +126,7 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		"newsession", "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
 		0, 0,
-		[]DeclarationParameter{
-		}, "func",
+		[]DeclarationParameter{}, "func",
 		NewSession, false,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -144,13 +143,13 @@ func init_sync() {
 		[]DeclarationParameter{
 			DeclarationParameter{"duration", "number", "number of seconds to sleep"},
 		}, "bool",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			ctx := GetContext()
 			select {
-				case <- ctx.Done():
-					panic(ctx.Err)
-				case <- time.After(time.Duration(ToFloat(a[0]) * float64(time.Second))):
-					return true
+			case <-ctx.Done():
+				panic(ctx.Err)
+			case <-time.After(time.Duration(ToFloat(a[0]) * float64(time.Second))):
+				return true
 			}
 		}, false,
 	})
@@ -160,9 +159,9 @@ func init_sync() {
 		[]DeclarationParameter{
 			DeclarationParameter{"f", "func", "function that produces the result value"},
 		}, "func",
-		func (a ...Scmer) Scmer {
+		func(a ...Scmer) Scmer {
 			var params []Scmer
-			once := sync.OnceValue[Scmer](func () Scmer {
+			once := sync.OnceValue[Scmer](func() Scmer {
 				return Apply(a[0], params...)
 			})
 			return func(a ...Scmer) Scmer {
@@ -174,9 +173,8 @@ func init_sync() {
 	Declare(&Globalenv, &Declaration{
 		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
 		1, 1,
-		[]DeclarationParameter{
-		}, "func",
-		func (a ...Scmer) Scmer {
+		[]DeclarationParameter{}, "func",
+		func(a ...Scmer) Scmer {
 			var mutex sync.Mutex
 			return func(a ...Scmer) Scmer {
 				mutex.Lock()

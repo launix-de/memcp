@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package scm
 
@@ -33,11 +33,11 @@ func HTTPServe(a ...Scmer) Scmer {
 	// HTTP endpoint; params: (port, handler)
 	port := String(a[0])
 	handler := &HttpServer{a[1]}
-	server := &http.Server {
-		Addr: fmt.Sprintf(":%v", port),
-		Handler: handler,
-		ReadTimeout: 10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+	server := &http.Server{
+		Addr:           fmt.Sprintf(":%v", port),
+		Handler:        handler,
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   10 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
 	go server.ListenAndServe()
@@ -46,14 +46,14 @@ func HTTPServe(a ...Scmer) Scmer {
 }
 
 // build this function into your file-local SCM environment to serve static files
-func HTTPStaticGetter(wd string) func (...Scmer) Scmer {
+func HTTPStaticGetter(wd string) func(...Scmer) Scmer {
 	mime.AddExtensionType(".js", "application/javascript")
 	mime.AddExtensionType(".html", "text/html")
 	mime.AddExtensionType(".svg", "image/svg+xml")
 
-	return func (a ...Scmer) Scmer {
+	return func(a ...Scmer) Scmer {
 		fs := http.FileServer(http.Dir(wd + "/" + String(a[0])))
-		return func (a ...Scmer) Scmer { // req res
+		return func(a ...Scmer) Scmer { // req res
 			Apply(Apply(a[1], "header"), "Content-Type", "") // reset content-type so static server can overwrite it
 			fs.ServeHTTP(a[1].([]Scmer)[1].(http.ResponseWriter), a[0].([]Scmer)[1].(*http.Request))
 			return nil
@@ -89,7 +89,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		user = req.URL.User.Username()
 		pass, upok = req.URL.User.Password()
 	}
-	req_scm := []Scmer {
+	req_scm := []Scmer{
 		"req", req, // must be first item to be found by us
 		"method", req.Method,
 		"host", req.Host,
@@ -148,45 +148,45 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		},
 	}
 	var res_lock sync.Mutex
-	res_scm := []Scmer {
+	res_scm := []Scmer{
 		"res", res,
-		"header", func (a ...Scmer) Scmer {
+		"header", func(a ...Scmer) Scmer {
 			res_lock.Lock()
 			res.Header().Set(String(a[0]), String(a[1]))
-			res_lock.Unlock();
+			res_lock.Unlock()
 			return "ok"
 		},
-		"status", func (a ...Scmer) Scmer {
+		"status", func(a ...Scmer) Scmer {
 			// status after header!
 			res_lock.Lock()
 			status, _ := strconv.Atoi(String(a[0]))
 			res.WriteHeader(status)
-			res_lock.Unlock();
+			res_lock.Unlock()
 			return "ok"
 		},
-		"print", func (a ...Scmer) Scmer {
+		"print", func(a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
 			for _, s := range a {
 				io.WriteString(res, String(s))
 			}
-			res_lock.Unlock();
+			res_lock.Unlock()
 			return "ok"
 		},
-		"println", func (a ...Scmer) Scmer {
+		"println", func(a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
-			io.WriteString(res, String(a[0]) + "\n")
-			res_lock.Unlock();
+			io.WriteString(res, String(a[0])+"\n")
+			res_lock.Unlock()
 			return "ok"
 		},
-		"jsonl", func (a ...Scmer) Scmer {
+		"jsonl", func(a ...Scmer) Scmer {
 			// print json line (only assoc)
 			res_lock.Lock()
 			io.WriteString(res, "{")
 			dict := a[0].([]Scmer)
 			for i, v := range dict {
-				if i % 2 == 0 {
+				if i%2 == 0 {
 					// key
 					bytes, _ := json.Marshal(String(v))
 					res.Write(bytes)
@@ -203,10 +203,10 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				}
 			}
 			io.WriteString(res, "}\n")
-			res_lock.Unlock();
+			res_lock.Unlock()
 			return "ok"
 		},
-		"websocket", func (a ...Scmer) Scmer {
+		"websocket", func(a ...Scmer) Scmer {
 			// upgrade to a websocket, params: onMessage, onClose
 			var upgrader = websocket.Upgrader{
 				ReadBufferSize:  1024,
@@ -219,7 +219,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				panic(err)
 			}
 			go func() {
-				defer func () {
+				defer func() {
 					if r := recover(); r != nil {
 						PrintError("error in websocket receive: " + fmt.Sprint(r))
 					}
@@ -260,7 +260,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 	NewContext(req.Context(), func() {
 		// catch panics and print out 500 Internal Server Error
-		defer func () {
+		defer func() {
 			if r := recover(); r != nil {
 				PrintError("error in http handler: " + fmt.Sprint(r))
 				res.Header().Set("Content-Type", "text/plain")

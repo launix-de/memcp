@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package scm
 
@@ -24,154 +24,172 @@ func EqualScm(a, b Scmer) Scmer { // case sensitive and can compare nil
 }
 func Equal(a, b Scmer) bool { // case sensitive and can compare nil
 	switch a_ := a.(type) {
+	case LazyString:
+		switch b_ := b.(type) {
 		case LazyString:
-			switch b_ := b.(type) {
-				case LazyString:
-					return a_.Hash == b_.Hash
-				case string:
-					return a_.GetValue() == b_
-				case float64:
-					return ToFloat(a_.GetValue()) == b_
-				case int64:
-					return ToInt(a_.GetValue()) == int(b_)
-				case bool:
-					return ToBool(a) == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-				case nil:
-					return !ToBool(a)
-			}
+			return a_.Hash == b_.Hash
 		case string:
-			switch b_ := b.(type) {
-				case LazyString:
-					return a_ == b_.GetValue()
-				case string:
-					return a_ == b_
-				case float64:
-					return ToFloat(a_) == b_
-				case int64:
-					return ToInt(a_) == int(b_)
-				case bool:
-					return ToBool(a) == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-				case nil:
-					return !ToBool(a)
-				case SourceInfo:
-					return Equal(a, b_.value)
-			}
+			return a_.GetValue() == b_
 		case float64:
-			switch b_ := b.(type) {
-				case LazyString:
-					return String(a_) == b_.GetValue()
-				case string:
-					return a_ == ToFloat(b_)
-				case float64:
-					return a_ == b_
-				case int64:
-					return a_ == float64(b_)
-				case bool:
-					return ToBool(a) == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-				case nil:
-					return !ToBool(a)
-			}
+			return ToFloat(a_.GetValue()) == b_
 		case int64:
-			switch b_ := b.(type) {
-				case LazyString:
-					return String(a_) == b_.GetValue()
-				case string:
-					return int(a_) == ToInt(b_)
-				case float64:
-					return float64(a_) == b_
-				case int64:
-					return a_ == b_
-				case bool:
-					return ToBool(a) == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-				case nil:
-					return !ToBool(a)
-			}
+			return ToInt(a_.GetValue()) == int(b_)
 		case bool:
-			switch b_ := b.(type) {
-				case LazyString:
-					return a_ == ToBool(b)
-				case string:
-					return a_ == ToBool(b)
-				case float64:
-					return a_ == ToBool(b)
-				case int64:
-					return a_ == ToBool(b)
-				case bool:
-					return a_ == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-				case nil:
-					return !a_
-			}
+			return ToBool(a) == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
 		case nil:
-			switch b_ := b.(type) {
-				case LazyString:
-					return !ToBool(b)
-				case string:
-					return !ToBool(b)
-				case float64:
-					return !ToBool(b)
-				case int64:
-					return !ToBool(b)
-				case bool:
-					return !b_
-				case nil:
-					return true
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-			}
+			return !ToBool(a)
+		}
+	case string:
+		switch b_ := b.(type) {
+		case LazyString:
+			return a_ == b_.GetValue()
+		case string:
+			return a_ == b_
+		case float64:
+			return ToFloat(a_) == b_
+		case int64:
+			return ToInt(a_) == int(b_)
+		case bool:
+			return ToBool(a) == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
+		case nil:
+			return !ToBool(a)
+		case SourceInfo:
+			return Equal(a, b_.value)
+		}
+	case float64:
+		switch b_ := b.(type) {
+		case LazyString:
+			return String(a_) == b_.GetValue()
+		case string:
+			return a_ == ToFloat(b_)
+		case float64:
+			return a_ == b_
+		case int64:
+			return a_ == float64(b_)
+		case bool:
+			return ToBool(a) == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
+		case nil:
+			return !ToBool(a)
+		}
+	case int64:
+		switch b_ := b.(type) {
+		case LazyString:
+			return String(a_) == b_.GetValue()
+		case string:
+			return int(a_) == ToInt(b_)
+		case float64:
+			return float64(a_) == b_
+		case int64:
+			return a_ == b_
+		case bool:
+			return ToBool(a) == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
+		case nil:
+			return !ToBool(a)
+		}
+	case bool:
+		switch b_ := b.(type) {
+		case LazyString:
+			return a_ == ToBool(b)
+		case string:
+			return a_ == ToBool(b)
+		case float64:
+			return a_ == ToBool(b)
+		case int64:
+			return a_ == ToBool(b)
+		case bool:
+			return a_ == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
+		case nil:
+			return !a_
+		}
+	case nil:
+		switch b_ := b.(type) {
+		case LazyString:
+			return !ToBool(b)
+		case string:
+			return !ToBool(b)
+		case float64:
+			return !ToBool(b)
+		case int64:
+			return !ToBool(b)
+		case bool:
+			return !b_
+		case nil:
+			return true
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
+		}
 	case []Scmer:
 		switch b_ := b.(type) {
-				case LazyString, string, float64, int64, bool, nil:
-					return len(a_) == 0 && !ToBool(b)
-				case []Scmer:
-					if len(a_) != len(b_) {
-						return false
-					}
-					for i, v := range a_ {
-						if !Equal(v, b_[i]) {
-							return false
-						}
-					}
-					return true
-				case *FastDict:
-					if len(a_) != len(b_.Pairs) { return false }
-					for i := 0; i < len(a_); i++ { if !Equal(a_[i], b_.Pairs[i]) { return false } }
-					return true
+		case LazyString, string, float64, int64, bool, nil:
+			return len(a_) == 0 && !ToBool(b)
+		case []Scmer:
+			if len(a_) != len(b_) {
+				return false
 			}
+			for i, v := range a_ {
+				if !Equal(v, b_[i]) {
+					return false
+				}
+			}
+			return true
+		case *FastDict:
+			if len(a_) != len(b_.Pairs) {
+				return false
+			}
+			for i := 0; i < len(a_); i++ {
+				if !Equal(a_[i], b_.Pairs[i]) {
+					return false
+				}
+			}
+			return true
+		}
 	case *FastDict:
 		switch b_ := b.(type) {
-			case LazyString, string, float64, int64, bool, nil:
-				return len(a_.Pairs) == 0 && !ToBool(b)
-			case []Scmer:
-				if len(a_.Pairs) != len(b_) { return false }
-				for i := 0; i < len(a_.Pairs); i++ { if !Equal(a_.Pairs[i], b_[i]) { return false } }
-				return true
-			case *FastDict:
-				if len(a_.Pairs) != len(b_.Pairs) { return false }
-				for i := 0; i < len(a_.Pairs); i++ { if !Equal(a_.Pairs[i], b_.Pairs[i]) { return false } }
-				return true
-		}
-		case Symbol:
-			switch b_ := b.(type) {
-				case Symbol:
-					return a_ == b_
+		case LazyString, string, float64, int64, bool, nil:
+			return len(a_.Pairs) == 0 && !ToBool(b)
+		case []Scmer:
+			if len(a_.Pairs) != len(b_) {
+				return false
 			}
+			for i := 0; i < len(a_.Pairs); i++ {
+				if !Equal(a_.Pairs[i], b_[i]) {
+					return false
+				}
+			}
+			return true
+		case *FastDict:
+			if len(a_.Pairs) != len(b_.Pairs) {
+				return false
+			}
+			for i := 0; i < len(a_.Pairs); i++ {
+				if !Equal(a_.Pairs[i], b_.Pairs[i]) {
+					return false
+				}
+			}
+			return true
+		}
+	case Symbol:
+		switch b_ := b.(type) {
+		case Symbol:
+			return a_ == b_
+		}
 
 	case func(...Scmer) Scmer:
 		switch b_ := b.(type) {
-			case func(...Scmer) Scmer:
-				return fmt.Sprintf("%p", a_) == fmt.Sprintf("%p", b_)
-			default:
-				return false
+		case func(...Scmer) Scmer:
+			return fmt.Sprintf("%p", a_) == fmt.Sprintf("%p", b_)
+		default:
+			return false
 		}
 	case SourceInfo:
 		return Equal(a_.value, b)
@@ -185,117 +203,135 @@ func EqualSQL(a, b Scmer) Scmer {
 		return nil
 	}
 	switch a_ := a.(type) {
+	case LazyString:
+		switch b_ := b.(type) {
 		case LazyString:
-			switch b_ := b.(type) {
-				case LazyString:
-					return a_.Hash == b_.Hash
-				case string:
-					return strings.EqualFold(a_.GetValue(), b_)
-				case float64:
-					return ToFloat(a_.GetValue()) == b_
-				case int64:
-					return ToInt(a_.GetValue()) == int(b_)
-				case bool:
-					return ToBool(a) == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-			}
+			return a_.Hash == b_.Hash
 		case string:
-			switch b_ := b.(type) {
-				case LazyString:
-					return strings.EqualFold(a_, b_.GetValue())
-				case string:
-					return strings.EqualFold(a_, b_)
-				case float64:
-					return ToFloat(a_) == b_
-				case int64:
-					return ToInt(a_) == int(b_)
-				case bool:
-					return ToBool(a) == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-				case SourceInfo:
-					return EqualSQL(a, b_.value)
-			}
+			return strings.EqualFold(a_.GetValue(), b_)
 		case float64:
-			switch b_ := b.(type) {
-				case LazyString:
-					return String(a_) == b_.GetValue()
-				case string:
-					return a_ == ToFloat(b_)
-				case float64:
-					return a_ == b_
-				case int64:
-					return a_ == float64(b_)
-				case bool:
-					return ToBool(a) == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-			}
+			return ToFloat(a_.GetValue()) == b_
 		case int64:
-			switch b_ := b.(type) {
-				case LazyString:
-					return String(a_) == b_.GetValue()
-				case string:
-					return int(a_) == ToInt(b_)
-				case float64:
-					return float64(a_) == b_
-				case int64:
-					return a_ == b_
-				case bool:
-					return ToBool(a) == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-			}
+			return ToInt(a_.GetValue()) == int(b_)
 		case bool:
-			switch b_ := b.(type) {
-				case LazyString:
-					return a_ == ToBool(b)
-				case string:
-					return a_ == ToBool(b)
-				case float64:
-					return a_ == ToBool(b)
-				case int64:
-					return a_ == ToBool(b)
-				case bool:
-					return a_ == b_
-				case []Scmer:
-					return len(b_) == 0 && !ToBool(a)
-			}
+			return ToBool(a) == b_
 		case []Scmer:
-			switch b_ := b.(type) {
-				case LazyString, string, float64, int64, bool, nil:
-					return len(a_) == 0 && !ToBool(b)
-				case []Scmer:
-					if len(a_) != len(b_) {
-						return false
-					}
-					for i, v := range a_ {
-						if !ToBool(EqualSQL(v, b_[i])) {
-							return false
-						}
-					}
-					return true
-				case *FastDict:
-					if len(a_) != len(b_.Pairs) { return false }
-					for i := 0; i < len(a_); i++ { if !ToBool(EqualSQL(a_[i], b_.Pairs[i])) { return false } }
-					return true
-			}
-		case *FastDict:
-			switch b_ := b.(type) {
-				case LazyString, string, float64, int64, bool, nil:
-					return len(a_.Pairs) == 0 && !ToBool(b)
-				case []Scmer:
-					if len(a_.Pairs) != len(b_) { return false }
-					for i := 0; i < len(a_.Pairs); i++ { if !ToBool(EqualSQL(a_.Pairs[i], b_[i])) { return false } }
-					return true
-				case *FastDict:
-					if len(a_.Pairs) != len(b_.Pairs) { return false }
-					for i := 0; i < len(a_.Pairs); i++ { if !ToBool(EqualSQL(a_.Pairs[i], b_.Pairs[i])) { return false } }
-					return true
-			}
+			return len(b_) == 0 && !ToBool(a)
+		}
+	case string:
+		switch b_ := b.(type) {
+		case LazyString:
+			return strings.EqualFold(a_, b_.GetValue())
+		case string:
+			return strings.EqualFold(a_, b_)
+		case float64:
+			return ToFloat(a_) == b_
+		case int64:
+			return ToInt(a_) == int(b_)
+		case bool:
+			return ToBool(a) == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
 		case SourceInfo:
-			return Equal(a_.value, b)
+			return EqualSQL(a, b_.value)
+		}
+	case float64:
+		switch b_ := b.(type) {
+		case LazyString:
+			return String(a_) == b_.GetValue()
+		case string:
+			return a_ == ToFloat(b_)
+		case float64:
+			return a_ == b_
+		case int64:
+			return a_ == float64(b_)
+		case bool:
+			return ToBool(a) == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
+		}
+	case int64:
+		switch b_ := b.(type) {
+		case LazyString:
+			return String(a_) == b_.GetValue()
+		case string:
+			return int(a_) == ToInt(b_)
+		case float64:
+			return float64(a_) == b_
+		case int64:
+			return a_ == b_
+		case bool:
+			return ToBool(a) == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
+		}
+	case bool:
+		switch b_ := b.(type) {
+		case LazyString:
+			return a_ == ToBool(b)
+		case string:
+			return a_ == ToBool(b)
+		case float64:
+			return a_ == ToBool(b)
+		case int64:
+			return a_ == ToBool(b)
+		case bool:
+			return a_ == b_
+		case []Scmer:
+			return len(b_) == 0 && !ToBool(a)
+		}
+	case []Scmer:
+		switch b_ := b.(type) {
+		case LazyString, string, float64, int64, bool, nil:
+			return len(a_) == 0 && !ToBool(b)
+		case []Scmer:
+			if len(a_) != len(b_) {
+				return false
+			}
+			for i, v := range a_ {
+				if !ToBool(EqualSQL(v, b_[i])) {
+					return false
+				}
+			}
+			return true
+		case *FastDict:
+			if len(a_) != len(b_.Pairs) {
+				return false
+			}
+			for i := 0; i < len(a_); i++ {
+				if !ToBool(EqualSQL(a_[i], b_.Pairs[i])) {
+					return false
+				}
+			}
+			return true
+		}
+	case *FastDict:
+		switch b_ := b.(type) {
+		case LazyString, string, float64, int64, bool, nil:
+			return len(a_.Pairs) == 0 && !ToBool(b)
+		case []Scmer:
+			if len(a_.Pairs) != len(b_) {
+				return false
+			}
+			for i := 0; i < len(a_.Pairs); i++ {
+				if !ToBool(EqualSQL(a_.Pairs[i], b_[i])) {
+					return false
+				}
+			}
+			return true
+		case *FastDict:
+			if len(a_.Pairs) != len(b_.Pairs) {
+				return false
+			}
+			for i := 0; i < len(a_.Pairs); i++ {
+				if !ToBool(EqualSQL(a_.Pairs[i], b_.Pairs[i])) {
+					return false
+				}
+			}
+			return true
+		}
+	case SourceInfo:
+		return Equal(a_.value, b)
 
 	}
 	panic("unknown SQL comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
@@ -318,33 +354,33 @@ func Less(a, b Scmer) bool {
 		return a_ < ToFloat(b)
 	case LazyString:
 		switch b_ := b.(type) {
-			case float64:
-				return ToFloat(a) < b_
-			case int64:
-				return ToInt(a) < int(b_)
-			case LazyString:
-				return a_.GetValue() < b_.GetValue()
-			case string:
-				return a_.GetValue() < b_
-			case nil:
-				return false
-			default:
-				panic("unknown type combo in comparison")
+		case float64:
+			return ToFloat(a) < b_
+		case int64:
+			return ToInt(a) < int(b_)
+		case LazyString:
+			return a_.GetValue() < b_.GetValue()
+		case string:
+			return a_.GetValue() < b_
+		case nil:
+			return false
+		default:
+			panic("unknown type combo in comparison")
 		}
 	case string:
 		switch b_ := b.(type) {
-			case float64:
-				return ToFloat(a) < b_
-			case int64:
-				return ToInt(a) < int(b_)
-			case LazyString:
-				return a_ < b_.GetValue()
-			case string:
-				return a_ < b_
-			case nil:
-				return false
-			default:
-				panic("unknown type combo in comparison")
+		case float64:
+			return ToFloat(a) < b_
+		case int64:
+			return ToInt(a) < int(b_)
+		case LazyString:
+			return a_ < b_.GetValue()
+		case string:
+			return a_ < b_
+		case nil:
+			return false
+		default:
+			panic("unknown type combo in comparison")
 		}
 	// are there any other types??
 	default:

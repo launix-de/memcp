@@ -31,78 +31,79 @@ import "strconv"
 //go:inline
 func ToBool(v Scmer) bool {
 	switch v2 := v.(type) {
-		case nil:
-			return false
-		case LazyString:
-			return v2.GetValue() != ""
-		case string:
-			return v2 != ""
-		case float64:
-			return v2 != 0.0
-		case int64:
-			return v2 != 0
-		case bool:
-			return v2
-		case Symbol:
-			return v2 != Symbol("false") && v2 != Symbol("nil")
-		case []Scmer:
-			return len(v2) > 0
-		default:
-			// native function, lambdas
-			return true
-	}
-}
-//go:inline
-func ToInt(v Scmer) int {
-	switch vv := v.(type) {
-		case nil:
-			return 0
-		case LazyString:
-			x, _ := strconv.Atoi(vv.GetValue())
-			return x
-		case string:
-			x, _ := strconv.Atoi(vv)
-			return x
-		case float64:
-			return int(vv)
-		case int64:
-			return int(vv)
-		case bool:
-			if vv {
-				return 1
-			} else {
-				return 0
-			}
-		default:
-			// []Scmer, native function, lambdas
-			return 1
-	}
-}
-//go:inline
-func ToFloat(v Scmer) float64 {
-	switch vv := v.(type) {
-		case LazyString:
-			x, _ := strconv.ParseFloat(vv.GetValue(), 64)
-			return x
-		case string:
-			x, _ := strconv.ParseFloat(vv, 64)
-			return x
-		case float64:
-			return vv
-		case int64:
-			return float64(vv)
-		case bool:
-			if vv {
-				return 1.0
-			} else {
-				return 0.0
-			}
-		default:
-			// nil, []Scmer, native function, lambdas
-			return 0.0
+	case nil:
+		return false
+	case LazyString:
+		return v2.GetValue() != ""
+	case string:
+		return v2 != ""
+	case float64:
+		return v2 != 0.0
+	case int64:
+		return v2 != 0
+	case bool:
+		return v2
+	case Symbol:
+		return v2 != Symbol("false") && v2 != Symbol("nil")
+	case []Scmer:
+		return len(v2) > 0
+	default:
+		// native function, lambdas
+		return true
 	}
 }
 
+//go:inline
+func ToInt(v Scmer) int {
+	switch vv := v.(type) {
+	case nil:
+		return 0
+	case LazyString:
+		x, _ := strconv.Atoi(vv.GetValue())
+		return x
+	case string:
+		x, _ := strconv.Atoi(vv)
+		return x
+	case float64:
+		return int(vv)
+	case int64:
+		return int(vv)
+	case bool:
+		if vv {
+			return 1
+		} else {
+			return 0
+		}
+	default:
+		// []Scmer, native function, lambdas
+		return 1
+	}
+}
+
+//go:inline
+func ToFloat(v Scmer) float64 {
+	switch vv := v.(type) {
+	case LazyString:
+		x, _ := strconv.ParseFloat(vv.GetValue(), 64)
+		return x
+	case string:
+		x, _ := strconv.ParseFloat(vv, 64)
+		return x
+	case float64:
+		return vv
+	case int64:
+		return float64(vv)
+	case bool:
+		if vv {
+			return 1.0
+		} else {
+			return 0.0
+		}
+	default:
+		// nil, []Scmer, native function, lambdas
+		return 0.0
+	}
+}
 
 func init_alu() {
 	// string functions
@@ -272,7 +273,7 @@ func init_alu() {
 			DeclarationParameter{"value", "bool", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !ToBool(a[0]);
+			return !ToBool(a[0])
 		},
 		true,
 	})
@@ -283,7 +284,7 @@ func init_alu() {
 			DeclarationParameter{"value", "bool", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !ToBool(a[0]);
+			return !ToBool(a[0])
 		},
 		true,
 	})
@@ -294,7 +295,7 @@ func init_alu() {
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return a[0] == nil;
+			return a[0] == nil
 		},
 		true,
 	})

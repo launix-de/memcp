@@ -221,6 +221,17 @@ Copyright (C) 2024  Carl-Philip Hänsch
 (assert (equal? ((lambda (x y) (+ x y)) 2 3) 5) true "lambda call")
 (assert (equal? (apply_assoc (lambda (x y) (+ x y)) (list "x" 2 "y" 3)) 5) true "apply_assoc maps assoc args")
 
+/* for loop (functional) */
+(print "testing for loop ...")
+/* Count to 10 with single state var */
+(assert (equal? (for '(0) (lambda (x) (< x 10)) (lambda (x) (list (+ x 1)))) '(10)) true "for increments to 10")
+/* Sum 0..9 with (x sum) state */
+(define for_res (for '(0 0) (lambda (x sum) (< x 10)) (lambda (x sum) (list (+ x 1) (+ sum x)))))
+(assert (equal? (nth for_res 0) 10) true "for final x=10")
+(assert (equal? (nth for_res 1) 45) true "for sum 0..9=45")
+/* condition false initially -> returns init unchanged */
+(assert (equal? (for '(5) (lambda (x) (< x 0)) (lambda (x) (list (+ x 1)))) '(5)) true "for returns init when condition false")
+
 /* Assoc merge with custom merge function */
 (print "testing assoc merge ...")
 (define m1 (list "x" 1))

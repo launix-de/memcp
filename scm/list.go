@@ -345,6 +345,7 @@ func init_list() {
 		},
 		true,
 	})
+
 	Declare(&Globalenv, &Declaration{
 		"produce", "returns a list that contains produced items - it works like for(state = startstate, condition(state), state = iterator(state)) {yield state}",
 		3, 3,

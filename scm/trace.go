@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package scm
 
@@ -23,15 +23,14 @@ import "sync"
 import "time"
 import "encoding/json"
 
-
 type Tracefile struct {
 	isFirst bool
-	file io.WriteCloser
-	m sync.Mutex
+	file    io.WriteCloser
+	m       sync.Mutex
 }
 
 var Trace *Tracefile // default trace: set to not nil if you want to trace
-var TracePrint bool // whether to print traces to stdout
+var TracePrint bool  // whether to print traces to stdout
 
 func SetTrace(on bool) { // sets Trace to nil or a value
 	if Trace != nil {
@@ -40,7 +39,7 @@ func SetTrace(on bool) { // sets Trace to nil or a value
 	}
 	if on {
 		// TODO: tracefolder
-		f, err := os.Create(os.Getenv("MEMCP_TRACEDIR") + "trace_"+fmt.Sprint(time.Now().Unix())+".json")
+		f, err := os.Create(os.Getenv("MEMCP_TRACEDIR") + "trace_" + fmt.Sprint(time.Now().Unix()) + ".json")
 		if err != nil {
 			panic(err)
 		}
@@ -61,7 +60,7 @@ func (t *Tracefile) Close() {
 	t.file.Close()
 }
 
-func (t *Tracefile) Duration(name string, cat string, f func ()) {
+func (t *Tracefile) Duration(name string, cat string, f func()) {
 	t.EventHalf(name, cat, "B", 0, 0)
 	defer t.EventHalf(name, cat, "E", 0, 0)
 	f()
@@ -76,7 +75,9 @@ func (t *Tracefile) EventHalf(name string, cat string, typ string, tid int, pid 
 	t.EventFull(name, cat, typ, ts, tid, pid)
 }
 
-/**
+/*
+*
+
 	@name string function
 	@cat string comma separated categories (for filtering)
 	@typ B/E for begin/end, X for events
@@ -114,4 +115,3 @@ func (t *Tracefile) EventFull(name string, cat string, typ string, ts int64, tid
 }
 
 var start time.Time = time.Now()
-

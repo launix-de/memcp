@@ -321,7 +321,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 				*/
 				// p.Params = nil do not replace parameter list with nil, the execution engine must handle it different
 				v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true) // optimize body
-				return v, transferOwnership, false // TODO: lambdas may be constant if their scope is kinda constant and they contain only foldable functions
+				return v, transferOwnership, false                              // TODO: lambdas may be constant if their scope is kinda constant and they contain only foldable functions
 			}
 
 			// now all the special cases
