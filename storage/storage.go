@@ -971,6 +971,63 @@ func Init(en scm.Env) {
 			}
 		}, false,
 	})
+
+	// show_shards(schema, table): returns a list of rows describing shards for a table
+	scm.Declare(&en, &scm.Declaration{
+		"show_shards", "show shard information for a given table",
+		2, 2,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "database name"},
+			scm.DeclarationParameter{"table", "string", "table name"},
+		}, "any",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+			// choose current shard list (partitioned or simple)
+			shards := t.Shards
+			if shards == nil {
+				shards = t.PShards
+			}
+			rows := make([]scm.Scmer, 0, len(shards))
+			for i, s := range shards {
+				if s == nil {
+					rows = append(rows, []scm.Scmer{
+						"shard", int64(i),
+						"state", "nil",
+						"main_count", int64(0),
+						"delta", int64(0),
+						"deletions", int64(0),
+						"size_bytes", int64(0),
+					})
+					continue
+				}
+				// read counts under lock
+				s.mu.RLock()
+				mainCount := s.main_count
+				delta := len(s.inserts)
+				deletions := s.deletions.Count()
+				state := sharedStateStr(s.srState)
+				// compute size while holding read lock for a consistent snapshot
+				size := s.ComputeSize()
+				s.mu.RUnlock()
+				rows = append(rows, []scm.Scmer{
+					"shard", int64(i),
+					"state", state,
+					"main_count", int64(mainCount),
+					"delta", int64(delta),
+					"deletions", int64(deletions),
+					"size_bytes", int64(size),
+				})
+			}
+			return rows
+		}, false,
+	})
 	scm.Declare(&en, &scm.Declaration{
 		"rebuild", "rebuilds all main storages and returns the amount of time it took",
 		0, 2,
