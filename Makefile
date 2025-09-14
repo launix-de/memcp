@@ -1,5 +1,7 @@
 all:
 	go build
+	# Build PHP plugin (stub) as a Go plugin
+	go build -buildmode=plugin -o php/memcp_php.so ./php
 
 run:
 	./memcp

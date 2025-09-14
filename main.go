@@ -35,6 +35,7 @@ import "io/ioutil"
 import "os/signal"
 import "crypto/rand"
 import "path/filepath"
+import "plugin"
 import "runtime/pprof"
 import "runtime/debug"
 import "github.com/google/uuid"
@@ -45,30 +46,30 @@ import "github.com/launix-de/memcp/storage"
 var IOEnv scm.Env
 
 func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
-	return func(a ...scm.Scmer) scm.Scmer {
-		filename := path + "/" + scm.String(a[0])
-		// TODO: filepath.Walk for wildcards
-		wd := filepath.Dir(filename)
-		otherPath := scm.Env{
-			scm.Vars{
-				"__DIR__":     path,
-				"__FILE__":    filename,
-				"import":      getImport(wd),
-				"load":        getLoad(wd),
-				"stream":      getStream(wd),
-				"watch":       getWatch(wd),
-				"serveStatic": scm.HTTPStaticGetter(wd),
-			},
-			nil,
-			&IOEnv,
-			true,
-		}
-		bytes, err := ioutil.ReadFile(filename)
-		if err != nil {
-			panic(err)
-		}
-		return scm.EvalAll(filename, string(bytes), &otherPath)
-	}
+    return func(a ...scm.Scmer) scm.Scmer {
+        filename := path + "/" + scm.String(a[0])
+        // TODO: filepath.Walk for wildcards
+        wd := filepath.Dir(filename)
+        otherPath := scm.Env{
+            scm.Vars{
+                "__DIR__":     path,
+                "__FILE__":    filename,
+                "import":      getImport(wd),
+                "load":        getLoad(wd),
+                "stream":      getStream(wd),
+                "watch":       getWatch(wd),
+                "serveStatic": scm.HTTPStaticGetter(wd),
+            },
+            nil,
+            &IOEnv,
+            true,
+        }
+        bytes, err := ioutil.ReadFile(filename)
+        if err != nil {
+            panic(err)
+        }
+        return scm.EvalAll(filename, string(bytes), &otherPath)
+    }
 }
 
 func getStream(path string) func(a ...scm.Scmer) scm.Scmer {
@@ -289,14 +290,35 @@ func setupIO(wd string) {
 		}, "bool",
 		scm.HTTPServe, false,
 	})
-	scm.Declare(&IOEnv, &scm.Declaration{
-		"serveStatic", "creates a static handler for use as a callback in (serve) - returns a handler lambda(req res)",
-		1, 1,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"directory", "string", "folder with the files to serve"},
-		}, "func",
-		(func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)), false,
-	})
+    scm.Declare(&IOEnv, &scm.Declaration{
+        "serveStatic", "creates a static handler for use as a callback in (serve) - returns a handler lambda(req res)",
+        1, 1,
+        []scm.DeclarationParameter{
+            scm.DeclarationParameter{"directory", "string", "folder with the files to serve"},
+        }, "func",
+        (func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)), false,
+    })
+    scm.Declare(&IOEnv, &scm.Declaration{
+        "loadPlugin", "Dynamically loads a Go plugin (.so) which may register new functions",
+        1, 1,
+        []scm.DeclarationParameter{
+            scm.DeclarationParameter{"filename", "string", "plugin .so path (absolute or relative)"},
+        }, "bool",
+        func(a ...scm.Scmer) scm.Scmer {
+            path := scm.String(a[0])
+            // Allow relative paths based on working directory
+            if !filepath.IsAbs(path) {
+                path = filepath.Join(wd, path)
+            }
+            // Open the plugin. Its init() will run and can register into Globalenv.
+            // We ignore looked up symbols; side effects suffice.
+            _, err := pluginOpen(path)
+            if err != nil {
+                panic(err)
+            }
+            return true
+        }, false,
+    })
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"mysql", "Imports a file .scm file into current namespace",
 		4, 4,
@@ -385,6 +407,16 @@ func setupIO(wd string) {
 			return defaultValue
 		}, false,
 	})
+}
+
+// pluginOpen wraps plugin.Open so it can be referenced from within lambdas
+// without importing plugin in many places.
+func pluginOpen(path string) (interface{}, error) {
+    p, err := plugin.Open(path)
+    if err != nil {
+        return nil, err
+    }
+    return p, nil
 }
 
 func main() {
