@@ -19,6 +19,9 @@
 (sql_builtins "UPPER" toUpper)
 (sql_builtins "LOWER" toLower)
 (sql_builtins "PASSWORD" password)
+/* Base64 helpers */
+(sql_builtins "TO_BASE64" base64_encode)
+(sql_builtins "FROM_BASE64" base64_decode)
 /* SQL LENGTH(str): NULL-safe wrapper around strlen */
 (sql_builtins "LENGTH" (lambda (x) (if (nil? x) nil (strlen x))))
 
@@ -27,3 +30,5 @@
 (sql_builtins "STRING_TO_VECTOR" json_decode)
 (sql_builtins "VECTOR_TO_STRING" json_encode)
 (sql_builtins "VECTOR_DIM" json_encode)
+
+/* management: use SQL statements instead (REBUILD, SHOW SHARDS, etc.) */

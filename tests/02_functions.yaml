@@ -103,6 +103,28 @@ test_cases:
         - upper_case: "HELLO"
           lower_case: "world"
 
+  # === BASE64 FUNCTIONS ===
+  - name: "TO_BASE64 encodes"
+    sql: "SELECT TO_BASE64('foo') AS b64"
+    expect:
+      rows: 1
+      data:
+        - b64: "Zm9v"
+
+  - name: "FROM_BASE64 decodes"
+    sql: "SELECT FROM_BASE64('Zm9v') AS plain"
+    expect:
+      rows: 1
+      data:
+        - plain: "foo"
+
+  - name: "Base64 roundtrip"
+    sql: "SELECT FROM_BASE64(TO_BASE64('Hello, world!')) AS plain"
+    expect:
+      rows: 1
+      data:
+        - plain: "Hello, world!"
+
   # === TIME FUNCTIONS ===
   - name: "UNIX_TIMESTAMP function exists"
     sql: "SELECT UNIX_TIMESTAMP() > 1600000000 AS recent_timestamp"
