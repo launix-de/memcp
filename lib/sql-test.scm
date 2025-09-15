@@ -54,11 +54,12 @@ Copyright (C) 2025  Carl-Philip Hänsch
 	(assert (equal? (count result2) 1) true "SELECT COUNT(*) should return 1 row")
 
 	/* Basic parsing tests - just verify the SQL parses correctly without executing */
-	(assert (list? (parse_sql "system" "SELECT 1")) true "Simple SELECT should parse")
-	(assert (list? (parse_sql "system" "SELECT * FROM user")) true "SELECT * should parse")
-	(assert (list? (parse_sql "system" "INSERT INTO user VALUES (1, 'test', 'pass')")) true "INSERT should parse")
-	(assert (list? (parse_sql "system" "UPDATE user SET username = 'newname' WHERE id = 1")) true "UPDATE should parse")
-	(assert (list? (parse_sql "system" "DELETE FROM user WHERE id = 1")) true "DELETE should parse")
+	(define allow (lambda (schema table write) true))
+	(assert (list? (parse_sql "system" "SELECT 1" allow)) true "Simple SELECT should parse")
+	(assert (list? (parse_sql "system" "SELECT * FROM user" allow)) true "SELECT * should parse")
+	(assert (list? (parse_sql "system" "INSERT INTO user VALUES (1, 'test', 'pass')" allow)) true "INSERT should parse")
+	(assert (list? (parse_sql "system" "UPDATE user SET username = 'newname' WHERE id = 1" allow)) true "UPDATE should parse")
+	(assert (list? (parse_sql "system" "DELETE FROM user WHERE id = 1" allow)) true "DELETE should parse")
 
 	(print "SQL parsing and execution tests completed successfully")
 
