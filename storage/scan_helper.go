@@ -18,8 +18,8 @@ package storage
 
 import (
 	"bytes"
-	"errors"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -617,69 +617,69 @@ func (e *Estimator) ScanEstimate(schema, table string, conditionCols []string, c
 // using a generic request (schemaLen/tableLen/filterLen/orderLen all zero).
 // It returns the raw response payload.
 func (e *Estimator) sendGeneric(op byte, payload []byte, timeout time.Duration) ([]byte, error) {
-    if e == nil {
-        return nil, errors.New("estimator not initialized")
-    }
-    e.mu.Lock()
-    defer e.mu.Unlock()
-    if e.mmap == nil {
-        return nil, errors.New("estimator not initialized")
-    }
-    buf := e.mmap
-    // Next sequence
-    seq := binary.LittleEndian.Uint64(buf[0:8]) + 1
-    // zero normal header lengths and inputCount to signal generic op
-    binary.LittleEndian.PutUint64(buf[16:24], 0)
-    binary.LittleEndian.PutUint32(buf[24:28], 0)
-    binary.LittleEndian.PutUint32(buf[28:32], 0)
-    binary.LittleEndian.PutUint32(buf[32:36], 0)
-    binary.LittleEndian.PutUint32(buf[36:40], 0)
-    // write opcode + payload length + payload
-    off := shmHeaderSize
-    if off+1+4+len(payload) > shmHeaderSize+reqMax {
-        return nil, errors.New("payload too large")
-    }
-    buf[off] = op
-    off++
-    binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(payload)))
-    off += 4
-    copy(buf[off:off+len(payload)], payload)
-    // publish seq last
-    binary.LittleEndian.PutUint64(buf[0:8], seq)
-    // wait for response
-    deadline := time.Now().Add(timeout)
-    for time.Now().Before(deadline) {
-        respSeq := binary.LittleEndian.Uint64(buf[8:16])
-        if respSeq == seq {
-            roff := shmHeaderSize
-            rlen := int(binary.LittleEndian.Uint32(buf[roff : roff+4]))
-            roff += 4
-            if roff+rlen > len(buf) || rlen < 0 {
-                return nil, errors.New("invalid response length")
-            }
-            out := make([]byte, rlen)
-            copy(out, buf[roff:roff+rlen])
-            return out, nil
-        }
-        time.Sleep(200 * time.Microsecond)
-    }
-    return nil, errors.New("timeout waiting for response")
+	if e == nil {
+		return nil, errors.New("estimator not initialized")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.mmap == nil {
+		return nil, errors.New("estimator not initialized")
+	}
+	buf := e.mmap
+	// Next sequence
+	seq := binary.LittleEndian.Uint64(buf[0:8]) + 1
+	// zero normal header lengths and inputCount to signal generic op
+	binary.LittleEndian.PutUint64(buf[16:24], 0)
+	binary.LittleEndian.PutUint32(buf[24:28], 0)
+	binary.LittleEndian.PutUint32(buf[28:32], 0)
+	binary.LittleEndian.PutUint32(buf[32:36], 0)
+	binary.LittleEndian.PutUint32(buf[36:40], 0)
+	// write opcode + payload length + payload
+	off := shmHeaderSize
+	if off+1+4+len(payload) > shmHeaderSize+reqMax {
+		return nil, errors.New("payload too large")
+	}
+	buf[off] = op
+	off++
+	binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(payload)))
+	off += 4
+	copy(buf[off:off+len(payload)], payload)
+	// publish seq last
+	binary.LittleEndian.PutUint64(buf[0:8], seq)
+	// wait for response
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		respSeq := binary.LittleEndian.Uint64(buf[8:16])
+		if respSeq == seq {
+			roff := shmHeaderSize
+			rlen := int(binary.LittleEndian.Uint32(buf[roff : roff+4]))
+			roff += 4
+			if roff+rlen > len(buf) || rlen < 0 {
+				return nil, errors.New("invalid response length")
+			}
+			out := make([]byte, rlen)
+			copy(out, buf[roff:roff+rlen])
+			return out, nil
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
+	return nil, errors.New("timeout waiting for response")
 }
 
 // SQL executes a SQL query via the estimator IPC (generic opcode 3) and
 // returns the raw response string (as returned by the Python helper).
 func (e *Estimator) SQL(sql string, timeout time.Duration) (string, error) {
-    resp, err := e.sendGeneric(3, []byte(sql), timeout)
-    if err != nil {
-        return "", err
-    }
-    return string(resp), nil
+	resp, err := e.sendGeneric(3, []byte(sql), timeout)
+	if err != nil {
+		return "", err
+	}
+	return string(resp), nil
 }
 
 // FetchModel requests a binary model blob by ID via opcode 2. The Python
 // helper responds with raw bytes of the model or empty on not found.
 func (e *Estimator) FetchModel(id string, timeout time.Duration) ([]byte, error) {
-    return e.sendGeneric(2, []byte(id), timeout)
+	return e.sendGeneric(2, []byte(id), timeout)
 }
 
 // mmap helpers (portable enough)

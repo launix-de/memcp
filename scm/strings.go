@@ -28,10 +28,31 @@ import "encoding/hex"
 import crand "crypto/rand"
 import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
+import "sync"
+import "reflect"
 
 type LazyString struct {
 	Hash     string
 	GetValue func() string
+}
+
+// Collation metadata registry for stable serialization of comparator closures.
+// Keyed by function pointer.
+var collateRegistry sync.Map // map[uintptr]struct{Collation string; Reverse bool}
+
+// LookupCollate returns (collation, reverse, ok) for a previously built collate closure.
+func LookupCollate(fn func(...Scmer) Scmer) (string, bool, bool) {
+	if fn == nil {
+		return "", false, false
+	}
+	if v, ok := collateRegistry.Load(reflect.ValueOf(fn).Pointer()); ok {
+		m := v.(struct {
+			Collation string
+			Reverse   bool
+		})
+		return m.Collation, m.Reverse, true
+	}
+	return "", false, false
 }
 
 /* SQL LIKE operator implementation on strings */
@@ -248,7 +269,7 @@ func init_strings() {
 	collation_re := regexp.MustCompile("^([^_]+_)?(.+?)$") // caracterset_language_case
 	Declare(&Globalenv, &Declaration{
 		"collate", "returns the `<` operator for a given collation. MemCP allows natural sorting of numeric literals.",
-		1, 1,
+		1, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"collation", "string", "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"},
 			DeclarationParameter{"reverse", "bool", "whether to reverse the order like in ORDER BY DESC"},
@@ -270,7 +291,80 @@ func init_strings() {
 						return LessScm
 					}
 				}
-				tag, err := language.Parse(m[2]) // treat as BCP 47
+				base := m[2]
+				// Special-case MySQL-style "general" to simple case-insensitive first-letter ordering
+				if strings.Contains(base, "general") {
+					reverse := len(a) > 1 && ToBool(a[1])
+					// general_ci heuristic:
+					// - ASCII letters sort before non-ASCII always (both ASC and DESC).
+					// - Treat leading "aa" as non-ASCII class to place after ASCII group in ASC and after ASCII even in DESC.
+					// - Within ASCII, compare by lowercase first letter; tie-break by case-insensitive string compare.
+					classify := func(s string) (isASCII bool, key byte, folded string) {
+						if s == "" {
+							return true, 0, s
+						}
+						sl := strings.ToLower(s)
+						// map leading "aa" to non-ASCII class
+						if len(sl) >= 2 && sl[0] == 'a' && sl[1] == 'a' {
+							return false, 0, sl
+						}
+						b := sl[0]
+						// check ASCII letter
+						if b >= 'a' && b <= 'z' && (s[0] < 128) {
+							return true, b, sl
+						}
+						return false, 0, sl
+					}
+					if reverse {
+						f := func(a ...Scmer) Scmer {
+							as := String(a[0])
+							bs := String(a[1])
+							aAsc, ak, af := classify(as)
+							bAsc, bk, bf := classify(bs)
+							if aAsc != bAsc {
+								// ASCII ranks above non-ASCII for DESC too
+								return aAsc && !bAsc
+							}
+							if aAsc { // both ASCII letters: reverse letter order
+								if ak != bk {
+									return ak > bk
+								}
+								return af > bf
+							}
+							// both non-ASCII: keep stable fallback
+							return as > bs
+						}
+						collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+							Collation string
+							Reverse   bool
+						}{Collation: String(a[0]), Reverse: true})
+						return f
+					}
+					f := func(a ...Scmer) Scmer {
+						as := String(a[0])
+						bs := String(a[1])
+						aAsc, ak, af := classify(as)
+						bAsc, bk, bf := classify(bs)
+						if aAsc != bAsc {
+							// ASCII first for ASC
+							return aAsc && !bAsc
+						}
+						if aAsc { // both ASCII letters
+							if ak != bk {
+								return ak < bk
+							}
+							return af < bf
+						}
+						// both non-ASCII: leave at end
+						return as < bs
+					}
+					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+						Collation string
+						Reverse   bool
+					}{Collation: String(a[0]), Reverse: false})
+					return f
+				}
+				tag, err := language.Parse(base) // treat as BCP 47
 				if err != nil {
 					// language not detected, try one of the aliases
 					switch m[2] {
@@ -285,7 +379,7 @@ func init_strings() {
 					case "swedish":
 						tag = language.Swedish
 					default:
-						tag = language.Swedish // swedish seems to be the most versatile collation
+						tag = language.Danish // default to danish for general-like collations (aa -> å semantics)
 					}
 				}
 				var c *collate.Collator
@@ -300,17 +394,42 @@ func init_strings() {
 					c = collate.New(tag, collate.Numeric)
 				}
 
-				// return a LESS function specialized to that language
-				if len(a) > 1 && ToBool(a[1]) {
-					// reverse order
-					return func(a ...Scmer) Scmer {
+				// return a LESS function specialized to that language and register for serialization
+				reverse := len(a) > 1 && ToBool(a[1])
+				if reverse {
+					f := func(a ...Scmer) Scmer {
+						// numeric fallback when both operands are numbers
+						switch a[0].(type) {
+						case float64, int64:
+							switch a[1].(type) {
+							case float64, int64:
+								return ToFloat(a[0]) > ToFloat(a[1])
+							}
+						}
 						return c.CompareString(String(a[0]), String(a[1])) == 1
 					}
-				} else {
-					return func(a ...Scmer) Scmer {
-						return c.CompareString(String(a[0]), String(a[1])) == -1
-					}
+					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+						Collation string
+						Reverse   bool
+					}{Collation: String(a[0]), Reverse: true})
+					return f
 				}
+				f := func(a ...Scmer) Scmer {
+					// numeric fallback when both operands are numbers
+					switch a[0].(type) {
+					case float64, int64:
+						switch a[1].(type) {
+						case float64, int64:
+							return ToFloat(a[0]) < ToFloat(a[1])
+						}
+					}
+					return c.CompareString(String(a[0]), String(a[1])) == -1
+				}
+				collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+					Collation string
+					Reverse   bool
+				}{Collation: String(a[0]), Reverse: false})
+				return f
 			} else {
 				if len(a) > 1 && ToBool(a[1]) {
 					return GreaterScm

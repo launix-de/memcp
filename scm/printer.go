@@ -115,6 +115,19 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 	case func(...Scmer) Scmer:
 		// native func serialization is the hardest; reverse the env!
 		// when later functional JIT is done, this must also handle deoptimization
+		// Special case: collate closures — serialize as (collate collation reverse)
+		if col, rev, ok := LookupCollate(v); ok {
+			b.WriteString("(collate \"")
+			b.WriteString(strings.ReplaceAll(col, "\"", "\\\""))
+			b.WriteString("\" ")
+			if rev {
+				b.WriteString("true")
+			} else {
+				b.WriteString("false")
+			}
+			b.WriteByte(')')
+			return
+		}
 		en2 := en
 		for en2 != nil {
 			for k, v2 := range en2.Vars {

@@ -21,6 +21,10 @@
 - Go imports: sort imports by path length ascending within each import block.
 - Scheme (`.scm`): follow existing patterns; filenames are kebab-case; keep code self-explanatory, add comments for more complex code parts.
 - Indentation in Scheme: indent nested forms with tabs; align continuation lines to opening form where helpful; avoid mixing tabs and spaces.
+  - After touching any files under `lib/`, run the Scheme formatter to normalize indentation and catch bracket issues:
+    - Reformat in-place: `python3 tools/lint_scm.py`
+    - Check only (CI-friendly): `python3 tools/lint_scm.py --check`
+  - The formatter indents with tabs based on parenthesis depth and warns if parentheses are unbalanced or depth goes negative on any line.
 - In this scheme dialect (set var value) does not change any value of the outer scope - it rather works exactly like (define )
 - Tests: YAML files use lower_snake_case keys and `NN_description.yaml` naming.
 - Avoid introducing new tools; prefer editing existing files over adding new ones.

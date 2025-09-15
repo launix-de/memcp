@@ -20,8 +20,8 @@ package storage
 import "fmt"
 import "sort"
 import "sync"
-import "strings"
 import "reflect"
+import "strings"
 import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
 
@@ -29,6 +29,8 @@ type indexPair struct {
 	itemid int // -1 for reference items
 	data   []scm.Scmer
 }
+
+// (no op) numeric helper removed; collations now use golang.org/x/text/collate for ordering
 
 type StorageIndex struct {
 	Cols        []string   // sort equal-cols alphabetically, so similar conditions are canonical
@@ -178,6 +180,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 	for i, c := range s.Cols {
 		cols[i] = s.t.getColumnStorageOrPanic(c)
 	}
+	// no collation-specific helpers in the current implementation
 
 	savings_threshold := 2.0    // building an index costs 1x the time as traversing the list
 	s.Savings = s.Savings + 1.0 // mark that we could save time

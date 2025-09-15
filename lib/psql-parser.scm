@@ -268,15 +268,19 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 		(?
 			(atom "ORDER" true)
 			(atom "BY" true)
-			(define order (+
-				(parser '((define col psql_expression) (define direction_desc (or
-					/* TODO: collation */
-					(parser (atom "DESC" true) >)
-					(parser(atom "ASC" true) <)
-					(parser empty <)
-				))) '(col direction_desc))
-				(atom "," true)
-			))
+            (define order (+
+                (parser '(
+                    (define col psql_expression)
+                    (? (atom "COLLATE" true) (define coll psql_identifier))
+                    (define direction_desc (or
+                        (parser (atom "DESC" true) >)
+                        (parser (atom "ASC" true) <)
+                        (parser empty <)
+                    ))
+                ) (list col (if coll (collate coll (equal? direction_desc >)) direction_desc)))
+                
+                (atom "," true)
+            ))
 		)
 		(?
 			(atom "LIMIT" true)

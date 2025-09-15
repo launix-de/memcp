@@ -89,7 +89,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password")))) (begin
 			(try (lambda () (time (begin
-				((res "header") "Content-Type" "text/plain")
+				((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 				((res "status") 200)
 				(define formula (parse_sql schema query (sql_policy (req "username"))))
 				(define resultrow (res "jsonl"))
@@ -110,7 +110,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 			) query)) (lambda(e) (begin
 				(print "SQL query: " query)
 				(print "error: " e)
-				((res "header") "Content-Type" "text/plain")
+				((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 				((res "status") 500)
 				((res "print") "SQL Error: " e)
 			)))
