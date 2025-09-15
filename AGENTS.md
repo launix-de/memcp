@@ -26,6 +26,7 @@
     - Check only (CI-friendly): `python3 tools/lint_scm.py --check`
   - The formatter indents with tabs based on parenthesis depth and warns if parentheses are unbalanced or depth goes negative on any line.
 - In this scheme dialect (set var value) does not change any value of the outer scope - it rather works exactly like (define )
+- lambdas in scheme have only two parameters: (paramlist) and body: `(lambda (a b) (+ a b))`. if you want to compute multiple statements inside the body, you must open a (begin) block
 - Tests: YAML files use lower_snake_case keys and `NN_description.yaml` naming.
 - Avoid introducing new tools; prefer editing existing files over adding new ones.
 
