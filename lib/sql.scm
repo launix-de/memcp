@@ -36,16 +36,21 @@ Copyright (C) 2023  Carl-Philip Hänsch
             '("admin") (lambda (a) a)
             (lambda (a b) (or a b))
             false))
-        (lambda (schema table write)
-            (begin
-                (if is_admin true (begin
-                    (define access_count (scan "system" "access"
-                        '("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
-                        '() (lambda () 1)
-                        + 0))
-                    (if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." table)))
-                ))
-            ))
+	(if is_admin (lambda (schema table write) true) /* admin -> allow all */
+		/* else: complicated policy */
+		(lambda (schema table write)
+		    (begin
+			/* Allow virtual INFORMATION_SCHEMA for all users */
+			(if (equal?? schema "information_schema") true (begin
+			    /* Database-level check via system.access */
+			    (define access_count (scan "system" "access"
+			        '("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
+			        '() (lambda () 1)
+			        + 0))
+				(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." table)))
+			))
+		    ))
+	)
     )
 ))
 
@@ -57,7 +62,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 ))
 (if (has? (show "system") "user") true (begin
     (print "creating table system.user")
-    (eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" nil))
+	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema table write) true)))
     (insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password (arg "root-password" "admin")) true)))
 ))
 
@@ -84,7 +89,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 /* access control: which user can access which database */
 (if (has? (show "system") "access") true (begin
 	(print "creating table system.access")
-    (eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" nil))
+	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema table write) true)))
 ))
 
 (set globalvars '("lower_case_table_names" 0))
@@ -221,7 +226,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 				/* tolerate an optional trailing ';' using multiline group */
 				(set sql (match sql (regex "^((?s:.*));\\s*" _ body) body sql))
 				(define formula (try (lambda ()
-					((if (equal? (session "syntax") "postgresql") (lambda (schema sql) (parse_psql schema sql nil)) (lambda (schema sql) (parse_sql schema sql nil))) schema sql))
+					((if (equal? (session "syntax") "postgresql") (lambda (schema sql policy) (parse_psql schema sql policy)) (lambda (schema sql policy) (parse_sql schema sql policy))) schema sql (sql_policy (coalesce (session "username") "root"))))
 				(lambda (e) (begin
 					(print "SQL query: " sql)
 					(print "error: " e)
