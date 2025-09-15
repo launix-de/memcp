@@ -316,6 +316,18 @@ func setupIO(wd string) {
 		}, "string",
 		scm.MySQLPassword, true,
 	})
+
+	// Graceful shutdown callable from Scheme/SQL (SHUTDOWN)
+	scm.Declare(&IOEnv, &scm.Declaration{
+		"shutdown", "Initiates a graceful shutdown of memcp after a short delay",
+		0, 0,
+		[]scm.DeclarationParameter{}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			scm.ReplInstance.Close()
+			return true
+		}, false,
+	})
+
 	scm.Declare(&IOEnv, &scm.Declaration{
 		"args", "Returns command line arguments",
 		0, 0,

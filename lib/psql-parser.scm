@@ -538,13 +538,15 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions)))))
 				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) schema id col "default" def))))
 				(parser '((atom "DROP" true) (atom "DEFAULT" true)) (lambda (col) (lambda (id) '((quote altercolumn) schema id col "default" nil))))
+				(parser '((atom "COLLATE" true) (define coll psql_identifier)) (lambda (col) (lambda (id) '((quote altercolumn) schema id col "collation" coll))))
 			))) (body col))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 
 	/* TODO: ignore comments wherever they occur --> Lexer */
-	(define p (parser (or
-		(parser (define query psql_select) (apply build_queryplan (apply untangle_query query)))
+		(define p (parser (or
+			(parser (atom "SHUTDOWN" true) '(shutdown))
+			(parser (define query psql_select) (apply build_queryplan (apply untangle_query query)))
 		psql_insert_into
 		psql_insert_select
 		psql_create_table

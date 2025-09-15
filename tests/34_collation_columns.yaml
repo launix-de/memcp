@@ -1,0 +1,81 @@
+metadata:
+  version: "1.0"
+  description: "Column-level COLLATE in CREATE/ALTER TABLE; verify persistence via SHOW"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS coll_cols"
+  - sql: |
+      CREATE TABLE coll_cols (
+        id INT,
+        txt TEXT COLLATE utf8mb4_general_ci
+      )
+  - sql: "INSERT INTO coll_cols (id, txt) VALUES (1, 'a'), (2, 'B')"
+
+test_cases:
+  - name: "SHOW FULL COLUMNS exposes column collation"
+    sql: "SHOW FULL COLUMNS FROM coll_cols"
+    expect:
+      rows: 2
+      data:
+        - Field: "id"
+        - Field: "txt"
+          Collation: "utf8mb4_general_ci"
+
+  - name: "ORDER BY uses column COLLATE (ASC, general_ci)"
+    sql: "SELECT txt FROM coll_cols ORDER BY txt LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - txt: "a"
+        - txt: "B"
+
+  - name: "SHUTDOWN memcp to verify persisted column collation"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "ORDER BY uses column COLLATE (ASC, general_ci) after restart"
+    sql: "SELECT txt FROM coll_cols ORDER BY txt LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - txt: "a"
+        - txt: "B"
+
+  - name: "ALTER COLUMN COLLATE to bin"
+    sql: "ALTER TABLE coll_cols ALTER COLUMN txt COLLATE bin"
+    expect:
+      rows: 0
+
+  - name: "SHOW FULL COLUMNS after ALTER shows new collation"
+    sql: "SHOW FULL COLUMNS FROM coll_cols"
+    expect:
+      rows: 2
+      data:
+        - Field: "id"
+        - Field: "txt"
+          Collation: "bin"
+
+  - name: "ORDER BY with column COLLATE bin (DESC)"
+    sql: "SELECT txt FROM coll_cols ORDER BY txt DESC LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - txt: "a"
+        - txt: "B"
+
+  - name: "SHUTDOWN memcp after ALTER to verify bin persisted"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "ORDER BY with column COLLATE bin (DESC) after restart"
+    sql: "SELECT txt FROM coll_cols ORDER BY txt DESC LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - txt: "a"
+        - txt: "B"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS coll_cols"

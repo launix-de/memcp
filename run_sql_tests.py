@@ -58,6 +58,11 @@ class SQLTestRunner:
         self.current_database = None
         self._ensured_dbs = set()
         self.suite_metadata = {}
+        self._restart_handler = None  # callable to restart memcp between tests
+
+    def set_restart_handler(self, fn):
+        """Install a restart handler callable that restarts MemCP (returns True on success)."""
+        self._restart_handler = fn
 
     # ----------------------
     # SQL identifier quoting
@@ -120,16 +125,23 @@ class SQLTestRunner:
             pass
 
     def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None) -> Optional[requests.Response]:
-        try:
-            # proactively ensure database exists (works for connect-only too)
-            self.ensure_database(database)
-            encoded_db = quote(database, safe='')
-            url = f"{self.base_url}/sql/{encoded_db}"
-            headers = auth_header if auth_header is not None else self.auth_header
-            return requests.post(url, data=query, headers=headers, timeout=10)
-        except Exception as e:
-            print(f"Error executing SQL: {e}")
-            return None
+        # proactively ensure database exists (works for connect-only too)
+        self.ensure_database(database)
+        encoded_db = quote(database, safe='')
+        url = f"{self.base_url}/sql/{encoded_db}"
+        headers = auth_header if auth_header is not None else self.auth_header
+        # Try request; if connection fails, wait for memcp to be ready and retry a few times
+        for attempt in range(5):
+            try:
+                return requests.post(url, data=query, headers=headers, timeout=10)
+            except Exception:
+                # parse port from base_url
+                try:
+                    port = int(self.base_url.rsplit(':', 1)[1])
+                except Exception:
+                    port = 4321
+                wait_for_memcp(port, timeout=5)
+        return None
 
     def execute_sparql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None) -> Optional[requests.Response]:
         try:
@@ -186,6 +198,23 @@ class SQLTestRunner:
         if is_sparql and "ttl_data" in test_case:
             if not self.load_ttl(database, test_case["ttl_data"]):
                 return self._record_fail(name, "TTL load failed", query, None, None)
+
+        # Special handling: SHUTDOWN command triggers graceful restart flow
+        if query and query.strip().upper() == "SHUTDOWN":
+            # Issue shutdown; then wait for server to restart (supervisor should bring it back)
+            resp = self.execute_sql(database, query, auth_header)
+            # Ignore response content; wait for readiness
+            try:
+                port = int(self.base_url.rsplit(':', 1)[1])
+            except Exception:
+                port = 4321
+            # wait up to ~30s for restart
+            ok = wait_for_memcp(port, timeout=30)
+            if ok:
+                self._record_success(name, is_noncritical)
+                return True
+            else:
+                return self._record_fail(name, "MemCP did not come back after SHUTDOWN", query, resp, None, is_noncritical)
 
         # Execute query
         response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header)
@@ -332,6 +361,38 @@ def wait_for_memcp(port=4321, timeout=30) -> bool:
             time.sleep(1)
     return False
 
+def start_memcp_process(port: int) -> subprocess.Popen | None:
+    try:
+        datadir = os.environ.get("MEMCP_TEST_DATADIR", f"/tmp/memcp-sql-tests-{port}")
+        proc = subprocess.Popen([
+            "./memcp", "-data", datadir,
+            f"--api-port={port}", f"--mysql-port={port+1000}",
+            "--disable-mysql", "lib/main.scm"
+        ], cwd=os.path.dirname(os.path.abspath(__file__)),
+           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if not wait_for_memcp(port):
+            return None
+        return proc
+    except Exception:
+        return None
+
+def stop_memcp_process(proc: subprocess.Popen) -> None:
+    try:
+        proc.stdin.close()
+        proc.wait(timeout=10)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+def kill_memcp_by_port(port: int) -> None:
+    pattern = f"memcp.*--api-port={port}"
+    try:
+        subprocess.run(["pkill", "-f", pattern], check=False)
+    except Exception:
+        pass
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only]")
@@ -362,25 +423,25 @@ def main():
         try:
             requests.get(base_url, timeout=2)
         except:
-            memcp_process = subprocess.Popen([
-                "./memcp", "-data", f"/tmp/memcp-sql-tests-{port}",
-                f"--api-port={port}", f"--mysql-port={port+1000}",
-                "--disable-mysql", "lib/main.scm"
-            ], cwd=os.path.dirname(os.path.abspath(__file__)),
-               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if not wait_for_memcp(port):
+            memcp_process = start_memcp_process(port)
+            if not memcp_process:
                 print("❌ Failed to start MemCP")
                 sys.exit(1)
 
     runner = SQLTestRunner(base_url)
+    if not connect_only:
+        def restart_handler() -> bool:
+            nonlocal memcp_process
+            if memcp_process:
+                stop_memcp_process(memcp_process)
+                memcp_process = None
+            memcp_process = start_memcp_process(port)
+            return memcp_process is not None
+        runner.set_restart_handler(restart_handler)
     success = runner.run_test_spec(spec_file)
 
     if not connect_only and memcp_process:
-        try:
-            memcp_process.stdin.close()
-            memcp_process.wait(timeout=10)
-        except:
-            memcp_process.kill()
+        stop_memcp_process(memcp_process)
 
     sys.exit(0 if success else 1)
 

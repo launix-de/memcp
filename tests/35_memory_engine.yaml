@@ -1,0 +1,41 @@
+metadata:
+  version: "1.0"
+  description: "ENGINE=MEMORY table retains schema but not data across restart"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS mem_t"
+  - sql: "CREATE TABLE mem_t (id INT, v TEXT) ENGINE=MEMORY"
+
+test_cases:
+  - name: "Insert data into MEMORY table"
+    sql: "INSERT INTO mem_t (id, v) VALUES (1, 'x'), (2, 'y')"
+    expect:
+      affected_rows: 2
+
+  - name: "Select returns inserted rows"
+    sql: "SELECT id, v FROM mem_t ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          v: "x"
+        - id: 2
+          v: "y"
+
+  - name: "SHUTDOWN memcp"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Table exists after restart"
+    sql: "SHOW FULL COLUMNS FROM mem_t"
+    expect:
+      rows: 2
+
+  - name: "Select after restart returns no rows"
+    sql: "SELECT id, v FROM mem_t ORDER BY id"
+    expect:
+      rows: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS mem_t"

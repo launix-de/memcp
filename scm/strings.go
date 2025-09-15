@@ -284,13 +284,18 @@ func init_strings() {
 				collation = collation[:len(collation)-3]
 			}
 			if m := collation_re.FindStringSubmatch(collation); m != nil {
-				if m[2] == "bin" { // binary
-					if len(a) > 1 && ToBool(a[1]) {
-						return GreaterScm
-					} else {
-						return LessScm
-					}
-				}
+            if m[2] == "bin" { // binary
+                // Return closures that compare raw UTF-8 byte order; register for serialization
+                if len(a) > 1 && ToBool(a[1]) {
+                    f := func(a ...Scmer) Scmer { return GreaterScm(a...) }
+                    collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct{Collation string; Reverse bool}{Collation: String(a[0]), Reverse: true})
+                    return f
+                } else {
+                    f := func(a ...Scmer) Scmer { return LessScm(a...) }
+                    collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct{Collation string; Reverse bool}{Collation: String(a[0]), Reverse: false})
+                    return f
+                }
+            }
 				base := m[2]
 				// Special-case MySQL-style "general" to simple case-insensitive first-letter ordering
 				if strings.Contains(base, "general") {

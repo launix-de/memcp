@@ -1,0 +1,51 @@
+metadata:
+  version: "1.0"
+  description: "ORDER BY with COLLATE comparators"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS coll_t"
+  - sql: |
+      CREATE TABLE coll_t (
+        id INT,
+        name VARCHAR(50)
+      )
+  - sql: "INSERT INTO coll_t (id, name) VALUES (1, 'a'), (2, 'B'), (3, 'aa'), (4, 'Ä')"
+
+test_cases:
+  - name: "ORDER BY binary default (uppercase before lowercase)"
+    sql: "SELECT name FROM coll_t ORDER BY name LIMIT 4"
+    expect:
+      rows: 4
+      data:
+        - name: "B"
+        - name: "a"
+        - name: "aa"
+        - name: "Ä"
+
+  - name: "ORDER BY COLLATE general_ci (case-insensitive, a before B)"
+    sql: "SELECT name FROM coll_t ORDER BY name COLLATE utf8mb4_general_ci LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - name: "a"
+        - name: "B"
+
+  - name: "ORDER BY COLLATE general_ci DESC (reverse order)"
+    sql: "SELECT name FROM coll_t ORDER BY name COLLATE utf8mb4_general_ci DESC LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - name: "B"
+        - name: "a"
+
+  - name: "ORDER BY explicit COLLATE bin DESC"
+    sql: "SELECT name FROM coll_t ORDER BY name COLLATE bin DESC LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - name: "Ä"
+        - name: "aa"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS coll_t"
+

@@ -525,12 +525,14 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 				/* ALTER COLUMN operations for defaults */
 				(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) schema id col "default" def)))
 				(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) schema id col "default" nil)))
+				(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "COLLATE" true) (define coll sql_identifier)) (lambda (id) '((quote altercolumn) schema id col "collation" coll)))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 
 	/* TODO: ignore comments wherever they occur --> Lexer */
-	(define p (parser (or
-		(parser (define query sql_select) (apply build_queryplan (apply untangle_query query)))
+		(define p (parser (or
+			(parser (atom "SHUTDOWN" true) '(shutdown))
+			(parser (define query sql_select) (apply build_queryplan (apply untangle_query query)))
 		(parser '((atom "DESCRIBE" true) (define query sql_select)) '('resultrow '('list "code" (serialize (apply build_queryplan (apply untangle_query query))))))
 		sql_insert_into
 		sql_insert_select
