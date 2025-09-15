@@ -20,7 +20,15 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (import "sql-builtins.scm")
 (import "queryplan.scm")
 
-/* helper: build a policy function for table-level access checks */
+/* helper: build a policy function for table-level access checks
+   usage: create a policy by (set policy (sql_policy "username")),
+   then you can query the policy by
+   (policy "database" "tablename" false) for read
+   (policy "database" "tablename" true) for write
+   (policy "system" true true) to check for admin access like CREATE DATABASE, CREATE USER, DROP DATABASE, SHUTDOWN and so on
+   if everything is fine, the function call will do nothing.
+   if the user is not allowed to access this property, the function will throw an error and the query is aborted before it has run
+*/
 (define sql_policy (lambda (username)
     (begin
         (define is_admin (scan "system" "user"
