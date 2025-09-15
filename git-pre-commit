@@ -6,6 +6,10 @@
 
 echo "🔍 Running MemCP pre-commit tests..."
 
+# Global state for reliable cleanup
+did_cleanup=0
+active_pids=()
+
 # Build memcp to ensure latest changes are included
 echo "🔨 Building memcp..."
 if ! go build -o memcp; then
@@ -66,16 +70,35 @@ for i in {1..60}; do
 done
 
 cleanup() {
+  # Make cleanup idempotent
+  if [ "$did_cleanup" -eq 1 ]; then return; fi
+  did_cleanup=1
   echo ""; echo "🛑 Stopping MemCP..."
+  # Stop any active test jobs we spawned
+  if [ ${#active_pids[@]} -gt 0 ]; then
+    kill "${active_pids[@]}" 2>/dev/null || true
+  fi
+  # Also stop any other background jobs (best-effort)
+  for pid in $(jobs -p 2>/dev/null); do
+    kill "$pid" 2>/dev/null || true
+  done
   kill $supervisor_pid 2>/dev/null || true
   # Also kill an active memcp if still running
   pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
   # Close and remove FIFO
   exec 3>&-
   rm -f "$fifo_path" 2>/dev/null || true
+  # Remove temp directory if created
+  if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
+    rm -rf "$tmpdir" 2>/dev/null || true
+  fi
   echo "✅ MemCP stopped"
 }
 trap cleanup EXIT
+# Handle Ctrl+C and termination signals
+trap 'echo; echo "✋ Interrupted"; cleanup; exit 130' INT
+trap 'echo; echo "✋ Terminated"; cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
 
 echo "🧪 Running SQL tests using single MemCP instance (parallel where safe)..."
 
@@ -110,8 +133,9 @@ run_one() {
     sleep 1
   done
   python3 run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
-  # Determine status
-  if grep -q "All tests passed" "$out"; then echo OK > "$statusf"; else echo FAIL > "$statusf"; fi
+  rc=$?
+  # Determine status by exit code (0 => OK, nonzero => FAIL)
+  if [ $rc -eq 0 ]; then echo OK > "$statusf"; else echo FAIL > "$statusf"; fi
   # Critical section: print output of this test
   {
     flock -x 9
@@ -121,7 +145,6 @@ run_one() {
 }
 
 # Run parallel-safe tests (track only test PIDs)
-active_pids=()
 for tf in $parallel_tests; do
   out="$tmpdir/$(basename "$tf").out"
   statusf="$tmpdir/$(basename "$tf").status"
@@ -157,6 +180,28 @@ for tf in $test_files; do
     failed_files="$failed_files $tf"
   fi
 done
+
+# Print detailed logs for failed test files again at the end
+if [ "$all_passed" != true ]; then
+  echo ""
+  echo "🔎 Detailed failure logs:"
+  for tf in $test_files; do
+    statusf="$tmpdir/$(basename "$tf").status"
+    if [ -f "$statusf" ] && grep -q OK "$statusf"; then
+      continue
+    fi
+    echo ""
+    echo "===== $(basename "$tf") ====="
+    out="$tmpdir/$(basename "$tf").out"
+    if [ -f "$out" ]; then
+      cat "$out"
+    else
+      echo "(no output captured)"
+    fi
+    echo "===== end $(basename "$tf") ====="
+  done
+  echo ""
+fi
 
 rm -rf "$tmpdir"
 
