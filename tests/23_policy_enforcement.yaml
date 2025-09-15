@@ -12,6 +12,42 @@ setup:
   - sql: "CREATE TABLE t(id INT, name TEXT)"
 
 test_cases:
+  - name: "alice cannot CREATE DATABASE"
+    username: "alice"
+    password: "pw"
+    sql: "CREATE DATABASE `policytestdb_alice`"
+    expect: { error: true }
+
+  - name: "alice cannot CREATE USER"
+    username: "alice"
+    password: "pw"
+    sql: "CREATE USER charlie IDENTIFIED BY 'pw'"
+    expect: { error: true }
+
+  - name: "alice cannot GRANT on db"
+    username: "alice"
+    password: "pw"
+    sql: "GRANT SELECT ON `memcp-tests`.* TO alice"
+    expect: { error: true }
+
+  - name: "alice cannot REVOKE on db"
+    username: "alice"
+    password: "pw"
+    sql: "REVOKE SELECT ON `memcp-tests`.* FROM alice"
+    expect: { error: true }
+
+  - name: "alice cannot DROP DATABASE"
+    username: "alice"
+    password: "pw"
+    sql: "DROP DATABASE `memcp-tests`"
+    expect: { error: true }
+
+  - name: "alice cannot SHUTDOWN"
+    username: "alice"
+    password: "pw"
+    sql: "SHUTDOWN"
+    expect: { error: true }
+
   - name: "alice cannot SELECT without grant"
     username: "alice"
     password: "pw"
