@@ -77,30 +77,88 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "🧪 Running SQL tests using single MemCP instance..."
+echo "🧪 Running SQL tests using single MemCP instance (parallel where safe)..."
 
-# Run each test file using --connect-only mode
 all_passed=true
 failed_files=""
 
-for test_file in $test_files; do
-    echo "🔍 Running $test_file..."
-    # Ensure server is responsive before each file
-    for i in {1..30}; do
-      if curl -s "http://localhost:$test_port" >/dev/null 2>&1; then
-        break
-      fi
-      sleep 1
-    done
-    if python3 run_sql_tests.py "$test_file" $test_port --connect-only; then
-        echo "✅ Tests in $test_file passed"
-    else
-        echo "❌ Tests in $test_file failed"
-        all_passed=false
-        failed_files="$failed_files $test_file"
-    fi
-    echo ""
+# Split tests: those that contain SHUTDOWN (disruptive) run sequentially; others in parallel
+parallel_tests=""
+sequential_tests=""
+for tf in $test_files; do
+  if grep -q "SHUTDOWN" "$tf"; then
+    sequential_tests="$sequential_tests $tf"
+  else
+    parallel_tests="$parallel_tests $tf"
+  fi
 done
+
+# Limit concurrency to number of processors, cap at 8
+max_jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+if [ "$max_jobs" -gt 8 ]; then max_jobs=8; fi
+
+tmpdir=$(mktemp -d)
+lockfile="/tmp/memcp-print.lock"
+
+run_one() {
+  local tf="$1"
+  local out="$2"
+  local statusf="$3"
+  # Wait for readiness before starting
+  for i in {1..30}; do
+    if curl -s "http://localhost:$test_port" >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  python3 run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
+  # Determine status
+  if grep -q "All tests passed" "$out"; then echo OK > "$statusf"; else echo FAIL > "$statusf"; fi
+  # Critical section: print output of this test
+  {
+    flock -x 9
+    cat "$out"
+    echo ""
+  } 9>>"$lockfile"
+}
+
+# Run parallel-safe tests (track only test PIDs)
+active_pids=()
+for tf in $parallel_tests; do
+  out="$tmpdir/$(basename "$tf").out"
+  statusf="$tmpdir/$(basename "$tf").status"
+  run_one "$tf" "$out" "$statusf" &
+  active_pids+=("$!")
+  # Concurrency gate: wait for the oldest test PID when at limit
+  while [ ${#active_pids[@]} -ge $max_jobs ]; do
+    wait "${active_pids[0]}"
+    active_pids=("${active_pids[@]:1}")
+  done
+done
+# Wait for remaining test jobs (ignore supervisor)
+for pid in "${active_pids[@]}"; do
+  wait "$pid"
+done
+
+# Run disruptive tests sequentially
+for tf in $sequential_tests; do
+  out="$tmpdir/$(basename "$tf").out"
+  statusf="$tmpdir/$(basename "$tf").status"
+  run_one "$tf" "$out" "$statusf"
+done
+
+# Stop supervisor and memcp now that all tests are done
+kill $supervisor_pid 2>/dev/null || true
+pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
+
+# Collect results in test file order
+for tf in $test_files; do
+  statusf="$tmpdir/$(basename "$tf").status"
+  if [ -f "$statusf" ] && grep -q OK "$statusf"; then :; else
+    all_passed=false
+    failed_files="$failed_files $tf"
+  fi
+done
+
+rm -rf "$tmpdir"
 
 if [ "$all_passed" = true ]; then
     echo "🎉 All tests passed, commit allowed"

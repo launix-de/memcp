@@ -201,15 +201,22 @@ class SQLTestRunner:
 
         # Special handling: SHUTDOWN command triggers graceful restart flow
         if query and query.strip().upper() == "SHUTDOWN":
-            # Issue shutdown; then wait for server to restart (supervisor should bring it back)
+            # Issue shutdown
             resp = self.execute_sql(database, query, auth_header)
-            # Ignore response content; wait for readiness
+            # Wait for server to go down, then come back up
             try:
                 port = int(self.base_url.rsplit(':', 1)[1])
             except Exception:
                 port = 4321
-            # wait up to ~30s for restart
-            ok = wait_for_memcp(port, timeout=30)
+            # Wait until server is unavailable
+            for _ in range(30):
+                try:
+                    requests.get(self.base_url, timeout=2)
+                except Exception:
+                    break
+                time.sleep(1)
+            # Now wait until available again
+            ok = wait_for_memcp(port, timeout=60)
             if ok:
                 self._record_success(name, is_noncritical)
                 return True
