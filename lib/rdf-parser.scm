@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 /* RDF parser according to: https://www.w3.org/TR/sparql11-query/ */
@@ -33,9 +33,9 @@ Copyright (C) 2024  Carl-Philip Hänsch
 )))
 
 /* TODO: blank nodes
- [ p o ]
- oder [] p o
- oder _:identifier
+[ p o ]
+oder [] p o
+oder _:identifier
 
 */
 
@@ -107,32 +107,32 @@ Copyright (C) 2024  Carl-Philip Hänsch
 )))
 
 (define parse_sparql (lambda (schema s) (match (ttl_header s)
-       '("prefixes" definitions "rest" rest) (rdf_queryplan schema (rdf_select rest) definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))))
+	'("prefixes" definitions "rest" rest) (rdf_queryplan schema (rdf_select rest) definitions '() (lambda (cols ctx) '('resultrow (cons list (map_assoc cols (lambda (k v) (rdf_replace_ctx v ctx)))))))
 )))
 
 
 (define load_ttl (lambda (schema s) (match (ttl_header s)
-	       '("prefixes" definitions "rest" rest)
-		(begin
-			(define rdf_constant_pfx (parser (or
-				(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (concat (definitions pfx) post)) /* add prefix */
-				rdf_constant
-			)))
-			(define ttl_fact (parser '(
-				(define facts 
-					(parser '((define s rdf_constant_pfx) (define ps (+ (parser '((define p rdf_constant_pfx) (define os (+ rdf_constant_pfx ","))) (map os (lambda (o) '(p o)))) ";")) (? ";") ".") (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
-				)
-				(define rest rest)
-			) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
-			(set load (lambda (facts) (!begin
-				/* (print "start ======== " facts "-- end") */
-				(insert schema "rdf" '("s" "p" "o") facts '() (lambda () true))
-			)))
-			(define process_fact (lambda (rest) (match (ttl_fact rest)
-				'("facts" facts "rest" (regex "[ \\n\\r\\t]*" _)) (load facts)
-				'("facts" facts "rest" rest) (!begin (load facts) (process_fact rest))
-				rest (error "couldnt parse: " rest)
-			)))
-			(process_fact rest)
-		)
+	'("prefixes" definitions "rest" rest)
+	(begin
+		(define rdf_constant_pfx (parser (or
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (concat (definitions pfx) post)) /* add prefix */
+			rdf_constant
+		)))
+		(define ttl_fact (parser '(
+			(define facts 
+				(parser '((define s rdf_constant_pfx) (define ps (+ (parser '((define p rdf_constant_pfx) (define os (+ rdf_constant_pfx ","))) (map os (lambda (o) '(p o)))) ";")) (? ";") ".") (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
+			)
+			(define rest rest)
+		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
+		(set load (lambda (facts) (!begin
+			/* (print "start ======== " facts "-- end") */
+			(insert schema "rdf" '("s" "p" "o") facts '() (lambda () true))
+		)))
+		(define process_fact (lambda (rest) (match (ttl_fact rest)
+			'("facts" facts "rest" (regex "[ \\n\\r\\t]*" _)) (load facts)
+			'("facts" facts "rest" rest) (!begin (load facts) (process_fact rest))
+			rest (error "couldnt parse: " rest)
+		)))
+		(process_fact rest)
+	)
 )))

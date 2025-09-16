@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 (import "sql-parser.scm")
@@ -21,37 +21,37 @@ Copyright (C) 2023  Carl-Philip Hänsch
 (import "queryplan.scm")
 
 /* helper: build a policy function for table-level access checks
-   usage: create a policy by (set policy (sql_policy "username")),
-   then you can query the policy by
-   (policy "database" "tablename" false) for read
-   (policy "database" "tablename" true) for write
-   (policy "system" true true) to check for admin access like CREATE DATABASE, CREATE USER, DROP DATABASE, SHUTDOWN and so on
-   if everything is fine, the function call will do nothing.
-   if the user is not allowed to access this property, the function will throw an error and the query is aborted before it has run
+usage: create a policy by (set policy (sql_policy "username")),
+then you can query the policy by
+(policy "database" "tablename" false) for read
+(policy "database" "tablename" true) for write
+(policy "system" true true) to check for admin access like CREATE DATABASE, CREATE USER, DROP DATABASE, SHUTDOWN and so on
+if everything is fine, the function call will do nothing.
+if the user is not allowed to access this property, the function will throw an error and the query is aborted before it has run
 */
 (define sql_policy (lambda (username)
-    (begin
-        (define is_admin (scan "system" "user"
-            '("username") (lambda (u) (equal?? u username))
-            '("admin") (lambda (a) a)
-            (lambda (a b) (or a b))
-            false))
-	(if is_admin (lambda (schema table write) true) /* admin -> allow all */
-		/* else: complicated policy */
-		(lambda (schema table write)
-		    (begin
-			/* Allow virtual INFORMATION_SCHEMA for all users */
-			(if (equal?? schema "information_schema") true (begin
-			    /* Database-level check via system.access */
-			    (define access_count (scan "system" "access"
-			        '("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
-			        '() (lambda () 1)
-			        + 0))
-				(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." table)))
+	(begin
+		(define is_admin (scan "system" "user"
+			'("username") (lambda (u) (equal?? u username))
+			'("admin") (lambda (a) a)
+			(lambda (a b) (or a b))
+			false))
+		(if is_admin (lambda (schema table write) true) /* admin -> allow all */
+			/* else: complicated policy */
+			(lambda (schema table write)
+				(begin
+					/* Allow virtual INFORMATION_SCHEMA for all users */
+					(if (equal?? schema "information_schema") true (begin
+						/* Database-level check via system.access */
+						(define access_count (scan "system" "access"
+							'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
+							'() (lambda () 1)
+							+ 0))
+						(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." table)))
+					))
 			))
-		    ))
+		)
 	)
-    )
 ))
 
 /* create user tables */
@@ -61,9 +61,9 @@ Copyright (C) 2023  Carl-Philip Hänsch
 	(createdatabase "system")
 ))
 (if (has? (show "system") "user") true (begin
-    (print "creating table system.user")
+	(print "creating table system.user")
 	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema table write) true)))
-    (insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password (arg "root-password" "admin")) true)))
+	(insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password (arg "root-password" "admin")) true)))
 ))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
@@ -121,17 +121,17 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					(original_resultrow '("affected_rows" query_result))
 				))
 			) query)) (lambda(e) (begin
-				(print "SQL query: " query)
-				(print "error: " e)
-				((res "header") "Content-Type" "text/event-stream; charset=utf-8")
-				((res "status") 500)
-				((res "print") "SQL Error: " e)
+					(print "SQL query: " query)
+					(print "error: " e)
+					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
+					((res "status") 500)
+					((res "print") "SQL Error: " e)
 			)))
 		) (begin
-			((res "header") "Content-Type" "text/plain")
-			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
-			((res "status") 401)
-			((res "print") "Unauthorized")
+				((res "header") "Content-Type" "text/plain")
+				((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+				((res "status") 401)
+				((res "print") "Unauthorized")
 		))
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
@@ -158,17 +158,17 @@ Copyright (C) 2023  Carl-Philip Hänsch
 					(original_resultrow '("affected_rows" query_result))
 				))
 			) query)) (lambda(e) (begin
-				(print "SQL query: " query)
-				(print "error: " e)
-				((res "header") "Content-Type" "text/plain")
-				((res "status") 500)
-				((res "print") "SQL Error: " e)
+					(print "SQL query: " query)
+					(print "error: " e)
+					((res "header") "Content-Type" "text/plain")
+					((res "status") 500)
+					((res "print") "SQL Error: " e)
 			)))
 		) (begin
-			((res "header") "Content-Type" "text/plain")
-			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
-			((res "status") 401)
-			((res "print") "Unauthorized")
+				((res "header") "Content-Type" "text/plain")
+				((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+				((res "status") 401)
+				((res "print") "Unauthorized")
 		))
 	)))
 	old_handler old_handler /* workaround for optimizer bug */
@@ -207,41 +207,41 @@ Copyright (C) 2023  Carl-Philip Hänsch
 /* dedicated mysql protocol listening at specified port */
 (try (lambda () (begin
 	(if (not (arg "disable-mysql" false)) (begin
-	(set port (arg "mysql-port" (env "MYSQL_PORT" "3307")))
-	(mysql port
-		(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
-		(lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))) /* allow virtual INFORMATION_SCHEMA, otherwise check db existence */
-		(lambda (schema sql resultrow_sql session) (begin /* sql */
-			(define resultrow resultrow_sql)
-			(if (equal? (session "syntax") "scheme") /* TODO: check access to system.* */ (begin
-				/* scheme syntax mode */
-				(set print (lambda args (resultrow '("result" (concat args)))))
-				(try (lambda () (resultrow '("result" (eval (scheme sql))))) (lambda (e) (begin
-					(print "Scheme query: " sql)
-					(print "error " e)
-					(resultrow '("error" e))
-				)))
-			) (time (begin
-				/* SQL syntax mode */
-				/* tolerate an optional trailing ';' using multiline group */
-				(set sql (match sql (regex "^((?s:.*));\\s*" _ body) body sql))
-				(define formula (try (lambda ()
-					((if (equal? (session "syntax") "postgresql") (lambda (schema sql policy) (parse_psql schema sql policy)) (lambda (schema sql policy) (parse_sql schema sql policy))) schema sql (sql_policy (coalesce (session "username") "root"))))
-				(lambda (e) (begin
-					(print "SQL query: " sql)
-					(print "error: " e)
-					(resultrow '("error" e))
-					nil
-				))))
-				(if formula (try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
-					(print "SQL query: " sql)
-					(print "execution plan: " formula)
-					(print "error: " e)
-					(resultrow '("error" e))
-				))) nil)
-			) sql))
-		))
-	)
-	(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password '" (arg "root-password" "admin") "'), set with --mysql-port")
+		(set port (arg "mysql-port" (env "MYSQL_PORT" "3307")))
+		(mysql port
+			(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
+			(lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))) /* allow virtual INFORMATION_SCHEMA, otherwise check db existence */
+			(lambda (schema sql resultrow_sql session) (begin /* sql */
+				(define resultrow resultrow_sql)
+				(if (equal? (session "syntax") "scheme") /* TODO: check access to system.* */ (begin
+					/* scheme syntax mode */
+					(set print (lambda args (resultrow '("result" (concat args)))))
+					(try (lambda () (resultrow '("result" (eval (scheme sql))))) (lambda (e) (begin
+						(print "Scheme query: " sql)
+						(print "error " e)
+						(resultrow '("error" e))
+					)))
+				) (time (begin
+						/* SQL syntax mode */
+						/* tolerate an optional trailing ';' using multiline group */
+						(set sql (match sql (regex "^((?s:.*));\\s*" _ body) body sql))
+						(define formula (try (lambda ()
+							((if (equal? (session "syntax") "postgresql") (lambda (schema sql policy) (parse_psql schema sql policy)) (lambda (schema sql policy) (parse_sql schema sql policy))) schema sql (sql_policy (coalesce (session "username") "root"))))
+							(lambda (e) (begin
+								(print "SQL query: " sql)
+								(print "error: " e)
+								(resultrow '("error" e))
+								nil
+						))))
+						(if formula (try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
+							(print "SQL query: " sql)
+							(print "execution plan: " formula)
+							(print "error: " e)
+							(resultrow '("error" e))
+						))) nil)
+					) sql))
+			))
+		)
+		(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password '" (arg "root-password" "admin") "'), set with --mysql-port")
 	)) ; close the if for disable-mysql
 )) print)

@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 /* emulate metadata tables */
@@ -99,30 +99,30 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
 	/* Unknown INFORMATION_SCHEMA table → clear SCM-side error */
 	'((ignorecase "information_schema") _)
-		(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
+	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
 	(show schema tbl) /* otherwise: fetch from metadata */
 )))
 (define scan_wrapper (lambda args (match args (merge '(scanfn schema tbl) rest) (match '(schema tbl)
 	'((ignorecase "information_schema") (ignorecase "schemata"))
-		(merge '(scanfn schema 
-			'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
-			) rest)
+	(merge '(scanfn schema 
+		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
+	) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
-		(merge '(scanfn schema 
-			'('merge '('map '('show) '('lambda '('schema) '('map '('show 'schema) '('lambda '('tbl) '('list "table_catalog" "def" "table_schema" 'schema "table_name" 'tbl "table_type" "BASE TABLE")))))) 
-			) rest)
+	(merge '(scanfn schema 
+		'('merge '('map '('show) '('lambda '('schema) '('map '('show 'schema) '('lambda '('tbl) '('list "table_catalog" "def" "table_schema" 'schema "table_name" 'tbl "table_type" "BASE TABLE")))))) 
+	) rest)
 	'((ignorecase "information_schema") (ignorecase "columns"))
-		(merge '(scanfn schema 
-			'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "name") "data_type" '((quote col) "type") "column_type" '((quote concat) '((quote col) "type") '((quote col) "dimensions")))))))))))
-			) rest)
+	(merge '(scanfn schema 
+		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "name") "data_type" '((quote col) "type") "column_type" '((quote concat) '((quote col) "type") '((quote col) "dimensions")))))))))))
+	) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-		(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
+	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-		(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
+	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "files"))
-		(merge '(scanfn schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
+	(merge '(scanfn schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
 	'((ignorecase "information_schema") (ignorecase "partitions"))
-		(merge '(scanfn schema '(list)) rest) /* empty: no MySQL partitions */
+	(merge '(scanfn schema '(list)) rest) /* empty: no MySQL partitions */
 	'(schema tbl) /* normal case */
-		(merge '(scanfn schema tbl) rest)
+	(merge '(scanfn schema tbl) rest)
 ))))

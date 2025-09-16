@@ -1,26 +1,26 @@
 /*
 Copyright (C) 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 (import "rdf-parser.scm")
 
 /*
 this is how rdf works:
- - every database may have a table rdf(s text, p text, o text)
- - import formats are: xml, ttl
+- every database may have a table rdf(s text, p text, o text)
+- import formats are: xml, ttl
 */
 
 (define handler_404 (lambda (req res) (begin
@@ -45,10 +45,10 @@ this is how rdf works:
 
 			(eval formula)
 		) query) (begin
-			((res "header") "Content-Type" "text/plain")
-			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
-			((res "status") 401)
-			((res "print") "Unauthorized")
+				((res "header") "Content-Type" "text/plain")
+				((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+				((res "status") 401)
+				((res "print") "Unauthorized")
 		))
 	)))
 	(define handle_ttl_load (lambda (req res schema ttl_data) (begin
@@ -64,10 +64,10 @@ this is how rdf works:
 			(load_ttl schema ttl_data)
 			((res "println") "TTL data loaded successfully")
 		) (begin
-			((res "header") "Content-Type" "text/plain")
-			((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
-			((res "status") 401)
-			((res "print") "Unauthorized")
+				((res "header") "Content-Type" "text/plain")
+				((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+				((res "status") 401)
+				((res "print") "Unauthorized")
 		))
 	)))
 	old_handler old_handler /* workaround for optimizer bug */
@@ -88,7 +88,7 @@ this is how rdf works:
 			)
 			/* default */
 			(!begin
-			((outer old_handler) req res))
-			)
+				((outer old_handler) req res))
+		)
 	))
 ))

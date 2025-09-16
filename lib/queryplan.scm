@@ -1,18 +1,18 @@
 /*
 Copyright (C) 2023, 2024  Carl-Philip Hänsch
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 /*
@@ -41,10 +41,10 @@ if there is a group function, create a temporary preaggregate table
 */
 
 /* helper functions:
- - (build_queryplan schema tables fields condition group having order limit offset schemas) builds a lisp expression that runs the query and calls resultrow for each result tuple
- - (build_scan schema tables cols map reduce neutral neutral2 condition group having order limit offset) builds a lisp expression that scans the tables
- - (extract_columns_for_tblvar expr tblvar) extracts a list of used columns for each tblvar '(tblvar col)
- - (replace_columns expr) replaces all (get_column ...) and (aggregate ...) with values
+- (build_queryplan schema tables fields condition group having order limit offset schemas) builds a lisp expression that runs the query and calls resultrow for each result tuple
+- (build_scan schema tables cols map reduce neutral neutral2 condition group having order limit offset) builds a lisp expression that scans the tables
+- (extract_columns_for_tblvar expr tblvar) extracts a list of used columns for each tblvar '(tblvar col)
+- (replace_columns expr) replaces all (get_column ...) and (aggregate ...) with values
 
 */
 
@@ -112,12 +112,12 @@ if there is a group function, create a temporary preaggregate table
 	(set rename_prefix (coalesce rename_prefix ""))
 
 	/* Guard: reject subselects in expressions for now.
-	   TODO(memcp): Transform inner_select{,_in,_exists} into LEFT JOINs on a derived table-set.
-	   Strategy sketch: first, recurse over untangle_query, then add a LEFT JOIN'd tableset,
-	   driven by the outer side; GROUP by (1) if no columns from the outer scope are bound
-	   or GROUP BY distinct dependent columns if correlated.
-	   We'll need a dependent-variable collector to detect correlations.
-	   We'll also need a multi-stage group/sort/limit operator (no idea how yet) */
+	TODO(memcp): Transform inner_select{,_in,_exists} into LEFT JOINs on a derived table-set.
+	Strategy sketch: first, recurse over untangle_query, then add a LEFT JOIN'd tableset,
+	driven by the outer side; GROUP by (1) if no columns from the outer scope are bound
+	or GROUP BY distinct dependent columns if correlated.
+	We'll need a dependent-variable collector to detect correlations.
+	We'll also need a multi-stage group/sort/limit operator (no idea how yet) */
 	(define reject_inner_selects (lambda (expr) (match expr
 		'((symbol inner_select) _) (error "not supported: (SELECT ...)")
 		'((symbol inner_select_in) _ _) (error "not supported: expr IN (SELECT ...)")
@@ -133,37 +133,37 @@ if there is a group function, create a temporary preaggregate table
 	(if order (map order (lambda (o) (match o '(col dir) (reject_inner_selects col)))) true)
 
 	/* TODO(memcp): Unnesting strategy
-	   - Prefer flattening nested SELECTs: prefix aliases (alias:tbl), add inner condition to outer condition, remember SELECT-title renames in renamelist.
-	   - Only materialize when necessary: inner GROUP/HAVING, LIMIT/OFFSET, or incompatible ORDER.
-	   - Before createtable materialization, detect FK/PK grouping and switch to a hidden computed column path instead of temp tables.
-	   - For ORDER+LIMIT: if compatible with outer ORDER, annotate node for range-based braking (k = offset+limit) and avoid inner materialization; drop inner ORDER if no LIMIT.
-	   - TODO: Implement free_vars(expr) and should_materialize(meta) helpers; add (order_brake k) annotation passed down to scan_order.
+	- Prefer flattening nested SELECTs: prefix aliases (alias:tbl), add inner condition to outer condition, remember SELECT-title renames in renamelist.
+	- Only materialize when necessary: inner GROUP/HAVING, LIMIT/OFFSET, or incompatible ORDER.
+	- Before createtable materialization, detect FK/PK grouping and switch to a hidden computed column path instead of temp tables.
+	- For ORDER+LIMIT: if compatible with outer ORDER, annotate node for range-based braking (k = offset+limit) and avoid inner materialization; drop inner ORDER if no LIMIT.
+	- TODO: Implement free_vars(expr) and should_materialize(meta) helpers; add (order_brake k) annotation passed down to scan_order.
 	*/
 
 	/* check if we have FROM selects -> returns '(tables renamelist condition schemas) */
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2 schemas2 replace_find_column2) (begin
-		 	/* prefix all table aliases */	
+			/* prefix all table aliases */	
 			(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a b) '((concat id ":" alias) schema tbl a b)))))
 			/* helper function add prefix to tblalias of every expression */
-				(define replace_column_alias (lambda (expr) (match expr
-					'((symbol get_column) nil ti col ci) (begin
-						/* resolve unqualified column against inner schemas2; must match exactly one table */
-						(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
-							(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
-								(cons alias acc)
-								acc)) '()))
-						(match matches
-							(cons only '()) '('get_column (concat id ":" only) ti col ci)
-							'() (error (concat "column " col " does not exist in subquery"))
-							(cons _ _) (error (concat "ambiguous column " col " in subquery"))
-						)
+			(define replace_column_alias (lambda (expr) (match expr
+				'((symbol get_column) nil ti col ci) (begin
+					/* resolve unqualified column against inner schemas2; must match exactly one table */
+					(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
+						(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
+							(cons alias acc)
+							acc)) '()))
+					(match matches
+						(cons only '()) '('get_column (concat id ":" only) ti col ci)
+						'() (error (concat "column " col " does not exist in subquery"))
+						(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 					)
-					'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
-					(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
-					expr
-				)))
+				)
+				'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+				(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
+				expr
+			)))
 			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 			(if group2 (error "group is not supported yet in subqueries"))
 			(if limit2 (error "limit is not supported yet in subqueries"))
@@ -171,75 +171,75 @@ if there is a group function, create a temporary preaggregate table
 		) (error "non matching return value for untangle_query"))
 		(error (concat "unknown tabledesc: " tbldesc))
 	))))
-	'(tablesList renameList conditionList schemasList) (begin /* schemas is an assoc array from alias -> columnlist */
-		/* rewrite a flat table list according to inner selects */
-		(set renamelist (merge renameList))
-		(set tables (merge tablesList))
-		(set schemas (merge schemasList))
-		/*(print "tables=" tables)*/
-		/*(print "schemas=" schemas)*/
+		'(tablesList renameList conditionList schemasList) (begin /* schemas is an assoc array from alias -> columnlist */
+			/* rewrite a flat table list according to inner selects */
+			(set renamelist (merge renameList))
+			(set tables (merge tablesList))
+			(set schemas (merge schemasList))
+			/*(print "tables=" tables)*/
+			/*(print "schemas=" schemas)*/
 
-		/* TODO: add rename_prefix to all table names and get_column expressions */
-		/* TODO: apply renamelist to all expressions in fields condition group having order */
+			/* TODO: add rename_prefix to all table names and get_column expressions */
+			/* TODO: apply renamelist to all expressions in fields condition group having order */
 
-		/* at first: extract additional join exprs into condition list */
-		(set condition (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
+			/* at first: extract additional join exprs into condition list */
+			(set condition (cons 'and (coalesce (filter (append (map tables (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
 
-		/* tells whether there is an aggregate inside */
-		(define expr_find_aggregate (lambda (expr) (match expr
-			'((symbol aggregate) item reduce neutral) true
-			(cons sym args) /* function call */ (reduce args (lambda (a b) (or a (expr_find_aggregate b))) false)
-			false
-		)))
+			/* tells whether there is an aggregate inside */
+			(define expr_find_aggregate (lambda (expr) (match expr
+				'((symbol aggregate) item reduce neutral) true
+				(cons sym args) /* function call */ (reduce args (lambda (a b) (or a (expr_find_aggregate b))) false)
+				false
+			)))
 
-		/* set group to 1 if fields contain aggregates even if not */
-		(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
+			/* set group to 1 if fields contain aggregates even if not */
+			(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
 
-		/* find those columns that have no table */
-		(define replace_find_column (lambda (expr) (match expr
-			'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
-			'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
-			(cons sym args) /* function call */ (cons sym (map args replace_find_column))
-			expr
-		)))
+			/* find those columns that have no table */
+			(define replace_find_column (lambda (expr) (match expr
+				'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
+				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
+				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
+				expr
+			)))
 
-		/* apply renamelist (assoc of assoc of expr) */
-		(define replace_rename (lambda (expr) (match expr
-			'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
-				/* no tblalias -> search the field in all tables */ (reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
-				/* tblalias -> look up the field */ (if (has_assoc? renamelist alias_) ((renamelist alias_) col) expr)
-			)
-			(cons sym args) /* function call */ (cons sym (map args replace_rename))
-			expr
-		)))
-		
+			/* apply renamelist (assoc of assoc of expr) */
+			(define replace_rename (lambda (expr) (match expr
+				'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
+					/* no tblalias -> search the field in all tables */ (reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
+					/* tblalias -> look up the field */ (if (has_assoc? renamelist alias_) ((renamelist alias_) col) expr)
+				)
+				(cons sym args) /* function call */ (cons sym (map args replace_rename))
+				expr
+			)))
 
-		/* expand *-columns */
-		(set fields (merge (extract_assoc fields (lambda (col expr) (match col
-			"*" (match expr
-				/* *.* */
-				'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas (lambda (alias def) (merge (map def (lambda (coldesc) /* all columns of each table */
+
+			/* expand *-columns */
+			(set fields (merge (extract_assoc fields (lambda (col expr) (match col
+				"*" (match expr
+					/* *.* */
+					'((symbol get_column) nil _ "*" _) (merge (extract_assoc schemas (lambda (alias def) (merge (map def (lambda (coldesc) /* all columns of each table */
 						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
 					)))
-				)))
-				/* tbl.* */
-				'((symbol get_column) tblvar ignorecase "*" _) (merge (extract_assoc schemas (lambda (alias def) (if ((if ignorecase equal?? equal?) alias tblvar) (merge (map def (lambda (coldesc) /* all columns of each table */
+					)))
+					/* tbl.* */
+					'((symbol get_column) tblvar ignorecase "*" _) (merge (extract_assoc schemas (lambda (alias def) (if ((if ignorecase equal?? equal?) alias tblvar) (merge (map def (lambda (coldesc) /* all columns of each table */
 						'((coldesc "Field") '((quote get_column) alias false (coldesc "Field") false))
 					))) '())
-				)))
-			)
-			'(col (replace_find_column expr))
-		)))))
+					)))
+				)
+				'(col (replace_find_column expr))
+			)))))
 
-		/* return parameter list for build_queryplan */
-		(set conditionAll (merge '('and (replace_rename condition)) conditionList)) /* TODO: append inner conditions to condition */
-		(set group (map group replace_rename))
-		(set having (replace_rename having))
-		(set order (map order (lambda (o) (match o '(col dir) '((replace_rename col) dir)))))
-		'(schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll group having order limit offset schemas replace_find_column)
-	)
-	/* else: empty tables list */
-	'(schema tables fields (optimize condition) group having order limit offset '() (lambda (expr) expr))
+			/* return parameter list for build_queryplan */
+			(set conditionAll (merge '('and (replace_rename condition)) conditionList)) /* TODO: append inner conditions to condition */
+			(set group (map group replace_rename))
+			(set having (replace_rename having))
+			(set order (map order (lambda (o) (match o '(col dir) '((replace_rename col) dir)))))
+			'(schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll group having order limit offset schemas replace_find_column)
+		)
+		/* else: empty tables list */
+		'(schema tables fields (optimize condition) group having order limit offset '() (lambda (expr) expr))
 	)
 )))
 
@@ -251,16 +251,16 @@ if there is a group function, create a temporary preaggregate table
 	/*(print "build queryplan " '(schema tables fields condition group having order limit offset schemas))*/
 
 	/*
-		Query builder masterplan:
-		1. make sure all optimizations are done (unnesting arbitrary queries, leave just one big table list with a field list, conditions, as well as a order+limit+offset)
-		2. if group is present: split the queryplan into filling the grouped table and scanning it -> find or create the preaggregate table, scan over the preaggregate
-		3. if order+limit+offset is present: split the queryplan into providing a scannable tableset and a ordered scan on that tableset
-		   -> find or create all tables that have to be nestedly scanned. if two tables are clumsed together, create a prejoin. recurse over build_queryplan without the order clause.
-		4. scan the rest of the tables
+	Query builder masterplan:
+	1. make sure all optimizations are done (unnesting arbitrary queries, leave just one big table list with a field list, conditions, as well as a order+limit+offset)
+	2. if group is present: split the queryplan into filling the grouped table and scanning it -> find or create the preaggregate table, scan over the preaggregate
+	3. if order+limit+offset is present: split the queryplan into providing a scannable tableset and a ordered scan on that tableset
+	-> find or create all tables that have to be nestedly scanned. if two tables are clumsed together, create a prejoin. recurse over build_queryplan without the order clause.
+	4. scan the rest of the tables
 
 	*/
 
-  	/* TODO: order tables: outer joins behind */
+	/* TODO: order tables: outer joins behind */
 
 	(if group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
@@ -304,33 +304,33 @@ if there is a group function, create a temporary preaggregate table
 				'('begin
 					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
 					/* INSERT IGNORE group cols into preaggregate */
-						'('time '('begin
-							/* If grouping is global (group='(1)), avoid base scan and insert one key row */
-							(if (equal? group '(1))
-								'('insert schema grouptbl '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
-								(begin
-									/* key columns */
-									(set keycols (merge_unique (map group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
-									(scan_wrapper 'scan schema tbl
-										(cons list filtercols)
-										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
-										(cons list keycols)
-										'((quote lambda)
-											(map keycols (lambda (col) (symbol (concat tblvar "." col))))
-											(cons (quote list) (map group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
-										'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
-										'(list) /* empty dict */
-										'((quote lambda) '('acc 'sharddict)
-											'('insert
-												schema grouptbl
-												(cons 'list (map group (lambda (col) (concat col))))
-												'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
-												'(list) '('lambda '() true) true)
-										)
-										isOuter)
-								)
+					'('time '('begin
+						/* If grouping is global (group='(1)), avoid base scan and insert one key row */
+						(if (equal? group '(1))
+							'('insert schema grouptbl '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
+							(begin
+								/* key columns */
+								(set keycols (merge_unique (map group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
+								(scan_wrapper 'scan schema tbl
+									(cons list filtercols)
+									'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
+									(cons list keycols)
+									'((quote lambda)
+										(map keycols (lambda (col) (symbol (concat tblvar "." col))))
+										(cons (quote list) (map group (lambda (expr) (replace_columns_from_expr expr))))) /* build records '(k1 k2 ...) */
+									'((quote lambda) '('acc 'rowvals) '('set_assoc 'acc 'rowvals true)) /* add keys to assoc; each key is a dataset -> unique filtering */
+									'(list) /* empty dict */
+									'((quote lambda) '('acc 'sharddict)
+										'('insert
+											schema grouptbl
+											(cons 'list (map group (lambda (col) (concat col))))
+											'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
+											'(list) '('lambda '() true) true)
+									)
+									isOuter)
 							)
-						) "collect")
+						)
+					) "collect")
 
 					/* compute aggregates */
 					'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
@@ -358,87 +358,87 @@ if there is a group function, create a temporary preaggregate table
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
 		)
 	) (begin
-		/* grouping has been removed; now to the real data: */
+			/* grouping has been removed; now to the real data: */
 
-		(if (coalesce order limit offset) (begin
-			/* ordered or limited scan */
-			/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
-			(set order (map (coalesce order '()) (lambda (x) (match x '(col dir) '((replace_find_column col) dir)))))
-			(define build_scan (lambda (tables condition)
-				(match tables
-					(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
-						(set cols (merge_unique
-							    (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
-							    (extract_columns_for_tblvar tblvar condition)
-						))
-						(match (split_condition (coalesce condition true) tables) '(now_condition later_condition) (begin
-							(set filtercols (extract_columns_for_tblvar tblvar now_condition))
-							/* TODO: add columns from rest condition into cols list */
+			(if (coalesce order limit offset) (begin
+				/* ordered or limited scan */
+				/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
+				(set order (map (coalesce order '()) (lambda (x) (match x '(col dir) '((replace_find_column col) dir)))))
+				(define build_scan (lambda (tables condition)
+					(match tables
+						(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
+							(set cols (merge_unique
+								(merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
+								(extract_columns_for_tblvar tblvar condition)
+							))
+							(match (split_condition (coalesce condition true) tables) '(now_condition later_condition) (begin
+								(set filtercols (extract_columns_for_tblvar tblvar now_condition))
+								/* TODO: add columns from rest condition into cols list */
 
-							/* extract order cols for this tblvar */
-							/* TODO: match case insensitive column */
-							/* TODO: non-trivial columns to computed columns */
-							/* preserve ORDER BY key order (first key has highest priority) */
-							(set ordercols (merge (map order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list col) '())))))
-							(set dirs      (merge (map order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list dir) '())))))
+								/* extract order cols for this tblvar */
+								/* TODO: match case insensitive column */
+								/* TODO: non-trivial columns to computed columns */
+								/* preserve ORDER BY key order (first key has highest priority) */
+								(set ordercols (merge (map order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list col) '())))))
+								(set dirs      (merge (map order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list dir) '())))))
 
-							(scan_wrapper 'scan_order schema tbl
-								/* condition */
-								(cons list filtercols)
-								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-								/* sortcols, sortdirs */
-								(cons list ordercols)
-								(cons list dirs)
-								offset
-								(coalesce limit -1)
-								/* extract columns and store them into variables */
-								(cons list cols)
-								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
-								/* no reduce+neutral */
-								nil
-								nil
-								isOuter
-							)
-						))
+								(scan_wrapper 'scan_order schema tbl
+									/* condition */
+									(cons list filtercols)
+									'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+									/* sortcols, sortdirs */
+									(cons list ordercols)
+									(cons list dirs)
+									offset
+									(coalesce limit -1)
+									/* extract columns and store them into variables */
+									(cons list cols)
+									'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
+									/* no reduce+neutral */
+									nil
+									nil
+									isOuter
+								)
+							))
+						)
+						'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 					)
-					'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
-				)
-			))
-			(build_scan tables (replace_find_column condition))
-		) (begin
-			/* unordered unlimited scan */
+				))
+				(build_scan tables (replace_find_column condition))
+			) (begin
+					/* unordered unlimited scan */
 
-			/* TODO: sort tables according to join plan */
-			/* TODO: match tbl to inner query vs string */
-			(define build_scan (lambda (tables condition)
-				(match tables
-					(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
-						(set cols (merge_unique
-							    (merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
-							    (extract_columns_for_tblvar tblvar condition)
-						))
-						/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
-						(match (split_condition (coalesce condition true) tables) '(now_condition later_condition) (begin
-							(set filtercols (extract_columns_for_tblvar tblvar now_condition))
+					/* TODO: sort tables according to join plan */
+					/* TODO: match tbl to inner query vs string */
+					(define build_scan (lambda (tables condition)
+						(match tables
+							(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
+								(set cols (merge_unique
+									(merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
+									(extract_columns_for_tblvar tblvar condition)
+								))
+								/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
+								(match (split_condition (coalesce condition true) tables) '(now_condition later_condition) (begin
+									(set filtercols (extract_columns_for_tblvar tblvar now_condition))
 
-							(scan_wrapper 'scan schema tbl
-								/* condition */
-								(cons list filtercols)
-								'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-								/* extract columns and store them into variables */
-								(cons list cols)
-								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
-								nil
-								nil
-								nil
-								isOuter
+									(scan_wrapper 'scan schema tbl
+										/* condition */
+										(cons list filtercols)
+										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+										/* extract columns and store them into variables */
+										(cons list cols)
+										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
+										nil
+										nil
+										nil
+										isOuter
+									)
+								))
 							)
-						))
-					)
-					'() /* final inner (=scalar) */ '('if condition '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
-				)
+							'() /* final inner (=scalar) */ '('if condition '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+						)
+					))
+					(build_scan tables (replace_find_column condition))
 			))
-			(build_scan tables (replace_find_column condition))
-		))
 	))
 )))
