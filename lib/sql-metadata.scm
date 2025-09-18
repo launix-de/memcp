@@ -113,7 +113,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge '(scanfn schema 
-		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "name") "data_type" '((quote col) "type") "column_type" '((quote concat) '((quote col) "type") '((quote col) "dimensions")))))))))))
+		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "Field") "data_type" '((quote col) "RawType") "column_type" '((quote concat) '((quote col) "Type") '((quote col) "Dimensions")))))))))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
 	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
