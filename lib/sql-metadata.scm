@@ -113,7 +113,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge '(scanfn schema 
-		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list) "table_catalog" "def" "table_schema" (quote schema) "table_name" (quote tbl) "column_name" '((quote col) "name") "data_type" '((quote col) "type") "column_type" '((quote concat) '((quote col) "type") '((quote col) "dimensions")))))))))))
+		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote map) '((quote show) (quote schema) (quote tbl)) '((quote lambda) '((quote col)) '((quote list)
+			"table_catalog" "def"
+			"table_schema" (quote schema)
+			"table_name" (quote tbl)
+			"column_name" '((quote col) "Field")
+			"ordinal_position" nil
+			"column_default" '((quote col) "Default")
+			"is_nullable" '((quote col) "Null")
+			"data_type" '((quote col) "RawType")
+			"column_type" '((quote col) "Type")
+			"column_key" nil
+			"extra" '((quote col) "Extra")
+			"privileges" '((quote col) "Privileges")
+			"column_comment" '((quote col) "Comment")
+			"is_generated" nil
+			"generation_expression" nil
+		))))))))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
 	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
