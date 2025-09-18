@@ -92,7 +92,11 @@ if the user is not allowed to access this property, the function will throw an e
 	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema table write) true)))
 ))
 
-(set globalvars '("lower_case_table_names" 0))
+/* global variables exposed via @@ and SHOW VARIABLES */
+(set globalvars (newsession))
+(globalvars "lower_case_table_names" 0)
+(globalvars "character_set_server" "utf8mb4")
+(globalvars "collation_server" "utf8mb4_general_ci")
 
 /* http hook for handling SQL */
 (define http_handler (begin

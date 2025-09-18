@@ -206,6 +206,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
 		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
+		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var */
+		(parser '((atom "@@" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true)) (? (atom "." true))) (define var sql_identifier_unquoted)) '('globalvars var))
 		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('globalvars var))
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
 		sql_number
@@ -609,7 +611,35 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DESCRIBE" true) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
 		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line))))) /* TODO: Field Type Collation Null Key Default Extra(auto_increment) Privileges Comment */
 
-		(parser '((atom "SHOW" true) (atom "VARIABLES" true)) '((quote map_assoc) '((quote list) "version" "0.9") '((quote lambda) '((quote key) (quote value)) '((quote resultrow) '((quote list) "Variable_name" (quote key) "Value" (quote value))))))
+		/* SHOW ENGINES: list engines recognized by CREATE/ALTER TABLE */
+		(parser '((atom "SHOW" true) (atom "ENGINES" true)) (cons '!begin '(
+			'((quote resultrow) '((quote list) "Engine" "SAFE"    "Support" "DEFAULT" "Comment" "Safe durable engine"              "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "LOGGING" "Support" "YES"     "Comment" "Append-only logging engine"      "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "MEMORY"  "Support" "YES"     "Comment" "In-memory engine"               "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "SLOPPY"  "Support" "YES"     "Comment" "Relaxed engine"                 "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "MyISAM"  "Support" "YES"     "Comment" "Alias of SAFE"                  "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "InnoDB"  "Support" "YES"     "Comment" "Alias of SAFE"                  "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "CSV"     "Support" "YES"     "Comment" "Alias of SAFE"                  "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+		)))
+		/* SHOW {CHARSET|CHARACTER SET} [LIKE pattern] */
+		(parser '((atom "SHOW" true) (or (atom "CHARSET" true) '((atom "CHARACTER" true) (atom "SET" true))) (? (atom "LIKE" true) (define likepattern sql_expression))) (cons '!begin '(
+			'((quote resultrow) '((quote list) "Charset" "utf8mb4" "Description" "UTF-8 Unicode" "Default collation" "utf8mb4_general_ci" "Maxlen" 4))
+		)))
+		/* SHOW COLLATION [LIKE pattern] */
+		(parser '((atom "SHOW" true) (atom "COLLATION" true) (? (atom "LIKE" true) (define likepattern sql_expression))) (cons '!begin '(
+			'((quote resultrow) '((quote list) "Collation" "utf8mb4_general_ci" "Charset" "utf8mb4" "Id" 255 "Default" "YES" "Compiled" "YES" "Sortlen" 1))
+			'((quote resultrow) '((quote list) "Collation" "utf8mb4_bin"        "Charset" "utf8mb4" "Id" 254 "Default" "NO"  "Compiled" "YES" "Sortlen" 1))
+		)))
+		/* SHOW PLUGINS: return empty set (ok for most clients) */
+		(parser '((atom "SHOW" true) (atom "PLUGINS" true)) (quote true))
+
+		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] */
+		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern sql_expression))) (cons '!begin '(
+			'((quote resultrow) '((quote list) "Variable_name" "version"               "Value" "0.9"))
+			'((quote resultrow) '((quote list) "Variable_name" "character_set_server" "Value" "utf8mb4"))
+			'((quote resultrow) '((quote list) "Variable_name" "collation_server"     "Value" "utf8mb4_general_ci"))
+			'((quote resultrow) '((quote list) "Variable_name" "lower_case_table_names" "Value" 0))
+		)))
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression)) (quote true)) /* ignore */
 
 
