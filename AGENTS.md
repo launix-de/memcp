@@ -20,6 +20,7 @@
 - Go: format with `go fmt ./...` after each patch; keep idiomatic Go (short, cohesive funcs). Tabs and gofmt defaults are expected.
 - Go imports: sort imports by path length ascending within each import block.
 - Scheme (`.scm`): follow existing patterns; filenames are kebab-case; keep code self-explanatory, add comments for more complex code parts.
+- Please remember, you are a textmodel and you are not trained to functional programming languages like scheme. Don't correct braces at your will, try to use tools like sed, run it only on small portions of the code
 - Indentation in Scheme: indent nested forms with tabs; align continuation lines to opening form where helpful; avoid mixing tabs and spaces.
   - After touching any files under `lib/`, run the Scheme formatter to normalize indentation and catch bracket issues:
     - Reformat in-place: `python3 tools/lint_scm.py`
