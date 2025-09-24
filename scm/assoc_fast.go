@@ -18,6 +18,7 @@ package scm
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/maphash"
 	"math"
 	"reflect"
@@ -62,55 +63,83 @@ func HashKey(k Scmer) uint64 {
 	h.SetSeed(fastDictSeed)
 	var writeScmer func(v Scmer)
 	writeScmer = func(v Scmer) {
-		switch x := v.(type) {
-		case nil:
+		switch auxTag(v.aux) {
+		case tagNil:
 			h.WriteByte(0)
-		case bool:
+		case tagBool:
 			h.WriteByte(1)
-			if x {
+			if v.Bool() {
 				h.WriteByte(1)
 			} else {
 				h.WriteByte(0)
 			}
-		case int64:
+		case tagInt:
 			h.WriteByte(2)
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], uint64(x))
+			binary.LittleEndian.PutUint64(b[:], uint64(v.Int()))
 			h.Write(b[:])
-		case float64:
+		case tagFloat:
 			h.WriteByte(3)
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], math.Float64bits(x))
+			binary.LittleEndian.PutUint64(b[:], math.Float64bits(v.Float()))
 			h.Write(b[:])
-		case string:
+		case tagString:
 			h.WriteByte(4)
-			h.WriteString(x)
-		case Symbol:
+			h.WriteString(v.String())
+		case tagSymbol:
 			h.WriteByte(5)
-			h.WriteString(string(x))
-		case []Scmer:
+			h.WriteString(v.String())
+		case tagSlice:
 			h.WriteByte(6)
 			// write length to reduce collisions for different list sizes
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], uint64(len(x)))
+			slice := v.Slice()
+			binary.LittleEndian.PutUint64(b[:], uint64(len(slice)))
 			h.Write(b[:])
-			for _, el := range x {
+			for _, el := range slice {
 				writeScmer(el)
 			}
-		case *FastDict:
-			// Hash as list of pairs to match []Scmer assoc representation
-			h.WriteByte(6)
+		case tagVector:
+			h.WriteByte(7)
+			vec := v.Vector()
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], uint64(len(x.Pairs)))
+			binary.LittleEndian.PutUint64(b[:], uint64(len(vec)))
 			h.Write(b[:])
-			for i := 0; i < len(x.Pairs); i += 2 {
-				writeScmer(x.Pairs[i])
-				writeScmer(x.Pairs[i+1])
+			for _, el := range vec {
+				var bb [8]byte
+				binary.LittleEndian.PutUint64(bb[:], math.Float64bits(el))
+				h.Write(bb[:])
 			}
-		default:
-			// Fallback on type name to avoid heavy allocations
+		case tagFunc:
+			h.WriteByte(8)
+			fn := v.Func()
+			if reflect.ValueOf(fn).Kind() == reflect.Func {
+				var b [8]byte
+				binary.LittleEndian.PutUint64(b[:], reflect.ValueOf(fn).Pointer())
+				h.Write(b[:])
+			} else {
+				h.WriteString(fmt.Sprintf("%v", fn))
+			}
+		case tagAny:
+			if fd, ok := v.Any().(*FastDict); ok {
+				// Hash as list of pairs to match []Scmer assoc representation
+				h.WriteByte(6)
+				var b [8]byte
+				binary.LittleEndian.PutUint64(b[:], uint64(len(fd.Pairs)))
+				h.Write(b[:])
+				for i := 0; i < len(fd.Pairs); i += 2 {
+					writeScmer(fd.Pairs[i])
+					writeScmer(fd.Pairs[i+1])
+				}
+				return
+			}
+			fallback := fmt.Sprintf("%T", v.Any())
 			h.WriteByte(255)
-			h.WriteString(reflect.TypeOf(v).String())
+			h.WriteString(fallback)
+		default:
+			// Hash as list of pairs to match []Scmer assoc representation
+			h.WriteByte(255)
+			h.WriteString(v.String())
 		}
 	}
 	writeScmer(k)
@@ -136,7 +165,7 @@ func (d *FastDict) Get(key Scmer) (Scmer, bool) {
 	if pos, ok := d.findPos(key, h); ok {
 		return d.Pairs[pos+1], true
 	}
-	return nil, false
+	return NewNil(), false
 }
 
 // Set sets or merges a value for key. If merge is nil, it overwrites.

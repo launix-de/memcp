@@ -523,13 +523,13 @@ func (e *Env) FindWrite(s Symbol) *Env {
 var Globalenv Env
 
 func List(a ...Scmer) Scmer {
-	return a
+	return NewSlice(a)
 }
 func isList(v Scmer) bool {
-	f, ok := v.(func(...Scmer) Scmer)
-	if !ok {
+	if auxTag(v.aux) != tagFunc {
 		return false
 	}
+	f := v.Func().(func(...Scmer) Scmer)
 	return reflect.ValueOf(f).Pointer() == reflect.ValueOf(List).Pointer()
 }
 func init() {

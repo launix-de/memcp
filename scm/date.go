@@ -36,8 +36,8 @@ func init_date() {
 		"now", "returns the unix timestamp",
 		0, 0,
 		[]DeclarationParameter{}, "int",
-		func(a ...Scmer) (result Scmer) {
-			return int64(time.Now().Unix())
+		func(a ...Scmer) Scmer {
+			return NewInt(time.Now().Unix())
 		},
 		false,
 	})
@@ -49,11 +49,11 @@ func init_date() {
 		}, "int",
 		func(a ...Scmer) Scmer {
 			for _, format := range allowed_formats { // try through all formats
-				if t, err := time.Parse(format, String(a[0])); err != nil {
-					return int64(t.Unix())
+				if t, err := time.Parse(format, String(a[0])); err == nil {
+					return NewInt(t.Unix())
 				}
 			}
-			return nil
+			return NewNil()
 		},
 		true,
 	})

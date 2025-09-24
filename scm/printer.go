@@ -27,41 +27,62 @@ import (
 )
 
 func String(v Scmer) string {
-	switch v := v.(type) {
-	case SourceInfo:
-		return String(v.value)
-	case NthLocalVar:
-		return fmt.Sprintf("(var %d)", v)
-	case []Scmer:
-		l := make([]string, len(v))
-		for i, x := range v {
-			l[i] = String(x)
-		}
-		return "(" + strings.Join(l, " ") + ")"
-	case *FastDict:
-		// print like a normal assoc list
-		l := make([]string, len(v.Pairs))
-		for i, x := range v.Pairs {
-			l[i] = String(x)
-		}
-		return "(" + strings.Join(l, " ") + ")"
-	case Proc:
-		return fmt.Sprintf("[func %s]", v.Body)
-	case func(...Scmer) Scmer:
-		if isList(v) { // runtime.FuncForPC(..)
-			return "list"
-		}
-		return "[native func]"
-	case string:
-		return v // this is not valid scm code! (but we need it to convert strings)
-	case io.Reader: // streams
-		var sb strings.Builder
-		io.Copy(&sb, v)
-		return sb.String()
-	case nil:
+	switch auxTag(v.aux) {
+	case tagNil:
 		return "nil"
+	case tagBool, tagInt, tagFloat:
+		return v.String()
+	case tagString:
+		return v.String()
+	case tagSymbol:
+		return v.String()
+	case tagSlice:
+		slice := v.Slice()
+		l := make([]string, len(slice))
+		for i, x := range slice {
+			l[i] = String(x)
+		}
+		return "(" + strings.Join(l, " ") + ")"
+	case tagVector:
+		vec := v.Vector()
+		parts := make([]string, len(vec))
+		for i, x := range vec {
+			parts[i] = fmt.Sprint(x)
+		}
+		return "#(" + strings.Join(parts, " ") + ")"
+	case tagFunc:
+		return "[native func]"
+	case tagAny:
+		switch val := v.Any().(type) {
+		case SourceInfo:
+			return String(val.value)
+		case NthLocalVar:
+			return fmt.Sprintf("(var %d)", val)
+		case *FastDict:
+			l := make([]string, len(val.Pairs))
+			for i, x := range val.Pairs {
+				l[i] = String(x)
+			}
+			return "(" + strings.Join(l, " ") + ")"
+		case Proc:
+			return fmt.Sprintf("[func %s]", String(val.Body))
+		case *Proc:
+			return fmt.Sprintf("[func %s]", String(val.Body))
+		case func(...Scmer) Scmer:
+			return "[native func]"
+		case func(*Env, ...Scmer) Scmer:
+			return "[native func]"
+		case io.Reader:
+			var sb strings.Builder
+			_, _ = io.Copy(&sb, val)
+			return sb.String()
+		case string:
+			return val
+		default:
+			return fmt.Sprint(val)
+		}
 	default:
-		return fmt.Sprint(v)
+		return fmt.Sprintf("<scmer %d>", auxTag(v.aux))
 	}
 }
 func SerializeToString(v Scmer, glob *Env) string {
@@ -78,9 +99,9 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		for k, v := range en.Vars {
 			// if Symbol is defined in a lambda, print the real value
 			// filter out redefinition of global functions
-			if fmt.Sprint(glob.Vars[Symbol(k)]) != fmt.Sprint(v) {
+			if gv, ok := glob.Vars[k]; !ok || !Equal(gv, v) {
 				b.WriteString("(define ")
-				b.WriteString(string(k)) // what if k contains spaces?? can it?
+				b.WriteString(string(k))
 				b.WriteString(" ")
 				SerializeEx(b, v, en.Outer, glob, p)
 				b.WriteString(") ")
@@ -90,33 +111,135 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(")")
 		return
 	}
-	switch v := v.(type) {
-	case SourceInfo:
-		SerializeEx(b, v.value, en, glob, p)
-	case []Scmer:
-		if len(v) == 2 && v[0] == Symbol("outer") {
-			b.WriteString("(outer ")
-			SerializeEx(b, v[1], en, glob, nil)
-			b.WriteByte(')')
+	switch auxTag(v.aux) {
+	case tagNil:
+		b.WriteString("nil")
+	case tagBool:
+		if v.Bool() {
+			b.WriteString("true")
 		} else {
-			if len(v) > 0 && (v[0] == Symbol("list") || isList(v[0])) {
-				b.WriteByte('\'')
-				v = v[1:]
+			b.WriteString("false")
+		}
+	case tagInt, tagFloat:
+		b.WriteString(v.String())
+	case tagString:
+		b.WriteByte('"')
+		b.WriteString(strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n").Replace(v.String()))
+		b.WriteByte('"')
+	case tagSymbol:
+		sym := v.String()
+		if strings.ContainsAny(sym, " \"()") {
+			b.WriteString("(unquote \"")
+			b.WriteString(strings.ReplaceAll(sym, "\"", "\\\""))
+			b.WriteString("\")")
+		} else {
+			b.WriteString(sym)
+		}
+	case tagSlice:
+		slice := v.Slice()
+		if len(slice) == 2 && slice[0].IsSymbol() && slice[0].String() == "outer" {
+			b.WriteString("(outer ")
+			SerializeEx(b, slice[1], en, glob, nil)
+			b.WriteByte(')')
+			return
+		}
+		if len(slice) > 0 && slice[0].IsSymbol() && slice[0].String() == "list" {
+			b.WriteByte('\'')
+			slice = slice[1:]
+		}
+		b.WriteByte('(')
+		for i, x := range slice {
+			if i != 0 {
+				b.WriteByte(' ')
 			}
+			SerializeEx(b, x, en, glob, p)
+		}
+		b.WriteByte(')')
+	case tagVector:
+		vec := v.Vector()
+		b.WriteString("#(")
+		for i, x := range vec {
+			if i != 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString(fmt.Sprint(x))
+		}
+		b.WriteByte(')')
+	case tagFunc:
+		serializeNativeFunc(b, v.Func(), en)
+	case tagAny:
+		switch val := v.Any().(type) {
+		case SourceInfo:
+			SerializeEx(b, val.value, en, glob, p)
+		case NthLocalVar:
+			if p != nil && p.NumVars >= int(val) && auxTag(p.Params.aux) == tagSlice {
+				params := p.Params.Slice()
+				if int(val) < len(params) && params[val].IsSymbol() {
+					b.WriteString(params[val].String())
+					return
+				}
+			}
+			b.WriteString("(var ")
+			b.WriteString(fmt.Sprint(val))
+			b.WriteByte(')')
+		case *FastDict:
 			b.WriteByte('(')
-			for i, x := range v {
+			for i, x := range val.Pairs {
 				if i != 0 {
 					b.WriteByte(' ')
 				}
 				SerializeEx(b, x, en, glob, p)
 			}
 			b.WriteByte(')')
+		case Proc:
+			serializeProc(b, val, en, glob, p)
+		case *Proc:
+			serializeProc(b, *val, en, glob, p)
+		case *ScmParser:
+			b.WriteString("(parser ")
+			SerializeEx(b, val.Syntax, glob, glob, p)
+			b.WriteByte(' ')
+			SerializeEx(b, val.Generator, en, glob, p)
+			b.WriteByte(')')
+		case func(...Scmer) Scmer:
+			serializeNativeFunc(b, val, en)
+		case func(*Env, ...Scmer) Scmer:
+			serializeNativeFunc(b, val, en)
+		case io.Reader:
+			var sb strings.Builder
+			_, _ = io.Copy(&sb, val)
+			b.WriteString(sb.String())
+		case string:
+			b.WriteByte('"')
+			b.WriteString(strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n").Replace(val))
+			b.WriteByte('"')
+		default:
+			b.WriteString(fmt.Sprint(val))
 		}
+	default:
+		b.WriteString(v.String())
+	}
+}
+
+func serializeProc(b *bytes.Buffer, v Proc, en *Env, glob *Env, parent *Proc) {
+	b.WriteString("(lambda ")
+	if v.NumVars > 0 && auxTag(v.Params.aux) == tagNil {
+		// TODO: deoptimize numbered lambdas when needed
+	}
+	SerializeEx(b, v.Params, glob, glob, nil)
+	b.WriteByte(' ')
+	SerializeEx(b, v.Body, v.En, glob, &v)
+	if v.NumVars > 0 {
+		b.WriteByte(' ')
+		b.WriteString(fmt.Sprint(v.NumVars))
+	}
+	b.WriteByte(')')
+}
+
+func serializeNativeFunc(b *bytes.Buffer, fn any, en *Env) {
+	switch f := fn.(type) {
 	case func(...Scmer) Scmer:
-		// native func serialization is the hardest; reverse the env!
-		// when later functional JIT is done, this must also handle deoptimization
-		// Special case: collate closures — serialize as (collate collation reverse)
-		if col, rev, ok := LookupCollate(v); ok {
+		if col, rev, ok := LookupCollate(f); ok {
 			b.WriteString("(collate \"")
 			b.WriteString(strings.ReplaceAll(col, "\"", "\\\""))
 			b.WriteString("\" ")
@@ -128,82 +251,21 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			b.WriteByte(')')
 			return
 		}
-		en2 := en
-		for en2 != nil {
-			for k, v2 := range en2.Vars {
-				// compare function pointers
-				if reflect.DeepEqual(v, v2) {
-					// found the right global function
-					b.WriteString(fmt.Sprint(k)) // print out variable name
+	}
+	fnPtr := reflect.ValueOf(fn).Pointer()
+	en2 := en
+	for en2 != nil {
+		for k, v := range en2.Vars {
+			if auxTag(v.aux) == tagFunc {
+				fv := v.Func()
+				ov := reflect.ValueOf(fv)
+				if ov.Kind() == reflect.Func && ov.Pointer() == fnPtr {
+					b.WriteString(string(k))
 					return
 				}
 			}
-			en2 = en2.Outer
 		}
-		b.WriteString("[unserializable native func]")
-	case *ScmParser:
-		b.WriteString("(parser ")
-		SerializeEx(b, v.Syntax, glob, glob, p)
-		b.WriteByte(' ')
-		SerializeEx(b, v.Generator, en, glob, p)
-		b.WriteByte(')')
-	// TODO: further parsers
-	case Proc:
-		b.WriteString("(lambda ")
-		if v.NumVars > 0 && v.Params == nil {
-			// TODO: deeoptimize
-		}
-		SerializeEx(b, v.Params, glob, glob, nil)
-		b.WriteByte(' ')
-		SerializeEx(b, v.Body, v.En, glob, &v)
-		if v.NumVars > 0 {
-			b.WriteByte(' ')
-			b.WriteString(fmt.Sprint(v.NumVars))
-		}
-		b.WriteByte(')')
-	case NthLocalVar:
-		if p != nil && p.NumVars >= int(v) && p.Params != nil {
-			if l, ok := p.Params.([]Scmer); ok {
-				s, _ := l[v].(Symbol)
-				b.WriteString(string(s))
-			} else {
-				s, _ := p.Params.(Symbol)
-				b.WriteString(string(s))
-			}
-		} else {
-			b.WriteString("(var ")
-			b.WriteString(fmt.Sprint(v))
-			b.WriteByte(')')
-		}
-	case Symbol:
-		// print as Symbol (because we already used a begin-block for defining our env)
-		if strings.Contains(string(v), " ") || strings.Contains(string(v), "(") || strings.Contains(string(v), ")") || strings.Contains(string(v), "\"") {
-			b.WriteString("(unquote \"")
-			b.WriteString(strings.Replace(string(v), "\"", "\\\"", -1))
-			b.WriteString("\")")
-		} else {
-			b.WriteString(string(v))
-		}
-	case string:
-		b.WriteByte('"')
-		b.WriteString(strings.NewReplacer("\"", "\\\"", "\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(v))
-		b.WriteByte('"')
-	case nil:
-		b.WriteString("nil")
-	default:
-		switch vv := v.(type) {
-		case *FastDict:
-			// serialize as assoc list
-			b.WriteByte('(')
-			for i, x := range vv.Pairs {
-				if i != 0 {
-					b.WriteByte(' ')
-				}
-				SerializeEx(b, x, en, glob, p)
-			}
-			b.WriteByte(')')
-		default:
-			b.WriteString(fmt.Sprint(v))
-		}
+		en2 = en2.Outer
 	}
+	b.WriteString("[unserializable native func]")
 }

@@ -26,76 +26,6 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import "math"
-import "strconv"
-
-//go:inline
-func ToBool(v Scmer) bool {
-	switch v2 := v.(type) {
-	case nil:
-		return false
-	case string:
-		return v2 != ""
-	case float64:
-		return v2 != 0.0
-	case int64:
-		return v2 != 0
-	case bool:
-		return v2
-	case Symbol:
-		return v2 != Symbol("false") && v2 != Symbol("nil")
-	case []Scmer:
-		return len(v2) > 0
-	default:
-		// native function, lambdas
-		return true
-	}
-}
-
-//go:inline
-func ToInt(v Scmer) int {
-	switch vv := v.(type) {
-	case nil:
-		return 0
-	case string:
-		x, _ := strconv.Atoi(vv)
-		return x
-	case float64:
-		return int(vv)
-	case int64:
-		return int(vv)
-	case bool:
-		if vv {
-			return 1
-		} else {
-			return 0
-		}
-	default:
-		// []Scmer, native function, lambdas
-		return 1
-	}
-}
-
-//go:inline
-func ToFloat(v Scmer) float64 {
-	switch vv := v.(type) {
-	case string:
-		x, _ := strconv.ParseFloat(vv, 64)
-		return x
-	case float64:
-		return vv
-	case int64:
-		return float64(vv)
-	case bool:
-		if vv {
-			return 1.0
-		} else {
-			return 0.0
-		}
-	default:
-		// nil, []Scmer, native function, lambdas
-		return 0.0
-	}
-}
 
 func init_alu() {
 	// string functions
@@ -107,9 +37,8 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
-		func(a ...Scmer) (result Scmer) {
-			_, ok2 := a[0].(int64)
-			return ok2
+		func(a ...Scmer) Scmer {
+			return NewBool(auxTag(a[0].aux) == tagInt)
 		},
 		true,
 	})
@@ -119,13 +48,9 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
-		func(a ...Scmer) (result Scmer) {
-			_, ok := a[0].(float64)
-			if ok {
-				return true
-			}
-			_, ok2 := a[0].(int64)
-			return ok2
+		func(a ...Scmer) Scmer {
+			tag := auxTag(a[0].aux)
+			return NewBool(tag == tagFloat || tag == tagInt)
 		},
 		true,
 	})
@@ -136,14 +61,14 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values to add"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := float64(0)
+			sum := 0.0
 			for _, i := range a {
-				if i == nil {
-					return nil
+				if i.IsNil() {
+					return NewNil()
 				}
-				v += ToFloat(i)
+				sum += i.Float()
 			}
-			return v
+			return NewFloat(sum)
 		},
 		true,
 	})
@@ -154,11 +79,11 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := ToFloat(a[0])
+			v := a[0].Float()
 			for _, i := range a[1:] {
-				v -= ToFloat(i)
+				v -= i.Float()
 			}
-			return v
+			return NewFloat(v)
 		},
 		true,
 	})
@@ -169,11 +94,11 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := ToFloat(a[0])
+			v := a[0].Float()
 			for _, i := range a[1:] {
-				v *= ToFloat(i)
+				v *= i.Float()
 			}
-			return v
+			return NewFloat(v)
 		},
 		true,
 	})
@@ -184,11 +109,11 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := ToFloat(a[0])
+			v := a[0].Float()
 			for _, i := range a[1:] {
-				v /= ToFloat(i)
+				v /= i.Float()
 			}
-			return v
+			return NewFloat(v)
 		},
 		true,
 	})
@@ -199,7 +124,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !Less(a[1], a[0])
+			return NewBool(!Less(a[1], a[0]))
 		},
 		true,
 	})
@@ -210,7 +135,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return Less(a[0], a[1])
+			return NewBool(Less(a[0], a[1]))
 		},
 		true,
 	})
@@ -221,7 +146,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return Less(a[1], a[0])
+			return NewBool(Less(a[1], a[0]))
 		},
 		true,
 	})
@@ -232,7 +157,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !Less(a[0], a[1])
+			return NewBool(!Less(a[0], a[1]))
 		},
 		true,
 	})
@@ -243,7 +168,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return Equal(a[0], a[1])
+			return NewBool(Equal(a[0], a[1]))
 		},
 		true,
 	})
@@ -265,7 +190,7 @@ func init_alu() {
 			DeclarationParameter{"value", "bool", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !ToBool(a[0])
+			return NewBool(!a[0].Bool())
 		},
 		true,
 	})
@@ -276,7 +201,7 @@ func init_alu() {
 			DeclarationParameter{"value", "bool", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !ToBool(a[0])
+			return NewBool(!a[0].Bool())
 		},
 		true,
 	})
@@ -287,7 +212,7 @@ func init_alu() {
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return a[0] == nil
+			return NewBool(a[0].IsNil())
 		},
 		true,
 	})
@@ -297,15 +222,16 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "number|string", "value"},
 		}, "number|string",
-		func(a ...Scmer) (result Scmer) {
+		func(a ...Scmer) Scmer {
+			var result Scmer
 			for _, v := range a {
-				if result == nil {
+				if result.IsNil() {
 					result = v
-				} else if v != nil && Less(v, result) {
+				} else if !v.IsNil() && Less(v, result) {
 					result = v
 				}
 			}
-			return
+			return result
 		},
 		true,
 	})
@@ -315,15 +241,16 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "number|string", "value"},
 		}, "number|string",
-		func(a ...Scmer) (result Scmer) {
+		func(a ...Scmer) Scmer {
+			var result Scmer
 			for _, v := range a {
-				if result == nil {
+				if result.IsNil() {
 					result = v
-				} else if v != nil && Less(result, v) {
+				} else if !v.IsNil() && Less(result, v) {
 					result = v
 				}
 			}
-			return
+			return result
 		},
 		true,
 	})
@@ -333,8 +260,8 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "number", "value"},
 		}, "number",
-		func(a ...Scmer) (result Scmer) {
-			return math.Floor(ToFloat(a[0]))
+		func(a ...Scmer) Scmer {
+			return NewFloat(math.Floor(a[0].Float()))
 		},
 		true,
 	})
@@ -344,8 +271,8 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "number", "value"},
 		}, "number",
-		func(a ...Scmer) (result Scmer) {
-			return math.Ceil(ToFloat(a[0]))
+		func(a ...Scmer) Scmer {
+			return NewFloat(math.Ceil(a[0].Float()))
 		},
 		true,
 	})
@@ -355,8 +282,8 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "number", "value"},
 		}, "number",
-		func(a ...Scmer) (result Scmer) {
-			return math.Round(ToFloat(a[0]))
+		func(a ...Scmer) Scmer {
+			return NewFloat(math.Round(a[0].Float()))
 		},
 		true,
 	})
