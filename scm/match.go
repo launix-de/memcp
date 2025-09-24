@@ -23,22 +23,57 @@ import (
 	"strings"
 )
 
-func valueFromPattern(pattern Scmer, en *Env) Scmer {
-	switch p := pattern.(type) {
-	case SourceInfo:
-		return valueFromPattern(p.value, en)
-	case Symbol:
-		en = en.FindRead(p)
-		if varcontent, ok := en.Vars[p]; ok {
-			return varcontent
-		} else {
-			return p
+func scmerSymbolName(s Scmer) (string, bool) {
+	if s.IsSymbol() {
+		return s.String(), true
+	}
+	if auxTag(s.aux) == tagAny {
+		if sym, ok := s.Any().(Symbol); ok {
+			return string(sym), true
 		}
+	}
+	return "", false
+}
+
+func scmerAsSlice(v Scmer) ([]Scmer, bool) {
+	if v.IsSlice() {
+		return v.Slice(), true
+	}
+	if auxTag(v.aux) == tagAny {
+		if slice, ok := v.Any().([]Scmer); ok {
+			return slice, true
+		}
+	}
+	return nil, false
+}
+
+func scmerAsString(v Scmer) (string, bool) {
+	if auxTag(v.aux) == tagString {
+		return v.String(), true
+	}
+	if auxTag(v.aux) == tagAny {
+		if s, ok := v.Any().(string); ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+func valueFromPattern(pattern Scmer, en *Env) Scmer {
+	switch v := pattern.Any().(type) {
+	case SourceInfo:
+		return valueFromPattern(v.value, en)
+	case Symbol:
+		en = en.FindRead(v)
+		if value, ok := en.Vars[v]; ok {
+			return value
+		}
+		return pattern
 	case NthLocalVar:
-		return en.VarsNumbered[p]
+		return en.VarsNumbered[v]
 	case []Scmer:
-		if len(p) == 2 && p[0] == Symbol("eval") {
-			return Eval(p[1], en)
+		if len(v) == 2 && v[0].SymbolEquals("eval") {
+			return Eval(v[1], en)
 		}
 	}
 	return pattern
@@ -64,183 +99,159 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	 - (number? Symbol) will match if value is a number and put the value into Symbol
 	 - (list? Symbol) will match if value is a list and put the value into Symbol
 	*/
-	switch p := pattern.(type) {
+	switch p := pattern.Any().(type) {
 	case SourceInfo:
 		return match(val, p.value, en) // omit sourceinfo
 	case int64, float64, string:
-		return Equal(val, p)
+		return Equal(val, pattern)
 	case Symbol:
-		if p == Symbol("nil") {
-			return val == nil
-		} else if p == Symbol("true") {
-			return val == true
-		} else if p == Symbol("false") {
-			return val == false
-		} else {
-			// unify value into variable
+		switch string(p) {
+		case "nil":
+			return val.IsNil()
+		case "true":
+			return val.Bool()
+		case "false":
+			return !val.Bool()
+		default:
 			en.Vars[p] = val
+			return true
 		}
-		return true
 	case NthLocalVar:
 		en.VarsNumbered[p] = val
 		return true
 	case []Scmer:
-		switch p[0] {
-		case Symbol("eval"):
+		name, ok := scmerSymbolName(p[0])
+		if !ok {
+			panic("unknown match pattern head: " + SerializeToString(p[0], en))
+		}
+		switch name {
+		case "eval":
 			// evaluate value and match then
 			return Equal(Eval(p[1], en), val)
-		case Symbol("var"):
+		case "var":
 			// unoptimized pattern
-			en.VarsNumbered[ToInt(p[1])] = val
+			en.VarsNumbered[int(p[1].Int())] = val
 			return true
-		case Symbol("list"):
+		case "list":
 			// list matching
-			switch v := val.(type) {
-			case []Scmer:
-				p = p[1:] // extract rest of list
-				// only list and list will match
-				if len(v) != len(p) {
+			if list, ok := scmerAsSlice(val); ok {
+				p = p[1:]
+				if len(list) != len(p) {
 					return false
 				}
-				for i, p_item := range p {
-					if !match(v[i], p_item, en) {
+				for i, pat := range p {
+					if !match(list[i], pat, en) {
 						return false
 					}
 				}
 				return true
-			default:
-				return false
 			}
-		case Symbol("quote"):
+			return false
+		case "quote":
 			// symbol literal
-			switch v := val.(type) {
-			case Symbol:
-				return p[1].(Symbol) == v
-			default:
-				return false
+			if sym, ok := scmerSymbolName(val); ok {
+				if expected, ok := scmerSymbolName(p[1]); ok {
+					return sym == expected
+				}
 			}
-		case Symbol("symbol"):
+			return false
+		case "symbol":
 			// symbol literal
-			switch v := val.(type) {
-			case Symbol:
-				return p[1].(Symbol) == v
-			default:
-				return false
+			if sym, ok := scmerSymbolName(val); ok {
+				if expected, ok := scmerSymbolName(p[1]); ok {
+					return sym == expected
+				}
 			}
-		case Symbol("string?"):
+			return false
+		case "string?":
 			// symbol literal
-			switch v := val.(type) {
-			case string:
-				return match(v, p[1], en)
-			default:
-				return false
+			if _, ok := scmerAsString(val); ok {
+				return match(val, p[1], en)
 			}
-		case Symbol("number?"):
+			return false
+		case "number?":
 			// symbol literal
-			switch v := val.(type) {
-			case float64:
-				return match(v, p[1], en)
-			case int64:
-				return match(v, p[1], en)
-			default:
-				return false
+			if val.IsInt() || val.IsFloat() {
+				return match(val, p[1], en)
 			}
-		case Symbol("list?"):
+			return false
+		case "list?":
 			// symbol literal
-			switch v := val.(type) {
-			case []Scmer:
-				return match(v, p[1], en)
-			default:
-				return false
+			if list, ok := scmerAsSlice(val); ok {
+				return match(NewSlice(list), p[1], en)
 			}
-		case Symbol("ignorecase"):
-			switch val2 := valueFromPattern(p[1], en).(type) {
-			case string:
-				switch val1 := val.(type) {
-				case string:
+			return false
+		case "ignorecase":
+			if val2, ok := scmerAsString(valueFromPattern(p[1], en)); ok {
+				if val1, ok := scmerAsString(val); ok {
 					return strings.EqualFold(val1, val2)
 				}
 			}
 			return false
-		case Symbol("concat"):
+		case "concat":
 			return matchConcat(val, p[1:], en)
-		case Symbol("merge"):
-			switch v := val.(type) {
-			case []Scmer: // only allowed for lists
-				// examine the pattern
-				if len(p) == 3 { // merge '(list) rest
-					switch p1 := valueFromPattern(p[1], en).(type) {
-					case []Scmer:
-						if len(p1) > 0 && p1[0] == Symbol("list") && len(p1)-1 <= len(v) {
-							for i := 1; i < len(p1); i++ {
-								if !match(v[i-1], p1[i], en) {
-									return false // pattern at position i dosen't match
+		case "merge":
+			if list, ok := scmerAsSlice(val); ok {
+				if len(p) == 3 {
+					if subPattern, ok := scmerAsSlice(valueFromPattern(p[1], en)); ok {
+						if len(subPattern) > 0 {
+							if head, ok := scmerSymbolName(subPattern[0]); ok && head == "list" && len(subPattern)-1 <= len(list) {
+								for i := 1; i < len(subPattern); i++ {
+									if !match(list[i-1], subPattern[i], en) {
+										return false
+									}
 								}
+								return match(NewSlice(list[len(subPattern)-1:]), p[2], en)
 							}
-							return match(v[len(p1)-1:], p[2], en) // match the rest of the array with the rest match pattern
-						} else {
-							return false
 						}
-					default:
-						// panic
 					}
-					// TODO: Symbol string
 				}
 				panic("unknown merge pattern: " + fmt.Sprint(p))
-			default:
-				return false // non-lists are not matching
 			}
-		case Symbol("cons"):
-			switch v := valueFromPattern(val, en).(type) {
-			case []Scmer: // only matches on arrays
-				if len(v) == 0 {
-					return false // empty list does not match cons
+			return false
+		case "cons":
+			if list, ok := scmerAsSlice(valueFromPattern(val, en)); ok {
+				if len(list) == 0 {
+					return false
 				}
-				return match(v[0], p[1], en) && match(v[1:], p[2], en)
-			default:
-				return false
+				return match(list[0], p[1], en) && match(NewSlice(list[1:]), p[2], en)
 			}
-		case Symbol("regex"):
+			return false
+		case "regex":
 			// syntax: (match "v=5" (regex "^v=(.*)" _ v) (print "v is " v))
 			// for multiline parsing, use (?ms:<REGEXP>)
 			// for additional info, see https://github.com/google/re2/wiki/Syntax
-			switch v := valueFromPattern(val, en).(type) {
-			case string: // only allowed for strings
-				switch p1 := valueFromPattern(p[1], en).(type) {
-				case string:
-					re, err := regexp.Compile(p1)
+			if str, ok := scmerAsString(valueFromPattern(val, en)); ok {
+				if patternStr, ok := scmerAsString(valueFromPattern(p[1], en)); ok {
+					re, err := regexp.Compile(patternStr)
 					if err != nil {
 						panic(err)
 					}
 					if re.NumSubexp() != len(p)-3 {
-						panic("regex " + p1 + " contains " + fmt.Sprint(re.NumSubexp()) + " subexpressions, found " + fmt.Sprint(len(p)))
+						panic("regex " + patternStr + " contains " + fmt.Sprint(re.NumSubexp()) + " subexpressions, found " + fmt.Sprint(len(p)))
 					}
-					match := re.FindStringSubmatch(v)
+					match := re.FindStringSubmatch(str)
 					if match != nil {
 						for i := 0; i <= re.NumSubexp(); i++ {
-							if p[i+2] != Symbol("_") {
-								switch v := p[i+2].(type) {
-								case NthLocalVar:
-									en.VarsNumbered[v] = match[i]
-								case Symbol:
-									en.Vars[v] = match[i]
-								default:
-									panic("regex variable invalid: " + SerializeToString(v, en))
-								}
+							if name, ok := scmerSymbolName(p[i+2]); ok && name == "_" {
+								continue
 							}
+							if idx, ok := p[i+2].Any().(NthLocalVar); ok {
+								en.VarsNumbered[idx] = NewString(match[i])
+								continue
+							}
+							if sym, ok := scmerSymbolName(p[i+2]); ok {
+								en.Vars[Symbol(sym)] = NewString(match[i])
+								continue
+							}
+							panic("regex variable invalid: " + SerializeToString(p[i+2], en))
 						}
 						return true
-					} else {
-						return false
 					}
-				case *regexp.Regexp:
-					panic("TODO: precompiled regexp from optimize()")
-				default:
-					panic("regex expects string")
+					return false
 				}
-			default:
-				return false // non-strings are not matching regex
 			}
+			panic("regex expects string")
 		default:
 			panic("unknown match pattern: " + fmt.Sprint(p))
 		}
@@ -250,107 +261,67 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 }
 
 func matchConcat(val Scmer, p []Scmer, en *Env) bool {
-	switch v := val.(type) {
-	case string: // only allowed for strings
-		// examine the pattern
-		if len(p) == 0 && val == "" {
-			// empty string
+	str, ok := scmerAsString(val)
+	if !ok {
+		return false
+	}
+	if len(p) == 0 {
+		return str == ""
+	}
+	if len(p) == 1 {
+		target := valueFromPattern(p[0], en)
+		if idx, ok := target.Any().(NthLocalVar); ok {
+			en.VarsNumbered[idx] = NewString(str)
 			return true
 		}
-		if len(p) == 1 {
-			switch p0 := valueFromPattern(p[0], en).(type) {
-			case NthLocalVar:
-				// string = Symbol
-				en.VarsNumbered[p0] = v
-				return true
-			case Symbol:
-				// string = Symbol
-				en.Vars[p0] = v
-				return true
-			default:
-				// otherwise
-			}
+		if name, ok := scmerSymbolName(target); ok {
+			en.Vars[Symbol(name)] = NewString(str)
+			return true
 		}
-		if len(p) >= 1 { // concat prefix rest
-			switch p0 := valueFromPattern(p[0], en).(type) {
-			case string:
-				// string Symbol
-				if strings.HasPrefix(v, p0) {
-					return matchConcat(v[len(p0):], p[1:], en) // match rest of pattern
-				} else {
-					return false
-				}
-			default:
-			}
-		}
-		if len(p) == 2 { // var + suffix
-			switch p0 := valueFromPattern(p[0], en).(type) {
-			case NthLocalVar:
-				// symbol + delimiter + rest
-				switch p1 := valueFromPattern(p[1], en).(type) {
-				case string:
-					// Symbol string
-					if strings.HasSuffix(v, p1) {
-						// extract postfix and match
-						en.VarsNumbered[p0] = v[:len(v)-len(p1)]
-						return true
-					} else {
-						return false
-					}
-				}
-			case Symbol:
-				switch p1 := valueFromPattern(p[1], en).(type) {
-				case string:
-					// Symbol string
-					if strings.HasSuffix(v, p1) {
-						// extract postfix and match
-						en.Vars[p0] = v[:len(v)-len(p1)]
-						return true
-					}
-					// else
-					return false
-				}
-			default:
-				// panic
-			}
-		} else if len(p) >= 2 { // concat a b rest
-			switch p0 := valueFromPattern(p[0], en).(type) {
-			case NthLocalVar:
-				// string Symbol
-				switch p1 := valueFromPattern(p[1], en).(type) {
-				case string:
-					idx := strings.Index(v, p1)
-					if idx != -1 {
-						// extract prefix and match rest
-						en.VarsNumbered[p0] = v[:idx]
-						return matchConcat(v[idx+len(p1):], p[2:], en)
-					} else {
-						return false
-					}
-				default:
-					// panic
-				}
-			case Symbol:
-				// string Symbol
-				switch p1 := valueFromPattern(p[1], en).(type) {
-				case string:
-					idx := strings.Index(v, p1)
-					if idx != -1 {
-						// extract prefix and match
-						en.Vars[p0] = v[:idx]
-						return matchConcat(v[idx+len(p1):], p[2:], en)
-					} else {
-						return false
-					}
-				default:
-					// panic
-				}
-			default:
-				// panic
-			}
-		}
-		panic("unknown concat pattern: " + fmt.Sprint(p))
-	default:
-		return false // non-strings are not matching
+		return false
 	}
+	first := valueFromPattern(p[0], en)
+	if prefix, ok := scmerAsString(first); ok {
+		if strings.HasPrefix(str, prefix) {
+			return matchConcat(NewString(str[len(prefix):]), p[1:], en)
+		}
+		return false
+	}
+	if len(p) == 2 {
+		suffixVal := valueFromPattern(p[1], en)
+		if suffix, ok := scmerAsString(suffixVal); ok {
+			if strings.HasSuffix(str, suffix) {
+				base := str[:len(str)-len(suffix)]
+				if idx, ok := first.Any().(NthLocalVar); ok {
+					en.VarsNumbered[idx] = NewString(base)
+					return true
+				}
+				if name, ok := scmerSymbolName(first); ok {
+					en.Vars[Symbol(name)] = NewString(base)
+					return true
+				}
+			}
+			return false
+		}
+	}
+	if len(p) >= 2 {
+		delimVal := valueFromPattern(p[1], en)
+		if delim, ok := scmerAsString(delimVal); ok {
+			idx := strings.Index(str, delim)
+			if idx == -1 {
+				return false
+			}
+			prefix := str[:idx]
+			rest := NewString(str[idx+len(delim):])
+			if id, ok := first.Any().(NthLocalVar); ok {
+				en.VarsNumbered[id] = NewString(prefix)
+			} else if name, ok := scmerSymbolName(first); ok {
+				en.Vars[Symbol(name)] = NewString(prefix)
+			} else {
+				return false
+			}
+			return matchConcat(rest, p[2:], en)
+		}
+	}
+	panic("unknown concat pattern: " + fmt.Sprint(p))
 }
