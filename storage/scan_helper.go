@@ -107,10 +107,6 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 			io.WriteString(w, "\"")
 			io.WriteString(w, x)
 			io.WriteString(w, "\"")
-		case scm.LazyString:
-			io.WriteString(w, "\"")
-			io.WriteString(w, x.GetValue())
-			io.WriteString(w, "\"")
 		case scm.Symbol:
 			writeSymbolOrColumn(string(x))
 		case scm.NthLocalVar:
