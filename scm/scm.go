@@ -879,9 +879,6 @@ integer?, rational?, real?, complex?, number?
  Parsing
 */
 
-// Symbols, numbers, expressions, procedures, lists, ... all implement this interface, which enables passing them along in the interpreter
-type Scmer interface{}
-
 type Symbol string //Symbols are represented by strings
 //Numbers by float64 (but no extra type)
 
