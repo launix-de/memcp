@@ -250,8 +250,6 @@ func Validate(val Scmer, require string) string {
 	switch v := val.(type) {
 	case nil:
 		return "nil"
-	case LazyString:
-		return "string"
 	case string:
 		return "string"
 	case float64:

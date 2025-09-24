@@ -103,11 +103,6 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 			s.last2 = s.last1
 			s.last1 = v
 		}
-	case scm.LazyString:
-		s.onlyInt = false
-		s.onlyFloat = false
-		s.hasString = true
-		s.longStrings++
 	case string:
 		s.onlyInt = false
 		s.onlyFloat = false

@@ -132,8 +132,6 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			switch v := val.(type) {
 			case string:
 				return match(v, p[1], en)
-			case LazyString:
-				return match(v, p[1], en)
 			default:
 				return false
 			}
@@ -157,11 +155,6 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			}
 		case Symbol("ignorecase"):
 			switch val2 := valueFromPattern(p[1], en).(type) {
-			case LazyString:
-				switch val1 := val.(type) {
-				case string:
-					return strings.EqualFold(val1, val2.GetValue())
-				}
 			case string:
 				switch val1 := val.(type) {
 				case string:
@@ -258,8 +251,6 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 
 func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 	switch v := val.(type) {
-	case LazyString:
-		panic("TODO: implement concat pattern on lazy strings")
 	case string: // only allowed for strings
 		// examine the pattern
 		if len(p) == 0 && val == "" {
@@ -282,8 +273,6 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 		}
 		if len(p) >= 1 { // concat prefix rest
 			switch p0 := valueFromPattern(p[0], en).(type) {
-			case LazyString:
-				panic("TODO: implement concat pattern on lazy strings")
 			case string:
 				// string Symbol
 				if strings.HasPrefix(v, p0) {
@@ -299,8 +288,6 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 			case NthLocalVar:
 				// symbol + delimiter + rest
 				switch p1 := valueFromPattern(p[1], en).(type) {
-				case LazyString:
-					panic("TODO: implement concat pattern on lazy strings")
 				case string:
 					// Symbol string
 					if strings.HasSuffix(v, p1) {
@@ -313,8 +300,6 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 				}
 			case Symbol:
 				switch p1 := valueFromPattern(p[1], en).(type) {
-				case LazyString:
-					panic("TODO: implement concat pattern on lazy strings")
 				case string:
 					// Symbol string
 					if strings.HasSuffix(v, p1) {
@@ -333,8 +318,6 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 			case NthLocalVar:
 				// string Symbol
 				switch p1 := valueFromPattern(p[1], en).(type) {
-				case LazyString:
-					panic("TODO: implement concat pattern on lazy strings")
 				case string:
 					idx := strings.Index(v, p1)
 					if idx != -1 {
@@ -350,8 +333,6 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 			case Symbol:
 				// string Symbol
 				switch p1 := valueFromPattern(p[1], en).(type) {
-				case LazyString:
-					panic("TODO: implement concat pattern on lazy strings")
 				case string:
 					idx := strings.Index(v, p1)
 					if idx != -1 {

@@ -16,375 +16,238 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package scm
 
-import "fmt"
 import "strings"
 
-func EqualScm(a, b Scmer) Scmer { // case sensitive and can compare nil
-	return Equal(a, b)
-}
-func Equal(a, b Scmer) bool { // case sensitive and can compare nil
-	switch a_ := a.(type) {
-	case LazyString:
-		switch b_ := b.(type) {
-		case LazyString:
-			return a_.Hash == b_.Hash
-		case string:
-			return a_.GetValue() == b_
-		case float64:
-			return ToFloat(a_.GetValue()) == b_
-		case int64:
-			return ToInt(a_.GetValue()) == int(b_)
-		case bool:
-			return ToBool(a) == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		case nil:
-			return !ToBool(a)
-		}
-	case string:
-		switch b_ := b.(type) {
-		case LazyString:
-			return a_ == b_.GetValue()
-		case string:
-			return a_ == b_
-		case float64:
-			return ToFloat(a_) == b_
-		case int64:
-			return ToInt(a_) == int(b_)
-		case bool:
-			return ToBool(a) == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		case nil:
-			return !ToBool(a)
-		case SourceInfo:
-			return Equal(a, b_.value)
-		}
-	case float64:
-		switch b_ := b.(type) {
-		case LazyString:
-			return String(a_) == b_.GetValue()
-		case string:
-			return a_ == ToFloat(b_)
-		case float64:
-			return a_ == b_
-		case int64:
-			return a_ == float64(b_)
-		case bool:
-			return ToBool(a) == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		case nil:
-			return !ToBool(a)
-		}
-	case int64:
-		switch b_ := b.(type) {
-		case LazyString:
-			return String(a_) == b_.GetValue()
-		case string:
-			return int(a_) == ToInt(b_)
-		case float64:
-			return float64(a_) == b_
-		case int64:
-			return a_ == b_
-		case bool:
-			return ToBool(a) == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		case nil:
-			return !ToBool(a)
-		}
-	case bool:
-		switch b_ := b.(type) {
-		case LazyString:
-			return a_ == ToBool(b)
-		case string:
-			return a_ == ToBool(b)
-		case float64:
-			return a_ == ToBool(b)
-		case int64:
-			return a_ == ToBool(b)
-		case bool:
-			return a_ == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		case nil:
-			return !a_
-		}
-	case nil:
-		switch b_ := b.(type) {
-		case LazyString:
-			return !ToBool(b)
-		case string:
-			return !ToBool(b)
-		case float64:
-			return !ToBool(b)
-		case int64:
-			return !ToBool(b)
-		case bool:
-			return !b_
-		case nil:
-			return true
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		}
-	case []Scmer:
-		switch b_ := b.(type) {
-		case LazyString, string, float64, int64, bool, nil:
-			return len(a_) == 0 && !ToBool(b)
-		case []Scmer:
-			if len(a_) != len(b_) {
-				return false
-			}
-			for i, v := range a_ {
-				if !Equal(v, b_[i]) {
-					return false
-				}
-			}
-			return true
-		case *FastDict:
-			if len(a_) != len(b_.Pairs) {
-				return false
-			}
-			for i := 0; i < len(a_); i++ {
-				if !Equal(a_[i], b_.Pairs[i]) {
-					return false
-				}
-			}
-			return true
-		}
-	case *FastDict:
-		switch b_ := b.(type) {
-		case LazyString, string, float64, int64, bool, nil:
-			return len(a_.Pairs) == 0 && !ToBool(b)
-		case []Scmer:
-			if len(a_.Pairs) != len(b_) {
-				return false
-			}
-			for i := 0; i < len(a_.Pairs); i++ {
-				if !Equal(a_.Pairs[i], b_[i]) {
-					return false
-				}
-			}
-			return true
-		case *FastDict:
-			if len(a_.Pairs) != len(b_.Pairs) {
-				return false
-			}
-			for i := 0; i < len(a_.Pairs); i++ {
-				if !Equal(a_.Pairs[i], b_.Pairs[i]) {
-					return false
-				}
-			}
-			return true
-		}
-	case Symbol:
-		switch b_ := b.(type) {
-		case Symbol:
-			return a_ == b_
-		}
+func EqualScm(a, b Scmer) Scmer { return NewBool(Equal(a, b)) }
 
-	case func(...Scmer) Scmer:
-		switch b_ := b.(type) {
-		case func(...Scmer) Scmer:
-			return fmt.Sprintf("%p", a_) == fmt.Sprintf("%p", b_)
-		default:
-			return false
-		}
-	case SourceInfo:
-		return Equal(a_.value, b)
+func Equal(a, b Scmer) bool {
+	ta := auxTag(a.aux)
+	tb := auxTag(b.aux)
+
+	if ta == tagNil && tb == tagNil {
+		return true
 	}
-	panic("unknown comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
+	if ta == tagNil {
+		return !b.Bool()
+	}
+	if tb == tagNil {
+		return !a.Bool()
+	}
+
+	if ta == tb {
+		switch ta {
+		case tagBool:
+			return a.Bool() == b.Bool()
+		case tagInt:
+			return a.Int() == b.Int()
+		case tagFloat:
+			return a.Float() == b.Float()
+		case tagString, tagSymbol:
+			return a.String() == b.String()
+		case tagSlice:
+			as := a.Slice()
+			bs := b.Slice()
+			if len(as) != len(bs) {
+				return false
+			}
+			for i := range as {
+				if !Equal(as[i], bs[i]) {
+					return false
+				}
+			}
+			return true
+		case tagVector:
+			av := a.Vector()
+			bv := b.Vector()
+			if len(av) != len(bv) {
+				return false
+			}
+			for i := range av {
+				if av[i] != bv[i] {
+					return false
+				}
+			}
+			return true
+		case tagAny:
+			return a.Any() == b.Any()
+		}
+	}
+
+	switch ta {
+	case tagBool:
+		return a.Bool() == b.Bool()
+	case tagInt:
+		if tb == tagFloat {
+			return float64(a.Int()) == b.Float()
+		}
+		if tb == tagString || tb == tagSymbol {
+			return a.Int() == b.Int()
+		}
+		return a.Int() == b.Int()
+	case tagFloat:
+		if tb == tagInt {
+			return a.Float() == float64(b.Int())
+		}
+		if tb == tagString || tb == tagSymbol {
+			return a.Float() == b.Float()
+		}
+		return a.Float() == b.Float()
+	case tagString, tagSymbol:
+		if tb == tagInt {
+			return a.Int() == b.Int()
+		}
+		if tb == tagFloat {
+			return a.Float() == b.Float()
+		}
+		if tb == tagBool {
+			return a.Bool() == b.Bool()
+		}
+		return a.String() == b.String()
+	case tagSlice:
+		if len(a.Slice()) == 0 {
+			return !b.Bool()
+		}
+	case tagVector:
+		if len(a.Vector()) == 0 {
+			return !b.Bool()
+		}
+	case tagAny:
+		return a.Any() == b.Any()
+	}
+
+	return a.String() == b.String()
 }
 
 func EqualSQL(a, b Scmer) Scmer {
-	// == NULL is always NULL
-	if a == nil || b == nil {
-		return nil
-	}
-	switch a_ := a.(type) {
-	case LazyString:
-		switch b_ := b.(type) {
-		case LazyString:
-			return a_.Hash == b_.Hash
-		case string:
-			return strings.EqualFold(a_.GetValue(), b_)
-		case float64:
-			return ToFloat(a_.GetValue()) == b_
-		case int64:
-			return ToInt(a_.GetValue()) == int(b_)
-		case bool:
-			return ToBool(a) == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		}
-	case string:
-		switch b_ := b.(type) {
-		case LazyString:
-			return strings.EqualFold(a_, b_.GetValue())
-		case string:
-			return strings.EqualFold(a_, b_)
-		case float64:
-			return ToFloat(a_) == b_
-		case int64:
-			return ToInt(a_) == int(b_)
-		case bool:
-			return ToBool(a) == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		case SourceInfo:
-			return EqualSQL(a, b_.value)
-		}
-	case float64:
-		switch b_ := b.(type) {
-		case LazyString:
-			return String(a_) == b_.GetValue()
-		case string:
-			return a_ == ToFloat(b_)
-		case float64:
-			return a_ == b_
-		case int64:
-			return a_ == float64(b_)
-		case bool:
-			return ToBool(a) == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		}
-	case int64:
-		switch b_ := b.(type) {
-		case LazyString:
-			return String(a_) == b_.GetValue()
-		case string:
-			return int(a_) == ToInt(b_)
-		case float64:
-			return float64(a_) == b_
-		case int64:
-			return a_ == b_
-		case bool:
-			return ToBool(a) == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		}
-	case bool:
-		switch b_ := b.(type) {
-		case LazyString:
-			return a_ == ToBool(b)
-		case string:
-			return a_ == ToBool(b)
-		case float64:
-			return a_ == ToBool(b)
-		case int64:
-			return a_ == ToBool(b)
-		case bool:
-			return a_ == b_
-		case []Scmer:
-			return len(b_) == 0 && !ToBool(a)
-		}
-	case []Scmer:
-		switch b_ := b.(type) {
-		case LazyString, string, float64, int64, bool, nil:
-			return len(a_) == 0 && !ToBool(b)
-		case []Scmer:
-			if len(a_) != len(b_) {
-				return false
-			}
-			for i, v := range a_ {
-				if !ToBool(EqualSQL(v, b_[i])) {
-					return false
-				}
-			}
-			return true
-		case *FastDict:
-			if len(a_) != len(b_.Pairs) {
-				return false
-			}
-			for i := 0; i < len(a_); i++ {
-				if !ToBool(EqualSQL(a_[i], b_.Pairs[i])) {
-					return false
-				}
-			}
-			return true
-		}
-	case *FastDict:
-		switch b_ := b.(type) {
-		case LazyString, string, float64, int64, bool, nil:
-			return len(a_.Pairs) == 0 && !ToBool(b)
-		case []Scmer:
-			if len(a_.Pairs) != len(b_) {
-				return false
-			}
-			for i := 0; i < len(a_.Pairs); i++ {
-				if !ToBool(EqualSQL(a_.Pairs[i], b_[i])) {
-					return false
-				}
-			}
-			return true
-		case *FastDict:
-			if len(a_.Pairs) != len(b_.Pairs) {
-				return false
-			}
-			for i := 0; i < len(a_.Pairs); i++ {
-				if !ToBool(EqualSQL(a_.Pairs[i], b_.Pairs[i])) {
-					return false
-				}
-			}
-			return true
-		}
-	case SourceInfo:
-		return Equal(a_.value, b)
+	ta := auxTag(a.aux)
+	tb := auxTag(b.aux)
 
+	if ta == tagNil || tb == tagNil {
+		return NewNil()
 	}
-	panic("unknown SQL comparison: " + fmt.Sprint(a) + " and " + fmt.Sprint(b))
+
+	if ta == tb {
+		switch ta {
+		case tagBool:
+			return NewBool(a.Bool() == b.Bool())
+		case tagInt:
+			return NewBool(a.Int() == b.Int())
+		case tagFloat:
+			return NewBool(a.Float() == b.Float())
+		case tagString, tagSymbol:
+			return NewBool(strings.EqualFold(a.String(), b.String()))
+		case tagSlice:
+			as := a.Slice()
+			bs := b.Slice()
+			if len(as) != len(bs) {
+				return NewBool(false)
+			}
+			for i := range as {
+				if !EqualSQL(as[i], bs[i]).Bool() {
+					return NewBool(false)
+				}
+			}
+			return NewBool(true)
+		case tagVector:
+			av := a.Vector()
+			bv := b.Vector()
+			if len(av) != len(bv) {
+				return NewBool(false)
+			}
+			for i := range av {
+				if av[i] != bv[i] {
+					return NewBool(false)
+				}
+			}
+			return NewBool(true)
+		case tagAny:
+			return NewBool(a.Any() == b.Any())
+		}
+	}
+
+	switch ta {
+	case tagInt:
+		if tb == tagFloat {
+			return NewBool(float64(a.Int()) == b.Float())
+		}
+		if tb == tagString || tb == tagSymbol {
+			return NewBool(a.Int() == b.Int())
+		}
+		return NewBool(a.Int() == b.Int())
+	case tagFloat:
+		if tb == tagInt {
+			return NewBool(a.Float() == float64(b.Int()))
+		}
+		if tb == tagString || tb == tagSymbol {
+			return NewBool(a.Float() == b.Float())
+		}
+		return NewBool(a.Float() == b.Float())
+	case tagString, tagSymbol:
+		if tb == tagInt {
+			return NewBool(a.Int() == b.Int())
+		}
+		if tb == tagFloat {
+			return NewBool(a.Float() == b.Float())
+		}
+		if tb == tagBool {
+			return NewBool(a.Bool() == b.Bool())
+		}
+		return NewBool(strings.EqualFold(a.String(), b.String()))
+	case tagBool:
+		return NewBool(a.Bool() == b.Bool())
+	case tagSlice:
+		if len(a.Slice()) == 0 {
+			return NewBool(!b.Bool())
+		}
+	case tagVector:
+		if len(a.Vector()) == 0 {
+			return NewBool(!b.Bool())
+		}
+	case tagAny:
+		return NewBool(a.Any() == b.Any())
+	}
+
+	return NewBool(strings.EqualFold(a.String(), b.String()))
 }
 
-// sort function for scmer
-func LessScm(a ...Scmer) Scmer {
-	return Less(a[0], a[1])
-}
-func GreaterScm(a ...Scmer) Scmer {
-	return Less(a[1], a[0])
-}
+func LessScm(a ...Scmer) Scmer    { return NewBool(Less(a[0], a[1])) }
+func GreaterScm(a ...Scmer) Scmer { return NewBool(Less(a[1], a[0])) }
+
 func Less(a, b Scmer) bool {
-	switch a_ := a.(type) {
-	case nil:
-		return b != nil // nil is always less than any other value except for nil (which is equal)
-	case int, uint, int64, uint64:
-		return ToFloat(a) < ToFloat(b) // todo: more fine grained
-	case float64:
-		return a_ < ToFloat(b)
-	case LazyString:
-		switch b_ := b.(type) {
-		case float64:
-			return ToFloat(a) < b_
-		case int64:
-			return ToInt(a) < int(b_)
-		case LazyString:
-			return a_.GetValue() < b_.GetValue()
-		case string:
-			return a_.GetValue() < b_
-		case nil:
-			return false
-		default:
-			panic("unknown type combo in comparison")
-		}
-	case string:
-		switch b_ := b.(type) {
-		case float64:
-			return ToFloat(a) < b_
-		case int64:
-			return ToInt(a) < int(b_)
-		case LazyString:
-			return a_ < b_.GetValue()
-		case string:
-			return a_ < b_
-		case nil:
-			return false
-		default:
-			panic("unknown type combo in comparison")
-		}
-	// are there any other types??
-	default:
-		panic("unknown type combo in comparison: " + String(a) + " < " + String(b))
+	ta := auxTag(a.aux)
+	tb := auxTag(b.aux)
+
+	if ta == tagNil && tb == tagNil {
+		return false
 	}
-	return false
+	if ta == tagNil {
+		return true
+	}
+	if tb == tagNil {
+		return false
+	}
+
+	switch ta {
+	case tagInt:
+		return float64(a.Int()) < b.Float()
+	case tagFloat:
+		return a.Float() < b.Float()
+	case tagString, tagSymbol:
+		switch tb {
+		case tagInt:
+			return a.Float() < b.Float()
+		case tagFloat:
+			return a.Float() < b.Float()
+		case tagString, tagSymbol:
+			return a.String() < b.String()
+		default:
+			panic("unknown type combo in comparison")
+		}
+	case tagBool:
+		return a.Int() < b.Int()
+	case tagAny:
+		return strings.Compare(a.String(), b.String()) < 0
+	default:
+		panic("unknown type combo in comparison")
+	}
 }

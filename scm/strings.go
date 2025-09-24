@@ -31,11 +31,6 @@ import "golang.org/x/text/language"
 import "sync"
 import "reflect"
 
-type LazyString struct {
-	Hash     string
-	GetValue func() string
-}
-
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
 var collateRegistry sync.Map // map[uintptr]struct{Collation string; Reverse bool}
