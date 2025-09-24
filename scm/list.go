@@ -27,6 +27,43 @@ package scm
 
 import "fmt"
 
+func asSlice(v Scmer, ctx string) []Scmer {
+	if v.IsSlice() {
+		return v.Slice()
+	}
+	if auxTag(v.aux) == tagAny {
+		switch vv := v.Any().(type) {
+		case []Scmer:
+			return vv
+		}
+	}
+	panic(fmt.Sprintf("%s expects a list, got %s", ctx, v.String()))
+}
+
+func asFastDict(v Scmer, ctx string) *FastDict {
+	if auxTag(v.aux) == tagAny {
+		if fd, ok := v.Any().(*FastDict); ok {
+			return fd
+		}
+	}
+	panic(fmt.Sprintf("%s expects an assoc list", ctx))
+}
+
+func asAssoc(v Scmer, ctx string) ([]Scmer, *FastDict) {
+	if v.IsSlice() {
+		return v.Slice(), nil
+	}
+	if auxTag(v.aux) == tagAny {
+		switch vv := v.Any().(type) {
+		case []Scmer:
+			return vv, nil
+		case *FastDict:
+			return nil, vv
+		}
+	}
+	panic(fmt.Sprintf("%s expects a dictionary", ctx))
+}
+
 func init_list() {
 	// list functions
 	DeclareTitle("Lists")
@@ -38,16 +75,18 @@ func init_list() {
 			DeclarationParameter{"list", "list", "base list"},
 		}, "int",
 		func(a ...Scmer) Scmer {
-			// append a b ...: append item b to list a (construct list from item + tail)
-			return float64(len(a[0].([]Scmer)))
-			switch dict := a[0].(type) {
-			case []Scmer:
-				return int64(len(dict))
-			case *FastDict:
-				return int64(len(dict.Pairs))
-			default:
-				panic("count expects a list")
+			switch auxTag(a[0].aux) {
+			case tagSlice:
+				return NewInt(int64(len(a[0].Slice())))
+			case tagAny:
+				switch dict := a[0].Any().(type) {
+				case []Scmer:
+					return NewInt(int64(len(dict)))
+				case *FastDict:
+					return NewInt(int64(len(dict.Pairs)))
+				}
 			}
+			panic("count expects a list")
 		},
 		true,
 	})
@@ -59,7 +98,12 @@ func init_list() {
 			DeclarationParameter{"index", "number", "index beginning from 0"},
 		}, "any",
 		func(a ...Scmer) Scmer {
-			return a[0].([]Scmer)[ToInt(a[1])]
+			list := asSlice(a[0], "nth")
+			idx := int(a[1].Int())
+			if idx < 0 || idx >= len(list) {
+				panic("nth index out of range")
+			}
+			return list[idx]
 		},
 		true,
 	})
@@ -71,8 +115,9 @@ func init_list() {
 			DeclarationParameter{"item...", "any", "items to add"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// append a b ...: append item b to list a (construct list from item + tail)
-			return append(a[0].([]Scmer), a[1:]...)
+			base := append([]Scmer{}, asSlice(a[0], "append")...)
+			base = append(base, a[1:]...)
+			return NewSlice(base)
 		},
 		true,
 	})
@@ -84,9 +129,8 @@ func init_list() {
 			DeclarationParameter{"item...", "any", "items to add"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// append a b ...: append item b to list a (construct list from item + tail)
-			list := a[0].([]Scmer)
-			for _, el := range a {
+			list := append([]Scmer{}, asSlice(a[0], "append_unique")...)
+			for _, el := range a[1:] {
 				for _, el2 := range list {
 					if Equal(el, el2) {
 						// ignore duplicates
@@ -96,7 +140,7 @@ func init_list() {
 				list = append(list, el)
 			skipItem:
 			}
-			return list
+			return NewSlice(list)
 		},
 		true,
 	})
@@ -108,13 +152,16 @@ func init_list() {
 			DeclarationParameter{"cdr", "list", "tail that is appended after car"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// cons a b: prepend item a to list b (construct list from item + tail)
-			switch car := a[0]; cdr := a[1].(type) {
-			case []Scmer:
-				return append([]Scmer{car}, cdr...)
-			default:
-				return []Scmer{car, cdr}
+			car := a[0]
+			if auxTag(a[1].aux) == tagSlice {
+				return NewSlice(append([]Scmer{car}, a[1].Slice()...))
 			}
+			if auxTag(a[1].aux) == tagAny {
+				if cdr, ok := a[1].Any().([]Scmer); ok {
+					return NewSlice(append([]Scmer{car}, cdr...))
+				}
+			}
+			return NewSlice([]Scmer{car, a[1]})
 		},
 		true,
 	})
@@ -125,8 +172,11 @@ func init_list() {
 			DeclarationParameter{"list", "list", "list"},
 		}, "any",
 		func(a ...Scmer) Scmer {
-			// head of tuple
-			return a[0].([]Scmer)[0]
+			list := asSlice(a[0], "car")
+			if len(list) == 0 {
+				panic("car on empty list")
+			}
+			return list[0]
 		},
 		true,
 	})
@@ -137,8 +187,11 @@ func init_list() {
 			DeclarationParameter{"list", "list", "list"},
 		}, "any",
 		func(a ...Scmer) Scmer {
-			// rest of tuple
-			return a[0].([]Scmer)[1:]
+			list := asSlice(a[0], "cdr")
+			if len(list) == 0 {
+				return NewSlice([]Scmer{})
+			}
+			return NewSlice(list[1:])
 		},
 		true,
 	})
@@ -149,29 +202,28 @@ func init_list() {
 			DeclarationParameter{"list", "list", "list of lists of items"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			list := a
+			lists := a
 			if len(a) == 1 {
-				// one parameter: interpret as list of lists
-				var ok bool
-				list, ok = a[0].([]Scmer)
-				if !ok {
-					panic("invalid input for merge: " + fmt.Sprint(a))
-				}
+				lists = asSlice(a[0], "zip")
 			}
-			if len(list) == 0 {
-				return []Scmer{}
+			if len(lists) == 0 {
+				return NewSlice([]Scmer{})
 			}
-			// merge arrays into one
-			size := len(list[0].([]Scmer))
+			first := asSlice(lists[0], "zip element")
+			size := len(first)
 			result := make([]Scmer, size)
-			for i := range result {
-				subresult := make([]Scmer, len(list))
-				for j, v := range list {
-					subresult[j] = v.([]Scmer)[i]
+			for i := 0; i < size; i++ {
+				subresult := make([]Scmer, len(lists))
+				for j, v := range lists {
+					current := asSlice(v, "zip item")
+					if i >= len(current) {
+						panic("zip expects lists of equal length")
+					}
+					subresult[j] = current[i]
 				}
-				result[i] = subresult
+				result[i] = NewSlice(subresult)
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -182,28 +234,19 @@ func init_list() {
 			DeclarationParameter{"list", "list", "list of lists of items"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			list := a
+			lists := a
 			if len(a) == 1 {
-				// one parameter: interpret as list of lists
-				var ok bool
-				list, ok = a[0].([]Scmer)
-				if !ok {
-					panic("invalid input for merge: " + fmt.Sprint(a))
-				}
+				lists = asSlice(a[0], "merge")
 			}
-			// merge arrays into one
 			size := 0
-			for _, v := range list {
-				size = size + len(v.([]Scmer))
+			for _, v := range lists {
+				size += len(asSlice(v, "merge item"))
 			}
-			result := make([]Scmer, size)
-			pos := 0
-			for _, v := range list {
-				inner := v.([]Scmer)
-				copy(result[pos:pos+len(inner)], inner)
-				pos = pos + len(inner)
+			result := make([]Scmer, 0, size)
+			for _, v := range lists {
+				result = append(result, asSlice(v, "merge item")...)
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -214,30 +257,30 @@ func init_list() {
 			DeclarationParameter{"list", "list", "list of lists of items"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			list := a
+			lists := a
 			if len(a) == 1 {
-				// one parameter: interpret as list of lists
-				list = a[0].([]Scmer)
+				lists = asSlice(a[0], "merge_unique")
 			}
-			// merge arrays into one
 			size := 0
-			for _, v := range list {
-				size = size + len(v.([]Scmer))
+			for _, v := range lists {
+				size += len(asSlice(v, "merge_unique item"))
 			}
 			result := make([]Scmer, 0, size)
-			for _, v := range list {
-				inner := v.([]Scmer)
-				for _, el := range inner {
-					for _, el2 := range result {
-						if Equal(el, el2) {
-							goto skipNext
+			for _, v := range lists {
+				for _, el := range asSlice(v, "merge_unique item") {
+					duplicate := false
+					for _, existing := range result {
+						if Equal(el, existing) {
+							duplicate = true
+							break
 						}
 					}
-					result = append(result, el)
-				skipNext:
+					if !duplicate {
+						result = append(result, el)
+					}
 				}
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -249,14 +292,13 @@ func init_list() {
 			DeclarationParameter{"needle", "any", "item to search for"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			// arr, element
-			list := a[0].([]Scmer)
+			list := asSlice(a[0], "has?")
 			for _, v := range list {
 				if Equal(a[1], v) {
-					return true
+					return NewBool(true)
 				}
 			}
-			return false
+			return NewBool(false)
 		},
 		true,
 	})
@@ -268,14 +310,15 @@ func init_list() {
 			DeclarationParameter{"condition", "func", "filter condition func(any)->bool"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			result := make([]Scmer, 0)
+			input := asSlice(a[0], "filter")
+			result := make([]Scmer, 0, len(input))
 			fn := OptimizeProcToSerialFunction(a[1])
-			for _, v := range a[0].([]Scmer) {
-				if ToBool(fn(v)) {
+			for _, v := range input {
+				if fn(v).Bool() {
 					result = append(result, v)
 				}
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -287,13 +330,13 @@ func init_list() {
 			DeclarationParameter{"map", "func", "map function func(any)->any that is applied to each item"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			list, _ := a[0].([]Scmer)
+			list := asSlice(a[0], "map")
 			result := make([]Scmer, len(list))
 			fn := OptimizeProcToSerialFunction(a[1])
 			for i, v := range list {
 				result[i] = fn(v)
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -305,13 +348,13 @@ func init_list() {
 			DeclarationParameter{"map", "func", "map function func(i, any)->any that is applied to each item"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			list, _ := a[0].([]Scmer)
+			list := asSlice(a[0], "mapIndex")
 			result := make([]Scmer, len(list))
 			fn := OptimizeProcToSerialFunction(a[1])
 			for i, v := range list {
-				result[i] = fn(i, v)
+				result[i] = fn(NewInt(int64(i)), v)
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -324,22 +367,19 @@ func init_list() {
 			DeclarationParameter{"neutral", "any", "(optional) initial value of the accumulator, defaults to nil"},
 		}, "any",
 		func(a ...Scmer) Scmer {
-			// arr, reducefn(a, b), [neutral]
-			list, _ := a[0].([]Scmer)
+			list := asSlice(a[0], "reduce")
 			fn := OptimizeProcToSerialFunction(a[1])
-			var result Scmer = nil
+			result := NewNil()
 			i := 0
 			if len(a) > 2 {
 				result = a[2]
-			} else {
-				if len(list) > 0 {
-					result = list[0]
-					i = i + 1
-				}
+			} else if len(list) > 0 {
+				result = list[0]
+				i = 1
 			}
 			for i < len(list) {
 				result = fn(result, list[i])
-				i = i + 1
+				i++
 			}
 			return result
 		},
@@ -355,16 +395,15 @@ func init_list() {
 			DeclarationParameter{"iterator", "func", "func that produces the next state"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// arr, reducefn(a, b), [neutral]
 			result := make([]Scmer, 0)
 			state := a[0]
 			condition := OptimizeProcToSerialFunction(a[1])
 			iterator := OptimizeProcToSerialFunction(a[2])
-			for ToBool(condition(state)) {
+			for condition(state).Bool() {
 				result = append(result, state)
 				state = iterator(state)
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -375,13 +414,15 @@ func init_list() {
 			DeclarationParameter{"n", "number", "number of elements to produce"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// arr, reducefn(a, b), [neutral]
-			n := ToInt(a[0])
+			n := int(a[0].Int())
+			if n < 0 {
+				n = 0
+			}
 			result := make([]Scmer, n)
 			for i := 0; i < n; i++ {
-				result[i] = float64(i) // TODO: leave to integer once a flexible type system is implemented
+				result[i] = NewInt(int64(i))
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -392,9 +433,15 @@ func init_list() {
 			DeclarationParameter{"value", "any", "value to check"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			// arr
-			_, ok := a[0].([]Scmer)
-			return ok
+			if a[0].IsSlice() {
+				return NewBool(true)
+			}
+			if auxTag(a[0].aux) == tagAny {
+				if _, ok := a[0].Any().([]Scmer); ok {
+					return NewBool(true)
+				}
+			}
+			return NewBool(false)
 		},
 		true,
 	})
@@ -406,14 +453,13 @@ func init_list() {
 			DeclarationParameter{"value", "any", "value to check"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			// arr
-			arr, _ := a[0].([]Scmer)
+			arr := asSlice(a[0], "contains?")
 			for _, v := range arr {
-				if Equal(v, a[1]) == true {
-					return true
+				if Equal(v, a[1]) {
+					return NewBool(true)
 				}
 			}
-			return false
+			return NewBool(false)
 		},
 		true,
 	})
@@ -429,27 +475,23 @@ func init_list() {
 			DeclarationParameter{"condition", "func", "filter function func(string any)->bool where the first parameter is the key, the second is the value"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// dict, fn(key, value)
 			result := make([]Scmer, 0)
 			fn := OptimizeProcToSerialFunction(a[1])
-			switch dict := a[0].(type) {
-			case []Scmer:
-				for i := 0; i < len(dict); i += 2 {
-					if ToBool(fn(dict[i], dict[i+1])) {
-						result = append(result, dict[i], dict[i+1])
+			if slice, fd := asAssoc(a[0], "filter_assoc"); fd == nil {
+				for i := 0; i < len(slice); i += 2 {
+					if fn(slice[i], slice[i+1]).Bool() {
+						result = append(result, slice[i], slice[i+1])
 					}
 				}
-			case *FastDict:
-				dict.Iterate(func(k, v Scmer) bool {
-					if ToBool(fn(k, v)) {
+			} else {
+				fd.Iterate(func(k, v Scmer) bool {
+					if fn(k, v).Bool() {
 						result = append(result, k, v)
 					}
 					return true
 				})
-			default:
-				panic("filter_assoc expects a list")
 			}
-			return result
+			return NewSlice(result)
 		},
 		true,
 	})
@@ -461,30 +503,27 @@ func init_list() {
 			DeclarationParameter{"map", "func", "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value."},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// apply fn(key value) to each assoc item and return mapped dict
-			result := make([]Scmer, 0)
 			fn := OptimizeProcToSerialFunction(a[1])
-			switch dict := a[0].(type) {
-			case []Scmer:
-				result = make([]Scmer, len(dict))
-				var k Scmer
-				for i, v := range dict {
+			if slice, fd := asAssoc(a[0], "map_assoc"); fd == nil {
+				result := make([]Scmer, len(slice))
+				var key Scmer
+				for i, v := range slice {
 					if i%2 == 0 {
 						result[i] = v
-						k = v
+						key = v
 					} else {
-						result[i] = fn(k, v)
+						result[i] = fn(key, v)
 					}
 				}
-			case *FastDict:
-				// allocate to same size
-				result = make([]Scmer, len(dict.Pairs))
-				i := 0
-				dict.Iterate(func(k, v Scmer) bool { result[i] = k; result[i+1] = fn(k, v); i += 2; return true })
-			default:
-				panic("map_assoc expects a list")
+				return NewSlice(result)
+			} else {
+				result := make([]Scmer, 0, len(fd.Pairs))
+				fd.Iterate(func(k, v Scmer) bool {
+					result = append(result, k, fn(k, v))
+					return true
+				})
+				return NewSlice(result)
 			}
-			return result
 		},
 		true,
 	})
@@ -497,18 +536,14 @@ func init_list() {
 			DeclarationParameter{"neutral", "any", "initial value for the accumulator"},
 		}, "any",
 		func(a ...Scmer) Scmer {
-			// dict, reducefn(a, key, value), neutral
 			result := a[2]
 			reduce := OptimizeProcToSerialFunction(a[1])
-			switch dict := a[0].(type) {
-			case []Scmer:
-				for i := 0; i < len(dict); i += 2 {
-					result = reduce(result, dict[i], dict[i+1])
+			if slice, fd := asAssoc(a[0], "reduce_assoc"); fd == nil {
+				for i := 0; i < len(slice); i += 2 {
+					result = reduce(result, slice[i], slice[i+1])
 				}
-			case *FastDict:
-				dict.Iterate(func(k, v Scmer) bool { result = reduce(result, k, v); return true })
-			default:
-				panic("reduce_assoc expects a list")
+			} else {
+				fd.Iterate(func(k, v Scmer) bool { result = reduce(result, k, v); return true })
 			}
 			return result
 		},
@@ -522,22 +557,18 @@ func init_list() {
 			DeclarationParameter{"key", "string", "key to test"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			// dict, element
-			switch dict := a[0].(type) {
-			case []Scmer:
-				for i := 0; i < len(dict); i += 2 {
-					if Equal(dict[i], a[1]) {
-						return true
+			if slice, fd := asAssoc(a[0], "has_assoc?"); fd == nil {
+				for i := 0; i < len(slice); i += 2 {
+					if Equal(slice[i], a[1]) {
+						return NewBool(true)
 					}
 				}
-			case *FastDict:
-				if _, ok := dict.Get(a[1]); ok {
-					return true
+			} else {
+				if _, ok := fd.Get(a[1]); ok {
+					return NewBool(true)
 				}
-			default:
-				panic("has_assoc? expects a list")
 			}
-			return false
+			return NewBool(false)
 		},
 		true,
 	})
@@ -549,28 +580,26 @@ func init_list() {
 			DeclarationParameter{"map", "func", "func(string any)->any that flattens down each element"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// apply fn(key value) to each assoc item and return results as array
-			result := make([]Scmer, 0)
 			fn := OptimizeProcToSerialFunction(a[1])
-			switch dict := a[0].(type) {
-			case []Scmer:
-				result = make([]Scmer, len(dict)/2)
-				var k Scmer
-				for i, v := range dict {
+			if slice, fd := asAssoc(a[0], "extract_assoc"); fd == nil {
+				result := make([]Scmer, len(slice)/2)
+				var key Scmer
+				for i, v := range slice {
 					if i%2 == 0 {
-						k = v
+						key = v
 					} else {
-						result[i/2] = fn(k, v)
+						result[i/2] = fn(key, v)
 					}
 				}
-			case *FastDict:
-				tmp := make([]Scmer, 0, len(dict.Pairs)/2)
-				dict.Iterate(func(k, v Scmer) bool { tmp = append(tmp, fn(k, v)); return true })
-				result = tmp
-			default:
-				panic("extract_assoc expects a list")
+				return NewSlice(result)
+			} else {
+				result := make([]Scmer, 0, len(fd.Pairs)/2)
+				fd.Iterate(func(k, v Scmer) bool {
+					result = append(result, fn(k, v))
+					return true
+				})
+				return NewSlice(result)
 			}
-			return result
 		},
 		true,
 	})
@@ -584,45 +613,36 @@ func init_list() {
 			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be pysically stored in the new dictionary."},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// dict, key, value, [merge]
-			var fn func(a ...Scmer) Scmer
+			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
-				fn = OptimizeProcToSerialFunction(a[3])
+				mfn := OptimizeProcToSerialFunction(a[3])
+				mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
 			}
-			switch dict := a[0].(type) {
-			case []Scmer:
-				list := dict
+			if slice, fd := asAssoc(a[0], "set_assoc"); fd == nil {
+				list := slice
 				for i := 0; i < len(list); i += 2 {
 					if Equal(list[i], a[1]) {
-						if len(a) > 3 {
-							list[i+1] = fn(list[i+1], a[2])
+						if mergeFn != nil {
+							list[i+1] = mergeFn(list[i+1], a[2])
 						} else {
 							list[i+1] = a[2]
 						}
-						return list
+						return NewSlice(list)
 					}
 				}
-				// append; if list gets big, transparently switch to FastDict
 				list = append(list, a[1], a[2])
-				if len(list) >= 10 { // threshold: 5 pairs
+				if len(list) >= 10 {
 					fd := NewFastDict(len(list)/2 + 4)
 					for i := 0; i < len(list); i += 2 {
 						fd.Set(list[i], list[i+1], nil)
 					}
-					return fd
+					return NewAny(fd)
 				}
-				return list
-			case *FastDict:
-				var merge func(Scmer, Scmer) Scmer
-				if len(a) > 3 {
-					mfn := fn
-					merge = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
-				}
-				dict.Set(a[1], a[2], merge)
-				return dict
-			default:
-				panic("set_assoc expects a list")
+				return NewSlice(list)
 			}
+			fd := asFastDict(a[0], "set_assoc")
+			fd.Set(a[1], a[2], mergeFn)
+			return NewAny(fd)
 		},
 		true,
 	})
@@ -635,27 +655,22 @@ func init_list() {
 			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary."},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			set_assoc := Globalenv.Vars["set_assoc"].(func(...Scmer) Scmer)
+			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
 			dst := a[0]
-			switch src := a[1].(type) {
-			case []Scmer:
-				if len(a) > 2 {
-					for i := 0; i < len(src); i += 2 {
-						dst = set_assoc(dst, src[i], src[i+1], a[2])
-					}
-				} else {
-					for i := 0; i < len(src); i += 2 {
-						dst = set_assoc(dst, src[i], src[i+1])
+			if slice, fd := asAssoc(a[1], "merge_assoc"); fd == nil {
+				for i := 0; i < len(slice); i += 2 {
+					if len(a) > 2 {
+						dst = setAssoc(dst, slice[i], slice[i+1], a[2])
+					} else {
+						dst = setAssoc(dst, slice[i], slice[i+1])
 					}
 				}
-			case *FastDict:
+			} else {
 				if len(a) > 2 {
-					src.Iterate(func(k, v Scmer) bool { dst = set_assoc(dst, k, v, a[2]); return true })
+					fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v, a[2]); return true })
 				} else {
-					src.Iterate(func(k, v Scmer) bool { dst = set_assoc(dst, k, v); return true })
+					fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v); return true })
 				}
-			default:
-				panic("merge_assoc expects a list as dict2")
 			}
 			return dst
 		},

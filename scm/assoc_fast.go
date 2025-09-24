@@ -115,7 +115,7 @@ func HashKey(k Scmer) uint64 {
 			fn := v.Func()
 			if reflect.ValueOf(fn).Kind() == reflect.Func {
 				var b [8]byte
-				binary.LittleEndian.PutUint64(b[:], reflect.ValueOf(fn).Pointer())
+				binary.LittleEndian.PutUint64(b[:], uint64(reflect.ValueOf(fn).Pointer()))
 				h.Write(b[:])
 			} else {
 				h.WriteString(fmt.Sprintf("%v", fn))

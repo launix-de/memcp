@@ -29,7 +29,7 @@ import querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
 // build this function into your SCM environment to offer http server capabilities
 func MySQLServe(a ...Scmer) Scmer {
 	// params: port, authcallback, schemacallback, querycallback
-	port := String(a[0])
+	port := a[0].String()
 
 	log := xlog.NewStdLog(xlog.Level(xlog.INFO))
 	var handler MySQLWrapper
@@ -46,12 +46,12 @@ func MySQLServe(a ...Scmer) Scmer {
 		defer mysql.Close()
 		mysql.Accept()
 	}()
-	return true
+	return NewBool(true)
 }
 
 // driver.CreatePassword helper function
 func MySQLPassword(a ...Scmer) Scmer {
-	return string(driver.CreatePassword(String(a[0])))
+	return NewString(string(driver.CreatePassword(a[0].String())))
 }
 
 type MySQLWrapper struct {
@@ -92,44 +92,75 @@ func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	m.log.Info("Auth Check with " + session.User())
 	// callback should load password from database
-	password := Apply(m.authcallback, session.User())
-	if password == nil {
+	password := Apply(m.authcallback, NewString(session.User()))
+	if password.IsNil() {
 		// user does not exist
 		return errors.New("Auth failed")
 	}
-	if !session.TestPassword([]byte(String(password))) {
+	if !session.TestPassword([]byte(password.String())) {
 		return errors.New("Auth failed")
 	}
 	return nil
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
 	m.log.Info("db " + database)
-	allowed := Apply(m.schemacallback, session.User(), database)
-	if !ToBool(allowed) {
+	allowed := Apply(m.schemacallback, NewString(session.User()), NewString(database))
+	if !allowed.Bool() {
 		return errors.New("access denied for database " + database)
 	}
 	session.SetSchema(database)
 	return nil
 }
 func ScmerToMySQL(v Scmer) sqltypes.Value {
-	switch v2 := v.(type) {
-	case nil:
+	switch auxTag(v.aux) {
+	case tagNil:
 		return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
-	case float64:
-		return sqltypes.NewFloat64(v2)
-	case int64:
-		return sqltypes.NewInt64(v2)
-	case bool:
-		if v2 {
+	case tagFloat:
+		return sqltypes.NewFloat64(v.Float())
+	case tagInt:
+		return sqltypes.NewInt64(v.Int())
+	case tagBool:
+		if v.Bool() {
 			return sqltypes.NewInt32(1)
-		} else {
-			return sqltypes.NewInt32(0)
 		}
-	case string:
-		return sqltypes.NewVarChar(v2) // TODO: also consider NewVarBinary
+		return sqltypes.NewInt32(0)
+	case tagString:
+		return sqltypes.NewVarChar(v.String())
+	case tagSymbol:
+		return sqltypes.NewVarChar(v.String())
+	case tagAny:
+		switch vv := v.Any().(type) {
+		case nil:
+			return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
+		case float64:
+			return sqltypes.NewFloat64(vv)
+		case int64:
+			return sqltypes.NewInt64(vv)
+		case bool:
+			if vv {
+				return sqltypes.NewInt32(1)
+			}
+			return sqltypes.NewInt32(0)
+		case string:
+			return sqltypes.NewVarChar(vv)
+		default:
+			return sqltypes.NewVarChar(fmt.Sprint(vv))
+		}
 	default:
-		return sqltypes.NewVarChar(String(v2))
+		return sqltypes.NewVarChar(v.String())
 	}
+}
+
+func mustSlice(ctx string, v Scmer) []Scmer {
+	if v.IsSlice() {
+		return v.Slice()
+	}
+	if auxTag(v.aux) == tagAny {
+		if slice, ok := v.Any().([]Scmer); ok {
+			return slice
+		}
+	}
+	panic(fmt.Sprintf("%s expects list", ctx))
 }
 
 type ErrorWrapper string
@@ -156,8 +187,10 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	result.State = sqltypes.RStateFields
 	result.Rows = make([][]sqltypes.Value, 0, 1024)
 	// load scm session object
-	scmSession, _ := mysqlsessions.Load(session.ID())
+	scmSessionAny, _ := mysqlsessions.Load(session.ID())
 	// result from scheme
+	sessionFunc := scmSessionAny.(func(...Scmer) Scmer)
+	scmSessionScmer := NewFunc(sessionFunc)
 	rowcount := func() Scmer {
 		defer func() {
 			if r := recover(); r != nil {
@@ -165,18 +198,18 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				myerr = ErrorWrapper(fmt.Sprint(r))
 			}
 		}()
-		return Apply(m.querycallback, session.Schema(), query, func(a ...Scmer) Scmer {
+		callbackFn := NewFunc(func(a ...Scmer) Scmer {
 			// function resultrow(item)
-			item := a[0].([]Scmer)
+			item := mustSlice("mysql result row", a[0])
 			resultlock.Lock()
 			defer resultlock.Unlock()
-			updateFlags(session, scmSession) // set transaction status
+			updateFlags(session, sessionFunc) // set transaction status
 
 			newitem := make([]sqltypes.Value, len(result.Fields))
 			for i := 0; i < len(item)-1; i += 2 {
 				val := ScmerToMySQL(item[i+1])
 
-				colname := String(item[i])
+				colname := item[i].String()
 				colid, ok := colmap[colname]
 				if ok {
 					newitem[colid] = val
@@ -203,22 +236,22 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				result.Rows = result.Rows[0:0] // slice off rest of buffer to restart
 			}
 			result.Rows = append(result.Rows, newitem)
-			return true
-		},
-			scmSession)
+			return NewBool(true)
+		})
+		return Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)
 	}()
 	if myerr != nil {
 		return myerr
 	}
 	// TODO: also set result.InsertID (maybe as a callback as 4th parameter to m.querycallback?)
-	switch rowcount_ := rowcount.(type) {
-	case float64:
-		result.RowsAffected = uint64(rowcount_)
-	case int64:
-		result.RowsAffected = uint64(rowcount_)
+	switch auxTag(rowcount.aux) {
+	case tagFloat:
+		result.RowsAffected = uint64(rowcount.Float())
+	case tagInt:
+		result.RowsAffected = uint64(rowcount.Int())
 	}
 	// update status greeting
-	updateFlags(session, scmSession)
+	updateFlags(session, sessionFunc)
 	// flush the rest
 	if result.State == sqltypes.RStateFields {
 		result.State = sqltypes.RStateNone // full send
@@ -232,12 +265,11 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	return myerr
 }
 
-func updateFlags(s *driver.Session, session_ any) {
-	session := session_.(func(...Scmer) Scmer)
-	tx := session("transaction")
-	if tx == nil {
+func updateFlags(s *driver.Session, sessionFunc func(...Scmer) Scmer) {
+	tx := sessionFunc(NewString("transaction"))
+	if tx.IsNil() {
 		s.SetTransaction(false)
-	} else {
-		s.SetTransaction(true)
+		return
 	}
+	s.SetTransaction(tx.Bool())
 }

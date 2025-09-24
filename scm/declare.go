@@ -51,7 +51,7 @@ func Declare(env *Env, def *Declaration) {
 	declarations[def.Name] = def
 	if def.Fn != nil {
 		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
-		env.Vars[Symbol(def.Name)] = def.Fn
+		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
 	}
 }
 
@@ -234,69 +234,74 @@ func types_merge(given, newtype string) string {
 // panics if the code is bad (returns possible datatype, at least "any")
 func Validate(val Scmer, require string) string {
 	var source_info SourceInfo
-	switch v := val.(type) {
-	case SourceInfo:
-		source_info = v
-		val = v.value
+	if auxTag(val.aux) == tagAny {
+		if si, ok := val.Any().(SourceInfo); ok {
+			source_info = si
+			val = si.value
+		}
 	}
-	switch v := val.(type) {
-	case nil:
+	switch auxTag(val.aux) {
+	case tagNil:
 		return "nil"
-	case string:
+	case tagString:
 		return "string"
-	case float64:
+	case tagSymbol:
+		return "symbol"
+	case tagFloat:
 		return "number"
-	case int64:
+	case tagInt:
 		return "int"
-	case bool:
+	case tagBool:
 		return "bool"
-	case Proc:
+	case tagFunc:
 		return "func"
-	case func(...Scmer) Scmer:
-		return "func"
-	case []Scmer:
-		if len(v) > 0 {
-			// function with head
+	case tagSlice:
+		slice := val.Slice()
+		if len(slice) > 0 {
 			var def *Declaration
-			switch head := v[0].(type) {
-			case Symbol:
-				if def2, ok := declarations[string(head)]; ok {
+			head := slice[0]
+			if head.IsSymbol() {
+				if def2, ok := declarations[head.String()]; ok {
 					def = def2
 				}
-			case func(...Scmer) Scmer:
-				if def2, ok := declarations[fmt.Sprintf("%p", head)]; ok {
+			} else if auxTag(head.aux) == tagFunc {
+				if def2, ok := declarations_hash[fmt.Sprintf("%p", head.Func())]; ok {
 					def = def2
+				}
+			} else if auxTag(head.aux) == tagAny {
+				switch hv := head.Any().(type) {
+				case func(...Scmer) Scmer:
+					if def2, ok := declarations_hash[fmt.Sprintf("%p", hv)]; ok {
+						def = def2
+					}
 				}
 			}
 			if def != nil {
-				if len(v)-1 < def.MinParameter {
+				if len(slice)-1 < def.MinParameter {
 					panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParameter) + " parameters")
 				}
-				if len(v)-1 > def.MaxParameter {
+				if len(slice)-1 > def.MaxParameter {
 					panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParameter) + " parameters")
 				}
 			}
+			skipFirst := slice[0].IsSymbol() && (slice[0].SymbolEquals("lambda") || slice[0].SymbolEquals("parser"))
 			returntype := ""
-			// validate params (TODO: exceptions like match??)
-			for i := 1; i < len(v); i++ {
-				if i != 1 || (v[0] != Symbol("lambda") && v[0] != Symbol("parser")) {
+			for i := 1; i < len(slice); i++ {
+				if i != 1 || !skipFirst {
 					subrequired := "any"
 					isReturntype := false
 					if def != nil {
-						j := i - 1 // parameter help
-						if i-1 >= len(def.Params) {
+						j := i - 1
+						if j >= len(def.Params) {
 							j = len(def.Params) - 1
 						}
-						// check parameter type
-						// TODO: both types could also be lists separated by |
-						// TODO: signature of lambda types??
 						subrequired = def.Params[j].Type
 						if subrequired == "returntype" {
 							subrequired = require
 							isReturntype = true
 						}
 					}
-					typ := Validate(v[i], subrequired)
+					typ := Validate(slice[i], subrequired)
 					if !types_match(typ, subrequired) {
 						panic(fmt.Sprintf("%s: function %s expects parameter %d to be %s, but found value of type %s", source_info.String(), def.Name, i, subrequired, typ))
 					}
@@ -315,12 +320,33 @@ func Validate(val Scmer, require string) string {
 				return def.Returns
 			}
 		}
+	case tagAny:
+		switch v := val.Any().(type) {
+		case nil:
+			return "nil"
+		case string:
+			return "string"
+		case float64:
+			return "number"
+		case int64:
+			return "int"
+		case bool:
+			return "bool"
+		case Proc:
+			return "func"
+		case *Proc:
+			return "func"
+		case []Scmer:
+			return Validate(NewSlice(v), require)
+		case func(...Scmer) Scmer:
+			return "func"
+		}
 	}
 	return "any"
 }
 
 func Help(fn Scmer) {
-	if fn == nil {
+	if fn.IsNil() {
 		fmt.Println("Available scm functions:")
 		for _, title := range declaration_titles {
 			if title[0] == '#' {
@@ -347,25 +373,40 @@ func Help(fn Scmer) {
 			}
 			fmt.Println("")
 		} else {
-			panic("function not found: " + fmt.Sprint(fn))
+			panic("function not found: " + String(fn))
 		}
 	}
 }
 
 // DeclarationForValue resolves a callable head (symbol or native func) to its Declaration.
 func DeclarationForValue(v Scmer) *Declaration {
-	switch h := v.(type) {
-	case string:
-		if d, ok := declarations[h]; ok {
+	switch auxTag(v.aux) {
+	case tagString:
+		if d, ok := declarations[v.String()]; ok {
 			return d
 		}
-	case Symbol:
-		if d, ok := declarations[string(h)]; ok {
+	case tagSymbol:
+		if d, ok := declarations[v.String()]; ok {
 			return d
 		}
-	case func(...Scmer) Scmer:
-		if d, ok := declarations_hash[fmt.Sprintf("%p", h)]; ok {
+	case tagFunc:
+		if d, ok := declarations_hash[fmt.Sprintf("%p", v.Func())]; ok {
 			return d
+		}
+	case tagAny:
+		switch h := v.Any().(type) {
+		case string:
+			if d, ok := declarations[h]; ok {
+				return d
+			}
+		case Symbol:
+			if d, ok := declarations[string(h)]; ok {
+				return d
+			}
+		case func(...Scmer) Scmer:
+			if d, ok := declarations_hash[fmt.Sprintf("%p", h)]; ok {
+				return d
+			}
 		}
 	}
 	return nil

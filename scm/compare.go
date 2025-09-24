@@ -116,7 +116,7 @@ func Equal(a, b Scmer) bool {
 		}
 	case tagFunc:
 		if tb == tagFunc {
-			return a.Func() == b.Func()
+			return a.ptr == b.ptr
 		}
 		return false
 	case tagAny:
@@ -213,7 +213,7 @@ func EqualSQL(a, b Scmer) Scmer {
 		}
 	case tagFunc:
 		if tb == tagFunc {
-			return NewBool(a.Func() == b.Func())
+			return NewBool(a.ptr == b.ptr)
 		}
 		return NewBool(false)
 	case tagAny:
@@ -259,7 +259,7 @@ func Less(a, b Scmer) bool {
 	case tagBool:
 		return a.Int() < b.Int()
 	case tagFunc:
-		return fmt.Sprintf("%p", a.Func()) < fmt.Sprintf("%p", b.Func())
+		return uintptr(a.ptr) < uintptr(b.ptr)
 	case tagAny:
 		return strings.Compare(a.String(), b.String()) < 0
 	default:
