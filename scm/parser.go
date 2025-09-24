@@ -37,9 +37,9 @@ func (source_info SourceInfo) String() string {
 
 func Simplify(s string) Scmer {
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
-		return f
+		return NewFloat(f)
 	}
-	return s
+	return NewString(s)
 }
 
 func Read(source, s string) (expression Scmer) {
@@ -61,73 +61,75 @@ func EvalAll(source, s string, en *Env) (expression Scmer) {
 // Syntactic Analysis
 func readFrom(tokens *[]Scmer) (expression Scmer) {
 	if len(*tokens) == 0 {
-		return nil
+		return NewNil()
 	}
 	var source_info SourceInfo
 	// pop first element from tokens
 	token := (*tokens)[0]
 	*tokens = (*tokens)[1:]
-	switch t := token.(type) {
-	case SourceInfo:
-		source_info = t
-		token = t.value
+	if token.IsSourceInfo() {
+		source_info = *token.SourceInfo()
+		token = source_info.value
 	}
-	switch t := token.(type) {
-	case Symbol:
-		if t == Symbol("(") {
+	if token.IsSymbol() {
+		sym := token.String()
+		if sym == "(" {
 			L := make([]Scmer, 0)
-			for { // read params until )
+			for {
 				if len(*tokens) == 0 {
-					// include source location of the opening parenthesis
 					panic(source_info.String() + ": expecting matching )")
 				}
-				if (*tokens)[0] == Symbol(")") {
-					// eat )
+				next := (*tokens)[0]
+				if next.IsSymbol() && next.String() == ")" {
 					*tokens = (*tokens)[1:]
-					// return L // finish read process
-					source_info.value = L // append to source info
-					return source_info
+					source_info.value = NewSlice(L)
+					return NewSourceInfo(source_info)
 				}
-				// add param
 				L = append(L, readFrom(tokens))
 			}
-		} else if t == Symbol("'") && len(*tokens) > 0 {
-			token = (*tokens)[0]
-			switch t := token.(type) {
-			case SourceInfo:
-				source_info = t
-				token = t.value
+		}
+		if sym == "'" && len(*tokens) > 0 {
+			next := (*tokens)[0]
+			if next.IsSourceInfo() {
+				source_info = *next.SourceInfo()
+				next = source_info.value
 			}
-			if token == Symbol("(") {
+			if next.IsSymbol() && next.String() == "(" {
 				*tokens = (*tokens)[1:]
-				// list literal
 				L := make([]Scmer, 1)
-				L[0] = Symbol("list")
+				L[0] = NewSymbol("list")
 				for {
 					if len(*tokens) == 0 {
-						// include source location of the opening parenthesis
 						panic(source_info.String() + ": expecting matching )")
 					}
-					if (*tokens)[0] == Symbol(")") {
+					next2 := (*tokens)[0]
+					if next2.IsSymbol() && next2.String() == ")" {
 						break
 					}
 					L = append(L, readFrom(tokens))
 				}
 				*tokens = (*tokens)[1:]
-				source_info.value = L // append to source info
-				return source_info
-			} else {
-				// quote symbol
-				*tokens = (*tokens)[1:]
-				return []Scmer{Symbol("quote"), token}
+				listForm := NewSlice(L)
+				if source_info.source != "" {
+					source_info.value = listForm
+					return NewSourceInfo(source_info)
+				}
+				return listForm
 			}
-		} else {
-			return token
+			quoted := readFrom(tokens)
+			quoteElems := make([]Scmer, 2)
+			quoteElems[0] = NewSymbol("quote")
+			quoteElems[1] = quoted
+			quoteForm := NewSlice(quoteElems)
+			if source_info.source != "" {
+				source_info.value = quoteForm
+				return NewSourceInfo(source_info)
+			}
+			return quoteForm
 		}
-	default:
-		// string, Number
 		return token
 	}
+	return token
 }
 
 // Lexical Analysis
@@ -191,35 +193,34 @@ func tokenize(source, s string) []Scmer {
 			state = 3 // continue with string
 		} else if state == 3 && ch == '"' {
 			// finish string
-			result = append(result, stringreplacer.Replace(string(s[startToken+1:i])))
+			result = append(result, NewString(stringreplacer.Replace(string(s[startToken+1:i]))))
 			state = 0
 		} else {
 			// otherwise: state change!
 			if state == 1 {
 				// finish Number
 				if f, err := strconv.ParseFloat(s[startToken:i], 64); err == nil {
-					result = append(result, float64(f))
+					result = append(result, NewFloat(f))
 				} else if s[startToken:i] == "-" {
-					result = append(result, Symbol("-"))
+					result = append(result, NewSymbol("-"))
 				} else {
-					result = append(result, Symbol("NaN"))
+					result = append(result, NewSymbol("NaN"))
 				}
 			}
 			if state == 2 {
 				// finish Symbol
-				result = append(result, Symbol(s[startToken:i]))
+				result = append(result, NewSymbol(s[startToken:i]))
 			}
 			// now detect what to parse next
 			startToken = i
 			if ch == '(' {
-				//result = append(result, Symbol("("))
-				result = append(result, SourceInfo{source, line, col, Symbol("(")})
+				result = append(result, NewSourceInfo(SourceInfo{source, line, col, NewSymbol("(")}))
 				state = 0
 			} else if ch == ')' {
-				result = append(result, Symbol(")"))
+				result = append(result, NewSymbol(")"))
 				state = 0
 			} else if ch == '\'' {
-				result = append(result, Symbol("'"))
+				result = append(result, NewSymbol("'"))
 				state = 0
 			} else if ch == '"' {
 				// start string
@@ -241,16 +242,16 @@ func tokenize(source, s string) []Scmer {
 	if state == 1 {
 		// finish Number
 		if f, err := strconv.ParseFloat(s[startToken:], 64); err == nil {
-			result = append(result, float64(f))
+			result = append(result, NewFloat(f))
 		} else if s[startToken:] == "-" {
-			result = append(result, Symbol("-"))
+			result = append(result, NewSymbol("-"))
 		} else {
-			result = append(result, Symbol("NaN"))
+			result = append(result, NewSymbol("NaN"))
 		}
 	}
 	if state == 2 {
 		// finish Symbol
-		result = append(result, Symbol(s[startToken:]))
+		result = append(result, NewSymbol(s[startToken:]))
 	}
 	return result
 }

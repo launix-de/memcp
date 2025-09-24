@@ -16,7 +16,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package scm
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 func EqualScm(a, b Scmer) Scmer { return NewBool(Equal(a, b)) }
 
@@ -111,6 +114,11 @@ func Equal(a, b Scmer) bool {
 		if len(a.Vector()) == 0 {
 			return !b.Bool()
 		}
+	case tagFunc:
+		if tb == tagFunc {
+			return a.Func() == b.Func()
+		}
+		return false
 	case tagAny:
 		return a.Any() == b.Any()
 	}
@@ -203,6 +211,11 @@ func EqualSQL(a, b Scmer) Scmer {
 		if len(a.Vector()) == 0 {
 			return NewBool(!b.Bool())
 		}
+	case tagFunc:
+		if tb == tagFunc {
+			return NewBool(a.Func() == b.Func())
+		}
+		return NewBool(false)
 	case tagAny:
 		return NewBool(a.Any() == b.Any())
 	}
@@ -245,6 +258,8 @@ func Less(a, b Scmer) bool {
 		}
 	case tagBool:
 		return a.Int() < b.Int()
+	case tagFunc:
+		return fmt.Sprintf("%p", a.Func()) < fmt.Sprintf("%p", b.Func())
 	case tagAny:
 		return strings.Compare(a.String(), b.String()) < 0
 	default:

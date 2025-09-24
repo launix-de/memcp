@@ -26,76 +26,6 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import "math"
-import "strconv"
-
-//go:inline
-func ToBool(v Scmer) bool {
-	switch v2 := v.(type) {
-	case nil:
-		return false
-	case string:
-		return v2 != ""
-	case float64:
-		return v2 != 0.0
-	case int64:
-		return v2 != 0
-	case bool:
-		return v2
-	case Symbol:
-		return v2 != Symbol("false") && v2 != Symbol("nil")
-	case []Scmer:
-		return len(v2) > 0
-	default:
-		// native function, lambdas
-		return true
-	}
-}
-
-//go:inline
-func ToInt(v Scmer) int {
-	switch vv := v.(type) {
-	case nil:
-		return 0
-	case string:
-		x, _ := strconv.Atoi(vv)
-		return x
-	case float64:
-		return int(vv)
-	case int64:
-		return int(vv)
-	case bool:
-		if vv {
-			return 1
-		} else {
-			return 0
-		}
-	default:
-		// []Scmer, native function, lambdas
-		return 1
-	}
-}
-
-//go:inline
-func ToFloat(v Scmer) float64 {
-	switch vv := v.(type) {
-	case string:
-		x, _ := strconv.ParseFloat(vv, 64)
-		return x
-	case float64:
-		return vv
-	case int64:
-		return float64(vv)
-	case bool:
-		if vv {
-			return 1.0
-		} else {
-			return 0.0
-		}
-	default:
-		// nil, []Scmer, native function, lambdas
-		return 0.0
-	}
-}
 
 func init_alu() {
 	// string functions
@@ -107,9 +37,8 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
-		func(a ...Scmer) (result Scmer) {
-			_, ok2 := a[0].(int64)
-			return ok2
+		func(a ...Scmer) Scmer {
+			return NewBool(auxTag(a[0].aux) == tagInt)
 		},
 		true,
 	})
@@ -119,13 +48,9 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
-		func(a ...Scmer) (result Scmer) {
-			_, ok := a[0].(float64)
-			if ok {
-				return true
-			}
-			_, ok2 := a[0].(int64)
-			return ok2
+		func(a ...Scmer) Scmer {
+			tag := auxTag(a[0].aux)
+			return NewBool(tag == tagFloat || tag == tagInt)
 		},
 		true,
 	})
@@ -136,32 +61,31 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values to add"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			// Return nil if any argument is nil
-			for _, i := range a {
-				if i == nil {
-					return nil
+			// Fast path: accumulate ints until first non-int, then promote to float if needed
+			var sumInt int64
+			i := 0
+			for i < len(a) {
+				v := a[i]
+				if v.IsInt() {
+					sumInt += v.Int()
+					i++
+					continue
 				}
+				break
 			}
-			// Fast path: if all args are int64, keep result as int64
-			allInts := true
-			sumInt := int64(0)
-			for _, i := range a {
-				if v, ok := i.(int64); ok {
-					sumInt += v
-				} else {
-					allInts = false
-					break
+			if i == len(a) {
+				return NewInt(sumInt)
+			}
+			// Promote to float and continue
+			sumFloat := float64(sumInt)
+			for ; i < len(a); i++ {
+				v := a[i]
+				if v.IsNil() {
+					return NewNil()
 				}
+				sumFloat += v.Float()
 			}
-			if allInts {
-				return sumInt
-			}
-			// Fallback: accumulate as float64 for mixed types
-			sumFloat := float64(0)
-			for _, i := range a {
-				sumFloat += ToFloat(i)
-			}
-			return sumFloat
+			return NewFloat(sumFloat)
 		},
 		true,
 	})
@@ -172,35 +96,35 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			// Return nil if any argument is nil
+			// Nil short-circuit
 			for _, v := range a {
-				if v == nil {
-					return nil
+				if v.IsNil() {
+					return NewNil()
 				}
 			}
-			// If all args are ints, keep int64
-			allInts := true
-			diffInt := int64(0)
-			if v0, ok := a[0].(int64); ok {
-				diffInt = v0
-				for _, i := range a[1:] {
-					if vv, ok := i.(int64); ok {
-						diffInt -= vv
-					} else {
-						allInts = false
-						break
-					}
+			// Int-first, then promote to float if needed
+			if a[0].IsInt() {
+				diffInt := a[0].Int()
+				i := 1
+				for i < len(a) && a[i].IsInt() {
+					diffInt -= a[i].Int()
+					i++
 				}
-				if allInts {
-					return diffInt
+				if i == len(a) {
+					return NewInt(diffInt)
 				}
+				diffFloat := float64(diffInt)
+				for ; i < len(a); i++ {
+					diffFloat -= a[i].Float()
+				}
+				return NewFloat(diffFloat)
 			}
-			// Fallback to float arithmetic
-			diffFloat := ToFloat(a[0])
-			for _, i := range a[1:] {
-				diffFloat -= ToFloat(i)
+			// Float mode from the start
+			diffFloat := a[0].Float()
+			for i := 1; i < len(a); i++ {
+				diffFloat -= a[i].Float()
 			}
-			return diffFloat
+			return NewFloat(diffFloat)
 		},
 		true,
 	})
@@ -211,35 +135,39 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			// Return nil if any argument is nil
+			// Nil short-circuit (SQL-style): if any arg is nil, result is nil
 			for _, v := range a {
-				if v == nil {
-					return nil
+				if v.IsNil() {
+					return NewNil()
 				}
 			}
-			// If all args are ints, keep int64
-			allInts := true
+			// Try integer mode: treat float operands with zero fractional part as integers
 			prodInt := int64(1)
-			if v0, ok := a[0].(int64); ok {
-				prodInt = v0
-				for _, i := range a[1:] {
-					if vv, ok := i.(int64); ok {
-						prodInt *= vv
-					} else {
-						allInts = false
-						break
+			i := 0
+			for ; i < len(a); i++ {
+				v := a[i]
+				if v.IsInt() {
+					prodInt *= v.Int()
+					continue
+				}
+				if v.IsFloat() {
+					f := v.Float()
+					if f == math.Trunc(f) {
+						prodInt *= int64(f)
+						continue
 					}
 				}
-				if allInts {
-					return prodInt
-				}
+				break // non-integer number encountered -> switch to float mode
 			}
-			// Fallback to float arithmetic
-			prodFloat := ToFloat(a[0])
-			for _, i := range a[1:] {
-				prodFloat *= ToFloat(i)
+			if i == len(a) {
+				return NewInt(prodInt)
 			}
-			return prodFloat
+			// Float mode: include any prior integer product and continue in float
+			prodFloat := float64(prodInt)
+			for ; i < len(a); i++ {
+				prodFloat *= a[i].Float()
+			}
+			return NewFloat(prodFloat)
 		},
 		true,
 	})
@@ -250,17 +178,17 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			// Return nil if any argument is nil
+			// Nil short-circuit
 			for _, v := range a {
-				if v == nil {
-					return nil
+				if v.IsNil() {
+					return NewNil()
 				}
 			}
-			v := ToFloat(a[0])
+			v := a[0].Float()
 			for _, i := range a[1:] {
-				v /= ToFloat(i)
+				v /= i.Float()
 			}
-			return v
+			return NewFloat(v)
 		},
 		true,
 	})
@@ -271,7 +199,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !Less(a[1], a[0])
+			return NewBool(!Less(a[1], a[0]))
 		},
 		true,
 	})
@@ -282,7 +210,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return Less(a[0], a[1])
+			return NewBool(Less(a[0], a[1]))
 		},
 		true,
 	})
@@ -293,7 +221,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return Less(a[1], a[0])
+			return NewBool(Less(a[1], a[0]))
 		},
 		true,
 	})
@@ -304,7 +232,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !Less(a[0], a[1])
+			return NewBool(!Less(a[0], a[1]))
 		},
 		true,
 	})
@@ -315,7 +243,7 @@ func init_alu() {
 			DeclarationParameter{"value...", "any", "values"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return Equal(a[0], a[1])
+			return NewBool(Equal(a[0], a[1]))
 		},
 		true,
 	})
@@ -337,7 +265,7 @@ func init_alu() {
 			DeclarationParameter{"value", "bool", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !ToBool(a[0])
+			return NewBool(!a[0].Bool())
 		},
 		true,
 	})
@@ -348,7 +276,7 @@ func init_alu() {
 			DeclarationParameter{"value", "bool", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return !ToBool(a[0])
+			return NewBool(!a[0].Bool())
 		},
 		true,
 	})
@@ -359,7 +287,7 @@ func init_alu() {
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return a[0] == nil
+			return NewBool(a[0].IsNil())
 		},
 		true,
 	})
@@ -369,15 +297,16 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "number|string", "value"},
 		}, "number|string",
-		func(a ...Scmer) (result Scmer) {
+		func(a ...Scmer) Scmer {
+			var result Scmer
 			for _, v := range a {
-				if result == nil {
+				if result.IsNil() {
 					result = v
-				} else if v != nil && Less(v, result) {
+				} else if !v.IsNil() && Less(v, result) {
 					result = v
 				}
 			}
-			return
+			return result
 		},
 		true,
 	})
@@ -387,15 +316,16 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "number|string", "value"},
 		}, "number|string",
-		func(a ...Scmer) (result Scmer) {
+		func(a ...Scmer) Scmer {
+			var result Scmer
 			for _, v := range a {
-				if result == nil {
+				if result.IsNil() {
 					result = v
-				} else if v != nil && Less(result, v) {
+				} else if !v.IsNil() && Less(result, v) {
 					result = v
 				}
 			}
-			return
+			return result
 		},
 		true,
 	})
@@ -405,8 +335,8 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "number", "value"},
 		}, "number",
-		func(a ...Scmer) (result Scmer) {
-			return math.Floor(ToFloat(a[0]))
+		func(a ...Scmer) Scmer {
+			return NewFloat(math.Floor(a[0].Float()))
 		},
 		true,
 	})
@@ -416,8 +346,8 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "number", "value"},
 		}, "number",
-		func(a ...Scmer) (result Scmer) {
-			return math.Ceil(ToFloat(a[0]))
+		func(a ...Scmer) Scmer {
+			return NewFloat(math.Ceil(a[0].Float()))
 		},
 		true,
 	})
@@ -427,8 +357,8 @@ func init_alu() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "number", "value"},
 		}, "number",
-		func(a ...Scmer) (result Scmer) {
-			return math.Round(ToFloat(a[0]))
+		func(a ...Scmer) Scmer {
+			return NewFloat(math.Round(a[0].Float()))
 		},
 		true,
 	})
