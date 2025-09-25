@@ -199,7 +199,7 @@ func init_list() {
 		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list of lists of items"},
+			DeclarationParameter{"list", "any", "list of lists of items"},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			lists := a
@@ -231,7 +231,7 @@ func init_list() {
 		"merge", "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list of lists of items"},
+			DeclarationParameter{"list", "any", "list of lists of items"},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			lists := a

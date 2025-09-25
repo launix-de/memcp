@@ -60,6 +60,9 @@ func scmerAsString(v Scmer) (string, bool) {
 }
 
 func valueFromPattern(pattern Scmer, en *Env) Scmer {
+	if pattern.IsSourceInfo() {
+		return valueFromPattern(pattern.SourceInfo().value, en)
+	}
 	switch v := pattern.Any().(type) {
 	case SourceInfo:
 		return valueFromPattern(v.value, en)
@@ -99,6 +102,9 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	 - (number? Symbol) will match if value is a number and put the value into Symbol
 	 - (list? Symbol) will match if value is a list and put the value into Symbol
 	*/
+	if pattern.IsSourceInfo() {
+		return match(val, pattern.SourceInfo().value, en)
+	}
 	switch p := pattern.Any().(type) {
 	case SourceInfo:
 		return match(val, p.value, en) // omit sourceinfo

@@ -242,11 +242,9 @@ func types_merge(given, newtype string) string {
 // panics if the code is bad (returns possible datatype, at least "any")
 func Validate(val Scmer, require string) string {
 	var source_info SourceInfo
-	if auxTag(val.aux) == tagAny {
-		if si, ok := val.Any().(SourceInfo); ok {
-			source_info = si
-			val = si.value
-		}
+	if val.IsSourceInfo() {
+		source_info = *val.SourceInfo()
+		val = source_info.value
 	}
 	switch auxTag(val.aux) {
 	case tagNil:
@@ -254,7 +252,10 @@ func Validate(val Scmer, require string) string {
 	case tagString:
 		return "string"
 	case tagSymbol:
-		return "symbol"
+		if val.SymbolEquals("true") || val.SymbolEquals("false") {
+			return "bool"
+		}
+		return "any"
 	case tagFloat:
 		return "number"
 	case tagInt:
@@ -265,6 +266,9 @@ func Validate(val Scmer, require string) string {
 		return "func"
 	case tagSlice:
 		slice := val.Slice()
+		if len(slice) == 0 {
+			return "list"
+		}
 		if len(slice) > 0 {
 			var def *Declaration
 			head := slice[0]
@@ -295,6 +299,10 @@ func Validate(val Scmer, require string) string {
 			skipFirst := slice[0].IsSymbol() && (slice[0].SymbolEquals("lambda") || slice[0].SymbolEquals("parser"))
 			returntype := ""
 			for i := 1; i < len(slice); i++ {
+				if def != nil && def.Name == "match" && i >= 2 && i%2 == 0 {
+					// pattern positions in (match) are not evaluated like regular function args; skip validation
+					continue
+				}
 				if i != 1 || !skipFirst {
 					subrequired := "any"
 					isReturntype := false
@@ -327,6 +335,7 @@ func Validate(val Scmer, require string) string {
 				}
 				return def.Returns
 			}
+			return "any"
 		}
 	case tagAny:
 		switch v := val.Any().(type) {

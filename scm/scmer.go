@@ -34,6 +34,11 @@ const (
 	goAllocOverhead     = uint(16)
 )
 
+const (
+	funcKindVariadic = uint64(0)
+	funcKindWithEnv  = uint64(1)
+)
+
 // ComputeSize allows Scmer to satisfy storages that expect Sizable.
 // It approximates the total memory consumption of the value including
 // the inline Scmer representation and any heap allocations the value
@@ -55,6 +60,7 @@ const (
 	tagFunc
 	tagProc
 	tagNthLocalVar
+	tagSourceInfo
 	tagAny
 	// custom tags >= 100
 )
@@ -120,7 +126,13 @@ func NewVector(vec []float64) Scmer {
 func NewFunc(fn func(...Scmer) Scmer) Scmer {
 	ptr := new(func(...Scmer) Scmer)
 	*ptr = fn
-	return Scmer{unsafe.Pointer(ptr), makeAux(tagFunc, 0)}
+	return Scmer{unsafe.Pointer(ptr), makeAux(tagFunc, funcKindVariadic)}
+}
+
+func NewEnvFunc(fn func(*Env, ...Scmer) Scmer) Scmer {
+	ptr := new(func(*Env, ...Scmer) Scmer)
+	*ptr = fn
+	return Scmer{unsafe.Pointer(ptr), makeAux(tagFunc, funcKindWithEnv)}
 }
 
 func NewProcStruct(p Proc) Scmer {
@@ -139,6 +151,12 @@ func NewProc(p *Proc) Scmer {
 
 func NewNthLocalVar(idx NthLocalVar) Scmer {
 	return Scmer{unsafe.Pointer(uintptr(idx)), makeAux(tagNthLocalVar, 0)}
+}
+
+func NewSourceInfo(si SourceInfo) Scmer {
+	ptr := new(SourceInfo)
+	*ptr = si
+	return Scmer{unsafe.Pointer(ptr), makeAux(tagSourceInfo, 0)}
 }
 
 func NewAny(v any) Scmer {
@@ -189,6 +207,8 @@ func FromAny(v any) Scmer {
 		return NewVector(vv)
 	case func(...Scmer) Scmer:
 		return NewFunc(vv)
+	case func(*Env, ...Scmer) Scmer:
+		return NewEnvFunc(vv)
 	case Proc:
 		return NewProcStruct(vv)
 	case *Proc:
@@ -196,6 +216,13 @@ func FromAny(v any) Scmer {
 			return NewProc(nil)
 		}
 		return NewProc(vv)
+	case SourceInfo:
+		return NewSourceInfo(vv)
+	case *SourceInfo:
+		if vv == nil {
+			return NewNil()
+		}
+		return NewSourceInfo(*vv)
 	default:
 		return NewAny(v)
 	}
@@ -415,6 +442,8 @@ func (s Scmer) String() string {
 		return "nil"
 	case tagFunc:
 		return "[func]"
+	case tagSourceInfo:
+		return s.SourceInfo().String()
 	default:
 		if auxTag(s.aux) == tagAny {
 			return fmt.Sprintf("%v", *(*any)(s.ptr))
@@ -440,10 +469,17 @@ func (s Scmer) Vector() []float64 {
 }
 
 func (s Scmer) Func() func(...Scmer) Scmer {
-	if auxTag(s.aux) != tagFunc {
+	if auxTag(s.aux) != tagFunc || auxVal(s.aux) != funcKindVariadic {
 		panic("not function")
 	}
 	return *(*func(...Scmer) Scmer)(s.ptr)
+}
+
+func (s Scmer) EnvFunc() func(*Env, ...Scmer) Scmer {
+	if auxTag(s.aux) != tagFunc || auxVal(s.aux) != funcKindWithEnv {
+		panic("not environment function")
+	}
+	return *(*func(*Env, ...Scmer) Scmer)(s.ptr)
 }
 
 func (s Scmer) IsProc() bool { return auxTag(s.aux) == tagProc }
@@ -462,6 +498,15 @@ func (s Scmer) NthLocalVar() NthLocalVar {
 		panic("not nth local var")
 	}
 	return NthLocalVar(uintptr(s.ptr))
+}
+
+func (s Scmer) IsSourceInfo() bool { return auxTag(s.aux) == tagSourceInfo }
+
+func (s Scmer) SourceInfo() *SourceInfo {
+	if auxTag(s.aux) != tagSourceInfo {
+		panic("not source info")
+	}
+	return (*SourceInfo)(s.ptr)
 }
 
 // Symbol returns the Scheme symbol value as Go string.
@@ -492,11 +537,16 @@ func (s Scmer) Any() any {
 	case tagVector:
 		return s.Vector()
 	case tagFunc:
+		if auxVal(s.aux) == funcKindWithEnv {
+			return s.EnvFunc()
+		}
 		return s.Func()
 	case tagProc:
 		return s.Proc()
 	case tagNthLocalVar:
 		return s.NthLocalVar()
+	case tagSourceInfo:
+		return *s.SourceInfo()
 	case tagAny:
 		return *(*any)(s.ptr)
 	default:

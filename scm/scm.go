@@ -34,6 +34,9 @@ import (
 )
 
 func symbolName(v Scmer) (string, bool) {
+	if v.IsSourceInfo() {
+		return symbolName(v.SourceInfo().value)
+	}
 	if auxTag(v.aux) == tagSymbol {
 		return v.String(), true
 	}
@@ -53,6 +56,9 @@ func mustSymbol(v Scmer) Symbol {
 }
 
 func mustNthLocalVar(v Scmer) NthLocalVar {
+	if v.IsSourceInfo() {
+		return mustNthLocalVar(v.SourceInfo().value)
+	}
 	if auxTag(v.aux) == tagAny {
 		if idx, ok := v.Any().(NthLocalVar); ok {
 			return idx
@@ -104,6 +110,8 @@ restart:
 		return NewFloat(v)
 	case Proc:
 		return NewAny(v)
+	case *Proc:
+		return NewProc(v)
 	case *ScmParser:
 		return NewAny(v)
 	case func(...Scmer) Scmer:
@@ -217,10 +225,14 @@ restart:
 				return NewNil()
 			case "define", "set":
 				val := Eval(list[2], en)
-				for en.Nodefine {
-					en = en.Outer
+				target := en
+				for target != nil && target.Nodefine {
+					target = target.Outer
 				}
-				en.Vars[mustSymbol(list[1])] = val
+				if target == nil {
+					target = &Globalenv
+				}
+				target.Vars[mustSymbol(list[1])] = val
 				return val
 			case "setN":
 				val := Eval(list[2], en)
@@ -236,7 +248,9 @@ restart:
 				return NewAny(NewParser(list[1], NewNil(), NewNil(), en, false))
 			case "lambda":
 				params := list[1]
-				if auxTag(params.aux) == tagAny {
+				if params.IsSourceInfo() {
+					params = params.SourceInfo().value
+				} else if auxTag(params.aux) == tagAny {
 					if si, ok := params.Any().(SourceInfo); ok {
 						params = si.value
 					}
@@ -316,46 +330,11 @@ restart:
 			}
 			return p.Execute(String(Eval(operands[0], en)), en)
 		case Proc:
-			en2 := Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
-			switch params := p.Params.Any().(type) {
-			case []Scmer:
-				if len(params) < len(operands) {
-					panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
-				}
-				if p.NumVars > 0 {
-					for i, _ := range params {
-						if i < len(operands) {
-							en2.VarsNumbered[i] = Eval(operands[i], en)
-						}
-					}
-				} else {
-					for i, param := range params {
-						if !param.SymbolEquals("_") {
-							if i < len(operands) {
-								en2.Vars[mustSymbol(param)] = Eval(operands[i], en)
-							} else {
-								en2.Vars[mustSymbol(param)] = NewNil()
-							}
-						}
-					}
-				}
-			case Symbol:
-				args := make([]Scmer, len(operands))
-				for i, x := range operands {
-					args[i] = Eval(x, en)
-				}
-				argsList := NewSlice(args)
-				if p.NumVars > 0 {
-					en2.VarsNumbered[0] = argsList
-				} else {
-					en2.Vars[params] = argsList
-				}
-			case nil:
-				// no arguments
-			default:
-			}
-			en = &en2
-			expression = p.Body
+			proc := p
+			en, expression = prepareProcCall(&proc, operands, en)
+			goto restart // tail call optimized
+		case *Proc:
+			en, expression = prepareProcCall(p, operands, en)
 			goto restart // tail call optimized
 		case []Scmer: // associative list
 			// format: (key value key value ... default)
@@ -396,26 +375,121 @@ restart:
 	return
 }
 
-func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
-	switch p := procedure.Any().(type) {
-	case Proc:
-		switch params := p.Params.Any().(type) {
-		case []Scmer:
-			new_params := make([]Scmer, len(params))
-			for i, sym := range params {
-				symName := mustSymbol(sym)
-				for j := 0; j < len(args); j += 2 {
-					if args[j].String() == string(symName) {
-						new_params[i] = args[j+1]
+func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
+	if p == nil {
+		panic("apply: nil procedure")
+	}
+	proc := *p
+	env := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
+	switch params := proc.Params.Any().(type) {
+	case []Scmer:
+		if len(params) < len(operands) {
+			panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
+		}
+		if proc.NumVars > 0 {
+			for i := range params {
+				if i < len(operands) {
+					env.VarsNumbered[i] = Eval(operands[i], caller)
+				}
+			}
+		} else {
+			for i, param := range params {
+				if !param.SymbolEquals("_") {
+					if i < len(operands) {
+						env.Vars[mustSymbol(param)] = Eval(operands[i], caller)
+					} else {
+						env.Vars[mustSymbol(param)] = NewNil()
 					}
 				}
 			}
-			return Apply(procedure, new_params...)
-		default:
-			panic("apply_assoc cannot run on non-list parameters")
 		}
+	case Symbol:
+		args := make([]Scmer, len(operands))
+		for i, operand := range operands {
+			args[i] = Eval(operand, caller)
+		}
+		argsList := NewSlice(args)
+		if proc.NumVars > 0 {
+			env.VarsNumbered[0] = argsList
+		} else {
+			env.Vars[params] = argsList
+		}
+	case nil:
+		// no arguments to bind
+	default:
+		panic("proc parameters must be list, symbol, or nil")
+	}
+	return env, proc.Body
+}
+
+func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
+	if p == nil {
+		panic("apply: nil procedure")
+	}
+	proc := *p
+	env := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
+	switch params := proc.Params.Any().(type) {
+	case []Scmer:
+		if proc.NumVars > 0 {
+			for i := range params {
+				if i < len(args) {
+					env.VarsNumbered[i] = args[i]
+				}
+			}
+		} else {
+			for i, param := range params {
+				if !param.SymbolEquals("_") {
+					if i < len(args) {
+						env.Vars[mustSymbol(param)] = args[i]
+					} else {
+						env.Vars[mustSymbol(param)] = NewNil()
+					}
+				}
+			}
+		}
+	case Symbol:
+		argsList := NewSlice(args)
+		if proc.NumVars > 0 {
+			env.VarsNumbered[0] = argsList
+		} else {
+			env.Vars[params] = argsList
+		}
+	case nil:
+		// no arguments to bind
+	default:
+		panic("proc parameters must be list, symbol, or nil")
+	}
+	return env, proc.Body
+}
+
+func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
+	var proc *Proc
+	switch p := procedure.Any().(type) {
+	case Proc:
+		copy := p
+		proc = &copy
+	case *Proc:
+		proc = p
 	default:
 		panic("apply_assoc cannot run on non-lambdas")
+	}
+	if proc == nil {
+		panic("apply_assoc cannot run on nil lambdas")
+	}
+	switch params := proc.Params.Any().(type) {
+	case []Scmer:
+		newParams := make([]Scmer, len(params))
+		for i, sym := range params {
+			symName := mustSymbol(sym)
+			for j := 0; j < len(args); j += 2 {
+				if args[j].String() == string(symName) {
+					newParams[i] = args[j+1]
+				}
+			}
+		}
+		return Apply(procedure, newParams...)
+	default:
+		panic("apply_assoc cannot run on non-list parameters")
 	}
 }
 
@@ -435,32 +509,12 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		}
 		return p.Execute(String(args[0]), en)
 	case Proc:
-		en := &Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
-		switch params := p.Params.Any().(type) {
-		case []Scmer:
-			if p.NumVars > 0 {
-				for i, _ := range params {
-					if i < len(args) {
-						en.VarsNumbered[i] = args[i]
-					}
-				}
-			} else {
-				for i, param := range params {
-					if !param.SymbolEquals("_") && i < len(args) {
-						en.Vars[mustSymbol(param)] = args[i]
-					}
-				}
-			}
-		case Symbol:
-			argsList := NewSlice(args)
-			if p.NumVars > 0 {
-				en.VarsNumbered[0] = argsList
-			} else {
-				en.Vars[params] = argsList
-			}
-		case nil:
-		}
-		return Eval(p.Body, en)
+		proc := p
+		env, body := prepareProcCallWithArgs(&proc, args)
+		return Eval(body, env)
+	case *Proc:
+		env, body := prepareProcCallWithArgs(p, args)
+		return Eval(body, env)
 	case []Scmer: // associative list
 		// format: (key value key value ... default)
 		if idx, ok := args[0].Any().(NthLocalVar); ok {
@@ -842,7 +896,7 @@ Patterns can be any of:
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "returntype",
 		func(a ...Scmer) Scmer {
-			return NewAny(SourceInfo{
+			return NewSourceInfo(SourceInfo{
 				String(a[0]),
 				ToInt(a[1]),
 				ToInt(a[2]),
@@ -942,6 +996,14 @@ func ComputeSize(v Scmer) uint {
 		data := uint(len(vec)) * 8
 		sz += goAllocOverhead + align8(data)
 		return sz
+	case tagSourceInfo:
+		si := v.SourceInfo()
+		sz := base + goAllocOverhead
+		if si.source != "" {
+			sz += align8(uint(len(si.source)))
+		}
+		sz += ComputeSize(si.value)
+		return sz
 	case tagAny:
 		payload := v.Any()
 		return base + goAllocOverhead + computeGoPayload(payload)
@@ -973,6 +1035,23 @@ func computeGoPayload(val any) uint {
 		for _, elem := range v {
 			sz += ComputeSize(elem)
 		}
+		return sz
+	case SourceInfo:
+		sz := goAllocOverhead
+		if v.source != "" {
+			sz += align8(uint(len(v.source)))
+		}
+		sz += ComputeSize(v.value)
+		return sz
+	case *SourceInfo:
+		if v == nil {
+			return 0
+		}
+		sz := goAllocOverhead
+		if v.source != "" {
+			sz += align8(uint(len(v.source)))
+		}
+		sz += ComputeSize(v.value)
 		return sz
 	case [][]Scmer:
 		if len(v) == 0 {

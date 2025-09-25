@@ -67,11 +67,9 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 	// pop first element from tokens
 	token := (*tokens)[0]
 	*tokens = (*tokens)[1:]
-	if auxTag(token.aux) == tagAny {
-		if t, ok := token.Any().(SourceInfo); ok {
-			source_info = t
-			token = t.value
-		}
+	if token.IsSourceInfo() {
+		source_info = *token.SourceInfo()
+		token = source_info.value
 	}
 	if token.IsSymbol() {
 		sym := token.String()
@@ -85,18 +83,16 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 				if next.IsSymbol() && next.String() == ")" {
 					*tokens = (*tokens)[1:]
 					source_info.value = NewSlice(L)
-					return NewAny(source_info)
+					return NewSourceInfo(source_info)
 				}
 				L = append(L, readFrom(tokens))
 			}
 		}
 		if sym == "'" && len(*tokens) > 0 {
 			next := (*tokens)[0]
-			if auxTag(next.aux) == tagAny {
-				if t, ok := next.Any().(SourceInfo); ok {
-					source_info = t
-					next = t.value
-				}
+			if next.IsSourceInfo() {
+				source_info = *next.SourceInfo()
+				next = source_info.value
 			}
 			if next.IsSymbol() && next.String() == "(" {
 				*tokens = (*tokens)[1:]
@@ -116,7 +112,7 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 				listForm := NewSlice(L)
 				if source_info.source != "" {
 					source_info.value = listForm
-					return NewAny(source_info)
+					return NewSourceInfo(source_info)
 				}
 				return listForm
 			}
@@ -127,7 +123,7 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 			quoteForm := NewSlice(quoteElems)
 			if source_info.source != "" {
 				source_info.value = quoteForm
-				return NewAny(source_info)
+				return NewSourceInfo(source_info)
 			}
 			return quoteForm
 		}
@@ -218,7 +214,7 @@ func tokenize(source, s string) []Scmer {
 			// now detect what to parse next
 			startToken = i
 			if ch == '(' {
-				result = append(result, NewAny(SourceInfo{source, line, col, NewSymbol("(")}))
+				result = append(result, NewSourceInfo(SourceInfo{source, line, col, NewSymbol("(")}))
 				state = 0
 			} else if ch == ')' {
 				result = append(result, NewSymbol(")"))

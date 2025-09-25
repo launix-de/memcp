@@ -16,61 +16,545 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package scm
 
-// NOTE: The original optimizer relied on the interface-based Scmer type. To
-// keep the build working while the runtime is being ported to the new tagged
-// representation we provide minimal stubs that keep previous entry points but
-// no longer perform aggressive rewrites. When optimisation logic is migrated
-// it can replace these helpers.
-
 var SettingsHaveGoodBacktraces bool
 
-// OptimizeProcToSerialFunction returns a callable suitable for repeated use.
-// For already optimised functions we unwrap the underlying Go function. For
-// other values we fall back to calling Apply so behaviour stays consistent.
+// to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
 func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
-	if val.IsNil() {
+	if val.IsNil() || (val.ptr == nil && val.aux == 0) {
 		return func(...Scmer) Scmer { return NewNil() }
 	}
-
-	switch auxTag(val.aux) {
-	case tagFunc:
+	if auxTag(val.aux) == tagFunc {
 		return val.Func()
-	case tagAny:
+	}
+	if auxTag(val.aux) == tagAny {
 		if fn, ok := val.Any().(func(...Scmer) Scmer); ok {
 			return fn
 		}
-		if proc, ok := val.Any().(Proc); ok {
+	}
+
+	var proc *Proc
+	switch auxTag(val.aux) {
+	case tagProc:
+		proc = val.Proc()
+	case tagAny:
+		switch pv := val.Any().(type) {
+		case Proc:
+			copy := pv
+			proc = &copy
+		case *Proc:
+			proc = pv
+		}
+	}
+	if proc == nil {
+		captured := val
+		return func(args ...Scmer) Scmer { return Apply(captured, args...) }
+	}
+	p := *proc
+
+	// constant body
+	switch auxTag(p.Body.aux) {
+	case tagNil, tagBool, tagInt, tagFloat, tagString:
+		constant := p.Body
+		return func(...Scmer) Scmer { return constant }
+	}
+
+	en := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, p.NumVars), Outer: p.En, Nodefine: false}
+	params := p.Params
+	if stripped, ok := scmerStripSourceInfo(params); ok {
+		params = stripped
+	}
+	if params.IsSlice() {
+		paramSlice := params.Slice()
+		if p.NumVars > 0 {
 			return func(args ...Scmer) Scmer {
-				return Apply(NewAny(proc), args...)
+				for i := 0; i < p.NumVars; i++ {
+					if i < len(args) {
+						en.VarsNumbered[i] = args[i]
+					} else {
+						en.VarsNumbered[i] = NewNil()
+					}
+				}
+				return Eval(p.Body, en)
+			}
+		}
+		return func(args ...Scmer) Scmer {
+			for i, param := range paramSlice {
+				if stripped, ok := scmerStripSourceInfo(param); ok {
+					param = stripped
+				}
+				if !param.IsSymbol() || param.SymbolEquals("_") {
+					continue
+				}
+				sym := mustSymbol(param)
+				if i < len(args) {
+					en.Vars[sym] = args[i]
+				} else {
+					en.Vars[sym] = NewNil()
+				}
+			}
+			return Eval(p.Body, en)
+		}
+	}
+	if params.IsSymbol() {
+		sym := mustSymbol(params)
+		if p.NumVars > 0 {
+			return func(args ...Scmer) Scmer {
+				en.VarsNumbered[0] = NewSlice(args)
+				return Eval(p.Body, en)
+			}
+		}
+		return func(args ...Scmer) Scmer {
+			en.Vars[sym] = NewSlice(args)
+			return Eval(p.Body, en)
+		}
+	}
+	return func(args ...Scmer) Scmer {
+		return Eval(p.Body, en)
+	}
+}
+
+// do preprocessing and optimization (Optimize is allowed to edit the value in-place)
+func Optimize(val Scmer, env *Env) Scmer {
+	ome := newOptimizerMetainfo()
+	v, _, _ := OptimizeEx(val, env, &ome, true)
+	return v
+}
+
+type optimizerMetainfo struct {
+	variableReplacement map[Symbol]Scmer
+	setBlacklist        []Symbol
+}
+
+func newOptimizerMetainfo() (result optimizerMetainfo) {
+	result.variableReplacement = make(map[Symbol]Scmer)
+	return
+}
+func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
+	result.variableReplacement = make(map[Symbol]Scmer)
+	for k, v := range ome.variableReplacement {
+		result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
+	}
+	result.setBlacklist = ome.setBlacklist
+	return
+}
+
+func scmerIsSymbol(v Scmer, name string) bool {
+	if s, ok := symbolName(v); ok {
+		return s == name
+	}
+	return false
+}
+
+func scmerSymbol(v Scmer) (Symbol, bool) {
+	if s, ok := symbolName(v); ok {
+		return Symbol(s), true
+	}
+	return "", false
+}
+
+func scmerStripSourceInfo(v Scmer) (Scmer, bool) {
+	if v.IsSourceInfo() {
+		si := v.SourceInfo()
+		return si.value, true
+	}
+	if auxTag(v.aux) == tagAny {
+		if si, ok := v.Any().(SourceInfo); ok {
+			return si.value, true
+		}
+	}
+	return v, false
+}
+
+func scmerSlice(v Scmer) ([]Scmer, bool) {
+	if v.IsSlice() {
+		return v.Slice(), true
+	}
+	if stripped, ok := scmerStripSourceInfo(v); ok {
+		return scmerSlice(stripped)
+	}
+	if auxTag(v.aux) == tagAny {
+		if slice, ok := v.Any().([]Scmer); ok {
+			return slice, true
+		}
+	}
+	return nil, false
+}
+func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
+	if val.ptr == nil && val.aux == 0 {
+		return NewNil(), true, true
+	}
+
+	switch auxTag(val.aux) {
+	case tagNil, tagBool, tagInt, tagFloat, tagString:
+		return val, true, true
+	case tagSymbol:
+		sym := mustSymbol(val)
+		if replacement, ok := ome.variableReplacement[sym]; ok {
+			return OptimizeEx(replacement, env, ome, useResult)
+		}
+		return val, true, false
+	case tagSlice:
+		return optimizeList(val.Slice(), env, ome, useResult)
+	case tagSourceInfo:
+		si := *val.SourceInfo()
+		if SettingsHaveGoodBacktraces {
+			result, transferOwnership, isConstant = OptimizeEx(si.value, env, ome, useResult)
+			if isConstant {
+				return result, transferOwnership, true
+			}
+			si.value = result
+			return NewSourceInfo(si), transferOwnership, false
+		}
+		return OptimizeEx(si.value, env, ome, useResult)
+	case tagAny:
+		payload := val.Any()
+		switch pv := payload.(type) {
+		case SourceInfo:
+			if SettingsHaveGoodBacktraces {
+				result, transferOwnership, isConstant = OptimizeEx(pv.value, env, ome, useResult)
+				if isConstant {
+					return result, transferOwnership, true
+				}
+				pv.value = result
+				return NewSourceInfo(pv), transferOwnership, false
+			}
+			return OptimizeEx(pv.value, env, ome, useResult)
+		case Symbol:
+			return OptimizeEx(NewSymbol(string(pv)), env, ome, useResult)
+		case []Scmer:
+			return OptimizeEx(NewSlice(pv), env, ome, useResult)
+		case Scmer:
+			return OptimizeEx(pv, env, ome, useResult)
+		default:
+			switch v := pv.(type) {
+			case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string:
+				return FromAny(v), true, true
+			}
+			return val, transferOwnership, false
+		}
+	default:
+		return val, transferOwnership, false
+	}
+}
+
+func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
+	if len(v) == 0 {
+		return NewSlice(v), transferOwnership, false
+	}
+
+	headSym, headOk := scmerSymbol(v[0])
+
+	if headOk && headSym == Symbol("outer") && len(v) == 2 {
+		inner, transferOwnership, isConstant := OptimizeEx(v[1], env, ome, useResult)
+		if isConstant {
+			return inner, true, true
+		}
+		v[1] = inner
+		return NewSlice(v), transferOwnership, false
+	}
+
+	if headOk && headSym == Symbol("begin") {
+		usedVariables := make(map[Symbol]int)
+		variableContent := make(map[Symbol]Scmer)
+		var visitNode func(x Scmer, depth int, blacklist []Symbol)
+		visitNode = func(x Scmer, depth int, blacklist []Symbol) {
+			if stripped, ok := scmerStripSourceInfo(x); ok {
+				x = stripped
+			}
+			if sub, ok := scmerSlice(x); ok && len(sub) > 0 {
+				subHead, subHeadOk := scmerSymbol(sub[0])
+				if subHeadOk && (subHead == Symbol("define") || subHead == Symbol("set")) {
+					visitNode(sub[2], depth, blacklist)
+					if sym, ok := scmerSymbol(sub[1]); ok {
+						variableContent[sym] = sub[2]
+					}
+				} else if subHeadOk && subHead == Symbol("lambda") {
+					params := sub[1]
+					if stripped, ok := scmerStripSourceInfo(params); ok {
+						params = stripped
+					}
+					if sym, ok := scmerSymbol(params); ok {
+						visitNode(sub[2], depth+1, append(append([]Symbol{}, blacklist...), sym))
+					} else if list, ok := scmerSlice(params); ok {
+						blacklist2 := append([]Symbol{}, blacklist...)
+						for _, entry := range list {
+							if s, ok := scmerSymbol(entry); ok {
+								blacklist2 = append(blacklist2, s)
+							}
+						}
+						visitNode(sub[2], depth+1, blacklist2)
+					}
+				} else if !subHeadOk || subHead != Symbol("begin") {
+					for i := 1; i < len(sub); i++ {
+						visitNode(sub[i], depth+1, blacklist)
+					}
+				} else if subHead != Symbol("eval") {
+					usedVariables[Symbol("eval")] = 1
+					for i := 2; i < len(sub); i++ {
+						visitNode(sub[i], depth, blacklist)
+					}
+				} else {
+					for i := 1; i < len(sub); i++ {
+						visitNode(sub[i], depth, blacklist)
+					}
+				}
+				return
+			}
+			if sym, ok := scmerSymbol(x); ok {
+				isBlacklisted := false
+				for _, b := range blacklist {
+					if b == sym {
+						isBlacklisted = true
+						break
+					}
+				}
+				if !isBlacklisted {
+					if depth > 0 {
+						usedVariables[sym] = 100
+					} else {
+						usedVariables[sym] = usedVariables[sym] + 1
+					}
+				}
+			}
+		}
+		for i := 1; i < len(v); i++ {
+			visitNode(v[i], 0, nil)
+		}
+		ome2 := ome.Copy()
+		for sym, content := range variableContent {
+			if usedVariables[sym] < 2 || !content.IsSlice() {
+				delete(variableContent, sym)
+				delete(usedVariables, sym)
+				ome2.setBlacklist = append(ome2.setBlacklist, sym)
+				ome2.variableReplacement[sym] = content
+			}
+		}
+		if len(usedVariables) == 0 {
+			v[0] = NewSymbol("!begin")
+			for sym, content := range ome2.variableReplacement {
+				if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
+					ome2.variableReplacement[sym] = slice[1]
+				}
+			}
+		}
+		for i := 1; i < len(v); i++ {
+			var constant bool
+			v[i], transferOwnership, constant = OptimizeEx(v[i], env, &ome2, i == len(v)-1 && useResult)
+			if constant {
+				if i == len(v)-1 {
+					isConstant = true
+				} else {
+					v = append(v[:i], v[i+1:]...)
+					i--
+				}
+			}
+		}
+		if scmerIsSymbol(v[0], "!begin") && len(v) == 2 {
+			return OptimizeEx(v[1], env, &ome2, useResult)
+		}
+		return NewSlice(v), transferOwnership, isConstant
+	}
+
+	if headOk && headSym == Symbol("var") && len(v) == 2 {
+		return NewNthLocalVar(NthLocalVar(ToInt(v[1]))), false, false
+	}
+
+	if headOk && headSym == Symbol("unquote") && len(v) == 2 {
+		unquoted := v[1]
+		if stripped, ok := scmerStripSourceInfo(unquoted); ok {
+			unquoted = stripped
+		}
+		switch auxTag(unquoted.aux) {
+		case tagString:
+			return NewSymbol(unquoted.String()), true, false
+		case tagAny:
+			if s, ok := unquoted.Any().(string); ok {
+				return NewSymbol(s), true, false
 			}
 		}
 	}
 
-	// Fall back to dispatching through Apply; this keeps semantics identical
-	// while the optimiser is being ported.
-	return func(args ...Scmer) Scmer {
-		return Apply(val, args...)
+	if headOk && headSym == Symbol("lambda") {
+		params := v[1]
+		if stripped, ok := scmerStripSourceInfo(params); ok {
+			params = stripped
+		}
+		ome2 := ome.Copy()
+		if list, ok := scmerSlice(params); ok {
+			for _, param := range list {
+				if sym, ok := scmerSymbol(param); ok {
+					delete(ome2.variableReplacement, sym)
+				}
+			}
+		} else if sym, ok := scmerSymbol(params); ok {
+			delete(ome2.variableReplacement, sym)
+		}
+		v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
+		return NewSlice(v), transferOwnership, false
 	}
+
+	switch {
+	case headOk && (headSym == Symbol("set") || headSym == Symbol("define")) && len(v) == 3:
+		if sym, ok := scmerSymbol(v[1]); ok {
+			for _, black := range ome.setBlacklist {
+				if black == sym {
+					if useResult {
+						return ome.variableReplacement[sym], false, false
+					}
+					return NewNil(), true, true
+				}
+			}
+			if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() {
+				v[1] = repl
+			}
+		}
+		if v[1].IsNthLocalVar() {
+			v[0] = NewSymbol("setN")
+		}
+		v[2], transferOwnership, _ = OptimizeEx(v[2], env, ome, true)
+	case headOk && headSym == Symbol("match"):
+		v[1], transferOwnership, _ = OptimizeEx(v[1], env, ome, true)
+		for i := 3; i < len(v); i += 2 {
+			ome2 := ome.Copy()
+			v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2)
+			v[i], transferOwnership, _ = OptimizeEx(v[i], env, &ome2, useResult)
+		}
+		if len(v)%2 == 1 {
+			v[len(v)-1], transferOwnership, _ = OptimizeEx(v[len(v)-1], env, ome, useResult)
+		}
+		return NewSlice(v), transferOwnership, false
+	case headOk && headSym == Symbol("parser"):
+		return OptimizeParser(NewSlice(v), env, ome, false), true, false
+	case !headOk || headSym != Symbol("quote"):
+		allConstArgs := true
+		for i := 0; i < len(v); i++ {
+			var constant bool
+			v[i], transferOwnership, constant = OptimizeEx(v[i], env, ome, true)
+			if i > 0 && !constant {
+				allConstArgs = false
+			}
+		}
+		if scmerIsSymbol(v[0], "!begin") && allConstArgs {
+			return v[len(v)-1], true, true
+		}
+		if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
+			for i := range v {
+				if list, ok := scmerSlice(v[i]); ok && len(list) > 0 && (isList(list[0]) || scmerIsSymbol(list[0], "list")) {
+					v[i] = NewSlice(list[1:])
+				}
+			}
+			result, transferOwnership, isConstant = d.Fn(v[1:]...), true, true
+			if list, ok := scmerSlice(result); ok {
+				packed := make([]Scmer, 1, len(list)+1)
+				packed[0] = NewFunc(List)
+				packed = append(packed, list...)
+				result = NewSlice(packed)
+			}
+			return result, transferOwnership, isConstant
+		}
+		if scmerIsSymbol(v[0], "and") {
+			if len(v) == 2 {
+				return OptimizeEx(v[1], env, ome, useResult)
+			}
+			allTrue := true
+			for i := 1; i < len(v); i++ {
+				arg := v[i]
+				switch auxTag(arg.aux) {
+				case tagNil, tagBool, tagInt, tagFloat, tagString:
+					if !ToBool(arg) {
+						return NewBool(false), true, true
+					}
+					newArgs := append([]Scmer{}, v[:i]...)
+					newArgs = append(newArgs, v[i+1:]...)
+					return OptimizeEx(NewSlice(newArgs), env, ome, useResult)
+				default:
+					allTrue = false
+				}
+			}
+			if allTrue {
+				return NewBool(true), true, true
+			}
+			return NewSlice(v), transferOwnership, false
+		}
+	}
+
+	return NewSlice(v), transferOwnership, false
 }
 
-// Optimize currently acts as a no-op. The call sites expect the original
-// value back, so we simply return it unchanged.
-func Optimize(val Scmer, env *Env) Scmer {
+func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMetainfo, ome2 *optimizerMetainfo) Scmer {
+	if stripped, ok := scmerStripSourceInfo(pattern); ok {
+		pattern = stripped
+	}
+
+	if sym, ok := scmerSymbol(pattern); ok {
+		delete(ome2.variableReplacement, sym)
+		return pattern
+	}
+
+	if slice, ok := scmerSlice(pattern); ok {
+		if len(slice) == 0 {
+			return NewSlice(slice)
+		}
+		headSym, headOk := scmerSymbol(slice[0])
+		if headOk && headSym == Symbol("eval") && len(slice) > 1 {
+			slice[1], _, _ = OptimizeEx(slice[1], env, ome, true)
+			return NewSlice(slice)
+		}
+		if headOk && headSym == Symbol("var") && len(slice) == 2 {
+			return NewNthLocalVar(NthLocalVar(ToInt(slice[1])))
+		}
+		for i := 1; i < len(slice); i++ {
+			slice[i] = OptimizeMatchPattern(NewNil(), slice[i], env, ome, ome2)
+		}
+		return NewSlice(slice)
+	}
+
+	return pattern
+}
+
+func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) Scmer {
+	if stripped, ok := scmerStripSourceInfo(val); ok {
+		val = stripped
+	}
+
+	slice, ok := scmerSlice(val)
+	if !ok || len(slice) == 0 {
+		return val
+	}
+
+	headSym, headOk := scmerSymbol(slice[0])
+	if headOk && headSym == Symbol("parser") {
+		ign2 := ignoreResult
+		if len(slice) > 2 {
+			ign2 = true // result of parser can be ignored when expr is executed
+		}
+		ome2 := ome.Copy()
+		slice[1] = OptimizeParser(slice[1], env, &ome2, ign2) // syntax expr -> collect new variables
+		if len(slice) > 2 {
+			slice[2], _, _ = OptimizeEx(slice[2], env, &ome2, !ignoreResult) // generator expr -> use variables
+		}
+		if len(slice) > 3 {
+			slice[3], _, _ = OptimizeEx(slice[3], env, ome, true) // delimiter expr
+		}
+		val = NewSlice(slice)
+	} else if headOk && headSym == Symbol("define") {
+		slice[2] = OptimizeParser(slice[2], env, ome, false)
+		if sym, ok := scmerSymbol(slice[1]); ok {
+			if _, present := ome.variableReplacement[sym]; present {
+				delete(ome.variableReplacement, sym)
+			}
+		}
+		val = NewSlice(slice)
+	} else {
+		for i := 1; i < len(slice); i++ {
+			slice[i] = OptimizeParser(slice[i], env, ome, ignoreResult)
+		}
+		val = NewSlice(slice)
+	}
+
+	p := parseSyntax(val, env, ome, ignoreResult)
+	if p != nil {
+		return NewAny(p)
+	}
 	return val
 }
-
-// OptimizeEx mirrors the old signature but simply reports that the value is
-// unchanged and not a constant. This keeps the evaluator happy until the
-// optimiser is reintroduced.
-func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, bool, bool) {
-	return val, true, false
-}
-
-// optimizerMetainfo existed in the old implementation. We keep a tiny shell so
-// callers that manipulate it continue to compile, even though we do not use it
-// right now.
-type optimizerMetainfo struct{}
-
-func newOptimizerMetainfo() optimizerMetainfo { return optimizerMetainfo{} }
-
-func (ome *optimizerMetainfo) Copy() optimizerMetainfo { return optimizerMetainfo{} }

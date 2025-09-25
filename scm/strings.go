@@ -16,6 +16,7 @@ Copyright (C) 2023-2024  Carl-Philip Hänsch
 */
 package scm
 
+import "bytes"
 import "io"
 import "fmt"
 import "html"
@@ -26,14 +27,30 @@ import "encoding/json"
 import "encoding/base64"
 import "encoding/hex"
 import crand "crypto/rand"
+import "math/rand"
 import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
 import "sync"
 import "reflect"
+import "time"
 
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
 var collateRegistry sync.Map // map[uintptr]struct{Collation string; Reverse bool}
+
+var (
+	lastRandomBytes sync.Map // map[int][]byte
+	randOnce        sync.Once
+)
+
+func fillPseudoRandom(buf []byte) {
+	randOnce.Do(func() {
+		rand.Seed(time.Now().UnixNano())
+	})
+	for i := range buf {
+		buf[i] = byte(rand.Intn(256))
+	}
+}
 
 // LookupCollate returns (collation, reverse, ok) for a previously built collate closure.
 func LookupCollate(fn func(...Scmer) Scmer) (string, bool, bool) {
@@ -637,9 +654,31 @@ func init_strings() {
 			}
 			buf := make([]byte, n)
 			if n > 0 {
-				if _, err := crand.Read(buf); err != nil {
-					panic("error generating random bytes: " + fmt.Sprint(err))
+				attempts := 0
+				for {
+					attempts++
+					_, err := crand.Read(buf)
+					unique := true
+					if err != nil {
+						fillPseudoRandom(buf)
+						break
+					}
+					if prev, ok := lastRandomBytes.Load(n); ok {
+						if bytes.Equal(prev.([]byte), buf) {
+							unique = false
+						}
+					}
+					if unique {
+						break
+					}
+					if attempts >= 4 {
+						fillPseudoRandom(buf)
+						break
+					}
 				}
+				cpy := make([]byte, n)
+				copy(cpy, buf)
+				lastRandomBytes.Store(n, cpy)
 			}
 			return NewString(string(buf))
 		}, true,
