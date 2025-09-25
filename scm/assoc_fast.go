@@ -120,7 +120,13 @@ func HashKey(k Scmer) uint64 {
 			} else {
 				h.WriteString(fmt.Sprintf("%v", fn))
 			}
+		case tagSourceInfo:
+			writeScmer(v.SourceInfo().value)
 		case tagAny:
+			if si, ok := v.Any().(SourceInfo); ok {
+				writeScmer(si.value)
+				return
+			}
 			if fd, ok := v.Any().(*FastDict); ok {
 				// Hash as list of pairs to match []Scmer assoc representation
 				h.WriteByte(6)

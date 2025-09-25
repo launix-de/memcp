@@ -160,7 +160,6 @@ func mergeParserResultsNil(s string, r ...*parserResult) *parserResult {
 	return &parserResult{value: NewNil(), env: env}
 }
 
-
 func (b *ScmParser) Execute(str string, en *Env) Scmer {
 	var skipper *regexp.Regexp = b.Skipper
 	if skipper == nil {
@@ -173,7 +172,6 @@ func (b *ScmParser) Execute(str string, en *Env) Scmer {
 	}
 	return node.Payload.value
 }
-
 
 func (b *ScmParserVariable) Match(s *packrat.Scanner[*parserResult]) (packrat.Node[*parserResult], bool) {
 	m, ok := b.Parser.Match(s)
@@ -192,6 +190,9 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 	merger := mergeParserResults
 	if ignoreResult {
 		merger = mergeParserResultsNil
+	}
+	if syntax.IsSourceInfo() {
+		return parseSyntax(syntax.SourceInfo().value, en, ome, ignoreResult)
 	}
 	if auxTag(syntax.aux) == tagAny {
 		switch v := syntax.Any().(type) {

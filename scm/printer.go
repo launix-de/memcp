@@ -52,6 +52,8 @@ func String(v Scmer) string {
 		return "#(" + strings.Join(parts, " ") + ")"
 	case tagFunc:
 		return "[native func]"
+	case tagSourceInfo:
+		return String(v.SourceInfo().value)
 	case tagAny:
 		switch val := v.Any().(type) {
 		case SourceInfo:
@@ -167,6 +169,8 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteByte(')')
 	case tagFunc:
 		serializeNativeFunc(b, v.Func(), en)
+	case tagSourceInfo:
+		SerializeEx(b, v.SourceInfo().value, en, glob, p)
 	case tagAny:
 		switch val := v.Any().(type) {
 		case SourceInfo:

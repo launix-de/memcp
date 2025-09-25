@@ -23,6 +23,22 @@ func EqualScm(a, b Scmer) Scmer { return NewBool(Equal(a, b)) }
 func Equal(a, b Scmer) bool {
 	ta := auxTag(a.aux)
 	tb := auxTag(b.aux)
+	if a.IsSourceInfo() {
+		return Equal(a.SourceInfo().value, b)
+	}
+	if b.IsSourceInfo() {
+		return Equal(a, b.SourceInfo().value)
+	}
+	if ta == tagAny {
+		if si, ok := a.Any().(SourceInfo); ok {
+			return Equal(si.value, b)
+		}
+	}
+	if tb == tagAny {
+		if si, ok := b.Any().(SourceInfo); ok {
+			return Equal(a, si.value)
+		}
+	}
 
 	if ta == tagNil && tb == tagNil {
 		return true
@@ -120,7 +136,80 @@ func Equal(a, b Scmer) bool {
 		return a.Any() == b.Any()
 	}
 
+	if pairsA, ok := assocPairs(a); ok {
+		if pairsB, ok := assocPairs(b); ok {
+			return equalAssocPairs(pairsA, pairsB)
+		}
+	}
+
 	return a.String() == b.String()
+}
+
+func assocPairs(v Scmer) ([]Scmer, bool) {
+	v = unwrapAssoc(v)
+	switch auxTag(v.aux) {
+	case tagSlice:
+		s := v.Slice()
+		if len(s)%2 == 0 {
+			return s, true
+		}
+	case tagAny:
+		switch vv := v.Any().(type) {
+		case []Scmer:
+			if len(vv)%2 == 0 {
+				return vv, true
+			}
+		case *FastDict:
+			return vv.Pairs, true
+		}
+	}
+	return nil, false
+}
+
+func unwrapAssoc(v Scmer) Scmer {
+	if v.IsSourceInfo() {
+		return v.SourceInfo().value
+	}
+	return v
+}
+
+func equalAssocPairs(aPairs, bPairs []Scmer) bool {
+	if len(aPairs)%2 != 0 || len(bPairs)%2 != 0 {
+		return false
+	}
+	if len(aPairs) != len(bPairs) {
+		return false
+	}
+	type entry struct {
+		key Scmer
+		val Scmer
+	}
+	buckets := make(map[uint64][]entry)
+	for i := 0; i < len(bPairs); i += 2 {
+		h := HashKey(bPairs[i])
+		buckets[h] = append(buckets[h], entry{bPairs[i], bPairs[i+1]})
+	}
+	for i := 0; i < len(aPairs); i += 2 {
+		h := HashKey(aPairs[i])
+		entries := buckets[h]
+		found := false
+		for idx, e := range entries {
+			if Equal(aPairs[i], e.key) && Equal(aPairs[i+1], e.val) {
+				buckets[h] = append(entries[:idx], entries[idx+1:]...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	for _, entries := range buckets {
+		if len(entries) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func EqualSQL(a, b Scmer) Scmer {
