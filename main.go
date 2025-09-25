@@ -343,7 +343,7 @@ func setupIO(wd string) {
 		2, 3,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"longname", "string", "long argument name (without --)"},
-			scm.DeclarationParameter{"shortname", "string", "short argument name (without -) or default value if only 2 args"},
+			scm.DeclarationParameter{"shortname", "string|any", "short argument name (without -) or default value if only 2 args"},
 			scm.DeclarationParameter{"default", "any", "default value if argument not found"},
 		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
@@ -356,6 +356,9 @@ func setupIO(wd string) {
 				defaultValue = a[1]
 			} else {
 				// (arg "longname" "s" defaultValue)
+				if !a[1].IsString() {
+					panic("arg: shortname must be string when provided")
+				}
 				shortname = scm.String(a[1])
 				defaultValue = a[2]
 			}
