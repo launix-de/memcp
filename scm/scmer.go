@@ -53,6 +53,8 @@ const (
 	tagSlice
 	tagVector // []float64
 	tagFunc
+	tagProc
+	tagNthLocalVar
 	tagAny
 	// custom tags >= 100
 )
@@ -87,16 +89,25 @@ func NewFloat(f float64) Scmer {
 }
 
 func NewString(s string) Scmer {
+	if len(s) == 0 {
+		return Scmer{nil, makeAux(tagString, 0)}
+	}
 	sh := (*[2]uintptr)(unsafe.Pointer(&s))
 	return Scmer{unsafe.Pointer(sh[0]), makeAux(tagString, uint64(len(s)))}
 }
 
 func NewSymbol(sym string) Scmer {
+	if len(sym) == 0 {
+		return Scmer{nil, makeAux(tagSymbol, 0)}
+	}
 	sh := (*[2]uintptr)(unsafe.Pointer(&sym))
 	return Scmer{unsafe.Pointer(sh[0]), makeAux(tagSymbol, uint64(len(sym)))}
 }
 
 func NewSlice(slice []Scmer) Scmer {
+	if len(slice) == 0 {
+		return Scmer{nil, makeAux(tagSlice, 0)}
+	}
 	sh := (*[3]uintptr)(unsafe.Pointer(&slice))
 	return Scmer{unsafe.Pointer(sh[0]), makeAux(tagSlice, uint64(len(slice)))}
 }
@@ -110,6 +121,24 @@ func NewFunc(fn func(...Scmer) Scmer) Scmer {
 	ptr := new(func(...Scmer) Scmer)
 	*ptr = fn
 	return Scmer{unsafe.Pointer(ptr), makeAux(tagFunc, 0)}
+}
+
+func NewProcStruct(p Proc) Scmer {
+	cp := p
+	return NewProc(&cp)
+}
+
+func NewProc(p *Proc) Scmer {
+	if p == nil {
+		return Scmer{nil, makeAux(tagProc, 0)}
+	}
+	ptr := new(Proc)
+	*ptr = *p
+	return Scmer{unsafe.Pointer(ptr), makeAux(tagProc, 0)}
+}
+
+func NewNthLocalVar(idx NthLocalVar) Scmer {
+	return Scmer{unsafe.Pointer(uintptr(idx)), makeAux(tagNthLocalVar, 0)}
 }
 
 func NewAny(v any) Scmer {
@@ -160,6 +189,13 @@ func FromAny(v any) Scmer {
 		return NewVector(vv)
 	case func(...Scmer) Scmer:
 		return NewFunc(vv)
+	case Proc:
+		return NewProcStruct(vv)
+	case *Proc:
+		if vv == nil {
+			return NewProc(nil)
+		}
+		return NewProc(vv)
 	default:
 		return NewAny(v)
 	}
@@ -410,6 +446,24 @@ func (s Scmer) Func() func(...Scmer) Scmer {
 	return *(*func(...Scmer) Scmer)(s.ptr)
 }
 
+func (s Scmer) IsProc() bool { return auxTag(s.aux) == tagProc }
+
+func (s Scmer) Proc() *Proc {
+	if auxTag(s.aux) != tagProc {
+		panic("not proc")
+	}
+	return (*Proc)(s.ptr)
+}
+
+func (s Scmer) IsNthLocalVar() bool { return auxTag(s.aux) == tagNthLocalVar }
+
+func (s Scmer) NthLocalVar() NthLocalVar {
+	if auxTag(s.aux) != tagNthLocalVar {
+		panic("not nth local var")
+	}
+	return NthLocalVar(uintptr(s.ptr))
+}
+
 // Symbol returns the Scheme symbol value as Go string.
 func (s Scmer) Symbol() string {
 	if auxTag(s.aux) != tagSymbol {
@@ -439,6 +493,10 @@ func (s Scmer) Any() any {
 		return s.Vector()
 	case tagFunc:
 		return s.Func()
+	case tagProc:
+		return s.Proc()
+	case tagNthLocalVar:
+		return s.NthLocalVar()
 	case tagAny:
 		return *(*any)(s.ptr)
 	default:
