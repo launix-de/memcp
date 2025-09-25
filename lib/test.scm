@@ -137,7 +137,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (print "testing dictionaries ...")
 
 /* small assoc basic ops */
-(define d ())
+(define d '())
 (set d (set_assoc d "a" 1))
 (set d (set_assoc d "b" 2))
 (assert (has_assoc? d "a") true "assoc has a")
