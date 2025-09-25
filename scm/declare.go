@@ -195,6 +195,23 @@ func WriteDocumentation(folder string) error {
 }
 
 func types_match(given string, required string) bool {
+	// handle type alternatives
+	required_ := strings.Split(required, "|")
+	given_ := strings.Split(given, "|")
+	if len(required_) > 1 || len(given_) > 1 {
+		for _, r := range required_ {
+			for _, g := range given_ {
+				if types_match(g, r) {
+					return true // if any given fits any required, the value is allowed
+				}
+			}
+		}
+		return false
+	}
+	// single type comparison
+	if given == required {
+		return true // exact match
+	}
 	if given == "any" {
 		return true // be graceful, we can't check it
 	}
@@ -204,17 +221,8 @@ func types_match(given string, required string) bool {
 	if given == "int" && required == "number" {
 		return true // we allow int to number but not otherwise
 	}
-	required_ := strings.Split(required, "|")
-	given_ := strings.Split(given, "|")
-	for _, r := range required_ {
-		for _, g := range given_ {
-			// TODO: in case of func: compare signatures??
-			// TODO: list(subtype)
-			if r == g {
-				return true // if any given fits any required, the value is allowed
-			}
-		}
-	}
+	// TODO: in case of func: compare signatures??
+	// TODO: list(subtype)
 	return false // not a single match
 }
 
