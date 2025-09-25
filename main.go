@@ -50,18 +50,18 @@ func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 		// TODO: filepath.Walk for wildcards
 		wd := filepath.Dir(filename)
 		otherPath := scm.Env{
-			scm.Vars{
-				"__DIR__":     path,
-				"__FILE__":    filename,
-				"import":      getImport(wd),
-				"load":        getLoad(wd),
-				"stream":      getStream(wd),
-				"watch":       getWatch(wd),
-				"serveStatic": scm.HTTPStaticGetter(wd),
+			Vars: scm.Vars{
+				"__DIR__":     scm.NewString(path),
+				"__FILE__":    scm.NewString(filename),
+				"import":      scm.NewFunc(getImport(wd)),
+				"load":        scm.NewFunc(getLoad(wd)),
+				"stream":      scm.NewFunc(getStream(wd)),
+				"watch":       scm.NewFunc(getWatch(wd)),
+				"serveStatic": scm.NewFunc(scm.HTTPStaticGetter(wd)),
 			},
-			nil,
-			&IOEnv,
-			true,
+			VarsNumbered: nil,
+			Outer:        &IOEnv,
+			Nodefine:     true,
 		}
 		bytes, err := ioutil.ReadFile(filename)
 		if err != nil {
@@ -78,16 +78,16 @@ func getStream(path string) func(a ...scm.Scmer) scm.Scmer {
 		if err != nil {
 			panic(err)
 		}
-		return stream // io.Reader
+		return scm.NewAny(io.Reader(stream))
 	}
 }
 
 func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
-		stream, ok := a[0].(io.Reader)
+		stream, ok := a[0].Any().(io.Reader)
 		if !ok {
 			// not a stream? call getStream
-			stream = getStream(path)(a[0]).(io.Reader)
+			stream = getStream(path)(a[0]).Any().(io.Reader)
 		}
 		if len(a) > 2 {
 			splitter := bufio.NewReader(stream)
@@ -104,7 +104,7 @@ func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 					panic(err)
 				}
 				// go??
-				scm.Apply(a[1], str)
+				scm.Apply(a[1], scm.NewString(str))
 			}
 		} else {
 			// read in whole
@@ -113,12 +113,12 @@ func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 				panic(err)
 			}
 			if len(a) > 1 {
-				scm.Apply(a[1], string(bytes))
+				scm.Apply(a[1], scm.NewString(string(bytes)))
 			} else {
-				return string(bytes)
+				return scm.NewString(string(bytes))
 			}
 		}
-		return true
+		return scm.NewBool(true)
 	}
 }
 
@@ -131,7 +131,7 @@ func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
 			if err != nil {
 				panic(err)
 			}
-			scm.Apply(a[1], string(bytes))
+			scm.Apply(a[1], scm.NewString(string(bytes)))
 		}
 		reread() // read once at the beginning in sync
 		// watch for changes
@@ -172,7 +172,7 @@ func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
 		if err != nil {
 			panic(err)
 		}
-		return true
+		return scm.NewBool(true)
 	}
 }
 
@@ -191,10 +191,10 @@ func (i *arrayFlags) Set(value string) error {
 func setupIO(wd string) {
 	// define some IO functions (scm will not provide them since it is sandboxable)
 	IOEnv = scm.Env{
-		scm.Vars{},
-		nil,
-		&scm.Globalenv,
-		true, // other defines go into Globalenv
+		Vars:         scm.Vars{},
+		VarsNumbered: nil,
+		Outer:        &scm.Globalenv,
+		Nodefine:     true, // other defines go into Globalenv
 	}
 	scm.DeclareTitle("IO")
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -208,7 +208,7 @@ func setupIO(wd string) {
 				fmt.Print(scm.String(s))
 			}
 			fmt.Println()
-			return true
+			return scm.NewBool(true)
 		}, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -221,13 +221,11 @@ func setupIO(wd string) {
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) > 1 {
 				if val, ok := os.LookupEnv(scm.String(a[0])); ok {
-					return val
-				} else {
-					return a[1]
+					return scm.NewString(val)
 				}
-			} else {
-				return os.Getenv(scm.String(a[0]))
+				return a[1]
 			}
+			return scm.NewString(os.Getenv(scm.String(a[0])))
 		}, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -238,11 +236,11 @@ func setupIO(wd string) {
 		}, "nil",
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
-				scm.Help(nil)
+				scm.Help(scm.NewNil())
 			} else {
 				scm.Help(a[0])
 			}
-			return nil
+			return scm.NewNil()
 		}, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -324,7 +322,7 @@ func setupIO(wd string) {
 		[]scm.DeclarationParameter{}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			scm.ReplInstance.Close()
-			return true
+			return scm.NewBool(true)
 		}, false,
 	})
 
@@ -335,9 +333,9 @@ func setupIO(wd string) {
 		func(a ...scm.Scmer) scm.Scmer {
 			args := make([]scm.Scmer, len(os.Args))
 			for i, arg := range os.Args {
-				args[i] = arg
+				args[i] = scm.NewString(arg)
 			}
-			return args
+			return scm.NewSlice(args)
 		}, false,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
@@ -365,12 +363,11 @@ func setupIO(wd string) {
 			// Check for --longname=value or --longname value
 			longPrefix := "--" + longname
 			for i, arg := range os.Args {
-				argStr := scm.String(arg)
-				if argStr == longPrefix && i+1 < len(os.Args) {
-					return os.Args[i+1]
+				if arg == longPrefix && i+1 < len(os.Args) {
+					return scm.NewString(os.Args[i+1])
 				}
-				if len(argStr) > len(longPrefix) && argStr[:len(longPrefix)+1] == longPrefix+"=" {
-					return argStr[len(longPrefix)+1:]
+				if len(arg) > len(longPrefix) && arg[:len(longPrefix)+1] == longPrefix+"=" {
+					return scm.NewString(arg[len(longPrefix)+1:])
 				}
 			}
 
@@ -378,19 +375,19 @@ func setupIO(wd string) {
 			if shortname != "" {
 				shortPrefix := "-" + shortname
 				for i, arg := range os.Args {
-					if scm.String(arg) == shortPrefix && i+1 < len(os.Args) {
-						return os.Args[i+1]
+					if arg == shortPrefix && i+1 < len(os.Args) {
+						return scm.NewString(os.Args[i+1])
 					}
 				}
 			}
 
 			// Check for boolean flags (--longname without value means true)
 			for _, arg := range os.Args {
-				if scm.String(arg) == longPrefix {
-					return true
+				if arg == longPrefix {
+					return scm.NewBool(true)
 				}
-				if shortname != "" && scm.String(arg) == "-"+shortname {
-					return true
+				if shortname != "" && arg == "-"+shortname {
+					return scm.NewBool(true)
 				}
 			}
 
@@ -498,12 +495,12 @@ func main() {
 	// scripts initialization
 	if len(imports) == 0 {
 		// load default script
-		IOEnv.Vars["import"].(func(...scm.Scmer) scm.Scmer)("lib/main.scm")
+		IOEnv.Vars["import"].Func()(scm.NewString("lib/main.scm"))
 	} else {
 		// load scripts from command line
 		for _, scmfile := range imports {
 			fmt.Println("Loading " + scmfile + " ...")
-			IOEnv.Vars["import"].(func(...scm.Scmer) scm.Scmer)(scmfile)
+			IOEnv.Vars["import"].Func()(scm.NewString(scmfile))
 		}
 	}
 	for _, command := range commands {

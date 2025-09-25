@@ -16,10 +16,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package scm
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
 func EqualScm(a, b Scmer) Scmer { return NewBool(Equal(a, b)) }
 

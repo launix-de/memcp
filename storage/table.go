@@ -20,6 +20,7 @@ import "fmt"
 import "sync"
 import "errors"
 import "strings"
+import "strconv"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
@@ -205,7 +206,7 @@ func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
 }
 
 func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
-	if val == nil {
+	if val.IsNil() {
 		return RESTRICT
 	}
 	switch scm.String(val) {
@@ -222,36 +223,50 @@ func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
 
 func (t *table) ShowColumns() scm.Scmer {
 	if t == nil {
-		return nil
+		return scm.NewNil()
 	}
 	result := make([]scm.Scmer, len(t.Columns))
 	for i, v := range t.Columns {
 		result[i] = v.Show()
 	}
-	return result
+	return scm.NewSlice(result)
 }
 
 func (c *column) Show() scm.Scmer {
 	dims := make([]scm.Scmer, len(c.Typdimensions))
 	for i, v := range c.Typdimensions {
-		dims[i] = v
+		dims[i] = scm.NewInt(int64(v))
 	}
 	typ := c.Typ
-	if len(dims) > 0 {
-		typ += "("
+	if len(c.Typdimensions) > 0 {
+		var b strings.Builder
+		b.WriteString(c.Typ)
+		b.WriteByte('(')
 		for i, v := range c.Typdimensions {
 			if i > 0 {
-				typ = typ + ","
+				b.WriteByte(',')
 			}
-			typ = typ + scm.String(v)
+			b.WriteString(strconv.Itoa(v))
 		}
-		typ += ")"
+		b.WriteByte(')')
+		typ = b.String()
 	}
 	extra := ""
 	if c.AutoIncrement {
 		extra = "auto_increment"
 	}
-	return []scm.Scmer{"Field", c.Name, "Type", typ, "Collation", c.Collation, "RawType", c.Typ, "Dimensions", dims, "Null", c.AllowNull, "Default", c.Default, "Extra", extra, "Privileges", "select,insert,update,references", "Comment", c.Comment}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString("Field"), scm.NewString(c.Name),
+		scm.NewString("Type"), scm.NewString(typ),
+		scm.NewString("Collation"), scm.NewString(c.Collation),
+		scm.NewString("RawType"), scm.NewString(c.Typ),
+		scm.NewString("Dimensions"), scm.NewSlice(dims),
+		scm.NewString("Null"), scm.NewBool(c.AllowNull),
+		scm.NewString("Default"), c.Default,
+		scm.NewString("Extra"), scm.NewString(extra),
+		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
+		scm.NewString("Comment"), scm.NewString(c.Comment),
+	})
 }
 
 func (c *column) UpdateSanitizer() {
@@ -260,7 +275,7 @@ func (c *column) UpdateSanitizer() {
 	// string to int
 	case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
 		c.sanitizer = func(v scm.Scmer) scm.Scmer {
-			return int64(scm.ToInt(v))
+			return scm.NewInt(int64(scm.ToInt(v)))
 		}
 	}
 }
@@ -270,20 +285,20 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 	case "type":
 		c.Typ = scm.String(val)
 		c.UpdateSanitizer()
-		return c.Typ
+		return scm.NewString(c.Typ)
 	case "dimensions":
 		// expect val to be a list of numbers
-		if val == nil {
+		if val.IsNil() {
 			c.Typdimensions = nil
-			return nil
+			return scm.NewNil()
 		}
-		if l, ok := val.([]scm.Scmer); ok {
+		if l, ok := scmerSlice(val); ok {
 			dims := make([]int, len(l))
 			for i, v := range l {
 				dims[i] = scm.ToInt(v)
 			}
 			c.Typdimensions = dims
-			return val
+			return scm.NewSlice(l)
 		}
 		panic("invalid dimensions value for alter column")
 	case "default":
@@ -291,16 +306,16 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 		return c.Default
 	case "null":
 		c.AllowNull = scm.ToBool(val)
-		return c.AllowNull
+		return scm.NewBool(c.AllowNull)
 	case "temp":
 		c.IsTemp = scm.ToBool(val)
-		return c.IsTemp
+		return scm.NewBool(c.IsTemp)
 	case "collation":
 		c.Collation = scm.String(val)
-		return c.Collation
+		return scm.NewString(c.Collation)
 	case "comment":
 		c.Comment = scm.String(val)
-		return c.Comment
+		return scm.NewString(c.Comment)
 	default:
 		panic("unimplemented alter column operation: " + key)
 	}
@@ -308,11 +323,11 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 
 func (d dataset) Get(key string) (scm.Scmer, bool) {
 	for i := 0; i < len(d); i += 2 {
-		if d[i] == key {
+		if scm.String(d[i]) == key {
 			return d[i+1], true
 		}
 	}
-	return nil, false
+	return scm.NewNil(), false
 }
 
 func (d dataset) GetI(key string) (scm.Scmer, bool) { // case insensitive
@@ -321,7 +336,7 @@ func (d dataset) GetI(key string) (scm.Scmer, bool) { // case insensitive
 			return d[i+1], true
 		}
 	}
-	return nil, false
+	return scm.NewNil(), false
 }
 
 func (t *table) CreateColumn(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) bool {
@@ -348,28 +363,30 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	c.Collation = "utf8mb4"
 	c.AllowNull = true
 	for i := 0; i < len(extrainfo); i += 2 {
-		if extrainfo[i] == "primary" {
+		key := scm.String(extrainfo[i])
+		switch key {
+		case "primary":
 			// append unique key
 			t.Unique = append(t.Unique, uniqueKey{"PRIMARY", []string{name}})
-		} else if extrainfo[i] == "unique" {
+		case "unique":
 			// append unique key
 			t.Unique = append(t.Unique, uniqueKey{name, []string{name}})
-		} else if extrainfo[i] == "auto_increment" {
+		case "auto_increment":
 			c.AutoIncrement = scm.ToBool(extrainfo[i+1])
-		} else if extrainfo[i] == "null" {
+		case "null":
 			c.AllowNull = scm.ToBool(extrainfo[i+1])
-		} else if extrainfo[i] == "default" {
+		case "default":
 			c.Default = extrainfo[i+1]
-		} else if extrainfo[i] == "update" {
+		case "update":
 			c.OnUpdate = extrainfo[i+1]
-		} else if extrainfo[i] == "comment" {
+		case "comment":
 			c.Comment = scm.String(extrainfo[i+1])
-		} else if extrainfo[i] == "collate" {
+		case "collate":
 			c.Collation = scm.String(extrainfo[i+1])
-		} else if extrainfo[i] == "temp" {
+		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
-		} else {
-			panic("unknown column attribute: " + scm.String(extrainfo[i]))
+		default:
+			panic("unknown column attribute: " + key)
 		}
 	}
 	c.UpdateSanitizer()
@@ -463,23 +480,25 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				shard.Insert(columns, values, false, onFirstInsertId)
 				result += len(values)
 			}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
-				if onCollision != nil {
+				if !onCollision.IsNil() {
 					// Evaluate onCollision and add to affected rows per MySQL semantics
 					// - inserted rows already counted above
 					// - on duplicate: count 2 if changed, 1 if no-op
 					ret := scm.Apply(onCollision, data...)
-					switch v := ret.(type) {
-					case bool:
-						if v {
+					switch {
+					case ret.IsBool():
+						if ret.Bool() {
 							result += 2
 						} else {
-							result += 1
+							result++
 						}
-					case int64:
-						result += int(v)
+					case ret.IsInt():
+						result += int(ret.Int())
+					case ret.IsFloat():
+						result += int(ret.Float())
 					default:
 						// Fallback: consider as one affected row
-						result += 1
+						result++
 					}
 				} else {
 					panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
@@ -516,20 +535,22 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					s.Insert(columns, values, false, onFirstInsertId)
 					result += len(values)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
-					if onCollision != nil {
+					if !onCollision.IsNil() {
 						// Evaluate onCollision and add to affected rows per MySQL semantics
 						ret := scm.Apply(onCollision, data...)
-						switch v := ret.(type) {
-						case bool:
-							if v {
+						switch {
+						case ret.IsBool():
+							if ret.Bool() {
 								result += 2
 							} else {
-								result += 1
+								result++
 							}
-						case int64:
-							result += int(v)
+						case ret.IsInt():
+							result += int(ret.Int())
+						case ret.IsFloat():
+							result += int(ret.Float())
 						default:
-							result += 1
+							result++
 						}
 					} else {
 						panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
@@ -549,7 +570,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				if colidx < len(values[i]) {
 					shardcols[j] = values[i][colidx]
 				} else {
-					shardcols[j] = nil
+					shardcols[j] = scm.NewNil()
 				}
 			}
 			shard := t.PShards[computeShardIndex(dims, shardcols)]
@@ -654,7 +675,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {
 						if p == "$update" {
-							params[i] = s.UpdateFunction(uid, true)
+							params[i] = scm.NewFunc(s.UpdateFunction(uid, true))
 						} else if len(p) >= 4 && p[:4] == "NEW." {
 							for j, c := range columns {
 								if p[4:] == c {
@@ -693,7 +714,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		cols := make([]scm.Scmer, len(uniq.Cols))
 		colidx := make([]int, len(uniq.Cols))
 		for i, c := range uniq.Cols {
-			cols[i] = scm.Symbol(c)
+			cols[i] = scm.NewSymbol(c)
 			for j, col := range columns { // find uniq columns
 				if c == col {
 					colidx[i] = j
@@ -701,34 +722,43 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 		}
 		conditionBody := make([]scm.Scmer, len(uniq.Cols)+1)
-		conditionBody[0] = scm.Symbol("and")
+		conditionBody[0] = scm.NewSymbol("and")
 		last_j := 0
 		for j, row := range values {
 			for i, colidx := range colidx {
 				value := row[colidx]
-				if !mergeNull && value == nil {
-					conditionBody[i+1] = false // NULL can be there multiple times
+				if !mergeNull && value.IsNil() {
+					conditionBody[i+1] = scm.NewBool(false) // NULL can be there multiple times
 				} else {
-					conditionBody[i+1] = []scm.Scmer{scm.Symbol("equal??"), scm.NthLocalVar(i), value}
+					conditionBody[i+1] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewAny(scm.NthLocalVar(i)), value})
 				}
 			}
-			condition := scm.Proc{cols, conditionBody, &scm.Globalenv, len(uniq.Cols)}
-			updatefn := t.scan(uniq.Cols, condition, onCollisionCols, func(args ...scm.Scmer) scm.Scmer {
-				t.uniquelock.Unlock()
-				for i, p := range onCollisionCols {
-					if len(p) >= 4 && p[:4] == "NEW." {
-						for j, c := range columns {
-							if p[4:] == c {
-								args[i] = row[j]
+			condition := scm.Proc{Params: scm.NewSlice(cols), Body: scm.NewSlice(conditionBody), En: &scm.Globalenv, NumVars: len(uniq.Cols)}
+			updatefn := t.scan(
+				uniq.Cols,
+				scm.NewAny(condition),
+				onCollisionCols,
+				scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					t.uniquelock.Unlock()
+					for i, p := range onCollisionCols {
+						if len(p) >= 4 && p[:4] == "NEW." {
+							for j, c := range columns {
+								if p[4:] == c {
+									args[i] = row[j]
+								}
 							}
 						}
 					}
-				}
-				failure(uniq.Id, args) // call collision function
-				t.uniquelock.Lock()
-				return true // feedback that there was a collision
-			}, func(a ...scm.Scmer) scm.Scmer { return a[1] }, nil, nil, false)
-			if updatefn != nil {
+					failure(uniq.Id, args) // call collision function
+					t.uniquelock.Lock()
+					return scm.NewBool(true) // feedback that there was a collision
+				}),
+				scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
+				scm.NewNil(),
+				scm.NewNil(),
+				false,
+			)
+			if !updatefn.IsNil() {
 				// found a unique collision: flush the successing items and skip this one
 				if j != last_j {
 					t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1) // flush

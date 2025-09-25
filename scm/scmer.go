@@ -19,7 +19,6 @@ package scm
 import (
 	"fmt"
 	"math"
-	"reflect"
 	"strconv"
 	"unsafe"
 )
@@ -28,6 +27,19 @@ import (
 type Scmer struct {
 	ptr unsafe.Pointer
 	aux uint64 // type tag + extra data (len, etc.)
+}
+
+const (
+	scmerStructOverhead = uint(16)
+	goAllocOverhead     = uint(16)
+)
+
+// ComputeSize allows Scmer to satisfy storages that expect Sizable.
+// It approximates the total memory consumption of the value including
+// the inline Scmer representation and any heap allocations the value
+// references.
+func (s Scmer) ComputeSize() uint {
+	return ComputeSize(s)
 }
 
 // Type tags (upper 16 bits of aux)
@@ -95,7 +107,9 @@ func NewVector(vec []float64) Scmer {
 }
 
 func NewFunc(fn func(...Scmer) Scmer) Scmer {
-	return Scmer{unsafe.Pointer(fn), makeAux(tagFunc, 0)}
+	ptr := new(func(...Scmer) Scmer)
+	*ptr = fn
+	return Scmer{unsafe.Pointer(ptr), makeAux(tagFunc, 0)}
 }
 
 func NewAny(v any) Scmer {
@@ -145,7 +159,7 @@ func FromAny(v any) Scmer {
 	case []float64:
 		return NewVector(vv)
 	case func(...Scmer) Scmer:
-		return NewFunc(v)
+		return NewFunc(vv)
 	default:
 		return NewAny(v)
 	}
@@ -291,9 +305,8 @@ func (s Scmer) Int() int64 {
 				return i
 			}
 		}
-	default:
-		return 0
 	}
+	return 0
 }
 
 func (s Scmer) Float() float64 {
@@ -344,9 +357,8 @@ func (s Scmer) Float() float64 {
 				return f
 			}
 		}
-	default:
-		return 0.0
 	}
+	return 0.0
 }
 
 func (s Scmer) String() string {
@@ -391,11 +403,11 @@ func (s Scmer) Vector() []float64 {
 	return *(*[]float64)(unsafe.Pointer(&hdr))
 }
 
-func (s Scmer) Func() func (...Scmer) Scmer {
+func (s Scmer) Func() func(...Scmer) Scmer {
 	if auxTag(s.aux) != tagFunc {
 		panic("not function")
 	}
-	return (func (...Scmer) Scmer)(s.ptr)
+	return *(*func(...Scmer) Scmer)(s.ptr)
 }
 
 // Symbol returns the Scheme symbol value as Go string.
@@ -433,3 +445,8 @@ func (s Scmer) Any() any {
 		panic(fmt.Sprintf("unknown tag %d in Any", auxTag(s.aux)))
 	}
 }
+
+// Compatibility helpers for legacy code paths.
+func ToBool(v Scmer) bool     { return v.Bool() }
+func ToInt(v Scmer) int       { return int(v.Int()) }
+func ToFloat(v Scmer) float64 { return v.Float() }

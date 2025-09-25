@@ -63,7 +63,7 @@ func (s *storageShard) ComputeSize() uint {
 		}
 		s.mu.RUnlock()
 		result += s.deletions.ComputeSize()
-		result += scm.ComputeSize(s.inserts)
+		result += scm.ComputeSize(scm.NewAny(s.inserts))
 		for _, idx := range s.Indexes {
 			result += idx.ComputeSize()
 		}
@@ -71,7 +71,7 @@ func (s *storageShard) ComputeSize() uint {
 		return result
 	}
 	result += s.deletions.ComputeSize()
-	result += scm.ComputeSize(s.inserts)
+	result += scm.ComputeSize(scm.NewAny(s.inserts))
 	for _, idx := range s.Indexes {
 		result += idx.ComputeSize()
 	}
@@ -320,7 +320,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 
 				// update statement -> also perform an insert
 				// TODO: check if we can do in-place editing in the delta storage (if idx > t.main_count)
-				changes := a[0].([]scm.Scmer)
+				changes := mustScmerSlice(a[0], "update changes")
 				// build the whole dataset from storage
 				cols := make([]string, len(t.columns))
 				d2 := make([]scm.Scmer, 0, len(t.columns))
@@ -334,7 +334,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 						t.deltaColumns[k] = colidx
 					}
 					for len(d2) <= colidx {
-						d2 = append(d2, nil)
+						d2 = append(d2, scm.NewNil())
 					}
 					cols[colidx] = k
 					if idx < t.main_count {
@@ -349,7 +349,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					if !ok {
 						panic("UPDATE on invalid column: " + scm.String(changes[j]))
 					}
-					if d2[colidx] != changes[j+1] {
+					if !scm.Equal(d2[colidx], changes[j+1]) {
 						d2[colidx] = changes[j+1]
 						result = true // mark that something has changed
 					}
@@ -410,7 +410,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			idx2 := idx - t.deletions.CountUntil(idx)
 			t.next.UpdateFunction(idx2, false)(a...) // propagate to succeeding shard
 		}
-		return result // maybe instead return UpdateFunction for newly inserted item??
+		return scm.NewBool(result) // maybe instead return UpdateFunction for newly inserted item??
 	}
 }
 
@@ -469,7 +469,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			t.t.Auto_increment = t.t.Auto_increment + uint64(len(values)) // batch reservation of new IDs
 			t.t.mu.Unlock()
 		}
-		if c.AutoIncrement || c.Default != nil {
+		if c.AutoIncrement || !c.Default.IsNil() {
 			// column with default or auto increment -> also add to deltacolumns
 			cidx, ok := t.deltaColumns[c.Name]
 			if !ok {
@@ -494,8 +494,8 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				// fill auto_increment col (lock-free because the lock is outside the loop)
 				cidx := t.deltaColumns[c.Name]
 				Auto_increment++ // local increase
-				newrow[cidx] = int64(Auto_increment)
-			} else if c.Default != nil {
+				newrow[cidx] = scm.NewInt(int64(Auto_increment))
+			} else if !c.Default.IsNil() {
 				// fill col with default
 				cidx := t.deltaColumns[c.Name]
 				newrow[cidx] = c.Default
@@ -735,17 +735,15 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 		for j, v := range values {
 			if dcolPresent[j] {
 				idx := dcols[j]
-				var got scm.Scmer
+				got := scm.NewNil()
 				if idx >= 0 && idx < len(item) {
 					got = item[idx]
-				} else {
-					got = nil
 				}
 				if !scm.Equal(got, v) {
 					goto skipnextdelta
 				}
 			} else {
-				if !scm.Equal(nil, v) {
+				if !scm.Equal(scm.NewNil(), v) {
 					goto skipnextdelta
 				}
 			}
@@ -774,12 +772,9 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 	if ok {
 		if colidx < len(item) {
 			return item[colidx]
-		} else {
-			return nil
 		}
-	} else {
-		return nil
 	}
+	return scm.NewNil()
 }
 
 func (t *storageShard) RemoveFromDisk() {

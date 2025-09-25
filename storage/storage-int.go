@@ -84,7 +84,7 @@ func (s *StorageInt) DeserializeEx(f io.Reader, readMagicbyte bool) uint {
 }
 
 func toInt(x scm.Scmer) int64 {
-	switch v := x.(type) {
+	switch v := x.Any().(type) {
 	case float64:
 		return int64(v)
 	case int:
@@ -95,9 +95,8 @@ func toInt(x scm.Scmer) int64 {
 		return int64(v)
 	case int64:
 		return v
-	// TODO: 8 bit, 16 bit, 32 bit
 	default:
-		return 0
+		return x.Int()
 	}
 }
 
@@ -116,9 +115,9 @@ func (s *StorageInt) String() string {
 func (s *StorageInt) GetValue(i uint) scm.Scmer {
 	v := s.GetValueUInt(i)
 	if s.hasNull && v == s.null {
-		return nil
+		return scm.NewNil()
 	}
-	return int64(v) + s.offset
+	return scm.NewInt(int64(v) + s.offset)
 }
 
 func (s *StorageInt) GetValueUInt(i uint) uint64 {
@@ -141,7 +140,7 @@ func (s *StorageInt) prepare() {
 }
 func (s *StorageInt) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
-	if value == nil {
+	if value.IsNil() {
 		s.hasNull = true
 		return
 	}
@@ -181,7 +180,7 @@ func (s *StorageInt) build(i uint, value scm.Scmer) {
 	}
 	// store
 	vi := toInt(value)
-	if value == nil {
+	if value.IsNil() {
 		// null value
 		vi = int64(s.null)
 	} else {

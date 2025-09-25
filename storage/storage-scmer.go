@@ -80,41 +80,41 @@ func (s *StorageSCMER) GetValue(i uint) scm.Scmer {
 }
 
 func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
-	switch v := value.(type) {
-	case int64:
-		v2 := toInt(value)
-		// analyze whether there is a sequence
+	if value.IsNil() {
+		s.null++
+		return
+	}
+	if value.IsInt() {
+		v2 := value.Int()
 		if v2-s.last1 == s.last1-s.last2 {
-			s.numSeq = s.numSeq + 1 // count as sequencable
+			s.numSeq++
 		}
-		// push sequence detector
 		s.last2 = s.last1
 		s.last1 = v2
-	case float64:
-		if _, f := math.Modf(v); f != 0.0 {
+		return
+	}
+	if value.IsFloat() {
+		f := value.Float()
+		if _, frac := math.Modf(f); frac != 0.0 {
 			s.onlyInt = false
 		} else {
-			v := toInt(value)
-			// analyze whether there is a sequence
+			v := int64(f)
 			if v-s.last1 == s.last1-s.last2 {
-				s.numSeq = s.numSeq + 1 // count as sequencable
+				s.numSeq++
 			}
-			// push sequence detector
 			s.last2 = s.last1
 			s.last1 = v
 		}
-	case string:
-		s.onlyInt = false
+		return
+	}
+	s.onlyInt = false
+	if value.IsString() {
 		s.onlyFloat = false
 		s.hasString = true
-		if len(v) > 255 {
+		if len(value.String()) > 255 {
 			s.longStrings++
 		}
-	case nil:
-		s.null = s.null + 1 // count NULL
-		// storageInt can also handle null
-	default:
-		s.onlyInt = false
+	} else {
 		s.onlyFloat = false
 	}
 }

@@ -31,36 +31,34 @@ type session struct {
 
 // build this function into your SCM environment to offer http server capabilities
 func NewSession(a ...Scmer) Scmer {
-	// params: port, authcallback, schemacallback, querycallback
 	sess := new(session)
 	sess.Map = make(map[string]Scmer)
-	return func(a ...Scmer) (result Scmer) {
-		if len(a) == 2 {
-			// set
+	return NewFunc(func(a ...Scmer) (result Scmer) {
+		switch len(a) {
+		case 2:
 			sess.Mu.Lock()
 			defer sess.Mu.Unlock()
-			sess.Map[String(a[0])] = a[1]
-			return a[1] // reflect the value as of mysql semantics
-		} else if len(a) == 1 {
-			// get
+			sess.Map[a[0].String()] = a[1]
+			return a[1]
+		case 1:
 			sess.Mu.RLock()
 			defer sess.Mu.RUnlock()
-			result, _ = sess.Map[String(a[0])]
-			return
-		} else if len(a) == 0 {
-			// list keys
-			sess.Mu.RLock()
-			defer sess.Mu.RUnlock()
-			l := make([]Scmer, 0, len(sess.Map))
-			for k, _ := range sess.Map {
-				l = append(l, k)
+			if v, ok := sess.Map[a[0].String()]; ok {
+				return v
 			}
-			result = l
-			return
-		} else {
+			return NewNil()
+		case 0:
+			sess.Mu.RLock()
+			defer sess.Mu.RUnlock()
+			keys := make([]Scmer, 0, len(sess.Map))
+			for k := range sess.Map {
+				keys = append(keys, NewString(k))
+			}
+			return NewSlice(keys)
+		default:
 			panic("wrong number of parameters provided to session: 0, 1 or 2 required")
 		}
-	}
+	})
 }
 
 var mgr *gls.ContextManager
@@ -70,31 +68,33 @@ func Context(a ...Scmer) (result Scmer) {
 		// prone to race conditions, to the first call should be called in the initialization
 		mgr = gls.NewContextManager()
 	}
-	if a[0] == "session" {
-		result, ok := mgr.GetValue("session")
-		if !ok {
-			panic("no session set")
+	if a[0].IsString() {
+		switch a[0].String() {
+		case "session":
+			val, ok := mgr.GetValue("session")
+			if !ok {
+				panic("no session set")
+			}
+			return val.(Scmer)
+		case "check":
+			ctxVal, ok := mgr.GetValue("context")
+			if !ok {
+				panic("no context set")
+			}
+			e := ctxVal.(context.Context).Err()
+			if e != nil {
+				panic(e)
+			}
+			return NewBool(true)
 		}
-		return result
-	} else if a[0] == "check" {
-		result, ok := mgr.GetValue("context")
-		if !ok {
-			panic("no context set")
-		}
-		e := result.(context.Context).Err()
-		if e != nil {
-			panic(e)
-		}
-		return true
-	} else if a[0] != nil {
-		// constructor
-		NewContext(context.TODO(), func() {
-			result = Apply(a[0], a[1:]...) // call the inner function in the context
-		})
-		return
-	} else {
-		panic("unimplemented")
 	}
+	if !a[0].IsNil() {
+		NewContext(context.TODO(), func() {
+			result = Apply(a[0], a[1:]...)
+		})
+		return result
+	}
+	panic("unimplemented")
 }
 
 func NewContext(ctx context.Context, fn func()) {
@@ -147,9 +147,9 @@ func init_sync() {
 			ctx := GetContext()
 			select {
 			case <-ctx.Done():
-				panic(ctx.Err)
+				panic(ctx.Err())
 			case <-time.After(time.Duration(ToFloat(a[0]) * float64(time.Second))):
-				return true
+				return NewBool(true)
 			}
 		}, false,
 	})
@@ -164,10 +164,10 @@ func init_sync() {
 			once := sync.OnceValue[Scmer](func() Scmer {
 				return Apply(a[0], params...)
 			})
-			return func(a ...Scmer) Scmer {
+			return NewFunc(func(a ...Scmer) Scmer {
 				params = a
 				return once()
-			}
+			})
 		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -176,7 +176,7 @@ func init_sync() {
 		[]DeclarationParameter{}, "func",
 		func(a ...Scmer) Scmer {
 			var mutex sync.Mutex
-			return func(a ...Scmer) Scmer {
+			return NewFunc(func(a ...Scmer) Scmer {
 				mutex.Lock()
 				defer func() {
 					mutex.Unlock() // free after return or panic, so we don't get into deadlocks
@@ -189,7 +189,7 @@ func init_sync() {
 
 				// execute serially
 				return Apply(a[0])
-			}
+			})
 		}, false,
 	})
 }

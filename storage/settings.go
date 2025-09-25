@@ -43,34 +43,34 @@ func InitSettings() {
 func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 	// schema, filename
 	if len(a) == 0 {
-		return []scm.Scmer{
-			"Backtrace", Settings.Backtrace,
-			"Trace", Settings.Trace,
-			"TracePrint", Settings.TracePrint,
-			"PartitionMaxDimensions", int64(Settings.PartitionMaxDimensions),
-			"DefaultEngine", Settings.DefaultEngine,
-			"ShardSize", int64(Settings.ShardSize),
-			"AnalyzeMinItems", int64(Settings.AnalyzeMinItems),
-			"AIEstimator", Settings.AIEstimator,
-		}
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewString("Backtrace"), scm.NewBool(Settings.Backtrace),
+			scm.NewString("Trace"), scm.NewBool(Settings.Trace),
+			scm.NewString("TracePrint"), scm.NewBool(Settings.TracePrint),
+			scm.NewString("PartitionMaxDimensions"), scm.NewInt(int64(Settings.PartitionMaxDimensions)),
+			scm.NewString("DefaultEngine"), scm.NewString(Settings.DefaultEngine),
+			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
+			scm.NewString("AnalyzeMinItems"), scm.NewInt(int64(Settings.AnalyzeMinItems)),
+			scm.NewString("AIEstimator"), scm.NewBool(Settings.AIEstimator),
+		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
 		case "Backtrace":
-			return Settings.Backtrace
+			return scm.NewBool(Settings.Backtrace)
 		case "Trace":
-			return Settings.Trace
+			return scm.NewBool(Settings.Trace)
 		case "TracePrint":
-			return Settings.TracePrint
+			return scm.NewBool(Settings.TracePrint)
 		case "PartitionMaxDimensions":
-			return int64(Settings.PartitionMaxDimensions)
+			return scm.NewInt(int64(Settings.PartitionMaxDimensions))
 		case "DefaultEngine":
-			return Settings.DefaultEngine
+			return scm.NewString(Settings.DefaultEngine)
 		case "ShardSize":
-			return int64(Settings.ShardSize)
+			return scm.NewInt(int64(Settings.ShardSize))
 		case "AnalyzeMinItems":
-			return int64(Settings.AnalyzeMinItems)
+			return scm.NewInt(int64(Settings.AnalyzeMinItems))
 		case "AIEstimator":
-			return Settings.AIEstimator
+			return scm.NewBool(Settings.AIEstimator)
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -115,6 +115,6 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
-		return true
+		return scm.NewBool(true)
 	}
 }

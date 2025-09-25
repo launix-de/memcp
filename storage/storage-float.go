@@ -65,10 +65,9 @@ func (s *StorageFloat) Deserialize(f io.Reader) uint {
 func (s *StorageFloat) GetValue(i uint) scm.Scmer {
 	// NULL is encoded as NaN in SQL
 	if math.IsNaN(s.values[i]) {
-		return nil
-	} else {
-		return s.values[i]
+		return scm.NewNil()
 	}
+	return scm.NewFloat(s.values[i])
 }
 
 func (s *StorageFloat) scan(i uint, value scm.Scmer) {
@@ -81,10 +80,10 @@ func (s *StorageFloat) init(i uint) {
 }
 func (s *StorageFloat) build(i uint, value scm.Scmer) {
 	// store
-	if value == nil {
+	if value.IsNil() {
 		s.values[i] = math.NaN()
 	} else {
-		s.values[i] = value.(float64)
+		s.values[i] = value.Float()
 	}
 }
 func (s *StorageFloat) finish() {

@@ -63,9 +63,9 @@ func LoadJSON(schema string, f io.Reader) {
 					// JSON with an unknown table format -> create dummy cols
 					var x map[string]scm.Scmer
 					json.Unmarshal([]byte(s), &x) // parse JSON
-					for c, _ := range x {
+					for c := range x {
 						// create column with dummy storage for next rebuild
-						t.CreateColumn(c, "ANY", []int{}, []scm.Scmer{"comment", "json import"})
+						t.CreateColumn(c, "ANY", []int{}, []scm.Scmer{scm.NewString("comment"), scm.NewString("json import")})
 					}
 				}
 				func(t *table, s string) {
@@ -79,7 +79,7 @@ func LoadJSON(schema string, f io.Reader) {
 						x[i] = v
 						i++
 					}
-					t.Insert(cols, [][]scm.Scmer{x}, nil, nil, false, nil) // put into table
+					t.Insert(cols, [][]scm.Scmer{x}, nil, scm.NewNil(), false, nil) // put into table
 				}(t, s)
 			}
 		}

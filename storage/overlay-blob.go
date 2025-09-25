@@ -86,31 +86,26 @@ func (s *OverlayBlob) Deserialize(f io.Reader) uint {
 
 func (s *OverlayBlob) GetValue(i uint) scm.Scmer {
 	v := s.Base.GetValue(i)
-	switch v_ := v.(type) {
-	case string:
-		if v_ != "" && v_[0] == '!' {
-			if v_[1] == '!' {
-				return v_[1:] // escaped string
-			} else {
-				// unpack from storage
-				if v, ok := s.values[*(*[32]byte)(unsafe.Pointer(unsafe.StringData(v_[1:])))]; ok {
-					var b strings.Builder
-					reader, err := gzip.NewReader(strings.NewReader(v))
-					if err != nil {
-						panic(err)
-					}
-					io.Copy(&b, reader)
-					reader.Close()
-					return b.String()
-				}
-				return nil // value was lost (this should not happen)
+	if v.IsString() {
+		vs := v.String()
+		if vs != "" && vs[0] == '!' {
+			if len(vs) > 1 && vs[1] == '!' {
+				return scm.NewString(vs[1:]) // escaped string
 			}
-		} else {
-			return v
+			if val, ok := s.values[*(*[32]byte)(unsafe.Pointer(unsafe.StringData(vs[1:])))]; ok {
+				var b strings.Builder
+				reader, err := gzip.NewReader(strings.NewReader(val))
+				if err != nil {
+					panic(err)
+				}
+				_, _ = io.Copy(&b, reader)
+				reader.Close()
+				return scm.NewString(b.String())
+			}
+			return scm.NewNil() // value lost
 		}
-	default:
-		return v
 	}
+	return v
 }
 
 func (s *OverlayBlob) prepare() {
@@ -118,22 +113,22 @@ func (s *OverlayBlob) prepare() {
 	s.Base.prepare()
 }
 func (s *OverlayBlob) scan(i uint, value scm.Scmer) {
-	switch v_ := value.(type) {
-	case string:
-		if len(v_) > 255 {
+	if value.IsString() {
+		vs := value.String()
+		if len(vs) > 255 {
 			h := sha256.New()
-			io.WriteString(h, v_)
-			s.Base.scan(i, fmt.Sprintf("!%s", h.Sum(nil)))
+			io.WriteString(h, vs)
+			s.Base.scan(i, scm.NewString("!"+string(h.Sum(nil))))
 		} else {
-			if v_ != "" && v_[0] == '!' {
-				s.Base.scan(i, "!"+v_) // escape strings that start with !
+			if vs != "" && vs[0] == '!' {
+				s.Base.scan(i, scm.NewString("!"+vs))
 			} else {
 				s.Base.scan(i, value)
 			}
 		}
-	default:
-		s.Base.scan(i, value)
+		return
 	}
+	s.Base.scan(i, value)
 }
 func (s *OverlayBlob) init(i uint) {
 	s.values = make(map[[32]byte]string)
@@ -141,29 +136,29 @@ func (s *OverlayBlob) init(i uint) {
 	s.Base.init(i)
 }
 func (s *OverlayBlob) build(i uint, value scm.Scmer) {
-	switch v_ := value.(type) {
-	case string:
-		if len(v_) > 255 {
+	if value.IsString() {
+		vs := value.String()
+		if len(vs) > 255 {
 			h := sha256.New()
-			io.WriteString(h, v_)
+			io.WriteString(h, vs)
 			hashsum := h.Sum(nil)
-			s.Base.build(i, fmt.Sprintf("!%s", hashsum))
+			s.Base.build(i, scm.NewString("!"+string(hashsum)))
 			var b strings.Builder
 			z := gzip.NewWriter(&b)
-			io.Copy(z, strings.NewReader(v_))
+			_, _ = io.Copy(z, strings.NewReader(vs))
 			z.Close()
 			s.size += uint(b.Len())
 			s.values[*(*[32]byte)(unsafe.Pointer(&hashsum[0]))] = b.String()
 		} else {
-			if v_ != "" && v_[0] == '!' {
-				s.Base.build(i, "!"+v_) // escape strings that start with !
+			if vs != "" && vs[0] == '!' {
+				s.Base.build(i, scm.NewString("!"+vs))
 			} else {
 				s.Base.build(i, value)
 			}
 		}
-	default:
-		s.Base.build(i, value)
+		return
 	}
+	s.Base.build(i, value)
 }
 func (s *OverlayBlob) finish() {
 	s.Base.finish()

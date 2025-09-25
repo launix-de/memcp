@@ -59,15 +59,20 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 	// Build symbol->index from Proc.Params to map lambda params to actual columns
 	symIndex := make(map[string]int, len(columnSymbols))
 	for i, s := range columnSymbols {
-		if sym, ok := s.(scm.Symbol); ok {
-			symIndex[string(sym)] = i
+		if s.IsSymbol() {
+			symIndex[strings.ToLower(s.String())] = i
+			continue
+		}
+		if sym, ok := s.Any().(scm.Symbol); ok {
+			symIndex[strings.ToLower(string(sym))] = i
 		}
 	}
 
 	var enc func(scm.Scmer)
 	writeSymbolOrColumn := func(s string) {
+		sLower := strings.ToLower(s)
 		// Prefer mapping lambda param -> column name
-		if idx, ok := symIndex[s]; ok {
+		if idx, ok := symIndex[sLower]; ok {
 			if idx >= 0 && idx < len(columns) {
 				io.WriteString(w, columns[idx])
 				return
@@ -85,66 +90,92 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 	}
 
 	enc = func(node scm.Scmer) {
-		switch x := node.(type) {
-		case nil:
+		switch {
+		case node.IsNil():
 			io.WriteString(w, "nil")
-		case bool:
-			if x {
+		case node.IsBool():
+			if node.Bool() {
 				io.WriteString(w, "true")
 			} else {
 				io.WriteString(w, "false")
 			}
-		case int:
-			io.WriteString(w, fmt.Sprint(x))
-		case int64:
-			io.WriteString(w, fmt.Sprint(x))
-		case uint64:
-			io.WriteString(w, fmt.Sprint(x))
-		case float64:
-			io.WriteString(w, fmt.Sprint(x))
-		case string:
-			// quote strings
+		case node.IsInt():
+			io.WriteString(w, fmt.Sprint(node.Int()))
+		case node.IsFloat():
+			io.WriteString(w, fmt.Sprint(node.Float()))
+		case node.IsString():
 			io.WriteString(w, "\"")
-			io.WriteString(w, x)
+			io.WriteString(w, node.String())
 			io.WriteString(w, "\"")
-		case scm.Symbol:
-			writeSymbolOrColumn(string(x))
-		case scm.NthLocalVar:
-			i := int(x)
-			if i >= 0 && i < len(columns) {
-				io.WriteString(w, columns[i])
-			} else {
-				io.WriteString(w, "?")
-			}
-		case scm.Proc:
-			// Lambdas are encoded as unknown per requirements
-			io.WriteString(w, "?")
-		case []scm.Scmer:
-			// If this is an (outer ...) form, replace whole call with "?"
-			if len(x) > 0 {
-				if head, ok := x[0].(scm.Symbol); ok && string(head) == "outer" {
+		case node.IsSymbol():
+			writeSymbolOrColumn(node.String())
+		case node.IsSlice():
+			slice := node.Slice()
+			if len(slice) > 0 {
+				if slice[0].IsSymbol() && slice[0].String() == "outer" {
 					io.WriteString(w, "?")
 					return
 				}
 			}
 			io.WriteString(w, "(")
-			for i := 0; i < len(x); i++ {
+			for i, item := range slice {
 				if i > 0 {
 					io.WriteString(w, " ")
 				}
-				enc(x[i])
+				enc(item)
 			}
 			io.WriteString(w, ")")
-		case func(...scm.Scmer) scm.Scmer:
-			// Resolve via scm.DeclarationForValue helper
-			if def := scm.DeclarationForValue(x); def != nil {
-				io.WriteString(w, def.Name)
-			} else {
+		default:
+			switch x := node.Any().(type) {
+			case nil:
+				io.WriteString(w, "nil")
+			case bool:
+				if x {
+					io.WriteString(w, "true")
+				} else {
+					io.WriteString(w, "false")
+				}
+			case int:
+				io.WriteString(w, fmt.Sprint(x))
+			case int64:
+				io.WriteString(w, fmt.Sprint(x))
+			case uint64:
+				io.WriteString(w, fmt.Sprint(x))
+			case float64:
+				io.WriteString(w, fmt.Sprint(x))
+			case string:
+				io.WriteString(w, "\"")
+				io.WriteString(w, x)
+				io.WriteString(w, "\"")
+			case scm.Symbol:
+				writeSymbolOrColumn(string(x))
+			case scm.NthLocalVar:
+				i := int(x)
+				if i >= 0 && i < len(columns) {
+					io.WriteString(w, columns[i])
+				} else {
+					io.WriteString(w, "?")
+				}
+			case scm.Proc:
+				io.WriteString(w, "?")
+			case []scm.Scmer:
+				io.WriteString(w, "(")
+				for i, item := range x {
+					if i > 0 {
+						io.WriteString(w, " ")
+					}
+					enc(item)
+				}
+				io.WriteString(w, ")")
+			case func(...scm.Scmer) scm.Scmer:
+				if def := scm.DeclarationForValue(scm.NewFunc(x)); def != nil {
+					io.WriteString(w, def.Name)
+				} else {
+					io.WriteString(w, "?")
+				}
+			default:
 				io.WriteString(w, "?")
 			}
-		default:
-			// Unknown constructs are intentionally hidden
-			io.WriteString(w, "?")
 		}
 	}
 
@@ -321,8 +352,18 @@ func safeLogScan(schema, table string, ordered bool, filter, order string, input
 	}
 
 	cols := []string{"schema", "table", "ordered", "filter", "order", "inputCount", "outputCount", "analyze_ns", "exec_ns"}
-	row := []scm.Scmer{schema, table, ordered, filter, order, inputCount, outputCount, analyzeNs, execNs}
-	t.Insert(cols, [][]scm.Scmer{row}, nil, nil, false, nil)
+	row := []scm.Scmer{
+		scm.NewString(schema),
+		scm.NewString(table),
+		scm.NewBool(ordered),
+		scm.NewString(filter),
+		scm.NewString(order),
+		scm.NewInt(inputCount),
+		scm.NewInt(outputCount),
+		scm.NewInt(analyzeNs),
+		scm.NewInt(execNs),
+	}
+	t.Insert(cols, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
 }
 
 // ---- AI IPC (shared-memory) estimator ----
@@ -544,8 +585,14 @@ func (e *Estimator) ScanEstimate(schema, table string, conditionCols []string, c
 
 	// Encode filter string
 	filter := ""
-	if p, ok := condition.(scm.Proc); ok {
-		filter = encodeScmerToString(p.Body, conditionCols, p.Params.([]scm.Scmer))
+	if proc, ok := condition.Any().(scm.Proc); ok {
+		var params []scm.Scmer
+		if proc.Params.IsSlice() {
+			params = proc.Params.Slice()
+		} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+			params = arr
+		}
+		filter = encodeScmerToString(proc.Body, conditionCols, params)
 	}
 	// Encode order string from sortcols
 	var sb strings.Builder
@@ -553,10 +600,9 @@ func (e *Estimator) ScanEstimate(schema, table string, conditionCols []string, c
 		if i > 0 {
 			sb.WriteByte('|')
 		}
-		switch v := sc.(type) {
-		case string:
-			sb.WriteString(v)
-		default:
+		if sc.IsString() {
+			sb.WriteString(sc.String())
+		} else {
 			encodeScmer(sc, &sb, nil, nil)
 		}
 	}

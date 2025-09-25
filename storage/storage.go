@@ -62,6 +62,31 @@ var storages = map[uint8]reflect.Type{
 	31: reflect.TypeOf(OverlayBlob{}),
 }
 
+func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {
+	if v.IsSlice() {
+		return v.Slice(), true
+	}
+	if arr, ok := v.Any().([]scm.Scmer); ok {
+		return arr, true
+	}
+	return nil, false
+}
+
+func mustScmerSlice(v scm.Scmer, ctx string) []scm.Scmer {
+	if slice, ok := scmerSlice(v); ok {
+		return slice
+	}
+	panic(ctx + ": expected list")
+}
+
+func scmerSliceToStrings(list []scm.Scmer) []string {
+	out := make([]string, len(list))
+	for i, item := range list {
+		out[i] = scm.String(item)
+	}
+	return out
+}
+
 func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
@@ -78,15 +103,11 @@ func Init(en scm.Env) {
 		func(a ...scm.Scmer) scm.Scmer {
 			schema := scm.String(a[0])
 			table := scm.String(a[1])
-			filtercols_ := a[2].([]scm.Scmer)
-			filtercols := make([]string, len(filtercols_))
-			for i, c := range filtercols_ {
-				filtercols[i] = scm.String(c)
-			}
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
 			filter := a[3]
 			var sortcols []scm.Scmer
 			if len(a) > 4 {
-				if lst, ok := a[4].([]scm.Scmer); ok {
+				if lst, ok := scmerSlice(a[4]); ok {
 					sortcols = lst
 				}
 			}
@@ -96,27 +117,27 @@ func Init(en scm.Env) {
 			globalEstimatorMu.Unlock()
 			db := GetDatabase(schema)
 			if db == nil {
-				return int64(0)
+				return scm.NewInt(0)
 			}
 			t := db.GetTable(table)
 			if t == nil {
-				return int64(0)
+				return scm.NewInt(0)
 			}
 			inputEstimate := int64(t.CountEstimate())
 			if est == nil {
-				return inputEstimate
+				return scm.NewInt(inputEstimate)
 			}
 			// Query estimator for output count with inputEstimate
 			out, err := est.ScanEstimate(schema, table, filtercols, filter, sortcols, inputEstimate, 50*time.Millisecond)
 			if err != nil {
 				fmt.Println("AIEstimator: call failed:", err, "— falling back to CountEstimate and disabling estimator")
 				StopGlobalEstimator()
-				return inputEstimate
+				return scm.NewInt(inputEstimate)
 			}
 			if out < 0 {
-				return inputEstimate
+				return scm.NewInt(inputEstimate)
 			}
-			return out
+			return scm.NewInt(out)
 		},
 		false,
 	})
@@ -137,65 +158,57 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"isOuter", "bool", "(optional) if true, in case of no hits, call map once anyway with NULL values"},
 		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
-			filtercols_ := a[2].([]scm.Scmer)
-			filtercols := make([]string, len(filtercols_))
-			for i, c := range filtercols_ {
-				filtercols[i] = scm.String(c)
-			}
-			mapcols_ := a[4].([]scm.Scmer)
-			mapcols := make([]string, len(mapcols_))
-			for i, c := range mapcols_ {
-				mapcols[i] = scm.String(c)
-			}
-			isOuter := false
-			if len(a) > 9 && scm.ToBool(a[9]) {
-				isOuter = true
-			}
-			if list, ok := a[1].([]scm.Scmer); ok {
-				// implementation on lists
-				var result scm.Scmer = nil
-				if len(a) > 7 { // custom neutral element
-					result = a[7]
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[4], "mapColumns"))
+			isOuter := len(a) > 9 && scm.ToBool(a[9])
+
+			if list, ok := scmerSlice(a[1]); ok {
+				neutral := scm.NewNil()
+				if len(a) > 7 {
+					neutral = a[7]
 				}
+				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[3])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapfn := scm.OptimizeProcToSerialFunction(a[5])
 				mapparams := make([]scm.Scmer, len(mapcols))
-				reducefn := func(a ...scm.Scmer) scm.Scmer {
-					return a[1]
-				}
+				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
 				if len(a) > 6 {
 					reducefn = scm.OptimizeProcToSerialFunction(a[6])
 				}
 				hadValue := false
 				for _, val := range list {
-					ds := dataset(val.([]scm.Scmer))
-					// filter
+					row := mustScmerSlice(val, "scan list row")
+					ds := dataset(row)
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
-					if scm.ToBool(filterfn(filterparams...)) {
-						hadValue = true
-						// map
-						for i, col := range mapcols {
-							mapparams[i], _ = ds.GetI(col)
-						}
-						// reduce
-						result = reducefn(result, mapfn(mapparams...))
+					if !scm.ToBool(filterfn(filterparams...)) {
+						continue
 					}
+					hadValue = true
+					for i, col := range mapcols {
+						mapparams[i], _ = ds.GetI(col)
+					}
+					result = reducefn(result, mapfn(mapparams...))
 				}
 				if !hadValue && isOuter {
-					// outer join
-					result = reducefn(result, mapfn(mapparams...)) // mapparams is filled with NULL
+					for i := range mapparams {
+						mapparams[i] = scm.NewNil()
+					}
+					result = reducefn(result, mapfn(mapparams...))
 				}
-				if len(a) > 8 && a[8] != nil {
-					reduce2 := scm.OptimizeProcToSerialFunction(a[8])
-					result = reduce2(a[7], result)
+				if len(a) > 8 && !a[8].IsNil() {
+					reduce2fn := scm.OptimizeProcToSerialFunction(a[8])
+					base := neutral
+					if len(a) > 7 {
+						base = a[7]
+					}
+					result = reduce2fn(base, result)
 				}
 				return result
 			}
-			// otherwise: implementation on storage
-			// params: table, condition, map, reduce, reduceSeed
+
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
@@ -204,20 +217,20 @@ func Init(en scm.Env) {
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
-			var aggregate scm.Scmer
-			var neutral scm.Scmer
+
+			aggregate := scm.NewNil()
 			if len(a) > 6 {
 				aggregate = a[6]
 			}
+			neutral := scm.NewNil()
 			if len(a) > 7 {
 				neutral = a[7]
 			}
-			reduce2 := scm.Scmer(nil)
+			reduce2 := scm.NewNil()
 			if len(a) > 8 {
 				reduce2 = a[8]
 			}
-			result := t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
-			return result
+			return t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -239,94 +252,76 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"isOuter", "bool", "(optional) if true, in case of no hits, call map once anyway with NULL values"},
 		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
-			filtercols_ := a[2].([]scm.Scmer)
-			filtercols := make([]string, len(filtercols_))
-			for i, c := range filtercols_ {
-				filtercols[i] = scm.String(c)
-			}
-			mapcols_ := a[8].([]scm.Scmer)
-			mapcols := make([]string, len(mapcols_))
-			for i, c := range mapcols_ {
-				mapcols[i] = scm.String(c)
-			}
+			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+			sortcolsVals := mustScmerSlice(a[4], "sortcols")
+			sortdirsVals := mustScmerSlice(a[5], "sortdirs")
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[8], "mapColumns"))
 
-			var aggregate scm.Scmer
-			var neutral scm.Scmer
+			aggregate := scm.NewNil()
 			if len(a) > 10 {
 				aggregate = a[10]
 			}
+			neutral := scm.NewNil()
 			if len(a) > 11 {
 				neutral = a[11]
 			}
-			sortcols := a[4].([]scm.Scmer)
-			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcols))
-			for i, dir := range a[5].([]scm.Scmer) {
-				sortdirs[i] = dir.(func(...scm.Scmer) scm.Scmer)
+
+			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcolsVals))
+			for i, dir := range sortdirsVals {
+				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
 			}
 
-			isOuter := false
-			if len(a) > 12 && scm.ToBool(a[12]) {
-				isOuter = true
-			}
+			isOuter := len(a) > 12 && scm.ToBool(a[12])
 
-			if list, ok := a[1].([]scm.Scmer); ok {
-				// implementation on lists
-				var result scm.Scmer = neutral
+			if list, ok := scmerSlice(a[1]); ok {
+				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[3])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapfn := scm.OptimizeProcToSerialFunction(a[9])
 				mapparams := make([]scm.Scmer, len(mapcols))
-				reducefn := func(a ...scm.Scmer) scm.Scmer {
-					return a[1]
-				}
-				if aggregate != nil {
+				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+				if !aggregate.IsNil() {
 					reducefn = scm.OptimizeProcToSerialFunction(aggregate)
 				}
-				var list2 []scm.Scmer // this is the list we will sort
+				var filtered []scm.Scmer
 				for _, val := range list {
-					ds := dataset(val.([]scm.Scmer))
-					// filter
+					row := mustScmerSlice(val, "scan_order list row")
+					ds := dataset(row)
 					for i, col := range filtercols {
 						filterparams[i], _ = ds.GetI(col)
 					}
 					if scm.ToBool(filterfn(filterparams...)) {
-						list2 = append(list2, val)
+						filtered = append(filtered, val)
 					}
 				}
-				// prepare sorting stage
-				scols := make([]func(uint) scm.Scmer, len(sortcols))
-				for i, scol := range sortcols {
-					if colname, ok := scol.(string); ok {
-						// naive column sort
-						scols[i] = func(i uint) scm.Scmer {
-							v, _ := dataset(list2[i].([]scm.Scmer)).GetI(colname)
-							return v
-						}
-					} else if proc, ok := scol.(scm.Proc); ok {
-						// complex lambda columns (TODO: either remove lambda columns or add colname mapping)
-						largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer))) // allocate only once, reuse in loop
-						for j, param := range proc.Params.([]scm.Scmer) {
-							largs[j] = func(i uint) scm.Scmer {
-								v, _ := dataset(list2[i].([]scm.Scmer)).GetI(string(param.(scm.Symbol)))
-								return v
-							}
-						}
-						procFn := scm.OptimizeProcToSerialFunction(proc)
+				scols := make([]func(uint) scm.Scmer, len(sortcolsVals))
+				for i, scol := range sortcolsVals {
+					if scol.IsString() {
+						colname := scol.String()
 						scols[i] = func(idx uint) scm.Scmer {
-							largs_ := make([]scm.Scmer, len(largs))
-							for i, getter := range largs {
-								// fetch columns used for getter
-								largs_[i] = getter(idx)
-							}
-							// execute getter
-							return procFn(largs_...)
+							row := mustScmerSlice(filtered[idx], "sort row")
+							ds := dataset(row)
+							val, _ := ds.GetI(colname)
+							return val
 						}
-					} else {
-						panic("unknown sort criteria: " + fmt.Sprint(scol))
+						continue
+					}
+					proc := scm.OptimizeProcToSerialFunction(scol)
+					var params []scm.Scmer
+					if slice, ok := scmerSlice(scol); ok {
+						params = slice
+					}
+					scols[i] = func(idx uint) scm.Scmer {
+						row := mustScmerSlice(filtered[idx], "sort row")
+						ds := dataset(row)
+						args := make([]scm.Scmer, len(params))
+						for j, p := range params {
+							args[j], _ = ds.GetI(scm.String(p))
+						}
+						return proc(args...)
 					}
 				}
-				sort.Slice(list2, func(i, j int) bool {
-					// sort list2
+				sort.Slice(filtered, func(i, j int) bool {
 					for c := 0; c < len(scols); c++ {
 						a := scols[c](uint(i))
 						b := scols[c](uint(j))
@@ -334,29 +329,29 @@ func Init(en scm.Env) {
 							return false
 						} else if scm.ToBool(sortdirs[c](b, a)) {
 							return true
-						} // else: go to next level
-						// otherwise: move on to c++
+						}
 					}
-					return false // equal is not less
+					return false
 				})
 				hadValue := false
-				for _, val := range list2 {
-					ds := dataset(val.([]scm.Scmer))
-					hadValue = true
-					// map
+				for _, val := range filtered {
+					row := mustScmerSlice(val, "scan_order row")
+					ds := dataset(row)
 					for i, col := range mapcols {
 						mapparams[i], _ = ds.GetI(col)
 					}
-					// reduce
 					result = reducefn(result, mapfn(mapparams...))
+					hadValue = true
 				}
 				if !hadValue && isOuter {
-					// outer join
-					result = reducefn(result, mapfn(mapparams...)) // mapparams is filled with NULL
+					for i := range mapparams {
+						mapparams[i] = scm.NewNil()
+					}
+					result = reducefn(result, mapfn(mapparams...))
 				}
 				return result
 			}
-			// params: table, condition, map, reduce, reduceSeed
+
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
@@ -365,8 +360,8 @@ func Init(en scm.Env) {
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
-			result := t.scan_order(filtercols, a[3], sortcols, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
-			return result
+
+			return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -377,11 +372,8 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"ignoreexists", "bool", "if true, return false instead of throwing an error"},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			ignoreexists := false
-			if len(a) > 1 && scm.ToBool(a[1]) {
-				ignoreexists = true
-			}
-			return CreateDatabase(scm.String(a[0]), ignoreexists)
+			ignoreexists := len(a) > 1 && scm.ToBool(a[1])
+			return scm.NewBool(CreateDatabase(scm.String(a[0]), ignoreexists))
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -392,11 +384,8 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"ifexists", "bool", "if true, don't throw an error if it doesn't exist"},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			ifexists := false
-			if len(a) > 1 {
-				ifexists = scm.ToBool(a[1])
-			}
-			return DropDatabase(scm.String(a[0]), ifexists)
+			ifexists := len(a) > 1 && scm.ToBool(a[1])
+			return scm.NewBool(DropDatabase(scm.String(a[0]), ifexists))
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -412,73 +401,63 @@ func Init(en scm.Env) {
 		func(a ...scm.Scmer) scm.Scmer {
 			// parse options
 			var pm PersistencyMode = Safe
-			options := a[3].([]scm.Scmer)
-			var auto_increment uint64 = 0
+			options := mustScmerSlice(a[3], "options")
+			var autoIncrement uint64
 			engine := Settings.DefaultEngine
 			collation := ""
 			charset := ""
 			comment := ""
-			for i := 0; i < len(options); i += 2 {
-				if options[i] == "engine" {
-					engine = scm.String(options[i+1])
-				} else if options[i] == "collation" {
-					collation = scm.String(options[i+1])
-				} else if options[i] == "charset" {
-					charset = scm.String(options[i+1])
-				} else if options[i] == "comment" {
-					comment = scm.String(options[i+1])
-				} else if options[i] == "auto_increment" {
-					auto_increment, _ = strconv.ParseUint(scm.String(options[i+1]), 0, 64)
-				} else {
-					panic("unknown option: " + scm.String(options[i]))
+			for i := 0; i+1 < len(options); i += 2 {
+				key := scm.String(options[i])
+				val := options[i+1]
+				switch key {
+				case "engine":
+					engine = scm.String(val)
+				case "collation":
+					collation = scm.String(val)
+				case "charset":
+					charset = scm.String(val)
+				case "comment":
+					comment = scm.String(val)
+				case "auto_increment":
+					autoIncrement, _ = strconv.ParseUint(scm.String(val), 0, 64)
+				default:
+					panic("unknown option: " + key)
 				}
 			}
-			if engine == "memory" {
+			switch engine {
+			case "memory":
 				pm = Memory
-			} else if engine == "sloppy" {
+			case "sloppy":
 				pm = Sloppy
-			} else if engine == "logged" {
+			case "logged":
 				pm = Logged
-			} else if engine == "safe" {
+			case "safe":
 				pm = Safe
-			} else {
+			default:
 				panic("unknown engine: " + engine)
 			}
 
-			// create table
-			ifnotexists := false
-			if len(a) > 4 && scm.ToBool(a[4]) {
-				ifnotexists = true
-			}
+			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
 			t, created := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
 			t.Collation = collation
 			t.Charset = charset
 			t.Comment = comment
-			t.Auto_increment = auto_increment
+			t.Auto_increment = autoIncrement
 			if created {
-				// add columns and constraints
-				for _, coldef := range a[2].([]scm.Scmer) {
-					def := coldef.([]scm.Scmer)
+				for _, coldef := range mustScmerSlice(a[2], "columns") {
+					def := mustScmerSlice(coldef, "column definition")
 					if len(def) == 0 {
 						continue
 					}
-					if def[0] == "unique" {
-						// id cols
-						cols := make([]string, len(def[2].([]scm.Scmer)))
-						for i, v := range def[2].([]scm.Scmer) {
-							cols[i] = scm.String(v)
-						}
+					head := scm.String(def[0])
+					switch head {
+					case "unique":
+						cols := scmerSliceToStrings(mustScmerSlice(def[2], "unique columns"))
 						t.Unique = append(t.Unique, uniqueKey{scm.String(def[1]), cols})
-					} else if def[0] == "foreign" {
-						// id cols tbl cols2
-						cols1 := make([]string, len(def[2].([]scm.Scmer)))
-						for i, v := range def[2].([]scm.Scmer) {
-							cols1[i] = scm.String(v)
-						}
-						cols2 := make([]string, len(def[4].([]scm.Scmer)))
-						for i, v := range def[4].([]scm.Scmer) {
-							cols2[i] = scm.String(v)
-						}
+					case "foreign":
+						cols1 := scmerSliceToStrings(mustScmerSlice(def[2], "foreign cols1"))
+						cols2 := scmerSliceToStrings(mustScmerSlice(def[4], "foreign cols2"))
 						t2name := scm.String(def[3])
 						t2 := t.schema.GetTable(t2name)
 						var updatemode foreignKeyMode
@@ -491,20 +470,20 @@ func Init(en scm.Env) {
 						}
 						t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode})
 						if t2 != nil {
-							// non-forward declaration
 							t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode})
 						}
-					} else if def[0] == "column" {
-						// normal column
+					case "column":
 						colname := scm.String(def[1])
 						typename := scm.String(def[2])
-						dimensions_ := def[3].([]scm.Scmer)
-						dimensions := make([]int, len(dimensions_))
-						for i, d := range dimensions_ {
+						dimVals := mustScmerSlice(def[3], "column dimensions")
+						dimensions := make([]int, len(dimVals))
+						for i, d := range dimVals {
 							dimensions[i] = scm.ToInt(d)
 						}
-						typeparams := def[4].([]scm.Scmer)
+						typeparams := mustScmerSlice(def[4], "column typeparams")
 						t.CreateColumn(colname, typename, dimensions, typeparams)
+					default:
+						panic("unknown column definition: " + head)
 					}
 				}
 				// add constraints that are added onto us
@@ -519,7 +498,7 @@ func Init(en scm.Env) {
 					}
 				}
 			}
-			return true
+			return scm.NewBool(true)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -549,25 +528,20 @@ func Init(en scm.Env) {
 			// normal column
 			colname := scm.String(a[2])
 			typename := scm.String(a[3])
-			dimensions_ := a[4].([]scm.Scmer)
-			dimensions := make([]int, len(dimensions_))
-			for i, d := range dimensions_ {
+			dimensionsVals := mustScmerSlice(a[4], "dimensions")
+			dimensions := make([]int, len(dimensionsVals))
+			for i, d := range dimensionsVals {
 				dimensions[i] = scm.ToInt(d)
 			}
-			typeparams := a[5].([]scm.Scmer)
+			typeparams := mustScmerSlice(a[5], "typeparams")
 			ok := t.CreateColumn(colname, typename, dimensions, typeparams)
 
-			if len(a) > 7 && a[7] != nil {
-				// computed columns (interface might not be final)
-				param_names_ := a[6].([]scm.Scmer)
-				param_names := make([]string, len(param_names_))
-				for i, pn := range param_names_ {
-					param_names[i] = scm.String(pn)
-				}
-				t.ComputeColumn(colname, param_names, a[7])
+			if len(a) > 7 && !a[7].IsNil() {
+				paramNames := scmerSliceToStrings(mustScmerSlice(a[6], "computor param names"))
+				t.ComputeColumn(colname, paramNames, a[7])
 			}
 
-			return ok
+			return scm.NewBool(ok)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -581,7 +555,6 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"columns", "list", "list of columns to include"},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
@@ -592,30 +565,24 @@ func Init(en scm.Env) {
 			}
 
 			if !scm.ToBool(a[3]) {
-				// we don't care about non-unique keys since we build our own indices
-				return true
+				return scm.NewBool(true)
 			}
 
-			l := a[4].([]scm.Scmer)
+			cols := scmerSliceToStrings(mustScmerSlice(a[4], "unique columns"))
 			name := scm.String(a[2])
-			cols := make([]string, len(l))
-			for i, v := range l {
-				cols[i] = scm.String(v)
-			}
 
 			db.schemalock.Lock()
 			defer db.schemalock.Unlock()
 			for _, u := range t.Unique {
 				if u.Id == name {
-					return false // key already exists
+					return scm.NewBool(false)
 				}
 			}
 
-			// add unique key
 			t.Unique = append(t.Unique, uniqueKey{name, cols})
 			db.save()
 
-			return true
+			return scm.NewBool(true)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -632,7 +599,6 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"deletemode", "string", "restrict|cascade|set null"},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			// get tbl
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
@@ -647,33 +613,23 @@ func Init(en scm.Env) {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[4]) + " does not exist")
 			}
 
-			l1 := a[3].([]scm.Scmer)
-			cols1 := make([]string, len(l1))
-			for i, v := range l1 {
-				cols1[i] = scm.String(v)
-			}
-
-			l2 := a[5].([]scm.Scmer)
-			cols2 := make([]string, len(l2))
-			for i, v := range l2 {
-				cols2[i] = scm.String(v)
-			}
+			cols1 := scmerSliceToStrings(mustScmerSlice(a[3], "foreign cols1"))
+			cols2 := scmerSliceToStrings(mustScmerSlice(a[5], "foreign cols2"))
 
 			db.schemalock.Lock()
 			defer db.schemalock.Unlock()
 			for _, u := range t1.Foreign {
 				if u.Id == id {
-					return false // key already exists
+					return scm.NewBool(false)
 				}
 			}
 
-			// add unique key
 			k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[6]), getForeignKeyMode(a[7])}
 			t1.Foreign = append(t1.Foreign, k)
 			t2.Foreign = append(t2.Foreign, k)
 			db.save()
 
-			return true
+			return scm.NewBool(true)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -704,7 +660,7 @@ func Init(en scm.Env) {
 				if t.Shards == nil && t.PShards != nil {
 					for _, sd := range t.PDimensions {
 						if sd.Column == scm.String(a[2]) {
-							return sd.Pivots // found the column in partition schema: return exactly the same pivots as we found already
+							return scm.NewSlice(sd.Pivots) // found the column in partition schema: return exactly the same pivots as we found already
 						}
 					}
 				}
@@ -713,7 +669,7 @@ func Init(en scm.Env) {
 				numPartitions = int(1 + ((2 * t.Count()) / Settings.ShardSize))
 			}
 			// calculate them anew
-			return t.NewShardDimension(scm.String(a[2]), numPartitions).Pivots
+			return scm.NewSlice(t.NewShardDimension(scm.String(a[2]), numPartitions).Pivots)
 
 		}, false,
 	})
@@ -735,29 +691,29 @@ func Init(en scm.Env) {
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
-			cols := dataset(a[2].([]scm.Scmer))
+			cols := dataset(mustScmerSlice(a[2], "partition columns"))
 			if t.PDimensions == nil {
 				// apply partitioning schema
 				ps := make([]shardDimension, len(cols)/2)
 				for i := 0; i < len(ps); i++ {
 					ps[i].Column = scm.String(cols[2*i])
-					ps[i].Pivots = cols[2*i+1].([]scm.Scmer)
+					ps[i].Pivots = mustScmerSlice(cols[2*i+1], "partition pivots")
 					ps[i].NumPartitions = len(ps[i].Pivots) + 1
 				}
 				if len(ps) > Settings.PartitionMaxDimensions {
 					ps = ps[:Settings.PartitionMaxDimensions]
 				}
 				t.repartition(ps) // perform repartitioning immediately
-				return true
+				return scm.NewBool(true)
 			} else {
 				// increase partitioning scores
 				for i, c := range t.Columns {
 					if pivots, ok := cols.Get(c.Name); ok {
 						// that column is in the parititoning schema -> increase score
-						t.Columns[i].PartitioningScore = c.PartitioningScore + len(pivots.([]scm.Scmer))
+						t.Columns[i].PartitioningScore = c.PartitioningScore + len(mustScmerSlice(pivots, "partition pivots"))
 					}
 				}
-				return false
+				return scm.NewBool(false)
 			}
 		}, false,
 	})
@@ -781,11 +737,11 @@ func Init(en scm.Env) {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
 
-			switch a[2] {
+			switch scm.String(a[2]) {
 			case "drop":
-				return t.DropColumn(scm.String(a[3]))
+				return scm.NewBool(t.DropColumn(scm.String(a[3])))
 			case "owner":
-				return false // ignore
+				return scm.NewBool(false) // ignore
 			default:
 				panic("unimplemented alter table operation: " + scm.String(a[2]))
 			}
@@ -813,24 +769,23 @@ func Init(en scm.Env) {
 			}
 			for i, c := range t.Columns {
 				if c.Name == scm.String(a[2]) {
-					switch a[3] {
+					switch scm.String(a[3]) {
 					case "drop":
 						ok := t.DropColumn(scm.String(a[2]))
 						db.save()
-						return ok
+						return scm.NewBool(ok)
 					case "auto_increment":
 						ai := scm.ToInt(a[4])
 						if ai > 1 {
 							// set ai value
 							t.Auto_increment = uint64(ai)
 							db.save()
-							return true
-						} else {
-							// set ai flag for column
-							t.Columns[i].AutoIncrement = scm.ToBool(a[4])
-							db.save()
-							return true
+							return scm.NewBool(true)
 						}
+						// set ai flag for column
+						t.Columns[i].AutoIncrement = scm.ToBool(a[4])
+						db.save()
+						return scm.NewBool(true)
 					default:
 						ok := t.Columns[i].Alter(scm.String(a[3]), a[4])
 						db.save()
@@ -855,7 +810,7 @@ func Init(en scm.Env) {
 			} else {
 				DropTable(scm.String(a[0]), scm.String(a[1]), false)
 			}
-			return true
+			return scm.NewBool(true)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -877,40 +832,39 @@ func Init(en scm.Env) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
 			var onCollisionCols []string
-			onCollision := scm.Scmer(nil)
+			onCollision := scm.NewNil()
 			if len(a) > 5 {
-				onCollisionCols_ := a[4].([]scm.Scmer)
-				onCollisionCols = make([]string, len(onCollisionCols_))
-				for i, c := range onCollisionCols_ {
+				onCollisionColsVals := mustScmerSlice(a[4], "onCollision columns")
+				onCollisionCols = make([]string, len(onCollisionColsVals))
+				for i, c := range onCollisionColsVals {
 					onCollisionCols[i] = scm.String(c)
 				}
 				onCollision = a[5]
 			}
-			mergeNull := false
-			if len(a) > 6 && scm.ToBool(a[6]) {
-				mergeNull = true
-			}
+			mergeNull := len(a) > 6 && scm.ToBool(a[6])
 			// optional onInsertid callback
 			var onFirst func(int64)
-			if len(a) > 7 && a[7] != nil {
+			if len(a) > 7 && !a[7].IsNil() {
 				cb := a[7]
 				var once sync.Once
-				onFirst = func(id int64) { once.Do(func() { scm.Apply(cb, id) }) }
+				onFirst = func(id int64) {
+					once.Do(func() { scm.Apply(cb, scm.NewInt(id)) })
+				}
 			}
-			cols_ := a[2].([]scm.Scmer)
-			cols := make([]string, len(cols_))
-			for i, col := range cols_ {
+			colsVals := mustScmerSlice(a[2], "column names")
+			cols := make([]string, len(colsVals))
+			for i, col := range colsVals {
 				cols[i] = scm.String(col)
 			}
-			rows_ := a[3].([]scm.Scmer)
-			rows := make([][]scm.Scmer, len(rows_))
-			for i, row := range rows_ {
-				rows[i] = row.([]scm.Scmer)
+			rowVals := mustScmerSlice(a[3], "dataset rows")
+			rows := make([][]scm.Scmer, len(rowVals))
+			for i, row := range rowVals {
+				rows[i] = mustScmerSlice(row, "insert row")
 			}
 			// perform insert
 			t := db.GetTable(scm.String(a[1]))
 			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
-			return int64(inserted)
+			return scm.NewInt(int64(inserted))
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -922,14 +876,13 @@ func Init(en scm.Env) {
 		}, "string",
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
-				return PrintMemUsage()
+				return scm.NewString(PrintMemUsage())
 			} else if len(a) == 1 {
-				return GetDatabase(scm.String(a[0])).PrintMemUsage()
+				return scm.NewString(GetDatabase(scm.String(a[0])).PrintMemUsage())
 			} else if len(a) == 2 {
-				return GetDatabase(scm.String(a[0])).GetTable(scm.String(a[1])).PrintMemUsage()
-			} else {
-				return nil
+				return scm.NewString(GetDatabase(scm.String(a[0])).GetTable(scm.String(a[1])).PrintMemUsage())
 			}
+			return scm.NewNil()
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -945,14 +898,14 @@ func Init(en scm.Env) {
 				dbs := databases.GetAll()
 				result := make([]scm.Scmer, len(dbs))
 				for i, db := range dbs {
-					result[i] = db.Name
+					result[i] = scm.NewString(db.Name)
 				}
-				return result
+				return scm.NewSlice(result)
 			} else if len(a) == 1 {
 				// show tables
 				db := GetDatabase(scm.String(a[0]))
 				if db == nil {
-					return nil // use this to check if a database exists
+					return scm.NewNil() // use this to check if a database exists
 				}
 				return db.ShowTables()
 			} else if len(a) == 2 {
@@ -966,9 +919,8 @@ func Init(en scm.Env) {
 					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
 				return t.ShowColumns()
-			} else {
-				panic("invalid call of show")
 			}
+			panic("invalid call of show")
 		}, false,
 	})
 
@@ -997,14 +949,14 @@ func Init(en scm.Env) {
 			rows := make([]scm.Scmer, 0, len(shards))
 			for i, s := range shards {
 				if s == nil {
-					rows = append(rows, []scm.Scmer{
-						"shard", int64(i),
-						"state", "nil",
-						"main_count", int64(0),
-						"delta", int64(0),
-						"deletions", int64(0),
-						"size_bytes", int64(0),
-					})
+					rows = append(rows, scm.NewSlice([]scm.Scmer{
+						scm.NewString("shard"), scm.NewInt(int64(i)),
+						scm.NewString("state"), scm.NewString("nil"),
+						scm.NewString("main_count"), scm.NewInt(0),
+						scm.NewString("delta"), scm.NewInt(0),
+						scm.NewString("deletions"), scm.NewInt(0),
+						scm.NewString("size_bytes"), scm.NewInt(0),
+					}))
 					continue
 				}
 				// read counts under lock
@@ -1016,16 +968,16 @@ func Init(en scm.Env) {
 				// compute size while holding read lock for a consistent snapshot
 				size := s.ComputeSize()
 				s.mu.RUnlock()
-				rows = append(rows, []scm.Scmer{
-					"shard", int64(i),
-					"state", state,
-					"main_count", int64(mainCount),
-					"delta", int64(delta),
-					"deletions", int64(deletions),
-					"size_bytes", int64(size),
-				})
+				rows = append(rows, scm.NewSlice([]scm.Scmer{
+					scm.NewString("shard"), scm.NewInt(int64(i)),
+					scm.NewString("state"), scm.NewString(state),
+					scm.NewString("main_count"), scm.NewInt(int64(mainCount)),
+					scm.NewString("delta"), scm.NewInt(int64(delta)),
+					scm.NewString("deletions"), scm.NewInt(int64(deletions)),
+					scm.NewString("size_bytes"), scm.NewInt(int64(size)),
+				}))
 			}
-			return rows
+			return scm.NewSlice(rows)
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -1045,7 +997,7 @@ func Init(en scm.Env) {
 				repartition = scm.ToBool(a[1])
 			}
 
-			return Rebuild(all, repartition)
+			return scm.NewString(Rebuild(all, repartition))
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -1070,9 +1022,13 @@ func Init(en scm.Env) {
 			if len(a) > 4 {
 				firstline = scm.ToBool(a[4])
 			}
-			LoadCSV(scm.String(a[0]), scm.String(a[1]), a[2].(io.Reader), delimiter, firstline)
+			stream, ok := a[2].Any().(io.Reader)
+			if !ok {
+				panic("loadCSV expects a stream")
+			}
+			LoadCSV(scm.String(a[0]), scm.String(a[1]), stream, delimiter, firstline)
 
-			return fmt.Sprint(time.Since(start))
+			return scm.NewString(fmt.Sprint(time.Since(start)))
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -1086,9 +1042,13 @@ func Init(en scm.Env) {
 			// schema, filename
 			start := time.Now()
 
-			LoadJSON(scm.String(a[0]), a[1].(io.Reader))
+			stream, ok := a[1].Any().(io.Reader)
+			if !ok {
+				panic("loadJSON expects a stream")
+			}
+			LoadJSON(scm.String(a[0]), stream)
 
-			return fmt.Sprint(time.Since(start))
+			return scm.NewString(fmt.Sprint(time.Since(start)))
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -1187,7 +1147,7 @@ func (t *table) PrintMemUsage() string {
 			ssz += indexSize
 		}
 		b.WriteString(" ---\n")
-		insertionSize := scm.ComputeSize(s.inserts)
+		insertionSize := scm.ComputeSize(scm.NewAny(s.inserts))
 		deletionSize := s.deletions.ComputeSize()
 		ssz += insertionSize
 		ssz += deletionSize

@@ -105,11 +105,11 @@ func (s *StorageSeq) GetValue(i uint) scm.Scmer {
 	var value, stride int64
 	value = int64(s.start.GetValueUInt(min)) + s.start.offset
 	if s.start.hasNull && value == int64(s.start.null) {
-		return nil
+		return scm.NewNil()
 	}
 	stride = int64(s.stride.GetValueUInt(min)) + s.stride.offset
 	recid := int64(s.recordId.GetValueUInt(min)) + s.recordId.offset
-	return float64(value + int64(int64(i)-recid)*stride)
+	return scm.NewFloat(float64(value + int64(int64(i)-recid)*stride))
 
 }
 
@@ -120,23 +120,23 @@ func (s *StorageSeq) prepare() {
 	s.stride.prepare()
 }
 func (s *StorageSeq) scan(i uint, value scm.Scmer) {
-	if value == nil {
+	if value.IsNil() {
 		// nil (stride is 0)
 		if i == 0 {
 			s.lastValueNil = true
 			s.seqCount = s.seqCount + 1
-			s.recordId.scan(s.seqCount-1, i)
-			s.start.scan(s.seqCount-1, nil)
-			s.stride.scan(s.seqCount-1, 0)
+			s.recordId.scan(s.seqCount-1, scm.NewInt(int64(i)))
+			s.start.scan(s.seqCount-1, scm.NewNil())
+			s.stride.scan(s.seqCount-1, scm.NewInt(0))
 		} else if s.lastValueNil {
 			// sequence stays the same
 		} else {
 			// start nil
 			s.lastValueNil = true
 			s.seqCount = s.seqCount + 1
-			s.recordId.scan(s.seqCount-1, i)
-			s.start.scan(s.seqCount-1, nil)
-			s.stride.scan(s.seqCount-1, 0)
+			s.recordId.scan(s.seqCount-1, scm.NewInt(int64(i)))
+			s.start.scan(s.seqCount-1, scm.NewNil())
+			s.stride.scan(s.seqCount-1, scm.NewInt(0))
 		}
 	} else {
 		// integer
@@ -146,7 +146,7 @@ func (s *StorageSeq) scan(i uint, value scm.Scmer) {
 			s.lastValueFirst = false
 			s.lastStride = v - s.lastValue
 			s.lastValue = v
-			s.stride.scan(s.seqCount-1, s.lastStride)
+			s.stride.scan(s.seqCount-1, scm.NewInt(s.lastStride))
 		} else if i != 0 && v == s.lastValue+s.lastStride {
 			// sequence stays the same
 			s.lastValue = v
@@ -156,7 +156,7 @@ func (s *StorageSeq) scan(i uint, value scm.Scmer) {
 			s.lastValue = v
 			s.lastValueFirst = true
 			s.lastValueNil = false
-			s.recordId.scan(s.seqCount-1, i)
+			s.recordId.scan(s.seqCount-1, scm.NewInt(int64(i)))
 			s.start.scan(s.seqCount-1, value)
 		}
 	}
@@ -174,23 +174,23 @@ func (s *StorageSeq) init(i uint) {
 }
 func (s *StorageSeq) build(i uint, value scm.Scmer) {
 	// store
-	if value == nil {
+	if value.IsNil() {
 		// nil (stride is 0)
 		if i == 0 {
 			s.lastValueNil = true
 			s.seqCount = s.seqCount + 1
-			s.recordId.build(s.seqCount-1, i)
-			s.start.build(s.seqCount-1, nil)
-			s.stride.build(s.seqCount-1, 0)
+			s.recordId.build(s.seqCount-1, scm.NewInt(int64(i)))
+			s.start.build(s.seqCount-1, scm.NewNil())
+			s.stride.build(s.seqCount-1, scm.NewInt(0))
 		} else if s.lastValueNil {
 			// sequence stays the same
 		} else {
 			// start nil
 			s.lastValueNil = true
 			s.seqCount = s.seqCount + 1
-			s.recordId.build(s.seqCount-1, i)
-			s.start.build(s.seqCount-1, nil)
-			s.stride.build(s.seqCount-1, 0)
+			s.recordId.build(s.seqCount-1, scm.NewInt(int64(i)))
+			s.start.build(s.seqCount-1, scm.NewNil())
+			s.stride.build(s.seqCount-1, scm.NewInt(0))
 		}
 	} else {
 		// integer
@@ -200,7 +200,7 @@ func (s *StorageSeq) build(i uint, value scm.Scmer) {
 			s.lastValueFirst = false
 			s.lastStride = v - s.lastValue
 			s.lastValue = v
-			s.stride.build(s.seqCount-1, s.lastStride)
+			s.stride.build(s.seqCount-1, scm.NewInt(s.lastStride))
 		} else if i != 0 && v == s.lastValue+s.lastStride {
 			// sequence stays the same
 			s.lastValue = v
@@ -210,7 +210,7 @@ func (s *StorageSeq) build(i uint, value scm.Scmer) {
 			s.lastValue = v
 			s.lastValueFirst = true
 			s.lastValueNil = false
-			s.recordId.build(s.seqCount-1, i)
+			s.recordId.build(s.seqCount-1, scm.NewInt(int64(i)))
 			s.start.build(s.seqCount-1, value)
 		}
 	}

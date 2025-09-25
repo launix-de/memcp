@@ -16,7 +16,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package storage
 
-import "fmt"
 import "time"
 import "sort"
 import "strings"
@@ -132,8 +131,8 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		atomic.AddInt64(&outCount, 1)
 		return innerCallback(args...)
 	}
-	aggregateFn := func(...scm.Scmer) scm.Scmer { return nil }
-	if aggregate != nil {
+	aggregateFn := func(...scm.Scmer) scm.Scmer { return scm.NewNil() }
+	if !aggregate.IsNil() {
 		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
 
@@ -229,7 +228,11 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		}
 	}
 	if !hadValue && isOuter {
-		akkumulator = aggregateFn(akkumulator, callbackFn(make([]scm.Scmer, len(callbackCols)))) // outer join: call once with NULLs
+		nullRow := make([]scm.Scmer, len(callbackCols))
+		for i := range nullRow {
+			nullRow[i] = scm.NewNil()
+		}
+		akkumulator = aggregateFn(akkumulator, callbackFn(nullRow...)) // outer join: call once with NULLs
 	}
 	execNs := time.Since(execStart).Nanoseconds()
 	// log statistics for ordered scan (best-effort, async) if threshold met
@@ -237,20 +240,23 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		go func(anNs, exNs int64) {
 			defer func() { _ = recover() }()
 			filterEnc := ""
-			if p, ok := condition.(scm.Proc); ok {
-				filterEnc = encodeScmerToString(p.Body, conditionCols, p.Params.([]scm.Scmer))
+			if proc, ok := condition.Any().(scm.Proc); ok {
+				var params []scm.Scmer
+				if proc.Params.IsSlice() {
+					params = proc.Params.Slice()
+				} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+					params = arr
+				}
+				filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 			}
 			var sb strings.Builder
 			for i, sc := range sortcols {
 				if i > 0 {
 					sb.WriteByte('|')
 				}
-				switch v := sc.(type) {
-				case string:
-					// Plain column name
-					sb.WriteString(v)
-				default:
-					// Use helper to encode unknowns/lambdas as '?'
+				if sc.IsString() {
+					sb.WriteString(sc.String())
+				} else {
 					encodeScmer(sc, &sb, nil, nil)
 				}
 			}
@@ -269,32 +275,48 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// prepare filter function
 	cdataset := make([]scm.Scmer, len(conditionCols))
+	for i := range cdataset {
+		cdataset[i] = scm.NewNil()
+	}
 
 	// prepare sort criteria so they can be queried easily
 	result.scols = make([]func(uint) scm.Scmer, len(sortcols))
 	for i, scol := range sortcols {
-		if colname, ok := scol.(string); ok {
-			// naive column sort
+		if scol.IsString() {
+			colname := scol.String()
 			result.scols[i] = t.ColumnReader(colname)
-		} else if proc, ok := scol.(scm.Proc); ok {
-			// complex lambda columns (TODO: either remove lambda columns or add colname mapping)
-			largs := make([]func(uint) scm.Scmer, len(proc.Params.([]scm.Scmer))) // allocate only once, reuse in loop
-			for j, param := range proc.Params.([]scm.Scmer) {
-				largs[j] = t.ColumnReader(string(param.(scm.Symbol)))
-			}
-			procFn := scm.OptimizeProcToSerialFunction(proc)
-			result.scols[i] = func(idx uint) scm.Scmer {
-				largs_ := make([]scm.Scmer, len(largs))
-				for i, getter := range largs {
-					// fetch columns used for getter
-					largs_[i] = getter(idx)
-				}
-				// execute getter
-				return procFn(largs_...)
-			}
-		} else {
-			panic("unknown sort criteria: " + fmt.Sprint(scol))
+			continue
 		}
+		if proc, ok := scol.Any().(scm.Proc); ok {
+			var params []scm.Scmer
+			if proc.Params.IsSlice() {
+				params = proc.Params.Slice()
+			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+				params = arr
+			}
+			largs := make([]func(uint) scm.Scmer, len(params))
+			for j, param := range params {
+				name := ""
+				if param.IsSymbol() {
+					name = param.String()
+				} else if sym, ok := param.Any().(scm.Symbol); ok {
+					name = string(sym)
+				} else {
+					name = scm.String(param)
+				}
+				largs[j] = t.ColumnReader(name)
+			}
+			procFn := scm.OptimizeProcToSerialFunction(scol)
+			result.scols[i] = func(idx uint) scm.Scmer {
+				vals := make([]scm.Scmer, len(largs))
+				for j, getter := range largs {
+					vals[j] = getter(idx)
+				}
+				return procFn(vals...)
+			}
+			continue
+		}
+		panic("unknown sort criteria: " + scm.String(scol))
 	}
 
 	// If a sort column has a column-level collation and sortdir is the default < or >,
@@ -304,8 +326,12 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	adjustedSortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortdirs))
 	for i := range sortdirs {
 		adjustedSortdirs[i] = sortdirs[i]
-		colname, ok := sortcols[i].(string)
-		if !ok {
+		colname := ""
+		if sortcols[i].IsString() {
+			colname = sortcols[i].String()
+		} else if sym, ok := sortcols[i].Any().(scm.Symbol); ok {
+			colname = string(sym)
+		} else {
 			continue
 		}
 		// find column definition
@@ -332,16 +358,15 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		defer func() { _ = recover() }()
 		// If dir(1,2) is true, comparator behaves like '<' (ASC) -> reverse=false
 		// Else if dir(2,1) is true, comparator behaves like '>' (DESC) -> reverse=true
-		if res := sortdirs[i](int64(1), int64(2)); scm.ToBool(res) {
+		if res := sortdirs[i](scm.NewInt(1), scm.NewInt(2)); scm.ToBool(res) {
 			reverse = false
-		} else if res2 := sortdirs[i](int64(2), int64(1)); scm.ToBool(res2) {
+		} else if res2 := sortdirs[i](scm.NewInt(2), scm.NewInt(1)); scm.ToBool(res2) {
 			reverse = true
 		}
 		// Build comparator via (collate coll reverse?)
-		cmpScm := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], coll, reverse)
-		if fn, ok := cmpScm.(func(...scm.Scmer) scm.Scmer); ok {
-			adjustedSortdirs[i] = fn
-		}
+		cmpScm := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(coll), scm.NewBool(reverse))
+		cmpFn := scm.OptimizeProcToSerialFunction(cmpScm)
+		adjustedSortdirs[i] = cmpFn
 	}
 
 	// prepare map columns (but only caller will use them)
@@ -349,7 +374,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	for i, arg := range callbackCols {
 		if arg == "$update" {
 			result.mcols[i] = func(idx uint) scm.Scmer {
-				return t.UpdateFunction(idx, true)
+				return scm.NewFunc(t.UpdateFunction(idx, true))
 			}
 		} else {
 			result.mcols[i] = t.ColumnReader(arg)

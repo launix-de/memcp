@@ -16,10 +16,13 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package scm
 
-import "io"
-import "bufio"
-import "compress/gzip"
-import "github.com/ulikunitz/xz"
+import (
+	"bufio"
+	"compress/gzip"
+	"io"
+
+	"github.com/ulikunitz/xz"
+)
 
 func init_streams() {
 	// string functions
@@ -31,13 +34,13 @@ func init_streams() {
 		[]DeclarationParameter{
 			DeclarationParameter{"content", "string", "content to put into the stream"},
 		}, "stream",
-		func(a ...Scmer) (result Scmer) {
+		func(a ...Scmer) Scmer {
 			reader, writer := io.Pipe()
 			go func() {
 				io.WriteString(writer, String(a[0]))
 				writer.Close()
 			}()
-			return io.Reader(reader)
+			return NewAny(io.Reader(reader))
 		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -46,8 +49,11 @@ func init_streams() {
 		[]DeclarationParameter{
 			DeclarationParameter{"stream", "stream", "input stream"},
 		}, "stream",
-		func(a ...Scmer) (result Scmer) {
-			stream := a[0].(io.Reader)
+		func(a ...Scmer) Scmer {
+			stream, ok := a[0].Any().(io.Reader)
+			if !ok {
+				panic("gzip expects a stream")
+			}
 			reader, writer := io.Pipe()
 			bwriter := bufio.NewWriterSize(writer, 16*1024)
 			zip := gzip.NewWriter(bwriter)
@@ -57,7 +63,7 @@ func init_streams() {
 				bwriter.Flush()
 				writer.Close()
 			}()
-			return (io.Reader)(reader)
+			return NewAny(io.Reader(reader))
 		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -66,8 +72,11 @@ func init_streams() {
 		[]DeclarationParameter{
 			DeclarationParameter{"stream", "stream", "input stream"},
 		}, "stream",
-		func(a ...Scmer) (result Scmer) {
-			stream := a[0].(io.Reader)
+		func(a ...Scmer) Scmer {
+			stream, ok := a[0].Any().(io.Reader)
+			if !ok {
+				panic("xz expects a stream")
+			}
 			reader, writer := io.Pipe()
 			bwriter := bufio.NewWriterSize(writer, 16*1024)
 			zip, err := xz.NewWriter(bwriter)
@@ -80,7 +89,7 @@ func init_streams() {
 			if err != nil {
 				panic(err)
 			}
-			return (io.Reader)(reader)
+			return NewAny(io.Reader(reader))
 		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -89,13 +98,16 @@ func init_streams() {
 		[]DeclarationParameter{
 			DeclarationParameter{"stream", "stream", "input stream"},
 		}, "stream",
-		func(a ...Scmer) (result Scmer) {
-			stream := a[0].(io.Reader)
-			result, err := gzip.NewReader(stream)
+		func(a ...Scmer) Scmer {
+			stream, ok := a[0].Any().(io.Reader)
+			if !ok {
+				panic("zcat expects a stream")
+			}
+			reader, err := gzip.NewReader(stream)
 			if err != nil {
 				panic(err)
 			}
-			return result
+			return NewAny(reader)
 		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -104,13 +116,16 @@ func init_streams() {
 		[]DeclarationParameter{
 			DeclarationParameter{"stream", "stream", "input stream"},
 		}, "stream",
-		func(a ...Scmer) (result Scmer) {
-			stream := a[0].(io.Reader)
-			result, err := xz.NewReader(stream)
+		func(a ...Scmer) Scmer {
+			stream, ok := a[0].Any().(io.Reader)
+			if !ok {
+				panic("xzcat expects a stream")
+			}
+			reader, err := xz.NewReader(stream)
 			if err != nil {
 				panic(err)
 			}
-			return result
+			return NewAny(reader)
 		}, false,
 	})
 }

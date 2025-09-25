@@ -36,15 +36,19 @@ func (s *StoragePrefix) String() string {
 }
 
 func (s *StoragePrefix) GetValue(i uint) scm.Scmer {
-	innerval := s.values.GetValue(i)
-	switch v := innerval.(type) {
-	case string:
-		return s.prefixdictionary[int64(s.prefixes.GetValueUInt(i))+s.prefixes.offset] + v // append prefix
-	case nil:
-		return nil
-	default:
+	inner := s.values.GetValue(i)
+	if inner.IsNil() {
+		return scm.NewNil()
+	}
+	if !inner.IsString() {
 		panic("invalid value in prefix storage")
 	}
+	idx := int64(s.prefixes.GetValueUInt(i)) + s.prefixes.offset
+	if idx >= int64(len(s.prefixdictionary)) || idx < 0 {
+		panic("prefix index out of range")
+	}
+	prefix := s.prefixdictionary[idx]
+	return scm.NewString(prefix + inner.String())
 }
 
 func (s *StoragePrefix) prepare() {
@@ -53,21 +57,17 @@ func (s *StoragePrefix) prepare() {
 	s.values.prepare()
 }
 func (s *StoragePrefix) scan(i uint, value scm.Scmer) {
-	var v string
-	switch v_ := value.(type) {
-	case string:
-		v = v_
-	default:
-		// NULL
-		s.values.scan(i, nil)
+	if value.IsNil() {
+		s.values.scan(i, scm.NewNil())
 		return
 	}
+	v := scm.String(value)
 
 	for pfid := len(s.prefixdictionary) - 1; pfid >= 0; pfid-- {
 		if strings.HasPrefix(v, s.prefixdictionary[pfid]) {
 			// learn the string stripped from its prefix
-			s.prefixes.scan(i, pfid)
-			s.values.scan(i, v[len(s.prefixdictionary[pfid]):])
+			s.prefixes.scan(i, scm.NewInt(int64(pfid)))
+			s.values.scan(i, scm.NewString(v[len(s.prefixdictionary[pfid]):]))
 			return
 		}
 	}
@@ -78,21 +78,17 @@ func (s *StoragePrefix) init(i uint) {
 }
 func (s *StoragePrefix) build(i uint, value scm.Scmer) {
 	// store
-	var v string
-	switch v_ := value.(type) {
-	case string:
-		v = v_
-	default:
-		// NULL = 1 1
-		s.values.build(i, nil)
+	if value.IsNil() {
+		s.values.build(i, scm.NewNil())
 		return
 	}
+	v := scm.String(value)
 
 	for pfid := len(s.prefixdictionary) - 1; pfid >= 0; pfid-- {
 		if strings.HasPrefix(v, s.prefixdictionary[pfid]) {
 			// learn the string stripped from its prefix
-			s.prefixes.build(i, pfid)
-			s.values.build(i, v[len(s.prefixdictionary[pfid]):])
+			s.prefixes.build(i, scm.NewInt(int64(pfid)))
+			s.values.build(i, scm.NewString(v[len(s.prefixdictionary[pfid]):]))
 			return
 		}
 	}

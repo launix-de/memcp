@@ -68,8 +68,8 @@ func (s *StorageSparse) Deserialize(f io.Reader) uint {
 	s.i = l2
 	scanner := bufio.NewScanner(f)
 	s.recids.prepare()
-	s.recids.scan(0, 0)
-	s.recids.scan(uint(l2-1), l-1)
+	s.recids.scan(0, scm.NewInt(0))
+	s.recids.scan(uint(l2-1), scm.NewInt(int64(l-1)))
 	s.recids.init(uint(l2))
 	i := 0
 	for {
@@ -83,7 +83,7 @@ func (s *StorageSparse) Deserialize(f io.Reader) uint {
 		}
 		var v any
 		json.Unmarshal(scanner.Bytes(), &v)
-		s.recids.build(uint(i), k)
+		s.recids.build(uint(i), scm.NewInt(int64(k)))
 		s.values[i] = scm.TransformFromJSON(v)
 		i++
 	}
@@ -96,7 +96,7 @@ func (s *StorageSparse) GetValue(i uint) scm.Scmer {
 	var upper uint = uint(s.i)
 	for {
 		if lower == upper {
-			return nil // sparse value
+			return scm.NewNil() // sparse value
 		}
 		pivot := uint((lower + upper) / 2)
 		recid := s.recids.GetValueUInt(pivot) + uint64(s.recids.offset)
@@ -113,8 +113,8 @@ func (s *StorageSparse) GetValue(i uint) scm.Scmer {
 }
 
 func (s *StorageSparse) scan(i uint, value scm.Scmer) {
-	if value != nil {
-		s.recids.scan(uint(s.i), i)
+	if !value.IsNil() {
+		s.recids.scan(uint(s.i), scm.NewInt(int64(i)))
 		s.i++
 	}
 }
@@ -129,8 +129,8 @@ func (s *StorageSparse) init(i uint) {
 }
 func (s *StorageSparse) build(i uint, value scm.Scmer) {
 	// store
-	if value != nil {
-		s.recids.build(uint(s.i), i)
+	if !value.IsNil() {
+		s.recids.build(uint(s.i), scm.NewInt(int64(i)))
 		s.values[s.i] = value
 		s.i++
 	}
