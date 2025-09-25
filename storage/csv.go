@@ -69,12 +69,12 @@ func LoadCSV(schema, table string, f io.Reader, delimiter string, firstLine bool
 			}
 			buffer = append(buffer, x)
 			if len(buffer) >= 4096 {
-				t.Insert(cols, buffer, nil, nil, false, nil)
+				t.Insert(cols, buffer, nil, scm.NewNil(), false, nil)
 				buffer = buffer[:0]
 			}
 		}
 	}
 	if len(buffer) > 0 {
-		t.Insert(cols, buffer, nil, nil, false, nil)
+		t.Insert(cols, buffer, nil, scm.NewNil(), false, nil)
 	}
 }

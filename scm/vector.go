@@ -16,7 +16,10 @@ Copyright (C) 2025  Carl-Philip Hänsch
 */
 package scm
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 func init_vector() {
 	// string functions
@@ -31,10 +34,14 @@ func init_vector() {
 			DeclarationParameter{"mode", "string", "DOT, COSINE, EUCLIDEAN, default is DOT"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			var result float64 = 0
-			v1 := a[0].([]Scmer)
-			v2 := a[1].([]Scmer)
-			if len(a) > 2 && a[2] == "COSINE" {
+			var result float64
+			v1 := asSlice(a[0], "dot v1")
+			v2 := asSlice(a[1], "dot v2")
+			mode := "DOT"
+			if len(a) > 2 {
+				mode = strings.ToUpper(String(a[2]))
+			}
+			if mode == "COSINE" {
 				// COSINE
 				var lena float64 = 0
 				var lenb float64 = 0
@@ -51,11 +58,11 @@ func init_vector() {
 				for i := 0; i < len(v1) && i < len(v2); i++ {
 					result += ToFloat(v1[i]) * ToFloat(v2[i])
 				}
-				if len(a) > 2 && a[2] == "EUCLIDEAN" {
+				if mode == "EUCLIDEAN" {
 					result = math.Sqrt(result)
 				}
 			}
-			return result
+			return NewFloat(result)
 		}, true,
 	})
 }

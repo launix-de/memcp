@@ -113,11 +113,23 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 					L = append(L, readFrom(tokens))
 				}
 				*tokens = (*tokens)[1:]
-				source_info.value = NewSlice(L)
+				listForm := NewSlice(L)
+				if source_info.source != "" {
+					source_info.value = listForm
+					return NewAny(source_info)
+				}
+				return listForm
+			}
+			quoted := readFrom(tokens)
+			quoteElems := make([]Scmer, 2)
+			quoteElems[0] = NewSymbol("quote")
+			quoteElems[1] = quoted
+			quoteForm := NewSlice(quoteElems)
+			if source_info.source != "" {
+				source_info.value = quoteForm
 				return NewAny(source_info)
 			}
-			*tokens = (*tokens)[1:]
-			return NewSlice([]Scmer{NewSymbol("quote"), next})
+			return quoteForm
 		}
 		return token
 	}

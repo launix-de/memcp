@@ -95,23 +95,19 @@ func StrLike(str, pattern string) bool {
 func TransformFromJSON(a_ any) Scmer {
 	switch a := a_.(type) {
 	case map[string]any:
-		result := make([]Scmer, 2*len(a))
-		i := 0
+		result := make([]Scmer, 0, len(a)*2)
 		for k, v := range a {
-			result[i] = k
-			result[i+1] = TransformFromJSON(v)
-			i += 2
+			result = append(result, NewString(k), TransformFromJSON(v))
 		}
-		return result
+		return NewSlice(result)
 	case []any:
-		// TODO: maybe rather make a JS like object with length = x, index = ...
 		result := make([]Scmer, len(a))
 		for i, v := range a {
 			result[i] = TransformFromJSON(v)
 		}
-		return result
+		return NewSlice(result)
 	default:
-		return Scmer(a_)
+		return FromAny(a_)
 	}
 }
 
@@ -125,9 +121,9 @@ func init_strings() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
-		func(a ...Scmer) (result Scmer) {
-			_, ok := a[0].(string)
-			return ok
+		func(a ...Scmer) Scmer {
+			_, ok := a[0].Any().(string)
+			return NewBool(ok)
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -137,16 +133,15 @@ func init_strings() {
 			DeclarationParameter{"value...", "any", "values to concat"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			// concat strings
 			var sb strings.Builder
 			for _, s := range a {
-				if stream, ok := s.(io.Reader); ok {
-					io.Copy(&sb, stream) // copy streams directly
+				if stream, ok := s.Any().(io.Reader); ok {
+					_, _ = io.Copy(&sb, stream)
 				} else {
 					sb.WriteString(String(s))
 				}
 			}
-			return sb.String()
+			return NewString(sb.String())
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -158,14 +153,12 @@ func init_strings() {
 			DeclarationParameter{"len", "number", "optional length"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			// concat strings
 			s := String(a[0])
 			i := ToInt(a[1])
 			if len(a) > 2 {
-				return s[i : i+ToInt(a[2])]
-			} else {
-				return s[i:]
+				return NewString(s[i : i+ToInt(a[2])])
 			}
+			return NewString(s[i:])
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -186,8 +179,7 @@ func init_strings() {
 			DeclarationParameter{"value", "string", "input string"},
 		}, "int",
 		func(a ...Scmer) Scmer {
-			// string
-			return float64(len(String(a[0])))
+			return NewInt(int64(len(String(a[0]))))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -199,8 +191,7 @@ func init_strings() {
 			DeclarationParameter{"collation", "string", "collation in which to compare them"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			// string
-			return StrLike(String(a[0]), String(a[1])) // TODO: collation
+			return NewBool(StrLike(String(a[0]), String(a[1])))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -210,8 +201,7 @@ func init_strings() {
 			DeclarationParameter{"value", "string", "input string"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			// string
-			return strings.ToLower(String(a[0]))
+			return NewString(strings.ToLower(String(a[0])))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -221,8 +211,7 @@ func init_strings() {
 			DeclarationParameter{"value", "string", "input string"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			// string
-			return strings.ToUpper(String(a[0]))
+			return NewString(strings.ToUpper(String(a[0])))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -234,8 +223,7 @@ func init_strings() {
 			DeclarationParameter{"replace", "string", "replace string"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			// string
-			return strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2]))
+			return NewString(strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2])))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -246,7 +234,6 @@ func init_strings() {
 			DeclarationParameter{"separator", "string", "(optional) parameter, defaults to \" \""},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// string, sep
 			split := " "
 			if len(a) > 1 {
 				split = String(a[1])
@@ -254,9 +241,9 @@ func init_strings() {
 			ar := strings.Split(String(a[0]), split)
 			result := make([]Scmer, len(ar))
 			for i, v := range ar {
-				result[i] = v
+				result[i] = NewString(v)
 			}
-			return result
+			return NewSlice(result)
 		}, true,
 	})
 
@@ -279,18 +266,23 @@ func init_strings() {
 				collation = collation[:len(collation)-3]
 			}
 			if m := collation_re.FindStringSubmatch(collation); m != nil {
-            if m[2] == "bin" { // binary
-                // Return closures that compare raw UTF-8 byte order; register for serialization
-                if len(a) > 1 && ToBool(a[1]) {
-                    f := func(a ...Scmer) Scmer { return GreaterScm(a...) }
-                    collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct{Collation string; Reverse bool}{Collation: String(a[0]), Reverse: true})
-                    return f
-                } else {
-                    f := func(a ...Scmer) Scmer { return LessScm(a...) }
-                    collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct{Collation string; Reverse bool}{Collation: String(a[0]), Reverse: false})
-                    return f
-                }
-            }
+				if m[2] == "bin" { // binary
+					// Return closures that compare raw UTF-8 byte order; register for serialization
+					if len(a) > 1 && ToBool(a[1]) {
+						f := func(a ...Scmer) Scmer { return GreaterScm(a...) }
+						collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+							Collation string
+							Reverse   bool
+						}{Collation: String(a[0]), Reverse: true})
+						return NewFunc(f)
+					}
+					f := func(a ...Scmer) Scmer { return LessScm(a...) }
+					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+						Collation string
+						Reverse   bool
+					}{Collation: String(a[0]), Reverse: false})
+					return NewFunc(f)
+				}
 				base := m[2]
 				// Special-case MySQL-style "general" to simple case-insensitive first-letter ordering
 				if strings.Contains(base, "general") {
@@ -321,48 +313,54 @@ func init_strings() {
 							bs := String(a[1])
 							aAsc, ak, af := classify(as)
 							bAsc, bk, bf := classify(bs)
+							var res bool
 							if aAsc != bAsc {
 								// ASCII ranks above non-ASCII for DESC too
-								return aAsc && !bAsc
-							}
-							if aAsc { // both ASCII letters: reverse letter order
+								res = aAsc && !bAsc
+							} else if aAsc { // both ASCII letters: reverse letter order
 								if ak != bk {
-									return ak > bk
+									res = ak > bk
+								} else {
+									res = af > bf
 								}
-								return af > bf
+							} else {
+								// both non-ASCII: keep stable fallback
+								res = as > bs
 							}
-							// both non-ASCII: keep stable fallback
-							return as > bs
+							return NewBool(res)
 						}
 						collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
 							Collation string
 							Reverse   bool
 						}{Collation: String(a[0]), Reverse: true})
-						return f
+						return NewFunc(f)
 					}
 					f := func(a ...Scmer) Scmer {
 						as := String(a[0])
 						bs := String(a[1])
 						aAsc, ak, af := classify(as)
 						bAsc, bk, bf := classify(bs)
+						var res bool
 						if aAsc != bAsc {
 							// ASCII first for ASC
-							return aAsc && !bAsc
-						}
-						if aAsc { // both ASCII letters
+							res = aAsc && !bAsc
+						} else if aAsc { // both ASCII letters
 							if ak != bk {
-								return ak < bk
+								res = ak < bk
+							} else {
+								res = af < bf
 							}
-							return af < bf
+						} else {
+							// both non-ASCII: leave at end
+							res = as < bs
 						}
-						// both non-ASCII: leave at end
-						return as < bs
+						return NewBool(res)
 					}
 					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
 						Collation string
 						Reverse   bool
 					}{Collation: String(a[0]), Reverse: false})
-					return f
+					return NewFunc(f)
 				}
 				tag, err := language.Parse(base) // treat as BCP 47
 				if err != nil {
@@ -398,44 +396,47 @@ func init_strings() {
 				reverse := len(a) > 1 && ToBool(a[1])
 				if reverse {
 					f := func(a ...Scmer) Scmer {
+						var res bool
 						// numeric fallback when both operands are numbers
-						switch a[0].(type) {
+						switch a[0].Any().(type) {
 						case float64, int64:
-							switch a[1].(type) {
+							switch a[1].Any().(type) {
 							case float64, int64:
-								return ToFloat(a[0]) > ToFloat(a[1])
+								res = ToFloat(a[0]) > ToFloat(a[1])
 							}
 						}
-						return c.CompareString(String(a[0]), String(a[1])) == 1
+						if !res {
+							res = c.CompareString(String(a[0]), String(a[1])) == 1
+						}
+						return NewBool(res)
 					}
 					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
 						Collation string
 						Reverse   bool
 					}{Collation: String(a[0]), Reverse: true})
-					return f
+					return NewFunc(f)
 				}
 				f := func(a ...Scmer) Scmer {
 					// numeric fallback when both operands are numbers
-					switch a[0].(type) {
+					switch a[0].Any().(type) {
 					case float64, int64:
-						switch a[1].(type) {
+						switch a[1].Any().(type) {
 						case float64, int64:
-							return ToFloat(a[0]) < ToFloat(a[1])
+							return NewBool(ToFloat(a[0]) < ToFloat(a[1]))
 						}
 					}
-					return c.CompareString(String(a[0]), String(a[1])) == -1
+					return NewBool(c.CompareString(String(a[0]), String(a[1])) == -1)
 				}
 				collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
 					Collation string
 					Reverse   bool
 				}{Collation: String(a[0]), Reverse: false})
-				return f
+				return NewFunc(f)
 			} else {
 				if len(a) > 1 && ToBool(a[1]) {
-					return GreaterScm
-				} else {
-					return LessScm
+					return NewFunc(GreaterScm)
 				}
+				return NewFunc(LessScm)
 			}
 		}, true,
 	})
@@ -448,8 +449,7 @@ func init_strings() {
 			DeclarationParameter{"value", "string", "input string"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			// string
-			return html.EscapeString(String(a[0]))
+			return NewString(html.EscapeString(String(a[0])))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -459,7 +459,7 @@ func init_strings() {
 			DeclarationParameter{"value", "string", "string to encode"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			return url.QueryEscape(String(a[0]))
+			return NewString(url.QueryEscape(String(a[0])))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -469,11 +469,11 @@ func init_strings() {
 			DeclarationParameter{"value", "string", "string to decode"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			if result, err := url.QueryUnescape(String(a[0])); err == nil {
-				return result
-			} else {
+			result, err := url.QueryUnescape(String(a[0]))
+			if err != nil {
 				panic("error while decoding URL: " + fmt.Sprint(err))
 			}
+			return NewString(result)
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -483,11 +483,11 @@ func init_strings() {
 			DeclarationParameter{"value", "any", "value to encode"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			b, err := json.Marshal(a[0])
+			b, err := json.Marshal(scmerToGo(a[0]))
 			if err != nil {
 				panic(err)
 			}
-			return string(b)
+			return NewString(string(b))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -497,30 +497,30 @@ func init_strings() {
 			DeclarationParameter{"value", "any", "value to encode"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			var transform func(Scmer) Scmer
-			transform = func(a_ Scmer) Scmer {
-				switch a := a_.(type) {
+			var transform func(Scmer) any
+			transform = func(val Scmer) any {
+				switch v := val.Any().(type) {
 				case []Scmer:
-					result := make(map[string]Scmer)
-					for i := 0; i < len(a)-1; i += 2 {
-						result[String(a[i])] = transform(a[i+1])
+					result := make(map[string]any)
+					for i := 0; i < len(v)-1; i += 2 {
+						result[String(v[i])] = transform(v[i+1])
 					}
 					return result
 				case *FastDict:
-					result := make(map[string]Scmer)
-					for i := 0; i < len(a.Pairs)-1; i += 2 {
-						result[String(a.Pairs[i])] = transform(a.Pairs[i+1])
+					result := make(map[string]any)
+					for i := 0; i < len(v.Pairs)-1; i += 2 {
+						result[String(v.Pairs[i])] = transform(v.Pairs[i+1])
 					}
 					return result
 				default:
-					return a_
+					return scmerToGo(val)
 				}
 			}
 			b, err := json.Marshal(transform(a[0]))
 			if err != nil {
 				panic(err)
 			}
-			return string(b)
+			return NewString(string(b))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -546,7 +546,7 @@ func init_strings() {
 			DeclarationParameter{"value", "string", "binary string to encode"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			return base64.StdEncoding.EncodeToString([]byte(String(a[0])))
+			return NewString(base64.StdEncoding.EncodeToString([]byte(String(a[0]))))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -560,7 +560,7 @@ func init_strings() {
 			if err != nil {
 				panic("error while decoding base64: " + fmt.Sprint(err))
 			}
-			return string(decoded)
+			return NewString(string(decoded))
 		}, true,
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
@@ -572,7 +572,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			input := String(a[0])
-			return sql_escapings.ReplaceAllStringFunc(input, func(m string) string {
+			out := sql_escapings.ReplaceAllStringFunc(input, func(m string) string {
 				switch m {
 				case "\\\\":
 					return "\\"
@@ -589,6 +589,7 @@ func init_strings() {
 				}
 				return m
 			})
+			return NewString(out)
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -605,7 +606,7 @@ func init_strings() {
 				result[2*i] = hexmap[input[i]/16]
 				result[2*i+1] = hexmap[input[i]%16]
 			}
-			return string(result)
+			return NewString(string(result))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -619,7 +620,7 @@ func init_strings() {
 			if err != nil {
 				panic("error while decoding hex: " + fmt.Sprint(err))
 			}
-			return string(decoded)
+			return NewString(string(decoded))
 		}, true,
 	})
 
@@ -640,7 +641,7 @@ func init_strings() {
 					panic("error generating random bytes: " + fmt.Sprint(err))
 				}
 			}
-			return string(buf)
+			return NewString(string(buf))
 		}, true,
 	})
 

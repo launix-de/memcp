@@ -33,6 +33,43 @@ import (
 	"time"
 )
 
+func symbolName(v Scmer) (string, bool) {
+	if auxTag(v.aux) == tagSymbol {
+		return v.String(), true
+	}
+	if auxTag(v.aux) == tagAny {
+		if sym, ok := v.Any().(Symbol); ok {
+			return string(sym), true
+		}
+	}
+	return "", false
+}
+
+func mustSymbol(v Scmer) Symbol {
+	if name, ok := symbolName(v); ok {
+		return Symbol(name)
+	}
+	panic("expected symbol")
+}
+
+func mustNthLocalVar(v Scmer) NthLocalVar {
+	if auxTag(v.aux) == tagAny {
+		if idx, ok := v.Any().(NthLocalVar); ok {
+			return idx
+		}
+	}
+	panic("expected numbered local variable")
+}
+
+func evalWithSourceInfo(si SourceInfo, en *Env) (value Scmer) {
+	defer func(src SourceInfo) {
+		if err := recover(); err != nil {
+			panic(fmt.Sprintf("%s\nin %s:%d:%d", fmt.Sprint(err), src.source, src.line, src.col))
+		}
+	}(si)
+	return Eval(si.value, en)
+}
+
 // TODO: (unquote string) -> symbol
 // lexer defs: (set rules (list)); (set rules (cons new_rule rules))
 // pattern matching (match pattern ifmatch pattern ifmatch else) -> function!
@@ -51,227 +88,206 @@ import (
 */
 
 func Eval(expression Scmer, en *Env) (value Scmer) {
-restart: // goto label because golang is lacking tail recursion, so just overwrite params and goto restart
-	switch e := expression.(type) {
+restart:
+	switch v := expression.Any().(type) {
 	case SourceInfo:
-		// omit source info
-		expression = e.value
-		defer func() {
-			err := recover()
-			if err != nil {
-				// recursively panic a stack trace
-				panic(fmt.Sprintf("%s\nin %s:%d:%d", fmt.Sprint(err), e.source, e.line, e.col))
-			}
-		}()
-		goto restart
+		return evalWithSourceInfo(v, en)
 	case nil:
-		return nil
+		return NewNil()
 	case bool:
-		value = e
+		return NewBool(v)
 	case string:
-		value = e
+		return NewString(v)
 	case int64:
-		value = e
+		return NewInt(v)
 	case float64:
-		value = e
+		return NewFloat(v)
 	case Proc:
-		value = e
+		return NewAny(v)
 	case *ScmParser:
-		value = e
-	case func(a ...Scmer) Scmer:
-		value = e
+		return NewAny(v)
+	case func(...Scmer) Scmer:
+		return NewFunc(v)
 	case Symbol:
-		value = en.FindRead(e).Vars[e]
+		return en.FindRead(v).Vars[v]
 	case NthLocalVar:
-		value = en.VarsNumbered[e]
+		return en.VarsNumbered[v]
 	case []Scmer:
-		if len(e) == 0 {
-			value = e
-			return
+		list := v
+		if len(list) == 0 {
+			return expression
 		}
-		if car, ok := e[0].(Symbol); ok {
-			// switch-case through all special symbols
-			switch car {
-			case "outer": // execute value in outer scope
-				//fmt.Println("eval outer",e[1],en.Outer,"in",en)
-				value = Eval(e[1], en.Outer)
+		if headSym, ok := list[0].Any().(Symbol); ok {
+			switch string(headSym) {
+			case "outer":
+				return Eval(list[1], en.Outer)
 			case "quote":
-				value = e[1]
+				return list[1]
 			case "eval":
-				// ...
-				expression = Eval(e[1], en)
+				expression = Eval(list[1], en)
 				goto restart
 			case "time":
-				// measure the time a step has taken
 				var start time.Time
 				if TracePrint {
 					start = time.Now()
 				}
+				var timedResult Scmer
 				if Trace != nil {
-					if len(e) > 2 { // with label
-						Trace.Duration(String(Eval(e[2], en)), "scm", func() {
-							value = Eval(e[1], en)
+					if len(list) > 2 {
+						Trace.Duration(String(Eval(list[2], en)), "scm", func() {
+							timedResult = Eval(list[1], en)
 						})
 					} else {
 						Trace.Duration("(time)", "scm", func() {
-							value = Eval(e[1], en)
+							timedResult = Eval(list[1], en)
 						})
 					}
 				} else {
-					value = Eval(e[1], en)
+					timedResult = Eval(list[1], en)
 				}
 				if TracePrint {
-					d := time.Now().Sub(start).String()
-					if len(e) > 2 { // with label
-						fmt.Println("trace", d, String(Eval(e[2], en)))
+					d := time.Since(start).String()
+					if len(list) > 2 {
+						fmt.Println("trace", d, String(Eval(list[2], en)))
 					} else {
 						fmt.Println("trace", d)
 					}
 				}
-				return
+				return timedResult
 			case "if":
 				i := 1
-				for i+1 < len(e) {
-					if ToBool(Eval(e[i], en)) {
-						expression = e[i+1]
+				for i+1 < len(list) {
+					if Eval(list[i], en).Bool() {
+						expression = list[i+1]
 						goto restart
 					}
 					i += 2
 				}
-				if i < len(e) { // else block
-					expression = e[i]
+				if i < len(list) {
+					expression = list[i]
 					goto restart
 				}
-				return nil
+				return NewNil()
 			case "and":
-				for i, x := range e {
-					if i > 0 && !ToBool(Eval(x, en)) {
-						return false
+				for idx, x := range list {
+					if idx > 0 && !Eval(x, en).Bool() {
+						return NewBool(false)
 					}
 				}
-				return true
+				return NewBool(true)
 			case "or":
-				for i, x := range e {
-					if i > 0 && ToBool(Eval(x, en)) {
-						return true
+				for idx, x := range list {
+					if idx > 0 && Eval(x, en).Bool() {
+						return NewBool(true)
 					}
 				}
-				return false
+				return NewBool(false)
 			case "coalesce":
-				for i := 1; i < len(e); i++ {
-					x2 := Eval(e[i], en)
-					if i == len(e)-1 || ToBool(x2) { // last value is taken even if ToBool is false, especially used for '()
-						return x2
+				for i := 1; i < len(list); i++ {
+					v := Eval(list[i], en)
+					if i == len(list)-1 || v.Bool() {
+						return v
 					}
 				}
-				return nil
+				return NewNil()
 			case "coalesceNil":
-				for i, x := range e {
-					x2 := Eval(x, en)
-					if i > 0 && x2 != nil {
-						return x2
+				for i, x := range list {
+					v := Eval(x, en)
+					if i > 0 && !v.IsNil() {
+						return v
 					}
 				}
-				return nil
-			case "match": // (match <value> <pattern> <result> <pattern> <result> <pattern> <result> [<default>])
-				val := Eval(e[1], en)
+				return NewNil()
+			case "match":
+				val := Eval(list[1], en)
 				i := 2
-				en2 := Env{make(Vars), en.VarsNumbered, en, true}
-				for i < len(e)-1 {
-					if match(val, e[i], &en2) {
-						// pattern has matched
+				en2 := Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: true}
+				for i < len(list)-1 {
+					if match(val, list[i], &en2) {
 						en = &en2
-						expression = e[i+1]
+						expression = list[i+1]
 						goto restart
 					}
 					i += 2
 				}
-				if i < len(e) {
-					// default: nothing matched
-					expression = e[i]
-					goto restart // tail call
-				} else {
-					// otherwise: nil
-					value = nil
+				if i < len(list) {
+					expression = list[i]
+					goto restart
 				}
-			/* set! is forbidden due to side effects
-			case "set!":
-				v := e[1].(Symbol)
-				en2 := en.FindWrite(v)
-				if en2 == nil {
-					// not yet defined: set in innermost env
-					en2 = en
-				}
-				en.Vars[v] = Eval(e[2], en)
-				value = "ok"*/
-			case "define", "set": // set only works in innermost env
-				// define will return itself back
-				value = Eval(e[2], en)
+				return NewNil()
+			case "define", "set":
+				val := Eval(list[2], en)
 				for en.Nodefine {
-					// skip nodefine envs so that imports write to the global env
 					en = en.Outer
 				}
-				en.Vars[e[1].(Symbol)] = value
-			case "setN": // set numbered
-				value = Eval(e[2], en)
-				en.VarsNumbered[int(e[1].(NthLocalVar))] = value
-			case "parser": // special form of lambda function
-				if len(e) > 3 {
-					value = NewParser(e[1], e[2], e[3], en, true)
-				} else if len(e) > 2 {
-					value = NewParser(e[1], e[2], nil, en, true)
-				} else {
-					value = NewParser(e[1], nil, nil, en, false)
+				en.Vars[mustSymbol(list[1])] = val
+				return val
+			case "setN":
+				val := Eval(list[2], en)
+				idx := mustNthLocalVar(list[1])
+				en.VarsNumbered[int(idx)] = val
+				return val
+			case "parser":
+				if len(list) > 3 {
+					return NewAny(NewParser(list[1], list[2], list[3], en, true))
+				} else if len(list) > 2 {
+					return NewAny(NewParser(list[1], list[2], NewNil(), en, true))
 				}
+				return NewAny(NewParser(list[1], NewNil(), NewNil(), en, false))
 			case "lambda":
-				switch si := e[1].(type) {
-				case SourceInfo:
-					// strip SourceInfo from lambda declarations
-					e[1] = si.value
+				params := list[1]
+				if auxTag(params.aux) == tagAny {
+					if si, ok := params.Any().(SourceInfo); ok {
+						params = si.value
+					}
 				}
 				numVars := 0
-				if len(e) > 3 {
-					numVars = ToInt(e[3])
+				if len(list) > 3 {
+					numVars = int(list[3].Int())
 				}
-				value = Proc{e[1], e[2], en, numVars}
+				return NewAny(Proc{Params: params, Body: list[2], En: en, NumVars: numVars})
 			case "begin":
-				// execute begin.. in own environment
-				en2 := Env{make(Vars), en.VarsNumbered, en, false}
-				for _, i := range e[1 : len(e)-1] {
-					Eval(i, &en2)
+				en2 := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
+				for _, form := range list[1 : len(list)-1] {
+					Eval(form, en2)
 				}
-				// tail call optimized version: last begin part will be tailed
-				expression = e[len(e)-1]
-				en = &en2
+				expression = list[len(list)-1]
+				en = en2
 				goto restart
 			case "!begin":
-				// execute begin.. in parent environment
-				for _, i := range e[1 : len(e)-1] {
-					Eval(i, en)
+				for _, form := range list[1 : len(list)-1] {
+					Eval(form, en)
 				}
-				// tail call optimized version: last begin part will be tailed
-				expression = e[len(e)-1]
+				expression = list[len(list)-1]
 				goto restart
 			case "parallel":
-				// execute all childs parallely, return null after finish
-				errs := make(chan Scmer, 1)
-				for _, i := range e[1:] {
-					gls.Go(func(i Scmer) func() {
+				// execute all childs parallely, return nil after finish
+				childExprs := list[1:]
+				if len(childExprs) == 0 {
+					return NewNil()
+				}
+				errs := make(chan any, len(childExprs))
+				for _, expr := range childExprs {
+					expr := expr
+					gls.Go(func(e Scmer) func() {
 						return func() {
 							defer func() {
-								// catch errors and pass them on
-								errs <- recover()
+								if r := recover(); r != nil {
+									errs <- r
+								} else {
+									errs <- nil
+								}
 							}()
-							Eval(i, en)
+							Eval(e, en)
 						}
-					}(i))
+					}(expr))
 				}
-				for range e[1:] {
+				for range childExprs {
 					if err := <-errs; err != nil {
 						panic(err)
 					}
 				}
-				return nil
+				return NewNil()
 			default:
 				goto to_apply
 			}
@@ -279,9 +295,9 @@ restart: // goto label because golang is lacking tail recursion, so just overwri
 		}
 	to_apply:
 		// apply
-		operands := e[1:]
-		procedure := Eval(e[0], en)
-		switch p := procedure.(type) {
+		operands := list[1:]
+		procedure := Eval(list[0], en)
+		switch p := procedure.Any().(type) {
 		case func(...Scmer) Scmer:
 			args := make([]Scmer, len(operands))
 			for i, x := range operands {
@@ -295,10 +311,13 @@ restart: // goto label because golang is lacking tail recursion, so just overwri
 			}
 			return p(en, args...)
 		case *ScmParser:
-			return p.Execute(String(Eval(e[1], en)), en)
+			if len(operands) == 0 {
+				return NewNil()
+			}
+			return p.Execute(String(Eval(operands[0], en)), en)
 		case Proc:
 			en2 := Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
-			switch params := p.Params.(type) {
+			switch params := p.Params.Any().(type) {
 			case []Scmer:
 				if len(params) < len(operands) {
 					panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
@@ -311,11 +330,11 @@ restart: // goto label because golang is lacking tail recursion, so just overwri
 					}
 				} else {
 					for i, param := range params {
-						if param != Symbol("_") {
+						if !param.SymbolEquals("_") {
 							if i < len(operands) {
-								en2.Vars[param.(Symbol)] = Eval(operands[i], en)
+								en2.Vars[mustSymbol(param)] = Eval(operands[i], en)
 							} else {
-								en2.Vars[param.(Symbol)] = nil
+								en2.Vars[mustSymbol(param)] = NewNil()
 							}
 						}
 					}
@@ -325,10 +344,11 @@ restart: // goto label because golang is lacking tail recursion, so just overwri
 				for i, x := range operands {
 					args[i] = Eval(x, en)
 				}
+				argsList := NewSlice(args)
 				if p.NumVars > 0 {
-					en2.VarsNumbered[0] = args
+					en2.VarsNumbered[0] = argsList
 				} else {
-					en2.Vars[params] = args
+					en2.Vars[params] = argsList
 				}
 			case nil:
 				// no arguments
@@ -339,9 +359,9 @@ restart: // goto label because golang is lacking tail recursion, so just overwri
 			goto restart // tail call optimized
 		case []Scmer: // associative list
 			// format: (key value key value ... default)
-			if i, ok := operands[0].(NthLocalVar); ok {
+			if idx, ok := operands[0].Any().(NthLocalVar); ok {
 				// indexed access generated through optimizer
-				return p[i]
+				return p[int(idx)]
 			} else {
 				arg := Eval(operands[0], en)
 				i := 0
@@ -354,7 +374,7 @@ restart: // goto label because golang is lacking tail recursion, so just overwri
 				if i < len(p) {
 					return p[i] // default value on n+1
 				}
-				return nil // no default value
+				return NewNil() // no default value
 			}
 		case *FastDict:
 			arg := Eval(operands[0], en)
@@ -364,27 +384,28 @@ restart: // goto label because golang is lacking tail recursion, so just overwri
 			if ln := len(p.Pairs); ln%2 == 1 && ln > 0 {
 				return p.Pairs[ln-1]
 			}
-			return nil
+			return NewNil()
 		case nil:
-			panic("Unknown function: " + fmt.Sprint(e[0]))
+			panic("Unknown function: " + fmt.Sprint(list[0]))
 		default:
 			panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 		}
 	default:
-		panic("Unknown expression type - EVAL " + fmt.Sprint(e))
+		panic("Unknown expression type - EVAL " + fmt.Sprint(v))
 	}
 	return
 }
 
 func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
-	switch p := procedure.(type) {
+	switch p := procedure.Any().(type) {
 	case Proc:
-		switch params := p.Params.(type) {
+		switch params := p.Params.Any().(type) {
 		case []Scmer:
 			new_params := make([]Scmer, len(params))
 			for i, sym := range params {
+				symName := mustSymbol(sym)
 				for j := 0; j < len(args); j += 2 {
-					if args[j] == String(sym) {
+					if args[j].String() == string(symName) {
 						new_params[i] = args[j+1]
 					}
 				}
@@ -403,16 +424,19 @@ func Apply(procedure Scmer, args ...Scmer) (value Scmer) {
 	return ApplyEx(procedure, args, &Globalenv)
 }
 func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
-	switch p := procedure.(type) {
+	switch p := procedure.Any().(type) {
 	case func(...Scmer) Scmer:
 		return p(args...)
 	case func(*Env, ...Scmer) Scmer:
 		return p(en, args...)
 	case *ScmParser:
+		if len(args) == 0 {
+			return NewNil()
+		}
 		return p.Execute(String(args[0]), en)
 	case Proc:
 		en := &Env{make(Vars), make([]Scmer, p.NumVars), p.En, false}
-		switch params := p.Params.(type) {
+		switch params := p.Params.Any().(type) {
 		case []Scmer:
 			if p.NumVars > 0 {
 				for i, _ := range params {
@@ -422,25 +446,26 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 				}
 			} else {
 				for i, param := range params {
-					if param != Symbol("_") && i < len(args) {
-						en.Vars[param.(Symbol)] = args[i]
+					if !param.SymbolEquals("_") && i < len(args) {
+						en.Vars[mustSymbol(param)] = args[i]
 					}
 				}
 			}
 		case Symbol:
+			argsList := NewSlice(args)
 			if p.NumVars > 0 {
-				en.VarsNumbered[0] = args
+				en.VarsNumbered[0] = argsList
 			} else {
-				en.Vars[params] = args
+				en.Vars[params] = argsList
 			}
 		case nil:
 		}
 		return Eval(p.Body, en)
 	case []Scmer: // associative list
 		// format: (key value key value ... default)
-		if i, ok := args[0].(NthLocalVar); ok {
+		if idx, ok := args[0].Any().(NthLocalVar); ok {
 			// indexed access generated through optimizer
-			return p[i]
+			return p[int(idx)]
 		} else {
 			i := 0
 			for i < len(p)-1 {
@@ -452,7 +477,7 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 			if i < len(p) {
 				return p[i] // default value on n+1
 			}
-			return nil // no default value
+			return NewNil() // no default value
 		}
 	case *FastDict: // associative dict
 		if v, ok := p.Get(args[0]); ok {
@@ -461,7 +486,7 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		if ln := len(p.Pairs); ln%2 == 1 && ln > 0 {
 			return p.Pairs[ln-1]
 		}
-		return nil
+		return NewNil()
 	case nil:
 		panic("Unknown function")
 	default:
@@ -526,20 +551,24 @@ func List(a ...Scmer) Scmer {
 	return NewSlice(a)
 }
 func isList(v Scmer) bool {
-	if auxTag(v.aux) != tagFunc {
-		return false
+	if auxTag(v.aux) == tagFunc {
+		return reflect.ValueOf(v.Func()).Pointer() == reflect.ValueOf(List).Pointer()
 	}
-	f := v.Func().(func(...Scmer) Scmer)
-	return reflect.ValueOf(f).Pointer() == reflect.ValueOf(List).Pointer()
+	if auxTag(v.aux) == tagAny {
+		if fn, ok := v.Any().(func(...Scmer) Scmer); ok {
+			return reflect.ValueOf(fn).Pointer() == reflect.ValueOf(List).Pointer()
+		}
+	}
+	return false
 }
 func init() {
 	Globalenv = Env{
 		Vars{ //aka an incomplete set of compiled-in functions
-			"true":  true,
-			"false": false,
+			Symbol("true"):  NewBool(true),
+			Symbol("false"): NewBool(false),
 
 			// basic
-			"list": List,
+			Symbol("list"): NewFunc(List),
 		},
 		nil,
 		nil,
@@ -568,7 +597,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "value to examine"},
 		}, "int", func(a ...Scmer) Scmer {
-			return int64(ComputeSize(a[0]))
+			return NewInt(int64(ComputeSize(a[0])))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -673,7 +702,7 @@ func init() {
 			defer func() {
 				err := recover()
 				if err != nil {
-					result = Apply(a[1], err)
+					result = Apply(a[1], FromAny(err))
 				}
 			}()
 			result = Apply(a[0])
@@ -688,7 +717,7 @@ func init() {
 			DeclarationParameter{"arguments", "list", "list of arguments to apply"},
 		}, "any",
 		func(a ...Scmer) Scmer {
-			return Apply(a[0], a[1].([]Scmer)...)
+			return Apply(a[0], asSlice(a[1], "apply")...)
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -699,7 +728,7 @@ func init() {
 			DeclarationParameter{"arguments", "list", "assoc list of arguments to apply"},
 		}, "symbol",
 		func(a ...Scmer) Scmer {
-			return ApplyAssoc(a[0], a[1].([]Scmer))
+			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -709,7 +738,7 @@ func init() {
 			DeclarationParameter{"value", "string", "string value that will be converted into a symbol"},
 		}, "symbol",
 		func(a ...Scmer) Scmer {
-			return Symbol(String(a[0]))
+			return NewSymbol(String(a[0]))
 		}, false,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -729,25 +758,18 @@ func init() {
 			DeclarationParameter{"step", "func", "step func that returns the next state as a list"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			state, ok := a[0].([]Scmer)
-			if !ok {
-				panic("for expects init to be a list")
-			}
+			state := append([]Scmer{}, asSlice(a[0], "for init")...)
 			cond := OptimizeProcToSerialFunction(a[1])
 			next := OptimizeProcToSerialFunction(a[2])
 			for ToBool(cond(state...)) {
 				v := next(state...)
-				if v == nil {
+				if v.IsNil() {
 					state = []Scmer{}
 					continue
 				}
-				state2, ok := v.([]Scmer)
-				if !ok {
-					panic("for step must return a list")
-				}
-				state = state2
+				state = append([]Scmer{}, asSlice(v, "for step")...)
 			}
-			return state
+			return NewSlice(state)
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -757,7 +779,7 @@ func init() {
 			DeclarationParameter{"value", "any", "any value"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			return String(a[0])
+			return NewString(String(a[0]))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -820,12 +842,12 @@ Patterns can be any of:
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "returntype",
 		func(a ...Scmer) Scmer {
-			return SourceInfo{
+			return NewAny(SourceInfo{
 				String(a[0]),
 				ToInt(a[1]),
 				ToInt(a[2]),
 				a[3],
-			}
+			})
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -850,7 +872,7 @@ Patterns can be any of:
 			DeclarationParameter{"code", "list", "Scheme code"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			return SerializeToString(a[0], &Globalenv)
+			return NewString(SerializeToString(a[0], &Globalenv))
 		}, false,
 	})
 
@@ -886,38 +908,144 @@ type Sizable interface {
 }
 
 func ComputeSize(v Scmer) uint {
-	switch vv := v.(type) {
-	case nil:
-		return 16
-	case Sizable:
-		return vv.ComputeSize()
-	case *Sizable:
-		return 8 /* ptr */ + 16 /* allocation header */ + (*vv).ComputeSize()
-	case []Scmer: // array
-		var sz uint = 16 /* allocation header */ + 24 /* slice */
-		for _, vi := range vv {
+	base := scmerStructOverhead
+	switch auxTag(v.aux) {
+	case tagNil:
+		return base
+	case tagBool, tagInt, tagFloat:
+		return base
+	case tagFunc:
+		return base + goAllocOverhead
+	case tagString, tagSymbol:
+		ln := uint(auxVal(v.aux))
+		if ln == 0 {
+			return base
+		}
+		return base + goAllocOverhead + align8(ln)
+	case tagSlice:
+		slice := v.Slice()
+		sz := base
+		if len(slice) == 0 {
+			return sz
+		}
+		sz += goAllocOverhead
+		for _, vi := range slice {
 			sz += ComputeSize(vi)
 		}
 		return sz
-	case [][]Scmer: // delta storage
-		var sz uint = 16 /* allocation header */ + 24 /* slice */
-		for _, vi := range vv {
-			sz += ComputeSize(vi)
+	case tagVector:
+		vec := v.Vector()
+		sz := base
+		if len(vec) == 0 {
+			return sz
 		}
+		data := uint(len(vec)) * 8
+		sz += goAllocOverhead + align8(data)
 		return sz
-	case []float64: // vector
-		var sz uint = 16 /* allocation header */ + 24 /* slice */ + 8*uint(len(vv)) /* data */
-		return sz
-	case *Scmer: // pointer
-		return 16 /* interface + data */ + ComputeSize(*vv)
-	case Symbol: // Symbol
-		return 16 /* allocation header */ + 16 /* const slice */ + 8*((uint(len(vv))-1)/8)
-	case string: // string
-		return 16 /* allocation header */ + 16 /* const slice */ + 8*((uint(len(vv))-1)/8)
-	case int, uint, int64, uint64, float64, bool: // known types
-		return 16 // 8 bytes interface ptr, 8 bytes raw data (int, float64 etc.)
-	default: // unknown -> with warning
-		fmt.Println(fmt.Sprintf("warning: unknown type %s", reflect.TypeOf(vv).Name()))
-		return 16 // 8 bytes interface ptr, 8 bytes raw data (int, float64 etc.)
+	case tagAny:
+		payload := v.Any()
+		return base + goAllocOverhead + computeGoPayload(payload)
+	default:
+		if auxTag(v.aux) >= 100 {
+			return base
+		}
+		fmt.Println(fmt.Sprintf("warning: unknown tag %d", auxTag(v.aux)))
+		return base
 	}
+}
+
+func computeGoPayload(val any) uint {
+	switch v := val.(type) {
+	case nil:
+		return 0
+	case Scmer:
+		return ComputeSize(v)
+	case *Scmer:
+		if v == nil {
+			return 0
+		}
+		return ComputeSize(*v)
+	case []Scmer:
+		if len(v) == 0 {
+			return 0
+		}
+		sz := goAllocOverhead
+		for _, elem := range v {
+			sz += ComputeSize(elem)
+		}
+		return sz
+	case [][]Scmer:
+		if len(v) == 0 {
+			return 0
+		}
+		sz := goAllocOverhead
+		for _, row := range v {
+			if len(row) == 0 {
+				continue
+			}
+			sz += goAllocOverhead
+			for _, elem := range row {
+				sz += ComputeSize(elem)
+			}
+		}
+		return sz
+	case []float64:
+		if len(v) == 0 {
+			return 0
+		}
+		return goAllocOverhead + align8(uint(len(v))*8)
+	case []byte:
+		if len(v) == 0 {
+			return 0
+		}
+		return goAllocOverhead + align8(uint(len(v)))
+	case string:
+		if len(v) == 0 {
+			return 0
+		}
+		return goAllocOverhead + align8(uint(len(v)))
+	case Symbol:
+		if len(v) == 0 {
+			return 0
+		}
+		return goAllocOverhead + align8(uint(len(v)))
+	case Sizable:
+		return v.ComputeSize()
+	case *Sizable:
+		if v == nil {
+			return 0
+		}
+		return (*v).ComputeSize()
+	case map[string]Scmer:
+		sz := goAllocOverhead
+		for k, val := range v {
+			if len(k) > 0 {
+				sz += goAllocOverhead + align8(uint(len(k)))
+			}
+			sz += ComputeSize(val)
+		}
+		return sz
+	case map[Scmer]Scmer:
+		sz := goAllocOverhead
+		for k, val := range v {
+			sz += ComputeSize(k)
+			sz += ComputeSize(val)
+		}
+		return sz
+	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return 0
+	default:
+		fmt.Println(fmt.Sprintf("warning: unknown any payload %T", v))
+		return 0
+	}
+}
+
+func align8(n uint) uint {
+	if n == 0 {
+		return 0
+	}
+	if r := n & 7; r != 0 {
+		return n + (8 - r)
+	}
+	return n
 }

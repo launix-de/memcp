@@ -101,18 +101,22 @@ func (s *StorageString) GetValue(i uint) scm.Scmer {
 	if s.nodict {
 		start := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
 		if s.starts.hasNull && start == s.starts.null {
-			return nil
+			return scm.NewNil()
 		}
 		len_ := uint64(int64(s.lens.GetValueUInt(i)) + s.lens.offset)
-		return s.dictionary[start : start+len_]
+		startIdx := int(start)
+		endIdx := int(start + len_)
+		return scm.NewString(s.dictionary[startIdx:endIdx])
 	} else {
 		idx := uint(int64(s.values.GetValueUInt(i)) + s.values.offset)
 		if s.values.hasNull && idx == uint(s.values.null) {
-			return nil
+			return scm.NewNil()
 		}
 		start := int64(s.starts.GetValueUInt(idx)) + s.starts.offset
 		len_ := int64(s.lens.GetValueUInt(idx)) + s.lens.offset
-		return s.dictionary[start : start+len_]
+		startIdx := int(start)
+		endIdx := int(start + len_)
+		return scm.NewString(s.dictionary[startIdx:endIdx])
 	}
 }
 
@@ -127,16 +131,13 @@ func (s *StorageString) prepare() {
 func (s *StorageString) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
 	var v string
-	switch v_ := value.(type) {
-	case string:
-		v = v_
-	default:
-		// NULL
+	if value.IsNil() {
 		if !s.nodict {
-			s.values.scan(i, nil)
+			s.values.scan(i, scm.NewNil())
 		}
 		return
 	}
+	v = scm.String(value)
 
 	// check if we have common prefix (but ignore duplicates because they are compressed by dictionary)
 	if s.laststr != v {
@@ -157,14 +158,14 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 		s.reverseMap = nil
 		s.sb.Reset()
 		if s.values.hasNull {
-			s.starts.scan(0, nil) // learn NULL
+			s.starts.scan(0, scm.NewNil()) // learn NULL
 		}
 		// build will fill our stringbuffer
 	}
 	s.allsize = s.allsize + len(v)
 	if s.nodict {
-		s.starts.scan(i, s.allsize)
-		s.lens.scan(i, len(v))
+		s.starts.scan(i, scm.NewInt(int64(s.allsize)))
+		s.lens.scan(i, scm.NewInt(int64(len(v))))
 	} else {
 		start, ok := s.reverseMap[v]
 		if ok {
@@ -175,12 +176,12 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 			start[1] = uint(s.sb.Len())
 			start[2] = uint(len(v))
 			s.sb.WriteString(v)
-			s.starts.scan(start[0], start[1])
-			s.lens.scan(start[0], start[2])
+			s.starts.scan(start[0], scm.NewInt(int64(start[1])))
+			s.lens.scan(start[0], scm.NewInt(int64(start[2])))
 			s.reverseMap[v] = start
 			s.count = s.count + 1
 		}
-		s.values.scan(i, start[0])
+		s.values.scan(i, scm.NewInt(int64(start[0])))
 	}
 }
 func (s *StorageString) init(i uint) {
@@ -200,34 +201,30 @@ func (s *StorageString) init(i uint) {
 		s.lens.init(s.count)
 		for _, start := range s.reverseMap {
 			// we read the value from dictionary, so we can free up all the single-strings
-			s.starts.build(start[0], start[1])
-			s.lens.build(start[0], start[2])
+			s.starts.build(start[0], scm.NewInt(int64(start[1])))
+			s.lens.build(start[0], scm.NewInt(int64(start[2])))
 		}
 	}
 }
 func (s *StorageString) build(i uint, value scm.Scmer) {
 	// store
-	var v string
-	switch v_ := value.(type) {
-	case string:
-		v = v_
-	default:
-		// NULL = 1 1
+	if value.IsNil() {
 		if s.nodict {
-			s.starts.build(i, nil)
+			s.starts.build(i, scm.NewNil())
 		} else {
-			s.values.build(i, nil)
+			s.values.build(i, scm.NewNil())
 		}
 		return
 	}
+	v := scm.String(value)
 	if s.nodict {
-		s.starts.build(i, s.sb.Len())
-		s.lens.build(i, len(v))
+		s.starts.build(i, scm.NewInt(int64(s.sb.Len())))
+		s.lens.build(i, scm.NewInt(int64(len(v))))
 		s.sb.WriteString(v)
 	} else {
 		start := s.reverseMap[v]
 		// write start+end into sub storage maps
-		s.values.build(i, start[0])
+		s.values.build(i, scm.NewInt(int64(start[0])))
 	}
 }
 func (s *StorageString) finish() {

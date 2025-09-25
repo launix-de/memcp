@@ -151,7 +151,7 @@ func ScmerToMySQL(v Scmer) sqltypes.Value {
 	}
 }
 
-func mustSlice(ctx string, v Scmer) []Scmer {
+func mustSliceMySQL(ctx string, v Scmer) []Scmer {
 	if v.IsSlice() {
 		return v.Slice()
 	}
@@ -200,7 +200,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		}()
 		callbackFn := NewFunc(func(a ...Scmer) Scmer {
 			// function resultrow(item)
-			item := mustSlice("mysql result row", a[0])
+			item := mustSliceMySQL("mysql result row", a[0])
 			resultlock.Lock()
 			defer resultlock.Unlock()
 			updateFlags(session, sessionFunc) // set transaction status

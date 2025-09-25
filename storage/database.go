@@ -208,10 +208,10 @@ func (db *database) ShowTables() scm.Scmer {
 	result := make([]scm.Scmer, len(tables))
 	i := 0
 	for _, t := range tables {
-		result[i] = t.Name
+		result[i] = scm.NewString(t.Name)
 		i = i + 1
 	}
-	return result
+	return scm.NewSlice(result)
 }
 
 func (db *database) rebuild(all bool, repartition bool) {

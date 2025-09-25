@@ -31,7 +31,7 @@ import "github.com/gorilla/websocket"
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
 	// HTTP endpoint; params: (port, handler)
-	port := String(a[0])
+	port := a[0].String()
 	handler := &HttpServer{a[1]}
 	server := &http.Server{
 		Addr:           fmt.Sprintf(":%v", port),
@@ -42,7 +42,7 @@ func HTTPServe(a ...Scmer) Scmer {
 	}
 	go server.ListenAndServe()
 	// TODO: ListenAndServeTLS
-	return true
+	return NewBool(true)
 }
 
 // build this function into your file-local SCM environment to serve static files
@@ -52,12 +52,14 @@ func HTTPStaticGetter(wd string) func(...Scmer) Scmer {
 	mime.AddExtensionType(".svg", "image/svg+xml")
 
 	return func(a ...Scmer) Scmer {
-		fs := http.FileServer(http.Dir(wd + "/" + String(a[0])))
-		return func(a ...Scmer) Scmer { // req res
-			Apply(Apply(a[1], "header"), "Content-Type", "") // reset content-type so static server can overwrite it
-			fs.ServeHTTP(a[1].([]Scmer)[1].(http.ResponseWriter), a[0].([]Scmer)[1].(*http.Request))
-			return nil
-		}
+		fs := http.FileServer(http.Dir(wd + "/" + a[0].String()))
+		return NewFunc(func(a ...Scmer) Scmer { // req res
+			resList := mustSliceNet("static response", a[1])
+			reqList := mustSliceNet("static request", a[0])
+			Apply(Apply(a[1], NewString("header")), NewString("Content-Type"), NewString(""))
+			fs.ServeHTTP(resList[1].Any().(http.ResponseWriter), reqList[1].Any().(*http.Request))
+			return NewNil()
+		})
 	}
 }
 
@@ -73,13 +75,13 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	query_scm := make([]Scmer, 0)
 	for k, v := range req.URL.Query() {
 		for _, v2 := range v {
-			query_scm = append(query_scm, k, v2)
+			query_scm = append(query_scm, NewString(k), NewString(v2))
 		}
 	}
 	header_scm := make([]Scmer, 0)
 	for k, v := range req.Header {
 		for _, v2 := range v {
-			header_scm = append(header_scm, k, v2)
+			header_scm = append(header_scm, NewString(k), NewString(v2))
 		}
 	}
 	// read user/pass from basicauth
@@ -90,29 +92,29 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		pass, upok = req.URL.User.Password()
 	}
 	req_scm := []Scmer{
-		"req", req, // must be first item to be found by us
-		"method", req.Method,
-		"host", req.Host,
-		"path", req.URL.Path,
-		"query", query_scm,
-		"header", header_scm,
-		"username", user,
-		"password", pass,
-		"ip", req.RemoteAddr,
-		"body", func(a ...Scmer) Scmer {
+		NewString("req"), NewAny(req),
+		NewString("method"), NewString(req.Method),
+		NewString("host"), NewString(req.Host),
+		NewString("path"), NewString(req.URL.Path),
+		NewString("query"), NewSlice(query_scm),
+		NewString("header"), NewSlice(header_scm),
+		NewString("username"), NewString(user),
+		NewString("password"), NewString(pass),
+		NewString("ip"), NewString(req.RemoteAddr),
+		NewString("body"), NewFunc(func(a ...Scmer) Scmer {
 			var b strings.Builder
 			io.Copy(&b, req.Body)
 			req.Body.Close()
-			return b.String()
-		},
-		"bodyParts", func(a ...Scmer) Scmer {
+			return NewString(b.String())
+		}),
+		NewString("bodyParts"), NewFunc(func(a ...Scmer) Scmer {
 			result := []Scmer{}
 			var b strings.Builder
 			io.Copy(&b, req.Body)
 			req.Body.Close()
 			s := b.String()
 			if s == "" {
-				return result
+				return NewSlice(result)
 			}
 			state := 0 // 0 -> await =, 1 = await &
 			for i := 0; i < len(s); i++ {
@@ -121,7 +123,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 					if err != nil {
 						panic(err)
 					}
-					result = append(result, s2)
+					result = append(result, NewString(s2))
 					state = 1
 					s = s[i+1:]
 					i = 0
@@ -130,7 +132,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 					if err != nil {
 						panic(err)
 					}
-					result = append(result, s2)
+					result = append(result, NewString(s2))
 					state = 0
 					s = s[i+1:]
 					i = 0
@@ -143,56 +145,56 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			if err != nil {
 				panic(err)
 			}
-			result = append(result, s2)
-			return result
-		},
+			result = append(result, NewString(s2))
+			return NewSlice(result)
+		}),
 	}
 	var res_lock sync.Mutex
 	res_scm := []Scmer{
-		"res", res,
-		"header", func(a ...Scmer) Scmer {
+		NewString("res"), NewAny(res),
+		NewString("header"), NewFunc(func(a ...Scmer) Scmer {
 			res_lock.Lock()
-			res.Header().Set(String(a[0]), String(a[1]))
+			res.Header().Set(a[0].String(), a[1].String())
 			res_lock.Unlock()
-			return "ok"
-		},
-		"status", func(a ...Scmer) Scmer {
+			return NewString("ok")
+		}),
+		NewString("status"), NewFunc(func(a ...Scmer) Scmer {
 			// status after header!
 			res_lock.Lock()
-			status, _ := strconv.Atoi(String(a[0]))
+			status, _ := strconv.Atoi(a[0].String())
 			res.WriteHeader(status)
 			res_lock.Unlock()
-			return "ok"
-		},
-		"print", func(a ...Scmer) Scmer {
+			return NewString("ok")
+		}),
+		NewString("print"), NewFunc(func(a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
 			for _, s := range a {
-				io.WriteString(res, String(s))
+				io.WriteString(res, s.String())
 			}
 			res_lock.Unlock()
-			return "ok"
-		},
-		"println", func(a ...Scmer) Scmer {
+			return NewString("ok")
+		}),
+		NewString("println"), NewFunc(func(a ...Scmer) Scmer {
 			// naive output
 			res_lock.Lock()
-			io.WriteString(res, String(a[0])+"\n")
+			io.WriteString(res, a[0].String()+"\n")
 			res_lock.Unlock()
-			return "ok"
-		},
-		"jsonl", func(a ...Scmer) Scmer {
+			return NewString("ok")
+		}),
+		NewString("jsonl"), NewFunc(func(a ...Scmer) Scmer {
 			// print json line (only assoc)
 			res_lock.Lock()
 			io.WriteString(res, "{")
-			dict := a[0].([]Scmer)
+			dict := mustSliceNet("jsonl", a[0])
 			for i, v := range dict {
 				if i%2 == 0 {
 					// key
-					bytes, _ := json.Marshal(String(v))
+					bytes, _ := json.Marshal(v.String())
 					res.Write(bytes)
 					io.WriteString(res, ": ")
 				} else {
-					bytes, err := json.Marshal(v)
+					bytes, err := json.Marshal(scmerToGo(v))
 					if err != nil {
 						panic(err)
 					}
@@ -204,9 +206,9 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			}
 			io.WriteString(res, "}\n")
 			res_lock.Unlock()
-			return "ok"
-		},
-		"websocket", func(a ...Scmer) Scmer {
+			return NewString("ok")
+		}),
+		NewString("websocket"), NewFunc(func(a ...Scmer) Scmer {
 			// upgrade to a websocket, params: onMessage, onClose
 			var upgrader = websocket.Upgrader{
 				ReadBufferSize:  1024,
@@ -239,24 +241,23 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 							panic(err)
 						}
 					}
-					// TODO: messageType 1 = text, 2 = binary?
 					if messageType == 1 {
-						Apply(a[0], string(msg)) // 1st parameter is callback to receive message
+						Apply(a[0], NewString(string(msg)))
 					}
 				}
 			}()
 			// return send callback
 			var sendmutex sync.Mutex
-			return func(a ...Scmer) Scmer {
+			return NewFunc(func(a ...Scmer) Scmer {
 				sendmutex.Lock()
 				defer sendmutex.Unlock()
-				err := ws.WriteMessage(ToInt(a[0]), []byte(String(a[1])))
+				err := ws.WriteMessage(int(a[0].Int()), []byte(a[1].String()))
 				if err != nil {
 					panic(err)
 				}
-				return "ok"
-			}
-		},
+				return NewString("ok")
+			})
+		}),
 	}
 	NewContext(req.Context(), func() {
 		// catch panics and print out 500 Internal Server Error
@@ -269,6 +270,44 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				io.WriteString(res, fmt.Sprint(r))
 			}
 		}()
-		Apply(s.callback, req_scm, res_scm)
+		Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
 	})
+}
+
+func scmerToGo(v Scmer) any {
+	switch auxTag(v.aux) {
+	case tagNil:
+		return nil
+	case tagBool:
+		return v.Bool()
+	case tagInt:
+		return v.Int()
+	case tagFloat:
+		return v.Float()
+	case tagString, tagSymbol:
+		return v.String()
+	case tagSlice:
+		list := v.Slice()
+		out := make([]any, len(list))
+		for i, item := range list {
+			out[i] = scmerToGo(item)
+		}
+		return out
+	case tagAny:
+		return v.Any()
+	default:
+		return v.String()
+	}
+}
+
+func mustSliceNet(ctx string, v Scmer) []Scmer {
+	if v.IsSlice() {
+		return v.Slice()
+	}
+	if auxTag(v.aux) == tagAny {
+		if slice, ok := v.Any().([]Scmer); ok {
+			return slice
+		}
+	}
+	panic(fmt.Sprintf("%s expects list", ctx))
 }

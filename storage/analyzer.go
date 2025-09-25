@@ -19,6 +19,16 @@ package storage
 import "sort"
 import "github.com/launix-de/memcp/scm"
 
+func mustSymbolValue(v scm.Scmer) scm.Symbol {
+	if v.IsSymbol() {
+		return scm.Symbol(v.String())
+	}
+	if sym, ok := v.Any().(scm.Symbol); ok {
+		return sym
+	}
+	panic("expected symbol")
+}
+
 type columnboundaries struct {
 	col            string
 	lower          scm.Scmer
@@ -31,22 +41,22 @@ type boundaries []columnboundaries
 
 // analyzes a lambda expression for value boundaries, so the best index can be found
 func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
-	p := condition.(scm.Proc)
+	p := condition.Any().(scm.Proc)
 	symbolmapping := make(map[scm.Symbol]string)
-	for i, sym := range p.Params.([]scm.Scmer) {
-		symbolmapping[sym.(scm.Symbol)] = conditionCols[i]
+	for i, sym := range p.Params.Any().([]scm.Scmer) {
+		symbolmapping[mustSymbolValue(sym)] = conditionCols[i]
 	}
 	cols := make([]columnboundaries, 0, 4)
 	addConstraint := func(in []columnboundaries, b2 columnboundaries) []columnboundaries {
 		for i, b := range in {
 			if b.col == b2.col {
 				// column match -> merge value range
-				if b.lower == nil || b2.lower != nil && scm.Less(b.lower, b2.lower) {
+				if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
 					// both values are ANDed, so take the higher value as lower bound
 					in[i].lower = b2.lower
 				}
 				in[i].lowerInclusive = b.lowerInclusive || b2.lowerInclusive // TODO: check correctness
-				if b.upper == nil || b2.upper != nil && scm.Less(b2.upper, b.upper) {
+				if b.upper.IsNil() || (!b2.upper.IsNil() && scm.Less(b2.upper, b.upper)) {
 					// the lower of both upper values will be the new upper bound
 					in[i].upper = b2.upper
 				}
@@ -59,42 +69,48 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
-		switch val := v.(type) {
-		case int64, float64, string:
-			// equals column vs. constant
-			return val, true
+		switch val := v.Any().(type) {
+		case int64:
+			return scm.NewInt(val), true
+		case float64:
+			return scm.NewFloat(val), true
+		case string:
+			return scm.NewString(val), true
 		case scm.Symbol:
-			if val2, ok := condition.(scm.Proc).En.Vars[val]; ok {
-				switch val3 := val2.(type) {
-				// bound constant
-				case int64, float64, string:
-					// equals column vs. constant
-					return val3, true
+			if val2, ok := condition.Any().(scm.Proc).En.Vars[val]; ok {
+				switch val3 := val2.Any().(type) {
+				case int64:
+					return scm.NewInt(val3), true
+				case float64:
+					return scm.NewFloat(val3), true
+				case string:
+					return scm.NewString(val3), true
 				}
 			}
 		case []scm.Scmer:
-			if val[0] == scm.Symbol("outer") {
-				if sym, ok := val[1].(scm.Symbol); ok {
-					if val2, ok := condition.(scm.Proc).En.Vars[sym]; ok {
-						switch val3 := val2.(type) {
-						// bound constant
-						case int64, float64, string:
-							// equals column vs. constant
-							return val3, true
-						}
+			if val[0].SymbolEquals("outer") {
+				sym := mustSymbolValue(val[1])
+				if val2, ok := condition.Any().(scm.Proc).En.Vars[sym]; ok {
+					switch val3 := val2.Any().(type) {
+					case int64:
+						return scm.NewInt(val3), true
+					case float64:
+						return scm.NewFloat(val3), true
+					case string:
+						return scm.NewString(val3), true
 					}
 				}
 			}
 		}
-		return nil, false
+		return scm.NewNil(), false
 	}
 	var traverseCondition func(scm.Scmer)
 	traverseCondition = func(node scm.Scmer) {
-		switch v := node.(type) {
+		switch v := node.Any().(type) {
 		case []scm.Scmer:
-			if v[0] == scm.Symbol("equal?") || v[0] == scm.Symbol("equal??") {
+			if v[0].SymbolEquals("equal?") || v[0].SymbolEquals("equal??") {
 				// equi
-				switch v1 := v[1].(type) {
+				switch v1 := v[1].Any().(type) {
 				case scm.Symbol:
 					if col, ok := symbolmapping[v1]; ok { // left is a column
 						if v2, ok := extractConstant(v[2]); ok { // right is a constant
@@ -104,31 +120,31 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					}
 					// TODO: equals constant vs. column
 				}
-			} else if v[0] == scm.Symbol("<") || v[0] == scm.Symbol("<=") {
+			} else if v[0].SymbolEquals("<") || v[0].SymbolEquals("<=") {
 				// compare
-				switch v1 := v[1].(type) {
+				switch v1 := v[1].Any().(type) {
 				case scm.Symbol:
 					if col, ok := symbolmapping[v1]; ok { // left is a column
 						if v2, ok := extractConstant(v[2]); ok { // right is a constant
 							// ?equal var const
-							cols = addConstraint(cols, columnboundaries{col, nil, false, v2, v[0] == scm.Symbol("<=")})
+							cols = addConstraint(cols, columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals("<=")})
 						}
 					}
 					// TODO: constant vs. column
 				}
-			} else if v[0] == scm.Symbol(">") || v[0] == scm.Symbol(">=") {
+			} else if v[0].SymbolEquals(">") || v[0].SymbolEquals(">=") {
 				// compare
-				switch v1 := v[1].(type) {
+				switch v1 := v[1].Any().(type) {
 				case scm.Symbol:
 					if col, ok := symbolmapping[v1]; ok { // left is a column
 						if v2, ok := extractConstant(v[2]); ok { // right is a constant
 							// ?equal var const
-							cols = addConstraint(cols, columnboundaries{col, v2, v[0] == scm.Symbol(">="), nil, false})
+							cols = addConstraint(cols, columnboundaries{col, v2, v[0].SymbolEquals(">="), scm.NewNil(), false})
 						}
 					}
 					// TODO: constant vs. column
 				}
-			} else if v[0] == scm.Symbol("and") {
+			} else if v[0].SymbolEquals("and") {
 				// AND -> recursive traverse
 				for i := 1; i < len(v); i++ {
 					traverseCondition(v[i])
@@ -143,7 +159,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 
 	// sort columns -> at first, the lower==upper alphabetically; then one lower!=upper according to best selectivity; discard the rest
 	sort.Slice(cols, func(i, j int) bool {
-		if cols[i].lower == cols[i].upper && cols[j].lower != cols[j].upper {
+		if scm.Equal(cols[i].lower, cols[i].upper) && !scm.Equal(cols[j].lower, cols[j].upper) {
 			return true // put equal?-conditions leftmost
 		}
 		return cols[i].col < cols[j].col // otherwise: alphabetically
@@ -157,7 +173,7 @@ func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scme
 		//fmt.Println("conditions:", cols)
 		// build up lower and upper bounds of index
 		for {
-			if len(cols) >= 2 && cols[len(cols)-2].lower != cols[len(cols)-2].upper {
+			if len(cols) >= 2 && !scm.Equal(cols[len(cols)-2].lower, cols[len(cols)-2].upper) {
 				// remove last col -> we cant have two ranged cols
 				cols = cols[:len(cols)-1]
 			} else {

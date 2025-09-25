@@ -187,7 +187,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 		if b.col == schema[0].Column {
 			// iterate this axis over boundaries
 			min := 0
-			if b.lower != nil {
+			if !b.lower.IsNil() {
 				// lower bound is given -> find lowest part
 				max := schema[0].NumPartitions - 1
 				for min < max {
@@ -209,7 +209,7 @@ func iterateShardIndex(schema []shardDimension, boundaries []columnboundaries, s
 			}
 
 			max := schema[0].NumPartitions - 1 // smaller than max
-			if b.upper != nil {
+			if !b.upper.IsNil() {
 				// upper bound is given -> find highest part
 				umin := min
 				for umin < max {
@@ -304,7 +304,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	for i := 1; i < n; i++ {
 		sample := pivotSamples[(i*len(pivotSamples))/n]
 		// only add new items
-		if sample != nil && (len(result.Pivots) == 0 || scm.Less(result.Pivots[len(result.Pivots)-1], sample)) {
+		if !sample.IsNil() && (len(result.Pivots) == 0 || scm.Less(result.Pivots[len(result.Pivots)-1], sample)) {
 			result.Pivots = append(result.Pivots, sample)
 		} else {
 			// TODO: what if the sample is equal by chance?

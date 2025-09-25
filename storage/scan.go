@@ -33,8 +33,6 @@ func (s scanError) Error() string {
 
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
-type emptyResult struct{}
-
 // scanResult bundles per-shard outputs to minimize allocations and type assertions.
 type scanResult struct {
 	res        scm.Scmer
@@ -77,7 +75,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	// collect values from parallel scan
 	akkumulator := neutral
 	hadValue := false
-	if aggregate2 != nil {
+	if !aggregate2.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate2)
 		for msg := range values {
 			if msg.err.r != nil {
@@ -85,17 +83,17 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
-			switch msg.res.(type) {
-			case emptyResult:
-				// no-op
-				hadValue = hadValue
-			default:
+			if msg.outCount > 0 {
 				akkumulator = fn(akkumulator, msg.res)
 				hadValue = true
 			}
 		}
 		if !hadValue && isOuter {
-			akkumulator = fn(akkumulator, scm.Apply(callback, make([]scm.Scmer, len(callbackCols))...)) // outer join: push one NULL row
+			nullRow := make([]scm.Scmer, len(callbackCols))
+			for i := range nullRow {
+				nullRow[i] = scm.NewNil()
+			}
+			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
 		}
 		// log statistics for unordered scan (best-effort, async so it doesn't add latency)
 		execNs := time.Since(execStart).Nanoseconds()
@@ -104,14 +102,20 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			go func(anNs, exNs int64) {
 				defer func() { _ = recover() }()
 				filterEnc := ""
-				if p, ok := condition.(scm.Proc); ok {
-					filterEnc = encodeScmerToString(p.Body, conditionCols, p.Params.([]scm.Scmer))
+				if proc, ok := condition.Any().(scm.Proc); ok {
+					var params []scm.Scmer
+					if proc.Params.IsSlice() {
+						params = proc.Params.Slice()
+					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+						params = arr
+					}
+					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 				}
 				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
 			}(analyzeNs, execNs)
 		}
 		return akkumulator
-	} else if aggregate != nil {
+	} else if !aggregate.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
 		for msg := range values {
 			if msg.err.r != nil {
@@ -119,17 +123,17 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
-			switch msg.res.(type) {
-			case emptyResult:
-				// no-op
-				hadValue = hadValue
-			default:
+			if msg.outCount > 0 {
 				akkumulator = fn(akkumulator, msg.res)
 				hadValue = true
 			}
 		}
 		if !hadValue && isOuter {
-			akkumulator = fn(akkumulator, scm.Apply(callback, make([]scm.Scmer, len(callbackCols))...)) // outer join: push one NULL row
+			nullRow := make([]scm.Scmer, len(callbackCols))
+			for i := range nullRow {
+				nullRow[i] = scm.NewNil()
+			}
+			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
 		}
 		execNs := time.Since(execStart).Nanoseconds()
 		if inputCount > int64(Settings.AnalyzeMinItems) {
@@ -137,8 +141,14 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			go func(anNs, exNs int64) {
 				defer func() { _ = recover() }()
 				filterEnc := ""
-				if p, ok := condition.(scm.Proc); ok {
-					filterEnc = encodeScmerToString(p.Body, conditionCols, p.Params.([]scm.Scmer))
+				if proc, ok := condition.Any().(scm.Proc); ok {
+					var params []scm.Scmer
+					if proc.Params.IsSlice() {
+						params = proc.Params.Slice()
+					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+						params = arr
+					}
+					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 				}
 				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
 			}(analyzeNs, execNs)
@@ -151,12 +161,14 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
-			if _, empty := msg.res.(emptyResult); !empty {
-				hadValue = true
-			}
+			hadValue = hadValue || msg.outCount > 0
 		}
 		if !hadValue && isOuter {
-			scm.Apply(callback, make([]scm.Scmer, len(callbackCols))...) // outer join: push one NULL row
+			nullRow := make([]scm.Scmer, len(callbackCols))
+			for i := range nullRow {
+				nullRow[i] = scm.NewNil()
+			}
+			scm.Apply(callback, nullRow...) // outer join: push one NULL row
 		}
 		execNs := time.Since(execStart).Nanoseconds()
 		if inputCount > int64(Settings.AnalyzeMinItems) {
@@ -164,8 +176,14 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			go func(anNs, exNs int64) {
 				defer func() { _ = recover() }()
 				filterEnc := ""
-				if p, ok := condition.(scm.Proc); ok {
-					filterEnc = encodeScmerToString(p.Body, conditionCols, p.Params.([]scm.Scmer))
+				if proc, ok := condition.Any().(scm.Proc); ok {
+					var params []scm.Scmer
+					if proc.Params.IsSlice() {
+						params = proc.Params.Slice()
+					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+						params = arr
+					}
+					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 				}
 				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
 			}(analyzeNs, execNs)
@@ -180,12 +198,18 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	callbackFn := scm.OptimizeProcToSerialFunction(callback)
-	aggregateFn := func(...scm.Scmer) scm.Scmer { return nil }
-	if aggregate != nil {
+	aggregateFn := func(...scm.Scmer) scm.Scmer { return scm.NewNil() }
+	if !aggregate.IsNil() {
 		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 	mdataset := make([]scm.Scmer, len(callbackCols))
+	for i := range cdataset {
+		cdataset[i] = scm.NewNil()
+	}
+	for i := range mdataset {
+		mdataset[i] = scm.NewNil()
+	}
 
 	// main storage
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -195,7 +219,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		ccols[i] = t.getColumnStorageOrPanic(k)
 	}
 	for i, k := range callbackCols { // iterate over columns
-		if string(k) == "$update" {
+		if k == "$update" {
 			mcols[i] = nil
 		} else if len(k) >= 4 && k[:4] == "NEW." {
 			// ignore NEW.
@@ -240,7 +264,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			for i, k := range mcols { // iterate over columns
 				if k == nil {
 					// update/delete function
-					mdataset[i] = t.UpdateFunction(idx, true)
+					mdataset[i] = scm.NewFunc(t.UpdateFunction(idx, true))
 				} else {
 					mdataset[i] = k.GetValue(idx)
 				}
@@ -259,9 +283,10 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			// prepare&call map function
 			for i, k := range callbackCols { // iterate over columns
 				if k == "$update" {
-					mdataset[i] = t.UpdateFunction(idx, true)
+					mdataset[i] = scm.NewFunc(t.UpdateFunction(idx, true))
 				} else if len(k) >= 4 && k[:4] == "NEW." {
 					// ignore NEW.
+					mdataset[i] = scm.NewNil()
 				} else {
 					mdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
 				}
@@ -281,8 +306,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	t.mu.RUnlock()
 	locked = false
 	if !hadValue {
-		return emptyResult{}, outCount
-	} else {
-		return akkumulator, outCount
+		return scm.NewNil(), outCount
 	}
+	return akkumulator, outCount
 }
