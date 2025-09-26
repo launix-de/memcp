@@ -514,7 +514,10 @@ func StartGlobalEstimator() {
 		return
 	}
 	fmt.Println("AIEstimator: starting...")
+	/* TODO: deactivated until shutdown procedure is waterproof and optimizer also must time out
 	est, err := NewEstimator("./ai_optimizer.py")
+	*/
+	est, err := (*Estimator)(nil), errors.New("no estimator yet")
 	if err != nil {
 		fmt.Println("AIEstimator: failed to start:", err)
 		return
