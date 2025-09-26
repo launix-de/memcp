@@ -72,7 +72,7 @@ func (m *MySQLWrapper) SetServerVersion() {
 func (m *MySQLWrapper) NewSession(session *driver.Session) {
 	m.log.Info("New Session from " + session.Addr())
 	// initialize something??
-	mysqlsessions.Store(session.ID(), NewSession())
+	mysqlsessions.Store(session.ID(), NewSession().Func())
 }
 func (m *MySQLWrapper) SessionInc(session *driver.Session) {
 	// I think we can skip session counting
