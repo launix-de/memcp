@@ -252,9 +252,6 @@ func Validate(val Scmer, require string) string {
 	case tagString:
 		return "string"
 	case tagSymbol:
-		if val.SymbolEquals("true") || val.SymbolEquals("false") {
-			return "bool"
-		}
 		return "any"
 	case tagFloat:
 		return "number"
