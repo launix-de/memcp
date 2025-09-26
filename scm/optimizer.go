@@ -322,7 +322,19 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		ome2 := ome.Copy()
 		for sym, content := range variableContent {
-			if usedVariables[sym] < 2 || !content.IsSlice() {
+			normalized := content
+			if stripped, ok := scmerStripSourceInfo(content); ok {
+				normalized = stripped
+			}
+			shouldReplace := false
+			if !normalized.IsSlice() {
+				shouldReplace = true
+			} else if usedVariables[sym] < 2 {
+				if slice, ok := scmerSlice(normalized); ok && len(slice) > 0 && scmerIsSymbol(slice[0], "quote") {
+					shouldReplace = true
+				}
+			}
+			if shouldReplace {
 				delete(variableContent, sym)
 				delete(usedVariables, sym)
 				ome2.setBlacklist = append(ome2.setBlacklist, sym)

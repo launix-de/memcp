@@ -415,6 +415,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (assert (panicked "panic") true "insufficient NumVars must panic (guards optimizer bug)")
 
 /* cascade override */
+(print "testing more lambda functions ...")
 (define lam_nested1 (lambda (req res) (+ req res)))
 (define lam_nested2 (lambda (req res) (+ 1 (lam_nested1 req res))))
 (define lam_nested3 (lambda (req res) (lam_nested2 req res)))
