@@ -15,6 +15,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+(begin /* own enclosure */
 (print "performing unit tests ...")
 
 (set teststat (newsession))
@@ -198,6 +199,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (assert (equal? (urldecode (urlencode "a b")) "a b") true "url roundtrip")
 (assert (strlike (json_encode_assoc (list "x" 1)) "%\"x\":1%") true "json_encode_assoc contains key and value")
 
+/* Optimizer safeguards for eval/import and aliasing in begin */
+/* Case: preserve old binding while overloading after an eval barrier */
+(define http_test_begin (begin
+	(define http_handler (lambda (req res) 1))
+	(define old_handler http_handler)
+	(eval '(print "optimizer eval barrier test"))
+	(define http_handler (lambda (req res) (+ (old_handler req res) 1)))
+	(http_handler 0 0)
+))
+(assert http_test_begin 2 "handler layering with eval barrier")
+
+/* Case: forbid inlining an alias to a symbol redefined later in the same begin */
+(define alias_cycle_guard (begin
+	(define a 10)
+	(define old_a a)
+	(define a (+ old_a 5))
+	(equal? a 15)
+))
+(assert alias_cycle_guard true "no self-referential aliasing inlining")
+
 /* hex/bin encode-decode */
 (assert (equal? (bin2hex "AB") "4142") true "bin2hex encodes bytes to hex")
 (assert (equal? (hex2bin "414243") "ABC") true "hex2bin decodes hex to bytes")
@@ -325,3 +346,4 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(print " it is unsafe to run memcp in this configuration")
 ) (print "all tests succeeded."))
 (print "")
+) /* end enclosure */
