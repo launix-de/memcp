@@ -49,6 +49,7 @@ func (s Scmer) ComputeSize() uint {
 }
 
 // Type tags (upper 16 bits of aux)
+// data will ALWAYS be stored with the correct tag, so a tagAny will never store an integer value or a []Scmer
 const (
 	tagNil = iota
 	tagString
