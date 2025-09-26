@@ -61,14 +61,31 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values to add"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			sum := 0.0
-			for _, i := range a {
-				if i.IsNil() {
+			// Fast path: accumulate ints until first non-int, then promote to float if needed
+			var sumInt int64
+			i := 0
+			for i < len(a) {
+				v := a[i]
+				if v.IsInt() {
+					sumInt += v.Int()
+					i++
+					continue
+				}
+				break
+			}
+			if i == len(a) {
+				return NewInt(sumInt)
+			}
+			// Promote to float and continue
+			sumFloat := float64(sumInt)
+			for ; i < len(a); i++ {
+				v := a[i]
+				if v.IsNil() {
 					return NewNil()
 				}
-				sum += i.Float()
+				sumFloat += v.Float()
 			}
-			return NewFloat(sum)
+			return NewFloat(sumFloat)
 		},
 		true,
 	})
