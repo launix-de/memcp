@@ -96,11 +96,35 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := a[0].Float()
-			for _, i := range a[1:] {
-				v -= i.Float()
+			// Nil short-circuit
+			for _, v := range a {
+				if v.IsNil() {
+					return NewNil()
+				}
 			}
-			return NewFloat(v)
+			// Int-first, then promote to float if needed
+			if a[0].IsInt() {
+				diffInt := a[0].Int()
+				i := 1
+				for i < len(a) && a[i].IsInt() {
+					diffInt -= a[i].Int()
+					i++
+				}
+				if i == len(a) {
+					return NewInt(diffInt)
+				}
+				diffFloat := float64(diffInt)
+				for ; i < len(a); i++ {
+					diffFloat -= a[i].Float()
+				}
+				return NewFloat(diffFloat)
+			}
+			// Float mode from the start
+			diffFloat := a[0].Float()
+			for i := 1; i < len(a); i++ {
+				diffFloat -= a[i].Float()
+			}
+			return NewFloat(diffFloat)
 		},
 		true,
 	})
@@ -111,11 +135,35 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := a[0].Float()
-			for _, i := range a[1:] {
-				v *= i.Float()
+			// Nil short-circuit
+			for _, v := range a {
+				if v.IsNil() {
+					return NewNil()
+				}
 			}
-			return NewFloat(v)
+			// Int-first multiply, then promote to float if needed
+			if a[0].IsInt() {
+				prodInt := a[0].Int()
+				i := 1
+				for i < len(a) && a[i].IsInt() {
+					prodInt *= a[i].Int()
+					i++
+				}
+				if i == len(a) {
+					return NewInt(prodInt)
+				}
+				prodFloat := float64(prodInt)
+				for ; i < len(a); i++ {
+					prodFloat *= a[i].Float()
+				}
+				return NewFloat(prodFloat)
+			}
+			// Float mode from the start
+			prodFloat := a[0].Float()
+			for i := 1; i < len(a); i++ {
+				prodFloat *= a[i].Float()
+			}
+			return NewFloat(prodFloat)
 		},
 		true,
 	})
@@ -126,6 +174,12 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
+			// Nil short-circuit
+			for _, v := range a {
+				if v.IsNil() {
+					return NewNil()
+				}
+			}
 			v := a[0].Float()
 			for _, i := range a[1:] {
 				v /= i.Float()
