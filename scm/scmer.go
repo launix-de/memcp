@@ -19,13 +19,14 @@ package scm
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"strconv"
 	"unsafe"
 )
 
 // Scmer is a compact tagged value container (16 bytes).
 type Scmer struct {
-	ptr unsafe.Pointer
+	ptr *byte
 	aux uint64 // type tag + extra data (len, etc.)
 }
 
@@ -80,59 +81,60 @@ func NewNil() Scmer { return Scmer{nil, makeAux(tagNil, 0)} }
 
 func NewBool(b bool) Scmer {
 	if b {
-		return Scmer{unsafe.Pointer(uintptr(1)), makeAux(tagBool, 0)}
+		return Scmer{(*byte)(unsafe.Pointer(uintptr(1))), makeAux(tagBool, 0)}
 	}
-	return Scmer{unsafe.Pointer(uintptr(0)), makeAux(tagBool, 0)}
+	return Scmer{(*byte)(unsafe.Pointer(uintptr(0))), makeAux(tagBool, 0)}
 }
 
 func NewInt(i int64) Scmer {
-	return Scmer{unsafe.Pointer(uintptr(i)), makeAux(tagInt, 0)}
+	return Scmer{(*byte)(unsafe.Pointer(uintptr(i))), makeAux(tagInt, 0)}
 }
 
 func NewFloat(f float64) Scmer {
 	bits := math.Float64bits(f)
-	return Scmer{unsafe.Pointer(uintptr(bits)), makeAux(tagFloat, 0)}
+	return Scmer{(*byte)(unsafe.Pointer(uintptr(bits))), makeAux(tagFloat, 0)}
 }
 
 func NewString(s string) Scmer {
 	if len(s) == 0 {
 		return Scmer{nil, makeAux(tagString, 0)}
 	}
-	sh := (*[2]uintptr)(unsafe.Pointer(&s))
-	return Scmer{unsafe.Pointer(sh[0]), makeAux(tagString, uint64(len(s)))}
+	return Scmer{unsafe.StringData(s), makeAux(tagString, uint64(len(s)))}
 }
 
 func NewSymbol(sym string) Scmer {
 	if len(sym) == 0 {
 		return Scmer{nil, makeAux(tagSymbol, 0)}
 	}
-	sh := (*[2]uintptr)(unsafe.Pointer(&sym))
-	return Scmer{unsafe.Pointer(sh[0]), makeAux(tagSymbol, uint64(len(sym)))}
+	return Scmer{unsafe.StringData(sym), makeAux(tagSymbol, uint64(len(sym)))}
 }
 
 func NewSlice(slice []Scmer) Scmer {
 	if len(slice) == 0 {
 		return Scmer{nil, makeAux(tagSlice, 0)}
 	}
-	sh := (*[3]uintptr)(unsafe.Pointer(&slice))
-	return Scmer{unsafe.Pointer(sh[0]), makeAux(tagSlice, uint64(len(slice)))}
+	data := unsafe.SliceData(slice)
+	return Scmer{(*byte)(unsafe.Pointer(data)), makeAux(tagSlice, uint64(len(slice)))}
 }
 
 func NewVector(vec []float64) Scmer {
-	sh := (*[3]uintptr)(unsafe.Pointer(&vec))
-	return Scmer{unsafe.Pointer(sh[0]), makeAux(tagVector, uint64(len(vec)))}
+	if len(vec) == 0 {
+		return Scmer{nil, makeAux(tagVector, 0)}
+	}
+	data := unsafe.SliceData(vec)
+	return Scmer{(*byte)(unsafe.Pointer(data)), makeAux(tagVector, uint64(len(vec)))}
 }
 
 func NewFunc(fn func(...Scmer) Scmer) Scmer {
 	ptr := new(func(...Scmer) Scmer)
 	*ptr = fn
-	return Scmer{unsafe.Pointer(ptr), makeAux(tagFunc, funcKindVariadic)}
+	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagFunc, funcKindVariadic)}
 }
 
 func NewEnvFunc(fn func(*Env, ...Scmer) Scmer) Scmer {
 	ptr := new(func(*Env, ...Scmer) Scmer)
 	*ptr = fn
-	return Scmer{unsafe.Pointer(ptr), makeAux(tagFunc, funcKindWithEnv)}
+	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagFunc, funcKindWithEnv)}
 }
 
 func NewProcStruct(p Proc) Scmer {
@@ -146,23 +148,23 @@ func NewProc(p *Proc) Scmer {
 	}
 	ptr := new(Proc)
 	*ptr = *p
-	return Scmer{unsafe.Pointer(ptr), makeAux(tagProc, 0)}
+	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagProc, 0)}
 }
 
 func NewNthLocalVar(idx NthLocalVar) Scmer {
-	return Scmer{unsafe.Pointer(uintptr(idx)), makeAux(tagNthLocalVar, 0)}
+	return Scmer{(*byte)(unsafe.Pointer(uintptr(idx))), makeAux(tagNthLocalVar, 0)}
 }
 
 func NewSourceInfo(si SourceInfo) Scmer {
 	ptr := new(SourceInfo)
 	*ptr = si
-	return Scmer{unsafe.Pointer(ptr), makeAux(tagSourceInfo, 0)}
+	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagSourceInfo, 0)}
 }
 
 func NewAny(v any) Scmer {
 	p := new(any)
 	*p = v
-	return Scmer{unsafe.Pointer(p), makeAux(tagAny, 0)}
+	return Scmer{(*byte)(unsafe.Pointer(p)), makeAux(tagAny, 0)}
 }
 
 func FromAny(v any) Scmer {
@@ -236,7 +238,7 @@ func NewCustom(tag uint16, ptr unsafe.Pointer) Scmer {
 	if tag < 100 {
 		panic("custom tags should be >= 100 to avoid conflicts")
 	}
-	return Scmer{ptr, makeAux(tag, 0)}
+	return Scmer{(*byte)(ptr), makeAux(tag, 0)}
 }
 
 func (s Scmer) IsCustom(tag uint16) bool {
@@ -247,7 +249,7 @@ func (s Scmer) Custom(tag uint16) unsafe.Pointer {
 	if auxTag(s.aux) != tag {
 		panic("wrong custom tag")
 	}
-	return s.ptr
+	return unsafe.Pointer(s.ptr)
 }
 
 //
@@ -279,11 +281,11 @@ func (s Scmer) Bool() bool {
 	case tagNil:
 		return false
 	case tagBool:
-		return uintptr(s.ptr) != 0
+		return uintptr(unsafe.Pointer(s.ptr)) != 0
 	case tagInt:
-		return int64(uintptr(s.ptr)) != 0
+		return int64(uintptr(unsafe.Pointer(s.ptr))) != 0
 	case tagFloat:
-		return math.Float64frombits(uint64(uintptr(s.ptr))) != 0.0
+		return math.Float64frombits(uint64(uintptr(unsafe.Pointer(s.ptr)))) != 0.0
 	case tagString, tagSymbol:
 		return s.String() != ""
 	case tagSlice:
@@ -323,9 +325,9 @@ func (s Scmer) Bool() bool {
 func (s Scmer) Int() int64 {
 	switch auxTag(s.aux) {
 	case tagInt:
-		return int64(uintptr(s.ptr))
+		return int64(uintptr(unsafe.Pointer(s.ptr)))
 	case tagFloat:
-		return int64(math.Float64frombits(uint64(uintptr(s.ptr))))
+		return int64(math.Float64frombits(uint64(uintptr(unsafe.Pointer(s.ptr)))))
 	case tagString, tagSymbol:
 		v, err := strconv.ParseInt(s.String(), 10, 64)
 		if err != nil {
@@ -333,7 +335,7 @@ func (s Scmer) Int() int64 {
 		}
 		return v
 	case tagBool:
-		if uintptr(s.ptr) != 0 {
+		if uintptr(unsafe.Pointer(s.ptr)) != 0 {
 			return 1
 		}
 		return 0
@@ -375,9 +377,9 @@ func (s Scmer) Int() int64 {
 func (s Scmer) Float() float64 {
 	switch auxTag(s.aux) {
 	case tagFloat:
-		return math.Float64frombits(uint64(uintptr(s.ptr)))
+		return math.Float64frombits(uint64(uintptr(unsafe.Pointer(s.ptr))))
 	case tagInt:
-		return float64(int64(uintptr(s.ptr)))
+		return float64(int64(uintptr(unsafe.Pointer(s.ptr))))
 	case tagString, tagSymbol:
 		v, err := strconv.ParseFloat(s.String(), 64)
 		if err != nil {
@@ -385,7 +387,7 @@ func (s Scmer) Float() float64 {
 		}
 		return v
 	case tagBool:
-		if uintptr(s.ptr) != 0 {
+		if uintptr(unsafe.Pointer(s.ptr)) != 0 {
 			return 1.0
 		}
 		return 0.0
@@ -427,14 +429,14 @@ func (s Scmer) Float() float64 {
 func (s Scmer) String() string {
 	switch auxTag(s.aux) {
 	case tagString, tagSymbol:
-		hdr := [2]uintptr{uintptr(s.ptr), uintptr(auxVal(s.aux))}
+		hdr := [2]uintptr{uintptr(unsafe.Pointer(s.ptr)), uintptr(auxVal(s.aux))}
 		return *(*string)(unsafe.Pointer(&hdr))
 	case tagInt:
-		return strconv.FormatInt(int64(uintptr(s.ptr)), 10)
+		return strconv.FormatInt(int64(uintptr(unsafe.Pointer(s.ptr))), 10)
 	case tagFloat:
-		return strconv.FormatFloat(math.Float64frombits(uint64(uintptr(s.ptr))), 'g', -1, 64)
+		return strconv.FormatFloat(math.Float64frombits(uint64(uintptr(unsafe.Pointer(s.ptr)))), 'g', -1, 64)
 	case tagBool:
-		if uintptr(s.ptr) != 0 {
+		if uintptr(unsafe.Pointer(s.ptr)) != 0 {
 			return "true"
 		}
 		return "false"
@@ -446,7 +448,7 @@ func (s Scmer) String() string {
 		return s.SourceInfo().String()
 	default:
 		if auxTag(s.aux) == tagAny {
-			return fmt.Sprintf("%v", *(*any)(s.ptr))
+			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr)))
 		}
 		return fmt.Sprintf("<custom %d>", auxTag(s.aux))
 	}
@@ -456,15 +458,24 @@ func (s Scmer) Slice() []Scmer {
 	if auxTag(s.aux) != tagSlice {
 		panic("not slice")
 	}
-	hdr := [3]uintptr{uintptr(s.ptr), uintptr(auxVal(s.aux)), uintptr(auxVal(s.aux))}
-	return *(*[]Scmer)(unsafe.Pointer(&hdr))
+	ln := int(auxVal(s.aux))
+	if ln == 0 || s.ptr == nil {
+		return nil
+	}
+	head := (*Scmer)(unsafe.Pointer(s.ptr))
+	headers := reflect.SliceHeader{
+		Data: uintptr(unsafe.Pointer(head)),
+		Len:  ln,
+		Cap:  ln,
+	}
+	return *(*[]Scmer)(unsafe.Pointer(&headers))
 }
 
 func (s Scmer) Vector() []float64 {
 	if auxTag(s.aux) != tagVector {
 		panic("not vector")
 	}
-	hdr := [3]uintptr{uintptr(s.ptr), uintptr(auxVal(s.aux)), uintptr(auxVal(s.aux))}
+	hdr := [3]uintptr{uintptr(unsafe.Pointer(s.ptr)), uintptr(auxVal(s.aux)), uintptr(auxVal(s.aux))}
 	return *(*[]float64)(unsafe.Pointer(&hdr))
 }
 
@@ -472,14 +483,14 @@ func (s Scmer) Func() func(...Scmer) Scmer {
 	if auxTag(s.aux) != tagFunc || auxVal(s.aux) != funcKindVariadic {
 		panic("not function")
 	}
-	return *(*func(...Scmer) Scmer)(s.ptr)
+	return *(*func(...Scmer) Scmer)(unsafe.Pointer(s.ptr))
 }
 
 func (s Scmer) EnvFunc() func(*Env, ...Scmer) Scmer {
 	if auxTag(s.aux) != tagFunc || auxVal(s.aux) != funcKindWithEnv {
 		panic("not environment function")
 	}
-	return *(*func(*Env, ...Scmer) Scmer)(s.ptr)
+	return *(*func(*Env, ...Scmer) Scmer)(unsafe.Pointer(s.ptr))
 }
 
 func (s Scmer) IsProc() bool { return auxTag(s.aux) == tagProc }
@@ -488,7 +499,7 @@ func (s Scmer) Proc() *Proc {
 	if auxTag(s.aux) != tagProc {
 		panic("not proc")
 	}
-	return (*Proc)(s.ptr)
+	return (*Proc)(unsafe.Pointer(s.ptr))
 }
 
 func (s Scmer) IsNthLocalVar() bool { return auxTag(s.aux) == tagNthLocalVar }
@@ -497,7 +508,7 @@ func (s Scmer) NthLocalVar() NthLocalVar {
 	if auxTag(s.aux) != tagNthLocalVar {
 		panic("not nth local var")
 	}
-	return NthLocalVar(uintptr(s.ptr))
+	return NthLocalVar(uintptr(unsafe.Pointer(s.ptr)))
 }
 
 func (s Scmer) IsSourceInfo() bool { return auxTag(s.aux) == tagSourceInfo }
@@ -506,7 +517,7 @@ func (s Scmer) SourceInfo() *SourceInfo {
 	if auxTag(s.aux) != tagSourceInfo {
 		panic("not source info")
 	}
-	return (*SourceInfo)(s.ptr)
+	return (*SourceInfo)(unsafe.Pointer(s.ptr))
 }
 
 // Symbol returns the Scheme symbol value as Go string.
@@ -548,7 +559,7 @@ func (s Scmer) Any() any {
 	case tagSourceInfo:
 		return *s.SourceInfo()
 	case tagAny:
-		return *(*any)(s.ptr)
+		return *(*any)(unsafe.Pointer(s.ptr))
 	default:
 		panic(fmt.Sprintf("unknown tag %d in Any", auxTag(s.aux)))
 	}

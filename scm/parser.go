@@ -109,14 +109,6 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 					L = append(L, readFrom(tokens))
 				}
 				*tokens = (*tokens)[1:]
-				if len(L) == 1 {
-					empty := NewSlice([]Scmer{})
-					if source_info.source != "" {
-						source_info.value = empty
-						return NewSourceInfo(source_info)
-					}
-					return empty
-				}
 				listForm := NewSlice(L)
 				if source_info.source != "" {
 					source_info.value = listForm
