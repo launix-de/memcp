@@ -16,7 +16,10 @@ Copyright (C) 2023  Carl-Philip Hänsch
 */
 package scm
 
-import "strings"
+import (
+	"strings"
+	"unsafe"
+)
 
 func EqualScm(a, b Scmer) Scmer { return NewBool(Equal(a, b)) }
 
@@ -345,7 +348,7 @@ func Less(a, b Scmer) bool {
 	case tagBool:
 		return a.Int() < b.Int()
 	case tagFunc:
-		return uintptr(a.ptr) < uintptr(b.ptr)
+		return uintptr(unsafe.Pointer(a.ptr)) < uintptr(unsafe.Pointer(b.ptr))
 	case tagAny:
 		return strings.Compare(a.String(), b.String()) < 0
 	default:
