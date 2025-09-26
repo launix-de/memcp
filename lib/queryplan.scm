@@ -435,7 +435,7 @@ if there is a group function, create a temporary preaggregate table
 									)
 								))
 							)
-							'() /* final inner (=scalar) */ '('if condition '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+							'() /* final inner (=scalar) */ '('if (coalesce condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
 						)
 					))
 					(build_scan tables (replace_find_column condition))
