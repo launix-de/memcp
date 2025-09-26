@@ -17,6 +17,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package scm
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -570,3 +571,24 @@ func (s Scmer) Any() any {
 func ToBool(v Scmer) bool     { return v.Bool() }
 func ToInt(v Scmer) int       { return int(v.Int()) }
 func ToFloat(v Scmer) float64 { return v.Float() }
+
+// MarshalJSON encodes a Scmer into JSON by converting it to native Go
+// types first (nil, bool, float64/int64, string, []any, map-like assoc
+// list), ensuring stable and portable JSON output for persistence and APIs.
+func (s Scmer) MarshalJSON() ([]byte, error) {
+	// Reuse existing conversion used by HTTP layer
+	// Note: scmerToGo returns JSON-friendly Go values.
+	v := scmerToGo(s)
+	return json.Marshal(v)
+}
+
+// UnmarshalJSON decodes JSON into a Scmer by first decoding into
+// interface{} and then transforming to Scmer using TransformFromJSON.
+func (s *Scmer) UnmarshalJSON(data []byte) error {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*s = TransformFromJSON(v)
+	return nil
+}
