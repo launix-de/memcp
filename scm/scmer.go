@@ -17,6 +17,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package scm
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -576,19 +577,226 @@ func ToFloat(v Scmer) float64 { return v.Float() }
 // types first (nil, bool, float64/int64, string, []any, map-like assoc
 // list), ensuring stable and portable JSON output for persistence and APIs.
 func (s Scmer) MarshalJSON() ([]byte, error) {
-	// Reuse existing conversion used by HTTP layer
-	// Note: scmerToGo returns JSON-friendly Go values.
-	v := scmerToGo(s)
-	return json.Marshal(v)
+	// Custom, stable encoding for persistence of SCM values.
+	var toJSONable func(Scmer) any
+	// helper: find name of native func in Globalenv
+	nativeName := func(fn any) (string, bool) {
+		ptr := reflect.ValueOf(fn).Pointer()
+		en := &Globalenv
+		for en != nil {
+			for k, v := range en.Vars {
+				if auxTag(v.aux) == tagFunc {
+					var other any
+					if auxVal(v.aux) == funcKindWithEnv {
+						other = v.EnvFunc()
+					} else {
+						other = v.Func()
+					}
+					ov := reflect.ValueOf(other)
+					if ov.Kind() == reflect.Func && ov.Pointer() == ptr {
+						return string(k), true
+					}
+				}
+			}
+			en = en.Outer
+		}
+		return "", false
+	}
+	toJSONable = func(v Scmer) any {
+		switch auxTag(v.aux) {
+		case tagNil:
+			return nil
+		case tagBool:
+			return v.Bool()
+		case tagInt:
+			return v.Int()
+		case tagFloat:
+			return v.Float()
+		case tagString:
+			return v.String()
+		case tagSymbol:
+			return map[string]any{"symbol": v.String()}
+		case tagSlice:
+			list := v.Slice()
+			out := make([]any, len(list))
+			for i, it := range list {
+				out[i] = toJSONable(it)
+			}
+			return out
+		case tagVector:
+			return v.Vector()
+		case tagFunc:
+			// Try to encode as the symbolic name if known; otherwise as "?"
+			if auxVal(v.aux) == funcKindWithEnv {
+				if name, ok := nativeName(v.EnvFunc()); ok {
+					return map[string]any{"symbol": name}
+				}
+			} else {
+				if name, ok := nativeName(v.Func()); ok {
+					return map[string]any{"symbol": name}
+				}
+			}
+			return map[string]any{"symbol": "?"}
+		case tagProc:
+			p := v.Proc()
+			arr := make([]any, 0, 4)
+			arr = append(arr, map[string]any{"symbol": "lambda"})
+			arr = append(arr, toJSONable(p.Params))
+			arr = append(arr, toJSONable(p.Body))
+			if p.NumVars > 0 {
+				arr = append(arr, p.NumVars)
+			}
+			return arr
+		case tagSourceInfo:
+			return toJSONable(v.SourceInfo().value)
+		case tagAny:
+			a := v.Any()
+			switch vv := a.(type) {
+			case nil:
+				return nil
+			case bool, string:
+				return vv
+			case int:
+				return int64(vv)
+			case int8:
+				return int64(vv)
+			case int16:
+				return int64(vv)
+			case int32:
+				return int64(vv)
+			case int64:
+				return vv
+			case uint:
+				return int64(vv)
+			case uint8:
+				return int64(vv)
+			case uint16:
+				return int64(vv)
+			case uint32:
+				return int64(vv)
+			case uint64:
+				return int64(vv)
+			case float32:
+				return float64(vv)
+			case float64:
+				return vv
+			case Symbol:
+				return map[string]any{"symbol": string(vv)}
+			case []Scmer:
+				out := make([]any, len(vv))
+				for i := range vv {
+					out[i] = toJSONable(vv[i])
+				}
+				return out
+			case Proc:
+				return toJSONable(NewProcStruct(vv))
+			case *Proc:
+				if vv == nil {
+					return nil
+				}
+				return toJSONable(NewProc(vv))
+			case func(...Scmer) Scmer:
+				if name, ok := nativeName(vv); ok {
+					return map[string]any{"symbol": name}
+				}
+				return map[string]any{"symbol": "?"}
+			case func(*Env, ...Scmer) Scmer:
+				if name, ok := nativeName(vv); ok {
+					return map[string]any{"symbol": name}
+				}
+				return map[string]any{"symbol": "?"}
+			default:
+				// Fallback: stringify
+				return fmt.Sprintf("%v", vv)
+			}
+		default:
+			// Unknown custom tag -> fall back to string form
+			return v.String()
+		}
+	}
+	return json.Marshal(toJSONable(s))
 }
 
 // UnmarshalJSON decodes JSON into a Scmer by first decoding into
 // interface{} and then transforming to Scmer using TransformFromJSON.
 func (s *Scmer) UnmarshalJSON(data []byte) error {
+	// Use decoder with UseNumber to preserve ints
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal(data, &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return err
 	}
-	*s = TransformFromJSON(v)
+	var from func(any) Scmer
+	from = func(x any) Scmer {
+		switch t := x.(type) {
+		case nil:
+			return NewNil()
+		case bool:
+			return NewBool(t)
+		case json.Number:
+			if i, err := t.Int64(); err == nil {
+				return NewInt(i)
+			}
+			if f, err := t.Float64(); err == nil {
+				return NewFloat(f)
+			}
+			return NewString(string(t))
+		case float64:
+			// Should not happen with UseNumber, but keep for robustness
+			return NewFloat(t)
+		case string:
+			return NewString(t)
+		case map[string]any:
+			if sym, ok := t["symbol"]; ok {
+				if name, ok2 := sym.(string); ok2 {
+					return NewSymbol(name)
+				}
+			}
+			// assoc map -> flatten to '("k" v ...)
+			pairs := make([]Scmer, 0, len(t)*2)
+			for k, v2 := range t {
+				pairs = append(pairs, NewString(k), from(v2))
+			}
+			return NewSlice(pairs)
+		case []any:
+			// check for lambda form: [{"symbol":"lambda"}, params, body, (numVars?)]
+			if len(t) >= 3 {
+				if head, ok := t[0].(map[string]any); ok {
+					if sym, ok2 := head["symbol"]; ok2 {
+						if name, ok3 := sym.(string); ok3 && name == "lambda" {
+							params := from(t[1])
+							body := from(t[2])
+							proc := Proc{Params: params, Body: body, En: &Globalenv}
+							if len(t) > 3 {
+								switch nv := t[3].(type) {
+								case json.Number:
+									if i, err := nv.Int64(); err == nil {
+										proc.NumVars = int(i)
+									}
+								case float64:
+									proc.NumVars = int(nv)
+								case int64:
+									proc.NumVars = int(nv)
+								case int:
+									proc.NumVars = nv
+								}
+							}
+							return NewProcStruct(proc)
+						}
+					}
+				}
+			}
+			// generic list
+			out := make([]Scmer, len(t))
+			for i := range t {
+				out[i] = from(t[i])
+			}
+			return NewSlice(out)
+		default:
+			return FromAny(t)
+		}
+	}
+	*s = from(v)
 	return nil
 }
