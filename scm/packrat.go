@@ -195,17 +195,20 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 		return parseSyntax(syntax.SourceInfo().value, en, ome, ignoreResult)
 	}
 	if auxTag(syntax.aux) == tagAny {
-		switch v := syntax.Any().(type) {
-		case SourceInfo:
-			return parseSyntax(v.value, en, ome, ignoreResult)
-		case packrat.Parser[*parserResult]:
-			return v
-		case *ScmParser:
-			return v
-		case Symbol:
-			syntax = NewSymbol(string(v))
-		case []Scmer:
-			syntax = NewSlice(v)
+		if si, ok := syntax.Any().(SourceInfo); ok {
+			return parseSyntax(si.value, en, ome, ignoreResult)
+		}
+		if p, ok := syntax.Any().(packrat.Parser[*parserResult]); ok {
+			return p
+		}
+		if sp, ok := syntax.Any().(*ScmParser); ok {
+			return sp
+		}
+		if sym, ok := syntax.Any().(Symbol); ok {
+			syntax = NewSymbol(string(sym))
+		}
+		if sl, ok := syntax.Any().([]Scmer); ok {
+			syntax = NewSlice(sl)
 		}
 	}
 	if syntax.IsString() {

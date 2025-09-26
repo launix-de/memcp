@@ -415,12 +415,8 @@ func init_strings() {
 					f := func(a ...Scmer) Scmer {
 						var res bool
 						// numeric fallback when both operands are numbers
-						switch a[0].Any().(type) {
-						case float64, int64:
-							switch a[1].Any().(type) {
-							case float64, int64:
-								res = ToFloat(a[0]) > ToFloat(a[1])
-							}
+						if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
+							res = ToFloat(a[0]) > ToFloat(a[1])
 						}
 						if !res {
 							res = c.CompareString(String(a[0]), String(a[1])) == 1
@@ -435,12 +431,8 @@ func init_strings() {
 				}
 				f := func(a ...Scmer) Scmer {
 					// numeric fallback when both operands are numbers
-					switch a[0].Any().(type) {
-					case float64, int64:
-						switch a[1].Any().(type) {
-						case float64, int64:
-							return NewBool(ToFloat(a[0]) < ToFloat(a[1]))
-						}
+					if (a[0].IsInt() || a[0].IsFloat()) && (a[1].IsInt() || a[1].IsFloat()) {
+						return NewBool(ToFloat(a[0]) < ToFloat(a[1]))
 					}
 					return NewBool(c.CompareString(String(a[0]), String(a[1])) == -1)
 				}
@@ -516,22 +508,22 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			var transform func(Scmer) any
 			transform = func(val Scmer) any {
-				switch v := val.Any().(type) {
-				case []Scmer:
+				if val.IsSlice() {
+					v := val.Slice()
 					result := make(map[string]any)
 					for i := 0; i < len(v)-1; i += 2 {
 						result[String(v[i])] = transform(v[i+1])
 					}
 					return result
-				case *FastDict:
+				}
+				if fd, ok := val.Any().(*FastDict); ok {
 					result := make(map[string]any)
-					for i := 0; i < len(v.Pairs)-1; i += 2 {
-						result[String(v.Pairs[i])] = transform(v.Pairs[i+1])
+					for i := 0; i < len(fd.Pairs)-1; i += 2 {
+						result[String(fd.Pairs[i])] = transform(fd.Pairs[i+1])
 					}
 					return result
-				default:
-					return scmerToGo(val)
 				}
+				return scmerToGo(val)
 			}
 			b, err := json.Marshal(transform(a[0]))
 			if err != nil {

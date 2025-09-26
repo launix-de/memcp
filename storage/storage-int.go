@@ -83,23 +83,6 @@ func (s *StorageInt) DeserializeEx(f io.Reader, readMagicbyte bool) uint {
 	return uint(s.count)
 }
 
-func toInt(x scm.Scmer) int64 {
-	switch v := x.Any().(type) {
-	case float64:
-		return int64(v)
-	case int:
-		return int64(v)
-	case uint:
-		return int64(v)
-	case uint64:
-		return int64(v)
-	case int64:
-		return v
-	default:
-		return x.Int()
-	}
-}
-
 func (s *StorageInt) ComputeSize() uint {
 	return 8*uint(len(s.chunk)) + 64 // management overhead
 }
@@ -144,7 +127,7 @@ func (s *StorageInt) scan(i uint, value scm.Scmer) {
 		s.hasNull = true
 		return
 	}
-	v := toInt(value)
+	v := value.Int()
 	if v < s.offset {
 		s.offset = v
 	}
@@ -179,7 +162,7 @@ func (s *StorageInt) build(i uint, value scm.Scmer) {
 		panic("tried to build StorageInt outside of range")
 	}
 	// store
-	vi := toInt(value)
+	vi := value.Int()
 	if value.IsNil() {
 		// null value
 		vi = int64(s.null)

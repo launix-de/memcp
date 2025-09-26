@@ -95,33 +95,21 @@ func evalWithSourceInfo(si SourceInfo, en *Env) (value Scmer) {
 
 func Eval(expression Scmer, en *Env) (value Scmer) {
 restart:
-	switch v := expression.Any().(type) {
-	case SourceInfo:
-		return evalWithSourceInfo(v, en)
-	case nil:
-		return NewNil()
-	case bool:
-		return NewBool(v)
-	case string:
-		return NewString(v)
-	case int64:
-		return NewInt(v)
-	case float64:
-		return NewFloat(v)
-	case Proc:
-		return NewAny(v)
-	case *Proc:
-		return NewProc(v)
-	case *ScmParser:
-		return NewAny(v)
-	case func(...Scmer) Scmer:
-		return NewFunc(v)
-	case Symbol:
-		return en.FindRead(v).Vars[v]
-	case NthLocalVar:
-		return en.VarsNumbered[v]
-	case []Scmer:
-		list := v
+	switch auxTag(expression.aux) {
+	case tagSourceInfo:
+		return evalWithSourceInfo(*expression.SourceInfo(), en)
+	case tagNil, tagBool, tagInt, tagFloat, tagString:
+		return expression
+	case tagFunc:
+		return expression
+	case tagProc:
+		return expression
+	case tagSymbol:
+		return en.FindRead(mustSymbol(expression)).Vars[mustSymbol(expression)]
+	case tagNthLocalVar:
+		return en.VarsNumbered[expression.NthLocalVar()]
+	case tagSlice:
+		list := expression.Slice()
 		if len(list) == 0 {
 			return expression
 		}
@@ -259,7 +247,7 @@ restart:
 				if len(list) > 3 {
 					numVars = int(list[3].Int())
 				}
-				return NewAny(Proc{Params: params, Body: list[2], En: en, NumVars: numVars})
+				return NewProcStruct(Proc{Params: params, Body: list[2], En: en, NumVars: numVars})
 			case "begin":
 				en2 := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
 				for _, form := range list[1 : len(list)-1] {
@@ -311,66 +299,67 @@ restart:
 		// apply
 		operands := list[1:]
 		procedure := Eval(list[0], en)
-		switch p := procedure.Any().(type) {
-		case func(...Scmer) Scmer:
+		// Native funcs
+		if auxTag(procedure.aux) == tagFunc {
+			if auxVal(procedure.aux) == funcKindWithEnv {
+				args := make([]Scmer, len(operands))
+				for i, x := range operands {
+					args[i] = Eval(x, en)
+				}
+				return procedure.EnvFunc()(en, args...)
+			}
 			args := make([]Scmer, len(operands))
 			for i, x := range operands {
 				args[i] = Eval(x, en)
 			}
-			return p(args...)
-		case func(*Env, ...Scmer) Scmer:
-			args := make([]Scmer, len(operands))
-			for i, x := range operands {
-				args[i] = Eval(x, en)
+			return procedure.Func()(args...)
+		}
+		// Lambdas (procs)
+		if auxTag(procedure.aux) == tagProc {
+			en, expression = prepareProcCall(procedure.Proc(), operands, en)
+			goto restart
+		}
+		// Associative list
+		if procedure.IsSlice() {
+			p := procedure.Slice()
+			if operands[0].IsNthLocalVar() { // optimized indexed access
+				return p[int(operands[0].NthLocalVar())]
 			}
-			return p(en, args...)
-		case *ScmParser:
-			if len(operands) == 0 {
-				return NewNil()
-			}
-			return p.Execute(String(Eval(operands[0], en)), en)
-		case Proc:
-			proc := p
-			en, expression = prepareProcCall(&proc, operands, en)
-			goto restart // tail call optimized
-		case *Proc:
-			en, expression = prepareProcCall(p, operands, en)
-			goto restart // tail call optimized
-		case []Scmer: // associative list
-			// format: (key value key value ... default)
-			if idx, ok := operands[0].Any().(NthLocalVar); ok {
-				// indexed access generated through optimizer
-				return p[int(idx)]
-			} else {
-				arg := Eval(operands[0], en)
-				i := 0
-				for i < len(p)-1 {
-					if Equal(arg, p[i]) {
-						return p[i+1]
-					}
-					i += 2
-				}
-				if i < len(p) {
-					return p[i] // default value on n+1
-				}
-				return NewNil() // no default value
-			}
-		case *FastDict:
 			arg := Eval(operands[0], en)
-			if v, ok := p.Get(arg); ok {
-				return v
+			i := 0
+			for i < len(p)-1 {
+				if Equal(arg, p[i]) {
+					return p[i+1]
+				}
+				i += 2
 			}
-			if ln := len(p.Pairs); ln%2 == 1 && ln > 0 {
-				return p.Pairs[ln-1]
+			if i < len(p) {
+				return p[i]
 			}
 			return NewNil()
-		case nil:
-			panic("Unknown function: " + fmt.Sprint(list[0]))
-		default:
-			panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 		}
+		// Parser or FastDict
+		if auxTag(procedure.aux) == tagAny {
+			if parser, ok := procedure.Any().(*ScmParser); ok {
+				if len(operands) == 0 {
+					return NewNil()
+				}
+				return parser.Execute(String(Eval(operands[0], en)), en)
+			}
+			if fd, ok := procedure.Any().(*FastDict); ok {
+				arg := Eval(operands[0], en)
+				if v, ok := fd.Get(arg); ok {
+					return v
+				}
+				if ln := len(fd.Pairs); ln%2 == 1 && ln > 0 {
+					return fd.Pairs[ln-1]
+				}
+				return NewNil()
+			}
+		}
+		panic("Unknown function: " + fmt.Sprint(list[0]))
 	default:
-		panic("Unknown expression type - EVAL " + fmt.Sprint(v))
+		panic("Unknown expression type - EVAL " + fmt.Sprint(expression))
 	}
 	return
 }
@@ -381,8 +370,9 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 	}
 	proc := *p
 	env := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
-	switch params := proc.Params.Any().(type) {
-	case []Scmer:
+	switch auxTag(proc.Params.aux) {
+	case tagSlice:
+		params := proc.Params.Slice()
 		if len(params) < len(operands) {
 			panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", len(params), len(operands)))
 		}
@@ -403,7 +393,7 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 				}
 			}
 		}
-	case Symbol:
+	case tagSymbol:
 		args := make([]Scmer, len(operands))
 		for i, operand := range operands {
 			args[i] = Eval(operand, caller)
@@ -412,9 +402,9 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 		if proc.NumVars > 0 {
 			env.VarsNumbered[0] = argsList
 		} else {
-			env.Vars[params] = argsList
+			env.Vars[mustSymbol(proc.Params)] = argsList
 		}
-	case nil:
+	case tagNil:
 		// no arguments to bind
 	default:
 		panic("proc parameters must be list, symbol, or nil")
@@ -428,8 +418,9 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 	}
 	proc := *p
 	env := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
-	switch params := proc.Params.Any().(type) {
-	case []Scmer:
+	switch auxTag(proc.Params.aux) {
+	case tagSlice:
+		params := proc.Params.Slice()
 		if proc.NumVars > 0 {
 			for i := range params {
 				if i < len(args) {
@@ -447,14 +438,14 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 				}
 			}
 		}
-	case Symbol:
+	case tagSymbol:
 		argsList := NewSlice(args)
 		if proc.NumVars > 0 {
 			env.VarsNumbered[0] = argsList
 		} else {
-			env.Vars[params] = argsList
+			env.Vars[mustSymbol(proc.Params)] = argsList
 		}
-	case nil:
+	case tagNil:
 		// no arguments to bind
 	default:
 		panic("proc parameters must be list, symbol, or nil")
@@ -464,20 +455,21 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 
 func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
 	var proc *Proc
-	switch p := procedure.Any().(type) {
-	case Proc:
-		copy := p
-		proc = &copy
-	case *Proc:
+	if procedure.IsProc() {
+		proc = procedure.Proc()
+	} else if p, ok := procedure.Any().(*Proc); ok {
 		proc = p
-	default:
+	} else if pv, ok := procedure.Any().(Proc); ok {
+		cp := pv
+		proc = &cp
+	} else {
 		panic("apply_assoc cannot run on non-lambdas")
 	}
 	if proc == nil {
 		panic("apply_assoc cannot run on nil lambdas")
 	}
-	switch params := proc.Params.Any().(type) {
-	case []Scmer:
+	if auxTag(proc.Params.aux) == tagSlice {
+		params := proc.Params.Slice()
 		newParams := make([]Scmer, len(params))
 		for i, sym := range params {
 			symName := mustSymbol(sym)
@@ -488,9 +480,8 @@ func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
 			}
 		}
 		return Apply(procedure, newParams...)
-	default:
-		panic("apply_assoc cannot run on non-list parameters")
 	}
+	panic("apply_assoc cannot run on non-list parameters")
 }
 
 // helper function; Eval uses a code duplicate to get the tail recursion done right
@@ -498,55 +489,55 @@ func Apply(procedure Scmer, args ...Scmer) (value Scmer) {
 	return ApplyEx(procedure, args, &Globalenv)
 }
 func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
-	switch p := procedure.Any().(type) {
-	case func(...Scmer) Scmer:
-		return p(args...)
-	case func(*Env, ...Scmer) Scmer:
-		return p(en, args...)
-	case *ScmParser:
-		if len(args) == 0 {
-			return NewNil()
+	// Native funcs
+	if auxTag(procedure.aux) == tagFunc {
+		if auxVal(procedure.aux) == funcKindWithEnv {
+			return procedure.EnvFunc()(en, args...)
 		}
-		return p.Execute(String(args[0]), en)
-	case Proc:
-		proc := p
-		env, body := prepareProcCallWithArgs(&proc, args)
+		return procedure.Func()(args...)
+	}
+	// Lambdas
+	if auxTag(procedure.aux) == tagProc {
+		env, body := prepareProcCallWithArgs(procedure.Proc(), args)
 		return Eval(body, env)
-	case *Proc:
-		env, body := prepareProcCallWithArgs(p, args)
-		return Eval(body, env)
-	case []Scmer: // associative list
-		// format: (key value key value ... default)
+	}
+	// Assoc list
+	if procedure.IsSlice() {
+		p := procedure.Slice()
 		if idx, ok := args[0].Any().(NthLocalVar); ok {
-			// indexed access generated through optimizer
 			return p[int(idx)]
-		} else {
-			i := 0
-			for i < len(p)-1 {
-				if Equal(args[0], p[i]) {
-					return p[i+1]
-				}
-				i += 2
-			}
-			if i < len(p) {
-				return p[i] // default value on n+1
-			}
-			return NewNil() // no default value
 		}
-	case *FastDict: // associative dict
-		if v, ok := p.Get(args[0]); ok {
-			return v
+		i := 0
+		for i < len(p)-1 {
+			if Equal(args[0], p[i]) {
+				return p[i+1]
+			}
+			i += 2
 		}
-		if ln := len(p.Pairs); ln%2 == 1 && ln > 0 {
-			return p.Pairs[ln-1]
+		if i < len(p) {
+			return p[i]
 		}
 		return NewNil()
-	case nil:
-		panic("Unknown function")
-	default:
-		panic("Unknown procedure type - APPLY " + fmt.Sprint(p))
 	}
-	return
+	// Parser and FastDict via tagAny
+	if auxTag(procedure.aux) == tagAny {
+		if parser, ok := procedure.Any().(*ScmParser); ok {
+			if len(args) == 0 {
+				return NewNil()
+			}
+			return parser.Execute(String(args[0]), en)
+		}
+		if fd, ok := procedure.Any().(*FastDict); ok {
+			if v, ok := fd.Get(args[0]); ok {
+				return v
+			}
+			if ln := len(fd.Pairs); ln%2 == 1 && ln > 0 {
+				return fd.Pairs[ln-1]
+			}
+			return NewNil()
+		}
+	}
+	panic("Unknown function")
 }
 
 // TODO: func optimize für parzielle lambda-Ausdrücke und JIT

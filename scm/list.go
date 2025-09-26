@@ -32,8 +32,7 @@ func asSlice(v Scmer, ctx string) []Scmer {
 		return v.Slice()
 	}
 	if auxTag(v.aux) == tagAny {
-		switch vv := v.Any().(type) {
-		case []Scmer:
+		if vv, ok := v.Any().([]Scmer); ok {
 			return vv
 		}
 	}
@@ -54,11 +53,11 @@ func asAssoc(v Scmer, ctx string) ([]Scmer, *FastDict) {
 		return v.Slice(), nil
 	}
 	if auxTag(v.aux) == tagAny {
-		switch vv := v.Any().(type) {
-		case []Scmer:
+		if vv, ok := v.Any().([]Scmer); ok {
 			return vv, nil
-		case *FastDict:
-			return nil, vv
+		}
+		if fd, ok := v.Any().(*FastDict); ok {
+			return nil, fd
 		}
 	}
 	panic(fmt.Sprintf("%s expects a dictionary", ctx))
@@ -75,15 +74,15 @@ func init_list() {
 			DeclarationParameter{"list", "list", "base list"},
 		}, "int",
 		func(a ...Scmer) Scmer {
-			switch auxTag(a[0].aux) {
-			case tagSlice:
+			if auxTag(a[0].aux) == tagSlice {
 				return NewInt(int64(len(a[0].Slice())))
-			case tagAny:
-				switch dict := a[0].Any().(type) {
-				case []Scmer:
+			}
+			if auxTag(a[0].aux) == tagAny {
+				if dict, ok := a[0].Any().([]Scmer); ok {
 					return NewInt(int64(len(dict)))
-				case *FastDict:
-					return NewInt(int64(len(dict.Pairs)))
+				}
+				if fd, ok := a[0].Any().(*FastDict); ok {
+					return NewInt(int64(len(fd.Pairs)))
 				}
 			}
 			panic("count expects a list")

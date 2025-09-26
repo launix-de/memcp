@@ -112,43 +112,43 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 	return nil
 }
 func ScmerToMySQL(v Scmer) sqltypes.Value {
-	switch auxTag(v.aux) {
-	case tagNil:
-		return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
-	case tagFloat:
-		return sqltypes.NewFloat64(v.Float())
-	case tagInt:
-		return sqltypes.NewInt64(v.Int())
-	case tagBool:
-		if v.Bool() {
-			return sqltypes.NewInt32(1)
-		}
-		return sqltypes.NewInt32(0)
-	case tagString:
-		return sqltypes.NewVarChar(v.String())
-	case tagSymbol:
-		return sqltypes.NewVarChar(v.String())
-	case tagAny:
-		switch vv := v.Any().(type) {
-		case nil:
-			return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
-		case float64:
-			return sqltypes.NewFloat64(vv)
-		case int64:
-			return sqltypes.NewInt64(vv)
-		case bool:
-			if vv {
-				return sqltypes.NewInt32(1)
-			}
-			return sqltypes.NewInt32(0)
-		case string:
-			return sqltypes.NewVarChar(vv)
-		default:
-			return sqltypes.NewVarChar(fmt.Sprint(vv))
-		}
-	default:
-		return sqltypes.NewVarChar(v.String())
-	}
+    switch auxTag(v.aux) {
+    case tagNil:
+        return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
+    case tagFloat:
+        return sqltypes.NewFloat64(v.Float())
+    case tagInt:
+        return sqltypes.NewInt64(v.Int())
+    case tagBool:
+        if v.Bool() {
+            return sqltypes.NewInt32(1)
+        }
+        return sqltypes.NewInt32(0)
+    case tagString:
+        return sqltypes.NewVarChar(v.String())
+    case tagSymbol:
+        return sqltypes.NewVarChar(v.String())
+    case tagAny:
+        switch vv := v.Any().(type) {
+        case nil:
+            return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
+        case float64:
+            return sqltypes.NewFloat64(vv)
+        case int64:
+            return sqltypes.NewInt64(vv)
+        case bool:
+            if vv {
+                return sqltypes.NewInt32(1)
+            }
+            return sqltypes.NewInt32(0)
+        case string:
+            return sqltypes.NewVarChar(vv)
+        default:
+            return sqltypes.NewVarChar(fmt.Sprint(vv))
+        }
+    default:
+        return sqltypes.NewVarChar(v.String())
+    }
 }
 
 func mustSliceMySQL(ctx string, v Scmer) []Scmer {
@@ -186,11 +186,11 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	var resultlock sync.Mutex
 	result.State = sqltypes.RStateFields
 	result.Rows = make([][]sqltypes.Value, 0, 1024)
-	// load scm session object
-	scmSessionAny, _ := mysqlsessions.Load(session.ID())
-	// result from scheme
-	sessionFunc := scmSessionAny.(func(...Scmer) Scmer)
-	scmSessionScmer := NewFunc(sessionFunc)
+    // load scm session object
+    scmSessionAny, _ := mysqlsessions.Load(session.ID())
+    // result from scheme
+    sessionFunc := scmSessionAny.(func(...Scmer) Scmer)
+    scmSessionScmer := NewFunc(sessionFunc)
 	rowcount := func() Scmer {
 		defer func() {
 			if r := recover(); r != nil {
@@ -235,9 +235,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				}
 				result.Rows = result.Rows[0:0] // slice off rest of buffer to restart
 			}
-			result.Rows = append(result.Rows, newitem)
-			return NewBool(true)
-		})
+            result.Rows = append(result.Rows, newitem)
+            return NewBool(true)
+        })
 		return Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)
 	}()
 	if myerr != nil {

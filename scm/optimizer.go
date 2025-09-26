@@ -40,12 +40,11 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	case tagProc:
 		proc = val.Proc()
 	case tagAny:
-		switch pv := val.Any().(type) {
-		case Proc:
+		if pv, ok := val.Any().(Proc); ok {
 			copy := pv
 			proc = &copy
-		case *Proc:
-			proc = pv
+		} else if pv2, ok := val.Any().(*Proc); ok {
+			proc = pv2
 		}
 	}
 	if proc == nil {
@@ -220,8 +219,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 		return OptimizeEx(si.value, env, ome, useResult)
 	case tagAny:
 		payload := val.Any()
-		switch pv := payload.(type) {
-		case SourceInfo:
+		if pv, ok := payload.(SourceInfo); ok {
 			if SettingsHaveGoodBacktraces {
 				result, transferOwnership, isConstant = OptimizeEx(pv.value, env, ome, useResult)
 				if isConstant {
@@ -231,19 +229,21 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 				return NewSourceInfo(pv), transferOwnership, false
 			}
 			return OptimizeEx(pv.value, env, ome, useResult)
-		case Symbol:
-			return OptimizeEx(NewSymbol(string(pv)), env, ome, useResult)
-		case []Scmer:
-			return OptimizeEx(NewSlice(pv), env, ome, useResult)
-		case Scmer:
-			return OptimizeEx(pv, env, ome, useResult)
-		default:
-			switch v := pv.(type) {
-			case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string:
-				return FromAny(v), true, true
-			}
-			return val, transferOwnership, false
 		}
+		if sym, ok := payload.(Symbol); ok {
+			return OptimizeEx(NewSymbol(string(sym)), env, ome, useResult)
+		}
+		if sl, ok := payload.([]Scmer); ok {
+			return OptimizeEx(NewSlice(sl), env, ome, useResult)
+		}
+		if sm, ok := payload.(Scmer); ok {
+			return OptimizeEx(sm, env, ome, useResult)
+		}
+		switch v := payload.(type) {
+		case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, string:
+			return FromAny(v), true, true
+		}
+		return val, transferOwnership, false
 	default:
 		return val, transferOwnership, false
 	}

@@ -63,18 +63,22 @@ func valueFromPattern(pattern Scmer, en *Env) Scmer {
 	if pattern.IsSourceInfo() {
 		return valueFromPattern(pattern.SourceInfo().value, en)
 	}
-	switch v := pattern.Any().(type) {
-	case SourceInfo:
-		return valueFromPattern(v.value, en)
-	case Symbol:
-		en = en.FindRead(v)
-		if value, ok := en.Vars[v]; ok {
+	if auxTag(pattern.aux) == tagSourceInfo {
+		return valueFromPattern(pattern.SourceInfo().value, en)
+	}
+	if pattern.IsSymbol() {
+		sym := Symbol(pattern.String())
+		en = en.FindRead(sym)
+		if value, ok := en.Vars[sym]; ok {
 			return value
 		}
 		return pattern
-	case NthLocalVar:
-		return en.VarsNumbered[v]
-	case []Scmer:
+	}
+	if pattern.IsNthLocalVar() {
+		return en.VarsNumbered[pattern.NthLocalVar()]
+	}
+	if pattern.IsSlice() {
+		v := pattern.Slice()
 		if len(v) == 2 && v[0].SymbolEquals("eval") {
 			return Eval(v[1], en)
 		}
@@ -105,13 +109,12 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	if pattern.IsSourceInfo() {
 		return match(val, pattern.SourceInfo().value, en)
 	}
-	switch p := pattern.Any().(type) {
-	case SourceInfo:
-		return match(val, p.value, en) // omit sourceinfo
-	case int64, float64, string:
+	// literals
+	if pattern.IsInt() || pattern.IsFloat() || pattern.IsString() {
 		return Equal(val, pattern)
-	case Symbol:
-		switch string(p) {
+	}
+	if pattern.IsSymbol() {
+		switch pattern.String() {
 		case "nil":
 			return val.IsNil()
 		case "true":
@@ -119,13 +122,16 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		case "false":
 			return !val.Bool()
 		default:
-			en.Vars[p] = val
+			en.Vars[Symbol(pattern.String())] = val
 			return true
 		}
-	case NthLocalVar:
-		en.VarsNumbered[p] = val
+	}
+	if pattern.IsNthLocalVar() {
+		en.VarsNumbered[pattern.NthLocalVar()] = val
 		return true
-	case []Scmer:
+	}
+	if pattern.IsSlice() {
+		p := pattern.Slice()
 		name, ok := scmerSymbolName(p[0])
 		if !ok {
 			panic("unknown match pattern head: " + SerializeToString(p[0], en))
@@ -261,9 +267,8 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		default:
 			panic("unknown match pattern: " + fmt.Sprint(p))
 		}
-	default:
-		panic("unknown match pattern: " + fmt.Sprint(p))
 	}
+	panic("unknown match pattern: " + SerializeToString(pattern, en))
 }
 
 func matchConcat(val Scmer, p []Scmer, en *Env) bool {

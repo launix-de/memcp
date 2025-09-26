@@ -277,13 +277,6 @@ func Validate(val Scmer, require string) string {
 				if def2, ok := declarations_hash[fmt.Sprintf("%p", head.Func())]; ok {
 					def = def2
 				}
-			} else if auxTag(head.aux) == tagAny {
-				switch hv := head.Any().(type) {
-				case func(...Scmer) Scmer:
-					if def2, ok := declarations_hash[fmt.Sprintf("%p", hv)]; ok {
-						def = def2
-					}
-				}
 			}
 			if def != nil {
 				if len(slice)-1 < def.MinParameter {
@@ -335,25 +328,20 @@ func Validate(val Scmer, require string) string {
 			return "any"
 		}
 	case tagAny:
-		switch v := val.Any().(type) {
-		case nil:
+		if val.Any() == nil {
 			return "nil"
-		case string:
-			return "string"
-		case float64:
-			return "number"
-		case int64:
-			return "int"
-		case bool:
-			return "bool"
-		case Proc:
+		}
+		if _, ok := val.Any().(func(...Scmer) Scmer); ok {
 			return "func"
-		case *Proc:
+		}
+		if _, ok := val.Any().(Proc); ok {
 			return "func"
-		case []Scmer:
-			return Validate(NewSlice(v), require)
-		case func(...Scmer) Scmer:
+		}
+		if _, ok := val.Any().(*Proc); ok {
 			return "func"
+		}
+		if s, ok := val.Any().([]Scmer); ok {
+			return Validate(NewSlice(s), require)
 		}
 	}
 	return "any"
@@ -408,17 +396,18 @@ func DeclarationForValue(v Scmer) *Declaration {
 			return d
 		}
 	case tagAny:
-		switch h := v.Any().(type) {
-		case string:
-			if d, ok := declarations[h]; ok {
+		if s, ok := v.Any().(string); ok {
+			if d, ok := declarations[s]; ok {
 				return d
 			}
-		case Symbol:
-			if d, ok := declarations[string(h)]; ok {
+		}
+		if sym, ok := v.Any().(Symbol); ok {
+			if d, ok := declarations[string(sym)]; ok {
 				return d
 			}
-		case func(...Scmer) Scmer:
-			if d, ok := declarations_hash[fmt.Sprintf("%p", h)]; ok {
+		}
+		if fn, ok := v.Any().(func(...Scmer) Scmer); ok {
+			if d, ok := declarations_hash[fmt.Sprintf("%p", fn)]; ok {
 				return d
 			}
 		}

@@ -23,9 +23,6 @@ func mustSymbolValue(v scm.Scmer) scm.Symbol {
 	if v.IsSymbol() {
 		return scm.Symbol(v.String())
 	}
-	if sym, ok := v.Any().(scm.Symbol); ok {
-		return sym
-	}
 	panic("expected symbol")
 }
 
@@ -41,10 +38,20 @@ type boundaries []columnboundaries
 
 // analyzes a lambda expression for value boundaries, so the best index can be found
 func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
-	p := condition.Any().(scm.Proc)
+	var p scm.Proc
+	if condition.IsProc() {
+		p = *condition.Proc()
+	} else if si, ok := condition.Any().(scm.Proc); ok {
+		// fallback for legacy tagAny procs
+		p = si
+	} else {
+		panic("expected lambda for condition analysis")
+	}
 	symbolmapping := make(map[scm.Symbol]string)
-	for i, sym := range p.Params.Any().([]scm.Scmer) {
-		symbolmapping[mustSymbolValue(sym)] = conditionCols[i]
+	if p.Params.IsSlice() {
+		for i, sym := range p.Params.Slice() {
+			symbolmapping[mustSymbolValue(sym)] = conditionCols[i]
+		}
 	}
 	cols := make([]columnboundaries, 0, 4)
 	addConstraint := func(in []columnboundaries, b2 columnboundaries) []columnboundaries {
@@ -69,35 +76,23 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
-		switch val := v.Any().(type) {
-		case int64:
-			return scm.NewInt(val), true
-		case float64:
-			return scm.NewFloat(val), true
-		case string:
-			return scm.NewString(val), true
-		case scm.Symbol:
-			if val2, ok := condition.Any().(scm.Proc).En.Vars[val]; ok {
-				switch val3 := val2.Any().(type) {
-				case int64:
-					return scm.NewInt(val3), true
-				case float64:
-					return scm.NewFloat(val3), true
-				case string:
-					return scm.NewString(val3), true
+		if v.IsInt() || v.IsFloat() || v.IsString() {
+			return v, true
+		}
+		if v.IsSymbol() {
+			if val2, ok := p.En.Vars[scm.Symbol(v.String())]; ok {
+				if val2.IsInt() || val2.IsFloat() || val2.IsString() {
+					return val2, true
 				}
 			}
-		case []scm.Scmer:
-			if val[0].SymbolEquals("outer") {
+		}
+		if v.IsSlice() {
+			val := v.Slice()
+			if len(val) > 0 && val[0].IsSymbol() && val[0].String() == "outer" {
 				sym := mustSymbolValue(val[1])
-				if val2, ok := condition.Any().(scm.Proc).En.Vars[sym]; ok {
-					switch val3 := val2.Any().(type) {
-					case int64:
-						return scm.NewInt(val3), true
-					case float64:
-						return scm.NewFloat(val3), true
-					case string:
-						return scm.NewString(val3), true
+				if val2, ok := p.En.Vars[sym]; ok {
+					if val2.IsInt() || val2.IsFloat() || val2.IsString() {
+						return val2, true
 					}
 				}
 			}
@@ -106,54 +101,51 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	var traverseCondition func(scm.Scmer)
 	traverseCondition = func(node scm.Scmer) {
-		switch v := node.Any().(type) {
-		case []scm.Scmer:
-			if v[0].SymbolEquals("equal?") || v[0].SymbolEquals("equal??") {
-				// equi
-				switch v1 := v[1].Any().(type) {
-				case scm.Symbol:
-					if col, ok := symbolmapping[v1]; ok { // left is a column
-						if v2, ok := extractConstant(v[2]); ok { // right is a constant
-							// ?equal var const
-							cols = addConstraint(cols, columnboundaries{col, v2, true, v2, true})
-						}
+		if !node.IsSlice() {
+			return
+		}
+		v := node.Slice()
+		if len(v) == 0 || !v[0].IsSymbol() {
+			return
+		}
+		if v[0].SymbolEquals("equal?") || v[0].SymbolEquals("equal??") {
+			// equi
+			if v[1].IsSymbol() {
+				sym := scm.Symbol(v[1].String())
+				if col, ok := symbolmapping[sym]; ok { // left is a column
+					if v2, ok := extractConstant(v[2]); ok { // right is a constant
+						// ?equal var const
+						cols = addConstraint(cols, columnboundaries{col, v2, true, v2, true})
 					}
-					// TODO: equals constant vs. column
-				}
-			} else if v[0].SymbolEquals("<") || v[0].SymbolEquals("<=") {
-				// compare
-				switch v1 := v[1].Any().(type) {
-				case scm.Symbol:
-					if col, ok := symbolmapping[v1]; ok { // left is a column
-						if v2, ok := extractConstant(v[2]); ok { // right is a constant
-							// ?equal var const
-							cols = addConstraint(cols, columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals("<=")})
-						}
-					}
-					// TODO: constant vs. column
-				}
-			} else if v[0].SymbolEquals(">") || v[0].SymbolEquals(">=") {
-				// compare
-				switch v1 := v[1].Any().(type) {
-				case scm.Symbol:
-					if col, ok := symbolmapping[v1]; ok { // left is a column
-						if v2, ok := extractConstant(v[2]); ok { // right is a constant
-							// ?equal var const
-							cols = addConstraint(cols, columnboundaries{col, v2, v[0].SymbolEquals(">="), scm.NewNil(), false})
-						}
-					}
-					// TODO: constant vs. column
-				}
-			} else if v[0].SymbolEquals("and") {
-				// AND -> recursive traverse
-				for i := 1; i < len(v); i++ {
-					traverseCondition(v[i])
 				}
 			}
-			// TODO: <, >, <=, >=
-			// TODO: OR -> merge multiple
-			// TODO: variable expressions that can be expanded
+		} else if v[0].SymbolEquals("<") || v[0].SymbolEquals("<=") {
+			// compare
+			if v[1].IsSymbol() {
+				sym := scm.Symbol(v[1].String())
+				if col, ok := symbolmapping[sym]; ok { // left is a column
+					if v2, ok := extractConstant(v[2]); ok { // right is a constant
+						cols = addConstraint(cols, columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals("<=")})
+					}
+				}
+			}
+		} else if v[0].SymbolEquals(">") || v[0].SymbolEquals(">=") {
+			// compare
+			if v[1].IsSymbol() {
+				sym := scm.Symbol(v[1].String())
+				if col, ok := symbolmapping[sym]; ok { // left is a column
+					if v2, ok := extractConstant(v[2]); ok { // right is a constant
+						cols = addConstraint(cols, columnboundaries{col, v2, v[0].SymbolEquals(">="), scm.NewNil(), false})
+					}
+				}
+			}
+		} else if v[0].SymbolEquals("and") {
+			// AND -> recursive traverse
+			for i := 1; i < len(v); i++ {
+				traverseCondition(v[i])
+			}
 		}
+		// TODO: OR and more complex analysis
 	}
 	traverseCondition(p.Body) // recursive analysis over condition
 
