@@ -126,56 +126,27 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 			}
 			io.WriteString(w, ")")
 		default:
-			switch x := node.Any().(type) {
-			case nil:
-				io.WriteString(w, "nil")
-			case bool:
-				if x {
-					io.WriteString(w, "true")
-				} else {
-					io.WriteString(w, "false")
-				}
-			case int:
-				io.WriteString(w, fmt.Sprint(x))
-			case int64:
-				io.WriteString(w, fmt.Sprint(x))
-			case uint64:
-				io.WriteString(w, fmt.Sprint(x))
-			case float64:
-				io.WriteString(w, fmt.Sprint(x))
-			case string:
-				io.WriteString(w, "\"")
-				io.WriteString(w, x)
-				io.WriteString(w, "\"")
-			case scm.Symbol:
-				writeSymbolOrColumn(string(x))
-			case scm.NthLocalVar:
-				i := int(x)
+			// Prefer tag-based decoding for special cases.
+			if node.IsProc() {
+				io.WriteString(w, "?")
+				return
+			}
+			if node.IsNthLocalVar() {
+				i := int(node.NthLocalVar())
 				if i >= 0 && i < len(columns) {
 					io.WriteString(w, columns[i])
 				} else {
 					io.WriteString(w, "?")
 				}
-			case scm.Proc:
-				io.WriteString(w, "?")
-			case []scm.Scmer:
-				io.WriteString(w, "(")
-				for i, item := range x {
-					if i > 0 {
-						io.WriteString(w, " ")
-					}
-					enc(item)
-				}
-				io.WriteString(w, ")")
-			case func(...scm.Scmer) scm.Scmer:
-				if def := scm.DeclarationForValue(scm.NewFunc(x)); def != nil {
-					io.WriteString(w, def.Name)
-				} else {
-					io.WriteString(w, "?")
-				}
-			default:
-				io.WriteString(w, "?")
+				return
 			}
+			// Native function: try to resolve declaration if present.
+			if def := scm.DeclarationForValue(node); def != nil {
+				io.WriteString(w, def.Name)
+				return
+			}
+			// Fallback unknown
+			io.WriteString(w, "?")
 		}
 	}
 

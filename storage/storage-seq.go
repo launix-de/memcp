@@ -140,7 +140,7 @@ func (s *StorageSeq) scan(i uint, value scm.Scmer) {
 		}
 	} else {
 		// integer
-		v := toInt(value)
+		v := value.Int()
 		if s.lastValueFirst {
 			// learn stride from second value
 			s.lastValueFirst = false
@@ -194,7 +194,7 @@ func (s *StorageSeq) build(i uint, value scm.Scmer) {
 		}
 	} else {
 		// integer
-		v := toInt(value)
+		v := value.Int()
 		if s.lastValueFirst {
 			// learn stride from second value
 			s.lastValueFirst = false

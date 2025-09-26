@@ -55,34 +55,40 @@ func String(v Scmer) string {
 	case tagSourceInfo:
 		return String(v.SourceInfo().value)
 	case tagAny:
-		switch val := v.Any().(type) {
-		case SourceInfo:
-			return String(val.value)
-		case NthLocalVar:
-			return fmt.Sprintf("(var %d)", val)
-		case *FastDict:
-			l := make([]string, len(val.Pairs))
-			for i, x := range val.Pairs {
+		if si, ok := v.Any().(SourceInfo); ok {
+			return String(si.value)
+		}
+		if idx, ok := v.Any().(NthLocalVar); ok {
+			return fmt.Sprintf("(var %d)", idx)
+		}
+		if fd, ok := v.Any().(*FastDict); ok {
+			l := make([]string, len(fd.Pairs))
+			for i, x := range fd.Pairs {
 				l[i] = String(x)
 			}
 			return "(" + strings.Join(l, " ") + ")"
-		case Proc:
-			return fmt.Sprintf("[func %s]", String(val.Body))
-		case *Proc:
-			return fmt.Sprintf("[func %s]", String(val.Body))
-		case func(...Scmer) Scmer:
-			return "[native func]"
-		case func(*Env, ...Scmer) Scmer:
-			return "[native func]"
-		case io.Reader:
-			var sb strings.Builder
-			_, _ = io.Copy(&sb, val)
-			return sb.String()
-		case string:
-			return val
-		default:
-			return fmt.Sprint(val)
 		}
+		if p, ok := v.Any().(Proc); ok {
+			return fmt.Sprintf("[func %s]", String(p.Body))
+		}
+		if p, ok := v.Any().(*Proc); ok {
+			return fmt.Sprintf("[func %s]", String(p.Body))
+		}
+		if _, ok := v.Any().(func(...Scmer) Scmer); ok {
+			return "[native func]"
+		}
+		if _, ok := v.Any().(func(*Env, ...Scmer) Scmer); ok {
+			return "[native func]"
+		}
+		if r, ok := v.Any().(io.Reader); ok {
+			var sb strings.Builder
+			_, _ = io.Copy(&sb, r)
+			return sb.String()
+		}
+		if s, ok := v.Any().(string); ok {
+			return s
+		}
+		return fmt.Sprint(v.Any())
 	default:
 		return fmt.Sprintf("<scmer %d>", auxTag(v.aux))
 	}
@@ -172,54 +178,71 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 	case tagSourceInfo:
 		SerializeEx(b, v.SourceInfo().value, en, glob, p)
 	case tagAny:
-		switch val := v.Any().(type) {
-		case SourceInfo:
-			SerializeEx(b, val.value, en, glob, p)
-		case NthLocalVar:
-			if p != nil && p.NumVars >= int(val) && auxTag(p.Params.aux) == tagSlice {
+		if si, ok := v.Any().(SourceInfo); ok {
+			SerializeEx(b, si.value, en, glob, p)
+			return
+		}
+		if idx, ok := v.Any().(NthLocalVar); ok {
+			if p != nil && p.NumVars >= int(idx) && auxTag(p.Params.aux) == tagSlice {
 				params := p.Params.Slice()
-				if int(val) < len(params) && params[val].IsSymbol() {
-					b.WriteString(params[val].String())
+				if int(idx) < len(params) && params[idx].IsSymbol() {
+					b.WriteString(params[idx].String())
 					return
 				}
 			}
 			b.WriteString("(var ")
-			b.WriteString(fmt.Sprint(val))
+			b.WriteString(fmt.Sprint(idx))
 			b.WriteByte(')')
-		case *FastDict:
+			return
+		}
+		if fd, ok := v.Any().(*FastDict); ok {
 			b.WriteByte('(')
-			for i, x := range val.Pairs {
+			for i, x := range fd.Pairs {
 				if i != 0 {
 					b.WriteByte(' ')
 				}
 				SerializeEx(b, x, en, glob, p)
 			}
 			b.WriteByte(')')
-		case Proc:
-			serializeProc(b, val, en, glob, p)
-		case *Proc:
-			serializeProc(b, *val, en, glob, p)
-		case *ScmParser:
-			b.WriteString("(parser ")
-			SerializeEx(b, val.Syntax, glob, glob, p)
-			b.WriteByte(' ')
-			SerializeEx(b, val.Generator, en, glob, p)
-			b.WriteByte(')')
-		case func(...Scmer) Scmer:
-			serializeNativeFunc(b, val, en)
-		case func(*Env, ...Scmer) Scmer:
-			serializeNativeFunc(b, val, en)
-		case io.Reader:
-			var sb strings.Builder
-			_, _ = io.Copy(&sb, val)
-			b.WriteString(sb.String())
-		case string:
-			b.WriteByte('"')
-			b.WriteString(strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n").Replace(val))
-			b.WriteByte('"')
-		default:
-			b.WriteString(fmt.Sprint(val))
+			return
 		}
+		if pr, ok := v.Any().(Proc); ok {
+			serializeProc(b, pr, en, glob, p)
+			return
+		}
+		if prp, ok := v.Any().(*Proc); ok {
+			serializeProc(b, *prp, en, glob, p)
+			return
+		}
+		if sp, ok := v.Any().(*ScmParser); ok {
+			b.WriteString("(parser ")
+			SerializeEx(b, sp.Syntax, glob, glob, p)
+			b.WriteByte(' ')
+			SerializeEx(b, sp.Generator, en, glob, p)
+			b.WriteByte(')')
+			return
+		}
+		if f1, ok := v.Any().(func(...Scmer) Scmer); ok {
+			serializeNativeFunc(b, f1, en)
+			return
+		}
+		if f2, ok := v.Any().(func(*Env, ...Scmer) Scmer); ok {
+			serializeNativeFunc(b, f2, en)
+			return
+		}
+		if r, ok := v.Any().(io.Reader); ok {
+			var sb strings.Builder
+			_, _ = io.Copy(&sb, r)
+			b.WriteString(sb.String())
+			return
+		}
+		if s, ok := v.Any().(string); ok {
+			b.WriteByte('"')
+			b.WriteString(strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n").Replace(s))
+			b.WriteByte('"')
+			return
+		}
+		b.WriteString(fmt.Sprint(v.Any()))
 	default:
 		b.WriteString(v.String())
 	}

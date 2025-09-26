@@ -157,13 +157,13 @@ func assocPairs(v Scmer) ([]Scmer, bool) {
 			return s, true
 		}
 	case tagAny:
-		switch vv := v.Any().(type) {
-		case []Scmer:
+		if vv, ok := v.Any().([]Scmer); ok {
 			if len(vv)%2 == 0 {
 				return vv, true
 			}
-		case *FastDict:
-			return vv.Pairs, true
+		}
+		if fd, ok := v.Any().(*FastDict); ok {
+			return fd.Pairs, true
 		}
 	}
 	return nil, false
