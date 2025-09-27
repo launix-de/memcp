@@ -23,7 +23,14 @@ var optimizerSeenEvalImport bool
 
 // to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
 func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
-	if val.IsNil() || (val.ptr == nil && val.aux == 0) {
+	/* API contract:
+	- the returned func must only be called with the correct number of declared parameters
+	- thus we will perform no boundary checks
+	- we enclose and share the environment over multiple runs, so the function must not be called simultaneously
+	- for performance reason, we put as much checks and allocations out of the returned function and into our closure
+	- TODO: we want to hook up the JIT here to produce some machine code for hotpaths
+	*/
+	if val.IsNil() {
 		return func(...Scmer) Scmer { return NewNil() }
 	}
 	if auxTag(val.aux) == tagFunc {
@@ -48,8 +55,10 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 		}
 	}
 	if proc == nil {
+		// Not a lambda/proc: treat as constant value and return it regardless of args.
+		// This avoids attempting to Apply() non-callables like true/0/"x" which would panic.
 		captured := val
-		return func(args ...Scmer) Scmer { return Apply(captured, args...) }
+		return func(args ...Scmer) Scmer { return captured }
 	}
 	p := *proc
 
