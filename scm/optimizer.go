@@ -60,6 +60,41 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 		return func(...Scmer) Scmer { return constant }
 	}
 
+	// Fast-path: lambda body is exactly one of its parameters -> return that arg directly
+	{
+		body := p.Body
+		if stripped, ok := scmerStripSourceInfo(body); ok {
+			body = stripped
+		}
+		// numbered locals: (var i)
+		if body.IsNthLocalVar() {
+			idx := int(body.NthLocalVar())
+			return func(args ...Scmer) Scmer {
+				return args[idx]
+			}
+		}
+		// named params: find exact parameter symbol match
+		params := p.Params
+		if stripped, ok := scmerStripSourceInfo(params); ok {
+			params = stripped
+		}
+		if body.IsSymbol() && params.IsSlice() {
+			parms := params.Slice()
+			bSym := mustSymbol(body)
+			for i, ps := range parms {
+				if stripped, ok := scmerStripSourceInfo(ps); ok {
+					ps = stripped
+				}
+				if ps.IsSymbol() && mustSymbol(ps) == bSym {
+					idx := i
+					return func(args ...Scmer) Scmer {
+						return args[idx]
+					}
+				}
+			}
+		}
+	}
+
 	en := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, p.NumVars), Outer: p.En, Nodefine: false}
 	params := p.Params
 	if stripped, ok := scmerStripSourceInfo(params); ok {
