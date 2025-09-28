@@ -593,9 +593,9 @@ func init() {
 		"if", "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
 		2, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"condition...", "bool", "condition to evaluate"},
+			DeclarationParameter{"condition...", "any", "condition to evaluate"},
 			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true"},
-			DeclarationParameter{"false-branch", "returntype", "code to evaluate if condition is false"},
+			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false"},
 		}, "returntype", nil, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -862,6 +862,7 @@ Patterns can be any of:
 	init_vector()
 	init_parser()
 	init_sync()
+	init_scheduler()
 
 	RunJitTest()
 }

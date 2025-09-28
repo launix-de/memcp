@@ -316,27 +316,27 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				break
 			}
 		}
-        if coll == "" {
-            continue
-        }
-        // Only actionable collations: those with a language suffix or explicit 'bin'.
-        if !(strings.Contains(coll, "_") || strings.EqualFold(coll, "bin")) {
-            continue
-        }
-        // If sortdirs[i] already is a collate closure, respect it (explicit ORDER BY COLLATE)
-        if _, _, isCollate := scm.LookupCollate(sortdirs[i]); isCollate {
-            continue
-        }
-        // Derive reverse flag by probing comparator semantics (robust across pointer differences)
-        reverse := false // ASC by default
-        defer func() { _ = recover() }()
-        // If dir(1,2) is true, comparator behaves like '<' (ASC) -> reverse=false
-        // Else if dir(2,1) is true, comparator behaves like '>' (DESC) -> reverse=true
-        if res := sortdirs[i](int64(1), int64(2)); scm.ToBool(res) {
-            reverse = false
-        } else if res2 := sortdirs[i](int64(2), int64(1)); scm.ToBool(res2) {
-            reverse = true
-        }
+		if coll == "" {
+			continue
+		}
+		// Only actionable collations: those with a language suffix or explicit 'bin'.
+		if !(strings.Contains(coll, "_") || strings.EqualFold(coll, "bin")) {
+			continue
+		}
+		// If sortdirs[i] already is a collate closure, respect it (explicit ORDER BY COLLATE)
+		if _, _, isCollate := scm.LookupCollate(sortdirs[i]); isCollate {
+			continue
+		}
+		// Derive reverse flag by probing comparator semantics (robust across pointer differences)
+		reverse := false // ASC by default
+		defer func() { _ = recover() }()
+		// If dir(1,2) is true, comparator behaves like '<' (ASC) -> reverse=false
+		// Else if dir(2,1) is true, comparator behaves like '>' (DESC) -> reverse=true
+		if res := sortdirs[i](int64(1), int64(2)); scm.ToBool(res) {
+			reverse = false
+		} else if res2 := sortdirs[i](int64(2), int64(1)); scm.ToBool(res2) {
+			reverse = true
+		}
 		// Build comparator via (collate coll reverse?)
 		cmpScm := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], coll, reverse)
 		if fn, ok := cmpScm.(func(...scm.Scmer) scm.Scmer); ok {

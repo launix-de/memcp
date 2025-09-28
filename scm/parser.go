@@ -114,7 +114,6 @@ func readFrom(tokens *[]Scmer) (expression Scmer) {
 					L = append(L, readFrom(tokens))
 				}
 				*tokens = (*tokens)[1:]
-				// return L
 				source_info.value = L // append to source info
 				return source_info
 			} else {

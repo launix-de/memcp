@@ -144,14 +144,32 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values to add"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := float64(0)
+			// Return nil if any argument is nil
 			for _, i := range a {
 				if i == nil {
 					return nil
 				}
-				v += ToFloat(i)
 			}
-			return v
+			// Fast path: if all args are int64, keep result as int64
+			allInts := true
+			sumInt := int64(0)
+			for _, i := range a {
+				if v, ok := i.(int64); ok {
+					sumInt += v
+				} else {
+					allInts = false
+					break
+				}
+			}
+			if allInts {
+				return sumInt
+			}
+			// Fallback: accumulate as float64 for mixed types
+			sumFloat := float64(0)
+			for _, i := range a {
+				sumFloat += ToFloat(i)
+			}
+			return sumFloat
 		},
 		true,
 	})
@@ -162,11 +180,35 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := ToFloat(a[0])
-			for _, i := range a[1:] {
-				v -= ToFloat(i)
+			// Return nil if any argument is nil
+			for _, v := range a {
+				if v == nil {
+					return nil
+				}
 			}
-			return v
+			// If all args are ints, keep int64
+			allInts := true
+			diffInt := int64(0)
+			if v0, ok := a[0].(int64); ok {
+				diffInt = v0
+				for _, i := range a[1:] {
+					if vv, ok := i.(int64); ok {
+						diffInt -= vv
+					} else {
+						allInts = false
+						break
+					}
+				}
+				if allInts {
+					return diffInt
+				}
+			}
+			// Fallback to float arithmetic
+			diffFloat := ToFloat(a[0])
+			for _, i := range a[1:] {
+				diffFloat -= ToFloat(i)
+			}
+			return diffFloat
 		},
 		true,
 	})
@@ -177,11 +219,35 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			v := ToFloat(a[0])
-			for _, i := range a[1:] {
-				v *= ToFloat(i)
+			// Return nil if any argument is nil
+			for _, v := range a {
+				if v == nil {
+					return nil
+				}
 			}
-			return v
+			// If all args are ints, keep int64
+			allInts := true
+			prodInt := int64(1)
+			if v0, ok := a[0].(int64); ok {
+				prodInt = v0
+				for _, i := range a[1:] {
+					if vv, ok := i.(int64); ok {
+						prodInt *= vv
+					} else {
+						allInts = false
+						break
+					}
+				}
+				if allInts {
+					return prodInt
+				}
+			}
+			// Fallback to float arithmetic
+			prodFloat := ToFloat(a[0])
+			for _, i := range a[1:] {
+				prodFloat *= ToFloat(i)
+			}
+			return prodFloat
 		},
 		true,
 	})
@@ -192,6 +258,12 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
+			// Return nil if any argument is nil
+			for _, v := range a {
+				if v == nil {
+					return nil
+				}
+			}
 			v := ToFloat(a[0])
 			for _, i := range a[1:] {
 				v /= ToFloat(i)
