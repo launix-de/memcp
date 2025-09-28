@@ -200,31 +200,41 @@ class SQLTestRunner:
                 return self._record_fail(name, "TTL load failed", query, None, None)
 
         # Special handling: SHUTDOWN command triggers graceful restart flow
+        response: Optional[requests.Response]
         if query and query.strip().upper() == "SHUTDOWN":
             # Issue shutdown
             resp = self.execute_sql(database, query, auth_header)
-            # Wait for server to go down, then come back up
-            try:
-                port = int(self.base_url.rsplit(':', 1)[1])
-            except Exception:
-                port = 4321
-            # Wait until server is unavailable
-            for _ in range(30):
+            if not resp:
+                return self._record_fail(name, "No response", query, None, None)
+            # Only trigger restart logic when the command succeeded; otherwise fall through to normal expectation handling.
+            if resp.status_code == 200 and "SQL Error" not in resp.text:
                 try:
-                    requests.get(self.base_url, timeout=2)
+                    port = int(self.base_url.rsplit(':', 1)[1])
                 except Exception:
-                    break
-                time.sleep(1)
-            # Now wait until available again
-            ok = wait_for_memcp(port, timeout=60)
-            if ok:
-                self._record_success(name, is_noncritical)
-                return True
-            else:
+                    port = 4321
+                # Wait until server is unavailable
+                for _ in range(30):
+                    try:
+                        requests.get(self.base_url, timeout=2)
+                    except Exception:
+                        break
+                    time.sleep(1)
+                else:
+                    return self._record_fail(name, "MemCP did not shut down after SHUTDOWN", query, resp, None, is_noncritical)
+
+                if self._restart_handler is not None and not self._restart_handler():
+                    return self._record_fail(name, "MemCP restart handler failed", query, resp, None, is_noncritical)
+
+                # Now wait until available again
+                if wait_for_memcp(port, timeout=60):
+                    self._record_success(name, is_noncritical)
+                    return True
                 return self._record_fail(name, "MemCP did not come back after SHUTDOWN", query, resp, None, is_noncritical)
 
-        # Execute query
-        response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header)
+            response = resp
+        else:
+            # Execute query
+            response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header)
         if not response:
             return self._record_fail(name, "No response", query, None, None)
 
