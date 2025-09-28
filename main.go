@@ -554,20 +554,26 @@ var exitable sync.WaitGroup
 
 func cronroutine() {
 	exitable.Add(1)
-	for {
-		// wait first
-		select {
-		case <-exitsignal:
-			// memcp is about to exit; confirm the waitgroup and exit
-			exitable.Done()
-			return
-		case <-time.After(time.Minute * 15): // rebuild shards for all 15 minutes
-			// continue
-		}
+	defer exitable.Done()
 
-		fmt.Println("running 15min cron ...")
-		fmt.Println("table compression done in ", storage.Rebuild(false, true))
+	sched := &scm.DefaultScheduler
+	const rebuildInterval = 15 * time.Minute
+
+	var scheduleRebuild func(time.Duration)
+	scheduleRebuild = func(delay time.Duration) {
+		if _, ok := sched.ScheduleAfter(delay, func() {
+			fmt.Println("running 15min cron ...")
+			fmt.Println("table compression done in ", storage.Rebuild(false, true))
+			scheduleRebuild(rebuildInterval)
+		}); !ok {
+			fmt.Println("scheduler stopped before scheduling rebuild job")
+		}
 	}
+
+	scheduleRebuild(rebuildInterval)
+
+	<-exitsignal
+	sched.Stop()
 }
 
 func exitroutine() {

@@ -38,7 +38,7 @@ type FastDict struct {
 	index map[uint64][]int // hash -> positions (indices into Pairs, even only)
 }
 
-func NewFastDict(capacityPairs int) *FastDict {
+func NewFastDictValue(capacityPairs int) *FastDict {
 	if capacityPairs < 0 {
 		capacityPairs = 0
 	}

@@ -130,8 +130,12 @@ func NewVector(vec []float64) Scmer {
 	return Scmer{(*byte)(unsafe.Pointer(data)), makeAux(tagVector, uint64(len(vec)))}
 }
 
-func NewFastDictValue(fd *FastDict) Scmer {
-	return Scmer{fd, makeAux(tagFastDict, 0)}
+func NewFastDict(fd *FastDict) Scmer {
+	var ptr *byte
+	if fd != nil {
+		ptr = (*byte)(unsafe.Pointer(fd))
+	}
+	return Scmer{ptr, makeAux(tagFastDict, 0)}
 }
 
 func NewFunc(fn func(...Scmer) Scmer) Scmer {

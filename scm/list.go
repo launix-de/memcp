@@ -630,16 +630,16 @@ func init_list() {
 				}
 				list = append(list, a[1], a[2])
 				if len(list) >= 10 {
-					fd := NewFastDict(len(list)/2 + 4)
+					fd := NewFastDictValue(len(list)/2 + 4)
 					for i := 0; i < len(list); i += 2 {
 						fd.Set(list[i], list[i+1], nil)
 					}
-					return NewFastDictValue(fd)
+					return NewFastDict(fd)
 				}
 				return NewSlice(list)
 			} else {
 				fd.Set(a[1], a[2], mergeFn)
-				return NewFastDictValue(fd)
+				return NewFastDict(fd)
 			}
 		},
 		true,

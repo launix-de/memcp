@@ -135,32 +135,20 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			// Nil short-circuit
-			for _, v := range a {
-				if v.IsNil() {
+			prodInt := a[0].Int()
+			i := 1
+			for i < len(a) && a[i].IsInt() {
+				prodInt *= a[i].Int()
+				i++
+			}
+			if i == len(a) {
+				return NewInt(prodInt)
+			}
+			prodFloat := float64(prodInt)
+			for ; i < len(a); i++ {
+				if a[i].IsNil() {
 					return NewNil()
 				}
-			}
-			// Int-first multiply, then promote to float if needed
-			if a[0].IsInt() {
-				prodInt := a[0].Int()
-				i := 1
-				for i < len(a) && a[i].IsInt() {
-					prodInt *= a[i].Int()
-					i++
-				}
-				if i == len(a) {
-					return NewInt(prodInt)
-				}
-				prodFloat := float64(prodInt)
-				for ; i < len(a); i++ {
-					prodFloat *= a[i].Float()
-				}
-				return NewFloat(prodFloat)
-			}
-			// Float mode from the start
-			prodFloat := a[0].Float()
-			for i := 1; i < len(a); i++ {
 				prodFloat *= a[i].Float()
 			}
 			return NewFloat(prodFloat)
