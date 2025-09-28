@@ -58,7 +58,7 @@ if there is a group function, create a temporary preaggregate table
 /* changes (get_column tblvar ti col ci) into its symbol */
 (define replace_columns_from_expr (lambda (expr) (match expr
 	(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
-	'((symbol get_column) tblvar _ col _) (symbol (concat tblvar "." col)) /* TODO: case insensitive matching */
+	'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (error (concat "column " col " not found")) (symbol (concat tblvar "." col)))
 	(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
 	expr /* literals */
 )))
@@ -197,8 +197,8 @@ if there is a group function, create a temporary preaggregate table
 
 			/* find those columns that have no table */
 			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
-				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
+				'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) nil) false col false)
+				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) nil) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 				expr
 			)))
