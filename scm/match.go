@@ -39,6 +39,13 @@ func scmerAsSlice(v Scmer) ([]Scmer, bool) {
 	if v.IsSlice() {
 		return v.Slice(), true
 	}
+	if v.IsFastDict() {
+		fd := v.FastDict()
+		if fd == nil {
+			return []Scmer{}, true
+		}
+		return fd.Pairs, true
+	}
 	if auxTag(v.aux) == tagAny {
 		if slice, ok := v.Any().([]Scmer); ok {
 			return slice, true

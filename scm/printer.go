@@ -52,6 +52,16 @@ func String(v Scmer) string {
 		return "#(" + strings.Join(parts, " ") + ")"
 	case tagFunc:
 		return "[native func]"
+	case tagFastDict:
+		fd := v.FastDict()
+		if fd == nil {
+			return "()"
+		}
+		l := make([]string, len(fd.Pairs))
+		for i, x := range fd.Pairs {
+			l[i] = String(x)
+		}
+		return "(" + strings.Join(l, " ") + ")"
 	case tagSourceInfo:
 		return String(v.SourceInfo().value)
 	case tagAny:
@@ -60,13 +70,6 @@ func String(v Scmer) string {
 		}
 		if idx, ok := v.Any().(NthLocalVar); ok {
 			return fmt.Sprintf("(var %d)", idx)
-		}
-		if fd, ok := v.Any().(*FastDict); ok {
-			l := make([]string, len(fd.Pairs))
-			for i, x := range fd.Pairs {
-				l[i] = String(x)
-			}
-			return "(" + strings.Join(l, " ") + ")"
 		}
 		if p, ok := v.Any().(Proc); ok {
 			return fmt.Sprintf("[func %s]", String(p.Body))
@@ -175,6 +178,18 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteByte(')')
 	case tagFunc:
 		serializeNativeFunc(b, v.Func(), en)
+	case tagFastDict:
+		fd := v.FastDict()
+		b.WriteByte('(')
+		if fd != nil {
+			for i, x := range fd.Pairs {
+				if i != 0 {
+					b.WriteByte(' ')
+				}
+				SerializeEx(b, x, en, glob, p)
+			}
+		}
+		b.WriteByte(')')
 	case tagSourceInfo:
 		SerializeEx(b, v.SourceInfo().value, en, glob, p)
 	case tagAny:
@@ -192,17 +207,6 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			}
 			b.WriteString("(var ")
 			b.WriteString(fmt.Sprint(idx))
-			b.WriteByte(')')
-			return
-		}
-		if fd, ok := v.Any().(*FastDict); ok {
-			b.WriteByte('(')
-			for i, x := range fd.Pairs {
-				if i != 0 {
-					b.WriteByte(' ')
-				}
-				SerializeEx(b, x, en, glob, p)
-			}
 			b.WriteByte(')')
 			return
 		}

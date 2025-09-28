@@ -23,6 +23,7 @@ import (
 	"math"
 	"reflect"
 	"strconv"
+	"strings"
 	"unsafe"
 )
 
@@ -65,6 +66,7 @@ const (
 	tagProc
 	tagNthLocalVar
 	tagSourceInfo
+	tagFastDict
 	tagAny
 	// custom tags >= 100
 )
@@ -126,6 +128,10 @@ func NewVector(vec []float64) Scmer {
 	}
 	data := unsafe.SliceData(vec)
 	return Scmer{(*byte)(unsafe.Pointer(data)), makeAux(tagVector, uint64(len(vec)))}
+}
+
+func NewFastDictValue(fd *FastDict) Scmer {
+	return Scmer{fd, makeAux(tagFastDict, 0)}
 }
 
 func NewFunc(fn func(...Scmer) Scmer) Scmer {
@@ -228,6 +234,12 @@ func FromAny(v any) Scmer {
 			return NewNil()
 		}
 		return NewSourceInfo(*vv)
+	case *FastDict:
+		return NewFastDict(vv)
+	case FastDict:
+		ptr := new(FastDict)
+		*ptr = vv
+		return NewFastDict(ptr)
 	default:
 		return NewAny(v)
 	}
@@ -279,6 +291,8 @@ func (s Scmer) IsSlice() bool { return auxTag(s.aux) == tagSlice }
 
 func (s Scmer) IsVector() bool { return auxTag(s.aux) == tagVector }
 
+func (s Scmer) IsFastDict() bool { return auxTag(s.aux) == tagFastDict }
+
 func (s Scmer) Bool() bool {
 	switch auxTag(s.aux) {
 	case tagNil:
@@ -295,6 +309,12 @@ func (s Scmer) Bool() bool {
 		return len(s.Slice()) > 0
 	case tagVector:
 		return len(s.Vector()) > 0
+	case tagFastDict:
+		fd := s.FastDict()
+		if fd == nil {
+			return false
+		}
+		return len(fd.Pairs) > 0
 	case tagAny:
 		v := s.Any()
 		switch vv := v.(type) {
@@ -447,6 +467,16 @@ func (s Scmer) String() string {
 		return "nil"
 	case tagFunc:
 		return "[func]"
+	case tagFastDict:
+		fd := s.FastDict()
+		if fd == nil {
+			return "()"
+		}
+		parts := make([]string, len(fd.Pairs))
+		for i, el := range fd.Pairs {
+			parts[i] = el.String()
+		}
+		return "(" + strings.Join(parts, " ") + ")"
 	case tagSourceInfo:
 		return s.SourceInfo().String()
 	default:
@@ -480,6 +510,16 @@ func (s Scmer) Vector() []float64 {
 	}
 	hdr := [3]uintptr{uintptr(unsafe.Pointer(s.ptr)), uintptr(auxVal(s.aux)), uintptr(auxVal(s.aux))}
 	return *(*[]float64)(unsafe.Pointer(&hdr))
+}
+
+func (s Scmer) FastDict() *FastDict {
+	if auxTag(s.aux) != tagFastDict {
+		panic("not fastdict")
+	}
+	if s.ptr == nil {
+		return nil
+	}
+	return (*FastDict)(unsafe.Pointer(s.ptr))
 }
 
 func (s Scmer) Func() func(...Scmer) Scmer {
@@ -561,6 +601,8 @@ func (s Scmer) Any() any {
 		return s.NthLocalVar()
 	case tagSourceInfo:
 		return *s.SourceInfo()
+	case tagFastDict:
+		return s.FastDict()
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
 	default:
@@ -620,6 +662,17 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			list := v.Slice()
 			out := make([]any, len(list))
 			for i, it := range list {
+				out[i] = toJSONable(it)
+			}
+			return out
+		case tagFastDict:
+			fd := v.FastDict()
+			if fd == nil {
+				return []any{}
+			}
+			pairs := fd.ToList()
+			out := make([]any, len(pairs))
+			for i, it := range pairs {
 				out[i] = toJSONable(it)
 			}
 			return out

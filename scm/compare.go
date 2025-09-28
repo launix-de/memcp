@@ -87,6 +87,13 @@ func Equal(a, b Scmer) bool {
 				}
 			}
 			return true
+		case tagFastDict:
+			af := a.FastDict()
+			bf := b.FastDict()
+			if af == nil || bf == nil {
+				return af == nil && bf == nil
+			}
+			return equalAssocPairs(af.Pairs, bf.Pairs)
 		case tagAny:
 			return a.Any() == b.Any()
 		}
@@ -156,14 +163,17 @@ func assocPairs(v Scmer) ([]Scmer, bool) {
 		if len(s)%2 == 0 {
 			return s, true
 		}
+	case tagFastDict:
+		fd := v.FastDict()
+		if fd == nil {
+			return []Scmer{}, true
+		}
+		return fd.Pairs, true
 	case tagAny:
 		if vv, ok := v.Any().([]Scmer); ok {
 			if len(vv)%2 == 0 {
 				return vv, true
 			}
-		}
-		if fd, ok := v.Any().(*FastDict); ok {
-			return fd.Pairs, true
 		}
 	}
 	return nil, false

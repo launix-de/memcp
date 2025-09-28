@@ -65,6 +65,13 @@ func parserSlice(v Scmer) ([]Scmer, bool) {
 	if v.IsSlice() {
 		return v.Slice(), true
 	}
+	if v.IsFastDict() {
+		fd := v.FastDict()
+		if fd == nil {
+			return []Scmer{}, true
+		}
+		return fd.Pairs, true
+	}
 	if auxTag(v.aux) == tagAny {
 		if slice, ok := v.Any().([]Scmer); ok {
 			return slice, true
@@ -193,6 +200,14 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 	}
 	if syntax.IsSourceInfo() {
 		return parseSyntax(syntax.SourceInfo().value, en, ome, ignoreResult)
+	}
+	if syntax.IsFastDict() {
+		fd := syntax.FastDict()
+		if fd == nil {
+			syntax = NewSlice([]Scmer{})
+		} else {
+			syntax = NewSlice(fd.Pairs)
+		}
 	}
 	if auxTag(syntax.aux) == tagAny {
 		if si, ok := syntax.Any().(SourceInfo); ok {
