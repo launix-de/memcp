@@ -18,7 +18,6 @@ package scm
 
 import (
 	"encoding/binary"
-	"fmt"
 	"hash/maphash"
 	"math"
 	"reflect"
@@ -112,25 +111,47 @@ func HashKey(k Scmer) uint64 {
 			}
 		case tagFunc:
 			h.WriteByte(8)
-			fn := v.Func()
-			if reflect.ValueOf(fn).Kind() == reflect.Func {
-				var b [8]byte
-				binary.LittleEndian.PutUint64(b[:], uint64(reflect.ValueOf(fn).Pointer()))
-				h.Write(b[:])
+			// Hash native function by pointer to ensure stability
+			var ptr uintptr
+			if auxVal(v.aux) == funcKindWithEnv {
+				ptr = reflect.ValueOf(v.EnvFunc()).Pointer()
 			} else {
-				h.WriteString(fmt.Sprintf("%v", fn))
+				ptr = reflect.ValueOf(v.Func()).Pointer()
 			}
+			var b [8]byte
+			binary.LittleEndian.PutUint64(b[:], uint64(ptr))
+			h.Write(b[:])
 		case tagSourceInfo:
 			writeScmer(v.SourceInfo().value)
+		case tagFastDict:
+			fd := v.FastDict()
+			// Hash as list of pairs to match []Scmer assoc representation
+			h.WriteByte(6)
+			var b [8]byte
+			if fd == nil {
+				binary.LittleEndian.PutUint64(b[:], 0)
+				h.Write(b[:])
+				return
+			}
+			binary.LittleEndian.PutUint64(b[:], uint64(len(fd.Pairs)))
+			h.Write(b[:])
+			for i := 0; i < len(fd.Pairs); i += 2 {
+				writeScmer(fd.Pairs[i])
+				writeScmer(fd.Pairs[i+1])
+			}
 		case tagAny:
 			if si, ok := v.Any().(SourceInfo); ok {
 				writeScmer(si.value)
 				return
 			}
 			if fd, ok := v.Any().(*FastDict); ok {
-				// Hash as list of pairs to match []Scmer assoc representation
 				h.WriteByte(6)
 				var b [8]byte
+				if fd == nil {
+					binary.LittleEndian.PutUint64(b[:], 0)
+					h.Write(b[:])
+					return
+				}
 				binary.LittleEndian.PutUint64(b[:], uint64(len(fd.Pairs)))
 				h.Write(b[:])
 				for i := 0; i < len(fd.Pairs); i += 2 {
@@ -139,7 +160,7 @@ func HashKey(k Scmer) uint64 {
 				}
 				return
 			}
-			fallback := fmt.Sprintf("%T", v.Any())
+			fallback := reflect.TypeOf(v.Any()).String()
 			h.WriteByte(255)
 			h.WriteString(fallback)
 		default:

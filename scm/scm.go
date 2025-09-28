@@ -346,16 +346,19 @@ restart:
 				}
 				return parser.Execute(String(Eval(operands[0], en)), en)
 			}
-			if fd, ok := procedure.Any().(*FastDict); ok {
-				arg := Eval(operands[0], en)
+		}
+		if procedure.IsFastDict() {
+			fd := procedure.FastDict()
+			arg := Eval(operands[0], en)
+			if fd != nil {
 				if v, ok := fd.Get(arg); ok {
 					return v
 				}
 				if ln := len(fd.Pairs); ln%2 == 1 && ln > 0 {
 					return fd.Pairs[ln-1]
 				}
-				return NewNil()
 			}
+			return NewNil()
 		}
 		panic("Unknown function: " + fmt.Sprint(list[0]))
 	default:
@@ -527,15 +530,18 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 			}
 			return parser.Execute(String(args[0]), en)
 		}
-		if fd, ok := procedure.Any().(*FastDict); ok {
+	}
+	if procedure.IsFastDict() {
+		fd := procedure.FastDict()
+		if fd != nil {
 			if v, ok := fd.Get(args[0]); ok {
 				return v
 			}
 			if ln := len(fd.Pairs); ln%2 == 1 && ln > 0 {
 				return fd.Pairs[ln-1]
 			}
-			return NewNil()
 		}
+		return NewNil()
 	}
 	panic("Unknown function")
 }
@@ -987,6 +993,8 @@ func ComputeSize(v Scmer) uint {
 		data := uint(len(vec)) * 8
 		sz += goAllocOverhead + align8(data)
 		return sz
+	case tagFastDict:
+		return base + goAllocOverhead + fastDictPayloadSize(v.FastDict())
 	case tagSourceInfo:
 		si := v.SourceInfo()
 		sz := base + goAllocOverhead
@@ -1027,6 +1035,8 @@ func computeGoPayload(val any) uint {
 			sz += ComputeSize(elem)
 		}
 		return sz
+	case *FastDict:
+		return fastDictPayloadSize(v)
 	case SourceInfo:
 		sz := goAllocOverhead
 		if v.source != "" {
@@ -1108,6 +1118,29 @@ func computeGoPayload(val any) uint {
 		fmt.Println(fmt.Sprintf("warning: unknown any payload %T", v))
 		return 0
 	}
+}
+
+func fastDictPayloadSize(fd *FastDict) uint {
+	if fd == nil {
+		return 0
+	}
+	sz := goAllocOverhead
+	if len(fd.Pairs) > 0 {
+		sz += goAllocOverhead
+		for _, elem := range fd.Pairs {
+			sz += ComputeSize(elem)
+		}
+	}
+	if len(fd.index) > 0 {
+		sz += goAllocOverhead + uint(len(fd.index))*16
+		for _, bucket := range fd.index {
+			if len(bucket) == 0 {
+				continue
+			}
+			sz += goAllocOverhead + uint(len(bucket))*8
+		}
+	}
+	return sz
 }
 
 func align8(n uint) uint {

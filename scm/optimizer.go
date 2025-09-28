@@ -218,6 +218,13 @@ func scmerSlice(v Scmer) ([]Scmer, bool) {
 	if stripped, ok := scmerStripSourceInfo(v); ok {
 		return scmerSlice(stripped)
 	}
+	if v.IsFastDict() {
+		fd := v.FastDict()
+		if fd == nil {
+			return []Scmer{}, true
+		}
+		return fd.Pairs, true
+	}
 	if auxTag(v.aux) == tagAny {
 		if slice, ok := v.Any().([]Scmer); ok {
 			return slice, true

@@ -516,10 +516,13 @@ func init_strings() {
 					}
 					return result
 				}
-				if fd, ok := val.Any().(*FastDict); ok {
+				if val.IsFastDict() {
+					fd := val.FastDict()
 					result := make(map[string]any)
-					for i := 0; i < len(fd.Pairs)-1; i += 2 {
-						result[String(fd.Pairs[i])] = transform(fd.Pairs[i+1])
+					if fd != nil {
+						for i := 0; i < len(fd.Pairs)-1; i += 2 {
+							result[String(fd.Pairs[i])] = transform(fd.Pairs[i+1])
+						}
 					}
 					return result
 				}

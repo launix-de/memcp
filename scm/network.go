@@ -293,6 +293,16 @@ func scmerToGo(v Scmer) any {
 			out[i] = scmerToGo(item)
 		}
 		return out
+	case tagFastDict:
+		fd := v.FastDict()
+		if fd == nil {
+			return []any{}
+		}
+		out := make([]any, len(fd.Pairs))
+		for i, item := range fd.Pairs {
+			out[i] = scmerToGo(item)
+		}
+		return out
 	case tagAny:
 		return v.Any()
 	default:
@@ -303,6 +313,13 @@ func scmerToGo(v Scmer) any {
 func mustSliceNet(ctx string, v Scmer) []Scmer {
 	if v.IsSlice() {
 		return v.Slice()
+	}
+	if v.IsFastDict() {
+		fd := v.FastDict()
+		if fd == nil {
+			return []Scmer{}
+		}
+		return fd.Pairs
 	}
 	if auxTag(v.aux) == tagAny {
 		if slice, ok := v.Any().([]Scmer); ok {

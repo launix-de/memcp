@@ -28,36 +28,30 @@ package scm
 import "fmt"
 
 func asSlice(v Scmer, ctx string) []Scmer {
+	// Treat nil as empty list so higher-level code can be concise
+	if v.IsNil() {
+		return []Scmer{}
+	}
 	if v.IsSlice() {
 		return v.Slice()
-	}
-	if auxTag(v.aux) == tagAny {
-		if vv, ok := v.Any().([]Scmer); ok {
-			return vv
-		}
 	}
 	panic(fmt.Sprintf("%s expects a list, got %s", ctx, v.String()))
 }
 
-func asFastDict(v Scmer, ctx string) *FastDict {
-	if auxTag(v.aux) == tagAny {
-		if fd, ok := v.Any().(*FastDict); ok {
-			return fd
-		}
-	}
-	panic(fmt.Sprintf("%s expects an assoc list", ctx))
-}
-
 func asAssoc(v Scmer, ctx string) ([]Scmer, *FastDict) {
+	// Treat nil as empty dictionary (assoc list)
+	if v.IsNil() {
+		return []Scmer{}, nil
+	}
 	if v.IsSlice() {
 		return v.Slice(), nil
+	}
+	if v.IsFastDict() {
+		return nil, v.FastDict()
 	}
 	if auxTag(v.aux) == tagAny {
 		if vv, ok := v.Any().([]Scmer); ok {
 			return vv, nil
-		}
-		if fd, ok := v.Any().(*FastDict); ok {
-			return nil, fd
 		}
 	}
 	panic(fmt.Sprintf("%s expects a dictionary", ctx))
@@ -77,12 +71,16 @@ func init_list() {
 			if auxTag(a[0].aux) == tagSlice {
 				return NewInt(int64(len(a[0].Slice())))
 			}
+			if auxTag(a[0].aux) == tagFastDict {
+				fd := a[0].FastDict()
+				if fd == nil {
+					return NewInt(0)
+				}
+				return NewInt(int64(len(fd.Pairs)))
+			}
 			if auxTag(a[0].aux) == tagAny {
 				if dict, ok := a[0].Any().([]Scmer); ok {
 					return NewInt(int64(len(dict)))
-				}
-				if fd, ok := a[0].Any().(*FastDict); ok {
-					return NewInt(int64(len(fd.Pairs)))
 				}
 			}
 			panic("count expects a list")
@@ -617,7 +615,8 @@ func init_list() {
 				mfn := OptimizeProcToSerialFunction(a[3])
 				mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
 			}
-			if slice, fd := asAssoc(a[0], "set_assoc"); fd == nil {
+			slice, fd := asAssoc(a[0], "set_assoc")
+			if fd == nil {
 				list := slice
 				for i := 0; i < len(list); i += 2 {
 					if Equal(list[i], a[1]) {
@@ -635,13 +634,13 @@ func init_list() {
 					for i := 0; i < len(list); i += 2 {
 						fd.Set(list[i], list[i+1], nil)
 					}
-					return NewAny(fd)
+					return NewFastDictValue(fd)
 				}
 				return NewSlice(list)
+			} else {
+				fd.Set(a[1], a[2], mergeFn)
+				return NewFastDictValue(fd)
 			}
-			fd := asFastDict(a[0], "set_assoc")
-			fd.Set(a[1], a[2], mergeFn)
-			return NewAny(fd)
 		},
 		true,
 	})

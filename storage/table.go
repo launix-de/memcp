@@ -460,6 +460,11 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			shard = t.Shards[len(t.Shards)-1]
 			if shard.Count() >= Settings.ShardSize {
 				go func(i int) {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Println("error: shard rebuild failed for", t.schema.Name+".", t.Name, "shard", i, ":", r)
+						}
+					}()
 					// rebuild full shards in background
 					s := t.Shards[i]
 					t.Shards[i] = s.rebuild(false)

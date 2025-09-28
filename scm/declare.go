@@ -327,6 +327,12 @@ func Validate(val Scmer, require string) string {
 			}
 			return "any"
 		}
+	case tagFastDict:
+		fd := val.FastDict()
+		if fd == nil {
+			return "list"
+		}
+		return Validate(NewSlice(fd.Pairs), require)
 	case tagAny:
 		if val.Any() == nil {
 			return "nil"
