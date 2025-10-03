@@ -98,7 +98,7 @@ class SQLTestRunner:
         print(f"    Reason: {reason}")
         if query:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
-        if response:
+        if response is not None:
             print(f"    HTTP {response.status_code}: {response.text[:500]}{'...' if len(response.text) > 500 else ''}")
         if expect is not None:
             print(f"    Expected: {expect}\n")
@@ -158,13 +158,13 @@ class SQLTestRunner:
             self.ensure_database(database)
             url = f"{self.base_url}/rdf/{quote(database, safe='')}/load_ttl"
             response = requests.post(url, data=ttl_data, headers=self.auth_header, timeout=10)
-            return response and response.status_code == 200
+            return (response is not None) and response.status_code == 200
         except Exception as e:
             print(f"Error loading TTL data: {e}")
             return False
 
     def parse_jsonl_response(self, response: requests.Response) -> Optional[List[Dict]]:
-        if not response:
+        if response is None:
             return None
         text = response.text.strip()
         if not text:
@@ -204,7 +204,7 @@ class SQLTestRunner:
         if query and query.strip().upper() == "SHUTDOWN":
             # Issue shutdown
             resp = self.execute_sql(database, query, auth_header)
-            if not resp:
+            if resp is None:
                 return self._record_fail(name, "No response", query, None, None)
             # Only trigger restart logic when the command succeeded; otherwise fall through to normal expectation handling.
             if resp.status_code == 200 and "SQL Error" not in resp.text:
@@ -235,7 +235,7 @@ class SQLTestRunner:
         else:
             # Execute query
             response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header)
-        if not response:
+        if response is None:
             return self._record_fail(name, "No response", query, None, None)
 
         results = self.parse_jsonl_response(response)
@@ -289,7 +289,7 @@ class SQLTestRunner:
         for step in setup_steps:
             self.setup_operations.append(step)
             resp = self.execute_sql(database, step['sql'])
-            if not resp or resp.status_code not in [200, 500]:
+            if resp is None or resp.status_code not in [200, 500]:
                 return False
         return True
 
@@ -302,7 +302,7 @@ class SQLTestRunner:
             global is_connect_only_mode
             if is_connect_only_mode:
                 resp = self.execute_sql(database, "SHOW TABLES")
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     try:
                         tables = resp.json().get('data', [])
                         for row in tables:
