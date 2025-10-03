@@ -104,76 +104,68 @@ if the user is not allowed to access this property, the function will throw an e
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
-		(if (and pw (equal? pw (password (req "password")))) (begin
-			(try (lambda () (time (begin
-				((res "header") "Content-Type" "text/event-stream; charset=utf-8")
-				((res "status") 200)
-				(define formula (parse_sql schema query (sql_policy (req "username"))))
-				(define resultrow (res "jsonl"))
-				(define session (context "session"))
-				(set resultrow_called false)
-				(set original_resultrow resultrow)
-				(set last_row nil)
-				(define resultrow (lambda (row) (begin
-					(set resultrow_called true)
-					(if (equal? row last_row)
-						true
-						(begin (set last_row row) (original_resultrow row))))))
-				(set query_result (eval (source "SQL Query" 1 1 formula)))
-				/* If no resultrow was called and we got a number, return it as affected_rows */
-				(if (and (not resultrow_called) (number? query_result)) (begin
-					(original_resultrow '("affected_rows" query_result))
-				))
-			) query)) (lambda(e) (begin
-					(print "SQL query: " query)
-					(print "error: " e)
+		(if (and pw (equal? pw (password (req "password"))))
+			(begin
+				(time (begin
+					(define formula (parse_sql schema query (sql_policy (req "username"))))
 					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
-					((res "status") 500)
-					((res "print") "SQL Error: " e)
-			)))
-		) (begin
+					(define resultrow (res "jsonl"))
+					(define session (context "session"))
+					(set resultrow_called false)
+					(set original_resultrow resultrow)
+					(set last_row nil)
+					(define resultrow (lambda (row) (begin
+						(set resultrow_called true)
+						(if (equal? row last_row)
+							true
+							(begin (set last_row row) (original_resultrow row))))))
+					(set query_result (eval (source "SQL Query" 1 1 formula)))
+					/* If no resultrow was called and we got a number, return it as affected_rows */
+					(if (and (not resultrow_called) (number? query_result)) (begin
+						(original_resultrow '("affected_rows" query_result))
+					))
+				) query)
+			)
+			(begin
 				((res "header") "Content-Type" "text/plain")
 				((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
 				((res "status") 401)
 				((res "print") "Unauthorized")
-		))
+			)
+		)
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
 		/* check for password */
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
-		(if (and pw (equal? pw (password (req "password")))) (begin
-			(try (lambda () (time (begin
-				((res "header") "Content-Type" "text/plain")
-				((res "status") 200)
-				(define formula (parse_psql schema query (sql_policy (req "username"))))
-				(define resultrow (res "jsonl"))
-				(define session (context "session"))
-				(set resultrow_called false)
-				(set original_resultrow resultrow)
-				(set last_row nil)
-				(define resultrow (lambda (row) (begin
-					(set resultrow_called true)
-					(if (equal? row last_row)
-						true
-						(begin (set last_row row) (original_resultrow row))))))
-				(set query_result (eval (source "SQL Query" 1 1 formula)))
-				/* If no resultrow was called and we got a number, return it as affected_rows */
-				(if (and (not resultrow_called) (number? query_result)) (begin
-					(original_resultrow '("affected_rows" query_result))
-				))
-			) query)) (lambda(e) (begin
-					(print "SQL query: " query)
-					(print "error: " e)
+		(if (and pw (equal? pw (password (req "password"))))
+			(begin
+				(time (begin
+					(define formula (parse_psql schema query (sql_policy (req "username"))))
 					((res "header") "Content-Type" "text/plain")
-					((res "status") 500)
-					((res "print") "SQL Error: " e)
-			)))
-		) (begin
+					(define resultrow (res "jsonl"))
+					(define session (context "session"))
+					(set resultrow_called false)
+					(set original_resultrow resultrow)
+					(set last_row nil)
+					(define resultrow (lambda (row) (begin
+						(set resultrow_called true)
+						(if (equal? row last_row)
+							true
+							(begin (set last_row row) (original_resultrow row))))))
+					(set query_result (eval (source "SQL Query" 1 1 formula)))
+					/* If no resultrow was called and we got a number, return it as affected_rows */
+					(if (and (not resultrow_called) (number? query_result)) (begin
+						(original_resultrow '("affected_rows" query_result))
+					))
+				) query)
+			)
+			(begin
 				((res "header") "Content-Type" "text/plain")
 				((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
 				((res "status") 401)
 				((res "print") "Unauthorized")
-		))
+			)
+		)
 	)))
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
@@ -220,29 +212,13 @@ if the user is not allowed to access this property, the function will throw an e
 				(if (equal? (session "syntax") "scheme") /* TODO: check access to system.* */ (begin
 					/* scheme syntax mode */
 					(set print (lambda args (resultrow '("result" (concat args)))))
-					(try (lambda () (resultrow '("result" (eval (scheme sql))))) (lambda (e) (begin
-						(print "Scheme query: " sql)
-						(print "error " e)
-						(resultrow '("error" e))
-					)))
+					(resultrow '("result" (eval (scheme sql))))
 				) (time (begin
 						/* SQL syntax mode */
 						/* tolerate an optional trailing ';' using multiline group */
 						(set sql (match sql (regex "^((?s:.*));\\s*" _ body) body sql))
-						(define formula (try (lambda ()
-							((if (equal? (session "syntax") "postgresql") (lambda (schema sql policy) (parse_psql schema sql policy)) (lambda (schema sql policy) (parse_sql schema sql policy))) schema sql (sql_policy (coalesce (session "username") "root"))))
-							(lambda (e) (begin
-								(print "SQL query: " sql)
-								(print "error: " e)
-								(resultrow '("error" e))
-								nil
-						))))
-						(if formula (try (lambda () (eval (source "SQL Query" 1 1 formula))) (lambda(e) (begin
-							(print "SQL query: " sql)
-							(print "execution plan: " formula)
-							(print "error: " e)
-							(resultrow '("error" e))
-						))) nil)
+						(define formula ((if (equal? (session "syntax") "postgresql") (lambda (schema sql policy) (parse_psql schema sql policy)) (lambda (schema sql policy) (parse_sql schema sql policy))) schema sql (sql_policy (coalesce (session "username") "root"))))
+						(eval (source "SQL Query" 1 1 formula))
 					) sql))
 			))
 		)

@@ -158,13 +158,13 @@ class SQLTestRunner:
             self.ensure_database(database)
             url = f"{self.base_url}/rdf/{quote(database, safe='')}/load_ttl"
             response = requests.post(url, data=ttl_data, headers=self.auth_header, timeout=10)
-            return response and response.status_code == 200
+            return response is not None and response.status_code == 200
         except Exception as e:
             print(f"Error loading TTL data: {e}")
             return False
 
     def parse_jsonl_response(self, response: requests.Response) -> Optional[List[Dict]]:
-        if not response:
+        if response is None:
             return None
         text = response.text.strip()
         if not text:
@@ -217,7 +217,7 @@ class SQLTestRunner:
         else:
             # Execute query
             response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header)
-        if not response:
+        if response is None:
             return self._record_fail(name, "No response", query, None, None)
 
         results = self.parse_jsonl_response(response)
@@ -271,7 +271,7 @@ class SQLTestRunner:
         for step in setup_steps:
             self.setup_operations.append(step)
             resp = self.execute_sql(database, step['sql'])
-            if not resp or resp.status_code not in [200, 500]:
+            if resp is None or resp.status_code not in [200, 500]:
                 return False
         return True
 
@@ -284,7 +284,7 @@ class SQLTestRunner:
             global is_connect_only_mode
             if is_connect_only_mode:
                 resp = self.execute_sql(database, "SHOW TABLES")
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     try:
                         tables = resp.json().get('data', [])
                         for row in tables:
@@ -363,12 +363,16 @@ def wait_for_memcp(port=4321, timeout=30) -> bool:
 def start_memcp_process(port: int) -> subprocess.Popen | None:
     try:
         datadir = os.environ.get("MEMCP_TEST_DATADIR", f"/tmp/memcp-sql-tests-{port}")
+        env = os.environ.copy()
+        godebug = env.get("GODEBUG", "")
+        if "invalidptr=" not in godebug:
+            env["GODEBUG"] = f"{godebug},invalidptr=0" if godebug else "invalidptr=0"
         proc = subprocess.Popen([
             "./memcp", "-data", datadir,
             f"--api-port={port}", f"--mysql-port={port+1000}",
             "--disable-mysql", "lib/main.scm"
         ], cwd=os.path.dirname(os.path.abspath(__file__)),
-           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+           env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if not wait_for_memcp(port):
             return None
         return proc
