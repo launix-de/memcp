@@ -120,7 +120,11 @@ oder _:identifier
 		)))
 		(define ttl_fact (parser '(
 			(define facts 
-				(parser '((define s rdf_constant_pfx) (define ps (+ (parser '((define p rdf_constant_pfx) (define os (+ rdf_constant_pfx ","))) (map os (lambda (o) '(p o)))) ";")) (? ";") ".") (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
+				(parser '(
+					(define s rdf_constant_pfx)
+					(define ps (+ (parser '((define p rdf_constant_pfx) (define os (+ rdf_constant_pfx ",")) (? ";")) (map os (lambda (o) '(p o))))))
+					"."
+				) (merge (map ps (lambda (p) (map p (lambda (p1) (cons s p1)))))))
 			)
 			(define rest rest)
 		) '("facts" facts "rest" rest) "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
