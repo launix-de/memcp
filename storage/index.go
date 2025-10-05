@@ -270,11 +270,13 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 start_scan:
 
 	// bisect where the lower bound is found
+	// Only compare as many columns as provided in 'lower' (index can have more cols)
+	cmpCols := len(lower)
 	idx := sort.Search(int(s.t.main_count), func(idx int) bool {
 		idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
-		for i, c := range cols {
+		for i := 0; i < cmpCols; i++ {
 			a := lower[i]
-			b := c.GetValue(uint(idx2))
+			b := cols[i].GetValue(uint(idx2))
 			// TODO: respect !lowerEqual
 			if scm.Less(a, b) {
 				return true // less
@@ -294,9 +296,9 @@ iteration:
 		}
 		idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
 		// check for index bounds
-		for i, c := range cols {
-			a := c.GetValue(uint(idx2))
-			if i == len(cols)-1 {
+		for i := 0; i < cmpCols; i++ {
+			a := cols[i].GetValue(uint(idx2))
+			if i == cmpCols-1 {
 				if !upperLast.IsNil() && scm.Less(upperLast, a) { // TODO: respect !upperEqual
 					break iteration // stop traversing when we exceed the < part of last col
 				}
