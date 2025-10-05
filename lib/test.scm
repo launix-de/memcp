@@ -47,6 +47,30 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* match */
 	(assert (match '(1 2 3 5 6) (merge '(a b) rest) (concat "a=" a ", b=" b ", rest=" rest)) "a=1, b=2, rest=(3 5 6)" "match merge")
 
+	/* queryplan.scm pattern compatibility (with SourceInfo wrapping) */
+	(print "testing queryplan pattern matching ...")
+	(define tblx "t")
+	(define expr_gc (list 'get_column "t" false "id" false))
+	(assert (match expr_gc '((symbol get_column) (eval tblx) _ col _) col "no") "id" "match get_column for alias t -> id")
+	(define expr_gc_src (source "unit" 1 1 expr_gc))
+	(assert (match expr_gc_src '((symbol get_column) (eval tblx) _ col _) col "no") "id" "match get_column with SourceInfo wrapper")
+
+	/* nil tblvar */
+	(define expr_gc_nil (list 'get_column nil false "foo" false))
+	(assert (match expr_gc_nil '((symbol get_column) nil _ col _) col "no") "foo" "match get_column with nil tblvar -> foo")
+
+	/* ORDER mapping: o = ((get_column t.col) dir) -> extract col */
+	(define order1 (list (list 'get_column "t" false "id" false) true))
+	(assert (equal? (match order1 '(((symbol get_column) (eval tblx) _ col _) dir) (list col) '()) '("id")) true "match order key extraction")
+
+	/* aggregate head detection */
+	(define expr_agg (list 'aggregate 1 '+ 0))
+	(assert (match expr_agg (cons (symbol aggregate) args) args "no") '(1 '+ 0) "match aggregate captures args")
+
+	/* star expansion head (tbl.*) */
+	(define expr_star (list 'get_column "t" true "*" false))
+	(assert (match expr_star '((symbol get_column) (eval tblx) ignorecase "*" _) "ok" "no") "ok" "match tbl.* with case-insensitive flag")
+
 	/* Tests for scm package */
 	/* Tests for alu.go */
 
