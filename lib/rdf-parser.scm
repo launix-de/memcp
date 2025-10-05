@@ -115,7 +115,7 @@ oder _:identifier
 	'("prefixes" definitions "rest" rest)
 	(begin
 		(define rdf_constant_pfx (parser (or
-			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (concat (definitions pfx) post)) /* add prefix */
+			(parser '((define pfx (regex "[a-zA-Z0-9_]*" true)) (atom ":" false false) (define post (regex "[a-zA-Z0-9_]*" false))) (if (nil? (definitions pfx)) (error "undefined prefix: " pfx) (concat (definitions pfx) post))) /* add prefix with validation */
 			rdf_constant
 		)))
 		(define ttl_fact (parser '(
