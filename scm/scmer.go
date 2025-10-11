@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"reflect"
 	"strconv"
@@ -485,6 +486,18 @@ func (s Scmer) String() string {
 		}
 		return fmt.Sprintf("<custom %d>", auxTag(s.aux))
 	}
+}
+
+// Stream returns an io.Reader for the value.
+// - If the underlying value is already an io.Reader (streams are encoded as Any), it is passed through.
+// - Otherwise, the value is converted to its string form and a strings.Reader is returned.
+func (s Scmer) Stream() io.Reader {
+	if auxTag(s.aux) == tagAny {
+		if r, ok := s.Any().(io.Reader); ok {
+			return r
+		}
+	}
+	return strings.NewReader(s.String())
 }
 
 func (s Scmer) Slice() []Scmer {
