@@ -169,12 +169,6 @@ func assocPairs(v Scmer) ([]Scmer, bool) {
 			return []Scmer{}, true
 		}
 		return fd.Pairs, true
-	case tagAny:
-		if vv, ok := v.Any().([]Scmer); ok {
-			if len(vv)%2 == 0 {
-				return vv, true
-			}
-		}
 	}
 	return nil, false
 }
@@ -353,7 +347,8 @@ func Less(a, b Scmer) bool {
 		case tagString, tagSymbol:
 			return a.String() < b.String()
 		default:
-			panic("unknown type combo in comparison")
+			// Fallback: compare by string representation to avoid panics on mixed types
+			return strings.Compare(a.String(), b.String()) < 0
 		}
 	case tagBool:
 		return a.Int() < b.Int()
@@ -362,6 +357,7 @@ func Less(a, b Scmer) bool {
 	case tagAny:
 		return strings.Compare(a.String(), b.String()) < 0
 	default:
-		panic("unknown type combo in comparison")
+		// Fallback: compare by string representation for any unsupported combos
+		return strings.Compare(a.String(), b.String()) < 0
 	}
 }

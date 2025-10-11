@@ -225,11 +225,6 @@ func scmerSlice(v Scmer) ([]Scmer, bool) {
 		}
 		return fd.Pairs, true
 	}
-	if auxTag(v.aux) == tagAny {
-		if slice, ok := v.Any().([]Scmer); ok {
-			return slice, true
-		}
-	}
 	return nil, false
 }
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
@@ -284,9 +279,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 		if sym, ok := payload.(Symbol); ok {
 			return OptimizeEx(NewSymbol(string(sym)), env, ome, useResult)
 		}
-		if sl, ok := payload.([]Scmer); ok {
-			return OptimizeEx(NewSlice(sl), env, ome, useResult)
-		}
+		// no longer accept []Scmer in tagAny payloads
 		if sm, ok := payload.(Scmer); ok {
 			return OptimizeEx(sm, env, ome, useResult)
 		}

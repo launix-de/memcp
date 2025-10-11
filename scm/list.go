@@ -49,11 +49,6 @@ func asAssoc(v Scmer, ctx string) ([]Scmer, *FastDict) {
 	if v.IsFastDict() {
 		return nil, v.FastDict()
 	}
-	if auxTag(v.aux) == tagAny {
-		if vv, ok := v.Any().([]Scmer); ok {
-			return vv, nil
-		}
-	}
 	panic(fmt.Sprintf("%s expects a dictionary", ctx))
 }
 
@@ -77,11 +72,6 @@ func init_list() {
 					return NewInt(0)
 				}
 				return NewInt(int64(len(fd.Pairs)))
-			}
-			if auxTag(a[0].aux) == tagAny {
-				if dict, ok := a[0].Any().([]Scmer); ok {
-					return NewInt(int64(len(dict)))
-				}
 			}
 			panic("count expects a list")
 		},
@@ -152,11 +142,6 @@ func init_list() {
 			car := a[0]
 			if auxTag(a[1].aux) == tagSlice {
 				return NewSlice(append([]Scmer{car}, a[1].Slice()...))
-			}
-			if auxTag(a[1].aux) == tagAny {
-				if cdr, ok := a[1].Any().([]Scmer); ok {
-					return NewSlice(append([]Scmer{car}, cdr...))
-				}
 			}
 			return NewSlice([]Scmer{car, a[1]})
 		},
@@ -432,11 +417,6 @@ func init_list() {
 		func(a ...Scmer) Scmer {
 			if a[0].IsSlice() {
 				return NewBool(true)
-			}
-			if auxTag(a[0].aux) == tagAny {
-				if _, ok := a[0].Any().([]Scmer); ok {
-					return NewBool(true)
-				}
 			}
 			return NewBool(false)
 		},

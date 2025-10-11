@@ -66,9 +66,6 @@ func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {
 	if v.IsSlice() {
 		return v.Slice(), true
 	}
-	if arr, ok := v.Any().([]scm.Scmer); ok {
-		return arr, true
-	}
 	return nil, false
 }
 
