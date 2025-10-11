@@ -72,11 +72,6 @@ func parserSlice(v Scmer) ([]Scmer, bool) {
 		}
 		return fd.Pairs, true
 	}
-	if auxTag(v.aux) == tagAny {
-		if slice, ok := v.Any().([]Scmer); ok {
-			return slice, true
-		}
-	}
 	return nil, false
 }
 
@@ -222,9 +217,7 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 		if sym, ok := syntax.Any().(Symbol); ok {
 			syntax = NewSymbol(string(sym))
 		}
-		if sl, ok := syntax.Any().([]Scmer); ok {
-			syntax = NewSlice(sl)
-		}
+
 	}
 	if syntax.IsString() {
 		return packrat.NewAtomParser(&parserResult{value: syntax, env: nil}, syntax.String(), false, true)

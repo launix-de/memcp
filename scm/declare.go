@@ -346,9 +346,6 @@ func Validate(val Scmer, require string) string {
 		if _, ok := val.Any().(*Proc); ok {
 			return "func"
 		}
-		if s, ok := val.Any().([]Scmer); ok {
-			return Validate(NewSlice(s), require)
-		}
 	}
 	return "any"
 }

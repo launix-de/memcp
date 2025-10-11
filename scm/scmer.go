@@ -468,6 +468,21 @@ func (s Scmer) String() string {
 		return "nil"
 	case tagFunc:
 		return "[func]"
+	case tagSlice:
+		sl := s.Slice()
+		if len(sl) == 0 {
+			return "()"
+		}
+		var sb strings.Builder
+		sb.WriteString("(")
+		for i, el := range sl {
+			if i > 0 {
+				sb.WriteString(" ")
+			}
+			el.Write(&sb)
+		}
+		sb.WriteString(")")
+		return sb.String()
 	case tagFastDict:
 		fd := s.FastDict()
 		if fd == nil {
@@ -748,12 +763,6 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 				return vv
 			case Symbol:
 				return map[string]any{"symbol": string(vv)}
-			case []Scmer:
-				out := make([]any, len(vv))
-				for i := range vv {
-					out[i] = toJSONable(vv[i])
-				}
-				return out
 			case Proc:
 				return toJSONable(NewProcStruct(vv))
 			case *Proc:
@@ -781,6 +790,70 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(toJSONable(s))
+}
+
+func (s *Scmer) Write(w io.Writer) {
+	// Stream a textual representation without intermediate large strings.
+	// Mirrors String() formatting but writes directly and recurses for lists.
+	if s == nil {
+		io.WriteString(w, "nil")
+		return
+	}
+	switch auxTag(s.aux) {
+	case tagNil:
+		io.WriteString(w, "nil")
+	case tagBool:
+		if uintptr(unsafe.Pointer(s.ptr)) != 0 {
+			io.WriteString(w, "true")
+		} else {
+			io.WriteString(w, "false")
+		}
+	case tagInt:
+		// Fast path without allocations
+		var buf [32]byte
+		b := strconv.AppendInt(buf[:0], int64(uintptr(unsafe.Pointer(s.ptr))), 10)
+		w.Write(b)
+	case tagFloat:
+		var buf [64]byte
+		f := math.Float64frombits(uint64(uintptr(unsafe.Pointer(s.ptr))))
+		b := strconv.AppendFloat(buf[:0], f, 'g', -1, 64)
+		w.Write(b)
+	case tagString, tagSymbol:
+		io.WriteString(w, s.String())
+	case tagFunc:
+		io.WriteString(w, "[func]")
+	case tagSlice:
+		io.WriteString(w, "(")
+		list := s.Slice()
+		for i := range list {
+			if i > 0 {
+				io.WriteString(w, " ")
+			}
+			list[i].Write(w)
+		}
+		io.WriteString(w, ")")
+	case tagFastDict:
+		io.WriteString(w, "(")
+		fd := s.FastDict()
+		if fd != nil {
+			for i := 0; i < len(fd.Pairs); i++ {
+				if i > 0 {
+					io.WriteString(w, " ")
+				}
+				fd.Pairs[i].Write(w)
+			}
+		}
+		io.WriteString(w, ")")
+	case tagSourceInfo:
+		io.WriteString(w, s.SourceInfo().String())
+	default:
+		if auxTag(s.aux) == tagAny {
+			// Fallback: format underlying Go value using fmt
+			fmt.Fprintf(w, "%v", *(*any)(unsafe.Pointer(s.ptr)))
+			return
+		}
+		fmt.Fprintf(w, "<custom %d>", auxTag(s.aux))
+	}
 }
 
 // UnmarshalJSON decodes JSON into a Scmer by first decoding into

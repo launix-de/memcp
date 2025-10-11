@@ -144,22 +144,6 @@ func HashKey(k Scmer) uint64 {
 				writeScmer(si.value)
 				return
 			}
-			if fd, ok := v.Any().(*FastDict); ok {
-				h.WriteByte(6)
-				var b [8]byte
-				if fd == nil {
-					binary.LittleEndian.PutUint64(b[:], 0)
-					h.Write(b[:])
-					return
-				}
-				binary.LittleEndian.PutUint64(b[:], uint64(len(fd.Pairs)))
-				h.Write(b[:])
-				for i := 0; i < len(fd.Pairs); i += 2 {
-					writeScmer(fd.Pairs[i])
-					writeScmer(fd.Pairs[i+1])
-				}
-				return
-			}
 			fallback := reflect.TypeOf(v.Any()).String()
 			h.WriteByte(255)
 			h.WriteString(fallback)

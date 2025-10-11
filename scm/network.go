@@ -321,10 +321,5 @@ func mustSliceNet(ctx string, v Scmer) []Scmer {
 		}
 		return fd.Pairs
 	}
-	if auxTag(v.aux) == tagAny {
-		if slice, ok := v.Any().([]Scmer); ok {
-			return slice
-		}
-	}
 	panic(fmt.Sprintf("%s expects list", ctx))
 }

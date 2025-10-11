@@ -24,18 +24,26 @@ import (
 )
 
 func scmerSymbolName(s Scmer) (string, bool) {
-	if s.IsSymbol() {
-		return s.String(), true
+	// Unwrap SourceInfo and direct symbols
+	if name, ok := symbolName(s); ok {
+		return name, true
 	}
-	if auxTag(s.aux) == tagAny {
-		if sym, ok := s.Any().(Symbol); ok {
-			return string(sym), true
+	// Accept quoted symbols: (quote sym) -> sym
+	if list, ok := scmerAsSlice(s); ok {
+		if len(list) == 2 {
+			if head, ok2 := symbolName(list[0]); ok2 && head == "quote" {
+				return symbolName(list[1])
+			}
 		}
 	}
 	return "", false
 }
 
 func scmerAsSlice(v Scmer) ([]Scmer, bool) {
+	// Unwrap SourceInfo if present
+	if v.IsSourceInfo() {
+		return scmerAsSlice(v.SourceInfo().value)
+	}
 	if v.IsSlice() {
 		return v.Slice(), true
 	}
@@ -46,15 +54,14 @@ func scmerAsSlice(v Scmer) ([]Scmer, bool) {
 		}
 		return fd.Pairs, true
 	}
-	if auxTag(v.aux) == tagAny {
-		if slice, ok := v.Any().([]Scmer); ok {
-			return slice, true
-		}
-	}
 	return nil, false
 }
 
 func scmerAsString(v Scmer) (string, bool) {
+	// Unwrap SourceInfo if present
+	if v.IsSourceInfo() {
+		return scmerAsString(v.SourceInfo().value)
+	}
 	if auxTag(v.aux) == tagString {
 		return v.String(), true
 	}
@@ -140,7 +147,40 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	if pattern.IsSlice() {
 		p := pattern.Slice()
 		name, ok := scmerSymbolName(p[0])
+		// Structural list matching for nested head patterns like ((symbol ...)...)
+		if ok && (name == "symbol" || name == "quote") {
+			if list, ok2 := scmerAsSlice(val); ok2 {
+				if len(list) != len(p) {
+					return false
+				}
+				for i := range p {
+					if !match(list[i], p[i], en) {
+						return false
+					}
+				}
+				return true
+			}
+		}
 		if !ok {
+			// Restricted structural-list fallback: only when the first subpattern is itself
+			// a list with a recognized pattern head like 'symbol or 'quote. This mirrors
+			// common nested head-matching shapes used by the planner without altering
+			// arbitrary application-like patterns (e.g., '(lambda ...)).
+			if sub, ok2 := scmerAsSlice(p[0]); ok2 {
+				if subHead, ok3 := scmerSymbolName(sub[0]); ok3 && (subHead == "symbol" || subHead == "quote") {
+					if list, ok4 := scmerAsSlice(val); ok4 {
+						if len(list) != len(p) {
+							return false
+						}
+						for i := range p {
+							if !match(list[i], p[i], en) {
+								return false
+							}
+						}
+						return true
+					}
+				}
+			}
 			panic("unknown match pattern head: " + SerializeToString(p[0], en))
 		}
 		switch name {
