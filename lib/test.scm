@@ -249,6 +249,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (urldecode (urlencode "a b")) "a b") true "url roundtrip")
 	(assert (strlike (json_encode_assoc (list "x" 1)) "%\"x\":1%") true "json_encode_assoc contains key and value")
 
+	/* json_encode vs json_encode_assoc semantics (master-compatible) */
+	(assert (equal? (json_encode '(1 2 3)) "[1,2,3]") true "json_encode lists as arrays")
+	(assert (strlike (json_encode_assoc (list "x" 1 "y" 2)) "%\"x\":1%") true "json_encode_assoc has x:1")
+	(assert (strlike (json_encode_assoc (list "x" 1 "y" 2)) "%\"y\":2%") true "json_encode_assoc has y:2")
+
+	/* symbol encoding must preserve type marker */
+	(assert (equal? (json_encode (symbol "alpha")) "{\"symbol\":\"alpha\"}") true "json_encode(symbol) -> {symbol:\"alpha\"}")
+	(assert (strlike (json_encode (lambda (a b) (+ a b))) "%\"symbol\":\"lambda\"%") true "json_encode(lambda ...) contains lambda symbol header")
+	(assert (strlike (json_encode_assoc (list "s" (symbol "S"))) "%\"s\":{\"symbol\":\"S\"}%") true "json_encode_assoc preserves symbol values")
+
+	/* json_decode builds assoc list with functional access */
+	(assert (equal? ((json_decode "{\"a\":2}") "a") 2) true "json_decode object -> assoc callable by key")
+	(assert (equal? (nth (json_decode "[1,2,3]") 1) 2) true "json_decode array -> list indexable with nth")
+
 	/* Optimizer safeguards for eval/import and aliasing in begin */
 	/* Case: preserve old binding while overloading after an eval barrier */
 	(define http_test_begin (begin
