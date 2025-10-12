@@ -135,20 +135,36 @@ func init_alu() {
 			DeclarationParameter{"value...", "number", "values"},
 		}, "number",
 		func(a ...Scmer) Scmer {
-			prodInt := a[0].Int()
-			i := 1
-			for i < len(a) && a[i].IsInt() {
-				prodInt *= a[i].Int()
-				i++
+			// Nil short-circuit (SQL-style): if any arg is nil, result is nil
+			for _, v := range a {
+				if v.IsNil() {
+					return NewNil()
+				}
+			}
+			// Try integer mode: treat float operands with zero fractional part as integers
+			prodInt := int64(1)
+			i := 0
+			for ; i < len(a); i++ {
+				v := a[i]
+				if v.IsInt() {
+					prodInt *= v.Int()
+					continue
+				}
+				if v.IsFloat() {
+					f := v.Float()
+					if f == math.Trunc(f) {
+						prodInt *= int64(f)
+						continue
+					}
+				}
+				break // non-integer number encountered -> switch to float mode
 			}
 			if i == len(a) {
 				return NewInt(prodInt)
 			}
+			// Float mode: include any prior integer product and continue in float
 			prodFloat := float64(prodInt)
 			for ; i < len(a); i++ {
-				if a[i].IsNil() {
-					return NewNil()
-				}
 				prodFloat *= a[i].Float()
 			}
 			return NewFloat(prodFloat)

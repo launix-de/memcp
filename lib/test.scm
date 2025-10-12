@@ -96,7 +96,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (* 2 3) 6 "2 * 3 should be 6")
 	(assert (* 2 3 4) 24 "2 * 3 * 4 should be 24")
 	(assert (equal? (* 2 3.5) 7.0) true "int * float promotes to float")
-	(assert (nil? (* 2 nil)) true "* with nil returns nil")
+	/* regression: first arg float must not be truncated to int */
+	(assert (equal? (* 2.5 2) 5.0) true "float * int (float first) -> 5.0")
+	(assert (equal? (* 2.5 2 2) 10.0) true "float-first multiply across ints -> 10.0")
+	/* additional: begin with integers, only integers -> stays int */
+	(assert (int? (* 2 3 4 5)) true "int*int*int*int stays int type")
+	(assert (* 1 2 3 4 5) 120 "many ints multiply correctly")
+	/* additional: mixed starting with integers -> promote when float appears */
+	(assert (equal? (* 2 3 0.5) 3.0) true "int*int*float -> 3.0 (float)")
+	(assert (equal? (* 2 0.5 3) 3.0) true "int*float*int -> 3.0 (float)")
+	(assert (equal? (* 2 3 4.0) 24.0) true "int*int*float -> 24.0 (float)")
+	/* nil propagation */
+	(assert (nil? (* 2 nil)) true "* with nil at end returns nil")
+	(assert (nil? (* nil 2 3)) true "* with nil at beginning returns nil")
+	(assert (nil? (* 2 3 nil)) true "* with nil at end (3-args) returns nil")
+	(assert (nil? (* 2 3.5 nil)) true "* with int->float change then nil returns nil")
 
 	/* Test for / */
 	(assert (/ 6 2) 3 "6 / 2 should be 3")
