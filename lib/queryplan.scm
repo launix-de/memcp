@@ -197,8 +197,8 @@ if there is a group function, create a temporary preaggregate table
 
 			/* find those columns that have no table */
 			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) nil) false col false)
-				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) nil) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
+				'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
+				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 				expr
 			)))
@@ -291,7 +291,7 @@ if there is a group function, create a temporary preaggregate table
 
 				/* preparation */
 				(define tblvar_cols (merge_unique (map group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
-				(set condition (replace_find_column (coalesce condition true)))
+				(set condition (replace_find_column (coalesceNil condition true)))
 				(set filtercols (extract_columns_for_tblvar tblvar condition))
 
 				(define replace_agg_with_fetch (lambda (expr) (match expr
@@ -371,7 +371,7 @@ if there is a group function, create a temporary preaggregate table
 								(merge_unique (extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v))))
 								(extract_columns_for_tblvar tblvar condition)
 							))
-							(match (split_condition (coalesce condition true) tables) '(now_condition later_condition) (begin
+							(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 								(set filtercols (extract_columns_for_tblvar tblvar now_condition))
 								/* TODO: add columns from rest condition into cols list */
 
@@ -390,7 +390,7 @@ if there is a group function, create a temporary preaggregate table
 									(cons list ordercols)
 									(cons list dirs)
 									offset
-									(coalesce limit -1)
+									(coalesceNil limit -1)
 									/* extract columns and store them into variables */
 									(cons list cols)
 									'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
@@ -418,7 +418,7 @@ if there is a group function, create a temporary preaggregate table
 									(extract_columns_for_tblvar tblvar condition)
 								))
 								/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
-								(match (split_condition (coalesce condition true) tables) '(now_condition later_condition) (begin
+								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 									(set filtercols (extract_columns_for_tblvar tblvar now_condition))
 
 									(scan_wrapper 'scan schema tbl
@@ -435,7 +435,7 @@ if there is a group function, create a temporary preaggregate table
 									)
 								))
 							)
-							'() /* final inner (=scalar) */ '('if (coalesce condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+							'() /* final inner (=scalar) */ '('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
 						)
 					))
 					(build_scan tables (replace_find_column condition))
