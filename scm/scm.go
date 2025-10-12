@@ -100,6 +100,9 @@ restart:
 		return evalWithSourceInfo(*expression.SourceInfo(), en)
 	case tagNil, tagBool, tagInt, tagFloat, tagString:
 		return expression
+	case tagVector, tagFastDict, tagAny:
+		// Treat runtime vectors, fast dicts, and Any-wrapped values as immediate values
+		return expression
 	case tagFunc:
 		return expression
 	case tagProc:

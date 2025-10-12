@@ -299,6 +299,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* two independently generated strings should differ (overwhelmingly likely) */
 	(assert (equal? (randomBytes 32) (randomBytes 32)) false "two random strings must be unequal")
 
+	/* Eval and Parser (Any-wrapped) semantics */
+	(print "testing eval and parser semantics ...")
+	(assert (eval '(+ 2 3)) 5 "eval executes quoted code")
+	/* simple regex parser returns captured value */
+	(define p_regex (parser (define x (regex "[A-Za-z]+" true)) x))
+	(assert (equal? (p_regex "Hello") "Hello") true "parser returns regex capture")
+	/* atom parser with constant generator returns constant */
+	(define p_atom (parser (atom "FOO" true) "ok"))
+	(assert (equal? (p_atom "FOO") "ok") true "atom parser returns constant generator")
+
 	/* error cases intentionally omitted in unit tests to avoid compile-time constant folding side-effects */
 
 	/* Lambda / apply_assoc */
