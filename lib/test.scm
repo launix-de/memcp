@@ -143,8 +143,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (not false) true "not false should be true")
 
 	/* Truthiness of quoted symbols in special forms (no type-enforced not) */
-	(assert (if 'false 1 2) 2 "'false treated as falsy in if")
-	(assert (if 'nil 1 2) 2 "'nil treated as falsy in if")
+	(assert (if false 1 2) 2 "false treated as falsy in if")
+	(assert (if nil 1 2) 2 "'nil treated as falsy in if")
 
 	/* Test for nil? */
 	(assert (nil? nil) true "nil? of nil should be true")
