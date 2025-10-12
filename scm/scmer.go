@@ -852,7 +852,8 @@ func (s *Scmer) Write(w io.Writer) {
 			fmt.Fprintf(w, "%v", *(*any)(unsafe.Pointer(s.ptr)))
 			return
 		}
-		fmt.Fprintf(w, "<custom %d>", auxTag(s.aux))
+		// Unknown tag: fall back to the string representation
+		io.WriteString(w, s.String())
 	}
 }
 

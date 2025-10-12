@@ -52,6 +52,12 @@ func String(v Scmer) string {
 		return "#(" + strings.Join(parts, " ") + ")"
 	case tagFunc:
 		return "[native func]"
+	case tagProc:
+		// Pretty-print procedures as (lambda ...) expressions without
+		// serializing the captured environment to avoid recursion.
+		var b bytes.Buffer
+		serializeProcShallow(&b, *v.Proc(), &Globalenv)
+		return b.String()
 	case tagFastDict:
 		fd := v.FastDict()
 		if fd == nil {
@@ -178,6 +184,10 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteByte(')')
 	case tagFunc:
 		serializeNativeFunc(b, v.Func(), en)
+	case tagProc:
+		// Serialize compiled procedures as (lambda ...) expressions, but
+		// avoid walking the captured environment here to prevent cycles.
+		serializeProcShallow(b, *v.Proc(), glob)
 	case tagFastDict:
 		fd := v.FastDict()
 		b.WriteByte('(')
@@ -260,6 +270,22 @@ func serializeProc(b *bytes.Buffer, v Proc, en *Env, glob *Env, parent *Proc) {
 	SerializeEx(b, v.Params, glob, glob, nil)
 	b.WriteByte(' ')
 	SerializeEx(b, v.Body, v.En, glob, &v)
+	if v.NumVars > 0 {
+		b.WriteByte(' ')
+		b.WriteString(fmt.Sprint(v.NumVars))
+	}
+	b.WriteByte(')')
+}
+
+// serializeProcShallow prints a procedure as a (lambda ...) form without
+// embedding environment bindings. This avoids recursive printing when the
+// closure captures itself or large environments.
+func serializeProcShallow(b *bytes.Buffer, v Proc, glob *Env) {
+	b.WriteString("(lambda ")
+	SerializeEx(b, v.Params, glob, glob, nil)
+	b.WriteByte(' ')
+	// Print body using global env to avoid emitting (begin ... (define ...))
+	SerializeEx(b, v.Body, glob, glob, &v)
 	if v.NumVars > 0 {
 		b.WriteByte(' ')
 		b.WriteString(fmt.Sprint(v.NumVars))
