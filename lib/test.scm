@@ -317,6 +317,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define dd (reduce (produceN 6) (lambda (acc i) (set_assoc acc (concat "k" i) i)) ()))
 	(assert (equal? ld dd) true "list vs dict equal content")
 
+	/* FastDict unwrapping in match patterns */
+	(print "testing FastDict match unwrapping ...")
+	(define fd2 (reduce (produceN 10) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
+	/* list? should unwrap FastDict to a flat pair list; size = 20 */
+	(assert (match fd2 (list? xs) (reduce xs (lambda (acc _i) (+ acc 1)) 0) "no") 20 "FastDict list? unwraps to 20 elements")
+	/* cons over FastDict-as-list should take first element "k0" */
+	(assert (match fd2 (cons first rest) first "no") "k0" "FastDict cons head extracts first key")
+	/* verify next key via cons on rest -> "k1" */
+	(assert (match fd2 (cons _ rest) (match rest (cons k1 _) k1 "no") "no") "k1" "FastDict cons rest begins with k1")
+
 	/* Optimizer semantics (constant folding, shadowing, set behavior) */
 	(print "testing optimizer semantics ...")
 

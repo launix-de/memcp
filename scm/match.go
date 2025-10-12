@@ -47,6 +47,7 @@ func scmerAsSlice(v Scmer) ([]Scmer, bool) {
 	if v.IsSlice() {
 		return v.Slice(), true
 	}
+	// Accept FastDict as list of pairs for matching contexts
 	if v.IsFastDict() {
 		fd := v.FastDict()
 		if fd == nil {
