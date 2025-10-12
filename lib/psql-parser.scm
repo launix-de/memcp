@@ -184,7 +184,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "CONCAT" true) "(" (define p (+ psql_expression ",")) ")") (cons 'concat p)) /* TODO: proper implement CAST; for now make vscode work */
 		/* TODO: function call */
 
-		(parser '((atom "COALESCE" true) "(" (define args (* psql_expression ",")) ")") (cons (quote coalesce) args))
+		(parser '((atom "COALESCE" true) "(" (define args (* psql_expression ",")) ")") (cons (quote coalesceNil) args))
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" psql_expression "," psql_expression "," psql_expression ")") nil) /* ignore */
@@ -315,7 +315,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
 			(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
-			(set condition (replace_find_column (coalesce condition true)))
+			(set condition (replace_find_column (coalesceNil condition true)))
 			(set filtercols (extract_columns_for_tblvar tbl condition))
 			(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
 			'((quote scan)
@@ -350,7 +350,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				expr
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set condition (replace_find_column (coalesce condition true)))
+			(set condition (replace_find_column (coalesceNil condition true)))
 			(set filtercols (extract_columns_for_tblvar tbl condition))
 			'((quote scan)
 				(coalesce schema2 schema)
