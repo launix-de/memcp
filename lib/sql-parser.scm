@@ -194,7 +194,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "CONCAT" true) "(" (define p (+ sql_expression ",")) ")") (cons 'concat p)) /* TODO: proper implement CAST; for now make vscode work */
 		/* TODO: function call */
 
-		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesce) args))
+		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesceNil) args))
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
 		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */
@@ -327,7 +327,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
 			(set cols (map_assoc (merge cols) (lambda (col expr) (replace_find_column expr))))
-			(set condition (replace_find_column (coalesce condition true)))
+			(set condition (replace_find_column (coalesceNil condition true)))
 			(set filtercols (extract_columns_for_tblvar tbl condition))
 			(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
 			'((quote scan)
@@ -362,7 +362,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				expr
 			)))
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
-			(set condition (replace_find_column (coalesce condition true)))
+			(set condition (replace_find_column (coalesceNil condition true)))
 			(set filtercols (extract_columns_for_tblvar tbl condition))
 			'((quote scan)
 				(coalesce schema2 schema)
