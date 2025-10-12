@@ -132,9 +132,11 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		case "nil":
 			return val.IsNil()
 		case "true":
-			return val.Bool()
+			// Strict boolean match: only match literal true
+			return val.IsBool() && val.Bool()
 		case "false":
-			return !val.Bool()
+			// Strict boolean match: only match literal false
+			return val.IsBool() && !val.Bool()
 		default:
 			en.Vars[Symbol(pattern.String())] = val
 			return true
