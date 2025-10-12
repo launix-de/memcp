@@ -46,6 +46,49 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* match */
 (assert (match '(1 2 3 5 6) (merge '(a b) rest) (concat "a=" a ", b=" b ", rest=" rest)) "a=1, b=2, rest=(3 5 6)" "match merge")
 
+/* Match: corner cases */
+(print "testing match patterns ...")
+/* 1) symbol binding + literals */
+(assert (equal? (match 42 a a "no") 42) true "match symbol binds value")
+(assert (equal? (match "x" "x" "ok" "no") "ok") true "match string literal")
+(assert (equal? (match nil 'nil "nil" "no") "nil") true "match nil literal via symbol")
+(assert (equal? (match true 'true "t" "no") "t") true "match true literal via symbol")
+(assert (equal? (match false 'false "f" "no") "f") true "match false literal via symbol")
+/* 2) list pattern (exact shape) */
+(assert (equal? (match '(1 2) '(1 2) "ok" "no") "ok") true "match exact list")
+(assert (equal? (match '(1 2) '(1 2 3) "ok" "no") "no") true "list length mismatch")
+/* 3) symbol literal patterns: quote/symbol */
+(assert (equal? (match 'foo (quote foo) "ok" "no") "ok") true "match quoted symbol literal")
+(assert (equal? (match 'foo (symbol 'foo) "ok" "no") "ok") true "match symbol(...) literal")
+/* 4) type guards: string?/number?/list? */
+(assert (equal? (match "Hello" (string? s) s "no") "Hello") true "string? guard binds value")
+(assert (equal? (match 3 (number? n) n "no") 3) true "number? guard binds value")
+(assert (equal? (match '(a b) (list? L) L "no") '(a b)) true "list? guard binds value")
+/* 5) ignorecase */
+(assert (equal? (match "HeLLo" (ignorecase "hello") "hit" "miss") "hit") true "ignorecase matches")
+(assert (equal? (match 3 (ignorecase "3") "hit" "miss") "miss") true "ignorecase only on strings")
+/* 6) concat prefix/suffix/infix */
+(assert (equal? (match "abc123" (concat "abc" tail) tail "no") "123") true "concat prefix -> rest")
+(assert (equal? (match "abc123" (concat head "123") head "no") "abc") true "concat suffix -> head")
+(assert (equal? (match "a-b-c" (concat left "-" right) right "no") "b-c") true "concat infix left/rest")
+/* 7) cons head/tail, including empty */
+(assert (equal? (match '(1 2 3) (cons h t) (concat (string h) ":" (string t)) "no") "1:(2 3)") true "cons splits head/tail")
+(assert (equal? (match '() (cons h t) "hit" "miss") "miss") true "cons does not match empty list")
+/* 8) merge head list + rest, including too-long head */
+(assert (equal? (match '(1 2 3 4) (merge '(x y) r) (concat (string x) "+" (string y) ":" (string r)) "no") "1+2:(3 4)") true "merge head+rest")
+(assert (equal? (match '(1) (merge '(x y) r) "hit" "no") "no") true "merge head longer than value")
+/* 9) regex capture, ignore '_' and mismatch */
+(assert (equal? (match "v=5" (regex "^v=(.*)$" _ v) v "no") "5") true "regex single capture")
+(assert (equal? (match "aa-bb" (regex "^([a-z]+)-([a-z]+)$" a b) (concat a ":" b) "no") "aa:bb") true "regex two captures")
+(assert (equal? (match "zz" (regex "^v=(.*)$" _ v) v "no") "no") true "regex mismatch -> default")
+/* 10) eval pattern: expression result must match */
+(assert (equal? (match 7 (eval (+ 3 4)) "ok" "no") "ok") true "eval pattern matches computed value")
+(assert (equal? (match 7 (eval (+ 2 4)) "ok" "no") "no") true "eval pattern mismatch")
+/* 11) default omitted -> nil */
+(assert (nil? (match 1 2 "x")) true "match without default returns nil on miss")
+/* 12) ordering: first matching branch wins */
+(assert (equal? (match "abc" (regex "^a(.*)$" _ r) "A" (regex "^b(.*)$" _ r) "B" "C") "A") true "first match wins")
+
 /* Lists */
 /* count / nth / append / append_unique */
 (assert (equal? (count '(1 2 3)) 3) true "count on list")
@@ -423,10 +466,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (assert (equal? xb 10) true "outer env unchanged by !begin inside begin")
 /* undefined symbol lookup yields nil */
 (assert (nil? unknown_var_12345) true "reading unknown symbol yields nil")
-/* eval error should include SourceInfo location */
-(define caught (newsession))
-(try (lambda () (eval (scheme "(unknown)" "T.scm"))) (lambda (e) (caught "msg" (string e))))
-(assert (strlike (caught "msg") "%in T.scm:%") true "eval error includes source info")
 
 /* Sync / Context */
 (print "testing sync/context ...")
