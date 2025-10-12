@@ -142,6 +142,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (not true) false "not true should be false")
 	(assert (not false) true "not false should be true")
 
+	/* Truthiness of quoted symbols in special forms (no type-enforced not) */
+	(assert (if 'false 1 2) 2 "'false treated as falsy in if")
+	(assert (if 'nil 1 2) 2 "'nil treated as falsy in if")
+
 	/* Test for nil? */
 	(assert (nil? nil) true "nil? of nil should be true")
 	(assert (nil? 0) false "nil? of 0 should be false")
@@ -368,6 +372,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(lam_handler "handler" (begin (set old_handler (lam_handler "handler")) (set mid_handler (lambda (req res) (+ 1 (old_handler req res)))) mid_handler))
 	(assert ((lam_handler "handler") 4 7) 13 "nested lambda scope overriding with inner variables")
 
+
+	/* Mixed-type comparison: be forgiving (SQL) — no panic */
+	(try (lambda () (< "x" 1)) (lambda (e) (panicked "cmp-panic" true)))
+	(assert (panicked "cmp-panic") nil "mixed-type comparison should not panic")
 
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
