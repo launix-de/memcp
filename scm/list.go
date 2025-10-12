@@ -84,9 +84,9 @@ func init_list() {
 			DeclarationParameter{"item...", "any", "items to add"},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			// append a b ...: append item b to list a (construct list from item + tail)
+			// append a b ...: append items after a only if not yet present (by Equal)
 			list := a[0].([]Scmer)
-			for _, el := range a {
+			for _, el := range a[1:] {
 				for _, el2 := range list {
 					if Equal(el, el2) {
 						// ignore duplicates

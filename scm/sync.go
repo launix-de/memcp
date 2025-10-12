@@ -172,7 +172,7 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
-		1, 1,
+		0, 0,
 		[]DeclarationParameter{}, "func",
 		func(a ...Scmer) Scmer {
 			var mutex sync.Mutex

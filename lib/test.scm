@@ -46,6 +46,36 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* match */
 (assert (match '(1 2 3 5 6) (merge '(a b) rest) (concat "a=" a ", b=" b ", rest=" rest)) "a=1, b=2, rest=(3 5 6)" "match merge")
 
+/* Lists */
+/* count / nth / append / append_unique */
+(assert (equal? (count '(1 2 3)) 3) true "count on list")
+(assert (equal? (nth '(10 20 30) 1) 20) true "nth returns element")
+(assert (equal? (append '(1 2) 3 4) '(1 2 3 4)) true "append extends list")
+(assert (equal? (append_unique '(1 2 2) 2 3) '(1 2 2 3)) true "append_unique keeps first duplicates only")
+
+/* cons / car / cdr */
+(assert (equal? (cons 1 '(2 3)) '(1 2 3)) true "cons builds list")
+(assert (equal? (car '(9 8 7)) 9) true "car head")
+(assert (equal? (cdr '(9 8 7)) '(8 7)) true "cdr tail")
+
+/* zip / merge / merge_unique */
+(assert (equal? (zip (list (list 1 2) (list 3 4))) (list (list 1 3) (list 2 4))) true "zip list of lists")
+(assert (equal? (merge (list (list 1 2) (list 3))) '(1 2 3)) true "merge flattens")
+(assert (equal? (merge_unique (list (list 1 2) (list 2 3))) '(1 2 3)) true "merge_unique removes duplicates")
+
+/* has? / filter / map / mapIndex / reduce */
+(assert (has? '("a" "b" "c") "b") true "has? finds element")
+(assert (equal? (filter '(1 2 3 4) (lambda (x) (> x 2))) '(3 4)) true "filter keeps >2")
+(assert (equal? (map '(1 2 3) (lambda (x) (+ x x))) '(2 4 6)) true "map doubles")
+(assert (equal? (mapIndex '(10 20) (lambda (i v) (string i))) '("0" "1")) true "mapIndex uses index (stringified)")
+(assert (equal? (reduce '(1 2 3 4) (lambda (acc x) (+ acc x)) 0) 10) true "reduce sums")
+
+/* list? / contains? */
+(assert (list? '(1 2)) true "list? true on list")
+(assert (list? "x") false "list? false on string")
+(assert (contains? '("a" "b") "b") true "contains? present")
+(assert (contains? '("a" "b") "c") false "contains? absent")
+
 /* Tests for scm package */
 /* Tests for alu.go */
 
@@ -53,6 +83,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (assert (number? 42) true "42 should be a number")
 (assert (number? "42") false "\"42\" should not be a number")
 (assert (number? `symbol) false "'symbol' should not be a number")
+
+/* Test for int? (requires int64-producing builtin like size/now) */
+(assert (int? (size "abc")) true "size returns an int")
+(assert (int? 42) false "literal 42 is not an int (parsed as number)")
 
 /* Test for + */
 (assert (+ 1 2) 3 "1 + 2 should be 3")
@@ -198,6 +232,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (assert (equal? (urldecode (urlencode "a b")) "a b") true "url roundtrip")
 (assert (strlike (json_encode_assoc (list "x" 1)) "%\"x\":1%") true "json_encode_assoc contains key and value")
 
+/* string? / substr / simplify / case conversion */
+(assert (string? "foo") true "string? on string")
+(assert (string? 123) false "string? on number")
+(assert (equal? (substr "hello" 1 3) "ell") true "substr with length")
+(assert (equal? (substr "hello" 1) "ello") true "substr to end")
+(assert (equal? (simplify "3.14") 3.14) true "simplify numeric string")
+(assert (equal? (simplify "abc") "abc") true "simplify keeps non-numeric")
+(assert (equal? (toLower "ÄBCd") "äbcd") true "toLower handles letters")
+(assert (equal? (toUpper "ÄBCd") "ÄBCD") true "toUpper handles letters")
+
+/* collate comparator */
+(define less_bin (collate "bin"))
+(assert (less_bin "a" "b") true "bin collation: a<b")
+(assert ((collate "bin" true) "a" "b") false "bin reverse: a<b -> false")
+/* general_ci heuristic places ASCII before non-ASCII class like leading 'aa' */
+(assert ((collate "general_ci") "z" "aa") true "general_ci: ASCII first")
+
+/* SQL unescape */
+(assert (equal? (bin2hex (sql_unescape "a\\nb")) "610a62") true "sql_unescape newline")
+(assert (equal? (sql_unescape "a\\'b") "a'b") true "sql_unescape quote")
+(assert (equal? (bin2hex (sql_unescape "a\\0b")) "610062") true "sql_unescape NUL byte present")
+
+/* json_encode / json_decode */
+(assert (equal? (json_encode '(1 2 3)) "[1,2,3]") true "json_encode list")
+(assert (equal? (nth (json_decode "[1,2,3]") 1) 2) true "json_decode array access")
+(define jd (json_decode "{\"a\":1,\"b\":2}"))
+(assert (equal? (jd "a") 1) true "json_decode assoc getter")
+
 /* hex/bin encode-decode */
 (assert (equal? (bin2hex "AB") "4142") true "bin2hex encodes bytes to hex")
 (assert (equal? (hex2bin "414243") "ABC") true "hex2bin decodes hex to bytes")
@@ -214,12 +276,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* two independently generated strings should differ (overwhelmingly likely) */
 (assert (equal? (randomBytes 32) (randomBytes 32)) false "two random strings must be unequal")
 
+/* Streams */
+(print "testing streams ...")
+(assert (equal? (concat (streamString "abc")) "abc") true "streamString -> concat")
+(assert (equal? (concat (zcat (gzip (streamString "hello")))) "hello") true "gzip+zcat roundtrip")
+(assert (equal? (concat (xzcat (xz (streamString "xyz")))) "xyz") true "xz+xzcat roundtrip")
+
 /* error cases intentionally omitted in unit tests to avoid compile-time constant folding side-effects */
 
 /* Lambda / apply_assoc */
 (print "testing lambdas and apply_assoc ...")
 (assert (equal? ((lambda (x y) (+ x y)) 2 3) 5) true "lambda call")
 (assert (equal? (apply_assoc (lambda (x y) (+ x y)) (list "x" 2 "y" 3)) 5) true "apply_assoc maps assoc args")
+/* apply */
+(assert (equal? (apply + '(1 2 3)) 6) true "apply calls function with list args")
+/* symbol/string */
+(assert (equal? (symbol "foo") 'foo) true "symbol from string")
+(assert (equal? (string 'foo) "foo") true "string from symbol")
 
 /* for loop (functional) */
 (print "testing for loop ...")
@@ -313,6 +386,96 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (assert ((lam_handler "handler") 4 7) 12 "nested lambda scope overriding")
 (lam_handler "handler" (begin (set old_handler (lam_handler "handler")) (set mid_handler (lambda (req res) (+ 1 (old_handler req res)))) mid_handler))
 (assert ((lam_handler "handler") 4 7) 13 "nested lambda scope overriding with inner variables")
+
+/* Eval semantics */
+(print "testing Eval semantics ...")
+/* eval of computed code (list-built call) */
+(assert (equal? (eval (list + 1 2 3)) 6) true "eval applies computed list")
+/* eval on parsed code */
+(assert (equal? (eval (scheme "(+ 2 5)" "eval1.scm")) 7) true "eval scheme AST")
+/* serialize -> scheme -> eval roundtrip */
+(assert (equal? (eval (scheme (serialize (scheme "(+ 3 4)" "ser.scm")))) 7) true "serialize/scheme roundtrip")
+/* quote returns literal data */
+(assert (equal? (quote a) 'a) true "quote symbol")
+(assert (equal? '(1 2) (list 1 2)) true "literal list equals built list")
+/* if multi-branch and else */
+(assert (equal? (if false 1 true 2 3) 2) true "if selects first true branch")
+(assert (equal? (if false 1 false 2 3) 3) true "if else branch")
+/* and/or short-circuit evaluation with side-effect check via session */
+(define sc (newsession))
+(sc "a" 0)
+(and false (sc "a" 1))
+(assert (equal? (sc "a") 0) true "and short-circuits second arg")
+(or true (sc "a" 1))
+(assert (equal? (sc "a") 0) true "or short-circuits second arg")
+/* coalesce and coalesceNil */
+(assert (equal? (coalesce nil "" 0 '()) '()) true "coalesce takes last even if falsy")
+(assert (equal? (coalesceNil nil "" 0) "") true "coalesceNil returns first non-nil")
+/* outer evaluates expression in outer environment */
+(define ox_eval 10)
+(assert (equal? (begin (define ox_eval 20) (eval (list 'outer 'ox_eval))) 10) true "outer reads outer var")
+/* begin creates new scope; final value is last expression */
+(assert (equal? (begin (define p 1) (define q (+ p 1)) q) 2) true "begin uses new scope and returns last")
+/* !begin executes in parent env */
+(define xb 10)
+(define rb (begin (define xb 1) (!begin (define xb 2)) xb))
+(assert (equal? rb 2) true "!begin does not create new scope; updates same begin env")
+(assert (equal? xb 10) true "outer env unchanged by !begin inside begin")
+/* undefined symbol lookup yields nil */
+(assert (nil? unknown_var_12345) true "reading unknown symbol yields nil")
+/* eval error should include SourceInfo location */
+(define caught (newsession))
+(try (lambda () (eval (scheme "(unknown)" "T.scm"))) (lambda (e) (caught "msg" (string e))))
+(assert (strlike (caught "msg") "%in T.scm:%") true "eval error includes source info")
+
+/* Sync / Context */
+(print "testing sync/context ...")
+/* newsession key listing */
+(define sess (newsession))
+(sess "a" 1)
+(sess "b" 2)
+(define keys (sess))
+(assert (contains? keys "a") true "session lists key a")
+(assert (contains? keys "b") true "session lists key b")
+/* context + sleep */
+(assert (context (lambda () (sleep 0.005))) true "sleep inside context")
+/* context session */
+(assert (context (lambda () (begin (define s (context "session")) (s "k" 7) (equal? (s "k") 7)))) true "context session set/get")
+/* once */
+(define once_calls (newsession))
+(once_calls "n" 0)
+(define once_fn (once (lambda (x) (begin (once_calls "n" (+ (once_calls "n") 1)) (+ x 1)))))
+(assert (equal? (once_fn 2) 3) true "once first call computes")
+(assert (equal? (once_fn 99) 3) true "once second call returns cached")
+(assert (equal? (once_calls "n") 1) true "once executes only once")
+/* mutex */
+(define mtx (mutex))
+(assert (equal? (mtx (lambda () 42)) 42) true "mutex executes inner function")
+
+/* Scheduler */
+(print "testing scheduler ...")
+(define sched (newsession))
+(sched "done" false)
+(setTimeout (lambda () (sched "done" true)) 1)
+(context (lambda () (sleep 0.01)))
+(assert (sched "done") true "setTimeout fires callback")
+/* clearTimeout */
+(sched "done" false)
+(define tid (setTimeout (lambda () (sched "done" true)) 50))
+(clearTimeout tid)
+(context (lambda () (sleep 0.02)))
+(assert (sched "done") false "clearTimeout cancels callback")
+
+/* Date */
+(print "testing date helpers ...")
+(assert (number? (now)) true "now returns number")
+(assert (>= (now) 1000000000) true "now >= 1e9 epoch")
+
+/* Vectors */
+(print "testing vectors ...")
+(assert (equal? (dot '(1 2 3) '(4 5 6)) 32) true "dot product")
+(assert (equal? (dot '(3 4) '(3 4) "COSINE") 1) true "cosine of identical vectors = 1")
+(assert (equal? (round (* 1000 (dot '(3 4) '(3 4) "EUCLIDEAN"))) 5000) true "euclidean length sqrt(sum) *1000")
 
 
 (print "finished unit tests")

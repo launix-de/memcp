@@ -245,11 +245,11 @@ restart: // goto label because golang is lacking tail recursion, so just overwri
 				en = &en2
 				goto restart
 			case "!begin":
-				// execute begin.. in parent environment
+				// execute begin.. without creating a new environment (use current en)
 				for _, i := range e[1 : len(e)-1] {
 					Eval(i, en)
 				}
-				// tail call optimized version: last begin part will be tailed
+				// tail call optimized version: last part evaluated in current env
 				expression = e[len(e)-1]
 				goto restart
 			case "parallel":
