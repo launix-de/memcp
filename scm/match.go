@@ -44,18 +44,18 @@ func scmerAsSlice(v Scmer) ([]Scmer, bool) {
 	if v.IsSourceInfo() {
 		return scmerAsSlice(v.SourceInfo().value)
 	}
-	if v.IsSlice() {
-		return v.Slice(), true
-	}
-	// Accept FastDict as list of pairs for matching contexts
-	if v.IsFastDict() {
-		fd := v.FastDict()
-		if fd == nil {
-			return []Scmer{}, true
-		}
-		return fd.Pairs, true
-	}
-	return nil, false
+    if v.IsSlice() {
+        return v.Slice(), true
+    }
+    // Treat FastDict as a list of pairs so it behaves like a list in patterns.
+    if v.IsFastDict() {
+        fd := v.FastDict()
+        if fd == nil {
+            return []Scmer{}, true
+        }
+        return fd.Pairs, true
+    }
+    return nil, false
 }
 
 func scmerAsString(v Scmer) (string, bool) {
@@ -149,28 +149,12 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	}
 	if pattern.IsSlice() {
 		p := pattern.Slice()
-		name, ok := scmerSymbolName(p[0])
-		// Structural list matching for nested head patterns like ((symbol ...)...)
-		if ok && (name == "symbol" || name == "quote") {
-			if list, ok2 := scmerAsSlice(val); ok2 {
-				if len(list) != len(p) {
-					return false
-				}
-				for i := range p {
-					if !match(list[i], p[i], en) {
-						return false
-					}
-				}
-				return true
-			}
-		}
-		if !ok {
-			// Restricted structural-list fallback: only when the first subpattern is itself
-			// a list with a recognized pattern head like 'symbol or 'quote. This mirrors
-			// common nested head-matching shapes used by the planner without altering
-			// arbitrary application-like patterns (e.g., '(lambda ...)).
-			if sub, ok2 := scmerAsSlice(p[0]); ok2 {
-				if subHead, ok3 := scmerSymbolName(sub[0]); ok3 && (subHead == "symbol" || subHead == "quote") {
+		// Support nested head wrappers like ((symbol get_column) ...)
+		// by structurally matching lists element-wise when the first
+		// subpattern is itself a (symbol <name>) or (quote <sym>) form.
+		if _, okNested := symbolName(p[0]); !okNested {
+			if sub, ok2 := scmerAsSlice(p[0]); ok2 && len(sub) > 0 {
+				if head, ok3 := symbolName(sub[0]); ok3 && (head == "symbol" || head == "quote") {
 					if list, ok4 := scmerAsSlice(val); ok4 {
 						if len(list) != len(p) {
 							return false
@@ -182,10 +166,12 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 						}
 						return true
 					}
+					return false
 				}
 			}
-			panic("unknown match pattern head: " + SerializeToString(p[0], en))
+			panic("unknown match pattern: " + SerializeToString(pattern, en))
 		}
+		name, _ := symbolName(p[0])
 		switch name {
 		case "eval":
 			// evaluate value and match then
@@ -211,16 +197,16 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			return false
 		case "quote":
 			// symbol literal
-			if sym, ok := scmerSymbolName(val); ok {
-				if expected, ok := scmerSymbolName(p[1]); ok {
+			if sym, ok := symbolName(val); ok {
+				if expected, ok := symbolName(p[1]); ok {
 					return sym == expected
 				}
 			}
 			return false
 		case "symbol":
 			// symbol literal
-			if sym, ok := scmerSymbolName(val); ok {
-				if expected, ok := scmerSymbolName(p[1]); ok {
+			if sym, ok := symbolName(val); ok {
+				if expected, ok := symbolName(p[1]); ok {
 					return sym == expected
 				}
 			}
@@ -257,7 +243,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 				if len(p) == 3 {
 					if subPattern, ok := scmerAsSlice(valueFromPattern(p[1], en)); ok {
 						if len(subPattern) > 0 {
-							if head, ok := scmerSymbolName(subPattern[0]); ok && head == "list" && len(subPattern)-1 <= len(list) {
+							if head, ok := symbolName(subPattern[0]); ok && head == "list" && len(subPattern)-1 <= len(list) {
 								for i := 1; i < len(subPattern); i++ {
 									if !match(list[i-1], subPattern[i], en) {
 										return false
@@ -295,14 +281,14 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					match := re.FindStringSubmatch(str)
 					if match != nil {
 						for i := 0; i <= re.NumSubexp(); i++ {
-							if name, ok := scmerSymbolName(p[i+2]); ok && name == "_" {
+							if name, ok := symbolName(p[i+2]); ok && name == "_" {
 								continue
 							}
 							if idx, ok := p[i+2].Any().(NthLocalVar); ok {
 								en.VarsNumbered[idx] = NewString(match[i])
 								continue
 							}
-							if sym, ok := scmerSymbolName(p[i+2]); ok {
+							if sym, ok := symbolName(p[i+2]); ok {
 								en.Vars[Symbol(sym)] = NewString(match[i])
 								continue
 							}
@@ -335,7 +321,7 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 			en.VarsNumbered[idx] = NewString(str)
 			return true
 		}
-		if name, ok := scmerSymbolName(target); ok {
+		if name, ok := symbolName(target); ok {
 			en.Vars[Symbol(name)] = NewString(str)
 			return true
 		}
@@ -357,7 +343,7 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 					en.VarsNumbered[idx] = NewString(base)
 					return true
 				}
-				if name, ok := scmerSymbolName(first); ok {
+				if name, ok := symbolName(first); ok {
 					en.Vars[Symbol(name)] = NewString(base)
 					return true
 				}
@@ -376,7 +362,7 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 			rest := NewString(str[idx+len(delim):])
 			if id, ok := first.Any().(NthLocalVar); ok {
 				en.VarsNumbered[id] = NewString(prefix)
-			} else if name, ok := scmerSymbolName(first); ok {
+			} else if name, ok := symbolName(first); ok {
 				en.Vars[Symbol(name)] = NewString(prefix)
 			} else {
 				return false
