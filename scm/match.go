@@ -44,18 +44,18 @@ func scmerAsSlice(v Scmer) ([]Scmer, bool) {
 	if v.IsSourceInfo() {
 		return scmerAsSlice(v.SourceInfo().value)
 	}
-    if v.IsSlice() {
-        return v.Slice(), true
-    }
-    // Treat FastDict as a list of pairs so it behaves like a list in patterns.
-    if v.IsFastDict() {
-        fd := v.FastDict()
-        if fd == nil {
-            return []Scmer{}, true
-        }
-        return fd.Pairs, true
-    }
-    return nil, false
+	if v.IsSlice() {
+		return v.Slice(), true
+	}
+	// Treat FastDict as a list of pairs so it behaves like a list in patterns.
+	if v.IsFastDict() {
+		fd := v.FastDict()
+		if fd == nil {
+			return []Scmer{}, true
+		}
+		return fd.Pairs, true
+	}
+	return nil, false
 }
 
 func scmerAsString(v Scmer) (string, bool) {

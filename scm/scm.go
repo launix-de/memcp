@@ -98,25 +98,23 @@ restart:
 	switch auxTag(expression.aux) {
 	case tagSourceInfo:
 		return evalWithSourceInfo(*expression.SourceInfo(), en)
-	case tagNil, tagBool, tagInt, tagFloat, tagString:
-		return expression
-	case tagVector, tagFastDict, tagAny:
-		// Treat runtime vectors, fast dicts, and Any-wrapped values as immediate values
-		return expression
-	case tagFunc:
-		return expression
-	case tagProc:
+	case tagNil, tagBool, tagInt, tagFloat, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc:
+		// literals
 		return expression
 	case tagSymbol:
+		// get named variable
 		return en.FindRead(mustSymbol(expression)).Vars[mustSymbol(expression)]
 	case tagNthLocalVar:
+		// get numbered variable
 		return en.VarsNumbered[expression.NthLocalVar()]
 	case tagSlice:
+		// slice -> function call
 		list := expression.Slice()
 		if len(list) == 0 {
 			return expression
 		}
-		if headSym, ok := list[0].Any().(Symbol); ok {
+		if auxTag(list[0].aux) == tagSymbol {
+			headSym := list[0].Symbol()
 			switch string(headSym) {
 			case "outer":
 				return Eval(list[1], en.Outer)
@@ -232,19 +230,15 @@ restart:
 				return val
 			case "parser":
 				if len(list) > 3 {
-					return NewAny(NewParser(list[1], list[2], list[3], en, true))
+					return NewScmParser(NewParser(list[1], list[2], list[3], en, true))
 				} else if len(list) > 2 {
-					return NewAny(NewParser(list[1], list[2], NewNil(), en, true))
+					return NewScmParser(NewParser(list[1], list[2], NewNil(), en, true))
 				}
-				return NewAny(NewParser(list[1], NewNil(), NewNil(), en, false))
+				return NewScmParser(NewParser(list[1], NewNil(), NewNil(), en, false))
 			case "lambda":
 				params := list[1]
 				if params.IsSourceInfo() {
 					params = params.SourceInfo().value
-				} else if auxTag(params.aux) == tagAny {
-					if si, ok := params.Any().(SourceInfo); ok {
-						params = si.value
-					}
 				}
 				numVars := 0
 				if len(list) > 3 {
@@ -296,34 +290,33 @@ restart:
 			default:
 				goto to_apply
 			}
-			return
+			// control flow will never be here
 		}
 	to_apply:
 		// apply
 		operands := list[1:]
-		procedure := Eval(list[0], en)
-		// Native funcs
-		if auxTag(procedure.aux) == tagFunc {
-			if auxVal(procedure.aux) == funcKindWithEnv {
-				args := make([]Scmer, len(operands))
-				for i, x := range operands {
-					args[i] = Eval(x, en)
-				}
-				return procedure.EnvFunc()(en, args...)
-			}
+		procedure := Eval(list[0], en) // resolve the head (compute lambdas or lookup function from symbol)
+		switch auxTag(procedure.aux) {
+		case tagFunc:
+			// Native funcs
 			args := make([]Scmer, len(operands))
 			for i, x := range operands {
 				args[i] = Eval(x, en)
 			}
 			return procedure.Func()(args...)
-		}
-		// Lambdas (procs)
-		if auxTag(procedure.aux) == tagProc {
+		case tagFuncEnv:
+			// Native funcs with env
+			args := make([]Scmer, len(operands))
+			for i, x := range operands {
+				args[i] = Eval(x, en)
+			}
+			return procedure.FuncEnv()(en, args...)
+		case tagProc:
+			// Lambdas (procs)
 			en, expression = prepareProcCall(procedure.Proc(), operands, en)
 			goto restart
-		}
-		// Associative list
-		if procedure.IsSlice() {
+		case tagSlice:
+			// Associative list
 			p := procedure.Slice()
 			if operands[0].IsNthLocalVar() { // optimized indexed access
 				return p[int(operands[0].NthLocalVar())]
@@ -340,17 +333,13 @@ restart:
 				return p[i]
 			}
 			return NewNil()
-		}
-		// Parser or FastDict
-		if auxTag(procedure.aux) == tagAny {
-			if parser, ok := procedure.Any().(*ScmParser); ok {
-				if len(operands) == 0 {
-					return NewNil()
-				}
-				return parser.Execute(String(Eval(operands[0], en)), en)
+		case tagParser:
+			// Parser or FastDict
+			if len(operands) == 0 {
+				return NewNil()
 			}
-		}
-		if procedure.IsFastDict() {
+			return procedure.Parser().Execute(String(Eval(operands[0], en)), en)
+		case tagFastDict:
 			fd := procedure.FastDict()
 			arg := Eval(operands[0], en)
 			if fd != nil {
@@ -362,10 +351,11 @@ restart:
 				}
 			}
 			return NewNil()
+		default:
+			panic("Unknown function: " + list[0].String())
 		}
-		panic("Unknown function: " + fmt.Sprint(list[0]))
 	default:
-		panic("Unknown expression type - EVAL " + fmt.Sprint(expression))
+		panic("Unknown expression type - EVAL " + expression.String())
 	}
 	return
 }
@@ -496,19 +486,17 @@ func Apply(procedure Scmer, args ...Scmer) (value Scmer) {
 }
 func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 	// Native funcs
-	if auxTag(procedure.aux) == tagFunc {
-		if auxVal(procedure.aux) == funcKindWithEnv {
-			return procedure.EnvFunc()(en, args...)
-		}
+	switch auxTag(procedure.aux) {
+	case tagFuncEnv:
+		return procedure.FuncEnv()(en, args...)
+	case tagFunc:
 		return procedure.Func()(args...)
-	}
 	// Lambdas
-	if auxTag(procedure.aux) == tagProc {
+	case tagProc:
 		env, body := prepareProcCallWithArgs(procedure.Proc(), args)
 		return Eval(body, env)
-	}
 	// Assoc list
-	if procedure.IsSlice() {
+	case tagSlice:
 		p := procedure.Slice()
 		if idx, ok := args[0].Any().(NthLocalVar); ok {
 			return p[int(idx)]
@@ -524,17 +512,10 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 			return p[i]
 		}
 		return NewNil()
-	}
 	// Parser and FastDict via tagAny
-	if auxTag(procedure.aux) == tagAny {
-		if parser, ok := procedure.Any().(*ScmParser); ok {
-			if len(args) == 0 {
-				return NewNil()
-			}
-			return parser.Execute(String(args[0]), en)
-		}
-	}
-	if procedure.IsFastDict() {
+	case tagParser:
+		return procedure.Parser().Execute(String(args[0]), en)
+	case tagFastDict:
 		fd := procedure.FastDict()
 		if fd != nil {
 			if v, ok := fd.Get(args[0]); ok {
@@ -545,8 +526,9 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 			}
 		}
 		return NewNil()
+	default:
+		panic("Unknown function: " + procedure.String())
 	}
-	panic("Unknown function")
 }
 
 // TODO: func optimize für parzielle lambda-Ausdrücke und JIT
