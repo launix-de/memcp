@@ -39,11 +39,6 @@ const (
 	goAllocOverhead     = uint(16)
 )
 
-const (
-	funcKindVariadic = uint64(0)
-	funcKindWithEnv  = uint64(1)
-)
-
 // ComputeSize allows Scmer to satisfy storages that expect Sizable.
 // It approximates the total memory consumption of the value including
 // the inline Scmer representation and any heap allocations the value
@@ -64,7 +59,9 @@ const (
 	tagSlice
 	tagVector // []float64
 	tagFunc
+	tagFuncEnv
 	tagProc
+	tagParser
 	tagNthLocalVar
 	tagSourceInfo
 	tagFastDict
@@ -131,20 +128,32 @@ func NewVector(vec []float64) Scmer {
 	return Scmer{(*byte)(unsafe.Pointer(data)), makeAux(tagVector, uint64(len(vec)))}
 }
 
-func NewFastDictValue(fd *FastDict) Scmer {
-	return Scmer{fd, makeAux(tagFastDict, 0)}
+func NewScmParser(fd *ScmParser) Scmer {
+	var ptr *byte
+	if fd != nil {
+		ptr = (*byte)(unsafe.Pointer(fd))
+	}
+	return Scmer{ptr, makeAux(tagParser, 0)}
+}
+
+func NewFastDict(fd *FastDict) Scmer {
+	var ptr *byte
+	if fd != nil {
+		ptr = (*byte)(unsafe.Pointer(fd))
+	}
+	return Scmer{ptr, makeAux(tagFastDict, 0)}
 }
 
 func NewFunc(fn func(...Scmer) Scmer) Scmer {
 	ptr := new(func(...Scmer) Scmer)
 	*ptr = fn
-	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagFunc, funcKindVariadic)}
+	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagFunc, 0)}
 }
 
-func NewEnvFunc(fn func(*Env, ...Scmer) Scmer) Scmer {
+func NewFuncEnv(fn func(*Env, ...Scmer) Scmer) Scmer {
 	ptr := new(func(*Env, ...Scmer) Scmer)
 	*ptr = fn
-	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagFunc, funcKindWithEnv)}
+	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagFuncEnv, 0)}
 }
 
 func NewProcStruct(p Proc) Scmer {
@@ -220,7 +229,7 @@ func FromAny(v any) Scmer {
 	case func(...Scmer) Scmer:
 		return NewFunc(vv)
 	case func(*Env, ...Scmer) Scmer:
-		return NewEnvFunc(vv)
+		return NewFuncEnv(vv)
 	case Proc:
 		return NewProcStruct(vv)
 	case *Proc:
@@ -237,6 +246,8 @@ func FromAny(v any) Scmer {
 		return NewSourceInfo(*vv)
 	case *FastDict:
 		return NewFastDict(vv)
+	case *ScmParser:
+		return NewScmParser(vv)
 	case FastDict:
 		ptr := new(FastDict)
 		*ptr = vv
@@ -294,6 +305,8 @@ func (s Scmer) IsVector() bool { return auxTag(s.aux) == tagVector }
 
 func (s Scmer) IsFastDict() bool { return auxTag(s.aux) == tagFastDict }
 
+func (s Scmer) IsParser() bool { return auxTag(s.aux) == tagParser }
+
 func (s Scmer) Bool() bool {
 	switch auxTag(s.aux) {
 	case tagNil:
@@ -312,42 +325,16 @@ func (s Scmer) Bool() bool {
 		return len(s.Vector()) > 0
 	case tagFastDict:
 		fd := s.FastDict()
-		if fd == nil {
-			return false
-		}
 		return len(fd.Pairs) > 0
-	case tagAny:
-		v := s.Any()
-		switch vv := v.(type) {
-		case nil:
-			return false
-		case bool:
-			return vv
-		case int:
-			return vv != 0
-		case int64:
-			return vv != 0
-		case float64:
-			return vv != 0
-		case string:
-			return vv != ""
-		case []Scmer:
-			return len(vv) > 0
-		default:
-			return v != nil
-		}
-	case tagFunc:
-		return true
 	default:
-		if auxTag(s.aux) == tagAny {
-			return true
-		}
-		return s.ptr != nil
+		return true
 	}
 }
 
 func (s Scmer) Int() int64 {
 	switch auxTag(s.aux) {
+	case tagNil:
+		return 0
 	case tagInt:
 		return int64(uintptr(unsafe.Pointer(s.ptr)))
 	case tagFloat:
@@ -364,42 +351,17 @@ func (s Scmer) Int() int64 {
 		}
 		return 0
 	case tagAny:
-		switch v := s.Any().(type) {
-		case int:
-			return int64(v)
-		case int8:
-			return int64(v)
-		case int16:
-			return int64(v)
-		case int32:
-			return int64(v)
-		case int64:
-			return v
-		case uint:
-			return int64(v)
-		case uint8:
-			return int64(v)
-		case uint16:
-			return int64(v)
-		case uint32:
-			return int64(v)
-		case uint64:
-			return int64(v)
-		case float32:
-			return int64(v)
-		case float64:
-			return int64(v)
-		case string:
-			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
-				return i
-			}
-		}
+		return 1
+	default:
+		return 1
 	}
 	return 0
 }
 
 func (s Scmer) Float() float64 {
 	switch auxTag(s.aux) {
+	case tagNil:
+		return 0.0
 	case tagFloat:
 		return math.Float64frombits(uint64(uintptr(unsafe.Pointer(s.ptr))))
 	case tagInt:
@@ -415,39 +377,9 @@ func (s Scmer) Float() float64 {
 			return 1.0
 		}
 		return 0.0
-	case tagAny:
-		switch v := s.Any().(type) {
-		case int:
-			return float64(v)
-		case int8:
-			return float64(v)
-		case int16:
-			return float64(v)
-		case int32:
-			return float64(v)
-		case int64:
-			return float64(v)
-		case uint:
-			return float64(v)
-		case uint8:
-			return float64(v)
-		case uint16:
-			return float64(v)
-		case uint32:
-			return float64(v)
-		case uint64:
-			return float64(v)
-		case float32:
-			return float64(v)
-		case float64:
-			return v
-		case string:
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				return f
-			}
-		}
+	default:
+		return 1.0
 	}
-	return 0.0
 }
 
 func (s Scmer) String() string {
@@ -467,6 +399,12 @@ func (s Scmer) String() string {
 	case tagNil:
 		return "nil"
 	case tagFunc:
+		decl := DeclarationForValue(s)
+		if decl != nil {
+			return decl.Name
+		}
+		return "[func]"
+	case tagFuncEnv:
 		return "[func]"
 	case tagSlice:
 		sl := s.Slice()
@@ -493,6 +431,9 @@ func (s Scmer) String() string {
 			parts[i] = el.String()
 		}
 		return "(" + strings.Join(parts, " ") + ")"
+	case tagParser:
+		return fmt.Sprint(s.Parser())
+		return "[parser]"
 	case tagSourceInfo:
 		return s.SourceInfo().String()
 	default:
@@ -544,21 +485,25 @@ func (s Scmer) FastDict() *FastDict {
 	if auxTag(s.aux) != tagFastDict {
 		panic("not fastdict")
 	}
-	if s.ptr == nil {
-		return nil
-	}
 	return (*FastDict)(unsafe.Pointer(s.ptr))
 }
 
+func (s Scmer) Parser() *ScmParser {
+	if auxTag(s.aux) != tagParser {
+		panic("not parser")
+	}
+	return (*ScmParser)(unsafe.Pointer(s.ptr))
+}
+
 func (s Scmer) Func() func(...Scmer) Scmer {
-	if auxTag(s.aux) != tagFunc || auxVal(s.aux) != funcKindVariadic {
+	if auxTag(s.aux) != tagFunc {
 		panic("not function")
 	}
 	return *(*func(...Scmer) Scmer)(unsafe.Pointer(s.ptr))
 }
 
-func (s Scmer) EnvFunc() func(*Env, ...Scmer) Scmer {
-	if auxTag(s.aux) != tagFunc || auxVal(s.aux) != funcKindWithEnv {
+func (s Scmer) FuncEnv() func(*Env, ...Scmer) Scmer {
+	if auxTag(s.aux) != tagFuncEnv {
 		panic("not environment function")
 	}
 	return *(*func(*Env, ...Scmer) Scmer)(unsafe.Pointer(s.ptr))
@@ -592,11 +537,11 @@ func (s Scmer) SourceInfo() *SourceInfo {
 }
 
 // Symbol returns the Scheme symbol value as Go string.
-func (s Scmer) Symbol() string {
+func (s Scmer) Symbol() Symbol {
 	if auxTag(s.aux) != tagSymbol {
 		panic("not symbol")
 	}
-	return s.String()
+	return Symbol(s.String())
 }
 
 // Any unwraps the Scmer into a Go value for legacy code.
@@ -619,10 +564,9 @@ func (s Scmer) Any() any {
 	case tagVector:
 		return s.Vector()
 	case tagFunc:
-		if auxVal(s.aux) == funcKindWithEnv {
-			return s.EnvFunc()
-		}
 		return s.Func()
+	case tagFuncEnv:
+		return s.FuncEnv()
 	case tagProc:
 		return s.Proc()
 	case tagNthLocalVar:
@@ -631,6 +575,8 @@ func (s Scmer) Any() any {
 		return *s.SourceInfo()
 	case tagFastDict:
 		return s.FastDict()
+	case tagParser:
+		return s.Parser()
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
 	default:
@@ -650,28 +596,6 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 	// Custom, stable encoding for persistence of SCM values.
 	var toJSONable func(Scmer) any
 	// helper: find name of native func in Globalenv
-	nativeName := func(fn any) (string, bool) {
-		ptr := reflect.ValueOf(fn).Pointer()
-		en := &Globalenv
-		for en != nil {
-			for k, v := range en.Vars {
-				if auxTag(v.aux) == tagFunc {
-					var other any
-					if auxVal(v.aux) == funcKindWithEnv {
-						other = v.EnvFunc()
-					} else {
-						other = v.Func()
-					}
-					ov := reflect.ValueOf(other)
-					if ov.Kind() == reflect.Func && ov.Pointer() == ptr {
-						return string(k), true
-					}
-				}
-			}
-			en = en.Outer
-		}
-		return "", false
-	}
 	toJSONable = func(v Scmer) any {
 		switch auxTag(v.aux) {
 		case tagNil:
@@ -704,19 +628,18 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 				out[i] = toJSONable(it)
 			}
 			return out
+		case tagParser:
+			return map[string]any{"parser": "TODO"}
 		case tagVector:
 			return v.Vector()
 		case tagFunc:
 			// Try to encode as the symbolic name if known; otherwise as "?"
-			if auxVal(v.aux) == funcKindWithEnv {
-				if name, ok := nativeName(v.EnvFunc()); ok {
-					return map[string]any{"symbol": name}
-				}
-			} else {
-				if name, ok := nativeName(v.Func()); ok {
-					return map[string]any{"symbol": name}
-				}
+			decl := DeclarationForValue(v)
+			if decl != nil {
+				return map[string]any{"symbol": decl.Name}
 			}
+			return map[string]any{"symbol": "?"}
+		case tagFuncEnv:
 			return map[string]any{"symbol": "?"}
 		case tagProc:
 			p := v.Proc()
@@ -730,60 +653,6 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			return arr
 		case tagSourceInfo:
 			return toJSONable(v.SourceInfo().value)
-		case tagAny:
-			a := v.Any()
-			switch vv := a.(type) {
-			case nil:
-				return nil
-			case bool, string:
-				return vv
-			case int:
-				return int64(vv)
-			case int8:
-				return int64(vv)
-			case int16:
-				return int64(vv)
-			case int32:
-				return int64(vv)
-			case int64:
-				return vv
-			case uint:
-				return int64(vv)
-			case uint8:
-				return int64(vv)
-			case uint16:
-				return int64(vv)
-			case uint32:
-				return int64(vv)
-			case uint64:
-				return int64(vv)
-			case float32:
-				return float64(vv)
-			case float64:
-				return vv
-			case Symbol:
-				return map[string]any{"symbol": string(vv)}
-			case Proc:
-				return toJSONable(NewProcStruct(vv))
-			case *Proc:
-				if vv == nil {
-					return nil
-				}
-				return toJSONable(NewProc(vv))
-			case func(...Scmer) Scmer:
-				if name, ok := nativeName(vv); ok {
-					return map[string]any{"symbol": name}
-				}
-				return map[string]any{"symbol": "?"}
-			case func(*Env, ...Scmer) Scmer:
-				if name, ok := nativeName(vv); ok {
-					return map[string]any{"symbol": name}
-				}
-				return map[string]any{"symbol": "?"}
-			default:
-				// Fallback: stringify
-				return fmt.Sprintf("%v", vv)
-			}
 		default:
 			// Unknown custom tag -> fall back to string form
 			return v.String()
@@ -832,6 +701,8 @@ func (s *Scmer) Write(w io.Writer) {
 			list[i].Write(w)
 		}
 		io.WriteString(w, ")")
+	case tagParser:
+		io.WriteString(w, "[parser]")
 	case tagFastDict:
 		io.WriteString(w, "(")
 		fd := s.FastDict()

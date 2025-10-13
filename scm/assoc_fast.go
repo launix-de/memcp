@@ -17,10 +17,11 @@ Copyright (C) 2025  Carl-Philip Hänsch
 package scm
 
 import (
-	"encoding/binary"
-	"hash/maphash"
 	"math"
+	"unsafe"
 	"reflect"
+	"hash/maphash"
+	"encoding/binary"
 )
 
 // Stable seed for hashing to ensure consistent indices across Set/Get calls.
@@ -109,17 +110,11 @@ func HashKey(k Scmer) uint64 {
 				binary.LittleEndian.PutUint64(bb[:], math.Float64bits(el))
 				h.Write(bb[:])
 			}
-		case tagFunc:
+		case tagFunc, tagFuncEnv:
 			h.WriteByte(8)
 			// Hash native function by pointer to ensure stability
-			var ptr uintptr
-			if auxVal(v.aux) == funcKindWithEnv {
-				ptr = reflect.ValueOf(v.EnvFunc()).Pointer()
-			} else {
-				ptr = reflect.ValueOf(v.Func()).Pointer()
-			}
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], uint64(ptr))
+			binary.LittleEndian.PutUint64(b[:], uint64(uintptr(unsafe.Pointer(v.ptr))))
 			h.Write(b[:])
 		case tagSourceInfo:
 			writeScmer(v.SourceInfo().value)

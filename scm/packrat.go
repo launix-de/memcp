@@ -49,42 +49,16 @@ func parserSymbolEquals(v Scmer, name string) bool {
 	return v.IsSymbol() && v.String() == name
 }
 
-func parserSymbolName(v Scmer) (string, bool) {
-	if v.IsSymbol() {
-		return v.String(), true
-	}
-	if auxTag(v.aux) == tagAny {
-		if sym, ok := v.Any().(Symbol); ok {
-			return string(sym), true
-		}
-	}
-	return "", false
-}
-
-func parserSlice(v Scmer) ([]Scmer, bool) {
-	if v.IsSlice() {
-		return v.Slice(), true
-	}
-	if v.IsFastDict() {
-		fd := v.FastDict()
-		if fd == nil {
-			return []Scmer{}, true
-		}
-		return fd.Pairs, true
-	}
-	return nil, false
-}
-
 func scmerToParser(v Scmer) packrat.Parser[*parserResult] {
-	if auxTag(v.aux) == tagAny {
+	switch auxTag(v.aux) {
+	case tagAny:
 		if parser, ok := v.Any().(packrat.Parser[*parserResult]); ok {
 			return parser
 		}
-		if sp, ok := v.Any().(*ScmParser); ok {
-			return sp
-		}
+	case tagParser:
+		return v.Parser()
 	}
-	panic("value is not a parser")
+	panic("value is not a parser: " + v.String())
 }
 
 // allows self recursion on parsers
@@ -193,43 +167,32 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 	if ignoreResult {
 		merger = mergeParserResultsNil
 	}
-	if syntax.IsSourceInfo() {
+	switch auxTag(syntax.aux) {
+	case tagSourceInfo:
 		return parseSyntax(syntax.SourceInfo().value, en, ome, ignoreResult)
-	}
-	if syntax.IsFastDict() {
+	case tagFastDict:
 		fd := syntax.FastDict()
 		if fd == nil {
 			syntax = NewSlice([]Scmer{})
 		} else {
 			syntax = NewSlice(fd.Pairs)
 		}
-	}
-	if auxTag(syntax.aux) == tagAny {
-		if si, ok := syntax.Any().(SourceInfo); ok {
-			return parseSyntax(si.value, en, ome, ignoreResult)
-		}
+	case tagParser:
+		return syntax.Parser()
+	case tagAny:
 		if p, ok := syntax.Any().(packrat.Parser[*parserResult]); ok {
 			return p
 		}
-		if sp, ok := syntax.Any().(*ScmParser); ok {
-			return sp
-		}
-		if sym, ok := syntax.Any().(Symbol); ok {
-			syntax = NewSymbol(string(sym))
-		}
-
-	}
-	if syntax.IsString() {
+	case tagString:
 		return packrat.NewAtomParser(&parserResult{value: syntax, env: nil}, syntax.String(), false, true)
-	}
-	if syntax.IsSymbol() {
-		sym := Symbol(syntax.String())
+	case tagSymbol:
+		sym := syntax.Symbol()
 		switch sym {
-		case Symbol("$"):
+		case "$":
 			return packrat.NewEndParser(&parserResult{value: NewNil(), env: nil}, true)
-		case Symbol("empty"):
+		case "empty":
 			return packrat.NewEmptyParser(&parserResult{value: NewNil(), env: nil})
-		case Symbol("rest"):
+		case "rest":
 			return packrat.NewRestParser(func(s string) *parserResult { return &parserResult{value: NewString(s), env: nil} })
 		}
 		if ome != nil {
@@ -241,22 +204,21 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 			return &UndefinedParser{En: en, Sym: sym}
 		}
 		return scmerToParser(val)
-	}
-	if symVar, ok := syntax.Any().(NthLocalVar); ok {
+	case tagNthLocalVar:
 		if ome != nil {
 			return nil
 		}
-		if parserScmer := en.VarsNumbered[symVar]; !parserScmer.IsNil() {
+		if parserScmer := en.VarsNumbered[syntax.NthLocalVar()]; !parserScmer.IsNil() {
 			return scmerToParser(parserScmer)
 		}
 		panic("error invalid parser: " + syntax.String())
-	}
-	if list, ok := parserSlice(syntax); ok {
+	case tagSlice:
+		list := syntax.Slice()
 		if len(list) == 0 {
 			panic("invalid parser ()")
 		}
-		if name, ok := parserSymbolName(list[0]); ok {
-			switch name {
+		if list[0].IsSymbol() {
+			switch list[0].Symbol() {
 			case "parser":
 				var resulter Scmer = NewNil()
 				if len(list) > 2 {
