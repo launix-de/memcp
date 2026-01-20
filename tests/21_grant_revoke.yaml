@@ -92,4 +92,46 @@ test_cases:
     sql: "REVOKE SELECT ON `memcp-tests`.* FROM alice"
     expect: { affected_rows: 1 }
 
+  # === PostgreSQL permissions syntax (no-ops beyond db access) ===
+  - name: "psql grant connect on database (db access)"
+    syntax: postgresql
+    sql: "GRANT CONNECT ON DATABASE \"memcp-tests\" TO alice"
+    expect:
+      affected_rows: 1
+
+  - name: "psql revoke connect on database (db access)"
+    syntax: postgresql
+    sql: "REVOKE CONNECT ON DATABASE \"memcp-tests\" FROM alice"
+    expect:
+      affected_rows: 1
+
+  - name: "psql grant usage on schema (noop)"
+    syntax: postgresql
+    sql: "GRANT USAGE ON SCHEMA public TO alice"
+    expect:
+      affected_rows: 1
+
+  - name: "psql grant select on table (noop)"
+    syntax: postgresql
+    sql: "GRANT SELECT ON TABLE t TO alice"
+    expect:
+      error: true
+
+  - name: "psql revoke select on table (noop)"
+    syntax: postgresql
+    sql: "REVOKE SELECT ON TABLE t FROM alice"
+    expect:
+      error: true
+
+  - name: "psql grant all on all tables in schema (noop)"
+    syntax: postgresql
+    sql: "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO alice"
+    expect:
+      affected_rows: 1
+
+  - name: "psql revoke all on all tables in schema (noop)"
+    syntax: postgresql
+    sql: "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM alice"
+    expect: {}
+
 cleanup: []
