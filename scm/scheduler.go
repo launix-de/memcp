@@ -266,9 +266,9 @@ func setTimeout(a ...Scmer) Scmer {
 		})
 	})
 	if !ok {
-		return false
+		return NewBool(false)
 	}
-	return int64(id)
+	return NewInt(int64(id))
 }
 
 func clearTimeout(a ...Scmer) Scmer {
@@ -276,5 +276,5 @@ func clearTimeout(a ...Scmer) Scmer {
 		panic("clearTimeout expects one argument")
 	}
 	id := uint64(ToInt(a[0]))
-	return DefaultScheduler.Clear(id)
+	return NewBool(DefaultScheduler.Clear(id))
 }

@@ -17,11 +17,11 @@ Copyright (C) 2025  Carl-Philip Hänsch
 package scm
 
 import (
-	"math"
-	"unsafe"
-	"reflect"
-	"hash/maphash"
 	"encoding/binary"
+	"hash/maphash"
+	"math"
+	"reflect"
+	"unsafe"
 )
 
 // Stable seed for hashing to ensure consistent indices across Set/Get calls.
@@ -39,7 +39,7 @@ type FastDict struct {
 	index map[uint64][]int // hash -> positions (indices into Pairs, even only)
 }
 
-func NewFastDict(capacityPairs int) *FastDict {
+func NewFastDictValue(capacityPairs int) *FastDict {
 	if capacityPairs < 0 {
 		capacityPairs = 0
 	}
