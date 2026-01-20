@@ -128,6 +128,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 
 	(define psql_expression2 (parser (or
+		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
+		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") '('inner_select_in a sub))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") '('not ('inner_select_in a sub)))
 		(parser '((define a psql_expression3) "==" (define b psql_expression2)) '((quote equal??) a b))
 		(parser '((define a psql_expression3) "=" (define b psql_expression2)) '((quote equal??) a b))
 		(parser '((define a psql_expression3) "<>" (define b psql_expression2)) '((quote not) '((quote equal?) a b)))
@@ -163,8 +166,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 
 	(define psql_expression6 (parser (or
+		/* Scalar subselect in expressions: (SELECT ...) */
+		(parser '("(" (define sub psql_select) ")") '('inner_select sub))
 		(parser '("(" (define a psql_expression) ")") a)
 
+		/* EXISTS (SELECT ...) */
+		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") '('inner_select_exists sub))
 		(parser '((atom "CASE" true) (define conditions (* (parser '((atom "WHEN" true) (define a psql_expression) (atom "THEN" true) (define b psql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch psql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
@@ -185,6 +192,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* TODO: function call */
 
 		(parser '((atom "COALESCE" true) "(" (define args (* psql_expression ",")) ")") (cons (quote coalesceNil) args))
+		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
+		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))
+		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */
+		(parser '((atom "IF" true) "(" (define cond psql_expression) "," (define t psql_expression) "," (define f psql_expression) ")") '((quote if) cond t f))
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e psql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" psql_expression "," psql_expression "," psql_expression ")") nil) /* ignore */
@@ -196,6 +207,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (atom "ON" true) true)
 		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var psql_identifier_unquoted)) '('session var))
+		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var */
+		(parser '((atom "@@" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true)) (? (atom "." true))) (define var psql_identifier_unquoted)) '('globalvars var))
 		(parser '((atom "@@" true) (define var psql_identifier_unquoted)) '('globalvars var))
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* psql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
 		psql_number
@@ -246,11 +259,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(?
 			(atom "FROM" true)
 			(define from (+ tabledefs ","))
-			(?
-				(atom "WHERE" true)
-				(define condition psql_expression)
-			)
 		)
+		(define condition (or (parser '(
+			(atom "WHERE" true)
+			(define condition2 psql_expression)
+		) condition2) (empty true)))
 		/* GROUP BY + HAVING */
 		(?
 			(atom "GROUP" true)
@@ -395,7 +408,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
-			'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
+			'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))
 	)))
 
 	(define psql_insert_select (parser '(
@@ -430,7 +443,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			'('begin
-				'('set 'resultrow '('lambda '('item) '('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))))
+				'('set 'resultrow '('lambda '('item) '('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
 				(apply build_queryplan (apply untangle_query inner))
 			)
 	)))
@@ -547,6 +560,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query psql_select) (apply build_queryplan (apply untangle_query query)))
+		(parser '((atom "DESCRIBE" true) (define query psql_select)) '('resultrow '('list "code" (serialize (apply build_queryplan (apply untangle_query query))))))
 		psql_insert_into
 		psql_insert_select
 		psql_create_table
@@ -634,6 +648,35 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DESCRIBE" true) (define id psql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
 		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define id psql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line))))) /* TODO: Field Type Collation Null Key Default Extra(auto_increment) Privileges Comment */
 
+		/* SHOW ENGINES: list engines recognized by CREATE/ALTER TABLE */
+		(parser '((atom "SHOW" true) (atom "ENGINES" true)) (cons '!begin '(
+			'((quote resultrow) '((quote list) "Engine" "SAFE"    "Support" "DEFAULT" "Comment" "Safe durable engine"              "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "LOGGING" "Support" "YES"     "Comment" "Append-only logging engine"      "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "MEMORY"  "Support" "YES"     "Comment" "In-memory engine"               "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "SLOPPY"  "Support" "YES"     "Comment" "Relaxed engine"                 "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "MyISAM"  "Support" "YES"     "Comment" "Alias of SAFE"                  "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "InnoDB"  "Support" "YES"     "Comment" "Alias of SAFE"                  "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "CSV"     "Support" "YES"     "Comment" "Alias of SAFE"                  "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+		)))
+		/* SHOW {CHARSET|CHARACTER SET} [LIKE pattern] */
+		(parser '((atom "SHOW" true) (or (atom "CHARSET" true) '((atom "CHARACTER" true) (atom "SET" true))) (? (atom "LIKE" true) (define likepattern psql_expression))) (cons '!begin '(
+			'((quote resultrow) '((quote list) "Charset" "utf8mb4" "Description" "UTF-8 Unicode" "Default collation" "utf8mb4_general_ci" "Maxlen" 4))
+		)))
+		/* SHOW COLLATION [LIKE pattern] */
+		(parser '((atom "SHOW" true) (atom "COLLATION" true) (? (atom "LIKE" true) (define likepattern psql_expression))) (cons '!begin '(
+			'((quote resultrow) '((quote list) "Collation" "utf8mb4_general_ci" "Charset" "utf8mb4" "Id" 255 "Default" "YES" "Compiled" "YES" "Sortlen" 1))
+			'((quote resultrow) '((quote list) "Collation" "utf8mb4_bin"        "Charset" "utf8mb4" "Id" 254 "Default" "NO"  "Compiled" "YES" "Sortlen" 1))
+		)))
+		/* SHOW PLUGINS: return empty set (ok for most clients) */
+		(parser '((atom "SHOW" true) (atom "PLUGINS" true)) (quote true))
+
+		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] */
+		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern psql_expression))) (cons '!begin '(
+			'((quote resultrow) '((quote list) "Variable_name" "version"               "Value" "0.9"))
+			'((quote resultrow) '((quote list) "Variable_name" "character_set_server" "Value" "utf8mb4"))
+			'((quote resultrow) '((quote list) "Variable_name" "collation_server"     "Value" "utf8mb4_general_ci"))
+			'((quote resultrow) '((quote list) "Variable_name" "lower_case_table_names" "Value" 0))
+		)))
 		(parser '((atom "SHOW" true) (atom "VARIABLES" true)) '((quote map_assoc) '((quote list) "version" "0.9") '((quote lambda) '((quote key) (quote value)) '((quote resultrow) '((quote list) "Variable_name" (quote key) "Value" (quote value))))))
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset psql_expression)) (quote true)) /* ignore */
 
@@ -700,4 +743,3 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		((state "line") line)
 	)) "\n")
 )))
-)

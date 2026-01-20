@@ -201,10 +201,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "IF" true) "(" (define cond sql_expression) "," (define t sql_expression) "," (define f sql_expression) ")") '((quote if) cond t f))
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
+		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" sql_expression "," sql_expression "," sql_expression ")") nil) /* ignore */
+		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" sql_identifier "." (define key sql_identifier) "'" "," (define val sql_expression) "," sql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn schema tbl col "auto_increment" val) (error "unknown pg_catalog key: " key)))
 
 		(parser (atom "NULL" true) 'nil)
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
+		(parser (atom "ON" true) true)
+		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
 		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var */
 		(parser '((atom "@@" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true)) (? (atom "." true))) (define var sql_identifier_unquoted)) '('globalvars var))
@@ -663,6 +667,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			))
 			"(" (define cols (+ sql_identifier ",")) ")"
 			(? (atom "USING" true) (atom "BTREE" true))
+		) "ignore")
+		(parser '((atom "CREATE" true)
+			(or (atom "INDEX" true) '((atom "UNIQUE" true) (atom "INDEX" true)))
+			(define idx sql_identifier)
+			(atom "ON" true)
+			(define tbl (or
+				(parser '((define schema sql_identifier) (atom "." true) (define t sql_identifier)) '(schema t))
+				(parser (define t sql_identifier) '(schema t))
+			))
+			(atom "USING" true) (atom "BTREE" true)
+			"(" (define cols (+ sql_identifier ",")) ")"
 		) "ignore")
 
 		/* TODO: draw transaction number, commit */

@@ -118,6 +118,81 @@ test_cases:
       data:
         - plain: "foo"
 
+  # === POSTGRESQL SYNTAX COMPATIBILITY ===
+  - name: "PostgreSQL quoted identifiers"
+    syntax: postgresql
+    sql: |
+      CREATE TABLE "pg_users" (
+        "id" INT PRIMARY KEY,
+        "name" TEXT
+      )
+    expect:
+      affected_rows: 1
+
+  - name: "PostgreSQL INSERT with quoted identifiers"
+    syntax: postgresql
+    sql: |
+      INSERT INTO "pg_users" ("id", "name") VALUES (1, 'Ada')
+    expect:
+      affected_rows: 1
+
+  - name: "PostgreSQL SELECT with quoted identifiers"
+    syntax: postgresql
+    sql: |
+      SELECT "id", "name" FROM "pg_users"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          name: "Ada"
+
+  - name: "PostgreSQL scalar subselect"
+    syntax: postgresql
+    sql: |
+      SELECT (SELECT 1) AS v
+    expect:
+      error: true
+
+  - name: "PostgreSQL IN (SELECT ...)"
+    syntax: postgresql
+    sql: |
+      SELECT 1 IN (SELECT 1) AS ok
+    expect:
+      error: true
+
+  - name: "PostgreSQL EXISTS (SELECT ...)"
+    syntax: postgresql
+    sql: |
+      SELECT EXISTS (SELECT 1) AS ok
+    expect:
+      error: true
+
+  - name: "PostgreSQL ON/OFF literals"
+    syntax: postgresql
+    sql: |
+      SELECT ON AS v_on, OFF AS v_off
+    expect:
+      rows: 1
+      data:
+        - v_on: true
+          v_off: false
+
+  - name: "PostgreSQL pg_catalog.set_config ignored"
+    syntax: postgresql
+    sql: |
+      SELECT pg_catalog.set_config('search_path', 'memcp-tests', false) AS v
+    expect:
+      rows: 1
+      data:
+        - v: null
+
+  - name: "PostgreSQL DROP TABLE with quoted identifiers"
+    syntax: postgresql
+    sql: |
+      DROP TABLE "pg_users"
+    expect:
+      affected_rows: 1
+
   - name: "Base64 roundtrip"
     sql: "SELECT FROM_BASE64(TO_BASE64('Hello, world!')) AS plain"
     expect:

@@ -59,6 +59,7 @@ class SQLTestRunner:
         self._ensured_dbs = set()
         self.suite_metadata = {}
         self._restart_handler = None  # callable to restart memcp between tests
+        self.suite_syntax = None
 
     def set_restart_handler(self, fn):
         """Install a restart handler callable that restarts MemCP (returns True on success)."""
@@ -124,11 +125,13 @@ class SQLTestRunner:
         except Exception:
             pass
 
-    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None) -> Optional[requests.Response]:
+    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None) -> Optional[requests.Response]:
         # proactively ensure database exists (works for connect-only too)
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
-        url = f"{self.base_url}/sql/{encoded_db}"
+        normalized = self._normalize_syntax(syntax)
+        route = "psql" if normalized == "postgresql" else "sql"
+        url = f"{self.base_url}/{route}/{encoded_db}"
         headers = auth_header if auth_header is not None else self.auth_header
         # Try request; if connection fails, wait for memcp to be ready and retry a few times
         for attempt in range(5):
@@ -142,6 +145,16 @@ class SQLTestRunner:
                     port = 4321
                 wait_for_memcp(port, timeout=5)
         return None
+
+    def _normalize_syntax(self, syntax: Optional[str]) -> Optional[str]:
+        if not syntax:
+            return None
+        syntax_lower = str(syntax).strip().lower()
+        if syntax_lower in ["mysql", "default"]:
+            return None
+        if syntax_lower in ["postgres", "postgresql", "psql"]:
+            return "postgresql"
+        return syntax_lower
 
     def execute_sparql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None) -> Optional[requests.Response]:
         try:
@@ -193,6 +206,8 @@ class SQLTestRunner:
         tc_pass = test_case.get("password") or self.suite_metadata.get("password") or self.password
         creds = f"{tc_user}:{tc_pass}".encode()
         auth_header = {"Authorization": f"Basic {b64encode(creds).decode()}"}
+        test_syntax = test_case.get("syntax")
+        active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
 
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
@@ -203,7 +218,7 @@ class SQLTestRunner:
         response: Optional[requests.Response]
         if query and query.strip().upper() == "SHUTDOWN":
             # Issue shutdown
-            resp = self.execute_sql(database, query, auth_header)
+            resp = self.execute_sql(database, query, auth_header, active_syntax)
             if resp is not None and resp.status_code >= 500:
                 response = resp
             else:
@@ -216,7 +231,7 @@ class SQLTestRunner:
             response = resp
         else:
             # Execute query
-            response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header)
+            response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
         if response is None:
             return self._record_fail(name, "No response", query, None, None)
 
@@ -270,14 +285,14 @@ class SQLTestRunner:
         self.current_database = database
         for step in setup_steps:
             self.setup_operations.append(step)
-            resp = self.execute_sql(database, step['sql'])
+            resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
             if resp is None or resp.status_code not in [200, 500]:
                 return False
         return True
 
     def run_cleanup(self, cleanup_steps: List[Dict], database: str) -> None:
         for step in cleanup_steps:
-            self.execute_sql(database, step['sql'])
+            self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
 
     def cleanup_test_database(self, database: str) -> None:
         try:
@@ -312,6 +327,7 @@ class SQLTestRunner:
 
         metadata = spec.get('metadata', {})
         self.suite_metadata = metadata or {}
+        self.suite_syntax = self._normalize_syntax(self.suite_metadata.get("syntax"))
         database = 'memcp-tests'
 
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
