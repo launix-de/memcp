@@ -146,7 +146,6 @@ if the user is not allowed to access this property, the function will throw an e
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
-					(define formula (parse_psql schema query (sql_policy (req "username"))))
 					((res "header") "Content-Type" "text/plain")
 					(define resultrow (res "jsonl"))
 					(define session (context "session"))
@@ -158,7 +157,25 @@ if the user is not allowed to access this property, the function will throw an e
 						(if (equal? row last_row)
 							true
 							(begin (set last_row row) (original_resultrow row))))))
-					(set query_result (eval (source "SQL Query" 1 1 formula)))
+					(define handled (match query
+						(regex "SELECT\\s+c\\.relname\\s+as\\s+tblname\\s+FROM\\s+pg_catalog\\.pg_class" _)
+						(begin
+							(map (show schema) (lambda (tbl) (resultrow (list "tblname" tbl))))
+							true)
+						(regex "FROM\\s+pg_attribute" _)
+						(match query
+							(regex "c\\.relname\\s*=\\s*'([^']+)'" _ tbl)
+							(begin
+								(map (show schema tbl) (lambda (line) (resultrow line)))
+								true)
+							true)
+						(regex "FROM\\s+pg_indexes" _) true
+						(regex "FROM\\s+pg_constraint" _) true
+						false))
+					(define query_result (if handled nil (begin
+						(define formula (parse_psql schema query (sql_policy (req "username"))))
+						(eval (source "SQL Query" 1 1 formula))
+					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))

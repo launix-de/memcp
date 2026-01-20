@@ -529,6 +529,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(define typeparams psql_column_attributes)
 			) (lambda (id) '((quote createcolumn) schema id col type dimensions (cons 'list typeparams))))
 			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) '((quote altertable) schema id "owner" owner)))
+			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define cname psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
@@ -639,7 +640,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					0
 		)))
 
-		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (atom "USING" true) psql_identifier "(" (define cols (+ psql_identifier ",")) ")") '('createkey schema tbl id unique (cons (quote list) cols)))
+		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")") (if unique '('createkey schema tbl id unique (cons (quote list) cols)) true))
+		(parser '((atom "DROP" true) (atom "INDEX" true) (define id psql_identifier)) true)
 
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true) (? (atom "FROM" true) (define schema psql_identifier))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '((quote resultrow) '((quote list) "Table" (quote tbl))))))

@@ -70,6 +70,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	sql_number
 	sql_string
 )))
+(define sql_index_column (parser (or
+	(parser '((define col sql_identifier) "(" (define len sql_int) ")") col)
+	(parser (define col sql_identifier) col)
+)))
 
 (define parse_sql (lambda (schema s policy) (begin
 
@@ -509,6 +513,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser '((atom "ADD" true) (atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ sql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "ADD" true) (atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2))) */
 			(parser '((atom "ADD" true) (atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) nil) /* ignore index definitions */
+			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define cname (? sql_identifier))) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode))) (lambda (id) true))
+			(parser '((atom "DROP" true) (atom "FOREIGN" true) (atom "KEY" true) (define fk sql_identifier)) (lambda (id) true))
+			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define fk sql_identifier)) (lambda (id) true))
+			(parser '((atom "DROP" true) (atom "PRIMARY" true) (atom "KEY" true)) (lambda (id) true))
+			(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)) (lambda (id) true))
 			(parser '((atom "ADD" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_identifier)
@@ -519,6 +528,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				))
 				(define typeparams sql_column_attributes)
 			) (lambda (id) '((quote createcolumn) schema id col type dimensions (cons 'list typeparams))))
+			(parser '((atom "MODIFY" true) (?(atom "COLUMN" true))
+				(define col sql_identifier)
+				(define type sql_identifier)
+				(define dimensions (or
+					(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
+					(parser '("(" (define a sql_int) ")") '((quote list) a))
+					(parser empty '((quote list)))
+				))
+				(define typeparams sql_column_attributes)
+			) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
+			(parser '((atom "CHANGE" true)
+				(define oldcol sql_identifier)
+				(define col sql_identifier)
+				(define type sql_identifier)
+				(define dimensions (or
+					(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
+					(parser '("(" (define a sql_int) ")") '((quote list) a))
+					(parser empty '((quote list)))
+				))
+				(define typeparams sql_column_attributes)
+			) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "TYPE" true) (define type sql_identifier) (define dimensions (or
+				(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
+				(parser '("(" (define a sql_int) ")") '((quote list) a))
+				(parser empty '((quote list)))
+			))) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
+			(parser '((atom "CONVERT" true) (atom "TO" true) (atom "CHARACTER" true) (atom "SET" true) (define charset sql_identifier) (? (atom "COLLATE" true) (define coll sql_identifier))) (lambda (id) true))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
@@ -656,29 +692,41 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or sql_identifier '(sql_identifier (atom "AS" true) sql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
 
-		/* CREATE INDEX syntax acceptance (no-op; MemCP auto-indexes) */
+		/* CREATE INDEX syntax acceptance (no-op unless UNIQUE; MemCP auto-indexes) */
 		(parser '((atom "CREATE" true)
-			(or (atom "INDEX" true) '((atom "UNIQUE" true) (atom "INDEX" true)))
+			(atom "UNIQUE" true) (atom "INDEX" true)
 			(define idx sql_identifier)
 			(atom "ON" true)
 			(define tbl (or
-				(parser '((define schema sql_identifier) (atom "." true) (define t sql_identifier)) '(schema t))
-				(parser (define t sql_identifier) '(schema t))
+				(parser '((define schema2 sql_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
+				(parser (define t sql_identifier) '(nil t))
 			))
-			"(" (define cols (+ sql_identifier ",")) ")"
+			"(" (define cols (+ sql_index_column ",")) ")"
+			(? (atom "USING" true) (atom "BTREE" true))
+		) (match tbl '(schema2 t) '('createkey (coalesce schema2 schema) t idx true (cons (quote list) cols))))
+		(parser '((atom "CREATE" true)
+			(atom "INDEX" true)
+			(define idx sql_identifier)
+			(atom "ON" true)
+			(define tbl (or
+				(parser '((define schema2 sql_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
+				(parser (define t sql_identifier) '(nil t))
+			))
+			"(" (define cols (+ sql_index_column ",")) ")"
 			(? (atom "USING" true) (atom "BTREE" true))
 		) "ignore")
 		(parser '((atom "CREATE" true)
-			(or (atom "INDEX" true) '((atom "UNIQUE" true) (atom "INDEX" true)))
+			(atom "UNIQUE" true) (atom "INDEX" true)
 			(define idx sql_identifier)
 			(atom "ON" true)
 			(define tbl (or
-				(parser '((define schema sql_identifier) (atom "." true) (define t sql_identifier)) '(schema t))
-				(parser (define t sql_identifier) '(schema t))
+				(parser '((define schema2 sql_identifier) (atom "." true) (define t sql_identifier)) '(schema2 t))
+				(parser (define t sql_identifier) '(nil t))
 			))
 			(atom "USING" true) (atom "BTREE" true)
-			"(" (define cols (+ sql_identifier ",")) ")"
-		) "ignore")
+			"(" (define cols (+ sql_index_column ",")) ")"
+		) (match tbl '(schema2 t) '('createkey (coalesce schema2 schema) t idx true (cons (quote list) cols))))
+		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier) (? (atom "ON" true) (define tbl sql_identifier))) "ignore")
 
 		/* TODO: draw transaction number, commit */
 		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('session "transaction" 1))

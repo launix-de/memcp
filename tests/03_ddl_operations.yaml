@@ -150,6 +150,40 @@ test_cases:
     expect:
       affected_rows: 1
 
+  # === ALTER TABLE and INDEX syntax coverage ===
+  - name: "ALTER TABLE MODIFY COLUMN"
+    sql: "ALTER TABLE users MODIFY COLUMN name VARCHAR(255)"
+    expect:
+      affected_rows: 1
+
+  - name: "ALTER TABLE CHANGE COLUMN"
+    sql: "ALTER TABLE users CHANGE name name VARCHAR(128)"
+    expect:
+      affected_rows: 1
+
+  - name: "ALTER TABLE DROP INDEX noop"
+    sql: "ALTER TABLE users DROP INDEX idx_name"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE UNIQUE INDEX with prefix length"
+    sql: "CREATE UNIQUE INDEX name_prefix_unique ON users (name(16))"
+    expect: {}
+
+  - name: "DROP INDEX noop"
+    sql: "DROP INDEX name_prefix_unique ON users"
+    expect:
+      affected_rows: 1
+
+  - name: "ALTER TABLE ADD FOREIGN KEY"
+    sql: "ALTER TABLE users ADD FOREIGN KEY (id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+    expect: {}
+
+  - name: "ALTER TABLE DROP FOREIGN KEY noop"
+    sql: "ALTER TABLE users DROP FOREIGN KEY fk_dummy"
+    expect:
+      affected_rows: 1
+
   # TODO: ALTER USER operations
   # - name: "ALTER USER password"
   #   sql: "ALTER USER testuser IDENTIFIED BY 'newpassword'"
