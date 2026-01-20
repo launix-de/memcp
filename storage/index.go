@@ -20,8 +20,8 @@ package storage
 import "fmt"
 import "sort"
 import "sync"
-import "reflect"
 import "strings"
+
 import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
 
@@ -217,7 +217,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 					b := c.GetValue(tmp[j])
 					if scm.Less(a, b) {
 						return true // less
-					} else if !reflect.DeepEqual(a, b) {
+					} else if !scm.Equal(a, b) {
 						return false // greater
 					}
 					// otherwise: next iteration
@@ -251,7 +251,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 					}
 					if scm.Less(a, b) {
 						return true // less
-					} else if !reflect.DeepEqual(a, b) {
+					} else if !scm.Equal(a, b) {
 						return false // greater
 					}
 					// otherwise: next iteration

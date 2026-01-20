@@ -106,7 +106,7 @@ if the user is not allowed to access this property, the function will throw an e
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
-				(time (begin
+				(try (lambda () (time (begin
 					(define formula (parse_sql schema query (sql_policy (req "username"))))
 					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 					(define resultrow (res "jsonl"))
@@ -124,7 +124,13 @@ if the user is not allowed to access this property, the function will throw an e
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
-				) query)
+				) query)) (lambda(e) (begin
+						(print "SQL query: " query)
+						(print "error: " e)
+						((res "header") "Content-Type" "text/plain")
+						((res "status") 500)
+						((res "print") "SQL Error: " e)
+				)))
 			)
 			(begin
 				((res "header") "Content-Type" "text/plain")
@@ -139,7 +145,7 @@ if the user is not allowed to access this property, the function will throw an e
 		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
-				(time (begin
+				(try (lambda () (time (begin
 					(define formula (parse_psql schema query (sql_policy (req "username"))))
 					((res "header") "Content-Type" "text/plain")
 					(define resultrow (res "jsonl"))
@@ -157,7 +163,13 @@ if the user is not allowed to access this property, the function will throw an e
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
 					))
-				) query)
+				) query)) (lambda(e) (begin
+						(print "SQL query: " query)
+						(print "error: " e)
+						((res "header") "Content-Type" "text/plain")
+						((res "status") 500)
+						((res "print") "SQL Error: " e)
+				)))
 			)
 			(begin
 				((res "header") "Content-Type" "text/plain")

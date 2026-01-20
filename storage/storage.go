@@ -16,17 +16,17 @@ Copyright (C) 2023, 2024  Carl-Philip Hänsch
 */
 package storage
 
-import "io"
-import "sync"
 import "fmt"
-import "time"
+import "io"
 import "sort"
+import "sync"
+import "time"
+import "strconv"
 import "reflect"
 import "runtime"
 import "strings"
-import "strconv"
-import "github.com/launix-de/memcp/scm"
 import units "github.com/docker/go-units"
+import "github.com/launix-de/memcp/scm"
 
 // THE basic storage pattern
 type ColumnStorage interface {
@@ -786,7 +786,7 @@ func Init(en scm.Env) {
 					default:
 						ok := t.Columns[i].Alter(scm.String(a[3]), a[4])
 						db.save()
-						return ok
+						return scm.NewBool(scm.ToBool(ok))
 					}
 				}
 			}

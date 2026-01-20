@@ -30,12 +30,20 @@ echo "$test_files"
 echo ""
 
 test_port=4400
+godebug="$GODEBUG"
+if [[ "$godebug" != *"invalidptr="* ]]; then
+  if [ -n "$godebug" ]; then
+    godebug="${godebug},invalidptr=0"
+  else
+    godebug="invalidptr=0"
+  fi
+fi
 run_memcp_forever() {
   while true; do
     echo "🚀 (re)Starting MemCP on port $test_port..."
     pkill -f "memcp.*--api-port=$test_port" || true
     sleep 1
-    ./memcp -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm < "$fifo_path" >> /tmp/memcp-test.log 2>&1 &
+    GODEBUG="$godebug" ./memcp -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm < "$fifo_path" >> /tmp/memcp-test.log 2>&1 &
     memcp_pid=$!
     # wait for process to exit; test loop will poll readiness
     wait $memcp_pid

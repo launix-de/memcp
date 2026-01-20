@@ -64,7 +64,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* lightweight literal parser for top-level contexts (before sql_expression is defined) */
 (define sql_literal (parser (or
-	(parser (atom "NULL" true) nil)
+	(parser (atom "NULL" true) 'nil)
 	(parser (atom "TRUE" true) true)
 	(parser (atom "FALSE" true) false)
 	sql_number
@@ -202,7 +202,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e false)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 
-		(parser (atom "NULL" true) nil)
+		(parser (atom "NULL" true) 'nil)
 		(parser (atom "TRUE" true) true)
 		(parser (atom "FALSE" true) false)
 		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))

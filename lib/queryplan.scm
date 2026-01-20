@@ -197,7 +197,7 @@ if there is a group function, create a temporary preaggregate table
 
 			/* find those columns that have no table */
 			(define replace_find_column (lambda (expr) (match expr
-				'((symbol get_column) nil _ col ci) '((quote get_column) (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) (lambda () (error (concat "column " col " does not exist in tables")))) false col false)
+				'((symbol get_column) nil _ col ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) nil) (error (concat "column " col " does not exist in tables"))) false col false)
 				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 				expr
@@ -206,8 +206,21 @@ if there is a group function, create a temporary preaggregate table
 			/* apply renamelist (assoc of assoc of expr) */
 			(define replace_rename (lambda (expr) (match expr
 				'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
-					/* no tblalias -> search the field in all tables */ (reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
-					/* tblalias -> look up the field */ (if (has_assoc? renamelist alias_) ((renamelist alias_) col) expr)
+					/* no tblalias -> search the field in all tables */
+					(reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
+					/* tblalias -> look up the field */
+					(begin
+						(define alias_str (string alias_))
+						(define alias_sym (symbol alias_str))
+						(define rename_fn (if (has_assoc? renamelist alias_)
+							(renamelist alias_)
+							(if (has_assoc? renamelist alias_str)
+								(renamelist alias_str)
+								(if (has_assoc? renamelist alias_sym)
+									(renamelist alias_sym)
+									nil))))
+						(if (nil? rename_fn) expr (rename_fn col))
+					)
 				)
 				(cons sym args) /* function call */ (cons sym (map args replace_rename))
 				expr
@@ -232,7 +245,8 @@ if there is a group function, create a temporary preaggregate table
 			)))))
 
 			/* return parameter list for build_queryplan */
-			(set conditionAll (merge '('and (replace_rename condition)) conditionList)) /* TODO: append inner conditions to condition */
+			/* Append inner conditions (from derived tables) while avoiding nil short-circuit. */
+			(set conditionAll (cons 'and (filter (cons (replace_rename condition) conditionList) (lambda (x) (not (nil? x)))))) /* TODO: append inner conditions to condition */
 			(set group (map group replace_rename))
 			(set having (replace_rename having))
 			(set order (map order (lambda (o) (match o '(col dir) '((replace_rename col) dir)))))
