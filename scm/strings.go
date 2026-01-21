@@ -193,6 +193,28 @@ func init_strings() {
 			DeclarationParameter{"collation", "string", "collation in which to compare them"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
+			value := String(a[0])
+			pattern := String(a[1])
+			collation := "utf8mb4_general_ci"
+			if len(a) > 2 {
+				collation = strings.ToLower(String(a[2]))
+			}
+			if strings.Contains(collation, "_ci") {
+				value = strings.ToLower(value)
+				pattern = strings.ToLower(pattern)
+			}
+			return NewBool(StrLike(value, pattern))
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"strlike_cs", "matches the string against a wildcard pattern (case-sensitive)",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+			DeclarationParameter{"pattern", "string", "pattern with % and _ in them"},
+			DeclarationParameter{"collation", "string", "ignored (present for parser compatibility)"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
 			return NewBool(StrLike(String(a[0]), String(a[1])))
 		}, true,
 	})

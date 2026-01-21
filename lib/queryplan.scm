@@ -197,6 +197,48 @@ if there is a group function, create a temporary preaggregate table
 
 			/* find those columns that have no table */
 			(define replace_find_column (lambda (expr) (match expr
+				/* Ensure MySQL LIKE uses a collation at compile time:
+				- If lhs is a text column, take collation from schema metadata.
+				- Otherwise default to utf8mb4_general_ci (MySQL default in this project). */
+				'((symbol strlike) a b c) (begin
+					(define default_collation "utf8mb4_general_ci")
+					(define find_column_collation (lambda (tblalias colname) (begin
+						(define cols (schemas tblalias))
+						(define coldef (reduce cols (lambda (a coldef)
+							(if (or a (equal?? (coldef "Field") colname)) a coldef)
+						) nil))
+						(coalesce (and coldef (coldef "Collation")) default_collation)
+					)))
+					(match a
+						'((symbol get_column) nil _ col ci)
+						(cons (quote strlike)
+							(cons
+								(replace_find_column a)
+								(cons (replace_find_column b) (cons default_collation '()))))
+						'((symbol get_column) alias_ ti col ci)
+						(begin
+							(define resolved
+								(coalesce
+									(reduce_assoc schemas (lambda (a alias cols)
+										(if (and ((if ti equal?? equal?) alias_ alias)
+											(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+											alias
+											a)
+									) nil)
+									alias_))
+							(cons (quote strlike)
+								(cons
+									(replace_find_column a)
+									(cons
+										(replace_find_column b)
+										(cons
+											(if (equal?? c default_collation) (find_column_collation resolved col) c)
+											'())))))
+						_
+						(cons (quote strlike)
+							(cons (replace_find_column a) (cons (replace_find_column b) (cons c '()))))
+					)
+				)
 				'((symbol get_column) nil _ col ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) nil) (error (concat "column " col " does not exist in tables"))) false col false)
 				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))

@@ -14,6 +14,48 @@ test_cases:
       data:
         - r: true
 
+  - name: "LIKE is case-insensitive (MySQL default)"
+    sql: "SELECT 'Alpha' LIKE 'a%' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  - name: "LIKE respects binary collation (case-sensitive)"
+    sql: "SELECT 'Alpha' COLLATE utf8mb4_bin LIKE 'a%' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: false
+
+  - name: "= is case-insensitive (MySQL default)"
+    sql: "SELECT 'Alpha' = 'alpha' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  - name: "<> is case-insensitive (MySQL default)"
+    sql: "SELECT 'Alpha' <> 'alpha' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: false
+
+  - name: "= respects binary collation (case-sensitive)"
+    sql: "SELECT 'Alpha' COLLATE utf8mb4_bin = 'alpha' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: false
+
+  - name: "<> respects binary collation (case-sensitive)"
+    sql: "SELECT 'Alpha' COLLATE utf8mb4_bin <> 'alpha' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
   - name: "Single-char match"
     sql: "SELECT 'a1' LIKE 'a_' AS r"
     expect:
@@ -27,4 +69,3 @@ test_cases:
       rows: 1
       data:
         - r: false
-

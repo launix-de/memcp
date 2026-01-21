@@ -138,16 +138,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '('inner_select_in a sub))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") '('not ('inner_select_in a sub)))
+		/* Collation-aware comparisons (MySQL): enforce given collation on string comparisons */
+		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "=" (define b sql_expression2)) '('equal_collate a b collation))
+		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "==" (define b sql_expression2)) '('equal_collate a b collation))
+		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "<>" (define b sql_expression2)) '('notequal_collate a b collation))
+		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) "!=" (define b sql_expression2)) '('notequal_collate a b collation))
 		(parser '((define a sql_expression3) "==" (define b sql_expression2)) '((quote equal??) a b))
 		(parser '((define a sql_expression3) "=" (define b sql_expression2)) '((quote equal??) a b))
-		(parser '((define a sql_expression3) "<>" (define b sql_expression2)) '((quote not) '((quote equal?) a b)))
-		(parser '((define a sql_expression3) "!=" (define b sql_expression2)) '((quote not) '((quote equal?) a b)))
+		(parser '((define a sql_expression3) "<>" (define b sql_expression2)) '((quote not) '((quote equal??) a b)))
+		(parser '((define a sql_expression3) "!=" (define b sql_expression2)) '((quote not) '((quote equal??) a b)))
 		(parser '((define a sql_expression3) "<=" (define b sql_expression2)) '((quote <=) a b))
 		(parser '((define a sql_expression3) ">=" (define b sql_expression2)) '((quote >=) a b))
 		(parser '((define a sql_expression3) "<" (define b sql_expression2)) '((quote <) a b))
 		(parser '((define a sql_expression3) ">" (define b sql_expression2)) '((quote >) a b))
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b collation))
-		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b))
+		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
+		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('contains? (cons list b) a))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('not '('contains? (cons list b) a)))
 		sql_expression3

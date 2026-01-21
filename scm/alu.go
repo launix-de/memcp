@@ -25,7 +25,10 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
  */
 package scm
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 func init_alu() {
 	// string functions
@@ -255,6 +258,50 @@ func init_alu() {
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			return EqualSQL(a[0], a[1])
+		},
+		true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"equal_collate", "performs SQL equality with a specified collation (e.g. *_ci case-insensitive, *_bin case-sensitive); returns nil if either arg is nil",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"a", "any", "left side"},
+			DeclarationParameter{"b", "any", "right side"},
+			DeclarationParameter{"collation", "string", "collation name"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
+			coll := strings.ToLower(String(a[2]))
+			ta := auxTag(a[0].aux)
+			tb := auxTag(a[1].aux)
+			if (ta == tagString || ta == tagSymbol) && (tb == tagString || tb == tagSymbol) {
+				as := a[0].String()
+				bs := a[1].String()
+				if strings.Contains(coll, "_ci") {
+					return NewBool(strings.EqualFold(as, bs))
+				}
+				return NewBool(as == bs)
+			}
+			return EqualSQL(a[0], a[1])
+		},
+		true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"notequal_collate", "performs SQL inequality with a specified collation; returns nil if either arg is nil",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"a", "any", "left side"},
+			DeclarationParameter{"b", "any", "right side"},
+			DeclarationParameter{"collation", "string", "collation name"},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			r := Globalenv.Vars["equal_collate"].Func()(a[0], a[1], a[2])
+			if r.IsNil() {
+				return r
+			}
+			return NewBool(!r.Bool())
 		},
 		true,
 	})
