@@ -37,8 +37,8 @@ func initMySQLImport(en scm.Env) {
 		"mysql_import", "imports schema+data from a MySQL server into MemCP",
 		4, 8,
 		[]scm.DeclarationParameter{
-			{"host", "string", "MySQL host"},
-			{"port", "int", "MySQL port"},
+			{"host", "string|nil", "MySQL host (nil => 127.0.0.1)"},
+			{"port", "int|nil", "MySQL port (nil => 3306)"},
 			{"username", "string", "MySQL username"},
 			{"password", "string", "MySQL password"},
 			{"sourcedb", "string|nil", "source database (omit/nil => all non-system dbs)"},
@@ -48,8 +48,14 @@ func initMySQLImport(en scm.Env) {
 		},
 		"bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			host := scm.String(a[0])
-			port := scm.ToInt(a[1])
+			host := "127.0.0.1"
+			if !a[0].IsNil() {
+				host = scm.String(a[0])
+			}
+			port := 3306
+			if !a[1].IsNil() {
+				port = scm.ToInt(a[1])
+			}
 			user := scm.String(a[2])
 			password := scm.String(a[3])
 			var sourceDB, targetDB, sourceTable, targetTable string
