@@ -82,6 +82,9 @@ func initMySQLImport(en scm.Env) {
 			}
 			defer db.Close()
 
+			// drop-semantics: reset trigger metadata for this import run
+			DropTable(mysqlImportMetaSchema, mysqlImportTriggersTable, true)
+
 			srcDBs, err := mysqlListDatabases(ctx, db, sourceDB)
 			if err != nil {
 				panic(err.Error())
@@ -234,24 +237,18 @@ func mysqlImportTable(ctx context.Context, db *sql.DB, srcDB, srcTable, dstDB, d
 		return errors.New("could not create target database: " + dstDB)
 	}
 
-	t, created := CreateTable(dstDB, dstTable, Safe, true)
-	if created {
-		if err := mysqlImportColumns(ctx, db, srcDB, srcTable, t); err != nil {
-			return err
-		}
-		if err := mysqlImportConstraints(ctx, db, srcDB, srcTable, t); err != nil {
-			return err
-		}
-		if err := mysqlImportTriggers(ctx, db, srcDB, srcTable, dstDB, dstTable); err != nil {
-			return err
-		}
-	} else {
-		if err := mysqlImportConstraints(ctx, db, srcDB, srcTable, t); err != nil {
-			return err
-		}
-		if err := mysqlImportTriggers(ctx, db, srcDB, srcTable, dstDB, dstTable); err != nil {
-			return err
-		}
+	// drop-semantics: replace target table content+schema
+	DropTable(dstDB, dstTable, true)
+
+	t, _ := CreateTable(dstDB, dstTable, Safe, true)
+	if err := mysqlImportColumns(ctx, db, srcDB, srcTable, t); err != nil {
+		return err
+	}
+	if err := mysqlImportConstraints(ctx, db, srcDB, srcTable, t); err != nil {
+		return err
+	}
+	if err := mysqlImportTriggers(ctx, db, srcDB, srcTable, dstDB, dstTable); err != nil {
+		return err
 	}
 
 	cols := make([]string, 0, len(t.Columns))
