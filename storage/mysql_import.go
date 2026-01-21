@@ -20,7 +20,6 @@ import "context"
 import "database/sql"
 import "errors"
 import "fmt"
-import "os"
 import "runtime"
 import "strconv"
 import "strings"
@@ -36,11 +35,12 @@ const mysqlImportTriggersTable = "triggers"
 func initMySQLImport(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		"mysql_import", "imports schema+data from a MySQL server into MemCP",
-		3, 7,
+		4, 8,
 		[]scm.DeclarationParameter{
 			{"host", "string", "MySQL host"},
 			{"port", "int", "MySQL port"},
 			{"username", "string", "MySQL username"},
+			{"password", "string", "MySQL password"},
 			{"sourcedb", "string|nil", "source database (omit/nil => all non-system dbs)"},
 			{"targetdb", "string|nil", "target database (omit/nil => sourcedb)"},
 			{"sourcetable", "string|nil", "source table (omit/nil => all tables in sourcedb)"},
@@ -51,18 +51,19 @@ func initMySQLImport(en scm.Env) {
 			host := scm.String(a[0])
 			port := scm.ToInt(a[1])
 			user := scm.String(a[2])
+			password := scm.String(a[3])
 			var sourceDB, targetDB, sourceTable, targetTable string
-			if len(a) > 3 && !a[3].IsNil() {
-				sourceDB = scm.String(a[3])
-			}
 			if len(a) > 4 && !a[4].IsNil() {
-				targetDB = scm.String(a[4])
+				sourceDB = scm.String(a[4])
 			}
 			if len(a) > 5 && !a[5].IsNil() {
-				sourceTable = scm.String(a[5])
+				targetDB = scm.String(a[5])
 			}
 			if len(a) > 6 && !a[6].IsNil() {
-				targetTable = scm.String(a[6])
+				sourceTable = scm.String(a[6])
+			}
+			if len(a) > 7 && !a[7].IsNil() {
+				targetTable = scm.String(a[7])
 			}
 
 			if targetDB == "" {
@@ -72,15 +73,10 @@ func initMySQLImport(en scm.Env) {
 				targetTable = sourceTable
 			}
 
-			pw := os.Getenv("MEMCP_MYSQL_PASSWORD")
-			if pw == "" {
-				pw = os.Getenv("MYSQL_PWD")
-			}
-
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 
-			db, err := openMySQL(ctx, host, port, user, pw, "")
+			db, err := openMySQL(ctx, host, port, user, password, "")
 			if err != nil {
 				panic(err.Error())
 			}
