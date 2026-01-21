@@ -193,6 +193,45 @@ test_cases:
     expect:
       affected_rows: 1
 
+  - name: "PostgreSQL ILIKE is case-insensitive"
+    syntax: postgresql
+    sql: |
+      CREATE TABLE "pg_search" ("name" TEXT)
+    expect:
+      affected_rows: 1
+
+  - name: "PostgreSQL ILIKE matches regardless of case"
+    syntax: postgresql
+    sql: |
+      INSERT INTO "pg_search" ("name") VALUES ('Alpha')
+    expect:
+      affected_rows: 1
+
+  - name: "PostgreSQL ILIKE with ::text cast"
+    syntax: postgresql
+    sql: |
+      SELECT ("name")::text ILIKE 'a%' AS r FROM "pg_search"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  - name: "PostgreSQL LIKE remains case-sensitive"
+    syntax: postgresql
+    sql: |
+      SELECT ("name")::text LIKE 'a%' AS r FROM "pg_search"
+    expect:
+      rows: 1
+      data:
+        - r: false
+
+  - name: "PostgreSQL drop pg_search"
+    syntax: postgresql
+    sql: |
+      DROP TABLE "pg_search"
+    expect:
+      affected_rows: 1
+
   - name: "Base64 roundtrip"
     sql: "SELECT FROM_BASE64(TO_BASE64('Hello, world!')) AS plain"
     expect:

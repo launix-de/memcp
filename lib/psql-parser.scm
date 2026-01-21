@@ -139,8 +139,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((define a psql_expression3) ">=" (define b psql_expression2)) '((quote >=) a b))
 		(parser '((define a psql_expression3) "<" (define b psql_expression2)) '((quote <) a b))
 		(parser '((define a psql_expression3) ">" (define b psql_expression2)) '((quote >) a b))
-		(parser '((define a psql_expression3) (atom "COLLATE" true) (define collation psql_identifier) (atom "LIKE" true) (define b psql_expression2)) '('strlike a b collation))
-		(parser '((define a psql_expression3) (atom "LIKE" true) (define b psql_expression2)) '('strlike a b))
+		/* ILIKE is Postgres case-insensitive LIKE. */
+		(parser '((define a psql_expression3) (atom "ILIKE" true) (define b psql_expression2)) '('strlike a b "utf8mb4_general_ci"))
+		(parser '((define a psql_expression3) (atom "COLLATE" true) (define collation psql_identifier) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b collation))
+		/* Postgres LIKE is case-sensitive by default. */
+		(parser '((define a psql_expression3) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b))
 		(parser '((define a psql_expression3) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('contains? (cons list b) a))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('not '('contains? (cons list b) a)))
 		psql_expression3
@@ -165,7 +168,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		psql_expression6
 	)))
 
-	(define psql_expression6 (parser (or
+	(define psql_expression7 (parser (or
 		/* Scalar subselect in expressions: (SELECT ...) */
 		(parser '("(" (define sub psql_select) ")") '('inner_select sub))
 		(parser '("(" (define a psql_expression) ")") a)
@@ -214,6 +217,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		psql_number
 		psql_string
 		psql_column
+	)))
+
+	/* Postgres cast syntax: expr::text (postfix operator; avoid left recursion) */
+	(define psql_expression6 (parser (or
+		(parser '((define a psql_expression7) "::" (atom "text" true)) '('concat a))
+		psql_expression7
 	)))
 
 	(define tabledefs (parser (or
