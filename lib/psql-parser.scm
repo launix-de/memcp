@@ -104,6 +104,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* helper function for triggers and ON DUPLICATE: every column is just a symbol */
 	(define replace_stupid (lambda (expr) (match expr
 		'('get_column "VALUES" _ col _) (symbol (concat "NEW." col))
+		'('get_column "excluded" _ col _) (symbol (concat "NEW." col))
 		'('get_column _ _ col _) (symbol col) /* TODO: case matching */
 		(cons head tail) (cons head (map tail replace_stupid))
 		expr
@@ -111,6 +112,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* helper function for triggers and ON DUPLICATE: extract all used columns */
 	(define extract_stupid (lambda (expr) (match expr
 		'('get_column "VALUES" _ col _) '((concat "NEW." col))
+		'('get_column "excluded" _ col _) '((concat "NEW." col))
 		'('get_column _ _ col _) '(col)
 		(cons head tail) (merge_unique (map tail extract_stupid))
 		'()
@@ -411,13 +413,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			/* TODO: ignorecase */
 			(define updaterows (+ (parser '((define col psql_identifier) (atom "=" false) (define value psql_expression)) '(col value)) ","))
 		) updaterows)))
+		(define onconflict (? (parser '(
+			(atom "ON" true)
+			(atom "CONFLICT" true)
+			"(" (define conflictcols (+ psql_identifier ",")) ")"
+			(atom "DO" true)
+			(define oc (or
+				(parser '((atom "NOTHING" true)) '(do_nothing))
+				(parser '((atom "UPDATE" true) (atom "SET" true)
+					(define conflictupdates (+ (parser '((define col psql_identifier) (atom "=" false) (define value psql_expression)) '(col value)) ",")))
+					'(do_update conflictupdates))
+			))
+		) oc)))
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
-			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+			(set do_nothing (match onconflict '(do_nothing) true _ false))
+			(set conflictupdates (match onconflict '(do_update u) u _ nil))
+			(set updaterows3 (coalesce conflictupdates updaterows))
+			(set updaterows2 (if (nil? updaterows3) nil (merge updaterows3)))
+			(set updatecols (if (nil? updaterows3) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
-			'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))
+			'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
+				(if (or do_nothing (and ignoreexists (nil? updaterows3)))
+					'((quote lambda) '() 0)
+					(if ignoreexists '('lambda '() true) (if (nil? updaterows3) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
+				false '('lambda '('id) '('session "last_insert_id" 'id)))
 	)))
 
 	(define psql_insert_select (parser '(
