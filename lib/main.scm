@@ -18,7 +18,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (print "")
 (print "Welcome to memcp")
 (print "")
-(import "test.scm")
+(define skip_unit_tests (not (equal? (env "MEMCP_SKIP_UNIT_TESTS" "") "")))
+(if skip_unit_tests
+	(print "skipping unit tests (MEMCP_SKIP_UNIT_TESTS)")
+	(import "test.scm"))
 
 (set static_files (serveStatic "../assets"))
 

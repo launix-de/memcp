@@ -87,7 +87,8 @@ foreign keys:
 	delete: I am tbl2 -> check all cols2 (old values): do the values exist in tbl1.cols1? if so -> CASCADE a delete in tbl1, SET NULL in tbl1 or RESTRICT
 */
 type table struct {
-	schema          *database
+	Schema          string
+	ID              string
 	Name            string
 	Columns         []column
 	Unique          []uniqueKey     // unique keys
@@ -347,8 +348,10 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 		}
 	}
 
-	t.schema.schemalock.Lock()
-	defer t.schema.schemalock.Unlock()
+	// Schema updates are serialized by schemaLock to keep schema.json consistent.
+	mu := schemaLock(t.Schema)
+	mu.Lock()
+	defer mu.Unlock()
 
 	for _, c := range t.Columns {
 		if c.Name == name {
@@ -403,12 +406,13 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 		s.columns[name] = new(StorageSparse)
 		s.mu.Unlock()
 	}
-	t.schema.save()
+	saveTableMetadataLocked(t)
 	return true
 }
 
 func (t *table) DropColumn(name string) bool {
-	t.schema.schemalock.Lock()
+	mu := schemaLock(t.Schema)
+	mu.Lock()
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// found the column
@@ -424,12 +428,12 @@ func (t *table) DropColumn(name string) bool {
 				s.mu.Unlock()
 			}
 
-			t.schema.save()
-			t.schema.schemalock.Unlock()
+			saveTableMetadataLocked(t)
+			mu.Unlock()
 			return true
 		}
 	}
-	t.schema.schemalock.Unlock()
+	mu.Unlock()
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
@@ -462,14 +466,14 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				go func(i int) {
 					defer func() {
 						if r := recover(); r != nil {
-							fmt.Println("error: shard rebuild failed for", t.schema.Name+".", t.Name, "shard", i, ":", r)
+							fmt.Println("error: shard rebuild failed for", t.Schema+".", t.Name, "shard", i, ":", r)
 						}
 					}()
 					// rebuild full shards in background
 					s := t.Shards[i]
 					t.Shards[i] = s.rebuild(false)
 					// write new uuids to disk
-					t.schema.save()
+					saveTableMetadata(t)
 				}(len(t.Shards) - 1)
 				shard = NewShard(t)
 				fmt.Println("started new shard for table", t.Name)

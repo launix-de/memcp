@@ -170,26 +170,14 @@ func ensureSystemStatistic() {
 	const tblName = "scans"
 
 	// create database if missing
-	if GetDatabase(dbName) == nil {
-		CreateDatabase(dbName, true)
-	}
-	db := GetDatabase(dbName)
-	if db == nil {
-		return // should not happen; avoid panicking during init
-	}
+	CreateDatabase(dbName, true)
 
 	// create table if missing (use Sloppy persistency to avoid fsync costs)
 	t, _ := CreateTable(dbName, tblName, Sloppy, true)
-	if t == nil {
-		t = db.GetTable(tblName)
-		if t == nil {
-			return
-		}
-	}
 	// ensure persistency mode is Sloppy even if table pre-existed
 	if t.PersistencyMode != Sloppy {
 		t.PersistencyMode = Sloppy
-		t.schema.save()
+		saveTableMetadata(t)
 	}
 	// ensure columns exist
 	need := []struct {
@@ -221,17 +209,17 @@ func ensureSystemStatistic() {
 
 	// --- New: ensure system_statistic.table_histogram exists ---
 	// Schema: table_histogram(schema TEXT, table TEXT, model BLOB, UNIQUE(schema, table))
-	ensureTable := func(db *database, name string, pm PersistencyMode) *table {
+	ensureTable := func(name string, pm PersistencyMode) *table {
 		tt, _ := CreateTable(dbName, name, pm, true)
 		if tt == nil {
-			tt = db.GetTable(name)
+			tt = GetTable(dbName, name)
 		}
 		if tt == nil {
 			return nil
 		}
 		if tt.PersistencyMode != pm {
 			tt.PersistencyMode = pm
-			tt.schema.save()
+			saveTableMetadata(tt)
 		}
 		return tt
 	}
@@ -281,15 +269,16 @@ func ensureSystemStatistic() {
 		}
 		if !has {
 			// append unique and persist
-			tt.schema.schemalock.Lock()
+			mu := schemaLock(dbName)
+			mu.Lock()
 			tt.Unique = append(tt.Unique, uniqueKey{Id: id, Cols: cols})
-			tt.schema.save()
-			tt.schema.schemalock.Unlock()
+			saveTableMetadataLocked(tt)
+			mu.Unlock()
 		}
 	}
 
 	// table_histogram
-	th := ensureTable(db, "table_histogram", Sloppy)
+	th := ensureTable("table_histogram", Sloppy)
 	ensureCols(th, []struct{ name, typ string }{
 		{"schema", "TEXT"},
 		{"table", "TEXT"},
@@ -299,7 +288,7 @@ func ensureSystemStatistic() {
 
 	// base_models: base_models(id PRIMARY KEY, model)
 	// Use Safe persistence to protect valuable models (logged + durable).
-	bm := ensureTable(db, "base_models", Safe)
+	bm := ensureTable("base_models", Safe)
 	ensureCols(bm, []struct{ name, typ string }{
 		{"id", "TEXT"},
 		{"model", "BLOB"},
@@ -313,11 +302,7 @@ func ensureSystemStatistic() {
 // TODO: measurements are temporary; remove later (nanoseconds)
 func safeLogScan(schema, table string, ordered bool, filter, order string, inputCount, outputCount, analyzeNs, execNs int64) {
 	defer func() { _ = recover() }()
-	db := GetDatabase("system_statistic")
-	if db == nil {
-		return
-	}
-	t := db.GetTable("scans")
+	t := GetTable("system_statistic", "scans")
 	if t == nil {
 		return
 	}

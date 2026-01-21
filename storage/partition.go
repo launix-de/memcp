@@ -264,7 +264,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		}
 	}
 	if !hasCol {
-		panic("partition column does not exist: `" + t.schema.Name + "." + t.Name + "`.`" + col + "`")
+		panic("partition column does not exist: `" + t.Schema + "." + t.Name + "`.`" + col + "`")
 	}
 
 	shardlist := t.Shards
@@ -511,7 +511,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 					// write to disc (only if required)
 					if s.t.PersistencyMode != Memory {
-						f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
+						f := persistenceForSchema(s.t.Schema).WriteColumn(s.uuid.String(), col.Name)
 						newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 						f.Close()
 					}
@@ -520,7 +520,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 
 				if s.t.PersistencyMode == Safe || s.t.PersistencyMode == Logged {
 					// open a logfile
-					s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
+					s.logfile = persistenceForSchema(s.t.Schema).OpenLog(s.uuid.String())
 				}
 				done.Done()
 			}
@@ -556,9 +556,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	t.Shards = nil // partitioned layout is live
 	fmt.Println("activated new partitioning schema for ", t.Name, "after", time.Since(start))
 
-	t.schema.schemalock.Lock()
-	t.schema.save()
-	t.schema.schemalock.Unlock()
+	saveTableMetadata(t)
 
 	for _, s := range oldshards {
 		// discard from disk

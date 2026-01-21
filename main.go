@@ -37,6 +37,7 @@ import "crypto/rand"
 import "path/filepath"
 import "runtime/pprof"
 import "runtime/debug"
+import "unsafe"
 import "github.com/google/uuid"
 import "github.com/fsnotify/fsnotify"
 import "github.com/launix-de/memcp/scm"
@@ -321,7 +322,16 @@ func setupIO(wd string) {
 		0, 0,
 		[]scm.DeclarationParameter{}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			scm.ReplInstance.Close()
+			shutdownOnce.Do(func() {
+				go func() {
+					exitroutine()
+					os.Exit(0)
+				}()
+				// If a REPL is active, close it to unblock main() and follow the normal shutdown path too.
+				if scm.ReplInstance != nil {
+					scm.ReplInstance.Close()
+				}
+			})
 			return scm.NewBool(true)
 		}, false,
 	})
@@ -542,8 +552,20 @@ func main() {
 	// start cron
 	go cronroutine()
 
-	// REPL shell
-	scm.Repl(&IOEnv)
+	// REPL shell (only on interactive TTY).
+	// In non-interactive mode (e.g. SQL test runner), keep the process alive
+	// so HTTP handlers can serve requests.
+	isTerminal := func() bool {
+		const tcgets = 0x5401 // linux TCGETS
+		var termios [64]byte
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tcgets, uintptr(unsafe.Pointer(&termios[0])))
+		return errno == 0
+	}
+	if isTerminal() {
+		scm.Repl(&IOEnv)
+	} else {
+		select {}
+	}
 
 	// normal shutdown
 	exitroutine()
@@ -551,6 +573,7 @@ func main() {
 
 var exitsignal chan bool = make(chan bool, 1) // set true to start shutdown routine and wait for all jobs
 var exitable sync.WaitGroup
+var shutdownOnce sync.Once
 
 func cronroutine() {
 	exitable.Add(1)

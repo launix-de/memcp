@@ -67,6 +67,7 @@ const (
 	tagFastDict
 	tagAny
 	// custom tags >= 100
+	tagTableRef = 100
 )
 
 // Helpers
@@ -110,6 +111,13 @@ func NewSymbol(sym string) Scmer {
 		return Scmer{nil, makeAux(tagSymbol, 0)}
 	}
 	return Scmer{unsafe.StringData(sym), makeAux(tagSymbol, uint64(len(sym)))}
+}
+
+func NewTableRef(id string) Scmer {
+	if len(id) == 0 {
+		return Scmer{nil, makeAux(tagTableRef, 0)}
+	}
+	return Scmer{unsafe.StringData(id), makeAux(tagTableRef, uint64(len(id)))}
 }
 
 func NewSlice(slice []Scmer) Scmer {
@@ -384,7 +392,7 @@ func (s Scmer) Float() float64 {
 
 func (s Scmer) String() string {
 	switch auxTag(s.aux) {
-	case tagString, tagSymbol:
+	case tagString, tagSymbol, tagTableRef:
 		hdr := [2]uintptr{uintptr(unsafe.Pointer(s.ptr)), uintptr(auxVal(s.aux))}
 		return *(*string)(unsafe.Pointer(&hdr))
 	case tagInt:
@@ -579,9 +587,20 @@ func (s Scmer) Any() any {
 		return s.Parser()
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
+	case tagTableRef:
+		return s.String()
 	default:
 		panic(fmt.Sprintf("unknown tag %d in Any", auxTag(s.aux)))
 	}
+}
+
+func (s Scmer) IsTableRef() bool { return auxTag(s.aux) == tagTableRef }
+
+func (s Scmer) TableRef() string {
+	if auxTag(s.aux) != tagTableRef {
+		return ""
+	}
+	return s.String()
 }
 
 // Compatibility helpers for legacy code paths.
@@ -610,6 +629,8 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			return v.String()
 		case tagSymbol:
 			return map[string]any{"symbol": v.String()}
+		case tagTableRef:
+			return map[string]any{"table": v.String()}
 		case tagSlice:
 			list := v.Slice()
 			out := make([]any, len(list))
@@ -759,6 +780,11 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 		case string:
 			return NewString(t)
 		case map[string]any:
+			if ref, ok := t["table"]; ok && len(t) == 1 {
+				if id, ok2 := ref.(string); ok2 {
+					return NewTableRef(id)
+				}
+			}
 			if sym, ok := t["symbol"]; ok {
 				if name, ok2 := sym.(string); ok2 {
 					return NewSymbol(name)

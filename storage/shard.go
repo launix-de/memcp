@@ -107,7 +107,7 @@ func (u *storageShard) load(t *table) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		var log chan interface{}
-		log, u.logfile = u.t.schema.persistence.ReplayLog(u.uuid.String())
+		log, u.logfile = persistenceForSchema(u.t.Schema).ReplayLog(u.uuid.String())
 		numEntriesRestored := 0
 		for logentry := range log {
 			numEntriesRestored++
@@ -121,7 +121,7 @@ func (u *storageShard) load(t *table) {
 			}
 		}
 		if numEntriesRestored > 0 {
-			fmt.Println("restoring delta storage from database "+u.t.schema.Name+" shard "+u.uuid.String()+":", numEntriesRestored, "entries")
+			fmt.Println("restoring delta storage from database "+u.t.Schema+" shard "+u.uuid.String()+":", numEntriesRestored, "entries")
 		}
 	}
 }
@@ -135,7 +135,7 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 	loadLocked := func() ColumnStorage {
 		cs, present := u.columns[colName]
 		if !present {
-			panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+			panic("Column does not exist: `" + u.t.Schema + "`.`" + u.t.Name + "`.`" + colName + "`")
 		}
 		if cs != nil {
 			return cs
@@ -146,13 +146,13 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		}
 		release := acquireLoadSlot()
 		defer release()
-		f := u.t.schema.persistence.ReadColumn(u.uuid.String(), colName)
+		f := persistenceForSchema(u.t.Schema).ReadColumn(u.uuid.String(), colName)
 		var magicbyte uint8
 		if err := binary.Read(f, binary.LittleEndian, &magicbyte); err != nil {
 			u.columns[colName] = new(StorageSparse)
 			return u.columns[colName]
 		}
-		fmt.Println("loading storage "+u.t.schema.Name+" shard "+u.uuid.String()+" column "+colName+" of type", magicbyte)
+		fmt.Println("loading storage "+u.t.Schema+" shard "+u.uuid.String()+" column "+colName+" of type", magicbyte)
 		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 		cnt := columnstorage.Deserialize(f)
 		f.Close()
@@ -172,7 +172,7 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 	cs, present := u.columns[colName]
 	u.mu.RUnlock()
 	if !present {
-		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+		panic("Column does not exist: `" + u.t.Schema + "`.`" + u.t.Name + "`.`" + colName + "`")
 	}
 	if cs != nil {
 		return cs
@@ -195,7 +195,7 @@ func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
 	cs, present := u.columns[colName]
 	u.mu.RUnlock()
 	if !present {
-		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+		panic("Column does not exist: `" + u.t.Schema + "`.`" + u.t.Name + "`.`" + colName + "`")
 	}
 	if cs != nil {
 		return cs
@@ -207,7 +207,7 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 	if alreadyLocked {
 		cs, present := u.columns[colName]
 		if !present {
-			panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+			panic("Column does not exist: `" + u.t.Schema + "`.`" + u.t.Name + "`.`" + colName + "`")
 		}
 		if cs != nil {
 			return cs
@@ -281,7 +281,7 @@ func (s *storageShard) ensureLoaded() {
 
 func NewShard(t *table) *storageShard {
 	result := new(storageShard)
-	result.uuid, _ = uuid.NewRandom()
+	result.uuid = newUUID()
 	result.t = t
 	result.columns = make(map[string]ColumnStorage)
 	result.deltaColumns = make(map[string]int)
@@ -293,7 +293,7 @@ func NewShard(t *table) *storageShard {
 		result.columns[column.Name] = new(StorageSparse)
 	}
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
-		result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
+		result.logfile = persistenceForSchema(result.t.Schema).OpenLog(result.uuid.String())
 	}
 	// Newly created shards are live/writable, not cold
 	result.srState = WRITE
@@ -784,9 +784,9 @@ func (t *storageShard) RemoveFromDisk() {
 	}
 	for _, col := range t.t.Columns {
 		// delete column from file
-		t.t.schema.persistence.RemoveColumn(t.uuid.String(), col.Name)
+		persistenceForSchema(t.t.Schema).RemoveColumn(t.uuid.String(), col.Name)
 	}
-	t.t.schema.persistence.RemoveLog(t.uuid.String())
+	persistenceForSchema(t.t.Schema).RemoveLog(t.uuid.String())
 }
 
 // rebuild main storage from main+delta
@@ -822,7 +822,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	// from now on, we can rebuild with no hurry; inserts and update/deletes on the previous shard will propagate to us, too
 
 	if all || maxInsertIndex > 0 || deletions.Count() > 0 {
-		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
+		result.uuid = newUUID() // new uuid, serialize
 		// SetFinalizer to old shard to delete files from disk
 		runtime.SetFinalizer(t, func(t *storageShard) {
 			t.RemoveFromDisk()
@@ -842,7 +842,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.deletions.Reset()
 		if result.t.PersistencyMode == Safe || result.t.PersistencyMode == Logged {
 			// safe mode: also write all deltas to disk
-			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
+			result.logfile = persistenceForSchema(result.t.Schema).OpenLog(result.uuid.String())
 		}
 		t.mu.Unlock() // release lock, from now on, deletions+inserts should work
 		locked = false
@@ -924,7 +924,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 			// write to disc (only if required)
 			if t.t.PersistencyMode != Memory {
-				f := result.t.schema.persistence.WriteColumn(result.uuid.String(), col)
+				f := persistenceForSchema(result.t.Schema).WriteColumn(result.uuid.String(), col)
 				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 				f.Close()
 			}
@@ -943,7 +943,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			logfile := t.logfile
 			t.logfile = nil
 			logfile.Close()
-			t.t.schema.persistence.RemoveLog(t.uuid.String())
+			persistenceForSchema(t.t.Schema).RemoveLog(t.uuid.String())
 		}
 	} else {
 		// otherwise: table stays the same

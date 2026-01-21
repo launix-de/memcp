@@ -603,39 +603,39 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username psql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "user" '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
+				(list (quote insert) (get_table "system" "user") nil '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				(list (quote scan) (get_table "system" "user") nil '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
 		))
 
 		/* GRANT syntax (PostgreSQL-style) -> reflect only admin and database-level access */
 		/* GRANT <any> ON DATABASE db TO user */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
+				(list (quote insert) (get_table "system" "access") nil '('list "username" "database") '('list '('list username db)))
 		))
 		/* GRANT <any> ON SCHEMA db TO user */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
+				(list (quote insert) (get_table "system" "access") nil '('list "username" "database") '('list '('list username db)))
 		))
 		/* GRANT ALL PRIVILEGES ON ALL DATABASES is non-standard; ignore */
 		/* Treat GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA db TO user as db-level access */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
+				(list (quote insert) (get_table "system" "access") nil '('list "username" "database") '('list '('list username db)))
 		))
 
 		/* REVOKE syntax (PostgreSQL-style) -> mirror GRANT behavior */
 		/* REVOKE <any> ON DATABASE db FROM user */
 		(parser '((atom "REVOKE" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan)
-					"system"
-					"access"
+				(list (quote scan)
+					(get_table "system" "access")
+					nil
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
@@ -646,9 +646,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* REVOKE <any> ON SCHEMA db FROM user */
 		(parser '((atom "REVOKE" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan)
-					"system"
-					"access"
+				(list (quote scan)
+					(get_table "system" "access")
+					nil
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")

@@ -87,6 +87,29 @@ func scmerSliceToStrings(list []scm.Scmer) []string {
 func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
+	// Make the root catalog visible in Scheme as the global variable `Tables`.
+	if Tables != nil {
+		scm.Globalenv.Vars[scm.Symbol("Tables")] = scm.NewTableRef(Tables.ID)
+	}
+
+	scm.Declare(&en, &scm.Declaration{
+		"get_table", "resolve a table handle from schema+table using the root catalog",
+		2, 2,
+		[]scm.DeclarationParameter{
+			{"schema", "string", "database where the table is located"},
+			{"table", "string", "name of the table"},
+		}, "table",
+		func(a ...scm.Scmer) scm.Scmer {
+			schema := scm.String(a[0])
+			name := scm.String(a[1])
+			t := lookupTableHandle(schema, name)
+			if t == nil {
+				panic("table " + schema + "." + name + " does not exist")
+			}
+			return scm.NewTableRef(t.ID)
+		}, false,
+	})
+
 	scm.Declare(&en, &scm.Declaration{
 		"scan_estimate", "estimate output row count for a scan or ordered scan using the AI estimator if available",
 		4, 5,
@@ -112,11 +135,7 @@ func Init(en scm.Env) {
 			globalEstimatorMu.Lock()
 			est := globalEstimator
 			globalEstimatorMu.Unlock()
-			db := GetDatabase(schema)
-			if db == nil {
-				return scm.NewInt(0)
-			}
-			t := db.GetTable(table)
+			t := GetTable(schema, table)
 			if t == nil {
 				return scm.NewInt(0)
 			}
@@ -143,8 +162,8 @@ func Init(en scm.Env) {
 		"scan", "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
 		6, 10,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string|nil", "database where the table is located"},
-			scm.DeclarationParameter{"table", "string|list", "name of the table to scan (or a list if you have temporary data)"},
+			scm.DeclarationParameter{"table", "table|string|nil", "table handle (preferred) or schema name (legacy) or nil for list scan"},
+			scm.DeclarationParameter{"tableOrList", "string|list", "table name (legacy) or list of temporary data"},
 			scm.DeclarationParameter{"filterColumns", "list", "list of columns that are fed into filter"},
 			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
 			scm.DeclarationParameter{"mapColumns", "list", "list of columns that are fed into map"},
@@ -159,6 +178,7 @@ func Init(en scm.Env) {
 			mapcols := scmerSliceToStrings(mustScmerSlice(a[4], "mapColumns"))
 			isOuter := len(a) > 9 && scm.ToBool(a[9])
 
+			// handle scan of list values: (scan nil list ...)
 			if list, ok := scmerSlice(a[1]); ok {
 				neutral := scm.NewNil()
 				if len(a) > 7 {
@@ -206,13 +226,20 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			var t *table
+			if a[0].IsTableRef() {
+				t = resolveTableHandle(a[0])
+				if t == nil {
+					panic("table handle is invalid")
+				}
+			} else {
+				if !schemaExists(scm.String(a[0])) {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t = GetTable(scm.String(a[0]), scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
 			}
 
 			aggregate := scm.NewNil()
@@ -234,8 +261,8 @@ func Init(en scm.Env) {
 		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
 		10, 13,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database where the table is located"},
-			scm.DeclarationParameter{"table", "string", "name of the table to scan"},
+			scm.DeclarationParameter{"table", "table|string", "table handle (preferred) or schema name (legacy)"},
+			scm.DeclarationParameter{"tableName", "string", "table name (legacy; ignored when first arg is a table handle)"},
 			scm.DeclarationParameter{"filterColumns", "list", "list of columns that are fed into filter"},
 			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"},
 			scm.DeclarationParameter{"sortcols", "list", "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"},
@@ -349,13 +376,20 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			var t *table
+			if a[0].IsTableRef() {
+				t = resolveTableHandle(a[0])
+				if t == nil {
+					panic("table handle is invalid")
+				}
+			} else {
+				if !schemaExists(scm.String(a[0])) {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t = GetTable(scm.String(a[0]), scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
 			}
 
 			return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
@@ -456,7 +490,10 @@ func Init(en scm.Env) {
 						cols1 := scmerSliceToStrings(mustScmerSlice(def[2], "foreign cols1"))
 						cols2 := scmerSliceToStrings(mustScmerSlice(def[4], "foreign cols2"))
 						t2name := scm.String(def[3])
-						t2 := t.schema.GetTable(t2name)
+						if !schemaExists(scm.String(a[0])) {
+							panic("database " + scm.String(a[0]) + " does not exist")
+						}
+						t2 := GetTable(scm.String(a[0]), t2name)
 						var updatemode foreignKeyMode
 						if len(def) > 5 {
 							updatemode = getForeignKeyMode(def[5])
@@ -484,17 +521,22 @@ func Init(en scm.Env) {
 					}
 				}
 				// add constraints that are added onto us
-				for _, t2 := range t.schema.tables.GetAll() {
-					if t2 != t {
-						for _, foreign := range t2.Foreign {
-							if foreign.Tbl2 == t.Name {
-								// copy foward declaration to our definition list
-								t.Foreign = append(t.Foreign, foreign)
-							}
+				if !schemaExists(scm.String(a[0])) {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				ps := readSchema(scm.String(a[0]))
+				for _, t2 := range ps.Tables {
+					if t2 == nil || t2.Name == t.Name {
+						continue
+					}
+					for _, foreign := range t2.Foreign {
+						if foreign.Tbl2 == t.Name {
+							t.Foreign = append(t.Foreign, foreign)
 						}
 					}
 				}
 			}
+			saveTableMetadata(t)
 			return scm.NewBool(true)
 		}, false,
 	})
@@ -513,11 +555,10 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
+			if !schemaExists(scm.String(a[0])) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := GetTable(scm.String(a[0]), scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -552,11 +593,10 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"columns", "list", "list of columns to include"},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
+			if !schemaExists(scm.String(a[0])) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := GetTable(scm.String(a[0]), scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -568,8 +608,9 @@ func Init(en scm.Env) {
 			cols := scmerSliceToStrings(mustScmerSlice(a[4], "unique columns"))
 			name := scm.String(a[2])
 
-			db.schemalock.Lock()
-			defer db.schemalock.Unlock()
+			mu := schemaLock(scm.String(a[0]))
+			mu.Lock()
+			defer mu.Unlock()
 			for _, u := range t.Unique {
 				if u.Id == name {
 					return scm.NewBool(false)
@@ -577,7 +618,7 @@ func Init(en scm.Env) {
 			}
 
 			t.Unique = append(t.Unique, uniqueKey{name, cols})
-			db.save()
+			saveTableMetadataLocked(t)
 
 			return scm.NewBool(true)
 		}, false,
@@ -596,16 +637,15 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"deletemode", "string", "restrict|cascade|set null"},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
+			if !schemaExists(scm.String(a[0])) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
 			id := scm.String(a[1])
-			t1 := db.GetTable(scm.String(a[2]))
+			t1 := GetTable(scm.String(a[0]), scm.String(a[2]))
 			if t1 == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[2]) + " does not exist")
 			}
-			t2 := db.GetTable(scm.String(a[4]))
+			t2 := GetTable(scm.String(a[0]), scm.String(a[4]))
 			if t2 == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[4]) + " does not exist")
 			}
@@ -613,8 +653,9 @@ func Init(en scm.Env) {
 			cols1 := scmerSliceToStrings(mustScmerSlice(a[3], "foreign cols1"))
 			cols2 := scmerSliceToStrings(mustScmerSlice(a[5], "foreign cols2"))
 
-			db.schemalock.Lock()
-			defer db.schemalock.Unlock()
+			mu := schemaLock(scm.String(a[0]))
+			mu.Lock()
+			defer mu.Unlock()
 			for _, u := range t1.Foreign {
 				if u.Id == id {
 					return scm.NewBool(false)
@@ -624,7 +665,8 @@ func Init(en scm.Env) {
 			k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[6]), getForeignKeyMode(a[7])}
 			t1.Foreign = append(t1.Foreign, k)
 			t2.Foreign = append(t2.Foreign, k)
-			db.save()
+			saveTableMetadataLocked(t1)
+			saveTableMetadataLocked(t2)
 
 			return scm.NewBool(true)
 		}, false,
@@ -640,11 +682,10 @@ func Init(en scm.Env) {
 		}, "list",
 		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
+			if !schemaExists(scm.String(a[0])) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := GetTable(scm.String(a[0]), scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -680,11 +721,10 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
+			if !schemaExists(scm.String(a[0])) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := GetTable(scm.String(a[0]), scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -725,11 +765,10 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
+			if !schemaExists(scm.String(a[0])) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := GetTable(scm.String(a[0]), scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -756,11 +795,10 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
+			if !schemaExists(scm.String(a[0])) {
 				panic("database " + scm.String(a[0]) + " does not exist")
 			}
-			t := db.GetTable(scm.String(a[1]))
+			t := GetTable(scm.String(a[0]), scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -769,23 +807,22 @@ func Init(en scm.Env) {
 					switch scm.String(a[3]) {
 					case "drop":
 						ok := t.DropColumn(scm.String(a[2]))
-						db.save()
 						return scm.NewBool(ok)
 					case "auto_increment":
 						ai := scm.ToInt(a[4])
 						if ai > 1 {
 							// set ai value
 							t.Auto_increment = uint64(ai)
-							db.save()
+							saveTableMetadata(t)
 							return scm.NewBool(true)
 						}
 						// set ai flag for column
 						t.Columns[i].AutoIncrement = scm.ToBool(a[4])
-						db.save()
+						saveTableMetadata(t)
 						return scm.NewBool(true)
 					default:
 						ok := t.Columns[i].Alter(scm.String(a[3]), a[4])
-						db.save()
+						saveTableMetadata(t)
 						return scm.NewBool(scm.ToBool(ok))
 					}
 				}
@@ -814,8 +851,8 @@ func Init(en scm.Env) {
 		"insert", "inserts a new dataset into table and returns the number of successful items",
 		4, 8,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database"},
-			scm.DeclarationParameter{"table", "string", "name of the table"},
+			scm.DeclarationParameter{"table", "table|string", "table handle (preferred) or schema name (legacy)"},
+			scm.DeclarationParameter{"tableName", "string", "table name (legacy; ignored when first arg is a table handle)"},
 			scm.DeclarationParameter{"columns", "list", "list of column names, e.g. '(\"ID\", \"value\")"},
 			scm.DeclarationParameter{"datasets", "list", "list of list of column values, e.g. '('(1 10) '(2 15))"},
 			scm.DeclarationParameter{"onCollisionCols", "list", "list of columns of the old dataset that have to be passed to onCollision. Can also request $update."},
@@ -824,9 +861,20 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"onInsertid", "func", "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT"},
 		}, "number",
 		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
+			var t *table
+			if a[0].IsTableRef() {
+				t = resolveTableHandle(a[0])
+				if t == nil {
+					panic("table handle is invalid")
+				}
+			} else {
+				if !schemaExists(scm.String(a[0])) {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t = GetTable(scm.String(a[0]), scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
 			}
 			var onCollisionCols []string
 			onCollision := scm.NewNil()
@@ -858,8 +906,6 @@ func Init(en scm.Env) {
 			for i, row := range rowVals {
 				rows[i] = mustScmerSlice(row, "insert row")
 			}
-			// perform insert
-			t := db.GetTable(scm.String(a[1]))
 			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
 			return scm.NewInt(int64(inserted))
 		}, false,
@@ -875,9 +921,22 @@ func Init(en scm.Env) {
 			if len(a) == 0 {
 				return scm.NewString(PrintMemUsage())
 			} else if len(a) == 1 {
-				return scm.NewString(GetDatabase(scm.String(a[0])).PrintMemUsage())
+				if !schemaExists(scm.String(a[0])) {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				var sz uint
+				for _, name := range listTablesInSchema(scm.String(a[0])) {
+					if t := GetTable(scm.String(a[0]), name); t != nil {
+						sz += t.ComputeSize()
+					}
+				}
+				return scm.NewString(fmt.Sprintf("%s: %d bytes", scm.String(a[0]), sz))
 			} else if len(a) == 2 {
-				return scm.NewString(GetDatabase(scm.String(a[0])).GetTable(scm.String(a[1])).PrintMemUsage())
+				t := GetTable(scm.String(a[0]), scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				return scm.NewString(t.PrintMemUsage())
 			}
 			return scm.NewNil()
 		}, false,
@@ -892,26 +951,29 @@ func Init(en scm.Env) {
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				// show databases
-				dbs := databases.GetAll()
+				dbs := listSchemasOnDisk()
 				result := make([]scm.Scmer, len(dbs))
 				for i, db := range dbs {
-					result[i] = scm.NewString(db.Name)
+					result[i] = scm.NewString(db)
 				}
 				return scm.NewSlice(result)
 			} else if len(a) == 1 {
 				// show tables
-				db := GetDatabase(scm.String(a[0]))
-				if db == nil {
+				if !schemaExists(scm.String(a[0])) {
 					return scm.NewNil() // use this to check if a database exists
 				}
-				return db.ShowTables()
+				tables := listTablesInSchema(scm.String(a[0]))
+				result := make([]scm.Scmer, len(tables))
+				for i, t := range tables {
+					result[i] = scm.NewString(t)
+				}
+				return scm.NewSlice(result)
 			} else if len(a) == 2 {
 				// show columns
-				db := GetDatabase(scm.String(a[0]))
-				if db == nil {
+				if !schemaExists(scm.String(a[0])) {
 					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-				t := db.GetTable(scm.String(a[1]))
+				t := GetTable(scm.String(a[0]), scm.String(a[1]))
 				if t == nil {
 					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
@@ -930,11 +992,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"table", "string", "table name"},
 		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
+			t := GetTable(scm.String(a[0]), scm.String(a[1]))
 			if t == nil {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
@@ -1001,14 +1059,13 @@ func Init(en scm.Env) {
 		"loadCSV", "loads a CSV stream into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.",
 		3, 5,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database"},
-			scm.DeclarationParameter{"table", "string", "name of the table"},
+			scm.DeclarationParameter{"table", "table|string", "table handle (preferred) or schema name (legacy)"},
+			scm.DeclarationParameter{"tableName", "string", "table name (legacy; ignored when first arg is a table handle)"},
 			scm.DeclarationParameter{"stream", "stream", "CSV file, load with: (stream filename)"},
 			scm.DeclarationParameter{"delimiter", "string", "(optional) delimiter defaults to \";\""},
 			scm.DeclarationParameter{"firstline", "bool", "(optional) if the first line contains the column names (otherwise, the tables column order is used)"},
 		}, "string",
 		func(a ...scm.Scmer) scm.Scmer {
-			// schema, table, filename, delimiter
 			start := time.Now()
 
 			delimiter := ";"
@@ -1023,7 +1080,19 @@ func Init(en scm.Env) {
 			if !ok {
 				panic("loadCSV expects a stream")
 			}
-			LoadCSV(scm.String(a[0]), scm.String(a[1]), stream, delimiter, firstline)
+			var t *table
+			if a[0].IsTableRef() {
+				t = resolveTableHandle(a[0])
+				if t == nil {
+					panic("table handle is invalid")
+				}
+			} else {
+				t = GetTable(scm.String(a[0]), scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+			}
+			LoadCSV(t, stream, delimiter, firstline)
 
 			return scm.NewString(fmt.Sprint(time.Since(start)))
 		}, false,
@@ -1066,11 +1135,6 @@ func PrintMemUsage() string {
 	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", units.BytesSize(float64(m.Alloc)), units.BytesSize(float64(m.TotalAlloc)), units.BytesSize(float64(m.Sys)), m.NumGC))
-
-	for _, db := range databases.GetAll() {
-		b.WriteString("\n\n" + db.Name + " [" + sharedStateStr(db.srState) + "]\n======\n")
-		b.WriteString(db.PrintMemUsage())
-	}
 	return b.String()
 }
 
@@ -1085,30 +1149,6 @@ func sharedStateStr(s SharedState) string {
 	default:
 		return "UNKNOWN"
 	}
-}
-
-func (db *database) PrintMemUsage() string {
-	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
-	var b strings.Builder
-	if db.srState == COLD {
-		b.WriteString("State: COLD (no schema loaded)\n")
-		return b.String()
-	}
-	b.WriteString("Table                    \tColumns\tShards\tDims\tSize/Bytes\n")
-	var dsize uint
-	for _, t := range db.tables.GetAll() {
-		var size uint = 10*8 + 32*uint(len(t.Columns))
-		for _, s := range t.Shards {
-			size += s.ComputeSize()
-		}
-		for _, s := range t.PShards {
-			size += s.ComputeSize()
-		}
-		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%s\n", t.Name, len(t.Columns), len(t.Shards)+len(t.PShards), len(t.PDimensions), units.BytesSize(float64(size))))
-		dsize += size
-	}
-	b.WriteString(fmt.Sprintf("\ntotal size = %s\n", units.BytesSize(float64(dsize))))
-	return b.String()
 }
 
 func (t *table) PrintMemUsage() string {

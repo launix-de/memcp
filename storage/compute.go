@@ -49,7 +49,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 							shardlist[i] = s
 							t.mu.Unlock()
 							// persist new shard UUID after publishing
-							t.schema.save()
+							saveTableMetadata(t)
 						}
 						done <- nil
 					}

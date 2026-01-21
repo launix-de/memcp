@@ -21,7 +21,7 @@ import "bufio"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 
-func LoadCSV(schema, table string, f io.Reader, delimiter string, firstLine bool) {
+func LoadCSV(t *table, f io.Reader, delimiter string, firstLine bool) {
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
 
@@ -34,13 +34,8 @@ func LoadCSV(schema, table string, f io.Reader, delimiter string, firstLine bool
 		close(lines)
 	}()
 
-	db := GetDatabase(schema)
-	if db == nil {
-		panic("database " + schema + " does not exist")
-	}
-	t := db.GetTable(table)
 	if t == nil {
-		panic("table " + table + " does not exist")
+		panic("table is nil")
 	}
 	var cols []string
 	if firstLine {

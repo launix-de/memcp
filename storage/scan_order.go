@@ -261,7 +261,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 				}
 			}
 			orderEnc := sb.String()
-			safeLogScan(t.schema.Name, t.Name, true, filterEnc, orderEnc, inputCount, outCount, anNs, exNs)
+			safeLogScan(t.Schema, t.Name, true, filterEnc, orderEnc, inputCount, outCount, anNs, exNs)
 		}(analyzeNs, execNs)
 	}
 	return akkumulator

@@ -20,6 +20,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-builtins.scm")
 (import "queryplan.scm")
 
+/* strip an optional trailing semicolon (and trailing whitespace) */
+(define strip_trailing_semicolon (lambda (q) (begin
+	(define n (strlen q))
+	(define loop (lambda (i) (if (< i 0) "" (match (substr q i 1)
+		" "  (loop (- i 1))
+		"\t" (loop (- i 1))
+		"\r" (loop (- i 1))
+		"\n" (loop (- i 1))
+		";"  (substr q 0 i)
+		_    q
+	))))
+	(loop (- n 1))
+)))
+
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),
 then you can query the policy by
@@ -31,7 +45,7 @@ if the user is not allowed to access this property, the function will throw an e
 */
 (define sql_policy (lambda (username)
 	(begin
-		(define is_admin (scan "system" "user"
+		(define is_admin (scan (get_table "system" "user") nil
 			'("username") (lambda (u) (equal?? u username))
 			'("admin") (lambda (a) a)
 			(lambda (a b) (or a b))
@@ -43,7 +57,7 @@ if the user is not allowed to access this property, the function will throw an e
 					/* Allow virtual INFORMATION_SCHEMA for all users */
 					(if (equal?? schema "information_schema") true (begin
 						/* Database-level check via system.access */
-						(define access_count (scan "system" "access"
+						(define access_count (scan (get_table "system" "access") nil
 							'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
 							'() (lambda () 1)
 							+ 0))
@@ -63,8 +77,31 @@ if the user is not allowed to access this property, the function will throw an e
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
 	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema table write) true)))
-	(insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password (arg "root-password" "admin")) true)))
+	(insert (get_table "system" "user") nil '("id" "username" "password" "admin") '('(1 "root" (password (arg "root-password" "admin")) true)))
 ))
+
+/* ensure root user exists even if system.user pre-existed */
+(try (lambda () (begin
+	(if (has? (show "system") "user") (begin
+		(define root_count (scan (get_table "system" "user") nil
+			'("username") (lambda (u) (equal?? u "root"))
+			'() (lambda () 1)
+			+ 0))
+		(if (> root_count 0)
+			true
+			(begin
+				(define max_id (scan (get_table "system" "user") nil
+					'() (lambda () true)
+					'("id") (lambda (id) id)
+					(lambda (a b) (if (> a b) a b))
+					0))
+				(insert (get_table "system" "user") nil
+					'("id" "username" "password" "admin")
+					(list (list (+ max_id 1) "root" (password (arg "root-password" "admin")) true)))
+			)
+		)
+	) true)
+)) (lambda (e) true))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
 (try (lambda () (begin
@@ -73,7 +110,7 @@ if the user is not allowed to access this property, the function will throw an e
 			true
 			(begin
 				(createcolumn "system" "user" "admin" "boolean" '() '())
-				(scan "system" "user" '() (lambda () true) '("$update") (lambda ($update) ($update '("admin" true))))
+				(scan (get_table "system" "user") nil '() (lambda () true) '("$update") (lambda ($update) ($update '("admin" true))))
 			)
 		)
 	) true)
@@ -103,7 +140,7 @@ if the user is not allowed to access this property, the function will throw an e
 	(set old_handler http_handler)
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan (get_table "system" "user") nil '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -202,26 +239,22 @@ if the user is not allowed to access this property, the function will throw an e
 		(match (req "path")
 			(regex "^/sql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
-				/* tolerate an optional trailing ';' using multiline group */
-				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
+				(set query (strip_trailing_semicolon query))
 				(handle_query req res schema query)
 			)
 			(regex "^/sql/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
-				/* tolerate an optional trailing ';' using multiline group */
-				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
+				(set query (strip_trailing_semicolon query))
 				(handle_query req res schema query)
 			)
 			(regex "^/psql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
-				/* tolerate an optional trailing ';' using multiline group */
-				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
+				(set query (strip_trailing_semicolon query))
 				(handle_query_postgres req res schema query)
 			)
 			(regex "^/psql/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
-				/* tolerate an optional trailing ';' using multiline group */
-				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
+				(set query (strip_trailing_semicolon query))
 				(handle_query_postgres req res schema query)
 			)
 			/* default */
@@ -244,8 +277,7 @@ if the user is not allowed to access this property, the function will throw an e
 					(resultrow '("result" (eval (scheme sql))))
 				) (time (begin
 						/* SQL syntax mode */
-						/* tolerate an optional trailing ';' using multiline group */
-						(set sql (match sql (regex "^((?s:.*));\\s*" _ body) body sql))
+						(set sql (strip_trailing_semicolon sql))
 						(define formula ((if (equal? (session "syntax") "postgresql") (lambda (schema sql policy) (parse_psql schema sql policy)) (lambda (schema sql policy) (parse_sql schema sql policy))) schema sql (sql_policy (coalesce (session "username") "root"))))
 						(eval (source "SQL Query" 1 1 formula))
 					) sql))

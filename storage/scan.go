@@ -111,7 +111,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 					}
 					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 				}
-				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
+				safeLogScan(t.Schema, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
 			}(analyzeNs, execNs)
 		}
 		return akkumulator
@@ -150,7 +150,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 					}
 					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 				}
-				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
+				safeLogScan(t.Schema, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
 			}(analyzeNs, execNs)
 		}
 		return akkumulator
@@ -185,7 +185,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 					}
 					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 				}
-				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
+				safeLogScan(t.Schema, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
 			}(analyzeNs, execNs)
 		}
 		return akkumulator

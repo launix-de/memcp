@@ -97,6 +97,16 @@ func StrLike(str, pattern string) bool {
 func TransformFromJSON(a_ any) Scmer {
 	switch a := a_.(type) {
 	case map[string]any:
+		if ref, ok := a["table"]; ok && len(a) == 1 {
+			if id, ok2 := ref.(string); ok2 {
+				return NewTableRef(id)
+			}
+		}
+		if sym, ok := a["symbol"]; ok && len(a) == 1 {
+			if name, ok2 := sym.(string); ok2 {
+				return NewSymbol(name)
+			}
+		}
 		result := make([]Scmer, 0, len(a)*2)
 		for k, v := range a {
 			result = append(result, NewString(k), TransformFromJSON(v))

@@ -124,5 +124,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	'((ignorecase "information_schema") (ignorecase "partitions"))
 	(merge '(scanfn schema '(list)) rest) /* empty: no MySQL partitions */
 	'(schema tbl) /* normal case */
-	(merge '(scanfn schema tbl) rest)
+	/* normal case: resolve schema+tbl to a table handle during plan build */
+	(merge (list scanfn (get_table schema tbl) nil) rest)
 ))))

@@ -99,8 +99,20 @@ class SQLTestRunner:
         print(f"    Reason: {reason}")
         if query:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
-        if response:
-            print(f"    HTTP {response.status_code}: {response.text[:500]}{'...' if len(response.text) > 500 else ''}")
+        if response is not None:
+            parsed = None
+            try:
+                parsed = self.parse_jsonl_response(response)
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                raw = (response.text or "").strip()
+                if parsed == [] and raw and not raw.lstrip().startswith("{"):
+                    print(f"    HTTP {response.status_code}: {raw[:500]}{'...' if len(raw) > 500 else ''}")
+                else:
+                    print(f"    HTTP {response.status_code}: {parsed}")
+            else:
+                print(f"    HTTP {response.status_code}: {response.text[:500]}{'...' if len(response.text) > 500 else ''}")
         if expect is not None:
             print(f"    Expected: {expect}\n")
 
@@ -380,6 +392,8 @@ def start_memcp_process(port: int) -> subprocess.Popen | None:
     try:
         datadir = os.environ.get("MEMCP_TEST_DATADIR", f"/tmp/memcp-sql-tests-{port}")
         env = os.environ.copy()
+        # Avoid startup unit-test spam blocking stdout/stderr pipes.
+        env["MEMCP_SKIP_UNIT_TESTS"] = env.get("MEMCP_SKIP_UNIT_TESTS", "1")
         godebug = env.get("GODEBUG", "")
         if "invalidptr=" not in godebug:
             env["GODEBUG"] = f"{godebug},invalidptr=0" if godebug else "invalidptr=0"

@@ -98,7 +98,7 @@ restart:
 	switch auxTag(expression.aux) {
 	case tagSourceInfo:
 		return evalWithSourceInfo(*expression.SourceInfo(), en)
-	case tagNil, tagBool, tagInt, tagFloat, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc:
+	case tagNil, tagBool, tagInt, tagFloat, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc, tagTableRef:
 		// literals
 		return expression
 	case tagSymbol:
