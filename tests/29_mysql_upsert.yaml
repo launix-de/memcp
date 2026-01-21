@@ -20,15 +20,29 @@ test_cases:
     expect:
       affected_rows: 1
 
+  - name: "INSERT IGNORE inserts when no conflict"
+    sql: "INSERT IGNORE INTO upsert_t (id, x, y, email) VALUES (9, 1, 1, 'z@example.com')"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT IGNORE ignores duplicate PK"
+    sql: "INSERT IGNORE INTO upsert_t (id, x, y, email) VALUES (1, 999, 999, 'a@example.com')"
+    expect:
+      affected_rows: 0
+
   - name: "Select initial state"
     sql: "SELECT id, x, y, email FROM upsert_t ORDER BY id"
     expect:
-      rows: 1
+      rows: 2
       data:
         - id: 1
           x: 10
           y: 5
           email: "a@example.com"
+        - id: 9
+          x: 1
+          y: 1
+          email: "z@example.com"
 
   - name: "Simple overwrite: x = VALUES(x) on PK conflict"
     sql: |
@@ -119,7 +133,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - c: 2
+        - c: 3
 
   - name: "No-op overwrite: x = VALUES(x) with same value"
     sql: |
@@ -156,12 +170,12 @@ test_cases:
     expect:
       affected_rows: 1
 
-  - name: "Row count back to 2"
+  - name: "Row count back to 3"
     sql: "SELECT COUNT(*) AS c FROM upsert_t"
     expect:
       rows: 1
       data:
-        - c: 2
+        - c: 3
 
   - name: "Verify reinserted row"
     sql: "SELECT id, x, y, email FROM upsert_t WHERE id = 1"
