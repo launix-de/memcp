@@ -2,7 +2,7 @@
 
 metadata:
   version: "1.0"
-  description: "Parse IN (SELECT ...), EXISTS (SELECT ...), scalar (SELECT ...) but reject in planner"
+  description: "IN/EXISTS still rejected; scalar is noncritical until implemented"
 
 setup: []
 
@@ -26,9 +26,44 @@ test_cases:
       error: true
 
   - name: "Scalar subselect in SELECT list"
+    noncritical: true
     sql: "SELECT (SELECT 1) AS x"
     expect:
-      error: true
+      rows: 1
+      data:
+        - x: 1
+
+  - name: "Scalar subselect without correlation"
+    noncritical: true
+    setup:
+      - "DROP TABLE IF EXISTS t2"
+      - "CREATE TABLE t2 (owner INT, val INT)"
+      - "INSERT INTO t2 (owner, val) VALUES (1, 42)"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = 1) AS v"
+    expect:
+      rows: 1
+      data:
+        - v: 42
+    cleanup:
+      - "DROP TABLE IF EXISTS t2"
+
+  - name: "Scalar correlated subselect in SELECT list"
+    noncritical: true
+    setup:
+      - "DROP TABLE IF EXISTS t1"
+      - "DROP TABLE IF EXISTS t2"
+      - "CREATE TABLE t1 (id INT PRIMARY KEY)"
+      - "CREATE TABLE t2 (owner INT, val INT)"
+      - "INSERT INTO t1 (id) VALUES (1)"
+      - "INSERT INTO t2 (owner, val) VALUES (1, 42)"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = t1.id) AS v FROM t1"
+    expect:
+      rows: 1
+      data:
+        - v: 42
+    cleanup:
+      - "DROP TABLE IF EXISTS t2"
+      - "DROP TABLE IF EXISTS t1"
 
   - name: "IN constant list still supported"
     sql: "SELECT 1 WHERE 1 IN (1,2,3)"
@@ -36,4 +71,3 @@ test_cases:
       rows: 1
 
 cleanup: []
-

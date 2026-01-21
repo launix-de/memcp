@@ -150,8 +150,11 @@ test_cases:
     syntax: postgresql
     sql: |
       SELECT (SELECT 1) AS v
+    noncritical: true
     expect:
-      error: true
+      rows: 1
+      data:
+        - v: 1
 
   - name: "PostgreSQL IN (SELECT ...)"
     syntax: postgresql
