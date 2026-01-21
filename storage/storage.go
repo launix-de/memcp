@@ -1057,6 +1057,8 @@ func Init(en scm.Env) {
 		}, "any",
 		ChangeSettings, false,
 	})
+
+	initMySQLImport(en)
 }
 
 func PrintMemUsage() string {
