@@ -814,6 +814,31 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	t.next = result
 	result.mu.Lock() // interlock so no one will rebuild the shard twice
 	defer result.mu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			// If rebuild panics, ensure we don't leave a half-built shard reachable via t.next.
+			// Otherwise, later rebuild/save cycles may publish a schema referencing a UUID whose
+			// column files were never written.
+			t.mu.Lock()
+			if t.next == result {
+				t.next = nil
+			}
+			t.mu.Unlock()
+			if result.logfile != nil {
+				func() { defer func() { _ = recover() }(); result.logfile.Close() }()
+			}
+			if result.uuid != uuid.Nil && result.t != nil && result.t.schema != nil && result.t.schema.persistence != nil {
+				func() { defer func() { _ = recover() }(); result.t.schema.persistence.RemoveLog(result.uuid.String()) }()
+				for _, col := range result.t.Columns {
+					func() {
+						defer func() { _ = recover() }()
+						result.t.schema.persistence.RemoveColumn(result.uuid.String(), col.Name)
+					}()
+				}
+			}
+			panic(r)
+		}
+	}()
 
 	// now read out deletion list
 	maxInsertIndex := len(t.inserts)
@@ -823,10 +848,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 	if all || maxInsertIndex > 0 || deletions.Count() > 0 {
 		result.uuid, _ = uuid.NewRandom() // new uuid, serialize
-		// SetFinalizer to old shard to delete files from disk
-		runtime.SetFinalizer(t, func(t *storageShard) {
-			t.RemoveFromDisk()
-		})
 
 		var b strings.Builder
 		b.WriteString("rebuilding shard for table ")
@@ -945,6 +966,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			logfile.Close()
 			t.t.schema.persistence.RemoveLog(t.uuid.String())
 		}
+
+		// Only after a successful rebuild, schedule old shard files for deletion.
+		runtime.SetFinalizer(t, func(t *storageShard) {
+			t.RemoveFromDisk()
+		})
 	} else {
 		// otherwise: table stays the same
 		result.uuid = t.uuid // copy uuid in case nothing changes
