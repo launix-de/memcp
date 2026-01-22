@@ -65,6 +65,19 @@ test_cases:
       - "DROP TABLE IF EXISTS t2"
       - "DROP TABLE IF EXISTS t1"
 
+  - name: "Scalar subselect multiple rows errors"
+    noncritical: true
+    setup:
+      - "DROP TABLE IF EXISTS t2"
+      - "CREATE TABLE t2 (owner INT, val INT)"
+      - "INSERT INTO t2 (owner, val) VALUES (1, 41)"
+      - "INSERT INTO t2 (owner, val) VALUES (1, 42)"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = 1) AS v"
+    expect:
+      error: true
+    cleanup:
+      - "DROP TABLE IF EXISTS t2"
+
   - name: "IN constant list still supported"
     sql: "SELECT 1 WHERE 1 IN (1,2,3)"
     expect:
