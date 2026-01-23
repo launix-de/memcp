@@ -9,7 +9,7 @@ setup:
   - sql: "CREATE TABLE sales (dept VARCHAR(20), amount INT)"
   - sql: |
       INSERT INTO sales (dept, amount) VALUES
-      ('A', 10), ('A', 20), ('B', 5)
+      ('A', 10), ('A', 20), ('B', 5), ('C', 15)
 
 test_cases:
   - name: "Group and count with HAVING"
@@ -23,7 +23,7 @@ test_cases:
   - name: "Group with SUM and ORDER"
     sql: "SELECT dept, SUM(amount) AS s FROM sales GROUP BY dept ORDER BY SUM(amount) DESC"
     expect:
-      rows: 2
+      rows: 3
 
   - name: "Nested group stage with ORDER+LIMIT"
     sql: "SELECT dept, SUM(amount) AS s FROM sales GROUP BY dept ORDER BY SUM(amount) DESC LIMIT 1"
@@ -42,16 +42,12 @@ test_cases:
           s: 30
 
   - name: "Group ORDER+LIMIT with OFFSET"
-    setup:
-      - "INSERT INTO sales (dept, amount) VALUES ('C', 15)"
     sql: "SELECT dept, SUM(amount) AS s FROM sales GROUP BY dept ORDER BY SUM(amount) DESC LIMIT 1 OFFSET 1"
     expect:
       rows: 1
       data:
         - dept: "C"
           s: 15
-    cleanup:
-      - "DELETE FROM sales WHERE dept = 'C'"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS sales"
