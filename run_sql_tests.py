@@ -208,6 +208,12 @@ class SQLTestRunner:
         auth_header = {"Authorization": f"Basic {b64encode(creds).decode()}"}
         test_syntax = test_case.get("syntax")
         active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
+        setup_steps = test_case.get("setup")
+        cleanup_steps = test_case.get("cleanup")
+
+        if setup_steps:
+            if not self._run_inline_steps(setup_steps, database, active_syntax):
+                return self._record_fail(name, "Setup failed", query, None, None, is_noncritical)
 
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
@@ -233,15 +239,20 @@ class SQLTestRunner:
             # Execute query
             response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
         if response is None:
+            if cleanup_steps:
+                self._run_inline_steps(cleanup_steps, database, active_syntax)
             return self._record_fail(name, "No response", query, None, None)
 
         results = self.parse_jsonl_response(response)
 
         if self.validate_expectation(test_case, response, results):
             self._record_success(name, is_noncritical)
+            if cleanup_steps:
+                self._run_inline_steps(cleanup_steps, database, active_syntax)
             return True
-        else:
-            return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical)
+        if cleanup_steps:
+            self._run_inline_steps(cleanup_steps, database, active_syntax)
+        return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical)
 
     def validate_expectation(self, test_case: Dict, response: requests.Response, results: Optional[List[Dict]]) -> bool:
         expect = test_case.get("expect", {})
@@ -283,7 +294,7 @@ class SQLTestRunner:
     def run_setup(self, setup_steps: List[Dict], database: str) -> bool:
         self.setup_operations = []
         self.current_database = database
-        for step in setup_steps:
+        for step in self._normalize_steps(setup_steps):
             self.setup_operations.append(step)
             resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
             if resp is None or resp.status_code not in [200, 500]:
@@ -291,8 +302,24 @@ class SQLTestRunner:
         return True
 
     def run_cleanup(self, cleanup_steps: List[Dict], database: str) -> None:
-        for step in cleanup_steps:
+        for step in self._normalize_steps(cleanup_steps):
             self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
+
+    def _normalize_steps(self, steps: List[Dict] | List[str]) -> List[Dict]:
+        normalized = []
+        for step in steps or []:
+            if isinstance(step, str):
+                normalized.append({"sql": step})
+            elif isinstance(step, dict) and "sql" in step:
+                normalized.append(step)
+        return normalized
+
+    def _run_inline_steps(self, steps: List[Dict] | List[str], database: str, syntax: Optional[str]) -> bool:
+        for step in self._normalize_steps(steps):
+            resp = self.execute_sql(database, step['sql'], syntax=syntax)
+            if resp is None or resp.status_code not in [200, 500]:
+                return False
+        return True
 
     def cleanup_test_database(self, database: str) -> None:
         try:

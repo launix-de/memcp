@@ -33,5 +33,25 @@ test_cases:
         - dept: "A"
           s: 30
 
+  - name: "Group with HAVING and LIMIT"
+    sql: "SELECT dept, SUM(amount) AS s FROM sales GROUP BY dept HAVING SUM(amount) >= 10 ORDER BY SUM(amount) DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - dept: "A"
+          s: 30
+
+  - name: "Group ORDER+LIMIT with OFFSET"
+    setup:
+      - "INSERT INTO sales (dept, amount) VALUES ('C', 15)"
+    sql: "SELECT dept, SUM(amount) AS s FROM sales GROUP BY dept ORDER BY SUM(amount) DESC LIMIT 1 OFFSET 1"
+    expect:
+      rows: 1
+      data:
+        - dept: "C"
+          s: 15
+    cleanup:
+      - "DELETE FROM sales WHERE dept = 'C'"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sales"
