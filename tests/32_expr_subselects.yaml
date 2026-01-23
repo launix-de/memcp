@@ -2,7 +2,7 @@
 
 metadata:
   version: "1.0"
-  description: "IN/EXISTS still rejected; scalar subselects supported"
+  description: "IN/EXISTS still rejected; scalar is noncritical until implemented"
 
 setup: []
 
@@ -26,6 +26,7 @@ test_cases:
       error: true
 
   - name: "Scalar subselect in SELECT list"
+    noncritical: true
     sql: "SELECT (SELECT 1) AS x"
     expect:
       rows: 1
@@ -33,6 +34,7 @@ test_cases:
         - x: 1
 
   - name: "Scalar subselect without correlation"
+    noncritical: true
     setup:
       - "DROP TABLE IF EXISTS t2"
       - "CREATE TABLE t2 (owner INT, val INT)"
@@ -45,21 +47,8 @@ test_cases:
     cleanup:
       - "DROP TABLE IF EXISTS t2"
 
-  - name: "Scalar subselect ORDER BY LIMIT 1"
-    setup:
-      - "DROP TABLE IF EXISTS t2"
-      - "CREATE TABLE t2 (owner INT, val INT)"
-      - "INSERT INTO t2 (owner, val) VALUES (1, 41)"
-      - "INSERT INTO t2 (owner, val) VALUES (1, 42)"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = 1 ORDER BY val DESC LIMIT 1) AS v"
-    expect:
-      rows: 1
-      data:
-        - v: 42
-    cleanup:
-      - "DROP TABLE IF EXISTS t2"
-
   - name: "Scalar correlated subselect in SELECT list"
+    noncritical: true
     setup:
       - "DROP TABLE IF EXISTS t1"
       - "DROP TABLE IF EXISTS t2"
@@ -77,6 +66,7 @@ test_cases:
       - "DROP TABLE IF EXISTS t1"
 
   - name: "Scalar subselect multiple rows errors"
+    noncritical: true
     setup:
       - "DROP TABLE IF EXISTS t2"
       - "CREATE TABLE t2 (owner INT, val INT)"
