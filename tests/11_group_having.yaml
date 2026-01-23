@@ -25,5 +25,13 @@ test_cases:
     expect:
       rows: 2
 
+  - name: "Nested group stage with ORDER+LIMIT"
+    sql: "SELECT dept, SUM(amount) AS s FROM sales GROUP BY dept ORDER BY SUM(amount) DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - dept: "A"
+          s: 30
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS sales"
