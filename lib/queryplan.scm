@@ -129,6 +129,30 @@ if there is a group function, create a temporary preaggregate table
 			(list (quote offset) offset)
 		)
 	))
+	(define stage_group_cols (lambda (stage) (reduce stage (lambda (acc item)
+		(if (nil? acc) (match item
+			(cons (symbol group-cols) cols) cols
+			_ nil
+		) acc)
+	) nil)))
+	(define stage_having_expr (lambda (stage) (reduce stage (lambda (acc item)
+		(if (nil? acc) (match item
+			(cons (symbol having) rest) (if (nil? rest) nil (car rest))
+			_ nil
+		) acc)
+	) nil)))
+	(define stage_limit_val (lambda (stage) (reduce stage (lambda (acc item)
+		(if (nil? acc) (match item
+			(cons (symbol limit) rest) (if (nil? rest) nil (car rest))
+			_ nil
+		) acc)
+	) nil)))
+	(define stage_offset_val (lambda (stage) (reduce stage (lambda (acc item)
+		(if (nil? acc) (match item
+			(cons (symbol offset) rest) (if (nil? rest) nil (car rest))
+			_ nil
+		) acc)
+	) nil)))
 
 	/* TODO(memcp): Unnesting strategy
 	- Untangle/flatten FROM-subselects first (alias prefixing + column rewrite).
@@ -138,7 +162,6 @@ if there is a group function, create a temporary preaggregate table
 	*/
 
 	/* check if we have FROM selects -> returns '(tables renamelist condition schemas) */
-	(print "tables before zip=" tables)
 	(match (zip (map tables (lambda (tbldesc) (match tbldesc
 		'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 		'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
@@ -163,7 +186,23 @@ if there is a group function, create a temporary preaggregate table
 				expr
 			)))
 			/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
-			(if (not (nil? groups2)) (error "group/order/limit is not supported yet in subqueries"))
+			(if (and (not (nil? groups2)) (not (equal? groups2 '())))
+				(begin
+					(define unsupported (reduce groups2 (lambda (acc stage)
+						(or acc
+							(begin
+								(define g (stage_group_cols stage))
+								(and (not (nil? g)) (not (equal? g '())))
+							)
+							(not (nil? (stage_having_expr stage)))
+							(not (nil? (stage_limit_val stage)))
+							(not (nil? (stage_offset_val stage)))
+						)
+					) false))
+					(if unsupported (error "group/order/limit is not supported yet in subqueries"))
+					(set groups2 nil)
+				)
+			)
 			'(tablesPrefixed '(id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) (replace_column_alias condition2) (merge '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) '((concat id ":" k) v))))))
 		) (error "non matching return value for untangle_query"))
 		(error (concat "unknown tabledesc: " tbldesc))
@@ -289,12 +328,12 @@ if there is a group function, create a temporary preaggregate table
 			(set group (map group replace_rename))
 			(set having (replace_rename having))
 			(set order (map order (lambda (o) (match o '(col dir) '((replace_rename col) dir)))))
-			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) '()))
+			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
 			'(schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll groups schemas replace_find_column)
 		)
 		/* else: empty tables list */
 		(begin
-			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) '()))
+			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
 			'(schema tables fields (optimize condition) groups '() (lambda (expr) expr))
 		)
 	)
@@ -306,7 +345,6 @@ if there is a group function, create a temporary preaggregate table
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
 	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
 	/*(print "build queryplan " '(schema tables fields condition groups schemas))*/
-
 	/*
 	Query builder masterplan:
 	1. make sure all optimizations are done (unnesting arbitrary queries, leave just one big table list with fields, conditions, and group-stages)
@@ -356,9 +394,11 @@ if there is a group function, create a temporary preaggregate table
 			_ nil
 		) acc)
 	) nil)))
-	(set groups (coalesce groups '()))
-	(define stage (if (nil? groups) nil (car groups)))
-	(define rest_groups (if (nil? groups) '() (cdr groups)))
+	(set groups (coalesceNil groups '()))
+	(define groups_present (and (not (nil? groups)) (not (equal? groups '()))))
+	(define stage (if groups_present (car groups) nil))
+	(define rest_groups (if groups_present (cdr groups) nil))
+	(set rest_groups (coalesceNil rest_groups '()))
 	(define stage_group (if stage (stage_group_cols stage) nil))
 	(define stage_having (if stage (stage_having_expr stage) nil))
 	(define stage_order (if stage (stage_order_list stage) nil))
@@ -404,9 +444,19 @@ if there is a group function, create a temporary preaggregate table
 					expr /* literals */
 				)))
 
-				'('begin
-					/* TODO: partitioning hint for insert -> same partitioning scheme as tables */
-					/* INSERT IGNORE group cols into preaggregate */
+				(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_agg_with_fetch col) dir))))))
+				(define next_groups (merge
+					(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset)) '())
+					rest_groups
+				))
+				(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
+					(map_assoc fields (lambda (k v) (replace_agg_with_fetch v)))
+					(replace_agg_with_fetch stage_having)
+					next_groups
+					schemas
+					replace_find_column))
+
+				(define collect_plan
 					'('time '('begin
 						/* If grouping is global (group='(1)), avoid base scan and insert one key row */
 						(if (equal? stage_group '(1))
@@ -433,9 +483,9 @@ if there is a group function, create a temporary preaggregate table
 									isOuter)
 							)
 						)
-					) "collect")
+					) "collect"))
 
-					/* compute aggregates */
+				(define compute_plan
 					'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 						(set cols (extract_columns_for_tblvar tblvar expr))
 						/* TODO: name that column (concat ag "|" condition) */
@@ -452,29 +502,15 @@ if there is a group function, create a temporary preaggregate table
 								isOuter
 							)
 						))
-					))))) "compute")
+					))))) "compute"))
 
-					/* build the queryplan for the ordered limited scan on the grouped table */
-					(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) '((replace_agg_with_fetch col) dir))))))
-					(if (and (coalesce grouped_order stage_limit stage_offset) (not (nil? rest_groups)))
-						(error "order/limit stage must be last"))
-					(define next_groups (append
-						(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset)) '())
-						rest_groups
-					))
-					(build_queryplan schema '('(grouptbl schema grouptbl false nil))
-						(map_assoc fields (lambda (k v) (replace_agg_with_fetch v)))
-						(replace_agg_with_fetch stage_having)
-						next_groups
-						schemas
-						replace_find_column)
-				)
+				(list 'begin collect_plan compute_plan grouped_plan)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
 		)
 	) (begin
 			/* grouping has been removed; now to the real data: */
-			(if (not (nil? rest_groups)) (error "non-group stage must be last"))
+			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '()))) (error "non-group stage must be last"))
 			(if (coalesce stage_order stage_limit stage_offset) (begin
 				/* ordered or limited scan */
 				/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
