@@ -49,19 +49,23 @@ if there is a group function, create a temporary preaggregate table
 */
 
 /* returns a list of '(string...) */
-(define extract_columns_for_tblvar (lambda (tblvar expr) (match expr
-	'((symbol get_column) (eval tblvar) _ col _) '(col) /* TODO: case matching */
-	(cons sym args) /* function call */ (merge_unique (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg))))
-	'()
-)))
+(define extract_columns_for_tblvar (lambda (tblvar expr)
+	(match expr
+		'((symbol get_column) (eval tblvar) _ col _) '(col) /* TODO: case matching */
+		(cons sym args) /* function call */ (merge_unique (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg))))
+		'()
+	)
+))
 
 /* changes (get_column tblvar ti col ci) into its symbol */
-(define replace_columns_from_expr (lambda (expr) (match expr
-	(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
-	'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (error (concat "column " col " not found")) (symbol (concat tblvar "." col)))
-	(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
-	expr /* literals */
-)))
+(define replace_columns_from_expr (lambda (expr)
+	(match expr
+		(cons (symbol aggregate) args) /* aggregates: don't dive in */ (cons aggregate args)
+		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) (error (concat "column " col " not found")) (symbol (concat tblvar "." col)))
+		(cons sym args) /* function call */ (cons sym (map args replace_columns_from_expr))
+		expr /* literals */
+	)
+))
 
 /* scalar subselect helper wrappers */
 (define scalar_scan (lambda (schema tbl filtercols filterfn mapcols mapfn reduce neutral reduce2) (begin
@@ -74,11 +78,13 @@ if there is a group function, create a temporary preaggregate table
 )))
 
 /* returns a list of all aggregates in this expr */
-(define extract_aggregates (lambda (expr) (match expr
-	(cons (symbol aggregate) args) '(args)
-	(cons sym args) /* function call */ (merge (map args extract_aggregates))
-	/* literal */ '()
-)))
+(define extract_aggregates (lambda (expr)
+	(match expr
+		(cons (symbol aggregate) args) '(args)
+		(cons sym args) /* function call */ (merge (map args extract_aggregates))
+		/* literal */ '()
+	)
+))
 
 /* split_condition returns a tuple (now, later) according to what can be checked now and what has to be waited for tables '('(tblvar ...) ...) */
 (define split_condition (lambda (expr tables) (match expr
@@ -214,7 +220,9 @@ if there is a group function, create a temporary preaggregate table
 					(begin
 						(define outer_alias (column_exists_in_schema outer_schemas alias_name table_insensitive column_name column_insensitive))
 						(if (nil? outer_alias)
-							(error (concat "column " column_name " does not exist in outer query"))
+							(if (nil? alias_name)
+								(error (concat "column " column_name " does not exist in outer query"))
+								expr)
 							(list (quote outer) (symbol (concat outer_alias "." column_name))))
 					)
 				)
@@ -258,127 +266,61 @@ if there is a group function, create a temporary preaggregate table
 						(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset))
 						groups2)
 					groups2))
-				(define has_stage (and (not (nil? groups2)) (not (equal? groups2 '()))))
-				(if (and has_stage (not (equal? (cdr groups2) '()))) (error "multiple group stages not supported yet in scalar subselects"))
-				(define stage (if has_stage (car groups2) nil))
-				(define stage_item (lambda (key) (if stage
-					(reduce stage (lambda (acc item)
-						(if (nil? acc)
-							(if (and (list? item) (not (nil? item)) (equal?? (car item) key))
-								(cdr item)
-								nil)
-							acc)
-					) nil)
-					nil
-				)))
-				(define stage_group (if stage (coalesceNil (stage_item (quote group-cols)) '()) nil))
-				(define stage_having (if stage (if (nil? (stage_item (quote having))) nil (car (stage_item (quote having)))) nil))
-				(define stage_order (if stage (coalesceNil (if (nil? (stage_item (quote order))) nil (car (stage_item (quote order)))) '()) nil))
-				(define stage_limit (if stage (if (nil? (stage_item (quote limit))) nil (car (stage_item (quote limit)))) nil))
-				(define stage_offset (if stage (if (nil? (stage_item (quote offset))) nil (car (stage_item (quote offset)))) nil))
-				(if (or (and (not (nil? stage_group)) (not (equal? stage_group '()))) (not (nil? stage_having)))
-					(error "group/having is not supported yet in scalar subselects")
-				)
 				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
-				(set stage_order (coalesceNil stage_order '()))
-				(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column_subselect col) dir)))))
 				(define field_exprs (extract_assoc fields2 (lambda (k v) v)))
 				(define value_expr (match field_exprs
 					(cons only '()) only
 					_ (error "scalar subselect must return single column")
 				))
-				(set value_expr (replace_find_column_subselect value_expr))
-				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
-				(define scalar_expr (if (or (nil? tables2) (equal? tables2 '()))
-					value_expr
-					(begin
-						(if (not (and (list? tables2) (equal? (count tables2) 1)))
-							(error "scalar subselect with multiple tables not supported yet")
+				(define scalar_neutral (list (quote quote) (quote __scalar_empty)))
+				(define scalar_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
+					(list (quote if)
+						(list (quote equal?) (quote acc) scalar_neutral)
+						(list (quote if)
+							(list (quote equal?) (quote v) scalar_neutral)
+							(quote acc)
+							(quote v)
 						)
-						(define tdesc (car tables2))
-						(if (not (and (list? tdesc) (equal? (count tdesc) 5)))
-							(error "scalar subselect with multiple tables not supported yet")
-						)
-						(define tblvar (nth tdesc 0))
-						(define schema3 (nth tdesc 1))
-						(define tbl (nth tdesc 2))
-						(define isOuter (nth tdesc 3))
-						(define joinexpr (nth tdesc 4))
-						(if (not (nil? joinexpr)) (error "scalar subselect joins not supported yet"))
-						(define filtercols (extract_columns_for_tblvar tblvar condition2))
-						(define mapcols (extract_columns_for_tblvar tblvar value_expr))
-						(define use_ordered (or (and (not (nil? stage_order)) (not (equal? stage_order '()))) (not (nil? stage_limit)) (not (nil? stage_offset))))
-						(define ordercols (merge (map stage_order (lambda (o) (match o '(col dir) (match col
-							'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-							'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-							_ '()
-						))))))
-						(define dirs (merge (map stage_order (lambda (o) (match o '(col dir) (match col
-							'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-							'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-							_ '()
-						))))))
-						(if (and use_ordered (not (equal? stage_order '())) (not (equal? (count ordercols) (count stage_order))))
-							(error "scalar subselect ORDER BY must use direct columns")
-						)
-						(define scalar_neutral (list (quote quote) (quote __scalar_empty)))
-						(define scalar_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
-							(list (quote if)
-								(list (quote equal?) (quote acc) scalar_neutral)
-								(list (quote if)
-									(list (quote equal?) (quote v) scalar_neutral)
-									(quote acc)
-									(quote v)
-								)
-								(list (quote if)
-									(list (quote equal?) (quote v) scalar_neutral)
-									(quote acc)
-									(list (quote error) "scalar subselect returned more than one row")
-								)
-							)
-						))
-						(if use_ordered
-							(list (quote scalar_scan_order)
-								schema3
-								tbl
-								(cons list filtercols)
-								(list (quote lambda)
-									(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-									(list (quote optimize) (replace_columns_from_expr condition2))
-								)
-								(cons list ordercols)
-								(cons list dirs)
-								(coalesceNil stage_offset 0)
-								(coalesceNil stage_limit -1)
-								(cons list mapcols)
-								(list (quote lambda)
-									(map mapcols (lambda (col) (symbol (concat tblvar "." col))))
-									(replace_columns_from_expr value_expr)
-								)
-								scalar_reduce
-								scalar_neutral
-							)
-							(list (quote scalar_scan)
-								schema3
-								tbl
-								(cons list filtercols)
-								(list (quote lambda)
-									(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-									(list (quote optimize) (replace_columns_from_expr condition2))
-								)
-								(cons list mapcols)
-								(list (quote lambda)
-									(map mapcols (lambda (col) (symbol (concat tblvar "." col))))
-									(replace_columns_from_expr value_expr)
-								)
-								scalar_reduce
-								scalar_neutral
-								scalar_reduce
-							)
+						(list (quote if)
+							(list (quote equal?) (quote v) scalar_neutral)
+							(quote acc)
+							(list (quote error) "scalar subselect returned more than one row")
 						)
 					)
 				))
-				scalar_expr
+				(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
+				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
+				(define replace_resultrow (lambda (expr) (match expr
+					(cons sym args) (if (equal? sym (quote resultrow))
+						(cons (symbol "__scalar_resultrow") (map args replace_resultrow))
+						(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+							(list (quote symbol) "__scalar_resultrow")
+							(cons (replace_resultrow sym) (map args replace_resultrow))
+						)
+					)
+					expr
+				)))
+				(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
+				(list (quote begin)
+					(list (quote set) (symbol "accsess") (list (quote newsession)))
+					(list (symbol "accsess") "acc" scalar_neutral)
+					(list (quote set) (symbol "__scalar_resultrow")
+						(list (quote lambda) (list (symbol "row"))
+							(list (quote begin)
+								(list (symbol "accsess") "acc"
+									(list scalar_reduce
+										(list (symbol "accsess") "acc")
+										(list (quote nth) (symbol "row") 1)))
+								true
+							)
+						)
+					)
+					subplan
+					(list (quote if)
+						(list (quote equal?) (list (symbol "accsess") "acc") scalar_neutral)
+						nil
+						(list (symbol "accsess") "acc"))
+				)
 			)
 		)
 	)))
@@ -774,7 +716,9 @@ if there is a group function, create a temporary preaggregate table
 			/* tells whether there is an aggregate inside */
 			(define expr_find_aggregate (lambda (expr) (match expr
 				'((symbol aggregate) item reduce neutral) true
-				(cons sym args) /* function call */ (reduce args (lambda (a b) (or a (expr_find_aggregate b))) false)
+				(cons sym args) /* function call */ (if (nil? (inner_select_kind sym))
+					(reduce args (lambda (a b) (or a (expr_find_aggregate b))) false)
+					false)
 				false
 			)))
 
@@ -888,8 +832,7 @@ if there is a group function, create a temporary preaggregate table
 		)
 	)
 )
-)
-)
+))
 /* build queryplan from parsed query */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
@@ -988,12 +931,14 @@ if there is a group function, create a temporary preaggregate table
 				(set condition (replace_find_column (coalesceNil condition true)))
 				(set filtercols (extract_columns_for_tblvar tblvar condition))
 
-				(define replace_agg_with_fetch (lambda (expr) (match expr
-					(cons (symbol aggregate) rest) '('get_column grouptbl false (concat rest "|" condition) false) /* aggregate helper column */
-					'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (concat '('get_column tblvar ti col ci)) ci) /* grouped col */
-					(cons sym args) /* function call */ (cons sym (map args replace_agg_with_fetch))
-					expr /* literals */
-				)))
+				(define replace_agg_with_fetch (lambda (expr)
+					(match expr
+						(cons (symbol aggregate) rest) '('get_column grouptbl false (concat rest "|" condition) false) /* aggregate helper column */
+						'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (concat '('get_column tblvar ti col ci)) ci) /* grouped col */
+						(cons sym args) /* function call */ (cons sym (map args replace_agg_with_fetch))
+						expr /* literals */
+					)
+				))
 
 				(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_agg_with_fetch col) dir))))))
 				(define next_groups (merge
