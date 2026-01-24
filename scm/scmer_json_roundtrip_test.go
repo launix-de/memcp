@@ -87,7 +87,7 @@ func TestScmerJSON_RoundTripMany(t *testing.T) {
 			t.Fatalf("case %d failed: %v (json %s)", idx, err, string(b))
 		}
 		// Special shape checks
-		switch auxTag(in.aux) {
+		switch in.GetTag() {
 		case tagSymbol:
 			var m map[string]any
 			if err := json.Unmarshal(b, &m); err != nil {

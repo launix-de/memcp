@@ -50,7 +50,7 @@ func parserSymbolEquals(v Scmer, name string) bool {
 }
 
 func scmerToParser(v Scmer) packrat.Parser[*parserResult] {
-	switch auxTag(v.aux) {
+	switch v.GetTag() {
 	case tagAny:
 		if parser, ok := v.Any().(packrat.Parser[*parserResult]); ok {
 			return parser
@@ -104,7 +104,7 @@ func mergeParserResults(s string, r ...*parserResult) *parserResult {
 			continue
 		}
 		v := e.value
-		if auxTag(v.aux) == tagAny {
+		if v.GetTag() == tagAny {
 			if inner, ok := v.Any().(*parserResult); ok {
 				v = inner.value
 			}
@@ -167,7 +167,7 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 	if ignoreResult {
 		merger = mergeParserResultsNil
 	}
-	switch auxTag(syntax.aux) {
+	switch syntax.GetTag() {
 	case tagSourceInfo:
 		return parseSyntax(syntax.SourceInfo().value, en, ome, ignoreResult)
 	case tagFastDict:

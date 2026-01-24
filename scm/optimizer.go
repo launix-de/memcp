@@ -33,26 +33,19 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	if val.IsNil() {
 		return func(...Scmer) Scmer { return NewNil() }
 	}
-	if auxTag(val.aux) == tagFunc {
+	if val.GetTag() == tagFunc {
 		return val.Func()
 	}
-	if auxTag(val.aux) == tagAny {
+	if val.GetTag() == tagAny {
 		if fn, ok := val.Any().(func(...Scmer) Scmer); ok {
 			return fn
 		}
 	}
 
 	var proc *Proc
-	switch auxTag(val.aux) {
+	switch val.GetTag() {
 	case tagProc:
 		proc = val.Proc()
-	case tagAny:
-		if pv, ok := val.Any().(Proc); ok {
-			copy := pv
-			proc = &copy
-		} else if pv2, ok := val.Any().(*Proc); ok {
-			proc = pv2
-		}
 	}
 	if proc == nil {
 		// Not a lambda/proc: treat as constant value and return it regardless of args.
@@ -63,7 +56,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	p := *proc
 
 	// constant body
-	switch auxTag(p.Body.aux) {
+	switch p.Body.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString:
 		constant := p.Body
 		return func(...Scmer) Scmer { return constant }
@@ -203,7 +196,7 @@ func scmerStripSourceInfo(v Scmer) (Scmer, bool) {
 		si := v.SourceInfo()
 		return si.value, true
 	}
-	if auxTag(v.aux) == tagAny {
+	if v.GetTag() == tagAny {
 		if si, ok := v.Any().(SourceInfo); ok {
 			return si.value, true
 		}
@@ -232,7 +225,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 		return NewNil(), true, true
 	}
 
-	switch auxTag(val.aux) {
+	switch val.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString:
 		return val, true, true
 	case tagSymbol:
@@ -472,7 +465,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if stripped, ok := scmerStripSourceInfo(unquoted); ok {
 			unquoted = stripped
 		}
-		switch auxTag(unquoted.aux) {
+		switch unquoted.GetTag() {
 		case tagString:
 			return NewSymbol(unquoted.String()), true, false
 		case tagAny:
@@ -571,7 +564,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			allTrue := true
 			for i := 1; i < len(v); i++ {
 				arg := v[i]
-				switch auxTag(arg.aux) {
+				switch arg.GetTag() {
 				case tagNil, tagBool, tagInt, tagFloat, tagString:
 					if !ToBool(arg) {
 						return NewBool(false), true, true

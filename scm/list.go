@@ -63,10 +63,10 @@ func init_list() {
 			DeclarationParameter{"list", "list", "base list"},
 		}, "int",
 		func(a ...Scmer) Scmer {
-			if auxTag(a[0].aux) == tagSlice {
+			if a[0].GetTag() == tagSlice {
 				return NewInt(int64(len(a[0].Slice())))
 			}
-			if auxTag(a[0].aux) == tagFastDict {
+			if a[0].GetTag() == tagFastDict {
 				fd := a[0].FastDict()
 				if fd == nil {
 					return NewInt(0)
@@ -140,7 +140,7 @@ func init_list() {
 		}, "list",
 		func(a ...Scmer) Scmer {
 			car := a[0]
-			if auxTag(a[1].aux) == tagSlice {
+			if a[1].GetTag() == tagSlice {
 				return NewSlice(append([]Scmer{car}, a[1].Slice()...))
 			}
 			return NewSlice([]Scmer{car, a[1]})

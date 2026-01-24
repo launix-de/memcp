@@ -20,11 +20,12 @@ package scm
 import "fmt"
 import "sync"
 import "errors"
+import "strings"
 import "runtime"
-import "github.com/launix-de/go-mysqlstack/driver"
 import "github.com/launix-de/go-mysqlstack/xlog"
-import "github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
+import "github.com/launix-de/go-mysqlstack/driver"
 import querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
+import "github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
 
 // build this function into your SCM environment to offer http server capabilities
 func MySQLServe(a ...Scmer) Scmer {
@@ -112,7 +113,7 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 	return nil
 }
 func ScmerToMySQL(v Scmer) sqltypes.Value {
-	switch auxTag(v.aux) {
+	switch v.GetTag() {
 	case tagNil:
 		return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
 	case tagFloat:
@@ -135,6 +136,37 @@ type ErrorWrapper string
 
 func (s ErrorWrapper) Error() string {
 	return string(s)
+}
+func isSelectQuery(query string) bool {
+	trimmed := strings.TrimSpace(query)
+	for {
+		if strings.HasPrefix(trimmed, "/*") {
+			end := strings.Index(trimmed, "*/")
+			if end == -1 {
+				return false
+			}
+			trimmed = strings.TrimSpace(trimmed[end+2:])
+			continue
+		}
+		if strings.HasPrefix(trimmed, "--") {
+			end := strings.Index(trimmed, "\n")
+			if end == -1 {
+				return false
+			}
+			trimmed = strings.TrimSpace(trimmed[end+1:])
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			end := strings.Index(trimmed, "\n")
+			if end == -1 {
+				return false
+			}
+			trimmed = strings.TrimSpace(trimmed[end+1:])
+			continue
+		}
+		break
+	}
+	return strings.HasPrefix(strings.ToLower(trimmed), "select")
 }
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
 	if query == "select @@version_comment limit 1" {
@@ -217,6 +249,11 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	updateFlags(session, sessionFunc)
 	// flush the rest
 	if result.State == sqltypes.RStateFields {
+		if len(result.Fields) == 0 && isSelectQuery(query) {
+			result.Fields = []*querypb.Field{
+				{Name: "_empty", Type: querypb.Type_NULL_TYPE},
+			}
+		}
 		result.State = sqltypes.RStateNone // full send
 		callback(&result)
 	} else {

@@ -275,7 +275,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 }
 
 func scmerToGo(v Scmer) any {
-	switch auxTag(v.aux) {
+	switch v.GetTag() {
 	case tagNil:
 		return nil
 	case tagBool:

@@ -63,7 +63,7 @@ func HashKey(k Scmer) uint64 {
 	h.SetSeed(fastDictSeed)
 	var writeScmer func(v Scmer)
 	writeScmer = func(v Scmer) {
-		switch auxTag(v.aux) {
+		switch v.GetTag() {
 		case tagNil:
 			h.WriteByte(0)
 		case tagBool:

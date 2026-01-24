@@ -27,7 +27,7 @@ import (
 )
 
 func String(v Scmer) string {
-	switch auxTag(v.aux) {
+	switch v.GetTag() {
 	case tagNil:
 		return "nil"
 	case tagBool, tagInt, tagFloat:
@@ -77,12 +77,6 @@ func String(v Scmer) string {
 		if idx, ok := v.Any().(NthLocalVar); ok {
 			return fmt.Sprintf("(var %d)", idx)
 		}
-		if p, ok := v.Any().(Proc); ok {
-			return fmt.Sprintf("[func %s]", String(p.Body))
-		}
-		if p, ok := v.Any().(*Proc); ok {
-			return fmt.Sprintf("[func %s]", String(p.Body))
-		}
 		if _, ok := v.Any().(func(...Scmer) Scmer); ok {
 			return "[native func]"
 		}
@@ -99,7 +93,7 @@ func String(v Scmer) string {
 		}
 		return fmt.Sprint(v.Any())
 	default:
-		return fmt.Sprintf("<scmer %d>", auxTag(v.aux))
+		return fmt.Sprintf("<scmer %d>", v.GetTag())
 	}
 }
 func SerializeToString(v Scmer, glob *Env) string {
@@ -128,7 +122,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString(")")
 		return
 	}
-	switch auxTag(v.aux) {
+	switch v.GetTag() {
 	case tagNil:
 		b.WriteString("nil")
 	case tagBool:
@@ -208,7 +202,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			return
 		}
 		if idx, ok := v.Any().(NthLocalVar); ok {
-			if p != nil && p.NumVars >= int(idx) && auxTag(p.Params.aux) == tagSlice {
+			if p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
 				params := p.Params.Slice()
 				if int(idx) < len(params) && params[idx].IsSymbol() {
 					b.WriteString(params[idx].String())
@@ -218,14 +212,6 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			b.WriteString("(var ")
 			b.WriteString(fmt.Sprint(idx))
 			b.WriteByte(')')
-			return
-		}
-		if pr, ok := v.Any().(Proc); ok {
-			serializeProc(b, pr, en, glob, p)
-			return
-		}
-		if prp, ok := v.Any().(*Proc); ok {
-			serializeProc(b, *prp, en, glob, p)
 			return
 		}
 		if sp, ok := v.Any().(*ScmParser); ok {
@@ -264,7 +250,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 
 func serializeProc(b *bytes.Buffer, v Proc, en *Env, glob *Env, parent *Proc) {
 	b.WriteString("(lambda ")
-	if v.NumVars > 0 && auxTag(v.Params.aux) == tagNil {
+	if v.NumVars > 0 && v.Params.GetTag() == tagNil {
 		// TODO: deoptimize numbered lambdas when needed
 	}
 	SerializeEx(b, v.Params, glob, glob, nil)
@@ -313,7 +299,7 @@ func serializeNativeFunc(b *bytes.Buffer, fn any, en *Env) {
 	en2 := en
 	for en2 != nil {
 		for k, v := range en2.Vars {
-			if auxTag(v.aux) == tagFunc {
+			if v.GetTag() == tagFunc {
 				fv := v.Func()
 				ov := reflect.ValueOf(fv)
 				if ov.Kind() == reflect.Func && ov.Pointer() == fnPtr {

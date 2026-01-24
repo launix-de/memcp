@@ -30,7 +30,7 @@ import (
 
 // Scmer is a compact tagged value container (16 bytes). !! NEVER CHANGE IT TO MORE THAN THAT, THE STRUCT SIZE IS CRUCIAL FOR PERFORMANCE
 type Scmer struct {
-	ptr *byte // must always be a valid pointer; integer and float encoding: data is stored in aux and ptr contains a dummy that identifies the type
+	ptr *byte  // must always be a valid pointer; integer and float encoding: data is stored in aux and ptr contains a dummy that identifies the type
 	aux uint64 // type tag + extra data (len, etc.)
 }
 
@@ -71,8 +71,6 @@ const (
 
 var scmerIntSentinel byte
 var scmerFloatSentinel byte
-var scmerBoolSentinel byte // TODO: remove this. booleans don't need 64 bit to store, so you can encode in aux
-var scmerNthLocalVarSentinel byte // TODO: remove this. nthlocalvar don't need 64 bits, so you can encode in aux
 
 // Helpers
 func makeAux(tag uint16, val uint64) uint64 {
@@ -87,12 +85,6 @@ func (s Scmer) GetTag() uint16 {
 	if s.ptr == &scmerFloatSentinel {
 		return tagFloat
 	}
-	if s.ptr == &scmerBoolSentinel {
-		return tagBool
-	}
-	if s.ptr == &scmerNthLocalVarSentinel {
-		return tagNthLocalVar
-	}
 	return auxTag(s.aux)
 }
 
@@ -104,9 +96,9 @@ func NewNil() Scmer { return Scmer{nil, makeAux(tagNil, 0)} }
 
 func NewBool(b bool) Scmer {
 	if b {
-		return Scmer{&scmerBoolSentinel, 1}
+		return Scmer{nil, makeAux(tagBool, 1)}
 	}
-	return Scmer{&scmerBoolSentinel, 0}
+	return Scmer{nil, makeAux(tagBool, 0)}
 }
 
 func NewInt(i int64) Scmer {
@@ -191,7 +183,7 @@ func NewProc(p *Proc) Scmer {
 }
 
 func NewNthLocalVar(idx NthLocalVar) Scmer {
-	return Scmer{&scmerNthLocalVarSentinel, uint64(idx)}
+	return Scmer{nil, makeAux(tagNthLocalVar, uint64(idx))}
 }
 
 func NewSourceInfo(si SourceInfo) Scmer {
@@ -332,7 +324,7 @@ func (s Scmer) Bool() bool {
 	case tagNil:
 		return false
 	case tagBool:
-		return s.aux != 0
+		return auxVal(s.aux) != 0
 	case tagInt:
 		return int64(s.aux) != 0
 	case tagFloat:
@@ -366,7 +358,7 @@ func (s Scmer) Int() int64 {
 		}
 		return v
 	case tagBool:
-		if s.aux != 0 {
+		if auxVal(s.aux) != 0 {
 			return 1
 		}
 		return 0
@@ -393,7 +385,7 @@ func (s Scmer) Float() float64 {
 		}
 		return v
 	case tagBool:
-		if s.aux != 0 {
+		if auxVal(s.aux) != 0 {
 			return 1.0
 		}
 		return 0.0
@@ -412,7 +404,7 @@ func (s Scmer) String() string {
 	case tagFloat:
 		return strconv.FormatFloat(math.Float64frombits(s.aux), 'g', -1, 64)
 	case tagBool:
-		if s.aux != 0 {
+		if auxVal(s.aux) != 0 {
 			return "true"
 		}
 		return "false"
@@ -544,7 +536,7 @@ func (s Scmer) NthLocalVar() NthLocalVar {
 	if s.GetTag() != tagNthLocalVar {
 		panic("not nth local var")
 	}
-	return NthLocalVar(s.aux)
+	return NthLocalVar(auxVal(s.aux))
 }
 
 func (s Scmer) IsSourceInfo() bool { return s.GetTag() == tagSourceInfo }
@@ -692,7 +684,7 @@ func (s *Scmer) Write(w io.Writer) {
 	case tagNil:
 		io.WriteString(w, "nil")
 	case tagBool:
-		if s.aux != 0 {
+		if auxVal(s.aux) != 0 {
 			io.WriteString(w, "true")
 		} else {
 			io.WriteString(w, "false")
