@@ -79,9 +79,14 @@
 - No explicit coverage threshold; add tests for every feature/bugfix.
 - Don't forget to also add must-fail tests with expect: { error: true }
 
-## Security & Configuration
-- Do not expose development instances publicly. Use `--api-port`, `--mysql-port`, `--disable-mysql`, and `-data <path>` to isolate local runs.
-- Large datasets should not be added to Git; use local paths under `data/`.
+## Debugging Strategy
+- run memcp with enabled mysql frontend on port 3307, make sure to capture its output and enable TracePrint in settings
+- run some unit tests or let the user click through the software
+- read through the captured output, identify the failing queries and inspect the caught panics
+- construct a test case in tests/ that will reproduce the failing bug, verify bug reproduction with make test
+- work on the bugfix
+- verify with make test, reiterate
+- do not commit until all tests including the new one pass
 
 ## Execution Plan Building Hints (Pipelines & Braking)
 - Operator pipelines: fuse filter → project → aggregate in a single scan to reduce overhead
