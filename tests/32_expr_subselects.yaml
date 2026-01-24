@@ -2,7 +2,7 @@
 
 metadata:
   version: "1.0"
-  description: "IN/EXISTS still rejected; scalar subselects supported"
+  description: "IN/EXISTS and scalar subselects supported"
 
 setup:
   - sql: "DROP TABLE IF EXISTS t1"
@@ -17,24 +17,21 @@ setup:
   - sql: "INSERT INTO t2 (owner, val) VALUES (3, 42)"
   - sql: "INSERT INTO t2 (owner, val) VALUES (4, 55)"
 
-# TODO: turn error: true into what we expect according to SQL standard
-# TODO: also add complex cases with (SELECT FROM )
-
 test_cases:
   - name: "IN subselect simple"
     sql: "SELECT 1 WHERE 1 IN (SELECT 1)"
     expect:
-      error: true
+      rows: 1
 
   - name: "NOT IN subselect simple"
     sql: "SELECT 1 WHERE 1 NOT IN (SELECT 1)"
     expect:
-      error: true
+      rows: 0
 
   - name: "EXISTS subselect"
     sql: "SELECT 1 WHERE EXISTS (SELECT 1)"
     expect:
-      error: true
+      rows: 1
 
   - name: "Scalar subselect in SELECT list"
     sql: "SELECT (SELECT 1) AS x"

@@ -150,7 +150,6 @@ test_cases:
     syntax: postgresql
     sql: |
       SELECT (SELECT 1) AS v
-    noncritical: true
     expect:
       rows: 1
       data:
@@ -161,14 +160,18 @@ test_cases:
     sql: |
       SELECT 1 IN (SELECT 1) AS ok
     expect:
-      error: true
+      rows: 1
+      data:
+        - ok: true
 
   - name: "PostgreSQL EXISTS (SELECT ...)"
     syntax: postgresql
     sql: |
       SELECT EXISTS (SELECT 1) AS ok
     expect:
-      error: true
+      rows: 1
+      data:
+        - ok: true
 
   - name: "PostgreSQL ON/OFF literals"
     syntax: postgresql
