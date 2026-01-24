@@ -281,7 +281,13 @@ func NewCustom(tag uint16, ptr unsafe.Pointer) Scmer {
 }
 
 func (s Scmer) IsCustom(tag uint16) bool {
-	return s.GetTag() == tag
+	if s.ptr == &scmerIntSentinel {
+		return tag == tagInt
+	}
+	if s.ptr == &scmerFloatSentinel {
+		return tag == tagFloat
+	}
+	return auxTag(s.aux) == tag
 }
 
 func (s Scmer) Custom(tag uint16) unsafe.Pointer {
@@ -295,29 +301,85 @@ func (s Scmer) Custom(tag uint16) unsafe.Pointer {
 // Accessors with conversion
 //
 
-func (s Scmer) IsNil() bool { return s.GetTag() == tagNil }
+func (s Scmer) IsNil() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagNil
+}
 
-func (s Scmer) IsBool() bool { return s.GetTag() == tagBool }
+func (s Scmer) IsBool() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagBool
+}
 
-func (s Scmer) IsInt() bool { return s.GetTag() == tagInt }
+func (s Scmer) IsInt() bool {
+	if s.ptr == &scmerIntSentinel {
+		return true
+	}
+	if s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagInt
+}
 
-func (s Scmer) IsFloat() bool { return s.GetTag() == tagFloat }
+func (s Scmer) IsFloat() bool {
+	if s.ptr == &scmerFloatSentinel {
+		return true
+	}
+	if s.ptr == &scmerIntSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagFloat
+}
 
-func (s Scmer) IsString() bool { return s.GetTag() == tagString }
+func (s Scmer) IsString() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagString
+}
 
-func (s Scmer) IsSymbol() bool { return s.GetTag() == tagSymbol }
+func (s Scmer) IsSymbol() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagSymbol
+}
 
 func (s Scmer) SymbolEquals(name string) bool {
 	return s.GetTag() == tagSymbol && s.String() == name
 }
 
-func (s Scmer) IsSlice() bool { return s.GetTag() == tagSlice }
+func (s Scmer) IsSlice() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagSlice
+}
 
-func (s Scmer) IsVector() bool { return s.GetTag() == tagVector }
+func (s Scmer) IsVector() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagVector
+}
 
-func (s Scmer) IsFastDict() bool { return s.GetTag() == tagFastDict }
+func (s Scmer) IsFastDict() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagFastDict
+}
 
-func (s Scmer) IsParser() bool { return s.GetTag() == tagParser }
+func (s Scmer) IsParser() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagParser
+}
 
 func (s Scmer) Bool() bool {
 	switch s.GetTag() {
@@ -521,7 +583,12 @@ func (s Scmer) FuncEnv() func(*Env, ...Scmer) Scmer {
 	return *(*func(*Env, ...Scmer) Scmer)(unsafe.Pointer(s.ptr))
 }
 
-func (s Scmer) IsProc() bool { return s.GetTag() == tagProc }
+func (s Scmer) IsProc() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagProc
+}
 
 func (s Scmer) Proc() *Proc {
 	if s.GetTag() != tagProc {
@@ -530,7 +597,12 @@ func (s Scmer) Proc() *Proc {
 	return (*Proc)(unsafe.Pointer(s.ptr))
 }
 
-func (s Scmer) IsNthLocalVar() bool { return s.GetTag() == tagNthLocalVar }
+func (s Scmer) IsNthLocalVar() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagNthLocalVar
+}
 
 func (s Scmer) NthLocalVar() NthLocalVar {
 	if s.GetTag() != tagNthLocalVar {
@@ -539,7 +611,12 @@ func (s Scmer) NthLocalVar() NthLocalVar {
 	return NthLocalVar(auxVal(s.aux))
 }
 
-func (s Scmer) IsSourceInfo() bool { return s.GetTag() == tagSourceInfo }
+func (s Scmer) IsSourceInfo() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagSourceInfo
+}
 
 func (s Scmer) SourceInfo() *SourceInfo {
 	if s.GetTag() != tagSourceInfo {
