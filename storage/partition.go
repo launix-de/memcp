@@ -406,12 +406,38 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	// rebuild sharding schema
 	// TODO: check if we can own the table (don't repartition small tables whose shards we don't own)
 	// TODO: in case of big tables: search for other nodes who own shards and do the work together, otherwise we run out of ram
+
+	// If no shard candidates, fall back to parallel sharding based on data size
+	if len(shardCandidates) == 0 {
+		// Count total rows to determine number of shards
+		totalRows := uint(0)
+		shards := t.Shards
+		if shards == nil {
+			shards = t.PShards
+		}
+		for _, s := range shards {
+			if s != nil {
+				totalRows += s.Count()
+			}
+		}
+		// Create enough shards for parallel processing (at least 2*NumCPU for good parallelism)
+		desiredShards := int(1 + (2*totalRows)/Settings.ShardSize)
+		minShards := 2 * runtime.NumCPU()
+		if desiredShards < minShards && totalRows > Settings.ShardSize {
+			desiredShards = minShards
+		}
+		if desiredShards > 1 && len(t.Columns) > 0 {
+			// Use first column for round-robin distribution
+			shardCandidates = []shardDimension{t.NewShardDimension(t.Columns[0].Name, desiredShards)}
+		}
+	}
+
 	totalShards := 1
 	for _, sc := range shardCandidates {
 		totalShards *= sc.NumPartitions
 	}
 
-	fmt.Println("repartitioning", t.Name, "by", shardCandidates)
+	fmt.Println("repartitioning", t.Name, "by", shardCandidates, "into", totalShards, "shards")
 	start := time.Now() // time measurement
 
 	oldshards := t.Shards

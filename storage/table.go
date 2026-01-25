@@ -449,26 +449,20 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	}
 
 	if t.Shards != nil { // unpartitioned sharding
-		shard := t.Shards[len(t.Shards)-1]
-		// ensure the active shard is loaded and writable for upcoming insert
-		release := shard.GetExclusive()
-		defer release()
-		// load balance: if bucket is full, create new one; if bucket is busy (trylock), try another one
-		if shard.Count() >= Settings.ShardSize {
+		// Helper to get or create a shard with capacity for n rows
+		getShardWithCapacity := func(n uint) *storageShard {
 			t.mu.Lock()
-			// reload shard after lock to avoid race conditions
-			shard = t.Shards[len(t.Shards)-1]
-			if shard.Count() >= Settings.ShardSize {
+			shard := t.Shards[len(t.Shards)-1]
+			if shard.Count()+n > Settings.ShardSize {
+				// Current shard would overflow, create new one
 				go func(i int) {
 					defer func() {
 						if r := recover(); r != nil {
 							fmt.Println("error: shard rebuild failed for", t.schema.Name+".", t.Name, "shard", i, ":", r)
 						}
 					}()
-					// rebuild full shards in background
 					s := t.Shards[i]
 					t.Shards[i] = s.rebuild(false)
-					// write new uuids to disk
 					t.schema.save()
 				}(len(t.Shards) - 1)
 				shard = NewShard(t)
@@ -476,15 +470,27 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				t.Shards = append(t.Shards, shard)
 			}
 			t.mu.Unlock()
+			return shard
 		}
 
-		// check unique constraints in a thread safe manner
-		if len(t.Unique) > 0 {
-			t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer) {
-				// physically insert
-				shard.Insert(columns, values, false, onFirstInsertId)
-				result += len(values)
-			}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
+		// For bulk inserts larger than ShardSize, split into chunks
+		chunkSize := int(Settings.ShardSize)
+		for start := 0; start < len(values); start += chunkSize {
+			end := start + chunkSize
+			if end > len(values) {
+				end = len(values)
+			}
+			chunk := values[start:end]
+
+			shard := getShardWithCapacity(uint(len(chunk)))
+			release := shard.GetExclusive()
+
+			// check unique constraints in a thread safe manner
+			if len(t.Unique) > 0 {
+				t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
+					shard.Insert(columns, chunk, false, onFirstInsertId)
+					result += len(chunk)
+				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 				if !onCollision.IsNil() {
 					// Evaluate onCollision and add to affected rows per MySQL semantics
 					// - inserted rows already counted above
@@ -509,10 +515,12 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
 				}
 			}, 0)
-		} else {
-			// physically insert (parallel)
-			shard.Insert(columns, values, false, onFirstInsertId)
-			result += len(values)
+			} else {
+				// physically insert (no unique constraints)
+				shard.Insert(columns, chunk, false, onFirstInsertId)
+				result += len(chunk)
+			}
+			release()
 		}
 	} else {
 		// partitions

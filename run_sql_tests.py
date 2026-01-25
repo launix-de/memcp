@@ -401,11 +401,14 @@ class SQLTestRunner:
         create_sql = f"CREATE TABLE {self._quote_ident(table)} ({', '.join(col_defs)})"
         self.execute_sql(database, create_sql, syntax=self.suite_syntax)
 
-        # Sequential insert and get memory stats
+        # Sequential insert, rebuild to shard data, then get memory stats
+        # Note: rebuild with repartition will automatically create parallel shards
+        # when data is large enough, even without partitioning hints
         scm_code = f'''
 (begin
   (set rows (map (produceN {num_rows}) (lambda (i) {row_generator})))
   (set cnt (insert "{database}" "{table}" '({cols_scm}) rows))
+  (rebuild)
   (set mem (memstats))
   (list cnt (mem "heap_alloc"))
 )
@@ -525,9 +528,10 @@ class SQLTestRunner:
                     for line in explain_resp.text.strip().split('\n')[:10]:
                         print(f"       {line[:120]}")
 
-            # Warmup run for performance tests
+            # Warmup runs for performance tests (2 unmeasured runs before the measured one)
             if is_perf_test and test_case.get("warmup", True):
-                self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
+                for _ in range(2):
+                    self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
 
             # Get memcp PID and start CPU measurement for perf tests
             memcp_pid = find_memcp_pid() if is_perf_test else None
