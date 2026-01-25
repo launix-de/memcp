@@ -652,9 +652,7 @@ if there is a group function, create a temporary preaggregate table
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
 				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
-				'(id schemax subquery _ _) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
-					/* prefix all table aliases */	
-					(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a b) '((concat id ":" alias) schema tbl a b)))))
+				'(id schemax subquery isOuter joinexpr) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
 					/* helper function add prefix to tblalias of every expression */
 					(define replace_column_alias (lambda (expr) (match expr
 						'((symbol get_column) nil ti col ci) (begin
@@ -665,7 +663,14 @@ if there is a group function, create a temporary preaggregate table
 									acc)) '()))
 							(match matches
 								(cons only '()) '('get_column (concat id ":" only) ti col ci)
-								'() (error (concat "column " col " does not exist in subquery"))
+								'() (begin
+									/* column not in schemas2 - check if it's a SELECT alias in fields2 */
+									(if (nil? (fields2 col))
+										(error (concat "column " col " does not exist in subquery"))
+										/* found in fields2 - resolve to the underlying expression */
+										(replace_column_alias (fields2 col))
+									)
+								)
 								(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 							)
 						)
@@ -673,6 +678,37 @@ if there is a group function, create a temporary preaggregate table
 						(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
 						expr
 					)))
+					/* prefix all table aliases and transform their joinexprs */
+					(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
+						(list (concat id ":" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+					/* helper function to transform joinexpr: only transform references to subquery alias id */
+					(define transform_joinexpr (lambda (expr) (match expr
+						'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
+							/* reference to subquery alias -> resolve against inner schemas by passing nil alias */
+							(replace_column_alias (list (quote get_column) nil ti col ci))
+							/* reference to outer table -> keep as-is */
+							expr)
+						(cons sym args) /* function call */ (cons sym (map args transform_joinexpr))
+						expr
+					)))
+					/* transform and attach joinexpr to first table in tablesPrefixed */
+					(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr joinexpr)))
+					/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics */
+					(set condition2_transformed (replace_column_alias condition2))
+					(set joinexpr2 (if isOuter
+						/* merge condition2 into joinexpr for outer joins */
+						(if (nil? joinexpr2)
+							condition2_transformed
+							(if (or (nil? condition2_transformed) (equal? condition2_transformed true))
+								joinexpr2
+								(list (quote and) joinexpr2 condition2_transformed)))
+						joinexpr2))
+					(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
+						(set tablesPrefixed (cons
+							/* inherit isOuter from the subquery's join type, not from inner table */
+							(match (car tablesPrefixed) '(a s t io je) (list a s t isOuter joinexpr2))
+							(cdr tablesPrefixed)))
+					)
 					/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 					(if (and (not (nil? groups2)) (not (equal? groups2 '())))
 						(begin
@@ -691,7 +727,10 @@ if there is a group function, create a temporary preaggregate table
 							(set groups2 nil)
 						)
 					)
-					'(tablesPrefixed '(id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) (replace_column_alias condition2) (merge '(alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) '((concat id ":" k) v))))))
+					/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
+					/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
+					(set globalFilter (if isOuter true (replace_column_alias condition2)))
+					(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
 				) (error "non matching return value for untangle_query"))
 				(error (concat "unknown tabledesc: " tbldesc))
 			)))))

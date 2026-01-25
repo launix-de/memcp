@@ -22,6 +22,132 @@ test_cases:
     expect:
       rows: 5
 
+  - name: "Simple LEFT JOIN with derived table and ON condition"
+    sql: |
+      SELECT o.a AS oa, r.a AS ra
+      FROM ord_t o
+      LEFT JOIN (SELECT a FROM ord_t) r ON r.a = o.a
+      ORDER BY o.a
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - oa: 1
+          ra: 1
+        - oa: 2
+          ra: 2
+
+  - name: "Outer query ORDER BY on derived table column"
+    noncritical: true
+    sql: |
+      SELECT t.a
+      FROM (SELECT a FROM ord_t) t
+      LEFT JOIN ord_t o2 ON o2.a = t.a
+      ORDER BY t.a DESC
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - a: 5
+
+  - name: "LEFT JOIN with derived table using column alias in ON"
+    sql: |
+      SELECT k.a AS ka, r.ref_a AS ra
+      FROM ord_t k
+      LEFT JOIN (SELECT a AS ref_a FROM ord_t) r ON r.ref_a = k.a
+      ORDER BY k.a
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - ka: 1
+          ra: 1
+        - ka: 2
+          ra: 2
+
+  - name: "Derived table projection - SELECT * returns only projected columns"
+    sql: "SELECT * FROM (SELECT a FROM ord_t) t ORDER BY a LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - a: 1
+        - a: 2
+
+  - name: "Nested derived table - outer wraps inner with LEFT JOIN"
+    sql: |
+      SELECT t.* FROM (
+        SELECT o.a AS oa, r.a AS ra
+        FROM ord_t o
+        LEFT JOIN (SELECT a FROM ord_t) r ON r.a = o.a
+      ) AS t
+      ORDER BY t.oa
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - oa: 1
+          ra: 1
+        - oa: 2
+          ra: 2
+
+  - name: "Nested derived table with aliased join column"
+    sql: |
+      SELECT t.* FROM (
+        SELECT o.a AS oa, r.ref_a AS ra
+        FROM ord_t o
+        LEFT JOIN (SELECT a AS ref_a FROM ord_t) r ON r.ref_a = o.a
+      ) AS t
+      ORDER BY t.oa
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - oa: 1
+          ra: 1
+        - oa: 2
+          ra: 2
+
+  - name: "Double nested with multiple LEFT JOINs"
+    sql: |
+      SELECT t.* FROM (
+        SELECT o.a AS oa, r1.a AS r1a, r2.a AS r2a
+        FROM ord_t o
+        LEFT JOIN (SELECT a FROM ord_t) r1 ON r1.a = o.a
+        LEFT JOIN (SELECT a FROM ord_t WHERE a > 2) r2 ON r2.a = o.a
+      ) AS t
+      ORDER BY t.oa
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - oa: 1
+          r1a: 1
+          r2a: null
+        - oa: 2
+          r1a: 2
+          r2a: null
+        - oa: 3
+          r1a: 3
+          r2a: 3
+
+  - name: "Outer LEFT JOIN on wrapped derived table"
+    sql: |
+      SELECT t.oa, o2.a AS o2a FROM (
+        SELECT o.a AS oa
+        FROM ord_t o
+        LEFT JOIN (SELECT a FROM ord_t) r ON r.a = o.a
+      ) AS t
+      LEFT JOIN ord_t o2 ON o2.a = t.oa
+      ORDER BY t.oa
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - oa: 1
+          o2a: 1
+        - oa: 2
+          o2a: 2
+
   # TODO: add correlated subselect in FROM (LATERAL-style)
   # - name: "Derived table with correlation"
   #   sql: |
