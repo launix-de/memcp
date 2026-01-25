@@ -1,0 +1,77 @@
+# Performance tests for basic operations
+# Run with: PERF_TEST=1 python3 run_sql_tests.py tests/90_perf_basic.yaml
+# Use TIME_SCALE=2.0 for slower systems (e.g., Raspberry Pi)
+
+metadata:
+  version: "1.0"
+  description: "Performance tests: bulk insert, aggregation, joins"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS perf_data"
+  - sql: |
+      CREATE TABLE perf_data (
+        id INT,
+        category INT,
+        value INT,
+        name TEXT
+      )
+
+test_cases:
+  - name: "Perf: bulk insert 100k rows"
+    generate_data:
+      table: perf_data
+      rows: 100000
+      columns:
+        - name: id
+          type: sequential
+        - name: category
+          type: int
+        - name: value
+          type: int
+        - name: name
+          type: string
+    sql: "SELECT COUNT(*) AS cnt FROM perf_data"
+    threshold_ms: 5000
+    warmup: false
+    expect:
+      rows: 1
+      data:
+        - cnt: 100000
+
+  - name: "Perf: aggregation SUM/COUNT on 100k rows"
+    sql: "SELECT COUNT(*) AS cnt, SUM(value) AS total FROM perf_data"
+    threshold_ms: 500
+    expect:
+      rows: 1
+
+  - name: "Perf: aggregate with HAVING on 100k rows"
+    sql: "SELECT MAX(value) AS maxval, MIN(value) AS minval, AVG(value) AS avgval FROM perf_data"
+    threshold_ms: 1000
+    expect:
+      rows: 1
+
+  - name: "Perf: filtered scan on 100k rows"
+    sql: "SELECT COUNT(*) AS cnt FROM perf_data WHERE value > 500000"
+    threshold_ms: 300
+    expect:
+      rows: 1
+
+  - name: "Perf: ORDER BY + LIMIT on 100k rows"
+    sql: "SELECT id, value FROM perf_data ORDER BY value DESC LIMIT 10"
+    threshold_ms: 1000
+    expect:
+      rows: 10
+
+  - name: "Perf: self-join with LIMIT on 100k rows"
+    sql: |
+      SELECT d1.id, d1.value
+      FROM perf_data d1
+      JOIN perf_data d2 ON d2.id = d1.id
+      ORDER BY d1.value DESC
+      LIMIT 10
+    threshold_ms: 3000
+    expect:
+      rows: 10
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS perf_data"

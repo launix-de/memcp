@@ -33,6 +33,7 @@ except Exception as e:
 import json
 import subprocess
 import time
+import random
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional
@@ -40,6 +41,10 @@ from urllib.parse import quote
 
 # Global flag for connect-only mode
 is_connect_only_mode = False
+
+# Performance test configuration
+PERF_TEST_ENABLED = os.environ.get("PERF_TEST", "0") == "1"
+TIME_SCALE = float(os.environ.get("TIME_SCALE", "1.0"))  # multiplier for thresholds (e.g., 2.0 for slower systems)
 
 class SQLTestRunner:
     def __init__(self, base_url="http://localhost:4321", username="root", password="admin"):
@@ -82,20 +87,24 @@ class SQLTestRunner:
         encoded = b64encode(credentials.encode()).decode()
         return {"Authorization": f"Basic {encoded}"}
 
-    def _record_success(self, name: str, is_noncritical: bool = False):
+    def _record_success(self, name: str, is_noncritical: bool = False, elapsed_ms: float = None, threshold_ms: float = None):
         self.test_passed += 1
-        print(f"✅ {name}")
+        if elapsed_ms is not None and threshold_ms is not None:
+            print(f"✅ {name} ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms)")
+        else:
+            print(f"✅ {name}")
         if is_noncritical:
             self.noncritical_passed += 1
             print(f"   ⚠️  Passed but flagged noncritical — enable soon")
 
-    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect, is_noncritical: bool = False):
+    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect, is_noncritical: bool = False, elapsed_ms: float = None, threshold_ms: float = None):
         self.failed_tests.append((name, is_noncritical))
         if is_noncritical:
             self.failed_noncritical += 1
         else:
             self.failed_critical += 1
-        print(f"❌ {name}{' (noncritical)' if is_noncritical else ''}")
+        time_info = f" ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms)" if elapsed_ms is not None else ""
+        print(f"❌ {name}{' (noncritical)' if is_noncritical else ''}{time_info}")
         print(f"    Reason: {reason}")
         if query:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
@@ -191,6 +200,62 @@ class SQLTestRunner:
         return results
 
     # ----------------------
+    # Performance test helpers
+    # ----------------------
+    def generate_test_data(self, spec: Dict) -> List[List[Any]]:
+        """Generate test data based on column specifications.
+
+        spec format: {"columns": [{"name": "id", "type": "int"}, {"name": "value", "type": "int"}], "rows": 10000}
+        Supported types: int, float, string, bool
+        """
+        columns = spec.get("columns", [])
+        num_rows = spec.get("rows", 1000)
+        data = []
+        for i in range(num_rows):
+            row = []
+            for col in columns:
+                col_type = col.get("type", "int")
+                if col_type == "int":
+                    row.append(random.randint(0, 1000000))
+                elif col_type == "float":
+                    row.append(round(random.uniform(0, 1000000), 2))
+                elif col_type == "string":
+                    row.append(f"str_{random.randint(0, 1000000)}")
+                elif col_type == "bool":
+                    row.append(random.choice([True, False]))
+                elif col_type == "sequential":
+                    row.append(i)
+                else:
+                    row.append(i)
+            data.append(row)
+        return data
+
+    def bulk_insert(self, database: str, table: str, columns: List[str], data: List[List[Any]], batch_size: int = 10000) -> bool:
+        """Insert data in batches to avoid memory issues."""
+        for i in range(0, len(data), batch_size):
+            batch = data[i:i+batch_size]
+            values_list = []
+            for row in batch:
+                formatted = []
+                for v in row:
+                    if v is None:
+                        formatted.append("NULL")
+                    elif isinstance(v, bool):
+                        formatted.append("TRUE" if v else "FALSE")
+                    elif isinstance(v, str):
+                        formatted.append(f"'{v}'")
+                    else:
+                        formatted.append(str(v))
+                values_list.append(f"({','.join(formatted)})")
+
+            col_list = ",".join([self._quote_ident(c) for c in columns])
+            sql = f"INSERT INTO {self._quote_ident(table)} ({col_list}) VALUES {','.join(values_list)}"
+            resp = self.execute_sql(database, sql, syntax=self.suite_syntax)
+            if resp is None or resp.status_code != 200:
+                return False
+        return True
+
+    # ----------------------
     # Test execution
     # ----------------------
     def run_test_case(self, test_case: Dict, database: str) -> bool:
@@ -199,6 +264,27 @@ class SQLTestRunner:
         is_noncritical = bool(test_case.get("noncritical"))
         if is_noncritical:
             self.noncritical_count += 1
+
+        # Performance test handling
+        threshold_ms = test_case.get("threshold_ms")
+        is_perf_test = threshold_ms is not None
+        if is_perf_test:
+            threshold_ms = threshold_ms * TIME_SCALE  # apply time scale for slower systems
+            if not PERF_TEST_ENABLED:
+                print(f"⏭️  {name} (skipped - set PERF_TEST=1 to run)")
+                self.test_count -= 1  # don't count skipped perf tests
+                return True
+
+        # Data generation for performance tests
+        generate_data = test_case.get("generate_data")
+        if generate_data:
+            table = generate_data.get("table")
+            columns = generate_data.get("columns", [])
+            col_names = [c.get("name") for c in columns]
+            data = self.generate_test_data(generate_data)
+            if not self.bulk_insert(database, table, col_names, data):
+                return self._record_fail(name, "Data generation failed", None, None, None, is_noncritical)
+
         query = test_case.get("sql") or test_case.get("sparql")
         is_sparql = "sparql" in test_case
         # auth: allow per-test overrides, fallback to suite metadata, then runner defaults
@@ -230,15 +316,30 @@ class SQLTestRunner:
 
             response = resp
         else:
-            # Execute query
+            # Warmup run for performance tests
+            if is_perf_test and test_case.get("warmup", True):
+                self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
+
+            # Execute query (with timing for perf tests)
+            start_time = time.monotonic()
             response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+
         if response is None:
-            return self._record_fail(name, "No response", query, None, None)
+            return self._record_fail(name, "No response", query, None, None, is_noncritical)
 
         results = self.parse_jsonl_response(response)
 
+        # Check performance threshold
+        if is_perf_test and elapsed_ms > threshold_ms:
+            return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
+                                     test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms)
+
         if self.validate_expectation(test_case, response, results):
-            self._record_success(name, is_noncritical)
+            if is_perf_test:
+                self._record_success(name, is_noncritical, elapsed_ms, threshold_ms)
+            else:
+                self._record_success(name, is_noncritical)
             return True
         else:
             return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical)
