@@ -1,0 +1,103 @@
+# Performance tests for basic operations
+# Run with: PERF_TEST=1 make test
+# Calibrate with: PERF_TEST=1 PERF_CALIBRATE=1 make test (run ~10 times)
+# Bisect with: PERF_TEST=1 PERF_NORECALIBRATE=1 make test
+# Show query plans: PERF_TEST=1 PERF_EXPLAIN=1 make test
+# Row counts auto-scale per-test to target 10-20s query time
+
+metadata:
+  version: "1.0"
+  description: "Performance tests: aggregation, joins, ordering"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS perf_main"
+  - sql: "DROP TABLE IF EXISTS perf_small"
+  - sql: |
+      CREATE TABLE perf_main (
+        id INT PRIMARY KEY,
+        category INT,
+        value INT,
+        name TEXT
+      )
+  - sql: |
+      CREATE TABLE perf_small (
+        id INT PRIMARY KEY,
+        label TEXT
+      )
+
+test_cases:
+  # COUNT aggregation with data generation
+  - name: "Perf: COUNT"
+    generate_data:
+      table: perf_main
+      columns:
+        - name: id
+          type: sequential
+        - name: category
+          type: int
+        - name: value
+          type: int
+        - name: name
+          type: string
+    sql: "SELECT COUNT(*) AS cnt FROM perf_main"
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  # SUM aggregation (regenerates data)
+  - name: "Perf: SUM"
+    generate_data:
+      table: perf_main
+      columns:
+        - name: id
+          type: sequential
+        - name: category
+          type: int
+        - name: value
+          type: int
+        - name: name
+          type: string
+    sql: "SELECT SUM(value) AS total FROM perf_main"
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  # ORDER BY with LIMIT (regenerates data)
+  - name: "Perf: ORDER+LIMIT"
+    generate_data:
+      table: perf_main
+      columns:
+        - name: id
+          type: sequential
+        - name: category
+          type: int
+        - name: value
+          type: int
+        - name: name
+          type: string
+    sql: "SELECT id, value FROM perf_main ORDER BY value DESC LIMIT 100"
+    threshold_ms: 30000
+    expect:
+      rows: 100
+
+  # Full table scan with filter (regenerates data)
+  - name: "Perf: SCAN+FILTER"
+    generate_data:
+      table: perf_main
+      columns:
+        - name: id
+          type: sequential
+        - name: category
+          type: int
+        - name: value
+          type: int
+        - name: name
+          type: string
+    sql: "SELECT COUNT(*) AS cnt FROM perf_main WHERE value > 500000"
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS perf_main"
+  - sql: "DROP TABLE IF EXISTS perf_small"

@@ -2,31 +2,48 @@
 
 metadata:
   version: "1.0"
-  description: "IN/EXISTS still rejected; scalar is noncritical until implemented"
+  description: "IN/EXISTS and scalar subselects supported"
 
-setup: []
-
-# TODO: turn error: true into what we expect according to SQL standard
-# TODO: also add complex cases with (SELECT FROM )
+setup:
+  - sql: "DROP TABLE IF EXISTS t1"
+  - sql: "DROP TABLE IF EXISTS t2"
+  - sql: "DROP TABLE IF EXISTS t3"
+  - sql: "DROP TABLE IF EXISTS t4"
+  - sql: "CREATE TABLE t1 (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE t2 (owner INT, val INT)"
+  - sql: "CREATE TABLE t3 (id INT PRIMARY KEY, ref INT)"
+  - sql: "CREATE TABLE t4 (id INT PRIMARY KEY, description VARCHAR(20))"
+  - sql: "INSERT INTO t1 (id) VALUES (4)"
+  - sql: "INSERT INTO t2 (owner, val) VALUES (1, 42)"
+  - sql: "INSERT INTO t2 (owner, val) VALUES (2, 41)"
+  - sql: "INSERT INTO t2 (owner, val) VALUES (2, 42)"
+  - sql: "INSERT INTO t2 (owner, val) VALUES (3, 41)"
+  - sql: "INSERT INTO t2 (owner, val) VALUES (3, 42)"
+  - sql: "INSERT INTO t2 (owner, val) VALUES (4, 55)"
+  - sql: "INSERT INTO t3 (id, ref) VALUES (1, 10)"
+  - sql: "INSERT INTO t3 (id, ref) VALUES (2, 11)"
+  - sql: "INSERT INTO t3 (id, ref) VALUES (3, 12)"
+  - sql: "INSERT INTO t3 (id, ref) VALUES (4, NULL)"
+  - sql: "INSERT INTO t4 (id, description) VALUES (10, 'alpha')"
+  - sql: "INSERT INTO t4 (id, description) VALUES (11, 'beta')"
 
 test_cases:
   - name: "IN subselect simple"
     sql: "SELECT 1 WHERE 1 IN (SELECT 1)"
     expect:
-      error: true
+      rows: 1
 
   - name: "NOT IN subselect simple"
     sql: "SELECT 1 WHERE 1 NOT IN (SELECT 1)"
     expect:
-      error: true
+      rows: 0
 
   - name: "EXISTS subselect"
     sql: "SELECT 1 WHERE EXISTS (SELECT 1)"
     expect:
-      error: true
+      rows: 1
 
   - name: "Scalar subselect in SELECT list"
-    noncritical: true
     sql: "SELECT (SELECT 1) AS x"
     expect:
       rows: 1
@@ -34,53 +51,101 @@ test_cases:
         - x: 1
 
   - name: "Scalar subselect without correlation"
-    noncritical: true
-    setup:
-      - "DROP TABLE IF EXISTS t2"
-      - "CREATE TABLE t2 (owner INT, val INT)"
-      - "INSERT INTO t2 (owner, val) VALUES (1, 42)"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 1) AS v"
     expect:
       rows: 1
       data:
         - v: 42
-    cleanup:
-      - "DROP TABLE IF EXISTS t2"
+
+  - name: "Scalar subselect ORDER BY LIMIT 1"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = 3 ORDER BY val DESC LIMIT 1) AS v"
+    expect:
+      rows: 1
+      data:
+        - v: 42
+
+  - name: "Scalar subselect aggregate COUNT"
+    sql: "SELECT (SELECT COUNT(1) FROM t2 WHERE owner = 2 LIMIT 1) AS cnt"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "Scalar subselect aggregate COUNT star"
+    sql: "SELECT (SELECT COUNT(*) FROM t2 WHERE owner = 2 LIMIT 1) AS cnt"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "Scalar subselect aggregate HAVING false"
+    sql: "SELECT (SELECT COUNT(1) FROM t2 WHERE owner = 2 HAVING COUNT(1) > 5) AS cnt"
+    expect:
+      rows: 1
+      data:
+        - cnt: null
+
+  - name: "Scalar subselect GROUP BY with HAVING"
+    sql: "SELECT (SELECT COUNT(1) FROM t2 GROUP BY owner HAVING owner = 2) AS cnt"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "Scalar subselect GROUP BY ORDER+LIMIT"
+    sql: "SELECT (SELECT owner FROM t2 GROUP BY owner ORDER BY COUNT(1) DESC, owner ASC LIMIT 1) AS top_owner"
+    expect:
+      rows: 1
+      data:
+        - top_owner: 2
 
   - name: "Scalar correlated subselect in SELECT list"
-    noncritical: true
-    setup:
-      - "DROP TABLE IF EXISTS t1"
-      - "DROP TABLE IF EXISTS t2"
-      - "CREATE TABLE t1 (id INT PRIMARY KEY)"
-      - "CREATE TABLE t2 (owner INT, val INT)"
-      - "INSERT INTO t1 (id) VALUES (1)"
-      - "INSERT INTO t2 (owner, val) VALUES (1, 42)"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = t1.id) AS v FROM t1"
     expect:
       rows: 1
       data:
-        - v: 42
-    cleanup:
-      - "DROP TABLE IF EXISTS t2"
-      - "DROP TABLE IF EXISTS t1"
+        - v: 55
+
+  - name: "Derived table with scalar aggregate subselect"
+    sql: "SELECT t.* FROM (SELECT id, (SELECT COUNT(1) FROM t2 WHERE owner = t3.id LIMIT 1) AS cnt FROM t3) AS t ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          cnt: 1
+        - id: 2
+          cnt: 2
+        - id: 3
+          cnt: 2
+        - id: 4
+          cnt: 1
+
+  - name: "Scalar subselect preserves outer rows on missing ref"
+    sql: "SELECT id, (SELECT description FROM t4 WHERE id = t3.ref) AS d FROM t3 ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          d: alpha
+        - id: 2
+          d: beta
+        - id: 3
+          d: null
+        - id: 4
+          d: null
 
   - name: "Scalar subselect multiple rows errors"
-    noncritical: true
-    setup:
-      - "DROP TABLE IF EXISTS t2"
-      - "CREATE TABLE t2 (owner INT, val INT)"
-      - "INSERT INTO t2 (owner, val) VALUES (1, 41)"
-      - "INSERT INTO t2 (owner, val) VALUES (1, 42)"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = 1) AS v"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:
       error: true
-    cleanup:
-      - "DROP TABLE IF EXISTS t2"
 
   - name: "IN constant list still supported"
     sql: "SELECT 1 WHERE 1 IN (1,2,3)"
     expect:
       rows: 1
 
-cleanup: []
+cleanup:
+  - sql: "DROP TABLE IF EXISTS t4"
+  - sql: "DROP TABLE IF EXISTS t3"
+  - sql: "DROP TABLE IF EXISTS t2"
+  - sql: "DROP TABLE IF EXISTS t1"

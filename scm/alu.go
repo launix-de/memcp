@@ -41,7 +41,7 @@ func init_alu() {
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			return NewBool(auxTag(a[0].aux) == tagInt)
+			return NewBool(a[0].GetTag() == tagInt)
 		},
 		true,
 	})
@@ -52,7 +52,7 @@ func init_alu() {
 			DeclarationParameter{"value", "any", "value"},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			tag := auxTag(a[0].aux)
+			tag := a[0].GetTag()
 			return NewBool(tag == tagFloat || tag == tagInt)
 		},
 		true,
@@ -274,8 +274,8 @@ func init_alu() {
 				return NewNil()
 			}
 			coll := strings.ToLower(String(a[2]))
-			ta := auxTag(a[0].aux)
-			tb := auxTag(a[1].aux)
+			ta := a[0].GetTag()
+			tb := a[1].GetTag()
 			if (ta == tagString || ta == tagSymbol) && (tb == tagString || tb == tagSymbol) {
 				as := a[0].String()
 				bs := a[1].String()

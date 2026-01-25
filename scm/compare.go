@@ -24,8 +24,8 @@ import (
 func EqualScm(a, b Scmer) Scmer { return NewBool(Equal(a, b)) }
 
 func Equal(a, b Scmer) bool {
-	ta := auxTag(a.aux)
-	tb := auxTag(b.aux)
+	ta := a.GetTag()
+	tb := b.GetTag()
 	if a.IsSourceInfo() {
 		return Equal(a.SourceInfo().value, b)
 	}
@@ -157,7 +157,7 @@ func Equal(a, b Scmer) bool {
 
 func assocPairs(v Scmer) ([]Scmer, bool) {
 	v = unwrapAssoc(v)
-	switch auxTag(v.aux) {
+	switch v.GetTag() {
 	case tagSlice:
 		s := v.Slice()
 		if len(s)%2 == 0 {
@@ -220,8 +220,8 @@ func equalAssocPairs(aPairs, bPairs []Scmer) bool {
 }
 
 func EqualSQL(a, b Scmer) Scmer {
-	ta := auxTag(a.aux)
-	tb := auxTag(b.aux)
+	ta := a.GetTag()
+	tb := b.GetTag()
 
 	if ta == tagNil || tb == tagNil {
 		return NewNil()
@@ -320,8 +320,8 @@ func LessScm(a ...Scmer) Scmer    { return NewBool(Less(a[0], a[1])) }
 func GreaterScm(a ...Scmer) Scmer { return NewBool(Less(a[1], a[0])) }
 
 func Less(a, b Scmer) bool {
-	ta := auxTag(a.aux)
-	tb := auxTag(b.aux)
+	ta := a.GetTag()
+	tb := b.GetTag()
 
 	if ta == tagNil && tb == tagNil {
 		return false

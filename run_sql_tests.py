@@ -33,13 +33,84 @@ except Exception as e:
 import json
 import subprocess
 import time
+import random
+import multiprocessing
 from pathlib import Path
 from base64 import b64encode
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from urllib.parse import quote
+
+# CPU measurement helpers
+NUM_CPUS = multiprocessing.cpu_count()
+
+def find_memcp_pid() -> Optional[int]:
+    """Find the PID of the memcp process."""
+    try:
+        result = subprocess.run(['pgrep', '-f', 'memcp'], capture_output=True, text=True, timeout=2)
+        pids = result.stdout.strip().split('\n')
+        for pid_str in pids:
+            if pid_str.strip():
+                return int(pid_str.strip())
+    except:
+        pass
+    return None
+
+def get_process_cpu_times(pid: int) -> Optional[Tuple[float, float]]:
+    """Get user and system CPU times for a process from /proc/[pid]/stat.
+    Returns (utime + cutime, stime + cstime) in seconds, or None if unavailable."""
+    try:
+        with open(f'/proc/{pid}/stat', 'r') as f:
+            parts = f.read().split()
+            # Fields: utime(14), stime(15), cutime(16), cstime(17) - 1-indexed in docs, 0-indexed here
+            utime = int(parts[13])  # user time
+            stime = int(parts[14])  # system time
+            cutime = int(parts[15])  # children user time
+            cstime = int(parts[16])  # children system time
+            # Convert from clock ticks to seconds (typically 100 Hz = 100 ticks/sec)
+            hz = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
+            total_time = (utime + stime + cutime + cstime) / hz
+            return total_time
+    except:
+        return None
+
+def measure_cpu_load(pid: int, start_cpu: float, end_cpu: float, elapsed_sec: float) -> Optional[float]:
+    """Calculate CPU load as percentage of total CPU capacity.
+    Returns percentage where 100% = one core fully utilized, NUM_CPUS*100% = all cores."""
+    if start_cpu is None or end_cpu is None or elapsed_sec <= 0:
+        return None
+    cpu_used = end_cpu - start_cpu
+    # CPU load as percentage of wall time (100% = 1 core, 200% = 2 cores, etc.)
+    return (cpu_used / elapsed_sec) * 100
 
 # Global flag for connect-only mode
 is_connect_only_mode = False
+
+# Performance test configuration
+PERF_TEST_ENABLED = os.environ.get("PERF_TEST", "0") == "1"
+PERF_CALIBRATE = os.environ.get("PERF_CALIBRATE", "0") == "1"  # reset baselines to current times
+PERF_NORECALIBRATE = os.environ.get("PERF_NORECALIBRATE", "0") == "1"  # freeze row counts for bisecting
+PERF_EXPLAIN = os.environ.get("PERF_EXPLAIN", "0") == "1"  # show query plans
+PERF_BASELINE_FILE = ".perf_baseline.json"
+PERF_THRESHOLD_FACTOR = 1.3  # 30% tolerance over baseline
+PERF_TARGET_MIN_MS = 10000  # target minimum query time (10s)
+PERF_TARGET_MAX_MS = 20000  # target maximum query time (20s)
+PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
+PERF_DEFAULT_ROWS = 10000  # default starting row count
+PERF_MAX_ROWS = 10_000_000  # allow large datasets for proper calibration
+PERF_MAX_RAM_FRACTION = 0.3  # max 30% of RAM for table data
+
+def get_max_rows_for_ram(bytes_per_row: int = 100) -> int:
+    """Calculate max rows based on available RAM (30% limit)."""
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    total_kb = int(line.split()[1])
+                    max_bytes = int(total_kb * 1024 * PERF_MAX_RAM_FRACTION)
+                    return max_bytes // bytes_per_row
+    except:
+        pass
+    return 100_000_000  # fallback: 100M rows
 
 class SQLTestRunner:
     def __init__(self, base_url="http://localhost:4321", username="root", password="admin"):
@@ -60,10 +131,66 @@ class SQLTestRunner:
         self.suite_metadata = {}
         self._restart_handler = None  # callable to restart memcp between tests
         self.suite_syntax = None
+        self.perf_baselines = {}  # test_name -> {"time_ms": float, "rows": int}
+        self.perf_results = {}  # test_name -> {"time_ms": float, "rows": int}
 
     def set_restart_handler(self, fn):
         """Install a restart handler callable that restarts MemCP (returns True on success)."""
         self._restart_handler = fn
+
+    def load_perf_baselines(self):
+        """Load performance baselines from config file."""
+        try:
+            with open(PERF_BASELINE_FILE, 'r') as f:
+                self.perf_baselines = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.perf_baselines = {}
+
+    def save_perf_baselines(self):
+        """Save updated performance baselines to config file.
+
+        All tests in a suite share the same row count (based on slowest test)
+        to avoid issues with DELETE operations.
+        """
+        if not self.perf_results:
+            return
+
+        max_rows = get_max_rows_for_ram()
+
+        # Find the slowest test to determine shared scaling
+        slowest_time = max((r["time_ms"] for r in self.perf_results.values()), default=0)
+        # Get current row count (should be same for all tests in suite)
+        current_rows = max((r["rows"] for r in self.perf_results.values()), default=PERF_DEFAULT_ROWS)
+
+        if PERF_NORECALIBRATE:
+            # Just update times, keep existing rows
+            for name, result in self.perf_results.items():
+                if name in self.perf_baselines:
+                    self.perf_baselines[name]["time_ms"] = round(result["time_ms"], 1)
+                else:
+                    self.perf_baselines[name] = {"time_ms": round(result["time_ms"], 1), "rows": current_rows}
+        else:
+            # Scale based on slowest test (all tests use same row count)
+            if slowest_time < PERF_TARGET_MIN_MS:
+                new_rows = int(current_rows * PERF_SCALE_FACTOR)
+            elif slowest_time > PERF_TARGET_MAX_MS:
+                new_rows = max(1000, int(current_rows / PERF_SCALE_FACTOR))
+            else:
+                new_rows = current_rows
+
+            # Apply RAM limit and hard cap
+            new_rows = min(new_rows, max_rows, PERF_MAX_ROWS)
+
+            # Update all baselines with shared row count
+            for name, result in self.perf_results.items():
+                self.perf_baselines[name] = {
+                    "time_ms": round(result["time_ms"], 1),
+                    "rows": new_rows
+                }
+
+        with open(PERF_BASELINE_FILE, 'w') as f:
+            json.dump(self.perf_baselines, f, indent=2)
+        print(f"📏 Updated performance baselines in {PERF_BASELINE_FILE}")
 
     # ----------------------
     # SQL identifier quoting
@@ -82,20 +209,35 @@ class SQLTestRunner:
         encoded = b64encode(credentials.encode()).decode()
         return {"Authorization": f"Basic {encoded}"}
 
-    def _record_success(self, name: str, is_noncritical: bool = False):
+    def _record_success(self, name: str, is_noncritical: bool = False, elapsed_ms: float = None, threshold_ms: float = None, rows: int = None, heap_mb: float = None, cpu_pct: float = None):
         self.test_passed += 1
-        print(f"✅ {name}")
+        if elapsed_ms is not None and threshold_ms is not None:
+            rows_info = f", {rows:,} rows" if rows else ""
+            # Calculate time per row in microseconds
+            if rows and rows > 0:
+                us_per_row = (elapsed_ms * 1000) / rows
+                rate_info = f", {us_per_row:.2f}µs/row"
+            else:
+                rate_info = ""
+            # Show heap memory if available
+            mem_info = f", {heap_mb:.1f}MB heap" if heap_mb else ""
+            # Show CPU load as percentage of total capacity (100%/Ncores = one core)
+            cpu_info = f", {cpu_pct:.0f}%/{NUM_CPUS*100}% CPU" if cpu_pct is not None else ""
+            print(f"✅ {name} ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms{rows_info}{rate_info}{mem_info}{cpu_info})")
+        else:
+            print(f"✅ {name}")
         if is_noncritical:
             self.noncritical_passed += 1
             print(f"   ⚠️  Passed but flagged noncritical — enable soon")
 
-    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect, is_noncritical: bool = False):
+    def _record_fail(self, name: str, reason: str, query: str, response: Optional[requests.Response], expect, is_noncritical: bool = False, elapsed_ms: float = None, threshold_ms: float = None):
         self.failed_tests.append((name, is_noncritical))
         if is_noncritical:
             self.failed_noncritical += 1
         else:
             self.failed_critical += 1
-        print(f"❌ {name}{' (noncritical)' if is_noncritical else ''}")
+        time_info = f" ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms)" if elapsed_ms is not None else ""
+        print(f"❌ {name}{' (noncritical)' if is_noncritical else ''}{time_info}")
         print(f"    Reason: {reason}")
         if query:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
@@ -191,6 +333,104 @@ class SQLTestRunner:
         return results
 
     # ----------------------
+    # Performance test helpers
+    # ----------------------
+    def execute_scm(self, code: str) -> Optional[requests.Response]:
+        """Execute Scheme code via /scm endpoint."""
+        try:
+            url = f"{self.base_url}/scm"
+            return requests.post(url, data=code, headers=self.auth_header, timeout=600)
+        except Exception as e:
+            print(f"SCM execution error: {e}")
+            return None
+
+    def generate_and_insert_parallel(self, database: str, spec: Dict) -> bool:
+        """Generate and insert data using parallel Scheme workers.
+
+        This runs directly in the database with parallel goroutines for maximum performance.
+        """
+        table = spec.get("table")
+        columns = spec.get("columns", [])
+        num_rows = spec.get("rows", 1000)
+
+        # Build column generators for Scheme (deterministic, based on row index)
+        col_names = [c.get("name") for c in columns]
+        col_generators = []
+        for idx, col in enumerate(columns):
+            col_type = col.get("type", "int")
+            if col_type == "sequential":
+                col_generators.append("i")
+            elif col_type == "int":
+                # Simple deterministic value based on i (multiplied to spread values)
+                col_generators.append(f"(* i {37 + idx * 17})")
+            elif col_type == "float":
+                col_generators.append(f"(/ (* i {41 + idx * 13}) 100.0)")
+            elif col_type == "string":
+                col_generators.append(f'(concat "str_" i)')
+            elif col_type == "bool":
+                col_generators.append("(> i 0)")
+            else:
+                col_generators.append("i")
+
+        # Scheme code that generates and inserts data with parallel workers
+        cols_scm = " ".join([f'"{c}"' for c in col_names])
+        row_generator = f"(list {' '.join(col_generators)})"
+
+        # Build column definitions for table recreation
+        col_defs = []
+        for col in columns:
+            col_name = col.get("name")
+            col_type = col.get("type", "int")
+            if col_type == "sequential":
+                col_defs.append(f"{col_name} INT")
+            elif col_type == "int":
+                col_defs.append(f"{col_name} INT")
+            elif col_type == "float":
+                col_defs.append(f"{col_name} FLOAT")
+            elif col_type == "string":
+                col_defs.append(f"{col_name} TEXT")
+            elif col_type == "bool":
+                col_defs.append(f"{col_name} BOOLEAN")
+            else:
+                col_defs.append(f"{col_name} INT")
+
+        # Drop and recreate table (faster than DELETE for large tables)
+        self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(table)}", syntax=self.suite_syntax)
+        # Run rebuild to compact memory before measuring
+        self.execute_scm("(rebuild)")
+        create_sql = f"CREATE TABLE {self._quote_ident(table)} ({', '.join(col_defs)})"
+        self.execute_sql(database, create_sql, syntax=self.suite_syntax)
+
+        # Sequential insert and get memory stats
+        scm_code = f'''
+(begin
+  (set rows (map (produceN {num_rows}) (lambda (i) {row_generator})))
+  (set cnt (insert "{database}" "{table}" '({cols_scm}) rows))
+  (set mem (memstats))
+  (list cnt (mem "heap_alloc"))
+)
+'''
+        resp = self.execute_scm(scm_code)
+        if resp is None:
+            print(f"SCM response: None")
+            return {"success": False}
+        if resp.status_code != 200:
+            print(f"SCM error ({resp.status_code}): {resp.text[:500]}")
+            return {"success": False}
+        # Parse result - should be (count heap_alloc)
+        try:
+            # Response is JSON array [count, heap_bytes]
+            result = json.loads(resp.text.strip())
+            if isinstance(result, list) and len(result) >= 2:
+                cnt, heap_bytes = result[0], result[1]
+                if cnt != num_rows:
+                    print(f"SCM insert count mismatch: expected {num_rows}, got {cnt}")
+                return {"success": True, "heap_bytes": heap_bytes}
+        except:
+            print(f"SCM result: {resp.text[:200]}")
+        return {"success": True, "heap_bytes": 0}
+
+    # ----------------------
     # Test execution
     # ----------------------
     def run_test_case(self, test_case: Dict, database: str) -> bool:
@@ -199,6 +439,52 @@ class SQLTestRunner:
         is_noncritical = bool(test_case.get("noncritical"))
         if is_noncritical:
             self.noncritical_count += 1
+
+        # Performance test handling
+        yaml_threshold_ms = test_case.get("threshold_ms")
+        is_perf_test = yaml_threshold_ms is not None
+        perf_rows = PERF_DEFAULT_ROWS  # default row count
+        if is_perf_test:
+            # Get baseline data if available
+            baseline = self.perf_baselines.get(name, {})
+            if isinstance(baseline, dict):
+                baseline_time = baseline.get("time_ms")
+                baseline_rows = baseline.get("rows", PERF_DEFAULT_ROWS)
+            else:
+                # Legacy format: just a number
+                baseline_time = baseline
+                baseline_rows = PERF_DEFAULT_ROWS
+
+            # Use baseline time × 1.3 as threshold ONLY if in target range
+            # During scaling, use YAML threshold (generous)
+            if baseline_time and not PERF_CALIBRATE and baseline_time >= PERF_TARGET_MIN_MS:
+                threshold_ms = baseline_time * PERF_THRESHOLD_FACTOR
+            else:
+                threshold_ms = yaml_threshold_ms
+
+            # Use baseline rows (which may have been scaled)
+            perf_rows = baseline_rows
+
+            if not PERF_TEST_ENABLED:
+                print(f"⏭️  {name} (skipped - set PERF_TEST=1 to run)")
+                self.test_count -= 1  # don't count skipped perf tests
+                return True
+
+        # Data generation for performance tests using Scheme
+        generate_data = test_case.get("generate_data")
+        generate_elapsed_ms = 0
+        heap_bytes = 0
+        if generate_data:
+            # Use this test's calibrated row count
+            generate_data_with_rows = generate_data.copy()
+            generate_data_with_rows["rows"] = perf_rows
+            start_gen = time.monotonic()
+            gen_result = self.generate_and_insert_parallel(database, generate_data_with_rows)
+            if not gen_result.get("success", False):
+                return self._record_fail(name, "Data generation failed", None, None, None, is_noncritical)
+            generate_elapsed_ms = (time.monotonic() - start_gen) * 1000
+            heap_bytes = gen_result.get("heap_bytes", 0)
+
         query = test_case.get("sql") or test_case.get("sparql")
         is_sparql = "sparql" in test_case
         # auth: allow per-test overrides, fallback to suite metadata, then runner defaults
@@ -216,6 +502,7 @@ class SQLTestRunner:
 
         # Special handling: SHUTDOWN command triggers graceful restart flow
         response: Optional[requests.Response]
+        cpu_pct = None  # CPU load percentage, measured during query execution
         if query and query.strip().upper() == "SHUTDOWN":
             # Issue shutdown
             resp = self.execute_sql(database, query, auth_header, active_syntax)
@@ -230,15 +517,54 @@ class SQLTestRunner:
 
             response = resp
         else:
-            # Execute query
+            # Show query plan if PERF_EXPLAIN is enabled
+            if is_perf_test and PERF_EXPLAIN and not is_sparql:
+                explain_resp = self.execute_sql(database, f"DESCRIBE {query}", auth_header, active_syntax)
+                if explain_resp and explain_resp.status_code == 200:
+                    print(f"    📋 Query plan for {name}:")
+                    for line in explain_resp.text.strip().split('\n')[:10]:
+                        print(f"       {line[:120]}")
+
+            # Warmup run for performance tests
+            if is_perf_test and test_case.get("warmup", True):
+                self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
+
+            # Get memcp PID and start CPU measurement for perf tests
+            memcp_pid = find_memcp_pid() if is_perf_test else None
+            start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
+
+            # Execute query (with timing for perf tests)
+            start_time = time.monotonic()
             response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+            elapsed_sec = elapsed_ms / 1000
+
+            # End CPU measurement
+            end_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
+            cpu_pct = measure_cpu_load(memcp_pid, start_cpu, end_cpu, elapsed_sec) if memcp_pid else None
+
         if response is None:
-            return self._record_fail(name, "No response", query, None, None)
+            return self._record_fail(name, "No response", query, None, None, is_noncritical)
 
         results = self.parse_jsonl_response(response)
 
+        # Check performance threshold
+        if is_perf_test and elapsed_ms > threshold_ms:
+            return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
+                                     test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms)
+
         if self.validate_expectation(test_case, response, results):
-            self._record_success(name, is_noncritical)
+            if is_perf_test:
+                heap_mb = heap_bytes / (1024 * 1024) if heap_bytes else None
+                self._record_success(name, is_noncritical, elapsed_ms, threshold_ms, perf_rows, heap_mb, cpu_pct)
+                # Store result for baseline update (time and row count)
+                self.perf_results[name] = {"time_ms": elapsed_ms, "rows": perf_rows}
+                # Cleanup: drop table after perf test to free memory
+                if generate_data:
+                    table = generate_data.get("table")
+                    self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(table)}", syntax=self.suite_syntax)
+            else:
+                self._record_success(name, is_noncritical)
             return True
         else:
             return self._record_fail(name, "Expectation mismatch", query, response, test_case.get("expect"), is_noncritical)
@@ -330,6 +656,12 @@ class SQLTestRunner:
         self.suite_syntax = self._normalize_syntax(self.suite_metadata.get("syntax"))
         database = 'memcp-tests'
 
+        # Load performance baselines for this machine
+        if PERF_TEST_ENABLED:
+            self.load_perf_baselines()
+            if PERF_CALIBRATE:
+                print("🔧 Calibration mode: resetting baselines to current times")
+
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
         print(f"💾 Database: {database}")
 
@@ -363,6 +695,10 @@ class SQLTestRunner:
         else:
             print("🎉 All tests passed!")
         print("="*60)
+
+        # Update performance baselines on success (or in calibration mode)
+        if PERF_TEST_ENABLED and self.perf_results and (failed_crit == 0 or PERF_CALIBRATE):
+            self.save_perf_baselines()
 
         # Suite success is determined solely by critical tests
         return failed_crit == 0

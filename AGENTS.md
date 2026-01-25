@@ -68,6 +68,9 @@
 - This Scheme dialect is purely functional; procedures have no side effects and are fully parallelizable.
 - `(set symbol value)` is scope-local and works like (define ). there is no real set
 - To communicate outside scope, use sessions via `(newsession)` which are threadsafe.
+- the queryplan builder is basically a code generator. code is represented as data in scheme. to create the expression (+ 4 5) you have to quote everything whose computation should be delayed: '('+ 4 5) will evaluate 4 and 5 immediately and delay the addition
+- to produce functions, you must quote the symbols and the lists, e.g. '((quote lambda) '('param1 'param2) ...) or '('lambda '('param1 'param2)  ...), ' is the quoting character. '(...) constructs a list while (x) will execute the function x immediately. ('x) is invalid because symbols cannot be executed.
+- constructed code can be executed via (eval ...)
 
 ## Testing Guidelines
 - Framework: YAML specs executed via `run_sql_tests.py` against HTTP endpoints.
@@ -79,9 +82,14 @@
 - No explicit coverage threshold; add tests for every feature/bugfix.
 - Don't forget to also add must-fail tests with expect: { error: true }
 
-## Security & Configuration
-- Do not expose development instances publicly. Use `--api-port`, `--mysql-port`, `--disable-mysql`, and `-data <path>` to isolate local runs.
-- Large datasets should not be added to Git; use local paths under `data/`.
+## Debugging Strategy
+- run memcp with enabled mysql frontend on port 3307, make sure to capture its output and enable TracePrint in settings
+- run some unit tests or let the user click through the software
+- read through the captured output, identify the failing queries and inspect the caught panics
+- construct a test case in tests/ that will reproduce the failing bug, verify bug reproduction with make test
+- work on the bugfix
+- verify with make test, reiterate
+- do not commit until all tests including the new one pass
 
 ## Execution Plan Building Hints (Pipelines & Braking)
 - Operator pipelines: fuse filter → project → aggregate in a single scan to reduce overhead

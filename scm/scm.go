@@ -37,10 +37,10 @@ func symbolName(v Scmer) (string, bool) {
 	if v.IsSourceInfo() {
 		return symbolName(v.SourceInfo().value)
 	}
-	if auxTag(v.aux) == tagSymbol {
+	if v.GetTag() == tagSymbol {
 		return v.String(), true
 	}
-	if auxTag(v.aux) == tagAny {
+	if v.GetTag() == tagAny {
 		if sym, ok := v.Any().(Symbol); ok {
 			return string(sym), true
 		}
@@ -59,7 +59,7 @@ func mustNthLocalVar(v Scmer) NthLocalVar {
 	if v.IsSourceInfo() {
 		return mustNthLocalVar(v.SourceInfo().value)
 	}
-	if auxTag(v.aux) == tagAny {
+	if v.GetTag() == tagAny {
 		if idx, ok := v.Any().(NthLocalVar); ok {
 			return idx
 		}
@@ -95,7 +95,7 @@ func evalWithSourceInfo(si SourceInfo, en *Env) (value Scmer) {
 
 func Eval(expression Scmer, en *Env) (value Scmer) {
 restart:
-	switch auxTag(expression.aux) {
+	switch expression.GetTag() {
 	case tagSourceInfo:
 		return evalWithSourceInfo(*expression.SourceInfo(), en)
 	case tagNil, tagBool, tagInt, tagFloat, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc:
@@ -113,10 +113,32 @@ restart:
 		if len(list) == 0 {
 			return expression
 		}
-		if auxTag(list[0].aux) == tagSymbol {
+		if list[0].GetTag() == tagSymbol {
 			headSym := list[0].Symbol()
 			switch string(headSym) {
 			case "outer":
+				if en.Outer == nil {
+					return NewNil()
+				}
+				if list[1].IsSymbol() {
+					sym := list[1].Symbol()
+					if env := en.Outer.FindRead(sym); env != nil {
+						if val, ok := env.Vars[sym]; ok {
+							return val
+						}
+					}
+					symStr := string(sym)
+					if strings.Contains(symStr, ".") && !strings.Contains(symStr, ":") {
+						suffix := ":" + symStr
+						for env := en.Outer; env != nil; env = env.Outer {
+							for key, val := range env.Vars {
+								if strings.HasSuffix(string(key), suffix) {
+									return val
+								}
+							}
+						}
+					}
+				}
 				return Eval(list[1], en.Outer)
 			case "quote":
 				return list[1]
@@ -296,7 +318,7 @@ restart:
 		// apply
 		operands := list[1:]
 		procedure := Eval(list[0], en) // resolve the head (compute lambdas or lookup function from symbol)
-		switch auxTag(procedure.aux) {
+		switch procedure.GetTag() {
 		case tagFunc:
 			// Native funcs
 			args := make([]Scmer, len(operands))
@@ -366,7 +388,7 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 	}
 	proc := *p
 	env := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
-	switch auxTag(proc.Params.aux) {
+	switch proc.Params.GetTag() {
 	case tagSlice:
 		params := proc.Params.Slice()
 		if len(params) < len(operands) {
@@ -414,7 +436,7 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 	}
 	proc := *p
 	env := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
-	switch auxTag(proc.Params.aux) {
+	switch proc.Params.GetTag() {
 	case tagSlice:
 		params := proc.Params.Slice()
 		if proc.NumVars > 0 {
@@ -453,18 +475,13 @@ func ApplyAssoc(procedure Scmer, args []Scmer) (value Scmer) {
 	var proc *Proc
 	if procedure.IsProc() {
 		proc = procedure.Proc()
-	} else if p, ok := procedure.Any().(*Proc); ok {
-		proc = p
-	} else if pv, ok := procedure.Any().(Proc); ok {
-		cp := pv
-		proc = &cp
 	} else {
 		panic("apply_assoc cannot run on non-lambdas")
 	}
 	if proc == nil {
 		panic("apply_assoc cannot run on nil lambdas")
 	}
-	if auxTag(proc.Params.aux) == tagSlice {
+	if proc.Params.GetTag() == tagSlice {
 		params := proc.Params.Slice()
 		newParams := make([]Scmer, len(params))
 		for i, sym := range params {
@@ -486,7 +503,7 @@ func Apply(procedure Scmer, args ...Scmer) (value Scmer) {
 }
 func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 	// Native funcs
-	switch auxTag(procedure.aux) {
+	switch procedure.GetTag() {
 	case tagFuncEnv:
 		return procedure.FuncEnv()(en, args...)
 	case tagFunc:
@@ -587,10 +604,10 @@ func List(a ...Scmer) Scmer {
 	return NewSlice(a)
 }
 func isList(v Scmer) bool {
-	if auxTag(v.aux) == tagFunc {
+	if v.GetTag() == tagFunc {
 		return reflect.ValueOf(v.Func()).Pointer() == reflect.ValueOf(List).Pointer()
 	}
-	if auxTag(v.aux) == tagAny {
+	if v.GetTag() == tagAny {
 		if fn, ok := v.Any().(func(...Scmer) Scmer); ok {
 			return reflect.ValueOf(fn).Pointer() == reflect.ValueOf(List).Pointer()
 		}
@@ -952,7 +969,7 @@ type Sizable interface {
 
 func ComputeSize(v Scmer) uint {
 	base := scmerStructOverhead
-	switch auxTag(v.aux) {
+	switch v.GetTag() {
 	case tagNil:
 		return base
 	case tagBool, tagInt, tagFloat:
@@ -999,10 +1016,10 @@ func ComputeSize(v Scmer) uint {
 		payload := v.Any()
 		return base + goAllocOverhead + computeGoPayload(payload)
 	default:
-		if auxTag(v.aux) >= 100 {
+		if v.GetTag() >= 100 {
 			return base
 		}
-		fmt.Println(fmt.Sprintf("warning: unknown tag %d", auxTag(v.aux)))
+		fmt.Println(fmt.Sprintf("warning: unknown tag %d", v.GetTag()))
 		return base
 	}
 }

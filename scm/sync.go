@@ -20,6 +20,7 @@ package scm
 import "sync"
 import "time"
 import "context"
+import "runtime"
 import "github.com/jtolds/gls"
 
 /* threadsafe session storage */
@@ -191,5 +192,29 @@ func init_sync() {
 				return Apply(a[0])
 			})
 		}, false,
+	})
+	Declare(&Globalenv, &Declaration{
+		"numcpu", "Returns the number of logical CPUs available for parallel execution",
+		0, 0,
+		[]DeclarationParameter{}, "number",
+		func(a ...Scmer) Scmer {
+			return NewInt(int64(runtime.NumCPU()))
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"memstats", "Returns memory statistics as a dict with keys: alloc, total_alloc, sys, heap_alloc, heap_sys (all in bytes)",
+		0, 0,
+		[]DeclarationParameter{}, "dict",
+		func(a ...Scmer) Scmer {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			fd := NewFastDictValue(5)
+			fd.Set(NewString("alloc"), NewInt(int64(m.Alloc)), nil)
+			fd.Set(NewString("total_alloc"), NewInt(int64(m.TotalAlloc)), nil)
+			fd.Set(NewString("sys"), NewInt(int64(m.Sys)), nil)
+			fd.Set(NewString("heap_alloc"), NewInt(int64(m.HeapAlloc)), nil)
+			fd.Set(NewString("heap_sys"), NewInt(int64(m.HeapSys)), nil)
+			return NewFastDict(fd)
+		}, true,
 	})
 }

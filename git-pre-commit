@@ -29,7 +29,7 @@ echo "Found test files:"
 echo "$test_files"
 echo ""
 
-test_port=4400
+test_port=4480
 godebug="$GODEBUG"
 if [[ "$godebug" != *"invalidptr="* ]]; then
   if [ -n "$godebug" ]; then

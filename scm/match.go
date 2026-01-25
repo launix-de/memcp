@@ -63,10 +63,10 @@ func scmerAsString(v Scmer) (string, bool) {
 	if v.IsSourceInfo() {
 		return scmerAsString(v.SourceInfo().value)
 	}
-	if auxTag(v.aux) == tagString {
+	if v.GetTag() == tagString {
 		return v.String(), true
 	}
-	if auxTag(v.aux) == tagAny {
+	if v.GetTag() == tagAny {
 		if s, ok := v.Any().(string); ok {
 			return s, true
 		}
@@ -78,7 +78,7 @@ func valueFromPattern(pattern Scmer, en *Env) Scmer {
 	if pattern.IsSourceInfo() {
 		return valueFromPattern(pattern.SourceInfo().value, en)
 	}
-	if auxTag(pattern.aux) == tagSourceInfo {
+	if pattern.GetTag() == tagSourceInfo {
 		return valueFromPattern(pattern.SourceInfo().value, en)
 	}
 	if pattern.IsSymbol() {

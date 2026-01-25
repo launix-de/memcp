@@ -139,7 +139,7 @@ func TestScmerJSON_LambdaEncodingRoundtrip(t *testing.T) {
 func TestScmerJSON_NativeFuncEncoding(t *testing.T) {
 	// list function must marshal to {symbol:"list"}
 	v := Globalenv.Vars[Symbol("list")]
-	if auxTag(v.aux) != tagFunc {
+	if v.GetTag() != tagFunc {
 		t.Fatalf("global list not a native func: %v", v)
 	}
 	b, err := json.Marshal(v)

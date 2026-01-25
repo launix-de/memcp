@@ -246,7 +246,7 @@ func Validate(val Scmer, require string) string {
 		source_info = *val.SourceInfo()
 		val = source_info.value
 	}
-	switch auxTag(val.aux) {
+	switch val.GetTag() {
 	case tagNil:
 		return "nil"
 	case tagString:
@@ -273,7 +273,7 @@ func Validate(val Scmer, require string) string {
 				if def2, ok := declarations[head.String()]; ok {
 					def = def2
 				}
-			} else if auxTag(head.aux) == tagFunc {
+			} else if head.GetTag() == tagFunc {
 				if def2, ok := declarations_hash[fmt.Sprintf("%p", head.Func())]; ok {
 					def = def2
 				}
@@ -340,12 +340,6 @@ func Validate(val Scmer, require string) string {
 		if _, ok := val.Any().(func(...Scmer) Scmer); ok {
 			return "func"
 		}
-		if _, ok := val.Any().(Proc); ok {
-			return "func"
-		}
-		if _, ok := val.Any().(*Proc); ok {
-			return "func"
-		}
 	}
 	return "any"
 }
@@ -385,7 +379,7 @@ func Help(fn Scmer) {
 
 // DeclarationForValue resolves a callable head (symbol or native func) to its Declaration.
 func DeclarationForValue(v Scmer) *Declaration {
-	switch auxTag(v.aux) {
+	switch v.GetTag() {
 	case tagString:
 		if d, ok := declarations[v.String()]; ok {
 			return d
