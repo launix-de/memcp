@@ -36,8 +36,8 @@ func HTTPServe(a ...Scmer) Scmer {
 	server := &http.Server{
 		Addr:           fmt.Sprintf(":%v", port),
 		Handler:        handler,
-		ReadTimeout:    10 * time.Second,
-		WriteTimeout:   10 * time.Second,
+		ReadTimeout:    300 * time.Second,
+		WriteTimeout:   300 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
 	go server.ListenAndServe()

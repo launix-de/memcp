@@ -196,10 +196,42 @@ if the user is not allowed to access this property, the function will throw an e
 			)
 		)
 	)))
+	/* handler for raw Scheme code execution (global, no schema) */
+	(define handle_scm (lambda (req res code) (begin
+		/* check for password - must be admin */
+		(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+		(if (and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
+			(begin
+				(try (lambda () (begin
+					((res "header") "Content-Type" "application/json")
+					(define session (context "session"))
+					(set result (eval (scheme code)))
+					((res "print") (json_encode result))
+				)) (lambda(e) (begin
+					(print "SCM code: " code)
+					(print "error: " e)
+					((res "header") "Content-Type" "text/plain")
+					((res "status") 500)
+					((res "print") "SCM Error: " e)
+				)))
+			)
+			(begin
+				((res "header") "Content-Type" "text/plain")
+				((res "header") "WWW-Authenticate" "Basic realm=\"authorization required\"")
+				((res "status") 401)
+				((res "print") "Unauthorized (admin required)")
+			)
+		)
+	)))
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */
 		(match (req "path")
+			/* Scheme code execution endpoint (global, admin only) */
+			"/scm" (begin
+				(set code ((req "body")))
+				(handle_scm req res code)
+			)
 			(regex "^/sql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
 				/* tolerate an optional trailing ';' using multiline group */

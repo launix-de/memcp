@@ -1,0 +1,6 @@
+{
+  "Perf: COUNT": {"time_ms": 1400, "rows": 5500000},
+  "Perf: SUM": {"time_ms": 1400, "rows": 5500000},
+  "Perf: ORDER+LIMIT": {"time_ms": 500, "rows": 5500000},
+  "Perf: SCAN+FILTER": {"time_ms": 6500, "rows": 5500000}
+}

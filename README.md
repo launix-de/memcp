@@ -208,9 +208,90 @@ cp git-pre-commit .git/hooks/pre-commit
 
 # Run specific test suites
 python3 run_sql_tests.py tests/01_basic_sql.yaml 4400      # Basic operations
-python3 run_sql_tests.py tests/02_functions.yaml 4400     # SQL functions  
+python3 run_sql_tests.py tests/02_functions.yaml 4400     # SQL functions
 python3 run_sql_tests.py tests/07_error_cases.yaml 4400   # Error handling
 ```
+
+## Performance Testing 📊
+
+MemCP includes an auto-calibrating performance test framework that adapts to your machine.
+
+### Running Performance Tests
+
+```bash
+# Run perf tests (uses calibrated baselines)
+PERF_TEST=1 make test
+
+# Calibrate for your machine (run ~10 times to reach target time range)
+PERF_TEST=1 PERF_CALIBRATE=1 make test
+
+# Freeze row counts for bisecting performance regressions
+PERF_TEST=1 PERF_NORECALIBRATE=1 make test
+
+# Show query plans for each test
+PERF_TEST=1 PERF_EXPLAIN=1 make test
+```
+
+### How Calibration Works
+
+1. **Initial run** starts with 10,000 rows per test
+2. Each calibration run **scales row counts by 30%** up/down
+3. Target is **10-20 seconds** query time per test
+4. Baselines are stored in `.perf_baseline.json`
+5. After ~10 runs, row counts stabilize in the target range
+
+### Output Format
+
+```
+✅ Perf: COUNT (7.9ms / 30000ms, 20,000 rows, 0.39µs/row, 11.4MB heap)
+         │       │         │            │        │           └─ Heap memory after insert
+         │       │         │            │        └─ Time per row
+         │       │         │            └─ Calibrated row count
+         │       │         └─ Threshold (from baseline × 1.3)
+         │       └─ Actual query time
+         └─ Test name
+```
+
+### Performance Debugging Cookbook
+
+**Detecting a performance regression:**
+```bash
+# 1. Freeze baselines to use consistent row counts
+PERF_TEST=1 PERF_NORECALIBRATE=1 make test
+
+# 2. If a test fails threshold, you have a regression
+```
+
+**Bisecting a performance bug:**
+```bash
+# 1. Checkout the known-good commit, run calibration
+git checkout good-commit
+PERF_TEST=1 PERF_CALIBRATE=1 make test  # run 10x to calibrate
+
+# 2. Save the baseline
+cp .perf_baseline.json .perf_baseline_good.json
+
+# 3. Bisect with frozen row counts
+git bisect start
+git bisect bad HEAD
+git bisect good good-commit
+git bisect run bash -c 'PERF_TEST=1 PERF_NORECALIBRATE=1 make test'
+```
+
+**Analyzing slow queries:**
+```bash
+# Show query plans to understand execution
+PERF_TEST=1 PERF_EXPLAIN=1 make test
+```
+
+### Environment Variables
+
+| Variable | Values | Description |
+|----------|--------|-------------|
+| `PERF_TEST` | `0`/`1` | Enable performance tests |
+| `PERF_CALIBRATE` | `0`/`1` | Update baselines with new times |
+| `PERF_NORECALIBRATE` | `0`/`1` | Freeze row counts (for bisecting) |
+| `PERF_EXPLAIN` | `0`/`1` | Show query plans |
 
 ## License 📄
 
