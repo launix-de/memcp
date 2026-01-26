@@ -51,11 +51,12 @@ func (tt TriggerTiming) String() string {
 
 // TriggerDescription holds all information about a trigger
 type TriggerDescription struct {
-	Name     string        // Trigger name (user-defined or auto-generated)
-	Timing   TriggerTiming // BEFORE/AFTER INSERT/UPDATE/DELETE
-	Func     scm.Scmer     // The trigger function (compiled Scheme procedure)
-	IsSystem bool          // True for auto-generated triggers (hidden from SHOW TRIGGERS)
-	Priority int           // Execution order (lower = earlier)
+	Name      string        // Trigger name (user-defined or auto-generated)
+	Timing    TriggerTiming // BEFORE/AFTER INSERT/UPDATE/DELETE
+	Func      scm.Scmer     // The trigger function (compiled Scheme procedure)
+	SourceSQL string        // Original SQL body text (for SHOW TRIGGERS)
+	IsSystem  bool          // True for auto-generated triggers (hidden from SHOW TRIGGERS)
+	Priority  int           // Execution order (lower = earlier)
 }
 
 // GetTriggers returns all triggers for a specific timing

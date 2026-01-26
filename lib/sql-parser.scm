@@ -79,12 +79,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
 	/* derive the description of a column from its expression */
-	(define extract_title (lambda (expr) (match expr
-		'((symbol get_column) nil _ col _) col
-		'((symbol get_column) tblvar _ col _) col /* x.y -> (concat tblvar "." col) */
-		(cons sym args) /* function call */ (concat (cons sym (map args extract_title)))
-		(concat expr)
-	)))
+	/* For single column: use raw column name (most apps rely on this) */
+	/* For complex expressions: use captured SQL text */
+	/* captured_result is (raw_sql expr) from capture wrapper */
+	(define extract_title_or_sql (lambda (captured_result)
+		(match (car (cdr captured_result))
+			'((symbol get_column) nil _ col _) col
+			'((symbol get_column) tblvar _ col _) col /* x.y -> col */
+			_ (car captured_result) /* for complex expressions, use captured SQL */
+		)
+	))
 
 	/* merge two arrays into a dict */
 	(define zip_cols (lambda(cols tuple) (match cols
@@ -108,8 +112,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 
 	/* Trigger body parser: handles BEGIN...END or single statement */
-	/* For simple implementation, just capture common trigger patterns */
-	(define sql_trigger_body (parser (or
+	/* Uses (capture ...) to get both raw SQL text and parsed result */
+	/* Result is (raw_sql parsed_body) where parsed_body is the semantic representation */
+	(define sql_trigger_body (parser (capture (or
 		/* BEGIN...END block - for now just accept and store as placeholder */
 		/* The body will be empty string, full parsing to be added later */
 		(parser '((atom "BEGIN" true) (* (or
@@ -142,7 +147,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(atom "NEW" true) "." (define col sql_identifier) "=" (define expr sql_expression)
 			) '(col expr)) ","))
 		) '((quote list) "set" (cons (quote list) assignments)))
-	)))
+	))))
 
 	(define sql_column_attributes (parser (define sub (* (or
 		(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
@@ -304,7 +309,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser '((define tbl sql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_identifier)) '(title e))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_string)) '(title e))
-			(parser (define e sql_expression) '((extract_title e) e))
+			/* capture sql_expression to get raw SQL text for column naming */
+			(parser (define captured (capture sql_expression)) '((extract_title_or_sql captured) (car (cdr captured))))
 		) ","))
 		(?
 			(atom "FROM" true)
@@ -780,6 +786,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier) (? (atom "ON" true) (define tbl sql_identifier))) "ignore")
 
 		/* CREATE TRIGGER syntax */
+		/* body from sql_trigger_body is (raw_sql parsed_body) due to capture wrapper */
 		(parser '(
 			(atom "CREATE" true)
 			(atom "TRIGGER" true)
@@ -796,7 +803,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define tbl sql_identifier)
 			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
 			(define body sql_trigger_body)
-		) '((quote createtrigger) schema tbl name timing body))
+		) '((quote createtrigger) schema tbl name timing (car body) (car (cdr body))))
 
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))

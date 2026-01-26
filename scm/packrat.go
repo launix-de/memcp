@@ -45,6 +45,26 @@ type UndefinedParser struct {
 	Sym    Symbol
 }
 
+// ScmCaptureParser wraps a parser to capture the matched text
+type ScmCaptureParser struct {
+	Parser packrat.Parser[*parserResult]
+}
+
+func (b *ScmCaptureParser) Match(s *packrat.Scanner[*parserResult]) (packrat.Node[*parserResult], bool) {
+	s.Skip() // skip whitespace first to get clean capture start
+	startPos := s.GetPosition()
+	m, ok := b.Parser.Match(s)
+	if !ok {
+		return m, false
+	}
+	endPos := s.GetPosition()
+	matchedText := s.Substring(startPos, endPos)
+	// Return a list: (matched_text parsed_result)
+	result := []Scmer{NewString(matchedText), m.Payload.value}
+	env := m.Payload.env
+	return packrat.Node[*parserResult]{Payload: &parserResult{value: NewSlice(result), env: env}}, true
+}
+
 func parserSymbolEquals(v Scmer, name string) bool {
 	return v.IsSymbol() && v.String() == name
 }
@@ -342,6 +362,13 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 					return nil
 				}
 				return result
+			case "capture":
+				// (capture subparser) - returns (matched_text parsed_result)
+				sub := parseSyntax(list[1], en, ome, false)
+				if sub == nil {
+					return nil
+				}
+				return &ScmCaptureParser{Parser: sub}
 			}
 		}
 		if isList(list[0]) {
@@ -395,6 +422,7 @@ syntax can be one of:
 (+ sub separator) ManyParser
 (? xyz) MaybeParser (if >1 AndParser)
 (not mainparser parser1 parser2 parser3 ...) a parser that matches mainparser but not parser1...
+(capture subparser) wraps a parser and returns (matched_text parsed_result)
 $ EndParser
 empty EmptyParser
 symbol -> use other parser defined in env

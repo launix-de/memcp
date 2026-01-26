@@ -1061,13 +1061,14 @@ func Init(en scm.Env) {
 	// Trigger management
 	scm.Declare(&en, &scm.Declaration{
 		"createtrigger", "creates a new trigger on a table",
-		5, 5,
+		6, 6,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database"},
 			scm.DeclarationParameter{"table", "string", "name of the table"},
 			scm.DeclarationParameter{"name", "string", "name of the trigger"},
 			scm.DeclarationParameter{"timing", "string", "one of: before_insert, after_insert, before_update, after_update, before_delete, after_delete"},
-			scm.DeclarationParameter{"body", "any", "trigger body (SQL string or Scheme expression)"},
+			scm.DeclarationParameter{"source_sql", "string", "original SQL body text (for SHOW TRIGGERS)"},
+			scm.DeclarationParameter{"body", "any", "trigger body (parsed Scheme expression)"},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
@@ -1099,16 +1100,18 @@ func Init(en scm.Env) {
 				panic("invalid trigger timing: " + timingStr)
 			}
 
+			sourceSQL := scm.String(a[4])
 			// For now, store body as-is (can be SQL string or Scheme expr)
 			// TODO: compile SQL body to Scheme procedure
-			body := a[4]
+			body := a[5]
 
 			trigger := TriggerDescription{
-				Name:     name,
-				Timing:   timing,
-				Func:     body,
-				IsSystem: false,
-				Priority: 0,
+				Name:      name,
+				Timing:    timing,
+				Func:      body,
+				SourceSQL: sourceSQL,
+				IsSystem:  false,
+				Priority:  0,
 			}
 			t.AddTrigger(trigger)
 			t.schema.save()

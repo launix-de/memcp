@@ -650,6 +650,10 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 			}
 		}
 		val = NewSlice(slice)
+	} else if headOk && headSym == Symbol("capture") {
+		// capture wrapper - optimize sub-parser but keep capture structure
+		slice[1] = OptimizeParser(slice[1], env, ome, false)
+		val = NewSlice(slice)
 	} else {
 		for i := 1; i < len(slice); i++ {
 			slice[i] = OptimizeParser(slice[i], env, ome, ignoreResult)
