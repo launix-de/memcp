@@ -314,6 +314,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		if len(a) > 0 {
 			// update command
+			var triggerOldRow, triggerNewRow dataset // for AFTER UPDATE triggers
 			func() {
 				t.mu.Lock()         // write lock
 				defer t.mu.Unlock() // write lock
@@ -343,7 +344,11 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 						d2[colidx] = t.getDelta(int(idx-t.main_count), k)
 					}
 				}
-				// now d2 contains the old col (TODO: preserve OLD and NEW for triggers or bind them to trigger variables)
+				// now d2 contains the old row values
+				// copy slice for triggers before modifying (scheme values are immutable, but Go slice is modified)
+				if withTrigger && len(t.t.Triggers) > 0 {
+					triggerOldRow = append(dataset{}, d2...)
+				}
 				for j := 0; j < len(changes); j += 2 {
 					colidx, ok := t.deltaColumns[scm.String(changes[j])]
 					if !ok {
@@ -356,6 +361,11 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				}
 				if !result { // only do a write if something changed
 					return // leave inner func to unlock
+				}
+
+				// save new row for triggers (d2 now contains new values)
+				if withTrigger && len(t.t.Triggers) > 0 {
+					triggerNewRow = d2 // no copy needed, d2 won't be modified after this
 				}
 
 				// unique constraint checking
@@ -382,14 +392,28 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			if t.t.PersistencyMode == Safe {
 				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 			}
-			if withTrigger {
-				// TODO: execute AFTER UPDATE triggers
+			if withTrigger && triggerOldRow != nil {
+				t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
 			}
 		} else {
 			// delete
+			var triggerDeletedRow dataset // for AFTER DELETE trigger
 			func() {
 				t.mu.Lock()         // write lock
 				defer t.mu.Unlock() // write lock
+
+				// capture row data for triggers before deletion
+				if withTrigger && len(t.t.Triggers) > 0 {
+					triggerDeletedRow = make(dataset, 0, len(t.columns))
+					for k := range t.columns {
+						cs := t.getColumnStorageOrPanicEx(k, true)
+						if idx < t.main_count {
+							triggerDeletedRow = append(triggerDeletedRow, cs.GetValue(idx))
+						} else {
+							triggerDeletedRow = append(triggerDeletedRow, t.getDelta(int(idx-t.main_count), k))
+						}
+					}
+				}
 
 				t.deletions.Set(idx, true) // mark as deleted
 				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
@@ -400,8 +424,8 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			if t.t.PersistencyMode == Safe {
 				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 			}
-			if withTrigger {
-				// TODO: execute AFTER DELETE triggers
+			if withTrigger && triggerDeletedRow != nil {
+				t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
 			}
 		}
 		if result && t.next != nil {
@@ -443,7 +467,12 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	if t.t.PersistencyMode == Safe {
 		t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 	}
-	// TODO: execute AFTER INSERT triggers
+	// execute AFTER INSERT triggers
+	if len(t.t.Triggers) > 0 {
+		for _, row := range values {
+			t.t.ExecuteTriggers(AfterInsert, nil, row)
+		}
+	}
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
