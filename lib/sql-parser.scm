@@ -22,6 +22,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* exceptions for things that can't be identifiers */
 	(atom "NOT" true)
 	(atom "IN" true)
+	(atom "BETWEEN" true)
 	(atom "AS" true)
 	(atom "ON" true)
 	(atom "WHERE" true)
@@ -163,52 +164,52 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(if is_after
 							(error "SET NEW is not allowed in AFTER triggers")
 							(compile_set_assignments (cdr stmt)))
-					(if (equal? tag '!if)
-						/* IF condition THEN stmts END IF - stmt is (!if condition then_stmts) */
-						(begin
-							(define condition (car (cdr stmt)))
-							(define then_stmts (car (cdr (cdr stmt))))
-							/* Compile statements inside IF - flatten nested lists from SET */
-							(define compiled_then (merge (map then_stmts compile_stmt)))
-							(define valid_then (filter compiled_then (lambda (s) (not (nil? s)))))
-							/* Use !begin (no new scope) so set writes to outer changed_rows */
-							(define then_body (if (> (count valid_then) 1)
-								(cons '!begin valid_then)
-								(if (> (count valid_then) 0) (car valid_then) nil)))
-							/* Return as single-element list to be flattened by caller */
-							(list (list (symbol "if") (transform_trigger_expr condition) then_body)))
-					(if (equal? tag '!insert)
-						/* INSERT INTO table - stmt is (!insert tbl cols vals) */
-						(begin
-							(define tbl (car (cdr stmt)))
-							(define cols (car (cdr (cdr stmt))))
-							(define vals (car (cdr (cdr (cdr stmt)))))
-							(list (list (symbol "insert") schema tbl
-								(cons (symbol "list") cols)
-								(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
-								(list (symbol "list")) nil false nil)))
-					(if (equal? tag '!update)
-						/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
-						(begin
-							(define tbl (car (cdr stmt)))
-							(define assignments (car (cdr (cdr stmt))))
-							(define where (car (cdr (cdr (cdr stmt)))))
-							(list (list (symbol "update") schema tbl
-								(list (symbol "lambda") '() (if (nil? where) true (transform_trigger_expr where)))
-								(cons (symbol "list") (map assignments (lambda (a) (match a '(col expr) (list (symbol "list") col (transform_trigger_expr expr))))))
-								false)))
-					(if (equal? tag '!delete)
-						/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
-						(begin
-							(define tbl (car (cdr stmt)))
-							(define where (car (cdr (cdr stmt))))
-							(list (list (symbol "delete") schema tbl
-								(list (symbol "lambda") '() (if (nil? where) true (transform_trigger_expr where))))))
-						/* Unknown statement type */
-						nil
+						(if (equal? tag '!if)
+							/* IF condition THEN stmts END IF - stmt is (!if condition then_stmts) */
+							(begin
+								(define condition (car (cdr stmt)))
+								(define then_stmts (car (cdr (cdr stmt))))
+								/* Compile statements inside IF - flatten nested lists from SET */
+								(define compiled_then (merge (map then_stmts compile_stmt)))
+								(define valid_then (filter compiled_then (lambda (s) (not (nil? s)))))
+								/* Use !begin (no new scope) so set writes to outer changed_rows */
+								(define then_body (if (> (count valid_then) 1)
+									(cons '!begin valid_then)
+									(if (> (count valid_then) 0) (car valid_then) nil)))
+								/* Return as single-element list to be flattened by caller */
+								(list (list (symbol "if") (transform_trigger_expr condition) then_body)))
+							(if (equal? tag '!insert)
+								/* INSERT INTO table - stmt is (!insert tbl cols vals) */
+								(begin
+									(define tbl (car (cdr stmt)))
+									(define cols (car (cdr (cdr stmt))))
+									(define vals (car (cdr (cdr (cdr stmt)))))
+									(list (list (symbol "insert") schema tbl
+										(cons (symbol "list") cols)
+										(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
+										(list (symbol "list")) nil false nil)))
+								(if (equal? tag '!update)
+									/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
+									(begin
+										(define tbl (car (cdr stmt)))
+										(define assignments (car (cdr (cdr stmt))))
+										(define where (car (cdr (cdr (cdr stmt)))))
+										(list (list (symbol "update") schema tbl
+											(list (symbol "lambda") '() (if (nil? where) true (transform_trigger_expr where)))
+											(cons (symbol "list") (map assignments (lambda (a) (match a '(col expr) (list (symbol "list") col (transform_trigger_expr expr))))))
+											false)))
+									(if (equal? tag '!delete)
+										/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
+										(begin
+											(define tbl (car (cdr stmt)))
+											(define where (car (cdr (cdr stmt))))
+											(list (list (symbol "delete") schema tbl
+												(list (symbol "lambda") '() (if (nil? where) true (transform_trigger_expr where))))))
+										/* Unknown statement type */
+										nil
 					)))))
 				)
-			)))
+		)))
 
 		(match body
 			/* BEGIN...END block - compile all statements */
@@ -358,7 +359,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('contains? (cons list b) a))
-		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('not (contains? (cons list b) a)))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") (list (quote not) (cons (quote contains?) (cons (cons (quote list) b) (list a)))))
+		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
+		(parser '((define a sql_expression3) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low sql_expression3) (atom "AND" true) (define high sql_expression3)) (list (quote not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
 		sql_expression3
 	)))
 
@@ -969,8 +973,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
 			(define body sql_trigger_body)
 		) (begin
-			(define compiled (compile_trigger_body schema timing (car (cdr body))))
-			(list 'createtrigger schema tbl name timing (car body) (eval compiled))
+				(define compiled (compile_trigger_body schema timing (car (cdr body))))
+				(list 'createtrigger schema tbl name timing (car body) (eval compiled))
 		))
 
 		/* DROP TRIGGER syntax */

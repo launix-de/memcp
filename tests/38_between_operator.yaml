@@ -1,0 +1,114 @@
+# BETWEEN operator tests
+
+metadata:
+  version: "1.0"
+  description: "BETWEEN and NOT BETWEEN operator tests"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS numbers"
+  - sql: |
+      CREATE TABLE numbers (
+        ID INT PRIMARY KEY,
+        value INT,
+        name VARCHAR(32)
+      )
+  - sql: |
+      INSERT INTO numbers (ID, value, name) VALUES
+      (1, 10, 'ten'),
+      (2, 20, 'twenty'),
+      (3, 30, 'thirty'),
+      (4, 40, 'forty'),
+      (5, 50, 'fifty')
+
+test_cases:
+  - name: "BETWEEN with numeric range"
+    sql: |
+      SELECT ID, value FROM numbers WHERE value BETWEEN 15 AND 35 ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+          value: 20
+        - ID: 3
+          value: 30
+
+  - name: "BETWEEN inclusive lower bound"
+    sql: |
+      SELECT ID, value FROM numbers WHERE value BETWEEN 20 AND 40 ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 2
+          value: 20
+        - ID: 3
+          value: 30
+        - ID: 4
+          value: 40
+
+  - name: "BETWEEN inclusive upper bound"
+    sql: |
+      SELECT ID, value FROM numbers WHERE value BETWEEN 10 AND 30 ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          value: 10
+        - ID: 2
+          value: 20
+        - ID: 3
+          value: 30
+
+  - name: "BETWEEN no matches"
+    sql: |
+      SELECT ID, value FROM numbers WHERE value BETWEEN 100 AND 200 ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "NOT BETWEEN excludes range"
+    sql: |
+      SELECT ID, value FROM numbers WHERE value NOT BETWEEN 20 AND 40 ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          value: 10
+        - ID: 5
+          value: 50
+
+  - name: "BETWEEN with single value match"
+    sql: |
+      SELECT ID, value FROM numbers WHERE value BETWEEN 30 AND 30 ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 3
+          value: 30
+
+  - name: "BETWEEN with expressions"
+    sql: |
+      SELECT ID, value FROM numbers WHERE value BETWEEN 10 + 5 AND 20 + 10 ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+          value: 20
+        - ID: 3
+          value: 30
+
+  - name: "BETWEEN combined with other conditions"
+    sql: |
+      SELECT ID, value, name FROM numbers
+      WHERE value BETWEEN 15 AND 45 AND name LIKE 't%'
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+          value: 20
+          name: "twenty"
+        - ID: 3
+          value: 30
+          name: "thirty"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS numbers"

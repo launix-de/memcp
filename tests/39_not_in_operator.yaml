@@ -1,0 +1,70 @@
+# NOT IN operator tests
+
+metadata:
+  version: "1.0"
+  description: "NOT IN operator tests"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS items"
+  - sql: |
+      CREATE TABLE items (
+        ID INT PRIMARY KEY,
+        category VARCHAR(32)
+      )
+  - sql: |
+      INSERT INTO items (ID, category) VALUES
+      (1, 'A'), (2, 'B'), (3, 'A'), (4, 'C'), (5, 'B')
+
+test_cases:
+  - name: "NOT IN with numeric list"
+    sql: |
+      SELECT ID FROM items WHERE ID NOT IN (2, 4) ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+        - ID: 3
+        - ID: 5
+
+  - name: "NOT IN with string list"
+    sql: |
+      SELECT ID, category FROM items WHERE category NOT IN ('A', 'C') ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+          category: "B"
+        - ID: 5
+          category: "B"
+
+  - name: "NOT IN excludes all when all match"
+    sql: |
+      SELECT ID FROM items WHERE ID NOT IN (1, 2, 3, 4, 5) ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "NOT IN includes all when none match"
+    sql: |
+      SELECT ID FROM items WHERE ID NOT IN (100, 200) ORDER BY ID
+    expect:
+      rows: 5
+      data:
+        - ID: 1
+        - ID: 2
+        - ID: 3
+        - ID: 4
+        - ID: 5
+
+  - name: "NOT IN combined with other conditions"
+    sql: |
+      SELECT ID, category FROM items
+      WHERE ID NOT IN (1, 5) AND category = 'A'
+      ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 3
+          category: "A"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS items"
