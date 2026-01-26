@@ -234,26 +234,26 @@ if the user is not allowed to access this property, the function will throw an e
 			)
 			(regex "^/sql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
-				/* tolerate an optional trailing ';' using multiline group */
-				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
+				/* tolerate an optional trailing ';' - must be at end of string */
+				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
 				(handle_query req res schema query)
 			)
 			(regex "^/sql/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
-				/* tolerate an optional trailing ';' using multiline group */
-				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
+				/* tolerate an optional trailing ';' - must be at end of string */
+				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
 				(handle_query req res schema query)
 			)
 			(regex "^/psql/([^/]+)$" url schema) (begin
 				(set query ((req "body")))
-				/* tolerate an optional trailing ';' using multiline group */
-				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
+				/* tolerate an optional trailing ';' - must be at end of string */
+				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
 				(handle_query_postgres req res schema query)
 			)
 			(regex "^/psql/([^/]+)/(.*)$" url schema query_un) (begin
 				(set query (urldecode query_un))
-				/* tolerate an optional trailing ';' using multiline group */
-				(set query (match query (regex "^((?s:.*));\\s*" _ body) body query))
+				/* tolerate an optional trailing ';' - must be at end of string */
+				(set query (match query (regex "^((?s:.*));\\s*$" _ body) body query))
 				(handle_query_postgres req res schema query)
 			)
 			/* default */
@@ -276,8 +276,8 @@ if the user is not allowed to access this property, the function will throw an e
 					(resultrow '("result" (eval (scheme sql))))
 				) (time (begin
 						/* SQL syntax mode */
-						/* tolerate an optional trailing ';' using multiline group */
-						(set sql (match sql (regex "^((?s:.*));\\s*" _ body) body sql))
+						/* tolerate an optional trailing ';' - must be at end of string */
+						(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
 						(define formula ((if (equal? (session "syntax") "postgresql") (lambda (schema sql policy) (parse_psql schema sql policy)) (lambda (schema sql policy) (parse_sql schema sql policy))) schema sql (sql_policy (coalesce (session "username") "root"))))
 						(eval (source "SQL Query" 1 1 formula))
 					) sql))

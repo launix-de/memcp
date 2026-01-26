@@ -977,6 +977,69 @@ func Init(en scm.Env) {
 			return scm.NewSlice(rows)
 		}, false,
 	})
+
+	// show_triggers(schema, table): returns a list of triggers for a table (non-system triggers only)
+	scm.Declare(&en, &scm.Declaration{
+		"show_triggers", "show triggers for a given table",
+		1, 2,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "database name"},
+			scm.DeclarationParameter{"table", "string", "(optional) table name, if omitted shows all triggers in schema"},
+		}, "any",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			rows := make([]scm.Scmer, 0)
+			tables := db.tables.GetAll()
+			for _, t := range tables {
+				// If table name specified, filter
+				if len(a) >= 2 && scm.String(a[1]) != t.Name {
+					continue
+				}
+				for _, tr := range t.Triggers {
+					// Skip system triggers
+					if tr.IsSystem {
+						continue
+					}
+					// MySQL SHOW TRIGGERS format:
+					// Trigger, Event, Table, Statement, Timing, Created, sql_mode, Definer, character_set_client, collation_connection, Database Collation
+					timing := "BEFORE"
+					event := "INSERT"
+					switch tr.Timing {
+					case BeforeInsert:
+						timing, event = "BEFORE", "INSERT"
+					case AfterInsert:
+						timing, event = "AFTER", "INSERT"
+					case BeforeUpdate:
+						timing, event = "BEFORE", "UPDATE"
+					case AfterUpdate:
+						timing, event = "AFTER", "UPDATE"
+					case BeforeDelete:
+						timing, event = "BEFORE", "DELETE"
+					case AfterDelete:
+						timing, event = "AFTER", "DELETE"
+					}
+					rows = append(rows, scm.NewSlice([]scm.Scmer{
+						scm.NewString("Trigger"), scm.NewString(tr.Name),
+						scm.NewString("Event"), scm.NewString(event),
+						scm.NewString("Table"), scm.NewString(t.Name),
+						scm.NewString("Statement"), scm.NewString(tr.SourceSQL),
+						scm.NewString("Timing"), scm.NewString(timing),
+						scm.NewString("Created"), scm.NewNil(),
+						scm.NewString("sql_mode"), scm.NewString(""),
+						scm.NewString("Definer"), scm.NewString(""),
+						scm.NewString("character_set_client"), scm.NewString("utf8mb4"),
+						scm.NewString("collation_connection"), scm.NewString("utf8mb4_general_ci"),
+						scm.NewString("Database Collation"), scm.NewString("utf8mb4_general_ci"),
+					}))
+				}
+			}
+			return scm.NewSlice(rows)
+		}, false,
+	})
+
 	scm.Declare(&en, &scm.Declaration{
 		"rebuild", "rebuilds all main storages and returns the amount of time it took",
 		0, 2,

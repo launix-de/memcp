@@ -680,6 +680,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DESCRIBE" true) (define id psql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
 		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define id psql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line))))) /* TODO: Field Type Collation Null Key Default Extra(auto_increment) Privileges Comment */
 
+		/* SHOW TRIGGERS [FROM schema] */
+		(parser '((atom "SHOW" true) (atom "TRIGGERS" true) (? (atom "FROM" true) (define tgtschema psql_identifier)))
+			'((quote map) '((quote show_triggers) (coalesce tgtschema schema)) '((quote lambda) '((quote tr)) '((quote resultrow) (quote tr)))))
+
 		/* SHOW ENGINES: list engines recognized by CREATE/ALTER TABLE */
 		(parser '((atom "SHOW" true) (atom "ENGINES" true)) (cons '!begin '(
 			'((quote resultrow) '((quote list) "Engine" "SAFE"    "Support" "DEFAULT" "Comment" "Safe durable engine"              "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))

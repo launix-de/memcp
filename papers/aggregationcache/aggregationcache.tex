@@ -20,13 +20,13 @@
 \author{Carl-Philip Hänsch}
 \affiliation{%
   \institution{Launix}
-  \city{Chemnitz}
+  \city{Ebersbach-Neugersdorf}
   \country{Germany}
 }
 \email{info@launix.de}
 
 \begin{abstract}
-We present a novel approach to automatic materialized view management for aggregate queries in the MemCP in-memory database. Unlike existing systems that require explicit materialized view creation or provide only query result caching, our system automatically detects GROUP BY queries, creates persistent cached representations, and maintains them incrementally via automatically generated triggers. We introduce a \emph{weak reference} model with time-to-live (TTL) semantics and memory-pressure-aware eviction, allowing the system to balance cache utility against memory constraints. Our approach includes several optimizations: foreign key-aware placement that avoids redundant table creation, condition consolidation that merges multiple condition-specific caches into a single parameterized cache, and an adaptive update/invalidation decision based on workload characteristics. To our knowledge, this is the first system to combine fully automatic materialized view creation with incremental maintenance and soft-state memory management.
+We present \emph{Aggregation Caching}, a compiler-integrated aggregate caching mechanism for the MemCP in-memory database. The system detects eligible GROUP BY operators, creates cached aggregate representations on demand, and maintains them incrementally via automatically generated triggers. Caches are managed as soft state via a \emph{weak reference} model with time-to-live (TTL) semantics and memory-pressure-aware eviction, allowing the system to balance cache utility against memory constraints. We further introduce foreign key-aware placement, condition consolidation across families of filtered aggregations, and an adaptive update/invalidation policy based on workload characteristics.
 \end{abstract}
 
 \keywords{materialized views, incremental view maintenance, in-memory databases, query optimization, caching}
@@ -50,6 +50,10 @@ Materialized views address this inefficiency by precomputing and storing query r
 
 We present \emph{Aggregation Caching}, a feature of the MemCP in-memory database that addresses all of these limitations. Our contributions are:
 
+We emphasize that the proposed system does not introduce a new query language, explicit cache hints, or a separate tuning layer. Instead, it reuses the standard SQL front-end, logical rewriting, and physical planning pipeline of the existing query compiler: when a query plan contains an eligible aggregation operator, the compiler can transparently substitute it with a maintained cached representation (or fall back to the baseline plan) without user-visible semantics changes. Consequently, applications continue to issue ordinary SQL, while performance improvements are obtained automatically.
+
+
+
 \begin{itemize}
     \item \textbf{Automatic cache creation}: GROUP BY queries automatically trigger creation of persistent cached tables without user intervention.
     \item \textbf{Trigger-based incremental maintenance}: The system generates UPDATE, INSERT, and DELETE triggers that maintain aggregate values incrementally using delta computations.
@@ -61,52 +65,50 @@ We present \emph{Aggregation Caching}, a feature of the MemCP in-memory database
 
 \section{Related Work}
 
-\subsection{Materialized Views in Commercial Databases}
+Aggregation Caching combines techniques from materialized views, query rewrite, incremental view maintenance, and caching. We relate the approach to prior work along five dimensions: incremental view maintenance (IVM), workload-driven view management, aggregate/result caching, autonomic database operation, and MemCP's ``no-DBA'' physical design philosophy.
 
-\textbf{Oracle Database} provides materialized views with a FAST REFRESH option that enables incremental maintenance using materialized view logs \cite{oracle-mv}. However, materialized views must be explicitly created by the DBA, and the system does not automatically identify beneficial views.
+\subsection{Materialized Views and Incremental View Maintenance}
 
-\textbf{Microsoft SQL Server} supports indexed views that are automatically maintained on data modification \cite{sqlserver-indexed-views}. The query optimizer can automatically match queries to indexed views. However, creation remains explicit, and there is no memory-pressure-aware eviction.
+Materialized views trade storage for query latency by persisting derived results and reusing them across executions; keeping them consistent under base-table updates is the view maintenance problem. Gupta and Mumick survey view maintenance and classify techniques along information, modification, language, and instance dimensions \cite{gupta-mumick95}. Incremental view maintenance computes deltas for inserts, deletes, and updates, sometimes requiring auxiliary state (e.g., counts or lineage) to handle deletions and duplicates efficiently.
 
-\textbf{PostgreSQL} provides materialized views but requires explicit REFRESH MATERIALIZED VIEW commands for updates \cite{postgres-mv}. The pg\_ivm extension adds incremental view maintenance capabilities, but view creation remains manual.
+Aggregation Caching applies delta-based maintenance to GROUP BY aggregates via automatically generated triggers, and falls back to invalidation when incremental maintenance is difficult or not cost-effective (e.g., when MIN/MAX groups lose their current extreme). This aligns with the observation that recomputation can be preferable in some maintenance scenarios \cite{gupta-mumick95}. In contrast to traditional materialized views, maintained state is not created through explicit, user-managed definitions; instead, eligible caches are derived from compiled plans and substituted transparently during compilation.
 
-\subsection{Automatic Materialized Views}
+Query rewrite has long enabled optimizers to answer aggregate queries using precomputed summaries without requiring applications to change SQL. Zaharioudakis et al.\ describe \emph{Automatic Summary Tables}, where a query optimizer proves overlap between a query and a materialized aggregate and rewrites the query to use it \cite{zaharioudakis00ast}. Commercial systems provide related mechanisms (e.g., Oracle query rewrite and SQL Server indexed views) \cite{oracle-mv,sqlserver-indexed-views}, while others provide materialized views with explicit refresh workflows \cite{postgres-mv}. Aggregation Caching operates in the same general space, but targets a cache lifecycle that treats maintained state as soft state (TTL/eviction) and adds MemCP-specific reuse and placement optimizations.
 
-\textbf{Amazon Redshift} introduced Automatic Materialized Views in 2020, which analyzes query patterns and creates materialized views without user intervention \cite{redshift-auto-mv}. This is the closest existing system to our approach. However, Redshift's automatic MVs are fully persistent rather than soft-state, and do not include the condition consolidation optimization.
+Several systems push incremental view maintenance further by compiling view definitions into maintenance programs. DBToaster uses higher-order delta processing (``viewlet transforms'') to generate low-latency maintenance code for frequently fresh views under high update rates \cite{dbtoaster}. Materialize maintains views continuously using dataflow techniques \cite{materialize}. Noria targets read-heavy web applications: it compiles parameterized queries into a partially-stateful dataflow, evicts and reconstructs state on demand, and merges shared subgraphs across related queries \cite{noria}. Aggregation Caching differs by integrating into an OLTP query compiler and cache manager and by focusing on automatically maintained aggregate state that can be evicted and rebuilt without changing SQL semantics.
 
-\textbf{Google BigQuery} and \textbf{Snowflake} provide query result caching that automatically stores and reuses exact query results \cite{bigquery-cache, snowflake-cache}. However, this is not true materialized view maintenance: cached results are invalidated on any table modification rather than updated incrementally, and queries with different parameters cannot share cached results.
+\subsection{Workload-Driven and Dynamic View Management}
 
-\subsection{Streaming and Incremental Systems}
+Several systems manage collections of materialized aggregates based on workload demand. DynaMat dynamically materializes aggregate views at multiple granularities, selecting which views to keep under space constraints and which subset to refresh within a limited maintenance window \cite{kotidis99dynamat}. Modern cloud warehouses provide automatic materialized views that infer candidates from observed workloads and maintain them transparently. Amazon Redshift's AutoMV feature automatically creates, refreshes, and drops materialized views based on workload monitoring and rewrites queries to use them \cite{redshift-auto-mv}.
 
-\textbf{Materialize} is a streaming SQL database built entirely around incremental view maintenance using differential dataflow \cite{materialize}. Views are maintained in real-time as data changes. However, views must still be explicitly defined, and the system is designed for streaming rather than traditional OLTP/OLAP workloads.
+Aggregation Caching shares the goal of workload-driven, automatic reuse of precomputed aggregates, but targets in-memory, per-aggregation caches with explicit TTL and eviction under memory pressure. It also introduces domain-specific optimizations such as foreign-key-aware placement and condition consolidation to share maintained state across families of related GROUP BY queries.
 
-\textbf{Noria} from MIT is a research system that automatically maintains materialized views for web applications using dataflow processing \cite{noria}. It shares our goal of automatic maintenance but focuses on a different workload (web application backends) and does not include memory-pressure eviction.
+\subsection{Aggregate Caches in In-Memory Column Stores}
 
-\textbf{DBToaster} compiles SQL queries into high-performance incremental maintenance code \cite{dbtoaster}. It provides excellent performance for pre-defined views but does not address automatic view selection.
+In-memory column stores designed for mixed transactional and analytical workloads integrate aggregate caching as an internal engine. Mueller and Plattner propose aggregate query caching for main-delta column stores by caching aggregate results on the read-optimized main store and combining them with on-the-fly aggregation over newly inserted delta-state, avoiding invalidation on inserts \cite{mueller13aggcache}. Mueller et al.\ extend this line of work with efficient revalidation of cached aggregates under deletes/updates using bit vectors, and study when revalidation is preferable to invalidation \cite{mueller14revalidation}. Mueller et al.\ describe the SAP HANA aggregate cache, which dynamically caches aggregate queries, applies incremental maintenance and query compensation, and uses object-awareness to optimize join processing and reduce delta-compensation cost \cite{mueller15hanaaggcache}.
 
-\subsection{Summary of Gaps}
+Aggregation Caching addresses a similar goal in MemCP, but uses trigger-generated incremental maintenance of per-aggregation cache tables (rather than delta compensation on a main-delta store) and introduces foreign-key-aware placement and condition consolidation as reuse mechanisms for GROUP BY aggregates.
 
-Table~\ref{tab:comparison} summarizes the capabilities of existing systems compared to our approach.
+\subsection{Query Result Caching and Semantic Caching}
 
-\begin{table}[h]
-\caption{Comparison with Existing Systems}
-\label{tab:comparison}
-\begin{tabular}{lccccc}
-\toprule
-System & Auto & Incr. & Evict & FK & Consol. \\
-       & Create & Maint. & & Opt. & \\
-\midrule
-Oracle MV & \texttimes & \checkmark & \texttimes & \texttimes & \texttimes \\
-SQL Server IV & \texttimes & \checkmark & \texttimes & \texttimes & \texttimes \\
-PostgreSQL MV & \texttimes & \texttimes & \texttimes & \texttimes & \texttimes \\
-Redshift Auto MV & \checkmark & \checkmark & \texttimes & ? & \texttimes \\
-BigQuery Cache & \checkmark & \texttimes & \checkmark & \texttimes & \texttimes \\
-Materialize & \texttimes & \checkmark & \texttimes & \texttimes & \texttimes \\
-\textbf{MemCP (ours)} & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
-\bottomrule
-\end{tabular}
-\end{table}
+Many database services provide query result caches that reuse exact query outputs when the same query is issued repeatedly. BigQuery caches query results for approximately 24 hours (best-effort) and reuses them when the query text matches and referenced data has not changed \cite{bigquery-cache}. Snowflake persists query results and reuses them when the query and execution context match and the contributing table data is unchanged \cite{snowflake-cache}. Such result caches avoid recomputation but are not incrementally maintained and therefore do not provide continuously fresh aggregates under updates.
 
-To our knowledge, no existing system combines all five capabilities: automatic creation, incremental maintenance, memory-aware eviction, foreign key optimization, and condition consolidation.
+Semantic caching generalizes reuse beyond exact query matches by reasoning about predicates. Dar et al.\ propose semantic regions, remainder queries, and replacement policies that exploit the semantics of query predicates rather than page/tuple identifiers \cite{dar96semanticcache}.
+
+Aggregation Caching instead targets aggregates explicitly and integrates reuse into the compiler's plan selection: when a maintained cache is available, the compiler substitutes the aggregation with a scan over cached aggregate state; otherwise it emits the baseline plan. This design avoids exposing a separate caching API or manual tuning workflow while enabling cache eviction and rebuild without user intervention.
+
+\subsection{Autonomic and Self-Driving Database Systems}
+
+Autonomic database research aims to reduce the need for DBAs to diagnose and repair performance issues by deriving physical design decisions from observed workloads. AutoAdmin introduced optimizer-in-the-loop ``what-if'' analysis and workload-driven selection of physical structures (e.g., indexes and materialized views) \cite{agrawal06autoadmin}; Chaudhuri and Narasayya survey progress in self-tuning physical design and monitoring \cite{chaudhuri07selftuning}. The self-driving DBMS agenda calls for integrated planning components that deploy such optimizations without requiring application changes \cite{pavlo17selfdriving}. Recent work applies machine learning to tune DBMS configuration knobs (e.g., OtterTune) \cite{vanaken17ottertune}.
+
+Aggregation Caching aligns with this agenda by making a recurring analytical performance pattern (repeated aggregate computation) self-optimizing: the system automatically creates, maintains, consolidates, and evicts aggregate caches, while applications continue to issue ordinary SQL.
+
+\subsection{MemCP ``No-DBA'' Philosophy and Automatic Indexing}
+
+MemCP follows a ``no-DBA'' philosophy in which performance-critical physical design tasks are derived automatically from observed queries. MemCP's auto-indexing mechanism identifies ``desired indexes'' from predicate and ORDER BY patterns, delays index construction until the build cost is amortized by repeated use, and constructs indexes shard-locally \cite{memcp-autoindex}.
+
+Aggregation Caching extends this philosophy from access paths to precomputed aggregate state. Instead of requiring explicit materialized view definitions or external tuning advisors, the system derives eligible aggregate caches from compiled query plans and uses the same compilation pipeline to decide when cached state can be substituted for on-the-fly aggregation. The shared design principle is that performance optimizations should occur automatically, without administrators iteratively diagnosing and fixing performance problems.
+
 
 \section{System Design}
 
@@ -243,18 +245,18 @@ Expressions that cannot be analyzed fall back to invalidation mode.
 
 \section{Conclusion}
 
-We presented a novel approach to automatic aggregation caching that combines automatic materialized view creation, incremental trigger-based maintenance, and memory-aware weak reference semantics. Our system requires no user intervention to identify and create beneficial caches, maintains them in real-time as data changes, and automatically manages memory by evicting low-value caches under pressure.
+We presented an approach to automatic aggregation caching that combines on-demand cache creation, incremental trigger-based maintenance, and memory-aware weak reference semantics. The system avoids user-managed view definitions, maintains cached aggregates as data changes, and automatically manages memory by evicting low-value caches under pressure.
 
 The foreign key optimization and condition consolidation features further reduce memory overhead and improve cache hit rates. The adaptive mode selection ensures that incremental maintenance is used only when beneficial.
 
-To our knowledge, this is the first system to provide fully automatic materialized view management with all of these capabilities.
+Aggregation Caching demonstrates how a query compiler can integrate aggregate-aware caching and incremental maintenance with automatic cache lifecycle management.
 
 \begin{acks}
 MemCP is an open-source project developed by Launix. We thank the contributors and users who provided feedback on early designs.
 \end{acks}
 
 \bibliographystyle{ACM-Reference-Format}
-\begin{thebibliography}{10}
+\begin{thebibliography}{25}
 
 \bibitem{oracle-mv}
 Oracle Corporation.
@@ -264,7 +266,7 @@ Oracle Corporation.
 \bibitem{sqlserver-indexed-views}
 Microsoft.
 \newblock SQL Server Indexed Views.
-\newblock \url{https://docs.microsoft.com/en-us/sql/}
+\newblock \url{https://learn.microsoft.com/en-us/sql/}
 
 \bibitem{postgres-mv}
 PostgreSQL Global Development Group.
@@ -273,18 +275,18 @@ PostgreSQL Global Development Group.
 
 \bibitem{redshift-auto-mv}
 Amazon Web Services.
-\newblock Automatic Materialized Views in Amazon Redshift.
-\newblock \url{https://aws.amazon.com/blogs/big-data/}
+\newblock Automated Materialized Views (AutoMV) in Amazon Redshift.
+\newblock \url{https://docs.aws.amazon.com/redshift/latest/dg/materialized-view-auto-mv.html}
 
 \bibitem{bigquery-cache}
 Google Cloud.
-\newblock BigQuery Query Caching.
+\newblock BigQuery Cached Results (Query Caching).
 \newblock \url{https://cloud.google.com/bigquery/docs/cached-results}
 
 \bibitem{snowflake-cache}
 Snowflake Inc.
-\newblock Understanding Query Results Caching.
-\newblock \url{https://docs.snowflake.com/}
+\newblock Using Persisted Query Results.
+\newblock \url{https://docs.snowflake.com/en/user-guide/querying-persisted-results}
 
 \bibitem{materialize}
 Materialize Inc.
@@ -295,12 +297,84 @@ Materialize Inc.
 J. Gjengset, M. Schwarzkopf, J. Behrens, L. T. X. Araújo, M. Ousterhout, A. Balakrishnan, and H. Balakrishnan.
 \newblock Noria: Dynamic, Partially-Stateful Data-Flow for High-Performance Web Applications.
 \newblock In \textit{OSDI}, 2018.
+\newblock \url{https://www.usenix.org/system/files/osdi18-gjengset.pdf}
+
+\bibitem{zaharioudakis00ast}
+M. Zaharioudakis, R. Cochrane, G. Lapis, H. Pirahesh, and M. Urata.
+\newblock Answering Complex SQL Queries Using Automatic Summary Tables.
+\newblock In \textit{SIGMOD}, 2000.
+\newblock \url{https://doi.org/10.1145/342009.335390}
 
 \bibitem{dbtoaster}
-C. Koch, Y. Ahmad, O. Kennedy, M. Nikolic, A. Nötzli, D. Lupei, and A. Shaikhha.
+Y. Ahmad, O. Kennedy, C. Koch, and M. Nikolic.
 \newblock DBToaster: Higher-order Delta Processing for Dynamic, Frequently Fresh Views.
-\newblock \textit{VLDB Journal}, 2014.
+\newblock \textit{Proceedings of the VLDB Endowment}, 2012.
+\newblock \url{http://vldb.org/pvldb/vol5/p968_yanifahmad_vldb2012.pdf}
+
+\bibitem{gupta-mumick95}
+A. Gupta and I. S. Mumick.
+\newblock Maintenance of Materialized Views: Problems, Techniques, and Applications.
+\newblock \url{https://homepages.inf.ed.ac.uk/wenfei/qsx/reading/gupta95maintenance.pdf}, 1995.
+
+\bibitem{kotidis99dynamat}
+Y. Kotidis and N. Roussopoulos.
+\newblock DynaMat: A Dynamic View Management System for Data Warehouses.
+\newblock In \textit{SIGMOD}, 1999.
+\newblock \url{https://pages.aueb.gr/users/kotidis/Publications/Sigmod99/99DynaMat.pdf}
+
+\bibitem{dar96semanticcache}
+S. Dar, M. J. Franklin, B. T. Jonsson, D. Srivastava, and M. Tan.
+\newblock Semantic Data Caching and Replacement.
+\newblock In \textit{VLDB}, 1996.
+\newblock \url{https://www.vldb.org/conf/1996/P330.PDF}
+
+\bibitem{agrawal06autoadmin}
+S. Agrawal, S. Chaudhuri, and V. Narasayya.
+\newblock AutoAdmin: Self-Tuning Database Systems Technology.
+\newblock \url{https://www.microsoft.com/en-us/research/wp-content/uploads/2006/01/deb.pdf}, 2006.
+
+\bibitem{chaudhuri07selftuning}
+S. Chaudhuri and V. Narasayya.
+\newblock Self-Tuning Database Systems: A Decade of Progress.
+\newblock \textit{VLDB}, 2007.
+\newblock \url{https://15799.courses.cs.cmu.edu/spring2022/papers/01-background/p3-chaudhuri.pdf}
+
+\bibitem{pavlo17selfdriving}
+A. Pavlo et al.
+\newblock Self-Driving Database Management Systems.
+\newblock In \textit{CIDR}, 2017.
+\newblock \url{https://db.cs.cmu.edu/papers/2017/p42-pavlo-cidr17.pdf}
+
+\bibitem{vanaken17ottertune}
+D. Van Aken et al.
+\newblock Automatic Database Management System Tuning Through Large-scale Machine Learning.
+\newblock In \textit{SIGMOD}, 2017.
+\newblock \url{https://db.cs.cmu.edu/papers/2017/p1009-van-aken.pdf}
+
+\bibitem{mueller14revalidation}
+S. Mueller, L. Butzmann, and H. Plattner.
+\newblock Efficient Aggregate Cache Revalidation in an In-Memory Column Store.
+\newblock In \textit{DBKDA}, 2014.
+\newblock \url{https://www.thinkmind.org/articles/dbkda_2014_3_40_50089.pdf}
+
+\bibitem{mueller13aggcache}
+S. Mueller and H. Plattner.
+\newblock Aggregates Caching in Columnar In-Memory Databases.
+\newblock In \textit{IMDM}, 2013.
+\newblock \url{https://db.in.tum.de/other/imdm2013/papers/Muller.pdf}
+
+\bibitem{mueller15hanaaggcache}
+S. Mueller, A. Nica, L. Butzmann, S. Klauck, and H. Plattner.
+\newblock Using Object-Awareness to Optimize Join Processing in the SAP HANA Aggregate Cache.
+\newblock In \textit{EDBT}, 2015.
+\newblock \url{https://openproceedings.org/2015/conf/edbt/paper-330.pdf}
+
+\bibitem{memcp-autoindex}
+MemCP Project.
+\newblock Data Auto Sharding and Auto Indexing.
+\newblock \url{https://memcp.org/wiki/Data_Auto_Sharding_and_Auto_Indexing}
 
 \end{thebibliography}
+
 
 \end{document}

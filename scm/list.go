@@ -550,6 +550,34 @@ func init_list() {
 		true,
 	})
 	Declare(&Globalenv, &Declaration{
+		"get_assoc", "gets a value from a dictionary by key, returns nil if not found",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"dict", "list", "dictionary to look up"},
+			DeclarationParameter{"key", "any", "key to look up"},
+			DeclarationParameter{"default", "any", "optional default value if key not found"},
+		}, "any",
+		func(a ...Scmer) Scmer {
+			if slice, fd := asAssoc(a[0], "get_assoc"); fd == nil {
+				for i := 0; i < len(slice); i += 2 {
+					if Equal(slice[i], a[1]) {
+						return slice[i+1]
+					}
+				}
+			} else {
+				if v, ok := fd.Get(a[1]); ok {
+					return v
+				}
+			}
+			// Return default value if provided, otherwise nil
+			if len(a) >= 3 {
+				return a[2]
+			}
+			return NewNil()
+		},
+		true,
+	})
+	Declare(&Globalenv, &Declaration{
 		"extract_assoc", "applies a function (key value) on the dictionary and returns the results as a flat list",
 		2, 2,
 		[]DeclarationParameter{

@@ -359,6 +359,20 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 						result = true // mark that something has changed
 					}
 				}
+
+				// Execute BEFORE UPDATE triggers (can modify d2)
+				if withTrigger && triggerOldRow != nil {
+					d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
+					// Recheck if anything changed after trigger modifications
+					result = false
+					for i, v := range d2 {
+						if !scm.Equal(triggerOldRow[i], v) {
+							result = true
+							break
+						}
+					}
+				}
+
 				if !result { // only do a write if something changed
 					return // leave inner func to unlock
 				}
@@ -397,23 +411,31 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			}
 		} else {
 			// delete
-			var triggerDeletedRow dataset // for AFTER DELETE trigger
+			var triggerDeletedRow dataset // for BEFORE/AFTER DELETE trigger
+
+			// capture row data for triggers before deletion (outside lock for BEFORE trigger)
+			if withTrigger && len(t.t.Triggers) > 0 {
+				t.mu.RLock()
+				triggerDeletedRow = make(dataset, 0, len(t.columns))
+				for k := range t.columns {
+					cs := t.getColumnStorageOrPanicEx(k, true)
+					if idx < t.main_count {
+						triggerDeletedRow = append(triggerDeletedRow, cs.GetValue(idx))
+					} else {
+						triggerDeletedRow = append(triggerDeletedRow, t.getDelta(int(idx-t.main_count), k))
+					}
+				}
+				t.mu.RUnlock()
+
+				// Execute BEFORE DELETE triggers (can abort delete by returning false)
+				if !t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow) {
+					return scm.NewBool(false) // trigger aborted delete
+				}
+			}
+
 			func() {
 				t.mu.Lock()         // write lock
 				defer t.mu.Unlock() // write lock
-
-				// capture row data for triggers before deletion
-				if withTrigger && len(t.t.Triggers) > 0 {
-					triggerDeletedRow = make(dataset, 0, len(t.columns))
-					for k := range t.columns {
-						cs := t.getColumnStorageOrPanicEx(k, true)
-						if idx < t.main_count {
-							triggerDeletedRow = append(triggerDeletedRow, cs.GetValue(idx))
-						} else {
-							triggerDeletedRow = append(triggerDeletedRow, t.getDelta(int(idx-t.main_count), k))
-						}
-					}
-				}
 
 				t.deletions.Set(idx, true) // mark as deleted
 				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
@@ -450,6 +472,11 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64)) {
+	// Execute BEFORE INSERT triggers (can modify values)
+	if len(t.t.Triggers) > 0 {
+		values = t.t.ExecuteBeforeInsertTriggers(columns, values)
+	}
+
 	if !alreadyLocked {
 		t.mu.Lock()
 	}
