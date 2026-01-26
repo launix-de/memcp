@@ -1,0 +1,114 @@
+# IN with subquery tests
+
+metadata:
+  version: "1.0"
+  description: "IN and NOT IN with subquery tests"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS renderjob"
+  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: |
+      CREATE TABLE fop_files (
+        ID INT PRIMARY KEY,
+        name VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE renderjob (
+        ID INT PRIMARY KEY,
+        result INT
+      )
+  - sql: |
+      INSERT INTO fop_files (ID, name) VALUES
+      (1, 'image1.png'), (2, 'image2.png'), (3, 'image3.png'),
+      (4, 'image4.png'), (5, 'image5.png')
+  - sql: |
+      INSERT INTO renderjob (ID, result) VALUES
+      (101, 1), (102, 3), (103, 3)
+
+test_cases:
+  - name: "IN subquery - files with render results"
+    noncritical: true  # IN subquery in WHERE with table scan not yet supported
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (SELECT result FROM renderjob)
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+  - name: "NOT IN subquery - files without render results"
+    noncritical: true  # NOT IN subquery in WHERE with table scan not yet supported
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID NOT IN (SELECT result FROM renderjob)
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 2
+          name: "image2.png"
+        - ID: 4
+          name: "image4.png"
+        - ID: 5
+          name: "image5.png"
+
+  - name: "IN subquery with WHERE in subquery"
+    noncritical: true  # IN subquery in WHERE with table scan not yet supported
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (SELECT result FROM renderjob WHERE ID > 101)
+      ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 3
+          name: "image3.png"
+
+  - name: "IN subquery returns no matches"
+    noncritical: true  # IN subquery in WHERE with table scan not yet supported
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (SELECT result FROM renderjob WHERE ID > 1000)
+      ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "NOT IN subquery returns all when subquery empty"
+    noncritical: true  # NOT IN subquery in WHERE with table scan not yet supported
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID NOT IN (SELECT result FROM renderjob WHERE ID > 1000)
+      ORDER BY ID
+    expect:
+      rows: 5
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 2
+          name: "image2.png"
+        - ID: 3
+          name: "image3.png"
+        - ID: 4
+          name: "image4.png"
+        - ID: 5
+          name: "image5.png"
+
+  - name: "IN subquery combined with other conditions"
+    noncritical: true  # IN subquery in WHERE with table scan not yet supported
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (SELECT result FROM renderjob) AND name LIKE '%3%'
+      ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 3
+          name: "image3.png"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS renderjob"
+  - sql: "DROP TABLE IF EXISTS fop_files"

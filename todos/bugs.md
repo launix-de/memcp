@@ -43,11 +43,15 @@ WHERE ID NOT IN (1, 3)
 ```
 Test cases: tests/39_not_in_operator.yaml
 
-## IN with subquery
+## IN with subquery (partial)
 Used for permission checks:
 ```sql
 WHERE ID IN (SELECT result FROM renderjob)
 ```
+**Status**: Simple IN subqueries work (`1 IN (SELECT 1)`). IN subqueries with table scans
+where the outer query references a column don't work due to nested scan closure issues -
+the lambda passed to the inner scan doesn't have access to the outer row's values.
+Test cases: tests/41_in_subquery.yaml (marked noncritical)
 
 ## Scalar subquery empty result
 Scalar subqueries return NULL instead of 0 for COUNT(*) when no rows match.
