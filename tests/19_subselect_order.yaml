@@ -7,6 +7,15 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS temperature"
   - sql: "DROP TABLE IF EXISTS sensor"
+  - sql: "DROP TABLE IF EXISTS karte"
+  - sql: "DROP TABLE IF EXISTS sammlung"
+  - sql: "DROP TABLE IF EXISTS golli"
+  - sql: "DROP TABLE IF EXISTS karte2"
+  - sql: "DROP TABLE IF EXISTS sammlung2"
+  - sql: "DROP TABLE IF EXISTS golli2"
+  - sql: "DROP TABLE IF EXISTS karte3"
+  - sql: "DROP TABLE IF EXISTS sammlung3"
+  - sql: "DROP TABLE IF EXISTS golli3"
   - sql: "CREATE TABLE temperature (date INT, sensor INT, temp INT)"
   - sql: "CREATE TABLE sensor (ID INT, name VARCHAR(64))"
   - sql: |
@@ -18,6 +27,54 @@ setup:
       INSERT INTO sensor (ID, name) VALUES
       (1, 'S1'),
       (2, 'S2')
+  # Tables for LIMIT/OFFSET + JOIN bug tests
+  - sql: "CREATE TABLE sammlung (ID INT, name VARCHAR(64))"
+  - sql: "CREATE TABLE golli (ID INT, name VARCHAR(64))"
+  - sql: "CREATE TABLE karte (ID INT, name VARCHAR(64), author INT, sammlung INT)"
+  - sql: |
+      INSERT INTO sammlung (ID, name) VALUES
+      (1, 'Collection A'), (2, 'Collection B'), (3, 'Collection C')
+  - sql: |
+      INSERT INTO golli (ID, name) VALUES
+      (1, 'Author One'), (2, 'Author Two'), (3, 'Author Three')
+  - sql: |
+      INSERT INTO karte (ID, name, author, sammlung) VALUES
+      (1, 'Card 1', 1, 1), (2, 'Card 2', 2, 1), (3, 'Card 3', 1, 2),
+      (4, 'Card 4', 3, 2), (5, 'Card 5', 2, 3), (6, 'Card 6', 1, 1),
+      (7, 'Card 7', 3, 2), (8, 'Card 8', 2, 3), (9, 'Card 9', 1, 1),
+      (10, 'Card 10', 3, 2)
+  # Tables for double LEFT JOIN test
+  - sql: "CREATE TABLE sammlung2 (ID INT, name VARCHAR(64))"
+  - sql: "CREATE TABLE golli2 (ID INT, name VARCHAR(64))"
+  - sql: "CREATE TABLE karte2 (ID INT, name VARCHAR(64), author INT, sammlung INT)"
+  - sql: |
+      INSERT INTO sammlung2 (ID, name) VALUES
+      (1, 'Collection A'), (2, 'Collection B'), (3, 'Collection C')
+  - sql: |
+      INSERT INTO golli2 (ID, name) VALUES
+      (1, 'Author One'), (2, 'Author Two'), (3, 'Author Three')
+  - sql: |
+      INSERT INTO karte2 (ID, name, author, sammlung) VALUES
+      (1, 'Card 1', 1, 1), (2, 'Card 2', 2, 1), (3, 'Card 3', 1, 2),
+      (4, 'Card 4', 3, 2), (5, 'Card 5', 2, 3), (6, 'Card 6', 1, 1),
+      (7, 'Card 7', 3, 2), (8, 'Card 8', 2, 3), (9, 'Card 9', 1, 1),
+      (10, 'Card 10', 3, 2)
+  # Tables for outer LEFT JOIN on derived table test
+  - sql: "CREATE TABLE sammlung3 (ID INT, name VARCHAR(64))"
+  - sql: "CREATE TABLE golli3 (ID INT, name VARCHAR(64))"
+  - sql: "CREATE TABLE karte3 (ID INT, name VARCHAR(64), author INT, sammlung INT)"
+  - sql: |
+      INSERT INTO sammlung3 (ID, name) VALUES
+      (1, 'Collection A'), (2, 'Collection B'), (3, 'Collection C')
+  - sql: |
+      INSERT INTO golli3 (ID, name) VALUES
+      (1, 'Author One'), (2, 'Author Two'), (3, 'Author Three')
+  - sql: |
+      INSERT INTO karte3 (ID, name, author, sammlung) VALUES
+      (1, 'Card 1', 1, 1), (2, 'Card 2', 2, 1), (3, 'Card 3', 1, 2),
+      (4, 'Card 4', 3, 2), (5, 'Card 5', 2, 3), (6, 'Card 6', 1, 1),
+      (7, 'Card 7', 3, 2), (8, 'Card 8', 2, 3), (9, 'Card 9', 1, 1),
+      (10, 'Card 10', 3, 2)
 
 test_cases:
   - name: "Order by alias-qualified column"
@@ -97,6 +154,167 @@ test_cases:
     expect:
       rows: 3
 
+  # Bug reproduction: LIMIT/OFFSET with LEFT JOIN on derived table
+  # See todos/bugs.md - columns get wrong values when using OFFSET with JOINs
+
+  - name: "Derived table with LEFT JOIN and OFFSET"
+    sql: |
+      SELECT t.ID, t.name, t.author, t.`author_name`
+      FROM (
+        SELECT
+          karte.ID AS ID,
+          karte.name AS name,
+          karte.author AS author,
+          ref_author.name AS `author_name`
+        FROM karte
+        LEFT JOIN golli AS ref_author ON ref_author.ID = karte.author
+      ) AS t
+      ORDER BY t.ID ASC
+      LIMIT 3 OFFSET 2
+    expect:
+      rows: 3
+      data:
+        - ID: 3
+          name: "Card 3"
+          author: 1
+          author_name: "Author One"
+        - ID: 4
+          name: "Card 4"
+          author: 3
+          author_name: "Author Three"
+        - ID: 5
+          name: "Card 5"
+          author: 2
+          author_name: "Author Two"
+
+  - name: "Derived table with double LEFT JOIN and OFFSET"
+    sql: |
+      SELECT t.ID, t.name, t.author, t.`author_name`, t.`sammlung_name`
+      FROM (
+        SELECT
+          karte2.ID AS ID,
+          karte2.name AS name,
+          karte2.author AS author,
+          ref_author.name AS `author_name`,
+          ref_sammlung.name AS `sammlung_name`
+        FROM karte2
+        LEFT JOIN golli2 AS ref_author ON ref_author.ID = karte2.author
+        LEFT JOIN sammlung2 AS ref_sammlung ON ref_sammlung.ID = karte2.sammlung
+      ) AS t
+      ORDER BY t.ID ASC
+      LIMIT 3 OFFSET 5
+    expect:
+      rows: 3
+      data:
+        - ID: 6
+          name: "Card 6"
+          author: 1
+          author_name: "Author One"
+          sammlung_name: "Collection A"
+        - ID: 7
+          name: "Card 7"
+          author: 3
+          author_name: "Author Three"
+          sammlung_name: "Collection B"
+        - ID: 8
+          name: "Card 8"
+          author: 2
+          author_name: "Author Two"
+          sammlung_name: "Collection C"
+
+  - name: "Outer LEFT JOIN on derived table with OFFSET"
+    sql: |
+      SELECT t.ID, t.name, t.author, sorter.name AS sorter_name
+      FROM (
+        SELECT
+          karte3.ID AS ID,
+          karte3.name AS name,
+          karte3.author AS author
+        FROM karte3
+      ) AS t
+      LEFT JOIN golli3 AS sorter ON sorter.ID = t.author
+      ORDER BY t.ID ASC
+      LIMIT 3 OFFSET 4
+    expect:
+      rows: 3
+      data:
+        - ID: 5
+          name: "Card 5"
+          author: 2
+          sorter_name: "Author Two"
+        - ID: 6
+          name: "Card 6"
+          author: 1
+          sorter_name: "Author One"
+        - ID: 7
+          name: "Card 7"
+          author: 3
+          sorter_name: "Author Three"
+
+  # Bug fix: Unqualified column resolution prefers main table over subquery tables
+  # See todos/bugs.md - unqualified 'name' was resolving to golli.name instead of karte.name
+
+  - name: "Unqualified column resolves to main table not subquery"
+    sql: |
+      SELECT ID, name, author
+      FROM karte
+      LEFT JOIN (SELECT ID AS `author:ID`, golli.name AS `author:description` FROM golli) `ref:author`
+        ON `ref:author`.`author:ID` = karte.author
+      ORDER BY ID ASC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          name: "Card 1"
+          author: 1
+        - ID: 2
+          name: "Card 2"
+          author: 2
+        - ID: 3
+          name: "Card 3"
+          author: 1
+
+  - name: "Unqualified WHERE clause with subquery LEFT JOIN"
+    sql: |
+      SELECT ID, name, author
+      FROM karte
+      LEFT JOIN (SELECT ID AS `author:ID`, golli.name AS `author:description` FROM golli) `ref:author`
+        ON `ref:author`.`author:ID` = karte.author
+      WHERE ID = 2
+    expect:
+      rows: 1
+      data:
+        - ID: 2
+          name: "Card 2"
+          author: 2
+
+  - name: "Unqualified columns with multiple subquery JOINs"
+    sql: |
+      SELECT ID, name, author, sammlung
+      FROM karte
+      LEFT JOIN (SELECT ID AS `author:ID`, golli.name AS `author:name` FROM golli) `ref:author`
+        ON `ref:author`.`author:ID` = karte.author
+      LEFT JOIN (SELECT ID AS `sammlung:ID`, sammlung.name AS `sammlung:name` FROM sammlung) `ref:sammlung`
+        ON `ref:sammlung`.`sammlung:ID` = karte.sammlung
+      WHERE ID = 5
+    expect:
+      rows: 1
+      data:
+        - ID: 5
+          name: "Card 5"
+          author: 2
+          sammlung: 3
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS temperature"
   - sql: "DROP TABLE IF EXISTS sensor"
+  - sql: "DROP TABLE IF EXISTS karte"
+  - sql: "DROP TABLE IF EXISTS sammlung"
+  - sql: "DROP TABLE IF EXISTS golli"
+  - sql: "DROP TABLE IF EXISTS karte2"
+  - sql: "DROP TABLE IF EXISTS sammlung2"
+  - sql: "DROP TABLE IF EXISTS golli2"
+  - sql: "DROP TABLE IF EXISTS karte3"
+  - sql: "DROP TABLE IF EXISTS sammlung3"
+  - sql: "DROP TABLE IF EXISTS golli3"

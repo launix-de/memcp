@@ -808,7 +808,20 @@ if there is a group function, create a temporary preaggregate table
 							(cons (replace_find_column a) (cons (replace_find_column b) (cons c '()))))
 					)
 				)
-				'((symbol get_column) nil _ col ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false) alias a)) nil) (error (concat "column " col " does not exist in tables"))) false col false)
+				/* Unqualified column: prefer main tables (no ':' prefix) over subquery tables (prefixed with ':') */
+				'((symbol get_column) nil _ col ci) (begin
+					/* First try main tables (aliases without ':') */
+					(define main_match (reduce_assoc schemas (lambda (a alias cols)
+						(if (and (not (strlike (string alias) "%:%")) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+							alias a)) nil))
+					/* If not found in main tables, try subquery tables (aliases with ':') */
+					(define any_match (if (nil? main_match)
+						(reduce_assoc schemas (lambda (a alias cols)
+							(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
+								alias a)) nil)
+						main_match))
+					'((quote get_column) (coalesce any_match (error (concat "column " col " does not exist in tables"))) false col false)
+				)
 				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 				expr
@@ -1050,7 +1063,8 @@ if there is a group function, create a temporary preaggregate table
 				/* ordered or limited scan */
 				/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
 				(set stage_order (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
-				(define build_scan (lambda (tables condition)
+				/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
+				(define build_scan (lambda (tables condition is_first)
 					(match tables
 						(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
 							(set cols (merge_unique
@@ -1080,6 +1094,10 @@ if there is a group function, create a temporary preaggregate table
 								(set ordercols (merge (map stage_order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list col) '())))))
 								(set dirs      (merge (map stage_order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list dir) '())))))
 
+								/* offset/limit only apply to the outermost scan, not to nested JOINs */
+								(define scan_offset (if is_first stage_offset 0))
+								(define scan_limit (if is_first (coalesceNil stage_limit -1) -1))
+
 								(scan_wrapper 'scan_order schema tbl
 									/* condition */
 									(cons list filtercols)
@@ -1087,11 +1105,11 @@ if there is a group function, create a temporary preaggregate table
 									/* sortcols, sortdirs */
 									(cons list ordercols)
 									(cons list dirs)
-									stage_offset
-									(coalesceNil stage_limit -1)
+									scan_offset
+									scan_limit
 									/* extract columns and store them into variables */
 									(cons list cols)
-									'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
+									'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition false))
 									/* no reduce+neutral */
 									nil
 									nil
@@ -1102,7 +1120,7 @@ if there is a group function, create a temporary preaggregate table
 						'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 					)
 				))
-				(build_scan tables (replace_find_column condition))
+				(build_scan tables (replace_find_column condition) true)
 			) (begin
 					/* unordered unlimited scan */
 
