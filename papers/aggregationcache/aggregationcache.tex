@@ -1,0 +1,306 @@
+% Aggregation Cache: Automatic Incremental View Maintenance with Weak References
+% (c) Launix, Carl-Philip Hänsch
+% Draft - Work in Progress
+
+\documentclass[sigconf,nonacm]{acmart}
+
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  language=SQL
+}
+
+\title{Automatic Aggregation Caching with Incremental Maintenance and Memory-Aware Eviction}
+
+\author{Carl-Philip Hänsch}
+\affiliation{%
+  \institution{Launix}
+  \city{Chemnitz}
+  \country{Germany}
+}
+\email{info@launix.de}
+
+\begin{abstract}
+We present a novel approach to automatic materialized view management for aggregate queries in the MemCP in-memory database. Unlike existing systems that require explicit materialized view creation or provide only query result caching, our system automatically detects GROUP BY queries, creates persistent cached representations, and maintains them incrementally via automatically generated triggers. We introduce a \emph{weak reference} model with time-to-live (TTL) semantics and memory-pressure-aware eviction, allowing the system to balance cache utility against memory constraints. Our approach includes several optimizations: foreign key-aware placement that avoids redundant table creation, condition consolidation that merges multiple condition-specific caches into a single parameterized cache, and an adaptive update/invalidation decision based on workload characteristics. To our knowledge, this is the first system to combine fully automatic materialized view creation with incremental maintenance and soft-state memory management.
+\end{abstract}
+
+\keywords{materialized views, incremental view maintenance, in-memory databases, query optimization, caching}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+Analytical queries involving GROUP BY and aggregation functions (SUM, COUNT, AVG, MIN, MAX) are fundamental to business intelligence, dashboards, and reporting workloads. In traditional database systems, each execution of such a query requires a full scan of the source data, computation of group keys, and aggregation---even when the underlying data has not changed.
+
+Materialized views address this inefficiency by precomputing and storing query results. However, existing approaches suffer from several limitations:
+
+\begin{enumerate}
+    \item \textbf{Explicit creation required}: Users must identify beneficial materialized views and issue explicit CREATE MATERIALIZED VIEW statements.
+    \item \textbf{Manual or periodic refresh}: Many systems require manual REFRESH commands or scheduled batch updates rather than real-time incremental maintenance.
+    \item \textbf{All-or-nothing persistence}: Materialized views are either fully persistent (consuming memory/storage indefinitely) or not available at all.
+    \item \textbf{No automatic consolidation}: Similar queries with different filter conditions create separate materialized views rather than sharing a common base.
+\end{enumerate}
+
+We present \emph{Aggregation Caching}, a feature of the MemCP in-memory database that addresses all of these limitations. Our contributions are:
+
+\begin{itemize}
+    \item \textbf{Automatic cache creation}: GROUP BY queries automatically trigger creation of persistent cached tables without user intervention.
+    \item \textbf{Trigger-based incremental maintenance}: The system generates UPDATE, INSERT, and DELETE triggers that maintain aggregate values incrementally using delta computations.
+    \item \textbf{Weak reference semantics}: Cached tables have TTL-based expiration and can be evicted under memory pressure, with priority based on query frequency and computation cost savings.
+    \item \textbf{Foreign key optimization}: When the grouping column references another table's primary key, aggregates are stored as hidden columns on the referenced table rather than creating a separate cache table.
+    \item \textbf{Condition consolidation}: Multiple caches differing only in filter conditions are automatically merged into a single cache with the filter columns exposed for query-time filtering.
+    \item \textbf{Adaptive maintenance mode}: The system dynamically chooses between incremental updates and invalidation based on measured read/write ratios and calibrated cost factors.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Materialized Views in Commercial Databases}
+
+\textbf{Oracle Database} provides materialized views with a FAST REFRESH option that enables incremental maintenance using materialized view logs \cite{oracle-mv}. However, materialized views must be explicitly created by the DBA, and the system does not automatically identify beneficial views.
+
+\textbf{Microsoft SQL Server} supports indexed views that are automatically maintained on data modification \cite{sqlserver-indexed-views}. The query optimizer can automatically match queries to indexed views. However, creation remains explicit, and there is no memory-pressure-aware eviction.
+
+\textbf{PostgreSQL} provides materialized views but requires explicit REFRESH MATERIALIZED VIEW commands for updates \cite{postgres-mv}. The pg\_ivm extension adds incremental view maintenance capabilities, but view creation remains manual.
+
+\subsection{Automatic Materialized Views}
+
+\textbf{Amazon Redshift} introduced Automatic Materialized Views in 2020, which analyzes query patterns and creates materialized views without user intervention \cite{redshift-auto-mv}. This is the closest existing system to our approach. However, Redshift's automatic MVs are fully persistent rather than soft-state, and do not include the condition consolidation optimization.
+
+\textbf{Google BigQuery} and \textbf{Snowflake} provide query result caching that automatically stores and reuses exact query results \cite{bigquery-cache, snowflake-cache}. However, this is not true materialized view maintenance: cached results are invalidated on any table modification rather than updated incrementally, and queries with different parameters cannot share cached results.
+
+\subsection{Streaming and Incremental Systems}
+
+\textbf{Materialize} is a streaming SQL database built entirely around incremental view maintenance using differential dataflow \cite{materialize}. Views are maintained in real-time as data changes. However, views must still be explicitly defined, and the system is designed for streaming rather than traditional OLTP/OLAP workloads.
+
+\textbf{Noria} from MIT is a research system that automatically maintains materialized views for web applications using dataflow processing \cite{noria}. It shares our goal of automatic maintenance but focuses on a different workload (web application backends) and does not include memory-pressure eviction.
+
+\textbf{DBToaster} compiles SQL queries into high-performance incremental maintenance code \cite{dbtoaster}. It provides excellent performance for pre-defined views but does not address automatic view selection.
+
+\subsection{Summary of Gaps}
+
+Table~\ref{tab:comparison} summarizes the capabilities of existing systems compared to our approach.
+
+\begin{table}[h]
+\caption{Comparison with Existing Systems}
+\label{tab:comparison}
+\begin{tabular}{lccccc}
+\toprule
+System & Auto & Incr. & Evict & FK & Consol. \\
+       & Create & Maint. & & Opt. & \\
+\midrule
+Oracle MV & \texttimes & \checkmark & \texttimes & \texttimes & \texttimes \\
+SQL Server IV & \texttimes & \checkmark & \texttimes & \texttimes & \texttimes \\
+PostgreSQL MV & \texttimes & \texttimes & \texttimes & \texttimes & \texttimes \\
+Redshift Auto MV & \checkmark & \checkmark & \texttimes & ? & \texttimes \\
+BigQuery Cache & \checkmark & \texttimes & \checkmark & \texttimes & \texttimes \\
+Materialize & \texttimes & \checkmark & \texttimes & \texttimes & \texttimes \\
+\textbf{MemCP (ours)} & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+To our knowledge, no existing system combines all five capabilities: automatic creation, incremental maintenance, memory-aware eviction, foreign key optimization, and condition consolidation.
+
+\section{System Design}
+
+\subsection{Architecture Overview}
+
+Aggregation caching is integrated into MemCP's query processing pipeline. When the query planner encounters a GROUP BY clause, it:
+
+\begin{enumerate}
+    \item Constructs a \emph{canonical cache name} based on source table(s), grouping columns, and filter condition hash.
+    \item Checks for an existing valid cache with a matching name.
+    \item On cache hit: acquires a lease, returns cached results, applies any HAVING clause as a filter.
+    \item On cache miss: executes the aggregation, stores results in a new cache table, registers maintenance triggers on source tables.
+\end{enumerate}
+
+\subsection{Canonical Naming}
+
+Cache tables use a canonical naming scheme that ensures queries with equivalent semantics share the same cache:
+
+\begin{lstlisting}
+.{table}:({group_columns})|{condition_hash}
+\end{lstlisting}
+
+For multi-table queries, table names are sorted alphabetically:
+
+\begin{lstlisting}
+.{table1}+{table2}:({t1.col},{t2.col})|{hash}
+\end{lstlisting}
+
+When a cache table with a matching canonical name already exists, new aggregate queries with different aggregate functions simply add additional temporary columns to the existing table rather than creating a new one. For example, if \texttt{.orders:(customer\_id)|true} already exists with a \texttt{SUM(total)} column, a new query requesting \texttt{AVG(total)} would add a column to the same table. This maximizes cache reuse and minimizes storage overhead.
+
+\subsection{Foreign Key Optimization}
+
+When the grouping column has a foreign key relationship to another table's primary key, we avoid creating a separate cache table. Instead, aggregate values are stored as hidden columns on the referenced table.
+
+For example, given:
+\begin{lstlisting}
+SELECT dept_id, SUM(salary)
+FROM employees
+GROUP BY dept_id
+\end{lstlisting}
+
+If \texttt{dept\_id} references \texttt{departments.id}, the SUM is stored as a hidden column on the \texttt{departments} table rather than creating \texttt{.employees:(dept\_id)}.
+
+This optimization reduces storage overhead and leverages existing primary key structures.
+
+\subsection{Condition Consolidation}
+
+When the system detects multiple caches for the same grouping with different filter conditions (e.g., \texttt{|customer=1}, \texttt{|customer=2}, ...), it consolidates them into a single \texttt{|true} cache with the filter column included as an additional column.
+
+Queries then filter at read time:
+\begin{lstlisting}
+SELECT * FROM ".orders:(product)|true"
+WHERE customer = ?
+\end{lstlisting}
+
+Benefits include reduced memory usage, single computation, and the ability to create indices on the cache table's filter columns.
+
+\subsection{Weak Reference Model}
+
+Unlike traditional materialized views, our caches are \emph{weak references} with the following properties:
+
+\begin{itemize}
+    \item \textbf{TTL}: Default 365-day expiration from last access.
+    \item \textbf{Lease}: Active queries hold a lease preventing eviction during execution.
+    \item \textbf{Eviction priority}: Based on query count, time saved, and memory efficiency (savings per byte).
+    \item \textbf{Memory pressure}: When heap usage exceeds threshold, lowest-priority unleased caches are evicted.
+\end{itemize}
+
+\section{Incremental Maintenance}
+
+\subsection{Trigger Generation}
+
+When a cache is created, the system automatically generates AFTER triggers on the source table(s):
+
+\textbf{For SUM aggregates}:
+\begin{itemize}
+    \item INSERT: \texttt{cache[group] += NEW.expr}
+    \item UPDATE: \texttt{cache[old\_group] -= OLD.expr; cache[new\_group] += NEW.expr}
+    \item DELETE: \texttt{cache[group] -= OLD.expr}
+\end{itemize}
+
+\textbf{For COUNT aggregates}: Same as SUM with \texttt{expr = 1}.
+
+\textbf{For MIN/MAX aggregates}:
+\begin{itemize}
+    \item INSERT: Update if new value is more extreme.
+    \item UPDATE/DELETE: If deleted/old value equals current extreme, invalidate that group (requires rescan).
+\end{itemize}
+
+\textbf{For AVG aggregates}: Maintained via separate SUM and COUNT columns; AVG computed at read time.
+
+\subsection{Adaptive Mode Selection}
+
+The system dynamically chooses between incremental update and invalidation based on workload:
+
+\begin{equation}
+\text{use\_update} = \text{numReads} > \text{numWrites} \times \text{WriteFactor}
+\end{equation}
+
+WriteFactor is calibrated at startup via a micro-benchmark that measures relative costs of trigger execution versus full recomputation.
+
+\subsection{Complex Expressions}
+
+For expressions like \texttt{SUM(price * quantity * (1 - discount))}, the trigger computes:
+
+\begin{lstlisting}
+delta = NEW.price * NEW.quantity * (1 - NEW.discount)
+      - OLD.price * OLD.quantity * (1 - OLD.discount)
+cache[group] += delta
+\end{lstlisting}
+
+Expressions that cannot be analyzed fall back to invalidation mode.
+
+\section{Evaluation}
+
+\textit{[TODO: Benchmarks comparing:
+\begin{itemize}
+    \item Cold vs. hot query performance (expected 10-100x improvement)
+    \item Trigger overhead on write operations
+    \item Memory usage compared to no caching
+    \item Comparison with explicit materialized views
+    \item Scalability with number of cached aggregations
+\end{itemize}]}
+
+\section{Limitations and Future Work}
+
+\textbf{Storage engine choice}: Cache tables can use MEMORY (lost on restart) or SLOPPY (persisted but not crash-safe) engines. MEMORY is recommended as it guarantees correctness. For SLOPPY, we implement crash detection via a \texttt{clean\_exit} flag in the schema: on startup, if the flag is false (indicating crash), all SLOPPY temp tables are invalidated and rebuilt on first access. This ensures correctness at the cost of complexity.
+
+\textbf{Multi-table GROUP BY}: Currently limited; joins complicate trigger generation and invalidation.
+
+\textbf{Window functions}: Not yet supported for incremental maintenance.
+
+\textbf{Distributed execution}: Cache coherence across multiple MemCP nodes requires coordination.
+
+\section{Conclusion}
+
+We presented a novel approach to automatic aggregation caching that combines automatic materialized view creation, incremental trigger-based maintenance, and memory-aware weak reference semantics. Our system requires no user intervention to identify and create beneficial caches, maintains them in real-time as data changes, and automatically manages memory by evicting low-value caches under pressure.
+
+The foreign key optimization and condition consolidation features further reduce memory overhead and improve cache hit rates. The adaptive mode selection ensures that incremental maintenance is used only when beneficial.
+
+To our knowledge, this is the first system to provide fully automatic materialized view management with all of these capabilities.
+
+\begin{acks}
+MemCP is an open-source project developed by Launix. We thank the contributors and users who provided feedback on early designs.
+\end{acks}
+
+\bibliographystyle{ACM-Reference-Format}
+\begin{thebibliography}{10}
+
+\bibitem{oracle-mv}
+Oracle Corporation.
+\newblock Oracle Database Data Warehousing Guide: Materialized Views.
+\newblock \url{https://docs.oracle.com/en/database/}
+
+\bibitem{sqlserver-indexed-views}
+Microsoft.
+\newblock SQL Server Indexed Views.
+\newblock \url{https://docs.microsoft.com/en-us/sql/}
+
+\bibitem{postgres-mv}
+PostgreSQL Global Development Group.
+\newblock PostgreSQL Documentation: Materialized Views.
+\newblock \url{https://www.postgresql.org/docs/}
+
+\bibitem{redshift-auto-mv}
+Amazon Web Services.
+\newblock Automatic Materialized Views in Amazon Redshift.
+\newblock \url{https://aws.amazon.com/blogs/big-data/}
+
+\bibitem{bigquery-cache}
+Google Cloud.
+\newblock BigQuery Query Caching.
+\newblock \url{https://cloud.google.com/bigquery/docs/cached-results}
+
+\bibitem{snowflake-cache}
+Snowflake Inc.
+\newblock Understanding Query Results Caching.
+\newblock \url{https://docs.snowflake.com/}
+
+\bibitem{materialize}
+Materialize Inc.
+\newblock Materialize: The Streaming SQL Database.
+\newblock \url{https://materialize.com/}
+
+\bibitem{noria}
+J. Gjengset, M. Schwarzkopf, J. Behrens, L. T. X. Araújo, M. Ousterhout, A. Balakrishnan, and H. Balakrishnan.
+\newblock Noria: Dynamic, Partially-Stateful Data-Flow for High-Performance Web Applications.
+\newblock In \textit{OSDI}, 2018.
+
+\bibitem{dbtoaster}
+C. Koch, Y. Ahmad, O. Kennedy, M. Nikolic, A. Nötzli, D. Lupei, and A. Shaikhha.
+\newblock DBToaster: Higher-order Delta Processing for Dynamic, Frequently Fresh Views.
+\newblock \textit{VLDB Journal}, 2014.
+
+\end{thebibliography}
+
+\end{document}

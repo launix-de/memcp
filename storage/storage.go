@@ -1058,6 +1058,96 @@ func Init(en scm.Env) {
 		ChangeSettings, false,
 	})
 
+	// Trigger management
+	scm.Declare(&en, &scm.Declaration{
+		"createtrigger", "creates a new trigger on a table",
+		5, 5,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"table", "string", "name of the table"},
+			scm.DeclarationParameter{"name", "string", "name of the trigger"},
+			scm.DeclarationParameter{"timing", "string", "one of: before_insert, after_insert, before_update, after_update, before_delete, after_delete"},
+			scm.DeclarationParameter{"body", "any", "trigger body (SQL string or Scheme expression)"},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+
+			name := scm.String(a[2])
+			timingStr := scm.String(a[3])
+			var timing TriggerTiming
+			switch timingStr {
+			case "before_insert":
+				timing = BeforeInsert
+			case "after_insert":
+				timing = AfterInsert
+			case "before_update":
+				timing = BeforeUpdate
+			case "after_update":
+				timing = AfterUpdate
+			case "before_delete":
+				timing = BeforeDelete
+			case "after_delete":
+				timing = AfterDelete
+			default:
+				panic("invalid trigger timing: " + timingStr)
+			}
+
+			// For now, store body as-is (can be SQL string or Scheme expr)
+			// TODO: compile SQL body to Scheme procedure
+			body := a[4]
+
+			trigger := TriggerDescription{
+				Name:     name,
+				Timing:   timing,
+				Func:     body,
+				IsSystem: false,
+				Priority: 0,
+			}
+			t.AddTrigger(trigger)
+			t.schema.save()
+			return scm.NewBool(true)
+		}, false,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"droptrigger", "removes a trigger from a table",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"name", "string", "name of the trigger"},
+			scm.DeclarationParameter{"ifexists", "bool", "don't throw error if trigger doesn't exist"},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				if scm.ToBool(a[2]) {
+					return scm.NewBool(false)
+				}
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+
+			name := scm.String(a[1])
+			// Search all tables for the trigger
+			for _, t := range db.tables.GetAll() {
+				if t.RemoveTrigger(name) {
+					t.schema.save()
+					return scm.NewBool(true)
+				}
+			}
+
+			if scm.ToBool(a[2]) {
+				return scm.NewBool(false)
+			}
+			panic("trigger " + name + " does not exist")
+		}, false,
+	})
+
 	initMySQLImport(en)
 }
 

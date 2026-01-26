@@ -107,6 +107,43 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'()
 	)))
 
+	/* Trigger body parser: handles BEGIN...END or single statement */
+	/* For simple implementation, just capture common trigger patterns */
+	(define sql_trigger_body (parser (or
+		/* BEGIN...END block - for now just accept and store as placeholder */
+		/* The body will be empty string, full parsing to be added later */
+		(parser '((atom "BEGIN" true) (* (or
+			/* Skip any token that's not END */
+			sql_identifier
+			sql_string
+			sql_number
+			"." "," "(" ")" "=" ";" ":"
+			(atom "INSERT" true)
+			(atom "INTO" true)
+			(atom "VALUES" true)
+			(atom "NEW" true)
+			(atom "OLD" true)
+			(atom "SET" true)
+			(atom "UPDATE" true)
+			(atom "DELETE" true)
+			(atom "SELECT" true)
+			(atom "FROM" true)
+			(atom "WHERE" true)
+			(atom "IF" true)
+			(atom "THEN" true)
+			(atom "ELSE" true)
+			(atom "ELSEIF" true)
+			(atom "END IF" true)
+		)) (atom "END" true)) "begin_end_body")
+		/* Single SET statement for BEFORE triggers */
+		(parser '(
+			(atom "SET" true)
+			(define assignments (+ (parser '(
+				(atom "NEW" true) "." (define col sql_identifier) "=" (define expr sql_expression)
+			) '(col expr)) ","))
+		) '((quote list) "set" (cons (quote list) assignments)))
+	)))
+
 	(define sql_column_attributes (parser (define sub (* (or
 		(parser '((atom "PRIMARY" true) (atom "KEY" true)) '("primary" true))
 		(parser (atom "PRIMARY" true) '("primary" true))
@@ -741,6 +778,29 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"(" (define cols (+ sql_index_column ",")) ")"
 		) (match tbl '(schema2 t) '('createkey (coalesce schema2 schema) t idx true (cons (quote list) cols))))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier) (? (atom "ON" true) (define tbl sql_identifier))) "ignore")
+
+		/* CREATE TRIGGER syntax */
+		(parser '(
+			(atom "CREATE" true)
+			(atom "TRIGGER" true)
+			(define name sql_identifier)
+			(define timing (or
+				(parser '((atom "BEFORE" true) (atom "INSERT" true)) "before_insert")
+				(parser '((atom "AFTER" true) (atom "INSERT" true)) "after_insert")
+				(parser '((atom "BEFORE" true) (atom "UPDATE" true)) "before_update")
+				(parser '((atom "AFTER" true) (atom "UPDATE" true)) "after_update")
+				(parser '((atom "BEFORE" true) (atom "DELETE" true)) "before_delete")
+				(parser '((atom "AFTER" true) (atom "DELETE" true)) "after_delete")
+			))
+			(atom "ON" true)
+			(define tbl sql_identifier)
+			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
+			(define body sql_trigger_body)
+		) '((quote createtrigger) schema tbl name timing body))
+
+		/* DROP TRIGGER syntax */
+		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
+			'((quote droptrigger) schema name (if if_exists true false)))
 
 		/* TODO: draw transaction number, commit */
 		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('session "transaction" 1))

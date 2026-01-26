@@ -1,17 +1,21 @@
 # Trigger Infrastructure Tests
-# Testing basic SQL trigger infrastructure
+# Testing SQL CREATE/DROP TRIGGER and basic trigger execution
 
 metadata:
   version: "1.0"
-  description: "Basic trigger infrastructure tests"
+  description: "SQL trigger infrastructure tests"
 
 cleanup:
   - action: "Clean up test tables"
     sql: "DROP TABLE IF EXISTS trigger_test"
+  - action: "Clean up log table"
+    sql: "DROP TABLE IF EXISTS trigger_log"
 
 setup:
-  - action: "Create basic test table"
+  - action: "Create test table"
     sql: "CREATE TABLE trigger_test (id INT, val INT, name VARCHAR(50))"
+  - action: "Create log table for trigger testing"
+    sql: "CREATE TABLE trigger_log (id INT, action VARCHAR(20), old_val INT, new_val INT)"
 
 test_cases:
   # Basic table operations should still work
@@ -50,3 +54,16 @@ test_cases:
     expect:
       data:
         - cnt: 0
+
+  # TODO: Add CREATE TRIGGER tests once trigger execution is wired up
+  # For now, just test that the syntax is accepted
+  # - name: "CREATE TRIGGER syntax accepted"
+  #   sql: |
+  #     CREATE TRIGGER test_trigger
+  #     AFTER INSERT ON trigger_test
+  #     FOR EACH ROW
+  #     BEGIN
+  #       INSERT INTO trigger_log (id, action) VALUES (NEW.id, 'insert');
+  #     END
+  #   expect:
+  #     affected_rows: 0
