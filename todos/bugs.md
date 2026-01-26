@@ -5,6 +5,8 @@ The following bugs have been fixed and covered with test cases:
 1. LIMIT/OFFSET bug with JOINs - offset/limit was passed to nested scans, causing wrong data
 2. Column resolution bug - unqualified columns resolved to subquery tables instead of main table
 3. REST Scheme backend - verified admin-only protection at /scm endpoint
+4. BETWEEN operator - now fully implemented (tests/38_between_operator.yaml)
+5. NOT IN clause - now fully implemented (tests/39_not_in_operator.yaml)
 
 Test cases: tests/19_subselect_order.yaml
 
@@ -15,25 +17,31 @@ Test cases: tests/19_subselect_order.yaml
 Analysis of /home/carli/projekte/games/anim67or/out shows the following SQL features used
 that are not yet fully supported by MemCP:
 
-## EXISTS subqueries (high priority)
+## EXISTS subqueries (partial)
 Used extensively in permission checks (Files.php):
 ```sql
 EXISTS (SELECT ID FROM renderjob WHERE result = fop_files.ID)
 EXISTS (SELECT ID FROM scene WHERE img = fop_files.ID AND ...)
 ```
-Currently EXISTS always evaluates to empty or all rows.
+**Status**: Uncorrelated EXISTS works. Correlated EXISTS in WHERE does not work due to
+architectural limitation - scan filters are compiled at plan-build time and cannot
+resolve outer references at runtime. Would require query unnesting (transforming EXISTS
+into semi-join) to properly solve.
+Test cases: tests/40_exists_subquery.yaml
 
-## BETWEEN operator
+## BETWEEN operator [FIXED]
 Used in IDList.php for range queries:
 ```sql
 WHERE col BETWEEN 1000 AND 3000
 ```
+Test cases: tests/38_between_operator.yaml
 
-## NOT IN clause
+## NOT IN clause [FIXED]
 Used for exclusion filters:
 ```sql
 WHERE ID NOT IN (1, 3)
 ```
+Test cases: tests/39_not_in_operator.yaml
 
 ## IN with subquery
 Used for permission checks:
