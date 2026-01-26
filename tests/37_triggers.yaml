@@ -1,0 +1,52 @@
+# Trigger Infrastructure Tests
+# Testing basic SQL trigger infrastructure
+
+metadata:
+  version: "1.0"
+  description: "Basic trigger infrastructure tests"
+
+cleanup:
+  - action: "Clean up test tables"
+    sql: "DROP TABLE IF EXISTS trigger_test"
+
+setup:
+  - action: "Create basic test table"
+    sql: "CREATE TABLE trigger_test (id INT, val INT, name VARCHAR(50))"
+
+test_cases:
+  # Basic table operations should still work
+  - name: "Basic INSERT works"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1, 100, 'test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Basic SELECT works"
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          val: 100
+          name: "test"
+
+  - name: "Basic UPDATE works"
+    sql: "UPDATE trigger_test SET val = 200 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify UPDATE"
+    sql: "SELECT val FROM trigger_test WHERE id = 1"
+    expect:
+      data:
+        - val: 200
+
+  - name: "Basic DELETE works"
+    sql: "DELETE FROM trigger_test WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify DELETE"
+    sql: "SELECT COUNT(*) as cnt FROM trigger_test"
+    expect:
+      data:
+        - cnt: 0

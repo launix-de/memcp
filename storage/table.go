@@ -90,12 +90,13 @@ type table struct {
 	schema          *database
 	Name            string
 	Columns         []column
-	Unique          []uniqueKey     // unique keys
-	Foreign         []foreignKey    // foreign keys
-	PersistencyMode PersistencyMode /* 0 = safe (default), 1 = sloppy, 2 = memory */
-	mu              sync.Mutex      // schema/sharding lock
-	uniquelock      sync.Mutex      // unique insert lock
-	Auto_increment  uint64          // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
+	Unique          []uniqueKey          // unique keys
+	Foreign         []foreignKey         // foreign keys
+	Triggers        []TriggerDescription // triggers on this table
+	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
+	mu              sync.Mutex           // schema/sharding lock
+	uniquelock      sync.Mutex           // unique insert lock
+	Auto_increment  uint64               // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 	Collation       string
 	Charset         string
 	Comment         string

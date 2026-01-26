@@ -383,7 +383,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 			}
 			if withTrigger {
-				// TODO: before/after update trigger
+				// TODO: execute AFTER UPDATE triggers
 			}
 		} else {
 			// delete
@@ -401,7 +401,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 			}
 			if withTrigger {
-				// TODO: before/after delete trigger
+				// TODO: execute AFTER DELETE triggers
 			}
 		}
 		if result && t.next != nil {
@@ -443,7 +443,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	if t.t.PersistencyMode == Safe {
 		t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
 	}
-	// TODO: before/after insert trigger
+	// TODO: execute AFTER INSERT triggers
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
