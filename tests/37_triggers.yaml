@@ -55,15 +55,378 @@ test_cases:
       data:
         - cnt: 0
 
-  # TODO: Add CREATE TRIGGER tests once trigger execution is wired up
-  # For now, just test that the syntax is accepted
-  # - name: "CREATE TRIGGER syntax accepted"
-  #   sql: |
-  #     CREATE TRIGGER test_trigger
-  #     AFTER INSERT ON trigger_test
-  #     FOR EACH ROW
-  #     BEGIN
-  #       INSERT INTO trigger_log (id, action) VALUES (NEW.id, 'insert');
-  #     END
-  #   expect:
-  #     affected_rows: 0
+  # BEFORE INSERT trigger tests
+  - name: "CREATE BEFORE INSERT trigger"
+    sql: "CREATE TRIGGER before_ins_trigger BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = 999"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT with BEFORE INSERT trigger - value should be modified"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (10, 100, 'triggered')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEFORE INSERT trigger modified the value"
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - id: 10
+          val: 999
+          name: "triggered"
+
+  - name: "DROP TRIGGER"
+    sql: "DROP TRIGGER before_ins_trigger"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT after DROP TRIGGER - value should NOT be modified"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (11, 100, 'no_trigger')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify value is NOT modified after trigger dropped"
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 11"
+    expect:
+      rows: 1
+      data:
+        - id: 11
+          val: 100
+          name: "no_trigger"
+
+  # BEFORE INSERT trigger with expression using NEW column
+  - name: "CREATE BEFORE INSERT trigger with expression"
+    sql: "CREATE TRIGGER calc_trigger BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = NEW.id * 10"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT with expression trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (5, 1, 'calc')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify expression trigger calculated value"
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - id: 5
+          val: 50
+          name: "calc"
+
+  - name: "DROP expression trigger"
+    sql: "DROP TRIGGER calc_trigger"
+    expect:
+      affected_rows: 0
+
+  # DROP TRIGGER IF EXISTS
+  - name: "DROP TRIGGER IF EXISTS - non-existent trigger"
+    sql: "DROP TRIGGER IF EXISTS nonexistent_trigger"
+    expect:
+      affected_rows: 0
+
+  # BEFORE UPDATE trigger tests with OLD/NEW comparison
+  - name: "Clean up for UPDATE trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert row for UPDATE trigger test"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (100, 0, 'counter_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE BEFORE UPDATE trigger with OLD reference"
+    sql: "CREATE TRIGGER counter_trigger BEFORE UPDATE ON trigger_test FOR EACH ROW SET NEW.val = OLD.val + 1"
+    expect:
+      affected_rows: 0
+
+  - name: "Verify initial value"
+    sql: "SELECT val FROM trigger_test WHERE id = 100"
+    expect:
+      data:
+        - val: 0
+
+  - name: "First UPDATE - trigger should increment counter"
+    sql: "UPDATE trigger_test SET name = 'first_update' WHERE id = 100"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify counter after first UPDATE"
+    sql: "SELECT val, name FROM trigger_test WHERE id = 100"
+    expect:
+      data:
+        - val: 1
+          name: "first_update"
+
+  - name: "Second UPDATE - trigger should increment counter again"
+    sql: "UPDATE trigger_test SET name = 'second_update' WHERE id = 100"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify counter after second UPDATE"
+    sql: "SELECT val, name FROM trigger_test WHERE id = 100"
+    expect:
+      data:
+        - val: 2
+          name: "second_update"
+
+  - name: "Third UPDATE - trigger should increment counter again"
+    sql: "UPDATE trigger_test SET name = 'third_update' WHERE id = 100"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify counter after third UPDATE"
+    sql: "SELECT val, name FROM trigger_test WHERE id = 100"
+    expect:
+      data:
+        - val: 3
+          name: "third_update"
+
+  - name: "DROP counter trigger"
+    sql: "DROP TRIGGER counter_trigger"
+    expect:
+      affected_rows: 0
+
+  - name: "UPDATE without trigger - counter should NOT change"
+    sql: "UPDATE trigger_test SET name = 'no_trigger_update' WHERE id = 100"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify counter unchanged after trigger dropped"
+    sql: "SELECT val, name FROM trigger_test WHERE id = 100"
+    expect:
+      data:
+        - val: 3
+          name: "no_trigger_update"
+
+  # BEGIN...END block tests (statements must end with semicolon - MySQL compatible)
+  - name: "Clean up for BEGIN...END test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE BEFORE INSERT trigger with BEGIN...END"
+    sql: "CREATE TRIGGER begin_end_trigger BEFORE INSERT ON trigger_test FOR EACH ROW BEGIN SET NEW.val = 777; END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT with BEGIN...END trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (200, 1, 'begin_end_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEGIN...END trigger modified value"
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 200"
+    expect:
+      rows: 1
+      data:
+        - id: 200
+          val: 777
+          name: "begin_end_test"
+
+  - name: "DROP BEGIN...END trigger"
+    sql: "DROP TRIGGER begin_end_trigger"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE BEFORE INSERT trigger with multiple SET in BEGIN...END"
+    sql: "CREATE TRIGGER multi_set_trigger BEFORE INSERT ON trigger_test FOR EACH ROW BEGIN SET NEW.val = 999; SET NEW.name = 'modified'; END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT with multiple SET trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (202, 1, 'original')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify multiple SET trigger modified both values"
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 202"
+    expect:
+      rows: 1
+      data:
+        - id: 202
+          val: 999
+          name: "modified"
+
+  - name: "DROP multiple SET trigger"
+    sql: "DROP TRIGGER multi_set_trigger"
+    expect:
+      affected_rows: 0
+
+  # AFTER trigger tests (INSERT INTO from trigger)
+  - name: "Clean up for AFTER trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log table"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE AFTER INSERT trigger with INSERT INTO"
+    noncritical: true
+    sql: "CREATE TRIGGER after_ins_log AFTER INSERT ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, new_val) VALUES (NEW.id, 'insert', NEW.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT triggers AFTER INSERT"
+    noncritical: true
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (300, 42, 'after_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify AFTER INSERT trigger logged the action"
+    noncritical: true
+    sql: "SELECT id, action, new_val FROM trigger_log WHERE id = 300"
+    expect:
+      rows: 1
+      data:
+        - id: 300
+          action: "insert"
+          new_val: 42
+
+  - name: "DROP AFTER INSERT trigger"
+    noncritical: true
+    sql: "DROP TRIGGER IF EXISTS after_ins_log"
+    expect:
+      affected_rows: 0
+
+  # IF...THEN...END IF tests (MySQL trigger control flow)
+  - name: "Clean up for IF test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE trigger with IF...THEN...END IF"
+    noncritical: true
+    sql: "CREATE TRIGGER if_trigger BEFORE INSERT ON trigger_test FOR EACH ROW BEGIN IF NEW.val > 100 THEN SET NEW.val = 100; END IF; END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT with value > 100 should be capped"
+    noncritical: true
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (400, 999, 'if_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify IF trigger capped value to 100"
+    noncritical: true
+    sql: "SELECT val FROM trigger_test WHERE id = 400"
+    expect:
+      data:
+        - val: 100
+
+  - name: "INSERT with value <= 100 should not be changed"
+    noncritical: true
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (401, 50, 'if_test2')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify IF trigger did not change value <= 100"
+    noncritical: true
+    sql: "SELECT val FROM trigger_test WHERE id = 401"
+    expect:
+      data:
+        - val: 50
+
+  - name: "DROP IF trigger"
+    noncritical: true
+    sql: "DROP TRIGGER IF EXISTS if_trigger"
+    expect:
+      affected_rows: 0
+
+  # Test IF false does NOT set column to NULL (ELSE branch test)
+  - name: "Clean up for IF false test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE trigger with SET before IF"
+    noncritical: true
+    sql: "CREATE TRIGGER if_else_trigger BEFORE INSERT ON trigger_test FOR EACH ROW BEGIN SET NEW.name = 'always'; IF NEW.val > 100 THEN SET NEW.val = 100; END IF; END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT with IF false - val should NOT be NULL or changed"
+    noncritical: true
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (450, 42, 'original')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify IF false keeps original val AND applies prior SET"
+    noncritical: true
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 450"
+    expect:
+      rows: 1
+      data:
+        - id: 450
+          val: 42
+          name: "always"
+
+  - name: "INSERT with IF true - both modifications applied"
+    noncritical: true
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (451, 200, 'original')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify IF true applies both modifications"
+    noncritical: true
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 451"
+    expect:
+      rows: 1
+      data:
+        - id: 451
+          val: 100
+          name: "always"
+
+  - name: "DROP IF ELSE trigger"
+    noncritical: true
+    sql: "DROP TRIGGER IF EXISTS if_else_trigger"
+    expect:
+      affected_rows: 0
+
+  # DELETE trigger tests
+  - name: "Clean up for DELETE trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for DELETE test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert row for DELETE trigger test"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (500, 77, 'delete_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE AFTER DELETE trigger"
+    noncritical: true
+    sql: "CREATE TRIGGER after_del_log AFTER DELETE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'delete', OLD.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "DELETE triggers AFTER DELETE"
+    noncritical: true
+    sql: "DELETE FROM trigger_test WHERE id = 500"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify AFTER DELETE trigger logged the action"
+    noncritical: true
+    sql: "SELECT id, action, old_val FROM trigger_log WHERE id = 500"
+    expect:
+      rows: 1
+      data:
+        - id: 500
+          action: "delete"
+          old_val: 77
+
+  - name: "DROP AFTER DELETE trigger"
+    noncritical: true
+    sql: "DROP TRIGGER IF EXISTS after_del_log"
+    expect:
+      affected_rows: 0

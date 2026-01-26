@@ -90,28 +90,173 @@ func (t *table) RemoveTrigger(name string) bool {
 	return false
 }
 
-// ExecuteTriggers executes all triggers for a specific timing
+// rowToDict converts a dataset to a dict with column names
+func (t *table) rowToDict(row dataset) scm.Scmer {
+	if row == nil {
+		return scm.NewNil()
+	}
+	fd := scm.NewFastDictValue(len(t.Columns))
+	for i, col := range t.Columns {
+		if i < len(row) {
+			fd.Set(scm.NewString(col.Name), row[i], nil)
+		}
+	}
+	return scm.NewFastDict(fd)
+}
+
+// dictToRow converts a dict back to a dataset using column order
+func (t *table) dictToRow(dict scm.Scmer, columns []string) dataset {
+	if dict.IsNil() {
+		return nil
+	}
+	row := make(dataset, len(columns))
+	if dict.IsFastDict() {
+		fd := dict.FastDict()
+		for i, col := range columns {
+			if v, ok := fd.Get(scm.NewString(col)); ok {
+				row[i] = v
+			} else {
+				row[i] = scm.NewNil()
+			}
+		}
+	}
+	return row
+}
+
+// ExecuteTriggers executes all triggers for a specific timing (AFTER triggers)
 // oldRow is nil for INSERT, newRow is nil for DELETE
-// Returns error if a trigger panics (for BEFORE triggers, this aborts the operation)
-func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) error {
+func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 	triggers := t.GetTriggers(timing)
 	for _, tr := range triggers {
 		if tr.Func.IsNil() {
 			continue
 		}
-		// Build arguments based on timing
-		// Convert dataset to []scm.Scmer for Apply
-		var args []scm.Scmer
+		// Build arguments: pass OLD and NEW as dicts with column names
+		var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
 		switch timing {
 		case BeforeInsert, AfterInsert:
-			args = []scm.Scmer(newRow)
+			newDict = t.rowToDict(newRow)
 		case BeforeDelete, AfterDelete:
-			args = []scm.Scmer(oldRow)
+			oldDict = t.rowToDict(oldRow)
 		case BeforeUpdate, AfterUpdate:
-			args = append([]scm.Scmer(oldRow), []scm.Scmer(newRow)...)
+			oldDict = t.rowToDict(oldRow)
+			newDict = t.rowToDict(newRow)
 		}
-		// Execute trigger (TODO: proper error handling)
-		scm.Apply(tr.Func, args...)
+		// Execute trigger with (OLD NEW) arguments
+		// OLD and NEW are dicts: {"col1": val1, "col2": val2, ...}
+		scm.Apply(tr.Func, oldDict, newDict)
 	}
-	return nil
+}
+
+// rowToDictWithColumns converts a dataset to a dict using explicit column names
+func (t *table) rowToDictWithColumns(row dataset, columns []string) scm.Scmer {
+	if row == nil {
+		return scm.NewNil()
+	}
+	fd := scm.NewFastDictValue(len(columns))
+	for i, col := range columns {
+		if i < len(row) {
+			fd.Set(scm.NewString(col), row[i], nil)
+		}
+	}
+	return scm.NewFastDict(fd)
+}
+
+// ExecuteBeforeInsertTriggers executes BEFORE INSERT triggers and returns modified rows
+// The trigger function can modify NEW values by returning a modified dict
+func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer) [][]scm.Scmer {
+	triggers := t.GetTriggers(BeforeInsert)
+	if len(triggers) == 0 {
+		return values
+	}
+
+	result := make([][]scm.Scmer, len(values))
+	for i, row := range values {
+		// Build dict using the columns that are being inserted
+		newDict := t.rowToDictWithColumns(row, columns)
+		// Execute all BEFORE INSERT triggers, each can modify NEW
+		for _, tr := range triggers {
+			if tr.Func.IsNil() {
+				continue
+			}
+			// Trigger receives (OLD NEW), OLD is nil for INSERT
+			returned := scm.Apply(tr.Func, scm.NewNil(), newDict)
+			// If trigger returns a dict, use it as the new NEW
+			if !returned.IsNil() && returned.IsFastDict() {
+				newDict = returned
+			}
+		}
+		// Convert modified dict back to row using same columns
+		result[i] = t.dictToRow(newDict, columns)
+	}
+	return result
+}
+
+// ExecuteBeforeUpdateTriggers executes BEFORE UPDATE triggers
+// oldRow: the current row values (all columns in table order)
+// newRow: the row with changes applied (all columns in table order)
+// Returns the modified newRow
+func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset) dataset {
+	triggers := t.GetTriggers(BeforeUpdate)
+	if len(triggers) == 0 {
+		return newRow
+	}
+
+	// Build column names from table
+	columns := make([]string, len(t.Columns))
+	for i, col := range t.Columns {
+		columns[i] = col.Name
+	}
+
+	oldDict := t.rowToDictWithColumns(oldRow, columns)
+	newDict := t.rowToDictWithColumns(newRow, columns)
+
+	// Execute all BEFORE UPDATE triggers
+	for _, tr := range triggers {
+		if tr.Func.IsNil() {
+			continue
+		}
+		// Trigger receives (OLD NEW)
+		returned := scm.Apply(tr.Func, oldDict, newDict)
+		// If trigger returns a dict, use it as the new NEW
+		if !returned.IsNil() && returned.IsFastDict() {
+			newDict = returned
+		}
+	}
+
+	// Convert modified dict back to row
+	return t.dictToRow(newDict, columns)
+}
+
+// ExecuteBeforeDeleteTriggers executes BEFORE DELETE triggers
+// oldRow: the row being deleted (all columns in table order)
+// Returns true if delete should proceed, false to abort
+func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset) bool {
+	triggers := t.GetTriggers(BeforeDelete)
+	if len(triggers) == 0 {
+		return true
+	}
+
+	// Build column names from table
+	columns := make([]string, len(t.Columns))
+	for i, col := range t.Columns {
+		columns[i] = col.Name
+	}
+
+	oldDict := t.rowToDictWithColumns(oldRow, columns)
+
+	// Execute all BEFORE DELETE triggers
+	for _, tr := range triggers {
+		if tr.Func.IsNil() {
+			continue
+		}
+		// Trigger receives (OLD nil) for DELETE
+		returned := scm.Apply(tr.Func, oldDict, scm.NewNil())
+		// If trigger returns false/nil, abort delete
+		if returned.IsNil() || (returned.IsBool() && !scm.ToBool(returned)) {
+			return false
+		}
+	}
+
+	return true
 }

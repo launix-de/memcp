@@ -111,42 +111,203 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'()
 	)))
 
-	/* Trigger body parser: handles BEGIN...END or single statement */
-	/* Uses (capture ...) to get both raw SQL text and parsed result */
-	/* Result is (raw_sql parsed_body) where parsed_body is the semantic representation */
-	(define sql_trigger_body (parser (capture (or
-		/* BEGIN...END block - for now just accept and store as placeholder */
-		/* The body will be empty string, full parsing to be added later */
-		(parser '((atom "BEGIN" true) (* (or
-			/* Skip any token that's not END */
-			sql_identifier
-			sql_string
-			sql_number
-			"." "," "(" ")" "=" ";" ":"
-			(atom "INSERT" true)
-			(atom "INTO" true)
-			(atom "VALUES" true)
-			(atom "NEW" true)
-			(atom "OLD" true)
-			(atom "SET" true)
-			(atom "UPDATE" true)
-			(atom "DELETE" true)
-			(atom "SELECT" true)
-			(atom "FROM" true)
-			(atom "WHERE" true)
-			(atom "IF" true)
-			(atom "THEN" true)
-			(atom "ELSE" true)
-			(atom "ELSEIF" true)
-			(atom "END IF" true)
-		)) (atom "END" true)) "begin_end_body")
-		/* Single SET statement for BEFORE triggers */
+	/* helper function for triggers: transform get_column to dict access */
+	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
+	/* (get_column "OLD" _ col _) -> (get_assoc OLD col) */
+	/* (get_column nil _ col _) -> (get_assoc NEW col) for unqualified columns in trigger context */
+	(define transform_trigger_expr (lambda (expr) (match expr
+		'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+		'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+		(cons head tail) (cons (transform_trigger_expr head) (map tail transform_trigger_expr))
+		expr
+	)))
+
+	/* helper function to build nested set_assoc calls at compile time */
+	/* (build_trigger_sets NEW ((col1 expr1) (col2 expr2))) -> (set_assoc (set_assoc NEW "col1" expr1) "col2" expr2) */
+	(define build_trigger_sets (lambda (acc assignments)
+		(match assignments
+			'() acc
+			(cons assignment rest) (match assignment '(col expr)
+				(build_trigger_sets (list (symbol "set_assoc") acc col (transform_trigger_expr expr)) rest)))))
+
+	/* compile_trigger_body: compile parsed trigger body to executable lambda */
+	/* Input: schema (database name for INSERT/UPDATE/DELETE statements) */
+	/*        timing (string like "before_insert", "after_insert", etc.) */
+	/*        body from sql_trigger_body */
+	/*   - (!begin stmt1 stmt2 ...) for BEGIN...END blocks */
+	/*   - (list (col1 expr1) (col2 expr2) ...) for SET statements */
+	/* Output: (lambda (OLD NEW) ...) that can be applied by ExecuteTriggers */
+	/* Uses set_assoc approach: (set changed_rows (set_assoc changed_rows key value)) */
+	(define compile_trigger_body (lambda (schema timing body) (begin
+		(define params (list (symbol "OLD") (symbol "NEW")))
+		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
+		(define changed_rows_sym (symbol "changed_rows"))
+
+		/* Helper to compile SET assignments into (set changed_rows ...) statements */
+		/* Returns a list of set statements for each assignment */
+		(define compile_set_assignments (lambda (assignments)
+			(map assignments (lambda (a) (match a '(col expr)
+				(list (symbol "set") changed_rows_sym
+					(list (symbol "set_assoc") changed_rows_sym col (transform_trigger_expr expr))))))))
+
+		/* Helper to compile a single statement */
+		/* For BEFORE triggers with SET: returns (set changed_rows ...) statements */
+		/* For other statements: returns the statement as-is */
+		(define compile_stmt (lambda (stmt)
+			(if (not (list? stmt)) nil
+				(begin
+					(define tag (car stmt))
+					(if (equal? tag '!set)
+						/* SET NEW.col = expr - stmt is (!set a1 a2 ...) where ai are (col expr) pairs */
+						(if is_after
+							(error "SET NEW is not allowed in AFTER triggers")
+							(compile_set_assignments (cdr stmt)))
+					(if (equal? tag '!if)
+						/* IF condition THEN stmts END IF - stmt is (!if condition then_stmts) */
+						(begin
+							(define condition (car (cdr stmt)))
+							(define then_stmts (car (cdr (cdr stmt))))
+							/* Compile statements inside IF - flatten nested lists from SET */
+							(define compiled_then (merge (map then_stmts compile_stmt)))
+							(define valid_then (filter compiled_then (lambda (s) (not (nil? s)))))
+							/* Use !begin (no new scope) so set writes to outer changed_rows */
+							(define then_body (if (> (count valid_then) 1)
+								(cons '!begin valid_then)
+								(if (> (count valid_then) 0) (car valid_then) nil)))
+							/* Return as single-element list to be flattened by caller */
+							(list (list (symbol "if") (transform_trigger_expr condition) then_body)))
+					(if (equal? tag '!insert)
+						/* INSERT INTO table - stmt is (!insert tbl cols vals) */
+						(begin
+							(define tbl (car (cdr stmt)))
+							(define cols (car (cdr (cdr stmt))))
+							(define vals (car (cdr (cdr (cdr stmt)))))
+							(list (list (symbol "insert") schema tbl
+								(cons (symbol "list") cols)
+								(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
+								(list (symbol "list")) nil false nil)))
+					(if (equal? tag '!update)
+						/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
+						(begin
+							(define tbl (car (cdr stmt)))
+							(define assignments (car (cdr (cdr stmt))))
+							(define where (car (cdr (cdr (cdr stmt)))))
+							(list (list (symbol "update") schema tbl
+								(list (symbol "lambda") '() (if (nil? where) true (transform_trigger_expr where)))
+								(cons (symbol "list") (map assignments (lambda (a) (match a '(col expr) (list (symbol "list") col (transform_trigger_expr expr))))))
+								false)))
+					(if (equal? tag '!delete)
+						/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
+						(begin
+							(define tbl (car (cdr stmt)))
+							(define where (car (cdr (cdr stmt))))
+							(list (list (symbol "delete") schema tbl
+								(list (symbol "lambda") '() (if (nil? where) true (transform_trigger_expr where))))))
+						/* Unknown statement type */
+						nil
+					)))))
+				)
+			)))
+
+		(match body
+			/* BEGIN...END block - compile all statements */
+			(cons '!begin stmts) (begin
+				/* Compile all statements - each may return a list of statements */
+				(define compiled_stmts (merge (map stmts compile_stmt)))
+				/* Filter out nil statements */
+				(define valid_stmts (filter compiled_stmts (lambda (s) (not (nil? s)))))
+				/* For BEFORE triggers: init changed_rows from NEW, return it at end */
+				/* For AFTER triggers: just execute statements */
+				(if is_after
+					(if (> (count valid_stmts) 0)
+						(list (symbol "lambda") params (cons (symbol "begin") valid_stmts))
+						(list (symbol "lambda") params nil))
+					/* BEFORE trigger: wrap with changed_rows handling */
+					/* Use outer begin for define, inner !begin (no new scope) for statements */
+					/* set returns the value, so last (set changed_rows ...) returns the final dict */
+					(list (symbol "lambda") params
+						(list (symbol "begin")
+							(list (symbol "define") changed_rows_sym (symbol "NEW"))
+							(cons '!begin valid_stmts))))
+			)
+			/* SET assignments (legacy format) - body is AST (list (col1 expr1) ...), eval to get actual list */
+			(cons (symbol list) assignments) (begin
+				/* Validate: SET NEW is not allowed in AFTER triggers */
+				(if is_after
+					(error "SET NEW is not allowed in AFTER triggers - the row has already been written")
+					(list (symbol "lambda") params (build_trigger_sets (symbol "NEW") assignments)))
+			)
+			/* Unknown body type - return no-op */
+			_ (list (symbol "lambda") params nil)
+		)
+	)))
+
+	/* Simple trigger statements (non-IF) */
+	(define sql_trigger_simple_stmt (parser (or
+		/* SET NEW.col = expr; */
 		(parser '(
 			(atom "SET" true)
 			(define assignments (+ (parser '(
 				(atom "NEW" true) "." (define col sql_identifier) "=" (define expr sql_expression)
 			) '(col expr)) ","))
-		) '((quote list) "set" (cons (quote list) assignments)))
+			(atom ";" false)
+		) (cons '!set assignments))
+		/* INSERT INTO table (...) VALUES (...); */
+		(parser '(
+			(atom "INSERT" true) (atom "INTO" true) (define tbl sql_identifier)
+			"(" (define cols (+ sql_identifier ",")) ")"
+			(atom "VALUES" true)
+			(define values (+ (parser '("(" (define v (+ sql_expression ",")) ")") v) ","))
+			(atom ";" false)
+		) (list '!insert tbl cols values))
+		/* UPDATE table SET col=val WHERE condition; */
+		(parser '(
+			(atom "UPDATE" true) (define tbl sql_identifier)
+			(atom "SET" true) (define assignments (+ (parser '((define col sql_identifier) "=" (define expr sql_expression)) '(col expr)) ","))
+			(? (atom "WHERE" true) (define where sql_expression))
+			(atom ";" false)
+		) (list '!update tbl assignments where))
+		/* DELETE FROM table WHERE condition; */
+		(parser '(
+			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
+			(? (atom "WHERE" true) (define where sql_expression))
+			(atom ";" false)
+		) (list '!delete tbl where))
+	)))
+
+	/* Full trigger statement parser including IF...THEN...END IF */
+	/* IF body can contain simple statements (no nested IF for now) */
+	(define sql_trigger_stmt (parser (or
+		/* IF condition THEN stmts END IF; */
+		(parser '(
+			(atom "IF" true)
+			(define condition sql_expression)
+			(atom "THEN" true)
+			(define then_stmts (* sql_trigger_simple_stmt))
+			(atom "END" true) (atom "IF" true)
+			(atom ";" false)
+		) (list '!if condition then_stmts))
+		sql_trigger_simple_stmt
+	)))
+
+	/* Trigger body parser: handles BEGIN...END or single statement */
+	/* Uses (capture ...) to get both raw SQL text and parsed result */
+	/* Result is (raw_sql parsed_body) where parsed_body is the semantic representation */
+	(define sql_trigger_body (parser (capture (or
+		/* BEGIN...END block - statements must end with semicolon */
+		(parser '(
+			(atom "BEGIN" true)
+			(define stmts (* sql_trigger_stmt))
+			(atom "END" true)
+		) (cons '!begin stmts))
+		/* Single SET statement for BEFORE triggers (no semicolon needed) */
+		(parser '(
+			(atom "SET" true)
+			(define assignments (+ (parser '(
+				(atom "NEW" true) "." (define col sql_identifier) "=" (define expr sql_expression)
+			) '(col expr)) ","))
+		) (cons (quote list) assignments))
 	))))
 
 	(define sql_column_attributes (parser (define sub (* (or
@@ -709,6 +870,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DESCRIBE" true) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
 		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line))))) /* TODO: Field Type Collation Null Key Default Extra(auto_increment) Privileges Comment */
 
+		/* SHOW TRIGGERS [FROM schema] */
+		(parser '((atom "SHOW" true) (atom "TRIGGERS" true) (? (atom "FROM" true) (define tgtschema sql_identifier)))
+			'((quote map) '((quote show_triggers) (coalesce tgtschema schema)) '((quote lambda) '((quote tr)) '((quote resultrow) (quote tr)))))
+
 		/* SHOW ENGINES: list engines recognized by CREATE/ALTER TABLE */
 		(parser '((atom "SHOW" true) (atom "ENGINES" true)) (cons '!begin '(
 			'((quote resultrow) '((quote list) "Engine" "SAFE"    "Support" "DEFAULT" "Comment" "Safe durable engine"              "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
@@ -803,7 +968,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define tbl sql_identifier)
 			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
 			(define body sql_trigger_body)
-		) '((quote createtrigger) schema tbl name timing (car body) (car (cdr body))))
+		) (begin
+			(define compiled (compile_trigger_body schema timing (car (cdr body))))
+			(list 'createtrigger schema tbl name timing (car body) (eval compiled))
+		))
 
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
@@ -846,3 +1014,4 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		((state "line") line)
 	)) "\n")
 )))
+
