@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -570,6 +570,44 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (dot '(1 2 3) '(4 5 6)) 32) true "dot product")
 	(assert (equal? (dot '(3 4) '(3 4) "COSINE") 1) true "cosine of identical vectors = 1")
 	(assert (equal? (round (* 1000 (dot '(3 4) '(3 4) "EUCLIDEAN"))) 5000) true "euclidean length sqrt(sum) *1000")
+
+	/* JIT compilation */
+	(print "testing JIT compilation ...")
+
+	/* Basic arithmetic with single parameter */
+	(assert ((jit (lambda (x) (+ x 1))) 4) 5 "jit: x + 1")
+	(assert ((jit (lambda (x) (- x 3))) 10) 7 "jit: x - 3")
+	(assert ((jit (lambda (x) (* x 2))) 5) 10 "jit: x * 2")
+
+	/* Two parameters */
+	(assert ((jit (lambda (a b) (+ a b))) 3 4) 7 "jit: a + b")
+	(assert ((jit (lambda (a b) (* a b))) 3 4) 12 "jit: a * b")
+	(assert ((jit (lambda (a b) (- a b))) 10 3) 7 "jit: a - b")
+
+	/* Nested operations */
+	(assert ((jit (lambda (x) (* (+ x 1) 2))) 4) 10 "jit: (x+1)*2")
+	(assert ((jit (lambda (x) (+ (* x 2) 1))) 4) 9 "jit: x*2+1")
+
+	/* Comparisons */
+	(assert ((jit (lambda (x) (< x 10))) 5) true "jit: x < 10 (true)")
+	(assert ((jit (lambda (x) (< x 10))) 15) false "jit: x < 10 (false)")
+	(assert ((jit (lambda (x) (> x 0))) 5) true "jit: x > 0")
+	(assert ((jit (lambda (a b) (equal? a b))) 5 5) true "jit: a == b (true)")
+	(assert ((jit (lambda (a b) (equal? a b))) 5 6) false "jit: a == b (false)")
+
+	/* Conditionals */
+	(assert ((jit (lambda (x) (if (< x 5) 1 0))) 3) 1 "jit: if x<5 then 1 else 0 (true)")
+	(assert ((jit (lambda (x) (if (< x 5) 1 0))) 7) 0 "jit: if x<5 then 1 else 0 (false)")
+
+	/* Constants */
+	(assert ((jit (lambda () 42))) 42 "jit: constant return")
+	(assert ((jit (lambda (x) 99)) 5) 99 "jit: ignore param, return constant")
+
+	/* Boolean logic */
+	(assert ((jit (lambda (x) (and (> x 0) (< x 10)))) 5) true "jit: and (true)")
+	(assert ((jit (lambda (x) (and (> x 0) (< x 10)))) 15) false "jit: and (false)")
+	(assert ((jit (lambda (x) (or (< x 0) (> x 10)))) 5) false "jit: or (false)")
+	(assert ((jit (lambda (x) (or (< x 0) (> x 10)))) 15) true "jit: or (true)")
 
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
