@@ -587,6 +587,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* Nested operations */
 	(assert ((jit (lambda (x) (* (+ x 1) 2))) 4) 10 "jit: (x+1)*2")
 	(assert ((jit (lambda (x) (+ (* x 2) 1))) 4) 9 "jit: x*2+1")
+	(assert ((jit (lambda (a b c) (+ (* a b) c))) 3 4 5) 17 "jit: a*b+c")
+	(assert ((jit (lambda (a b c d) (+ (* a b) (* c d)))) 2 3 4 5) 26 "jit: a*b + c*d")
+	(assert ((jit (lambda (x) (+ (+ (+ x 1) 2) 3))) 10) 16 "jit: deeply nested +")
+	(assert ((jit (lambda (x) (* (* (* x 2) 2) 2))) 3) 24 "jit: deeply nested *")
+	(assert ((jit (lambda (a b) (- (* a a) (* b b)))) 5 3) 16 "jit: a²-b²")
+	(assert ((jit (lambda (a b c) (+ a (- b c)))) 10 7 3) 14 "jit: a+(b-c)")
 
 	/* Comparisons */
 	(assert ((jit (lambda (x) (< x 10))) 5) true "jit: x < 10 (true)")
@@ -608,6 +614,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (x) (and (> x 0) (< x 10)))) 15) false "jit: and (false)")
 	(assert ((jit (lambda (x) (or (< x 0) (> x 10)))) 5) false "jit: or (false)")
 	(assert ((jit (lambda (x) (or (< x 0) (> x 10)))) 15) true "jit: or (true)")
+	(assert ((jit (lambda (x) (not (< x 5)))) 3) false "jit: not (false)")
+	(assert ((jit (lambda (x) (not (< x 5)))) 7) true "jit: not (true)")
+
+	/* String operations */
+	(assert ((jit (lambda (s) (strlen s))) "hello") 5 "jit: strlen")
+	(assert ((jit (lambda (s) (strlen s))) "") 0 "jit: strlen empty")
+	(assert ((jit (lambda (s) (strlen s))) "äöü") 6 "jit: strlen utf8 bytes")
+	(assert ((jit (lambda (a b) (concat a b))) "foo" "bar") "foobar" "jit: concat")
+	(assert ((jit (lambda (s) (substr s 1 3))) "hello") "ell" "jit: substr")
+	(assert ((jit (lambda (s) (substr s 2))) "hello") "llo" "jit: substr to end")
+	(assert ((jit (lambda (s) (toUpper s))) "hello") "HELLO" "jit: toUpper")
+	(assert ((jit (lambda (s) (toLower s))) "HELLO") "hello" "jit: toLower")
+
+	/* Pattern matching (strlike) */
+	(assert ((jit (lambda (s) (strlike s "hello"))) "hello") true "jit: strlike exact")
+	(assert ((jit (lambda (s) (strlike s "hello"))) "world") false "jit: strlike no match")
+	(assert ((jit (lambda (s) (strlike s "h%"))) "hello") true "jit: strlike prefix %")
+	(assert ((jit (lambda (s) (strlike s "%o"))) "hello") true "jit: strlike suffix %")
+	(assert ((jit (lambda (s) (strlike s "h_llo"))) "hello") true "jit: strlike single _")
+	(assert ((jit (lambda (s) (strlike s "%ll%"))) "hello") true "jit: strlike infix")
+	(assert ((jit (lambda (s p) (strlike s p))) "hello" "h%") true "jit: strlike dynamic pattern")
+
+	/* Mixed types and nil handling */
+	(assert (nil? ((jit (lambda (x) (+ x nil))) 5)) true "jit: + with nil returns nil")
+	(assert (nil? ((jit (lambda (x) (* x nil))) 5)) true "jit: * with nil returns nil")
+	(assert ((jit (lambda (x) (if (nil? x) 0 x))) nil) 0 "jit: nil? check true")
+	(assert ((jit (lambda (x) (if (nil? x) 0 x))) 42) 42 "jit: nil? check false")
 
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
