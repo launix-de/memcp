@@ -8,6 +8,7 @@
 - `tests/`: YAML suites named `NN_description.yaml` (e.g., `01_basic_sql.yaml`).
 - `run_sql_tests.py`: test runner (HTTP-based); starts `memcp` when needed.
 - `docs/`: generated API/reference docs.
+- if you work on files, update/add the copyright notice's current year
 
 ## Build, Test, and Dev Commands
 - Build: `go build -o memcp` or `make` (default builds).
