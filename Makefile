@@ -1,6 +1,9 @@
 all:
 	go build
 
+ceph:
+	go build -tags=ceph
+
 run:
 	./memcp
 

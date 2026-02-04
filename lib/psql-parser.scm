@@ -730,12 +730,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or psql_identifier '(psql_identifier (atom "AS" true) psql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
 
+		/* USE database - change current schema */
+		(parser '((atom "USE" true) (define db psql_identifier)) '('session "schema" db))
+
 		/* TODO: draw transaction number, commit */
 		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('session "transaction" 1))
 		(parser '((atom "COMMIT" true)) '('session "transaction" nil))
 		(parser '((atom "ROLLBACK" true)) '('session "transaction" nil))
 		"" /* comment only command */
-	))) 
+	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
 

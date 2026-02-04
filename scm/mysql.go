@@ -272,4 +272,9 @@ func updateFlags(s *driver.Session, sessionFunc func(...Scmer) Scmer) {
 	} else {
 		s.SetTransaction(true)
 	}
+	// Update schema if changed via USE statement
+	schema := sessionFunc(NewString("schema"))
+	if !schema.IsNil() && schema.String() != "" {
+		s.SetSchema(schema.String())
+	}
 }

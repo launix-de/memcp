@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -66,6 +66,27 @@ type LogEntryInsert struct {
 // for CREATE TABLE
 type PersistenceFactory interface {
 	CreateDatabase(schema string) PersistenceEngine
+}
+
+// BackendConfig describes the configuration for a remote storage backend.
+// These are stored as JSON files in the data folder (e.g. data/mydb.json).
+type BackendConfig struct {
+	Backend string `json:"backend"` // "ceph", "s3", etc.
+
+	// Ceph-specific fields
+	UserName    string `json:"username,omitempty"`  // Ceph: e.g. "client.admin"
+	ClusterName string `json:"cluster,omitempty"`   // Ceph: often "ceph"
+	ConfFile    string `json:"conf_file,omitempty"` // Ceph: optional config path
+	Pool        string `json:"pool,omitempty"`      // Ceph: e.g. "memcp"
+	Prefix      string `json:"prefix,omitempty"`    // Object prefix (Ceph and S3)
+
+	// S3-specific fields
+	AccessKeyID     string `json:"access_key_id,omitempty"`     // S3: AWS or S3-compatible access key
+	SecretAccessKey string `json:"secret_access_key,omitempty"` // S3: AWS or S3-compatible secret key
+	Region          string `json:"region,omitempty"`            // S3: AWS region (e.g., "us-east-1")
+	Endpoint        string `json:"endpoint,omitempty"`          // S3: Custom endpoint (MinIO, etc.)
+	Bucket          string `json:"bucket,omitempty"`            // S3: Bucket name
+	ForcePathStyle  bool   `json:"force_path_style,omitempty"`  // S3: Use path-style URLs (for MinIO)
 }
 
 // Helper function to move databases between storages

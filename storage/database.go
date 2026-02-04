@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@ import "fmt"
 import "sync"
 import "time"
 import "runtime"
+import "strings"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
@@ -104,6 +105,34 @@ func UnloadDatabases() {
 	StopGlobalEstimator()
 }
 
+// createPersistenceFromConfig creates a PersistenceEngine based on the backend configuration.
+func createPersistenceFromConfig(dbName string, config *BackendConfig) PersistenceEngine {
+	switch config.Backend {
+	case "ceph":
+		factory := &CephFactory{
+			UserName:    config.UserName,
+			ClusterName: config.ClusterName,
+			ConfFile:    config.ConfFile,
+			Pool:        config.Pool,
+			Prefix:      config.Prefix,
+		}
+		return factory.CreateDatabase(dbName)
+	case "s3":
+		factory := &S3Factory{
+			AccessKeyID:     config.AccessKeyID,
+			SecretAccessKey: config.SecretAccessKey,
+			Region:          config.Region,
+			Endpoint:        config.Endpoint,
+			Bucket:          config.Bucket,
+			Prefix:          config.Prefix,
+			ForcePathStyle:  config.ForcePathStyle,
+		}
+		return factory.CreateDatabase(dbName)
+	default:
+		return nil
+	}
+}
+
 func LoadDatabases() {
 	// this happens before any init, so no read/write action is performed on any data yet
 	// read settings file
@@ -130,8 +159,31 @@ func LoadDatabases() {
 			db.persistence = &FileStorage{Basepath + "/" + entry.Name() + "/"}
 			db.srState = COLD
 			databases.Set(db)
-		} else {
-			// TODO: read .json files for S3 tables
+		} else if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {
+			// Backend configuration file (e.g., Ceph, S3)
+			dbName := strings.TrimSuffix(entry.Name(), ".json")
+			configPath := Basepath + "/" + entry.Name()
+			configData, err := os.ReadFile(configPath)
+			if err != nil {
+				fmt.Println("error: failed to read backend config", configPath, ":", err)
+				continue
+			}
+			var config BackendConfig
+			if err := json.Unmarshal(configData, &config); err != nil {
+				fmt.Println("error: failed to parse backend config", configPath, ":", err)
+				continue
+			}
+			persistence := createPersistenceFromConfig(dbName, &config)
+			if persistence == nil {
+				fmt.Println("error: unknown backend type", config.Backend, "in", configPath)
+				continue
+			}
+			fmt.Println("loading database", dbName, "from", config.Backend, "backend")
+			db := new(database)
+			db.Name = dbName
+			db.persistence = persistence
+			db.srState = COLD
+			databases.Set(db)
 		}
 	}
 

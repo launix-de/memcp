@@ -293,6 +293,132 @@ PERF_TEST=1 PERF_EXPLAIN=1 make test
 | `PERF_NORECALIBRATE` | `0`/`1` | Freeze row counts (for bisecting) |
 | `PERF_EXPLAIN` | `0`/`1` | Show query plans |
 
+## Remote Storage Backends 🗄️
+
+MemCP supports storing databases on remote storage backends instead of the local filesystem. To configure a remote backend, create a JSON configuration file in the data folder instead of a directory.
+
+### S3 / MinIO Storage
+
+Store your database on Amazon S3 or any S3-compatible storage (MinIO, Ceph RGW, etc.).
+
+**Configuration file** (`data/mydb.json`):
+```json
+{
+  "backend": "s3",
+  "access_key_id": "your-access-key",
+  "secret_access_key": "your-secret-key",
+  "region": "us-east-1",
+  "bucket": "memcp-data",
+  "prefix": "databases"
+}
+```
+
+**For MinIO or self-hosted S3-compatible storage:**
+```json
+{
+  "backend": "s3",
+  "access_key_id": "minioadmin",
+  "secret_access_key": "minioadmin",
+  "endpoint": "http://localhost:9000",
+  "bucket": "memcp",
+  "prefix": "data",
+  "force_path_style": true
+}
+```
+
+**Quick MinIO setup for testing:**
+```bash
+# Start MinIO with Docker
+docker run -d --name minio \
+  -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data --console-address ":9001"
+
+# Create a bucket (via MinIO Console at http://localhost:9001)
+# Or via mc CLI:
+mc alias set local http://localhost:9000 minioadmin minioadmin
+mc mb local/memcp
+```
+
+### Ceph/RADOS Storage
+
+Store your database directly on Ceph RADOS for high-performance distributed storage.
+
+**Why is Ceph optional?** The Ceph backend uses CGO to link against `librados` (the Ceph client library). This requires the C headers and library to be installed at compile time and the shared library at runtime. To keep the default build simple and portable, Ceph support is behind a build tag.
+
+```bash
+# Install Ceph development libraries (Ubuntu/Debian)
+sudo apt-get install librados-dev
+
+# Build MemCP with Ceph support
+make ceph
+# or: go build -tags=ceph
+```
+
+**Configuration file** (`data/mydb.json`):
+```json
+{
+  "backend": "ceph",
+  "username": "client.memcp",
+  "cluster": "ceph",
+  "pool": "memcp",
+  "prefix": "databases"
+}
+```
+
+**Optional fields:**
+- `conf_file`: Path to ceph.conf (defaults to `/etc/ceph/ceph.conf`)
+
+**Setting up a Ceph development cluster with vstart.sh:**
+```bash
+# Clone Ceph source
+git clone https://github.com/ceph/ceph.git
+cd ceph
+
+# Install dependencies and build (only vstart target needed)
+./install-deps.sh
+pip install cython setuptools
+./do_cmake.sh
+cd build && ninja vstart
+
+# Start a development cluster
+cd ..
+MON=1 OSD=3 MDS=0 MGR=1 ./build/bin/vstart.sh -d -n -x
+
+# Create a pool for MemCP
+./build/bin/ceph osd pool create memcp 32
+
+# Create a user for MemCP (optional, can also use client.admin)
+./build/bin/ceph auth get-or-create client.memcp \
+  mon 'allow r' \
+  osd 'allow rwx pool=memcp' \
+  -o ceph.client.memcp.keyring
+```
+
+**Environment variables for vstart cluster:**
+```bash
+export CEPH_CONF=/path/to/ceph/build/ceph.conf
+export CEPH_KEYRING=/path/to/ceph/build/keyring
+```
+
+### Backend Configuration Reference
+
+| Field | Backend | Description |
+|-------|---------|-------------|
+| `backend` | all | Backend type: `"s3"` or `"ceph"` |
+| `prefix` | all | Object key prefix for database objects |
+| `access_key_id` | S3 | AWS or S3-compatible access key |
+| `secret_access_key` | S3 | AWS or S3-compatible secret key |
+| `region` | S3 | AWS region (e.g., `"us-east-1"`) |
+| `endpoint` | S3 | Custom endpoint URL (for MinIO, etc.) |
+| `bucket` | S3 | S3 bucket name |
+| `force_path_style` | S3 | Use path-style URLs (required for MinIO) |
+| `username` | Ceph | Ceph user (e.g., `"client.admin"`) |
+| `cluster` | Ceph | Cluster name (usually `"ceph"`) |
+| `conf_file` | Ceph | Path to ceph.conf (optional) |
+| `pool` | Ceph | RADOS pool name |
+
 ## License 📄
 
 MemCP is open source software. See the LICENSE file for details.

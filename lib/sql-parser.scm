@@ -981,6 +981,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
 			'((quote droptrigger) schema name (if if_exists true false)))
 
+		/* USE database - change current schema */
+		(parser '((atom "USE" true) (define db sql_identifier)) '('session "schema" db))
+
 		/* TODO: draw transaction number, commit */
 		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('session "transaction" 1))
 		(parser '((atom "COMMIT" true)) '('session "transaction" nil))
