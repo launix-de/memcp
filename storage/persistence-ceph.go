@@ -356,8 +356,8 @@ func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error)
 	// Determine current size as append offset
 	st, err := s.ioctx.Stat(obj)
 	if err != nil {
-		// object may not exist yet -> create empty
-		if err := s.ioctx.WriteFull(obj, nil); err != nil {
+		// object may not exist yet -> create empty using Truncate
+		if err := s.ioctx.Truncate(obj, 0); err != nil {
 			return nil, err
 		}
 		st, _ = s.ioctx.Stat(obj)
@@ -501,7 +501,7 @@ func (w *CephLogfile) flushLocked(force bool) error {
 		// create next segment and update manifest
 		next := w.seg + 1
 		nextObj := w.s.obj(fmt.Sprintf("%s.log.%08d", w.shard, next))
-		if err := w.s.ioctx.WriteFull(nextObj, nil); err != nil {
+		if err := w.s.ioctx.Truncate(nextObj, 0); err != nil {
 			return err
 		}
 		// update manifest
