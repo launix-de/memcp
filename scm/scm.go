@@ -944,6 +944,7 @@ Patterns can be any of:
 	init_parser()
 	init_sync()
 	init_scheduler()
+	init_jit()
 
 	RunJitTest()
 }
