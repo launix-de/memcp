@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -222,4 +222,48 @@ func (e *execBuf) makeRX() error {
 	// change to PROT_READ|PROT_EXEC
 	data := (*[1 << 30]byte)(e.ptr)[:e.n:e.n]
 	return syscall.Mprotect(data, syscall.PROT_READ|syscall.PROT_EXEC)
+}
+
+func init_jit() {
+	DeclareTitle("JIT Compilation")
+
+	Declare(&Globalenv, &Declaration{
+		"jit", "compiles a lambda to optimized native code; passes through already compiled functions",
+		1, 1,
+		[]DeclarationParameter{
+			{"fn", "procedure", "the function to compile"},
+		}, "procedure",
+		jitCompile,
+		false, // not pure because it allocates executable memory
+	})
+}
+
+// jitCompile compiles a Proc to a native function (tagFunc)
+// Already compiled functions (tagFunc, tagFuncEnv) are passed through unchanged
+func jitCompile(a ...Scmer) Scmer {
+	if len(a) != 1 {
+		panic("jit: expects exactly 1 argument")
+	}
+
+	v := a[0]
+	tag := v.GetTag()
+
+	switch tag {
+	case tagFunc:
+		// Already a native function - pass through
+		return v
+
+	case tagFuncEnv:
+		// Already a native function with environment - pass through
+		return v
+
+	case tagProc:
+		// Lambda/procedure - compile it
+		// Use OptimizeProcToSerialFunction as fallback/baseline
+		fn := OptimizeProcToSerialFunction(v)
+		return NewFunc(fn)
+
+	default:
+		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))
+	}
 }
