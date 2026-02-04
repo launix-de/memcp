@@ -492,30 +492,30 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					shard.Insert(columns, chunk, false, onFirstInsertId)
 					result += len(chunk)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
-				if !onCollision.IsNil() {
-					// Evaluate onCollision and add to affected rows per MySQL semantics
-					// - inserted rows already counted above
-					// - on duplicate: count 2 if changed, 1 if no-op
-					ret := scm.Apply(onCollision, data...)
-					switch {
-					case ret.IsBool():
-						if ret.Bool() {
-							result += 2
-						} else {
+					if !onCollision.IsNil() {
+						// Evaluate onCollision and add to affected rows per MySQL semantics
+						// - inserted rows already counted above
+						// - on duplicate: count 2 if changed, 1 if no-op
+						ret := scm.Apply(onCollision, data...)
+						switch {
+						case ret.IsBool():
+							if ret.Bool() {
+								result += 2
+							} else {
+								result++
+							}
+						case ret.IsInt():
+							result += int(ret.Int())
+						case ret.IsFloat():
+							result += int(ret.Float())
+						default:
+							// Fallback: consider as one affected row
 							result++
 						}
-					case ret.IsInt():
-						result += int(ret.Int())
-					case ret.IsFloat():
-						result += int(ret.Float())
-					default:
-						// Fallback: consider as one affected row
-						result++
+					} else {
+						panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
 					}
-				} else {
-					panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
-				}
-			}, 0)
+				}, 0)
 			} else {
 				// physically insert (no unique constraints)
 				shard.Insert(columns, chunk, false, onFirstInsertId)
