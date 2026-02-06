@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025  Carl-Philip Hänsch
+Copyright (C) 2025, 2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -16,6 +16,8 @@ Copyright (C) 2025  Carl-Philip Hänsch
 */
 package storage
 
+import "errors"
+import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 // TriggerTiming defines when a trigger fires
@@ -49,14 +51,59 @@ func (tt TriggerTiming) String() string {
 	}
 }
 
+func (tt TriggerTiming) MarshalJSON() ([]byte, error) {
+	var s string
+	switch tt {
+	case BeforeInsert:
+		s = "before_insert"
+	case AfterInsert:
+		s = "after_insert"
+	case BeforeUpdate:
+		s = "before_update"
+	case AfterUpdate:
+		s = "after_update"
+	case BeforeDelete:
+		s = "before_delete"
+	case AfterDelete:
+		s = "after_delete"
+	default:
+		return nil, errors.New("unknown trigger timing")
+	}
+	return json.Marshal(s)
+}
+
+func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	switch s {
+	case "before_insert":
+		*tt = BeforeInsert
+	case "after_insert":
+		*tt = AfterInsert
+	case "before_update":
+		*tt = BeforeUpdate
+	case "after_update":
+		*tt = AfterUpdate
+	case "before_delete":
+		*tt = BeforeDelete
+	case "after_delete":
+		*tt = AfterDelete
+	default:
+		return errors.New("unknown trigger timing: " + s)
+	}
+	return nil
+}
+
 // TriggerDescription holds all information about a trigger
 type TriggerDescription struct {
-	Name      string        // Trigger name (user-defined or auto-generated)
-	Timing    TriggerTiming // BEFORE/AFTER INSERT/UPDATE/DELETE
-	Func      scm.Scmer     // The trigger function (compiled Scheme procedure)
-	SourceSQL string        // Original SQL body text (for SHOW TRIGGERS)
-	IsSystem  bool          // True for auto-generated triggers (hidden from SHOW TRIGGERS)
-	Priority  int           // Execution order (lower = earlier)
+	Name      string        `json:"name"`                // Trigger name (user-defined or auto-generated)
+	Timing    TriggerTiming `json:"timing"`              // BEFORE/AFTER INSERT/UPDATE/DELETE
+	Func      scm.Scmer     `json:"func"`                // The trigger function (compiled Scheme procedure)
+	SourceSQL string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
+	IsSystem  bool          `json:"is_system,omitempty"`  // True for auto-generated triggers (hidden from SHOW TRIGGERS)
+	Priority  int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
 }
 
 // GetTriggers returns all triggers for a specific timing

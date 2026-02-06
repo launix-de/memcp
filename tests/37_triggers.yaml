@@ -266,19 +266,19 @@ test_cases:
       affected_rows_any: true
 
   - name: "CREATE AFTER INSERT trigger with INSERT INTO"
-    noncritical: true
+
     sql: "CREATE TRIGGER after_ins_log AFTER INSERT ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, new_val) VALUES (NEW.id, 'insert', NEW.val); END"
     expect:
       affected_rows: 0
 
   - name: "INSERT triggers AFTER INSERT"
-    noncritical: true
+
     sql: "INSERT INTO trigger_test (id, val, name) VALUES (300, 42, 'after_test')"
     expect:
       affected_rows: 1
 
   - name: "Verify AFTER INSERT trigger logged the action"
-    noncritical: true
+
     sql: "SELECT id, action, new_val FROM trigger_log WHERE id = 300"
     expect:
       rows: 1
@@ -288,7 +288,7 @@ test_cases:
           new_val: 42
 
   - name: "DROP AFTER INSERT trigger"
-    noncritical: true
+
     sql: "DROP TRIGGER IF EXISTS after_ins_log"
     expect:
       affected_rows: 0
@@ -300,39 +300,39 @@ test_cases:
       affected_rows_any: true
 
   - name: "CREATE trigger with IF...THEN...END IF"
-    noncritical: true
+
     sql: "CREATE TRIGGER if_trigger BEFORE INSERT ON trigger_test FOR EACH ROW BEGIN IF NEW.val > 100 THEN SET NEW.val = 100; END IF; END"
     expect:
       affected_rows: 0
 
   - name: "INSERT with value > 100 should be capped"
-    noncritical: true
+
     sql: "INSERT INTO trigger_test (id, val, name) VALUES (400, 999, 'if_test')"
     expect:
       affected_rows: 1
 
   - name: "Verify IF trigger capped value to 100"
-    noncritical: true
+
     sql: "SELECT val FROM trigger_test WHERE id = 400"
     expect:
       data:
         - val: 100
 
   - name: "INSERT with value <= 100 should not be changed"
-    noncritical: true
+
     sql: "INSERT INTO trigger_test (id, val, name) VALUES (401, 50, 'if_test2')"
     expect:
       affected_rows: 1
 
   - name: "Verify IF trigger did not change value <= 100"
-    noncritical: true
+
     sql: "SELECT val FROM trigger_test WHERE id = 401"
     expect:
       data:
         - val: 50
 
   - name: "DROP IF trigger"
-    noncritical: true
+
     sql: "DROP TRIGGER IF EXISTS if_trigger"
     expect:
       affected_rows: 0
@@ -344,19 +344,19 @@ test_cases:
       affected_rows_any: true
 
   - name: "CREATE trigger with SET before IF"
-    noncritical: true
+
     sql: "CREATE TRIGGER if_else_trigger BEFORE INSERT ON trigger_test FOR EACH ROW BEGIN SET NEW.name = 'always'; IF NEW.val > 100 THEN SET NEW.val = 100; END IF; END"
     expect:
       affected_rows: 0
 
   - name: "INSERT with IF false - val should NOT be NULL or changed"
-    noncritical: true
+
     sql: "INSERT INTO trigger_test (id, val, name) VALUES (450, 42, 'original')"
     expect:
       affected_rows: 1
 
   - name: "Verify IF false keeps original val AND applies prior SET"
-    noncritical: true
+
     sql: "SELECT id, val, name FROM trigger_test WHERE id = 450"
     expect:
       rows: 1
@@ -366,13 +366,13 @@ test_cases:
           name: "always"
 
   - name: "INSERT with IF true - both modifications applied"
-    noncritical: true
+
     sql: "INSERT INTO trigger_test (id, val, name) VALUES (451, 200, 'original')"
     expect:
       affected_rows: 1
 
   - name: "Verify IF true applies both modifications"
-    noncritical: true
+
     sql: "SELECT id, val, name FROM trigger_test WHERE id = 451"
     expect:
       rows: 1
@@ -382,7 +382,7 @@ test_cases:
           name: "always"
 
   - name: "DROP IF ELSE trigger"
-    noncritical: true
+
     sql: "DROP TRIGGER IF EXISTS if_else_trigger"
     expect:
       affected_rows: 0
@@ -404,19 +404,19 @@ test_cases:
       affected_rows: 1
 
   - name: "CREATE AFTER DELETE trigger"
-    noncritical: true
+
     sql: "CREATE TRIGGER after_del_log AFTER DELETE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'delete', OLD.val); END"
     expect:
       affected_rows: 0
 
   - name: "DELETE triggers AFTER DELETE"
-    noncritical: true
+
     sql: "DELETE FROM trigger_test WHERE id = 500"
     expect:
       affected_rows: 1
 
   - name: "Verify AFTER DELETE trigger logged the action"
-    noncritical: true
+
     sql: "SELECT id, action, old_val FROM trigger_log WHERE id = 500"
     expect:
       rows: 1
@@ -426,7 +426,107 @@ test_cases:
           old_val: 77
 
   - name: "DROP AFTER DELETE trigger"
-    noncritical: true
+
     sql: "DROP TRIGGER IF EXISTS after_del_log"
+    expect:
+      affected_rows: 0
+
+  # --- Trigger persistence: set up multiple triggers, SHUTDOWN, verify ---
+  - name: "Clean up for persistence test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for persistence test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE BEFORE INSERT trigger for persistence"
+    sql: "CREATE TRIGGER persist_bi BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = NEW.val + 1000"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE BEFORE UPDATE trigger for persistence"
+    sql: "CREATE TRIGGER persist_bu BEFORE UPDATE ON trigger_test FOR EACH ROW SET NEW.val = OLD.val + 1"
+    expect:
+      affected_rows: 0
+
+  - name: "Verify triggers work before SHUTDOWN"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (900, 5, 'persist_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEFORE INSERT trigger applied before SHUTDOWN"
+    sql: "SELECT val FROM trigger_test WHERE id = 900"
+    expect:
+      data:
+        - val: 1005
+
+  - name: "Verify BEFORE UPDATE trigger works before SHUTDOWN"
+    sql: "UPDATE trigger_test SET name = 'updated' WHERE id = 900"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify counter incremented before SHUTDOWN"
+    sql: "SELECT val, name FROM trigger_test WHERE id = 900"
+    expect:
+      data:
+        - val: 1006
+          name: "updated"
+
+  - name: "SHUTDOWN for trigger persistence test"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "After restart: verify data survived"
+    sql: "SELECT val, name FROM trigger_test WHERE id = 900"
+    expect:
+      data:
+        - val: 1006
+          name: "updated"
+
+  - name: "After restart: BEFORE INSERT trigger still works"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (901, 10, 'after_restart')"
+    expect:
+      affected_rows: 1
+
+  - name: "After restart: verify BEFORE INSERT trigger applied"
+    sql: "SELECT val FROM trigger_test WHERE id = 901"
+    expect:
+      data:
+        - val: 1010
+
+  - name: "After restart: BEFORE UPDATE trigger still works"
+    sql: "UPDATE trigger_test SET name = 'restarted' WHERE id = 900"
+    expect:
+      affected_rows: 1
+
+  - name: "After restart: verify BEFORE UPDATE trigger incremented"
+    sql: "SELECT val, name FROM trigger_test WHERE id = 900"
+    expect:
+      data:
+        - val: 1007
+          name: "restarted"
+
+  - name: "After restart: DROP persisted trigger"
+    sql: "DROP TRIGGER persist_bi"
+    expect:
+      affected_rows: 0
+
+  - name: "After restart: INSERT without dropped trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (902, 42, 'no_trigger')"
+    expect:
+      affected_rows: 1
+
+  - name: "After restart: verify trigger no longer applies"
+    sql: "SELECT val FROM trigger_test WHERE id = 902"
+    expect:
+      data:
+        - val: 42
+
+  - name: "Cleanup remaining trigger"
+    sql: "DROP TRIGGER IF EXISTS persist_bu"
     expect:
       affected_rows: 0

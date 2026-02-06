@@ -416,13 +416,13 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			// capture row data for triggers before deletion (outside lock for BEFORE trigger)
 			if withTrigger && len(t.t.Triggers) > 0 {
 				t.mu.RLock()
-				triggerDeletedRow = make(dataset, 0, len(t.columns))
-				for k := range t.columns {
-					cs := t.getColumnStorageOrPanicEx(k, true)
+				triggerDeletedRow = make(dataset, len(t.t.Columns))
+				for i, col := range t.t.Columns {
+					cs := t.getColumnStorageOrPanicEx(col.Name, true)
 					if idx < t.main_count {
-						triggerDeletedRow = append(triggerDeletedRow, cs.GetValue(idx))
+						triggerDeletedRow[i] = cs.GetValue(idx)
 					} else {
-						triggerDeletedRow = append(triggerDeletedRow, t.getDelta(int(idx-t.main_count), k))
+						triggerDeletedRow[i] = t.getDelta(int(idx-t.main_count), col.Name)
 					}
 				}
 				t.mu.RUnlock()
