@@ -18,6 +18,7 @@ package scm
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -696,7 +698,11 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagFloat:
 			return v.Float()
 		case tagString:
-			return v.String()
+			s := v.String()
+			if !utf8.ValidString(s) {
+				return map[string]any{"bytes": base64.StdEncoding.EncodeToString([]byte(s))}
+			}
+			return s
 		case tagSymbol:
 			return map[string]any{"symbol": v.String()}
 		case tagSlice:
@@ -851,6 +857,14 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 			if sym, ok := t["symbol"]; ok {
 				if name, ok2 := sym.(string); ok2 {
 					return NewSymbol(name)
+				}
+			}
+			// decode binary strings encoded by MarshalJSON
+			if b64, ok := t["bytes"]; ok && len(t) == 1 {
+				if str, ok2 := b64.(string); ok2 {
+					if raw, err := base64.StdEncoding.DecodeString(str); err == nil {
+						return NewString(string(raw))
+					}
 				}
 			}
 			// assoc map -> flatten to '("k" v ...)

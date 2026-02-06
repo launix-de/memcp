@@ -24,6 +24,7 @@
 (sql_builtins "FROM_BASE64" base64_decode)
 /* SQL LENGTH(str): NULL-safe wrapper around strlen */
 (sql_builtins "LENGTH" (lambda (x) (if (nil? x) nil (strlen x))))
+(sql_builtins "REPEAT" string_repeat)
 
 /* vectors */
 (sql_builtins "VECTOR_DISTANCE" dot)

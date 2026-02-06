@@ -97,6 +97,14 @@ func StrLike(str, pattern string) bool {
 func TransformFromJSON(a_ any) Scmer {
 	switch a := a_.(type) {
 	case map[string]any:
+		// decode binary strings encoded by MarshalJSON
+		if b64, ok := a["bytes"]; ok && len(a) == 1 {
+			if s, ok := b64.(string); ok {
+				if raw, err := base64.StdEncoding.DecodeString(s); err == nil {
+					return NewString(string(raw))
+				}
+			}
+		}
 		result := make([]Scmer, 0, len(a)*2)
 		for k, v := range a {
 			result = append(result, NewString(k), TransformFromJSON(v))
@@ -268,6 +276,25 @@ func init_strings() {
 				result[i] = NewString(v)
 			}
 			return NewSlice(result)
+		}, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"string_repeat", "repeats a string n times",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string to repeat"},
+			DeclarationParameter{"count", "number", "number of repetitions"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			n := ToInt(a[1])
+			if n <= 0 {
+				return NewString("")
+			}
+			return NewString(strings.Repeat(String(a[0]), int(n)))
 		}, true,
 	})
 

@@ -1,0 +1,246 @@
+# Blob storage and REPEAT() function tests
+
+metadata:
+  version: "1.0"
+  description: "REPEAT function, TEXT/BLOB storage with short and long strings, persistence"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS blob_test"
+
+test_cases:
+  # --- REPEAT function ---
+  - name: "REPEAT basic"
+    sql: "SELECT REPEAT('ab', 3) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "ababab"
+
+  - name: "REPEAT with NULL"
+    sql: "SELECT REPEAT(NULL, 5) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "REPEAT with zero count"
+    sql: "SELECT REPEAT('x', 0) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: ""
+
+  # --- TEXT column with short strings (no blob overlay) ---
+  - name: "Create blob_test table"
+    sql: |
+      CREATE TABLE blob_test (
+        id INT PRIMARY KEY,
+        payload TEXT
+      )
+    expect:
+      rows: 0
+
+  - name: "Insert short strings"
+    sql: |
+      INSERT INTO blob_test (id, payload) VALUES
+      (1, 'hello'),
+      (2, 'world')
+    expect:
+      affected_rows: 2
+
+  - name: "Select short strings"
+    sql: "SELECT id, payload FROM blob_test ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          payload: "hello"
+        - id: 2
+          payload: "world"
+
+  # --- TEXT column with long strings (triggers OverlayBlob) ---
+  - name: "Insert long string (>255 bytes)"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (3, REPEAT('A', 1000))"
+    expect:
+      affected_rows: 1
+
+  - name: "Roundtrip: LENGTH of long string"
+    sql: "SELECT LENGTH(payload) AS len FROM blob_test WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - len: 1000
+
+  - name: "Roundtrip: long string value check"
+    sql: "SELECT payload = REPEAT('A', 1000) AS ok FROM blob_test WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  # --- Dedup: same long string twice ---
+  - name: "Insert duplicate long string"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (4, REPEAT('A', 1000))"
+    expect:
+      affected_rows: 1
+
+  - name: "Both rows return same value"
+    sql: "SELECT id FROM blob_test WHERE payload = REPEAT('A', 1000) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 3
+        - id: 4
+
+  # --- Escaping: string starting with '!' ---
+  - name: "Insert string starting with exclamation mark"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (5, '!dangerous-prefix')"
+    expect:
+      affected_rows: 1
+
+  - name: "Select string starting with exclamation mark"
+    sql: "SELECT payload FROM blob_test WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - payload: "!dangerous-prefix"
+
+  # --- Mixed short + long strings ---
+  - name: "Insert another long string"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (6, REPEAT('Z', 500))"
+    expect:
+      affected_rows: 1
+
+  - name: "Mixed lengths: count all rows"
+    sql: "SELECT COUNT(*) AS cnt FROM blob_test"
+    expect:
+      rows: 1
+      data:
+        - cnt: 6
+
+  # --- NULL in blob column ---
+  - name: "Insert NULL payload"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (7, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Select NULL payload"
+    sql: "SELECT payload FROM blob_test WHERE id = 7"
+    expect:
+      rows: 1
+      data:
+        - payload: null
+
+  # --- UPDATE blob value ---
+  - name: "Update short to long string"
+    sql: "UPDATE blob_test SET payload = REPEAT('U', 800) WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify updated value length"
+    sql: "SELECT LENGTH(payload) AS len FROM blob_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - len: 800
+
+  # --- DELETE row with blob ---
+  - name: "Delete row with long blob"
+    sql: "DELETE FROM blob_test WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify row deleted"
+    sql: "SELECT COUNT(*) AS cnt FROM blob_test WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  # --- Binary data via FROM_BASE64 ---
+  - name: "Insert binary with null bytes"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (10, FROM_BASE64('AAABAP8A/w=='))"
+    expect:
+      affected_rows: 1
+
+  - name: "Roundtrip binary with null bytes"
+    sql: "SELECT TO_BASE64(payload) AS b FROM blob_test WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - b: "AAABAP8A/w=="
+
+  - name: "Insert binary with 0xFF and control chars"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (11, FROM_BASE64('/////w=='))"
+    expect:
+      affected_rows: 1
+
+  - name: "Roundtrip binary with 0xFF"
+    sql: "SELECT TO_BASE64(payload) AS b FROM blob_test WHERE id = 11"
+    expect:
+      rows: 1
+      data:
+        - b: "/////w=="
+
+  - name: "Insert long binary blob (>255 bytes, triggers OverlayBlob)"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (12, FROM_BASE64(REPEAT('AAAA', 100)))"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify long binary length"
+    sql: "SELECT LENGTH(payload) AS len FROM blob_test WHERE id = 12"
+    expect:
+      rows: 1
+      data:
+        - len: 300
+
+  - name: "Roundtrip long binary data"
+    sql: "SELECT TO_BASE64(payload) = REPEAT('AAAA', 100) AS ok FROM blob_test WHERE id = 12"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  # --- Persistence: SHUTDOWN + restart + verify ---
+  - name: "SHUTDOWN memcp"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "After restart: count rows"
+    sql: "SELECT COUNT(*) AS cnt FROM blob_test"
+    expect:
+      rows: 1
+      data:
+        - cnt: 9
+
+  - name: "After restart: long string intact"
+    sql: "SELECT LENGTH(payload) AS len FROM blob_test WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - len: 1000
+
+  - name: "After restart: short string intact"
+    sql: "SELECT payload FROM blob_test WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - payload: "world"
+
+  - name: "After restart: binary with null bytes intact"
+    sql: "SELECT TO_BASE64(payload) AS b FROM blob_test WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - b: "AAABAP8A/w=="
+
+  - name: "After restart: long binary blob intact"
+    sql: "SELECT TO_BASE64(payload) = REPEAT('AAAA', 100) AS ok FROM blob_test WHERE id = 12"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS blob_test"
