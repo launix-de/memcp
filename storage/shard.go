@@ -156,6 +156,9 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 		cnt := columnstorage.Deserialize(f)
 		f.Close()
+		if blob, ok := columnstorage.(*OverlayBlob); ok {
+			blob.SetPersistence(u.t.schema.persistence)
+		}
 		if cnt > u.main_count {
 			u.main_count = cnt
 		}
@@ -838,8 +841,16 @@ func (t *storageShard) RemoveFromDisk() {
 	if t.logfile != nil {
 		t.logfile.Close()
 	}
+	// Release blob refcounts before removing column files.
+	// Skip for COLD shards (columns not loaded) -- orphaned blobs will be cleaned by (clean).
 	for _, col := range t.t.Columns {
-		// delete column from file
+		if cs, ok := t.columns[col.Name]; ok && cs != nil {
+			if blob, ok := cs.(*OverlayBlob); ok {
+				blob.ReleaseBlobs(t.main_count)
+			}
+		}
+	}
+	for _, col := range t.t.Columns {
 		t.t.schema.persistence.RemoveColumn(t.uuid.String(), col.Name)
 	}
 	t.t.schema.persistence.RemoveLog(t.uuid.String())
@@ -968,6 +979,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 			}
 			// build phase
+			if blob, ok := newcol.(*OverlayBlob); ok {
+				blob.persistence = result.t.schema.persistence
+			}
 			newcol.init(i)
 			i = 0
 			// build main

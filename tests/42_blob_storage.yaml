@@ -242,5 +242,119 @@ test_cases:
       data:
         - ok: 1
 
+  # --- Blob refcount: DROP TABLE releases blobs ---
+  - name: "Refcount: create table with long blob"
+    sql: |
+      CREATE TABLE blob_rc1 (
+        id INT PRIMARY KEY,
+        payload TEXT
+      )
+    expect:
+      rows: 0
+
+  - name: "Refcount: insert long string into rc1"
+    sql: "INSERT INTO blob_rc1 (id, payload) VALUES (1, REPEAT('R', 1000))"
+    expect:
+      affected_rows: 1
+
+  - name: "Refcount: persist via shutdown"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Refcount: verify blob after restart"
+    sql: "SELECT payload = REPEAT('R', 1000) AS ok FROM blob_rc1 WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  - name: "Refcount: drop table releases blob"
+    sql: "DROP TABLE blob_rc1"
+    expect:
+      rows: 0
+
+  # --- Blob refcount: shared blob across two tables ---
+  - name: "Shared blob: create first table"
+    sql: |
+      CREATE TABLE blob_shared1 (
+        id INT PRIMARY KEY,
+        payload TEXT
+      )
+    expect:
+      rows: 0
+
+  - name: "Shared blob: create second table"
+    sql: |
+      CREATE TABLE blob_shared2 (
+        id INT PRIMARY KEY,
+        payload TEXT
+      )
+    expect:
+      rows: 0
+
+  - name: "Shared blob: insert long string in first"
+    sql: "INSERT INTO blob_shared1 (id, payload) VALUES (1, REPEAT('S', 1000))"
+    expect:
+      affected_rows: 1
+
+  - name: "Shared blob: insert same long string in second"
+    sql: "INSERT INTO blob_shared2 (id, payload) VALUES (1, REPEAT('S', 1000))"
+    expect:
+      affected_rows: 1
+
+  - name: "Shared blob: drop first table"
+    sql: "DROP TABLE blob_shared1"
+    expect:
+      rows: 0
+
+  - name: "Shared blob: second table still has blob"
+    sql: "SELECT payload = REPEAT('S', 1000) AS ok FROM blob_shared2 WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  - name: "Shared blob: drop second table"
+    sql: "DROP TABLE blob_shared2"
+    expect:
+      rows: 0
+
+  # --- Blob refcount persistence across restart ---
+  - name: "RC persist: create table"
+    sql: |
+      CREATE TABLE blob_rcpersist (
+        id INT PRIMARY KEY,
+        payload TEXT
+      )
+    expect:
+      rows: 0
+
+  - name: "RC persist: insert long blob"
+    sql: "INSERT INTO blob_rcpersist (id, payload) VALUES (1, REPEAT('P', 1000))"
+    expect:
+      affected_rows: 1
+
+  - name: "RC persist: first shutdown to persist"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "RC persist: after restart blob still readable"
+    sql: "SELECT payload = REPEAT('P', 1000) AS ok FROM blob_rcpersist WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  - name: "RC persist: drop table after restart"
+    sql: "DROP TABLE blob_rcpersist"
+    expect:
+      rows: 0
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS blob_test"
+  - sql: "DROP TABLE IF EXISTS blob_rc1"
+  - sql: "DROP TABLE IF EXISTS blob_shared1"
+  - sql: "DROP TABLE IF EXISTS blob_shared2"
+  - sql: "DROP TABLE IF EXISTS blob_rcpersist"

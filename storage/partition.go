@@ -528,6 +528,9 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 							newcol = newcol2
 						}
 					}
+					if blob, ok := newcol.(*OverlayBlob); ok {
+						blob.persistence = s.t.schema.persistence
+					}
 					newcol.init(s.main_count) // allocate memory
 					for i, v := range values {
 						newcol.build(uint(i), v)

@@ -1061,6 +1061,15 @@ func Init(en scm.Env) {
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"clean", "removes orphaned blobs that are no longer referenced by any column storage (GC for crash orphans)",
+		0, 0,
+		[]scm.DeclarationParameter{}, "string",
+		func(a ...scm.Scmer) scm.Scmer {
+			panic("not yet implemented")
+		}, false,
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		"loadCSV", "loads a CSV stream into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.",
 		3, 5,
 		[]scm.DeclarationParameter{

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -19,6 +19,7 @@ package storage
 import "io"
 import "os"
 import "fmt"
+import "sync"
 import "bufio"
 import "bytes"
 import "strings"
@@ -27,7 +28,9 @@ import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 type FileStorage struct {
-	path string
+	path     string
+	blobMu   sync.Mutex
+	blobRefs map[string]int // lazy-loaded from blob/refcounts.json
 }
 
 type FileFactory struct {
@@ -45,7 +48,7 @@ func ProcessColumnName(col string) string {
 }
 
 func (f *FileFactory) CreateDatabase(schema string) PersistenceEngine {
-	return &FileStorage{f.Basepath + "/" + schema + "/"}
+	return &FileStorage{path: f.Basepath + "/" + schema + "/"}
 }
 
 func (f *FileStorage) ReadSchema() []byte {
@@ -92,6 +95,81 @@ func (s *FileStorage) WriteColumn(shard string, column string) io.WriteCloser {
 
 func (s *FileStorage) RemoveColumn(shard string, column string) {
 	os.Remove(s.path + shard + "-" + ProcessColumnName(column))
+}
+
+func (s *FileStorage) blobPath(hash string) string {
+	if len(hash) >= 4 {
+		return s.path + "blob/" + hash[:2] + "/" + hash[2:4] + "/" + hash
+	}
+	return s.path + "blob/" + hash
+}
+
+func (s *FileStorage) ReadBlob(hash string) io.ReadCloser {
+	f, err := os.Open(s.blobPath(hash))
+	if err != nil {
+		return ErrorReader{err}
+	}
+	return f
+}
+
+func (s *FileStorage) WriteBlob(hash string) io.WriteCloser {
+	p := s.blobPath(hash)
+	os.MkdirAll(p[:strings.LastIndex(p, "/")], 0750)
+	f, err := os.Create(p)
+	if err != nil {
+		panic(err)
+	}
+	return f
+}
+
+func (s *FileStorage) DeleteBlob(hash string) {
+	os.Remove(s.blobPath(hash))
+}
+
+func (s *FileStorage) loadBlobRefs() {
+	if s.blobRefs != nil {
+		return
+	}
+	s.blobRefs = make(map[string]int)
+	data, err := os.ReadFile(s.path + "blob/refcounts.json")
+	if err == nil && len(data) > 0 {
+		json.Unmarshal(data, &s.blobRefs)
+	}
+}
+
+func (s *FileStorage) IncrBlobRefcount(hash string) {
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	s.loadBlobRefs()
+	s.blobRefs[hash]++
+}
+
+func (s *FileStorage) DecrBlobRefcount(hash string) {
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	s.loadBlobRefs()
+	rc, ok := s.blobRefs[hash]
+	if !ok {
+		return // unknown hash (legacy data), no-op
+	}
+	rc--
+	if rc <= 0 {
+		delete(s.blobRefs, hash)
+		s.DeleteBlob(hash)
+	} else {
+		s.blobRefs[hash] = rc
+	}
+}
+
+func (s *FileStorage) FlushBlobRefcounts() {
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	if s.blobRefs == nil {
+		return
+	}
+	os.MkdirAll(s.path+"blob", 0750)
+	data, _ := json.Marshal(s.blobRefs)
+	os.WriteFile(s.path+"blob/refcounts.json", data, 0640)
 }
 
 func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {

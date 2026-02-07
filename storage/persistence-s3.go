@@ -71,6 +71,9 @@ type S3Storage struct {
 	mu     sync.Mutex
 	client *s3.Client
 	opened bool
+
+	blobMu   sync.Mutex
+	blobRefs map[string]int // lazy-loaded from blob/refcounts.json
 }
 
 func NewS3Storage(f *S3Factory, prefix string) *S3Storage {
@@ -220,6 +223,98 @@ func (s *S3Storage) RemoveColumn(shard string, column string) {
 		Bucket: aws.String(s.factory.Bucket),
 		Key:    aws.String(key),
 	})
+}
+
+func (s *S3Storage) ReadBlob(hash string) io.ReadCloser {
+	s.ensureOpen()
+	key := s.key("blob/" + hash)
+	resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(s.factory.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return ErrorReader{err}
+	}
+	return resp.Body
+}
+
+func (s *S3Storage) WriteBlob(hash string) io.WriteCloser {
+	s.ensureOpen()
+	key := s.key("blob/" + hash)
+	return &s3WriteCloser{s: s, key: key}
+}
+
+func (s *S3Storage) DeleteBlob(hash string) {
+	s.ensureOpen()
+	key := s.key("blob/" + hash)
+	_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+		Bucket: aws.String(s.factory.Bucket),
+		Key:    aws.String(key),
+	})
+}
+
+func (s *S3Storage) loadBlobRefs() {
+	if s.blobRefs != nil {
+		return
+	}
+	s.blobRefs = make(map[string]int)
+	s.ensureOpen()
+	key := s.key("blob/refcounts.json")
+	resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(s.factory.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err == nil && len(data) > 0 {
+		json.Unmarshal(data, &s.blobRefs)
+	}
+}
+
+func (s *S3Storage) IncrBlobRefcount(hash string) {
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	s.loadBlobRefs()
+	s.blobRefs[hash]++
+}
+
+func (s *S3Storage) DecrBlobRefcount(hash string) {
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	s.loadBlobRefs()
+	rc, ok := s.blobRefs[hash]
+	if !ok {
+		return
+	}
+	rc--
+	if rc <= 0 {
+		delete(s.blobRefs, hash)
+		s.DeleteBlob(hash)
+	} else {
+		s.blobRefs[hash] = rc
+	}
+}
+
+func (s *S3Storage) FlushBlobRefcounts() {
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	if s.blobRefs == nil {
+		return
+	}
+	s.ensureOpen()
+	data, _ := json.Marshal(s.blobRefs)
+	key := s.key("blob/refcounts.json")
+	_, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(s.factory.Bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(data),
+	})
+	if err != nil {
+		panic(fmt.Sprintf("S3Storage: failed to flush blob refcounts: %v", err))
+	}
 }
 
 func (s *S3Storage) Remove() {

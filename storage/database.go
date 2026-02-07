@@ -156,7 +156,7 @@ func LoadDatabases() {
 		if entry.IsDir() {
 			db := new(database)
 			db.Name = entry.Name()
-			db.persistence = &FileStorage{Basepath + "/" + entry.Name() + "/"}
+			db.persistence = &FileStorage{path: Basepath + "/" + entry.Name() + "/"}
 			db.srState = COLD
 			databases.Set(db)
 		} else if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "settings.json" {

@@ -98,9 +98,9 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 
 // TriggerDescription holds all information about a trigger
 type TriggerDescription struct {
-	Name      string        `json:"name"`                // Trigger name (user-defined or auto-generated)
-	Timing    TriggerTiming `json:"timing"`              // BEFORE/AFTER INSERT/UPDATE/DELETE
-	Func      scm.Scmer     `json:"func"`                // The trigger function (compiled Scheme procedure)
+	Name      string        `json:"name"`                 // Trigger name (user-defined or auto-generated)
+	Timing    TriggerTiming `json:"timing"`               // BEFORE/AFTER INSERT/UPDATE/DELETE
+	Func      scm.Scmer     `json:"func"`                 // The trigger function (compiled Scheme procedure)
 	SourceSQL string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
 	IsSystem  bool          `json:"is_system,omitempty"`  // True for auto-generated triggers (hidden from SHOW TRIGGERS)
 	Priority  int           `json:"priority,omitempty"`   // Execution order (lower = earlier)

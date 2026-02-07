@@ -44,6 +44,12 @@ type PersistenceEngine interface {
 	ReadColumn(shard string, column string) io.ReadCloser
 	WriteColumn(shard string, column string) io.WriteCloser
 	RemoveColumn(shard string, column string)
+	ReadBlob(hash string) io.ReadCloser
+	WriteBlob(hash string) io.WriteCloser
+	DeleteBlob(hash string)
+	IncrBlobRefcount(hash string)
+	DecrBlobRefcount(hash string)                                  // deletes blob when RC <= 0
+	FlushBlobRefcounts()                                           // persist refcount changes to disk
 	OpenLog(shard string) PersistenceLogfile                       // open for writing
 	ReplayLog(shard string) (chan interface{}, PersistenceLogfile) // replay existing log
 	RemoveLog(shard string)

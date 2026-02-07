@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -29,34 +29,26 @@ import "github.com/launix-de/memcp/scm"
 type OverlayBlob struct {
 	// every overlay has a base
 	Base ColumnStorage
-	// values
-	values map[[32]byte]string // gzipped contents content addressable
-	size   uint
+	// values: used during build() for dedup, and for legacy inline data
+	values      map[[32]byte]string
+	size        uint
+	persistence PersistenceEngine // reference to database persistence
+	refs        map[string]bool   // hex-hashes referenced in this build()
 }
 
 func (s *OverlayBlob) ComputeSize() uint {
-	var sz uint = 48 + 48*uint(len(s.values)) + s.size + s.Base.ComputeSize()
-	for _, v := range s.values {
-		sz += 24 + 16 + (uint(len(v)-1)/8+1)*8 + 32 // some overhead + content
-	}
-	return sz
+	return 48 + s.Base.ComputeSize()
 }
 
 func (s *OverlayBlob) String() string {
-	return fmt.Sprintf("overlay[%dx zip-blob %d]+%s", len(s.values), s.size, s.Base.String())
+	return fmt.Sprintf("overlay[blob]+%s", s.Base.String())
 }
 
 func (s *OverlayBlob) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(31)) // 31 = OverlayBlob
 	io.WriteString(f, "1234567")                    // dummy
-	var size uint64 = uint64(len(s.values))
-	binary.Write(f, binary.LittleEndian, size) // write number of overlay items
-	for k, v := range s.values {
-		f.Write(k[:])
-		binary.Write(f, binary.LittleEndian, uint64(len(v))) // write length
-		io.WriteString(f, v)                                 // write content
-	}
-	s.Base.Serialize(f) // serialize base
+	binary.Write(f, binary.LittleEndian, uint64(0)) // size=0: no inline blobs
+	s.Base.Serialize(f)                             // serialize base
 }
 
 func (s *OverlayBlob) Deserialize(f io.Reader) uint {
@@ -67,21 +59,52 @@ func (s *OverlayBlob) Deserialize(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &size) // read size
 	s.values = make(map[[32]byte]string)
 
-	for i := uint64(0); i < size; i++ {
-		var key [32]byte
-		f.Read(key[:])
-		var l uint64
-		binary.Read(f, binary.LittleEndian, &l)
-		value := make([]byte, l)
-		f.Read(value)
-		s.size += uint(l) // statistics
-		s.values[key] = string(value)
+	if size > 0 {
+		// LEGACY: read inline blobs (migration in SetPersistence)
+		for i := uint64(0); i < size; i++ {
+			var key [32]byte
+			f.Read(key[:])
+			var l uint64
+			binary.Read(f, binary.LittleEndian, &l)
+			value := make([]byte, l)
+			f.Read(value)
+			s.size += uint(l)
+			s.values[key] = string(value)
+		}
 	}
 	var basetype uint8
 	f.Read(unsafe.Slice(&basetype, 1))
 	s.Base = reflect.New(storages[basetype]).Interface().(ColumnStorage)
 	l := s.Base.Deserialize(f) // read base
 	return l
+}
+
+// SetPersistence sets the persistence engine and migrates legacy inline blobs.
+func (s *OverlayBlob) SetPersistence(p PersistenceEngine) {
+	s.persistence = p
+	s.refs = make(map[string]bool)
+	for hash, data := range s.values {
+		hexHash := fmt.Sprintf("%x", hash[:])
+		w := p.WriteBlob(hexHash)
+		io.WriteString(w, data)
+		w.Close()
+		p.IncrBlobRefcount(hexHash)
+		s.refs[hexHash] = true
+	}
+	p.FlushBlobRefcounts()
+	s.values = nil
+	s.size = 0
+}
+
+func gunzipValue(gzipped string) scm.Scmer {
+	var b strings.Builder
+	reader, err := gzip.NewReader(strings.NewReader(gzipped))
+	if err != nil {
+		panic(err)
+	}
+	_, _ = io.Copy(&b, reader)
+	reader.Close()
+	return scm.NewString(b.String())
 }
 
 func (s *OverlayBlob) GetValue(i uint) scm.Scmer {
@@ -92,16 +115,26 @@ func (s *OverlayBlob) GetValue(i uint) scm.Scmer {
 			if len(vs) > 1 && vs[1] == '!' {
 				return scm.NewString(vs[1:]) // escaped string
 			}
-			if val, ok := s.values[*(*[32]byte)(unsafe.Pointer(unsafe.StringData(vs[1:])))]; ok {
-				var b strings.Builder
-				reader, err := gzip.NewReader(strings.NewReader(val))
-				if err != nil {
-					panic(err)
+			hashKey := *(*[32]byte)(unsafe.Pointer(unsafe.StringData(vs[1:])))
+
+			// load from persistence (no RAM caching)
+			if s.persistence != nil {
+				hexHash := fmt.Sprintf("%x", hashKey[:])
+				r := s.persistence.ReadBlob(hexHash)
+				data, err := io.ReadAll(r)
+				r.Close()
+				if err == nil && len(data) > 0 {
+					return gunzipValue(string(data))
 				}
-				_, _ = io.Copy(&b, reader)
-				reader.Close()
-				return scm.NewString(b.String())
 			}
+
+			// fallback: check in-memory values (memory-mode or during build)
+			if s.values != nil {
+				if val, ok := s.values[hashKey]; ok {
+					return gunzipValue(val)
+				}
+			}
+
 			return scm.NewNil() // value lost
 		}
 	}
@@ -133,6 +166,7 @@ func (s *OverlayBlob) scan(i uint, value scm.Scmer) {
 func (s *OverlayBlob) init(i uint) {
 	s.values = make(map[[32]byte]string)
 	s.size = 0
+	s.refs = make(map[string]bool)
 	s.Base.init(i)
 }
 func (s *OverlayBlob) build(i uint, value scm.Scmer) {
@@ -142,13 +176,31 @@ func (s *OverlayBlob) build(i uint, value scm.Scmer) {
 			h := sha256.New()
 			io.WriteString(h, vs)
 			hashsum := h.Sum(nil)
+			hashKey := *(*[32]byte)(unsafe.Pointer(&hashsum[0]))
 			s.Base.build(i, scm.NewString("!"+string(hashsum)))
-			var b strings.Builder
-			z := gzip.NewWriter(&b)
-			_, _ = io.Copy(z, strings.NewReader(vs))
-			z.Close()
-			s.size += uint(b.Len())
-			s.values[*(*[32]byte)(unsafe.Pointer(&hashsum[0]))] = b.String()
+
+			// deduplicate: only compress+write if not already seen
+			if _, exists := s.values[hashKey]; !exists {
+				var b strings.Builder
+				z := gzip.NewWriter(&b)
+				_, _ = io.Copy(z, strings.NewReader(vs))
+				z.Close()
+				gzipped := b.String()
+				s.size += uint(len(gzipped))
+				s.values[hashKey] = gzipped
+
+				// write-through to persistence
+				if s.persistence != nil {
+					hexHash := fmt.Sprintf("%x", hashKey[:])
+					w := s.persistence.WriteBlob(hexHash)
+					io.WriteString(w, gzipped)
+					w.Close()
+					if !s.refs[hexHash] {
+						s.persistence.IncrBlobRefcount(hexHash)
+						s.refs[hexHash] = true
+					}
+				}
+			}
 		} else {
 			if vs != "" && vs[0] == '!' {
 				s.Base.build(i, scm.NewString("!"+vs))
@@ -161,9 +213,52 @@ func (s *OverlayBlob) build(i uint, value scm.Scmer) {
 	s.Base.build(i, value)
 }
 func (s *OverlayBlob) finish() {
+	if s.persistence != nil {
+		s.values = nil
+		s.size = 0
+		s.persistence.FlushBlobRefcounts()
+	}
 	s.Base.finish()
 }
 func (s *OverlayBlob) proposeCompression(i uint) ColumnStorage {
 	// dont't propose another pass
 	return nil
+}
+
+// ReleaseBlobs decrements RC for all blob hashes referenced by this OverlayBlob.
+func (s *OverlayBlob) ReleaseBlobs(count uint) {
+	if s.persistence == nil {
+		return
+	}
+
+	// Case 1: refs from build() available
+	if s.refs != nil && len(s.refs) > 0 {
+		for hexHash := range s.refs {
+			s.persistence.DecrBlobRefcount(hexHash)
+		}
+		s.refs = nil
+		s.persistence.FlushBlobRefcounts()
+		return
+	}
+
+	// Case 2: loaded from disk, refs unknown -- scan Base column
+	seen := make(map[string]bool)
+	for i := uint(0); i < count; i++ {
+		v := s.Base.GetValue(i)
+		if v.IsString() {
+			vs := v.String()
+			// Blob reference: "!" + 32 bytes hash, NOT "!!" (escaped)
+			if len(vs) == 33 && vs[0] == '!' && vs[1] != '!' {
+				hashKey := *(*[32]byte)(unsafe.Pointer(unsafe.StringData(vs[1:])))
+				hexHash := fmt.Sprintf("%x", hashKey[:])
+				if !seen[hexHash] {
+					seen[hexHash] = true
+					s.persistence.DecrBlobRefcount(hexHash)
+				}
+			}
+		}
+	}
+	if len(seen) > 0 {
+		s.persistence.FlushBlobRefcounts()
+	}
 }
