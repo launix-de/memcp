@@ -462,8 +462,8 @@ func main() {
 				knownArgs = append(knownArgs, os.Args[i+2])
 				skipNext = true
 			}
-		} else if arg == "-no-repl" {
-			knownArgs = append(knownArgs, arg)
+		} else if arg == "-no-repl" || arg == "--no-repl" {
+			knownArgs = append(knownArgs, "-no-repl")
 		} else if arg == "-h" || arg == "-help" || arg == "--help" {
 			knownArgs = append(knownArgs, arg)
 		} else if len(arg) > 2 && arg[:2] == "--" {
