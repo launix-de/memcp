@@ -1,0 +1,116 @@
+metadata:
+  version: "1.0"
+  description: "DDL compatibility for dbcheck.php migration tool"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dbc_child"
+  - sql: "DROP TABLE IF EXISTS dbc_t"
+
+test_cases:
+  # --- Table creation with full MySQL syntax ---
+  - name: "CREATE TABLE with CHARSET COLLATE ENGINE"
+    sql: "CREATE TABLE dbc_t (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL, email VARCHAR(200) COLLATE utf8mb4_unicode_ci, notes TEXT, active BOOLEAN DEFAULT true) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE=InnoDB"
+
+  # --- LOCK/UNLOCK (no-op) ---
+  - name: "LOCK TABLES WRITE"
+    sql: "LOCK TABLES dbc_t WRITE"
+  - name: "UNLOCK TABLES"
+    sql: "UNLOCK TABLES"
+
+  # --- SHOW operations ---
+  - name: "SHOW TABLES"
+    sql: "SHOW TABLES"
+  - name: "SHOW FULL COLUMNS FROM table"
+    sql: "SHOW FULL COLUMNS FROM dbc_t"
+  - name: "SHOW CREATE TABLE"
+    sql: "SHOW CREATE TABLE dbc_t"
+  - name: "SHOW INDEXES FROM table"
+    sql: "SHOW INDEXES FROM dbc_t"
+
+  # --- ALTER TABLE ADD column ---
+  - name: "ALTER TABLE ADD COLUMN with type"
+    sql: "ALTER TABLE dbc_t ADD COLUMN status VARCHAR(20)"
+  - name: "ALTER TABLE ADD column with COLLATE"
+    sql: "ALTER TABLE dbc_t ADD slug VARCHAR(100) COLLATE utf8mb4_unicode_ci"
+
+  # --- ALTER TABLE MODIFY/CHANGE ---
+  - name: "ALTER TABLE MODIFY COLUMN type"
+    sql: "ALTER TABLE dbc_t MODIFY COLUMN name VARCHAR(200)"
+  - name: "ALTER TABLE MODIFY with NOT NULL"
+    sql: "ALTER TABLE dbc_t MODIFY COLUMN status VARCHAR(50) NOT NULL"
+  - name: "ALTER TABLE CHANGE column type"
+    sql: "ALTER TABLE dbc_t CHANGE email email VARCHAR(250)"
+
+  # --- ALTER TABLE DROP COLUMN ---
+  - name: "ALTER TABLE DROP COLUMN"
+    sql: "ALTER TABLE dbc_t DROP COLUMN notes"
+
+  # --- ALTER TABLE defaults ---
+  - name: "ALTER TABLE ALTER COLUMN SET DEFAULT"
+    sql: "ALTER TABLE dbc_t ALTER COLUMN status SET DEFAULT 'active'"
+  - name: "ALTER TABLE ALTER COLUMN DROP DEFAULT"
+    sql: "ALTER TABLE dbc_t ALTER COLUMN status DROP DEFAULT"
+
+  # --- ALTER TABLE CONVERT TO CHARACTER SET (no-op) ---
+  - name: "ALTER TABLE CONVERT TO CHARACTER SET"
+    sql: "ALTER TABLE dbc_t CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+
+  # --- Indexes ---
+  - name: "CREATE INDEX non-unique (no-op)"
+    sql: "CREATE INDEX idx_name ON dbc_t (name)"
+  - name: "CREATE UNIQUE INDEX"
+    sql: "CREATE UNIQUE INDEX uk_email ON dbc_t (email)"
+  - name: "CREATE UNIQUE INDEX with prefix"
+    sql: "CREATE UNIQUE INDEX uk_slug ON dbc_t (slug(128))"
+  - name: "DROP INDEX"
+    sql: "DROP INDEX uk_slug ON dbc_t"
+
+  # --- Primary Key manipulation ---
+  - name: "ALTER TABLE DROP PRIMARY KEY"
+    sql: "ALTER TABLE dbc_t DROP PRIMARY KEY"
+  - name: "ALTER TABLE MODIFY with PRIMARY KEY AUTO_INCREMENT"
+    sql: "ALTER TABLE dbc_t MODIFY id INT NOT NULL PRIMARY KEY AUTO_INCREMENT"
+
+  # --- Foreign Keys ---
+  - name: "CREATE child table for FK test"
+    sql: "CREATE TABLE dbc_child (id INT PRIMARY KEY, parent_id INT)"
+  - name: "ALTER TABLE ADD FOREIGN KEY"
+    sql: "ALTER TABLE dbc_child ADD CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES dbc_t(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+  - name: "ALTER TABLE DROP FOREIGN KEY"
+    sql: "ALTER TABLE dbc_child DROP FOREIGN KEY fk_parent"
+
+  # --- INSERT IGNORE ---
+  - name: "Insert seed data"
+    sql: "INSERT INTO dbc_t (id, name, email, status, active) VALUES (1, 'Alice', 'alice@test.com', 'active', true)"
+  - name: "INSERT IGNORE duplicate"
+    sql: "INSERT IGNORE INTO dbc_t (id, name, email, status, active) VALUES (1, 'Bob', 'bob@test.com', 'active', true)"
+    expect:
+      affected_rows: 0
+  - name: "INSERT IGNORE ... SELECT"
+    sql: "INSERT IGNORE INTO dbc_t (id, name, email, status, active) SELECT id+100, name, CONCAT(name, '@copy.com'), status, active FROM dbc_t"
+    expect:
+      affected_rows: 1
+
+  # --- Triggers ---
+  - name: "DROP TRIGGER IF EXISTS"
+    sql: "DROP TRIGGER IF EXISTS `dbc_t.ib`"
+  - name: "CREATE TRIGGER"
+    sql: "CREATE TRIGGER `dbc_t.ib` BEFORE INSERT ON dbc_t FOR EACH ROW BEGIN SET NEW.status = COALESCE(NEW.status, 'new'); END"
+  - name: "DROP TRIGGER IF EXISTS after create"
+    sql: "DROP TRIGGER IF EXISTS `dbc_t.ib`"
+
+  # --- ANALYZE TABLE (no-op) ---
+  - name: "ANALYZE TABLE"
+    sql: "ANALYZE TABLE dbc_t"
+
+  # --- INFORMATION_SCHEMA queries ---
+  - name: "INFORMATION_SCHEMA.STATISTICS"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.STATISTICS WHERE table_name = 'dbc_t'"
+
+  # --- SHOW CREATE TABLE with schema prefix ---
+  - name: "SHOW CREATE TABLE with schema prefix"
+    sql: "SHOW CREATE TABLE `memcp-tests`.dbc_t"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dbc_child"
+  - sql: "DROP TABLE IF EXISTS dbc_t"

@@ -735,6 +735,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or psql_identifier '(psql_identifier (atom "AS" true) psql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
 
+		/* SHOW INDEXES FROM t / SHOW INDEX FROM t / SHOW KEYS FROM t (no-op, returns empty) */
+		(parser '((atom "SHOW" true) (or (atom "INDEXES" true) (atom "INDEX" true) (atom "KEYS" true)) (atom "FROM" true) psql_identifier (? (atom "WHERE" true) psql_expression)) "ignore")
+
+		/* ANALYZE TABLE (no-op) */
+		(parser '((atom "ANALYZE" true) (atom "TABLE" true) psql_identifier) "ignore")
+
 		/* USE database - change current schema */
 		(parser '((atom "USE" true) (define db psql_identifier)) '('session "schema" db))
 

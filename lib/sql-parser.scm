@@ -883,6 +883,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "SHOW" true) (atom "TRIGGERS" true) (? (atom "FROM" true) (define tgtschema sql_identifier)))
 			'((quote map) '((quote show_triggers) (coalesce tgtschema schema)) '((quote lambda) '((quote tr)) '((quote resultrow) (quote tr)))))
 
+		/* SHOW INDEXES FROM t / SHOW INDEX FROM t / SHOW KEYS FROM t (no-op, returns empty) */
+		(parser '((atom "SHOW" true) (or (atom "INDEXES" true) (atom "INDEX" true) (atom "KEYS" true)) (atom "FROM" true) sql_identifier (? (atom "WHERE" true) sql_expression)) "ignore")
+
 		/* SHOW ENGINES: list engines recognized by CREATE/ALTER TABLE */
 		(parser '((atom "SHOW" true) (atom "ENGINES" true)) (cons '!begin '(
 			'((quote resultrow) '((quote list) "Engine" "SAFE"    "Support" "DEFAULT" "Comment" "Safe durable engine"              "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
@@ -989,12 +992,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* USE database - change current schema */
 		(parser '((atom "USE" true) (define db sql_identifier)) '('session "schema" db))
 
+		/* ANALYZE TABLE (no-op) */
+		(parser '((atom "ANALYZE" true) (atom "TABLE" true) sql_identifier) "ignore")
+
 		/* TODO: draw transaction number, commit */
 		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('session "transaction" 1))
 		(parser '((atom "COMMIT" true)) '('session "transaction" nil))
 		(parser '((atom "ROLLBACK" true)) '('session "transaction" nil))
 		"" /* comment only command */
-	))) 
+	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
 
