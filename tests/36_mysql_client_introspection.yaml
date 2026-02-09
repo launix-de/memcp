@@ -1,0 +1,39 @@
+# MySQL Client Introspection — DBeaver/CLI probes
+
+metadata:
+  version: "1.0"
+  description: "SHOW ENGINES/CHARSET/COLLATION/VARIABLES; @@GLOBAL vars"
+
+setup: []
+
+test_cases:
+  - name: "SHOW ENGINES parses and returns rows"
+    sql: "SHOW ENGINES"
+    expect: {}  # Just check it runs successfully
+
+  - name: "SHOW CHARSET returns utf8mb4"
+    sql: "SHOW CHARSET LIKE 'utf8mb4'"
+    expect: {}  # Presence-only for now
+
+  - name: "SHOW COLLATION returns utf8mb4 variants"
+    sql: "SHOW COLLATION LIKE 'utf8mb4%'"
+    expect: {}  # Presence-only for now
+
+  - name: "SHOW VARIABLES LIKE lower_case_table_names"
+    sql: "SHOW VARIABLES LIKE 'lower_case_table_names'"
+    expect: {}  # Presence-only for now
+
+  - name: "Global character set and collation via @@GLOBAL"
+    sql: "SELECT @@GLOBAL.character_set_server AS character_set_server, @@GLOBAL.collation_server AS collation_server"
+    expect:
+      rows: 1
+      data:
+        - character_set_server: "utf8mb4"
+          collation_server: "utf8mb4_general_ci"
+
+  - name: "SHOW PLUGINS (stub) succeeds"
+    sql: "SHOW PLUGINS"
+    expect: {}  # Accept empty result
+
+cleanup: []
+

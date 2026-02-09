@@ -1,0 +1,375 @@
+# Decimal Storage, Sanitizer & Type Constraints
+# Tests for DECIMAL column handling, type sanitizers (INT, FLOAT, DECIMAL, BOOLEAN, VARCHAR),
+# NOT NULL enforcement, mixed-type columns, and rounding behavior.
+
+metadata:
+  version: "1.0"
+  description: "Decimal columns, sanitizer enforcement, type constraints, mixed types"
+
+setup:
+  - sql: "CREATE TABLE dec_basic (id INT, price DECIMAL(12,2), qty INT)"
+  - sql: "CREATE TABLE dec_nn (id INT, val DECIMAL(10,2) NOT NULL)"
+  - sql: "CREATE TABLE int_strict (id INT, n INT)"
+  - sql: "CREATE TABLE float_strict (id INT, f FLOAT)"
+  - sql: "CREATE TABLE bool_strict (id INT, b BOOLEAN)"
+  - sql: "CREATE TABLE vc_strict (id INT, s VARCHAR(5))"
+  - sql: "CREATE TABLE mixed_col (id INT, x any)"
+  - sql: "CREATE TABLE dec_scale0 (id INT, val DECIMAL(10,0))"
+
+test_cases:
+
+  # === DECIMAL INSERT & READBACK ===
+
+  - name: "Insert exact DECIMAL values"
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (1, 12.57, 100), (2, 0.50, 200), (3, 99.99, 50)"
+    expect:
+      affected_rows: 3
+
+  - name: "Readback DECIMAL values"
+    sql: "SELECT id, price, qty FROM dec_basic ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, price: 12.57, qty: 100 }
+        - { id: 2, price: 0.50, qty: 200 }
+        - { id: 3, price: 99.99, qty: 50 }
+
+  - name: "SUM on DECIMAL column"
+    sql: "SELECT SUM(price) AS total FROM dec_basic"
+    expect:
+      rows: 1
+      data:
+        - { total: 113.06 }
+
+  - name: "Insert negative DECIMAL"
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (4, -25.30, 10)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback negative DECIMAL"
+    sql: "SELECT price FROM dec_basic WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - { price: -25.30 }
+
+  - name: "Insert zero DECIMAL"
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (5, 0.00, 0)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback zero DECIMAL"
+    sql: "SELECT price FROM dec_basic WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - { price: 0.0 }
+
+  - name: "Insert NULL into nullable DECIMAL"
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (6, NULL, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback NULL DECIMAL"
+    sql: "SELECT price, qty FROM dec_basic WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - { price: null, qty: null }
+
+  # === DECIMAL ROUNDING (noncritical — float precision) ===
+
+  - name: "Rounding 12.565 to 2 decimal places"
+    noncritical: true
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (10, 12.565, 1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback rounded value 12.57"
+    noncritical: true
+    sql: "SELECT price FROM dec_basic WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - { price: 12.57 }
+
+  - name: "Rounding 0.999 to 2 decimal places"
+    noncritical: true
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (11, 0.999, 1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback rounded value 1.00"
+    noncritical: true
+    sql: "SELECT price FROM dec_basic WHERE id = 11"
+    expect:
+      rows: 1
+      data:
+        - { price: 1.0 }
+
+  - name: "Rounding 3.141592 to 2 decimal places"
+    noncritical: true
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (12, 3.141592, 1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback rounded value 3.14"
+    noncritical: true
+    sql: "SELECT price FROM dec_basic WHERE id = 12"
+    expect:
+      rows: 1
+      data:
+        - { price: 3.14 }
+
+  # === DECIMAL(10,0) — behaves like INT ===
+
+  - name: "Insert into DECIMAL(10,0)"
+    sql: "INSERT INTO dec_scale0 (id, val) VALUES (1, 42), (2, 7.9)"
+    expect:
+      affected_rows: 2
+
+  - name: "Readback DECIMAL(10,0) truncates fractional"
+    noncritical: true
+    sql: "SELECT val FROM dec_scale0 ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { val: 42 }
+        - { val: 8 }
+
+  # === UPDATE with sanitizer ===
+
+  - name: "UPDATE DECIMAL column"
+    sql: "UPDATE dec_basic SET price = 77.77 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback updated DECIMAL"
+    sql: "SELECT price FROM dec_basic WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - { price: 77.77 }
+
+  - name: "UPDATE rounds DECIMAL value"
+    noncritical: true
+    sql: "UPDATE dec_basic SET price = 55.555 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback UPDATE-rounded DECIMAL"
+    noncritical: true
+    sql: "SELECT price FROM dec_basic WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - { price: 55.56 }
+
+  # === NOT NULL enforcement ===
+
+  - name: "Insert valid NOT NULL DECIMAL"
+    sql: "INSERT INTO dec_nn (id, val) VALUES (1, 10.25)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert NULL into NOT NULL DECIMAL column must fail"
+    sql: "INSERT INTO dec_nn (id, val) VALUES (2, NULL)"
+    expect:
+      error: true
+
+  - name: "UPDATE NOT NULL DECIMAL to NULL must fail"
+    sql: "UPDATE dec_nn SET val = NULL WHERE id = 1"
+    expect:
+      error: true
+
+  # === INT sanitizer: string rejection ===
+
+  - name: "Insert int into INT column"
+    sql: "INSERT INTO int_strict (id, n) VALUES (1, 42)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert float into INT column converts"
+    sql: "INSERT INTO int_strict (id, n) VALUES (2, 7.9)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback INT from float → truncated to int"
+    sql: "SELECT n FROM int_strict WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - { n: 7 }
+
+  - name: "Insert string into INT column must fail"
+    sql: "INSERT INTO int_strict (id, n) VALUES (3, 'hello')"
+    expect:
+      error: true
+
+  - name: "UPDATE INT column with string must fail"
+    sql: "UPDATE int_strict SET n = 'world' WHERE id = 1"
+    expect:
+      error: true
+
+  # === FLOAT sanitizer: string rejection ===
+
+  - name: "Insert float into FLOAT column"
+    sql: "INSERT INTO float_strict (id, f) VALUES (1, 3.14)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert int into FLOAT column converts"
+    sql: "INSERT INTO float_strict (id, f) VALUES (2, 42)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback FLOAT from int → float"
+    sql: "SELECT f FROM float_strict WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - { f: 42.0 }
+
+  - name: "Insert string into FLOAT column must fail"
+    sql: "INSERT INTO float_strict (id, f) VALUES (3, 'nope')"
+    expect:
+      error: true
+
+  # === BOOLEAN sanitizer ===
+
+  - name: "Insert TRUE into BOOLEAN column"
+    sql: "INSERT INTO bool_strict (id, b) VALUES (1, TRUE)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert FALSE into BOOLEAN column"
+    sql: "INSERT INTO bool_strict (id, b) VALUES (2, FALSE)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback BOOLEAN values"
+    sql: "SELECT id, b FROM bool_strict ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { id: 1, b: true }
+        - { id: 2, b: false }
+
+  # === VARCHAR sanitizer: length truncation ===
+
+  - name: "Insert short string into VARCHAR(5)"
+    sql: "INSERT INTO vc_strict (id, s) VALUES (1, 'abc')"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert exact-length string into VARCHAR(5)"
+    sql: "INSERT INTO vc_strict (id, s) VALUES (2, 'abcde')"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert too-long string into VARCHAR(5) gets truncated"
+    noncritical: true
+    sql: "INSERT INTO vc_strict (id, s) VALUES (3, 'abcdefghij')"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback truncated VARCHAR"
+    noncritical: true
+    sql: "SELECT s FROM vc_strict WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - { s: "abcde" }
+
+  # === DECIMAL string rejection ===
+
+  - name: "Insert string into DECIMAL column must fail"
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (99, 'notanumber', 1)"
+    expect:
+      error: true
+
+  - name: "UPDATE DECIMAL column with string must fail"
+    sql: "UPDATE dec_basic SET price = 'text' WHERE id = 1"
+    expect:
+      error: true
+
+  # === Mixed-type column (any) ===
+
+  - name: "Insert int into any column"
+    sql: "INSERT INTO mixed_col (id, x) VALUES (1, 42)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert float into any column"
+    sql: "INSERT INTO mixed_col (id, x) VALUES (2, 3.14)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert string into any column"
+    sql: "INSERT INTO mixed_col (id, x) VALUES (3, 'hello')"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert NULL into any column"
+    sql: "INSERT INTO mixed_col (id, x) VALUES (4, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert boolean into any column"
+    sql: "INSERT INTO mixed_col (id, x) VALUES (5, TRUE)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback mixed-type column preserves types"
+    sql: "SELECT id, x FROM mixed_col ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - { id: 1, x: 42 }
+        - { id: 2, x: 3.14 }
+        - { id: 3, x: "hello" }
+        - { id: 4, x: null }
+        - { id: 5, x: true }
+
+  - name: "SUM on mixed any column with numerics"
+    sql: "SELECT SUM(x) AS total FROM mixed_col WHERE id <= 2"
+    expect:
+      rows: 1
+      data:
+        - { total: 45.14 }
+
+  # === Edge cases: large DECIMAL values ===
+
+  - name: "Insert large DECIMAL value"
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (20, 999999999.99, 1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback large DECIMAL"
+    sql: "SELECT price FROM dec_basic WHERE id = 20"
+    expect:
+      rows: 1
+      data:
+        - { price: 999999999.99 }
+
+  - name: "Insert very small DECIMAL value"
+    sql: "INSERT INTO dec_basic (id, price, qty) VALUES (21, 0.01, 1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback very small DECIMAL"
+    sql: "SELECT price FROM dec_basic WHERE id = 21"
+    expect:
+      rows: 1
+      data:
+        - { price: 0.01 }
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dec_basic"
+  - sql: "DROP TABLE IF EXISTS dec_nn"
+  - sql: "DROP TABLE IF EXISTS int_strict"
+  - sql: "DROP TABLE IF EXISTS float_strict"
+  - sql: "DROP TABLE IF EXISTS bool_strict"
+  - sql: "DROP TABLE IF EXISTS vc_strict"
+  - sql: "DROP TABLE IF EXISTS mixed_col"
+  - sql: "DROP TABLE IF EXISTS dec_scale0"
