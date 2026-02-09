@@ -508,3 +508,24 @@ func DropTable(schema, name string, ifexists bool) {
 		s.RemoveFromDisk()
 	}
 }
+
+func RenameTable(schema, oldname, newname string) {
+	db := GetDatabase(schema)
+	if db == nil {
+		panic("Database " + schema + " does not exist")
+	}
+	db.ensureLoaded()
+	db.schemalock.Lock()
+	defer db.schemalock.Unlock()
+	t := db.tables.Get(oldname)
+	if t == nil {
+		panic("Table " + schema + "." + oldname + " does not exist")
+	}
+	if db.tables.Get(newname) != nil {
+		panic("Table " + schema + "." + newname + " already exists")
+	}
+	db.tables.Remove(oldname)
+	t.Name = newname
+	db.tables.Set(t)
+	db.save()
+}

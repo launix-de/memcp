@@ -737,6 +737,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
+		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier)) '((quote renametable) schema oldname newname))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key psql_identifier) "=" (define value (or
 			(parser (atom "content" true) "content") /* quirks for SET xmloption = content */
 			(parser (atom "warning" true) "warning") /* quirks for SET client_min_messages = warning */

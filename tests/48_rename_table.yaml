@@ -1,0 +1,67 @@
+# RENAME TABLE and ALTER TABLE ADD FULLTEXT
+
+metadata:
+  version: "1.0"
+  description: "RENAME TABLE support and ADD FULLTEXT no-op"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ren_new"
+  - sql: "DROP TABLE IF EXISTS ren_old"
+
+test_cases:
+  - name: "Create table for rename"
+    sql: "CREATE TABLE ren_old (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100))"
+
+  - name: "Insert data before rename"
+    sql: "INSERT INTO ren_old (name) VALUES ('Alice'), ('Bob')"
+    expect:
+      affected_rows: 2
+
+  - name: "Verify data in old table"
+    sql: "SELECT COUNT(*) AS cnt FROM ren_old"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 2 }
+
+  - name: "RENAME TABLE old TO new"
+    sql: "RENAME TABLE ren_old TO ren_new"
+
+  - name: "Select from new table"
+    sql: "SELECT name FROM ren_new ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { name: "Alice" }
+        - { name: "Bob" }
+
+  - name: "Old table must not exist"
+    sql: "SELECT * FROM ren_old"
+    expect:
+      error: true
+
+  - name: "Insert into renamed table"
+    sql: "INSERT INTO ren_new (name) VALUES ('Charlie')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify all data after rename"
+    sql: "SELECT COUNT(*) AS cnt FROM ren_new"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 3 }
+
+  - name: "ALTER TABLE ADD FULLTEXT no-op"
+    sql: "ALTER TABLE ren_new ADD FULLTEXT search(name)"
+
+  - name: "Table still works after ADD FULLTEXT"
+    sql: "SELECT COUNT(*) AS cnt FROM ren_new"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 3 }
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ren_new"
+  - sql: "DROP TABLE IF EXISTS ren_old"

@@ -811,6 +811,19 @@ func Init(en scm.Env) {
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"renametable", "renames a table",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database"},
+			scm.DeclarationParameter{"oldname", "string", "current name of the table"},
+			scm.DeclarationParameter{"newname", "string", "new name of the table"},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			RenameTable(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
+			return scm.NewBool(true)
+		}, false,
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table and returns the number of successful items",
 		4, 8,
 		[]scm.DeclarationParameter{
