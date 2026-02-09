@@ -1,0 +1,40 @@
+# GROUP_CONCAT aggregate function
+
+metadata:
+  version: "1.0"
+  description: "GROUP_CONCAT with and without SEPARATOR"
+
+setup:
+  - sql: "CREATE TABLE gc_t (grp INT, val VARCHAR(50))"
+  - sql: "INSERT INTO gc_t (grp, val) VALUES (1, 'a'), (1, 'b'), (1, 'c'), (2, 'x'), (2, 'y')"
+
+test_cases:
+  - name: "GROUP_CONCAT default separator (comma)"
+    sql: "SELECT grp, GROUP_CONCAT(val) AS vals FROM gc_t GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+
+  - name: "GROUP_CONCAT with SEPARATOR"
+    sql: "SELECT grp, GROUP_CONCAT(val SEPARATOR ';') AS vals FROM gc_t GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+
+  - name: "GROUP_CONCAT single group"
+    sql: "SELECT GROUP_CONCAT(val) AS vals FROM gc_t WHERE grp = 1"
+    expect:
+      rows: 1
+
+  - name: "GROUP_CONCAT with SEPARATOR space"
+    sql: "SELECT GROUP_CONCAT(val SEPARATOR ' ') AS vals FROM gc_t WHERE grp = 2"
+    expect:
+      rows: 1
+
+  - name: "GROUP_CONCAT empty result"
+    sql: "SELECT GROUP_CONCAT(val) AS vals FROM gc_t WHERE grp = 99"
+    expect:
+      rows: 1
+      data:
+        - { vals: null }
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS gc_t"

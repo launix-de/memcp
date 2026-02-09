@@ -189,6 +189,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "AVG" true) "(" (define s psql_expression) ")") '((quote /) '('aggregate s (quote +) 0) '('aggregate 1 (quote +) 0)))
 		(parser '((atom "MIN" true) "(" (define s psql_expression) ")") '('aggregate s 'min nil))
 		(parser '((atom "MAX" true) "(" (define s psql_expression) ")") '('aggregate s 'max nil))
+		(parser '((atom "GROUP_CONCAT" true) "(" (define s psql_expression) (atom "SEPARATOR" true) (define sep psql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil))
+		(parser '((atom "GROUP_CONCAT" true) "(" (define s psql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a "," 'b))) nil))
 
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
