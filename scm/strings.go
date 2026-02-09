@@ -155,11 +155,11 @@ func init_strings() {
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
-		"substr", "returns a substring",
+		"substr", "returns a substring (0-based index)",
 		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "string", "string to cut"},
-			DeclarationParameter{"start", "number", "first character index"},
+			DeclarationParameter{"start", "number", "first character index (0-based)"},
 			DeclarationParameter{"len", "number", "optional length"},
 		}, "string",
 		func(a ...Scmer) Scmer {
@@ -169,6 +169,40 @@ func init_strings() {
 				return NewString(s[i : i+ToInt(a[2])])
 			}
 			return NewString(s[i:])
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"sql_substr", "SQL SUBSTR/SUBSTRING with 1-based index and bounds checking",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "string to cut"},
+			DeclarationParameter{"start", "number", "first character position (1-based)"},
+			DeclarationParameter{"len", "number", "optional length"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			s := String(a[0])
+			slen := len(s)
+			start := ToInt(a[1]) - 1 // convert 1-based to 0-based
+			if start < 0 {
+				start = 0
+			}
+			if start >= slen {
+				return NewString("")
+			}
+			if len(a) > 2 {
+				n := ToInt(a[2])
+				if start+n > slen {
+					n = slen - start
+				}
+				if n < 0 {
+					return NewString("")
+				}
+				return NewString(s[start : start+n])
+			}
+			return NewString(s[start:])
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -256,6 +290,76 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2])))
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"strtrim", "trims whitespace from both ends of a string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			return NewString(strings.TrimSpace(String(a[0])))
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"strltrim", "trims whitespace from the left of a string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"strrtrim", "trims whitespace from the right of a string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
+		}, true,
+	})
+	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
+	Declare(&Globalenv, &Declaration{
+		"sql_trim", "SQL TRIM(): NULL-safe trim of whitespace from both ends",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			return NewString(strings.TrimSpace(String(a[0])))
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"sql_ltrim", "SQL LTRIM(): NULL-safe trim of whitespace from left",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
+		}, true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"sql_rtrim", "SQL RTRIM(): NULL-safe trim of whitespace from right",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "string", "input string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		}, true,
 	})
 	Declare(&Globalenv, &Declaration{

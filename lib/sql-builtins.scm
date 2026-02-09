@@ -9,11 +9,17 @@
 (sql_builtins "CURRENT_TIMESTAMP" now)
 (sql_builtins "NOW" now)
 
+/* time */
+(sql_builtins "FROM_UNIXTIME" (lambda (ts) (if (nil? ts) nil (format_date (simplify ts) "%Y-%m-%d %H:%i:%s"))))
+
 /* math */
 (sql_builtins "FLOOR" floor)
 (sql_builtins "CEIL" ceil)
 (sql_builtins "CEILING" ceil)
 (sql_builtins "ROUND" round)
+(sql_builtins "ABS" sql_abs)
+(sql_builtins "GREATEST" max)
+(sql_builtins "LEAST" min)
 
 /* strings */
 (sql_builtins "UPPER" toUpper)
@@ -24,7 +30,15 @@
 (sql_builtins "FROM_BASE64" base64_decode)
 /* SQL LENGTH(str): NULL-safe wrapper around strlen */
 (sql_builtins "LENGTH" (lambda (x) (if (nil? x) nil (strlen x))))
+(sql_builtins "CHAR_LENGTH" (lambda (x) (if (nil? x) nil (strlen x))))
+(sql_builtins "CHARACTER_LENGTH" (lambda (x) (if (nil? x) nil (strlen x))))
 (sql_builtins "REPEAT" string_repeat)
+/* SQL REPLACE(str, from, to) */
+(sql_builtins "REPLACE" (lambda (s from to) (if (nil? s) nil (replace s from to))))
+/* TRIM/LTRIM/RTRIM are handled as explicit parser rules in sql-parser.scm and psql-parser.scm */
+/* SQL SUBSTR/SUBSTRING: 1-based index via Go primitive */
+(sql_builtins "SUBSTR" sql_substr)
+(sql_builtins "SUBSTRING" sql_substr)
 
 /* vectors */
 (sql_builtins "VECTOR_DISTANCE" dot)

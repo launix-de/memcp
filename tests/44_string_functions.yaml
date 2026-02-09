@@ -1,0 +1,188 @@
+metadata:
+  version: "1.0"
+  description: "String functions: SUBSTR, LEFT, RIGHT, REPLACE, TRIM, CHAR_LENGTH"
+
+test_cases:
+  # --- SUBSTR / SUBSTRING (1-based) ---
+  - name: "SUBSTR basic"
+    sql: "SELECT SUBSTR('Hello World', 1, 5) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "Hello"
+
+  - name: "SUBSTR from middle"
+    sql: "SELECT SUBSTR('Hello World', 7) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "World"
+
+  - name: "SUBSTR with NULL"
+    sql: "SELECT SUBSTR(NULL, 1, 3) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "SUBSTR beyond length"
+    sql: "SELECT SUBSTR('abc', 1, 10) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "abc"
+
+  - name: "SUBSTRING alias"
+    sql: "SELECT SUBSTRING('foobar', 4, 3) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "bar"
+
+  # --- LEFT / RIGHT ---
+  - name: "LEFT basic"
+    sql: "SELECT LEFT('Hello World', 5) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "Hello"
+
+  - name: "LEFT with NULL"
+    sql: "SELECT LEFT(NULL, 3) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "RIGHT basic"
+    sql: "SELECT RIGHT('Hello World', 5) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "World"
+
+  - name: "RIGHT with NULL"
+    sql: "SELECT RIGHT(NULL, 3) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  # --- REPLACE ---
+  - name: "REPLACE basic"
+    sql: "SELECT REPLACE('Hello World', 'World', 'Earth') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "Hello Earth"
+
+  - name: "REPLACE multiple occurrences"
+    sql: "SELECT REPLACE('aabbcc', 'b', 'x') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "aaxxcc"
+
+  - name: "REPLACE with NULL"
+    sql: "SELECT REPLACE(NULL, 'a', 'b') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  # --- TRIM / LTRIM / RTRIM ---
+  - name: "TRIM both sides"
+    sql: "SELECT TRIM('  hello  ') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "hello"
+
+  - name: "TRIM with NULL"
+    sql: "SELECT TRIM(NULL) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "LTRIM"
+    sql: "SELECT CONCAT('|', LTRIM('  hello  '), '|') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "|hello  |"
+
+  - name: "RTRIM"
+    sql: "SELECT CONCAT('|', RTRIM('  hello  '), '|') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "|  hello|"
+
+  # --- CHAR_LENGTH / CHARACTER_LENGTH ---
+  - name: "CHAR_LENGTH basic"
+    sql: "SELECT CHAR_LENGTH('hello') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 5
+
+  - name: "CHARACTER_LENGTH alias"
+    sql: "SELECT CHARACTER_LENGTH('test') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 4
+
+  - name: "CHAR_LENGTH with NULL"
+    sql: "SELECT CHAR_LENGTH(NULL) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  # --- Combined usage ---
+  - name: "SUBSTR in CONCAT"
+    sql: "SELECT CONCAT(LEFT('Hello', 3), RIGHT('World', 3)) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "Helrld"
+
+  - name: "TRIM with REPLACE"
+    sql: "SELECT TRIM(REPLACE('  a-b-c  ', '-', ' ')) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "a b c"
+
+  # --- Usage with table data ---
+  - name: "Create test table"
+    sql: "CREATE TABLE fn_str_test (id INT PRIMARY KEY, name VARCHAR(100))"
+
+  - name: "Insert test data"
+    sql: "INSERT INTO fn_str_test (id, name) VALUES (1, '  Alice  '), (2, '  Bob  '), (3, NULL)"
+
+  - name: "TRIM on column"
+    sql: "SELECT TRIM(name) AS n FROM fn_str_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - n: "Alice"
+
+  - name: "LEFT on column"
+    sql: "SELECT LEFT(TRIM(name), 3) AS n FROM fn_str_test WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - n: "Bob"
+
+  - name: "SUBSTR NULL column"
+    sql: "SELECT SUBSTR(name, 1, 3) AS n FROM fn_str_test WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - n: null
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS fn_str_test"

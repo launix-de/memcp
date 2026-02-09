@@ -409,4 +409,26 @@ func init_alu() {
 		},
 		true,
 	})
+	Declare(&Globalenv, &Declaration{
+		"sql_abs", "SQL ABS(): returns absolute value, NULL-safe",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "number", "value"},
+		}, "number",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			v := a[0].Float()
+			if v < 0 {
+				v = -v
+			}
+			// preserve int type
+			if ToInt(a[0]) == int(v) && a[0].Float() == v {
+				return NewInt(int64(v))
+			}
+			return NewFloat(v)
+		},
+		true,
+	})
 }

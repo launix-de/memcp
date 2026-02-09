@@ -394,7 +394,8 @@ func (s Scmer) Bool() bool {
 	case tagFloat:
 		return math.Float64frombits(s.aux) != 0.0
 	case tagString, tagSymbol:
-		return s.String() != ""
+		str := s.String()
+		return str != "" && str != "false"
 	case tagSlice:
 		return len(s.Slice()) > 0
 	case tagVector:

@@ -16,7 +16,10 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package scm
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 func init_date() {
 	// string functions
@@ -54,6 +57,28 @@ func init_date() {
 				}
 			}
 			return NewNil()
+		},
+		true,
+	})
+	Declare(&Globalenv, &Declaration{
+		"format_date", "formats a unix timestamp into a date string",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"timestamp", "number", "unix timestamp"},
+			DeclarationParameter{"format", "string", "MySQL-style format string (e.g. %Y-%m-%d %H:%i:%s)"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			ts := ToInt(a[0])
+			t := time.Unix(int64(ts), 0).UTC()
+			format := String(a[1])
+			// convert MySQL format specifiers to Go layout
+			r := strings.NewReplacer(
+				"%Y", "2006", "%m", "01", "%d", "02",
+				"%H", "15", "%i", "04", "%s", "05",
+				"%T", "15:04:05",
+			)
+			goFmt := r.Replace(format)
+			return NewString(t.Format(goFmt))
 		},
 		true,
 	})

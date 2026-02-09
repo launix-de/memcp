@@ -41,6 +41,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "ORDER" true)
 	(atom "LIMIT" true)
 	(atom "DELIMITER" true)
+	(atom "TRIM" true)
+	(atom "LTRIM" true)
+	(atom "RTRIM" true)
 )))
 (define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"])+" false false)) "\"") (sql_unescape id))) /* with double quote */
 (define psql_identifier (parser (define x (or psql_identifier_unquoted psql_identifier_quoted)) x))
@@ -193,8 +196,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p)) /* TODO: proper implement CAST; for now make vscode work */
-		(parser '((atom "CONCAT" true) "(" (define p (+ psql_expression ",")) ")") (cons 'concat p)) /* TODO: proper implement CAST; for now make vscode work */
-		/* TODO: function call */
+		(parser '((atom "CONCAT" true) "(" (define p (+ psql_expression ",")) ")") (cons 'concat p))
+		/* TRIM/LTRIM/RTRIM as explicit parser rules for reliable dispatch */
+		(parser '((atom "TRIM" true) "(" (define e psql_expression) ")") '((quote sql_trim) e))
+		(parser '((atom "LTRIM" true) "(" (define e psql_expression) ")") '((quote sql_ltrim) e))
+		(parser '((atom "RTRIM" true) "(" (define e psql_expression) ")") '((quote sql_rtrim) e))
 
 		(parser '((atom "COALESCE" true) "(" (define args (* psql_expression ",")) ")") (cons (quote coalesceNil) args))
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
@@ -215,6 +221,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var */
 		(parser '((atom "@@" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true)) (? (atom "." true))) (define var psql_identifier_unquoted)) '('globalvars var))
 		(parser '((atom "@@" true) (define var psql_identifier_unquoted)) '('globalvars var))
+		/* LEFT(str, n) -- special case because LEFT is a reserved keyword (LEFT JOIN) */
+		(parser '((atom "LEFT" true) "(" (define s psql_expression) "," (define n psql_expression) ")") '((quote sql_substr) s 1 n))
+		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
+		(parser '((atom "RIGHT" true) "(" (define s psql_expression) "," (define n psql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* psql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
 		psql_number
 		psql_string

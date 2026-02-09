@@ -1,0 +1,115 @@
+metadata:
+  version: "1.0"
+  description: "Math and date functions: ABS, GREATEST, LEAST, FROM_UNIXTIME"
+
+test_cases:
+  # --- ABS ---
+  - name: "ABS positive"
+    sql: "SELECT ABS(42) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 42
+
+  - name: "ABS negative"
+    sql: "SELECT ABS(-42) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 42
+
+  - name: "ABS zero"
+    sql: "SELECT ABS(0) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 0
+
+  - name: "ABS with NULL"
+    sql: "SELECT ABS(NULL) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "ABS in expression"
+    sql: "SELECT ABS(5 - 10) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 5
+
+  # --- GREATEST / LEAST ---
+  - name: "GREATEST of numbers"
+    sql: "SELECT GREATEST(1, 5, 3) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 5
+
+  - name: "GREATEST of two"
+    sql: "SELECT GREATEST(10, 20) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 20
+
+  - name: "LEAST of numbers"
+    sql: "SELECT LEAST(1, 5, 3) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 1
+
+  - name: "LEAST of two"
+    sql: "SELECT LEAST(10, 20) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 10
+
+  # --- FROM_UNIXTIME ---
+  - name: "FROM_UNIXTIME epoch"
+    sql: "SELECT FROM_UNIXTIME(0) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "1970-01-01 00:00:00"
+
+  - name: "FROM_UNIXTIME with value"
+    sql: "SELECT FROM_UNIXTIME(1704067200) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-01-01 00:00:00"
+
+  - name: "FROM_UNIXTIME with NULL"
+    sql: "SELECT FROM_UNIXTIME(NULL) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  # --- Usage with table data ---
+  - name: "Create test table"
+    sql: "CREATE TABLE fn_math_test (id INT PRIMARY KEY, val INT)"
+
+  - name: "Insert test data"
+    sql: "INSERT INTO fn_math_test (id, val) VALUES (1, -10), (2, 25), (3, NULL)"
+
+  - name: "ABS on column"
+    sql: "SELECT ABS(val) AS v FROM fn_math_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - v: 10
+
+  - name: "ABS NULL column"
+    sql: "SELECT ABS(val) AS v FROM fn_math_test WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - v: null
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS fn_math_test"
