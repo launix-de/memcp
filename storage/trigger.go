@@ -16,6 +16,7 @@ Copyright (C) 2025, 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "errors"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
@@ -73,26 +74,36 @@ func (tt TriggerTiming) MarshalJSON() ([]byte, error) {
 }
 
 func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
+	// Try string first (new format)
 	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
-		return err
+	if err := json.Unmarshal(data, &s); err == nil {
+		switch s {
+		case "before_insert":
+			*tt = BeforeInsert
+		case "after_insert":
+			*tt = AfterInsert
+		case "before_update":
+			*tt = BeforeUpdate
+		case "after_update":
+			*tt = AfterUpdate
+		case "before_delete":
+			*tt = BeforeDelete
+		case "after_delete":
+			*tt = AfterDelete
+		default:
+			return errors.New("unknown trigger timing: " + s)
+		}
+		return nil
 	}
-	switch s {
-	case "before_insert":
-		*tt = BeforeInsert
-	case "after_insert":
-		*tt = AfterInsert
-	case "before_update":
-		*tt = BeforeUpdate
-	case "after_update":
-		*tt = AfterUpdate
-	case "before_delete":
-		*tt = BeforeDelete
-	case "after_delete":
-		*tt = AfterDelete
-	default:
-		return errors.New("unknown trigger timing: " + s)
+	// Fall back to numeric (legacy format)
+	var n uint8
+	if err := json.Unmarshal(data, &n); err != nil {
+		return errors.New("trigger timing must be string or number")
 	}
+	if n > uint8(AfterDelete) {
+		return fmt.Errorf("unknown trigger timing number: %d", n)
+	}
+	*tt = TriggerTiming(n)
 	return nil
 }
 
