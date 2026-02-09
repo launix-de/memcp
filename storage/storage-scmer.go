@@ -84,6 +84,15 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 		s.null++
 		return
 	}
+	if value.GetTag() == scm.TagDate {
+		v2 := value.Int()
+		if v2-s.last1 == s.last1-s.last2 {
+			s.numSeq++
+		}
+		s.last2 = s.last1
+		s.last1 = v2
+		return
+	}
 	if value.IsInt() {
 		v2 := value.Int()
 		if v2-s.last1 == s.last1-s.last2 {

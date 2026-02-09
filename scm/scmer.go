@@ -26,6 +26,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -67,6 +68,7 @@ const (
 	tagNthLocalVar
 	tagSourceInfo
 	tagFastDict
+	tagDate
 	tagAny
 	// custom tags >= 100
 )
@@ -75,6 +77,7 @@ const (
 const (
 	TagString = tagString
 	TagSymbol = tagSymbol
+	TagDate   = tagDate
 )
 
 var scmerIntSentinel byte
@@ -111,6 +114,19 @@ func NewBool(b bool) Scmer {
 
 func NewInt(i int64) Scmer {
 	return Scmer{&scmerIntSentinel, uint64(i)}
+}
+
+func NewDate(unixts int64) Scmer {
+	return Scmer{nil, makeAux(tagDate, uint64(unixts))}
+}
+
+// signExtend48 sign-extends a 48-bit two's complement value to int64.
+func signExtend48(v uint64) int64 {
+	v &= (1 << 48) - 1
+	if v&(1<<47) != 0 {
+		return int64(v) | (int64(-1) << 48)
+	}
+	return int64(v)
 }
 
 func NewFloat(f float64) Scmer {
@@ -343,6 +359,13 @@ func (s Scmer) IsFloat() bool {
 	return auxTag(s.aux) == tagFloat
 }
 
+func (s Scmer) IsDate() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagDate
+}
+
 func (s Scmer) IsString() bool {
 	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
 		return false
@@ -406,6 +429,8 @@ func (s Scmer) Bool() bool {
 		return len(s.Slice()) > 0
 	case tagVector:
 		return len(s.Vector()) > 0
+	case tagDate:
+		return true
 	case tagFastDict:
 		fd := s.FastDict()
 		return len(fd.Pairs) > 0
@@ -428,6 +453,8 @@ func (s Scmer) Int() int64 {
 			return 0
 		}
 		return v
+	case tagDate:
+		return signExtend48(auxVal(s.aux))
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1
@@ -455,6 +482,8 @@ func (s Scmer) Float() float64 {
 			return 0.0
 		}
 		return v
+	case tagDate:
+		return float64(signExtend48(auxVal(s.aux)))
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1.0
@@ -479,6 +508,8 @@ func (s Scmer) String() string {
 			return "true"
 		}
 		return "false"
+	case tagDate:
+		return time.Unix(signExtend48(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05")
 	case tagNil:
 		return "nil"
 	case tagFunc:
@@ -651,6 +682,8 @@ func (s Scmer) Any() any {
 		return s.Bool()
 	case tagInt:
 		return s.Int()
+	case tagDate:
+		return s.Int()
 	case tagFloat:
 		return s.Float()
 	case tagString:
@@ -704,6 +737,8 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			return v.Int()
 		case tagFloat:
 			return v.Float()
+		case tagDate:
+			return time.Unix(signExtend48(auxVal(v.aux)), 0).UTC().Format("2006-01-02 15:04:05")
 		case tagString:
 			s := v.String()
 			if !utf8.ValidString(s) {
@@ -789,6 +824,8 @@ func (s *Scmer) Write(w io.Writer) {
 		f := math.Float64frombits(s.aux)
 		b := strconv.AppendFloat(buf[:0], f, 'g', -1, 64)
 		w.Write(b)
+	case tagDate:
+		io.WriteString(w, time.Unix(signExtend48(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"))
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
 	case tagFunc:

@@ -125,6 +125,8 @@ func ScmerToMySQL(v Scmer) sqltypes.Value {
 			return sqltypes.NewInt32(1)
 		}
 		return sqltypes.NewInt32(0)
+	case tagDate:
+		return sqltypes.NewVarChar(v.String())
 	case tagString:
 		return sqltypes.NewVarChar(v.String())
 	default:

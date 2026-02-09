@@ -59,6 +59,8 @@ func Equal(a, b Scmer) bool {
 			return a.Bool() == b.Bool()
 		case tagInt:
 			return a.Int() == b.Int()
+		case tagDate:
+			return a.Int() == b.Int()
 		case tagFloat:
 			return a.Float() == b.Float()
 		case tagString, tagSymbol:
@@ -102,6 +104,13 @@ func Equal(a, b Scmer) bool {
 	switch ta {
 	case tagBool:
 		return a.Bool() == b.Bool()
+	case tagDate:
+		if tb == tagString || tb == tagSymbol {
+			if ts, ok := ParseDateString(b.String()); ok {
+				return a.Int() == ts
+			}
+		}
+		return a.Int() == b.Int()
 	case tagInt:
 		if tb == tagFloat {
 			return float64(a.Int()) == b.Float()
@@ -119,6 +128,11 @@ func Equal(a, b Scmer) bool {
 		}
 		return a.Float() == b.Float()
 	case tagString, tagSymbol:
+		if tb == tagDate {
+			if ts, ok := ParseDateString(a.String()); ok {
+				return ts == b.Int()
+			}
+		}
 		if tb == tagInt {
 			return a.Int() == b.Int()
 		}
@@ -233,6 +247,8 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(a.Bool() == b.Bool())
 		case tagInt:
 			return NewBool(a.Int() == b.Int())
+		case tagDate:
+			return NewBool(a.Int() == b.Int())
 		case tagFloat:
 			return NewBool(a.Float() == b.Float())
 		case tagString, tagSymbol:
@@ -267,6 +283,13 @@ func EqualSQL(a, b Scmer) Scmer {
 	}
 
 	switch ta {
+	case tagDate:
+		if tb == tagString || tb == tagSymbol {
+			if ts, ok := ParseDateString(b.String()); ok {
+				return NewBool(a.Int() == ts)
+			}
+		}
+		return NewBool(a.Int() == b.Int())
 	case tagInt:
 		if tb == tagFloat {
 			return NewBool(float64(a.Int()) == b.Float())
@@ -284,6 +307,11 @@ func EqualSQL(a, b Scmer) Scmer {
 		}
 		return NewBool(a.Float() == b.Float())
 	case tagString, tagSymbol:
+		if tb == tagDate {
+			if ts, ok := ParseDateString(a.String()); ok {
+				return NewBool(ts == b.Int())
+			}
+		}
 		if tb == tagInt {
 			return NewBool(a.Int() == b.Int())
 		}
@@ -334,12 +362,24 @@ func Less(a, b Scmer) bool {
 	}
 
 	switch ta {
+	case tagDate:
+		if tb == tagString || tb == tagSymbol {
+			if ts, ok := ParseDateString(b.String()); ok {
+				return a.Int() < ts
+			}
+		}
+		return float64(a.Int()) < b.Float()
 	case tagInt:
 		return float64(a.Int()) < b.Float()
 	case tagFloat:
 		return a.Float() < b.Float()
 	case tagString, tagSymbol:
 		switch tb {
+		case tagDate:
+			if ts, ok := ParseDateString(a.String()); ok {
+				return ts < b.Int()
+			}
+			return a.Float() < b.Float()
 		case tagInt:
 			return a.Float() < b.Float()
 		case tagFloat:

@@ -370,6 +370,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 
 	(define sql_expression3 (parser (or
+		/* date + INTERVAL n UNIT */
+		(parser '((define a sql_expression4) "+" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_identifier_unquoted)) '('date_add a n unit))
+		/* date - INTERVAL n UNIT */
+		(parser '((define a sql_expression4) "-" (atom "INTERVAL" true) (define n sql_expression4) (define unit sql_identifier_unquoted)) '('date_sub a n unit))
 		(parser '((define a sql_expression4) "+" (define b sql_expression3)) '((quote +) a b))
 		(parser '((define a sql_expression4) "-" (define b sql_expression3)) '((quote -) a b))
 		sql_expression4
@@ -410,6 +414,24 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p psql_expression) ")") '('parse_date p))
+
+		/* DATE literal: DATE 'yyyy-mm-dd' */
+		(parser '((atom "DATE" true) (define s sql_string)) '('parse_date s))
+
+		/* CURRENT_DATE / CURRENT_DATE() */
+		(parser '((atom "CURRENT_DATE" true) "(" ")") '('current_date))
+		(parser (atom "CURRENT_DATE" true) '('current_date))
+
+		/* EXTRACT(field FROM expr) */
+		(parser '((atom "EXTRACT" true) "(" (define field sql_identifier_unquoted) (atom "FROM" true) (define e sql_expression) ")") '('extract_date e field))
+
+		/* DATE_ADD(expr, INTERVAL n UNIT) */
+		(parser '((atom "DATE_ADD" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_add e n unit))
+		/* DATE_SUB(expr, INTERVAL n UNIT) */
+		(parser '((atom "DATE_SUB" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_sub e n unit))
+
+		/* DATE(expr) - extract date part */
+		(parser '((atom "DATE" true) "(" (define e sql_expression) ")") '('date_trunc_day e))
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p))
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "SIGNED" true) ")") '('simplify p))
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p))

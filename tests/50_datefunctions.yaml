@@ -1,0 +1,209 @@
+metadata:
+  version: "1.0"
+  description: "Date type and date functions: tagDate, DATE column, DATE literal, INTERVAL, EXTRACT, DATE_ADD, DATE_SUB, CURRENT_DATE"
+
+test_cases:
+  # --- Setup ---
+  - name: "Create table with DATE column"
+    sql: "CREATE TABLE date_test (id INT PRIMARY KEY, dt DATE, ts DATETIME)"
+
+  # --- INSERT datetime string ---
+  - name: "Insert datetime string"
+    sql: "INSERT INTO date_test (id, dt, ts) VALUES (1, '2024-06-15 10:30:00', '2024-06-15 10:30:00')"
+
+  - name: "Select datetime string"
+    sql: "SELECT dt, ts FROM date_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - dt: "2024-06-15 10:30:00"
+          ts: "2024-06-15 10:30:00"
+
+  # --- INSERT unix timestamp integer ---
+  - name: "Insert unix timestamp"
+    sql: "INSERT INTO date_test (id, dt, ts) VALUES (2, 1704067200, 1704067200)"
+
+  - name: "Select unix timestamp as datetime"
+    sql: "SELECT dt FROM date_test WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - dt: "2024-01-01 00:00:00"
+
+  # --- INSERT date-only string ---
+  - name: "Insert date-only string"
+    sql: "INSERT INTO date_test (id, dt) VALUES (3, '2024-12-25')"
+
+  - name: "Select date-only string"
+    sql: "SELECT dt FROM date_test WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - dt: "2024-12-25 00:00:00"
+
+  # --- NULL in DATE column ---
+  - name: "Insert NULL date"
+    sql: "INSERT INTO date_test (id, dt) VALUES (4, NULL)"
+
+  - name: "Select NULL date"
+    sql: "SELECT dt FROM date_test WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - dt: null
+
+  # --- NOW() stored in DATE column ---
+  - name: "Insert NOW() into date column"
+    sql: "INSERT INTO date_test (id, dt) VALUES (5, NOW())"
+
+  - name: "NOW() value is not null"
+    sql: "SELECT dt IS NOT NULL AS ok FROM date_test WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  # --- DATE_FORMAT on DATE column ---
+  - name: "DATE_FORMAT on date column"
+    sql: "SELECT DATE_FORMAT(dt, '%Y-%m-%d') AS d FROM date_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15"
+
+  # --- Comparison: WHERE date_col > string ---
+  - name: "Date greater than string"
+    sql: "SELECT id FROM date_test WHERE dt > '2024-06-01' AND dt < '2025-01-01' ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 3
+
+  # --- Comparison: WHERE date_col BETWEEN strings ---
+  - name: "Date BETWEEN strings"
+    sql: "SELECT id FROM date_test WHERE dt BETWEEN '2024-01-01' AND '2024-12-31' ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+
+  # --- FROM_UNIXTIME ---
+  - name: "FROM_UNIXTIME returns datetime string"
+    sql: "SELECT FROM_UNIXTIME(0) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "1970-01-01 00:00:00"
+
+  # --- DATE literal ---
+  - name: "DATE literal"
+    sql: "SELECT DATE '2024-03-15' AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-03-15 00:00:00"
+
+  # --- DATE literal in comparison ---
+  - name: "DATE literal comparison"
+    sql: "SELECT id FROM date_test WHERE dt > DATE '2024-06-01' AND dt < DATE '2025-01-01' ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 3
+
+  # --- EXTRACT ---
+  - name: "EXTRACT YEAR"
+    sql: "SELECT EXTRACT(YEAR FROM dt) AS y FROM date_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - y: 2024
+
+  - name: "EXTRACT MONTH"
+    sql: "SELECT EXTRACT(MONTH FROM dt) AS m FROM date_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - m: 6
+
+  - name: "EXTRACT DAY"
+    sql: "SELECT EXTRACT(DAY FROM dt) AS d FROM date_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - d: 15
+
+  # --- DATE_ADD ---
+  - name: "DATE_ADD days"
+    sql: "SELECT DATE_ADD(DATE '2024-01-01', INTERVAL 10 DAY) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-01-11 00:00:00"
+
+  - name: "DATE_ADD months"
+    sql: "SELECT DATE_ADD(DATE '2024-01-15', INTERVAL 3 MONTH) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-04-15 00:00:00"
+
+  - name: "DATE_ADD years"
+    sql: "SELECT DATE_ADD(DATE '2024-03-15', INTERVAL 1 YEAR) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2025-03-15 00:00:00"
+
+  # --- DATE_SUB ---
+  - name: "DATE_SUB days"
+    sql: "SELECT DATE_SUB(DATE '2024-06-15', INTERVAL 15 DAY) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-05-31 00:00:00"
+
+  # --- INTERVAL arithmetic: date + interval ---
+  - name: "Date plus interval"
+    sql: "SELECT DATE '2024-01-01' + INTERVAL 90 DAY AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-03-31 00:00:00"
+
+  - name: "Date minus interval"
+    sql: "SELECT DATE '1998-12-01' - INTERVAL 90 DAY AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "1998-09-02 00:00:00"
+
+  - name: "Date plus interval year"
+    sql: "SELECT DATE '1995-03-15' + INTERVAL 1 YEAR AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "1996-03-15 00:00:00"
+
+  # --- CURRENT_DATE ---
+  - name: "CURRENT_DATE is not null"
+    sql: "SELECT CURRENT_DATE IS NOT NULL AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  # --- DATE() function ---
+  - name: "DATE function truncates to midnight"
+    sql: "SELECT DATE('2024-06-15 10:30:00') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 00:00:00"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS date_test"

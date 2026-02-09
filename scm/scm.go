@@ -98,7 +98,7 @@ restart:
 	switch expression.GetTag() {
 	case tagSourceInfo:
 		return evalWithSourceInfo(*expression.SourceInfo(), en)
-	case tagNil, tagBool, tagInt, tagFloat, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc:
 		// literals
 		return expression
 	case tagSymbol:
@@ -973,7 +973,7 @@ func ComputeSize(v Scmer) uint {
 	switch v.GetTag() {
 	case tagNil:
 		return base
-	case tagBool, tagInt, tagFloat:
+	case tagBool, tagInt, tagFloat, tagDate:
 		return base
 	case tagFunc:
 		return base + goAllocOverhead

@@ -12,6 +12,9 @@
 /* time */
 (sql_builtins "FROM_UNIXTIME" (lambda (ts) (if (nil? ts) nil (format_date (simplify ts) "%Y-%m-%d %H:%i:%s"))))
 (sql_builtins "DATE_FORMAT" format_date)
+(sql_builtins "STR_TO_DATE" str_to_date)
+(sql_builtins "DATE" date_trunc_day)
+(sql_builtins "CURRENT_DATE" current_date)
 
 /* math */
 (sql_builtins "FLOOR" floor)

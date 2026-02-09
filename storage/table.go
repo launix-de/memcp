@@ -318,6 +318,25 @@ func (c *column) UpdateSanitizer() {
 			}
 			return scm.NewFloat(f)
 		}
+	case "DATE", "DATETIME", "TIMESTAMP":
+		inner = func(v scm.Scmer) scm.Scmer {
+			if v.GetTag() == scm.TagDate {
+				return v
+			}
+			if v.IsInt() {
+				return scm.NewDate(v.Int())
+			}
+			if v.IsFloat() {
+				return scm.NewDate(int64(v.Float()))
+			}
+			if v.IsString() {
+				if ts, ok := scm.ParseDateString(v.String()); ok {
+					return scm.NewDate(ts)
+				}
+				panic("cannot parse date string for column " + name + ": " + v.String())
+			}
+			return scm.NewDate(v.Int())
+		}
 	case "VARCHAR", "CHAR":
 		dims := c.Typdimensions
 		if len(dims) >= 1 && dims[0] > 0 {
