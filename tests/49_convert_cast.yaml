@@ -1,0 +1,146 @@
+# CONVERT, CAST, REGEXP_REPLACE
+
+metadata:
+  version: "1.0"
+  description: "Type conversion functions and REGEXP_REPLACE"
+
+test_cases:
+  # --- CAST ---
+  - name: "CAST AS UNSIGNED"
+    sql: "SELECT CAST('42' AS UNSIGNED) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 42 }
+
+  - name: "CAST AS SIGNED"
+    sql: "SELECT CAST('-7' AS SIGNED) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: -7 }
+
+  - name: "CAST AS INTEGER"
+    sql: "SELECT CAST('123' AS INTEGER) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 123 }
+
+  - name: "CAST AS DECIMAL(10,2)"
+    sql: "SELECT CAST('3.14' AS DECIMAL(10,2)) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 3.14 }
+
+  - name: "CAST AS DECIMAL(5)"
+    sql: "SELECT CAST('99.9' AS DECIMAL(5)) AS v"
+    expect:
+      rows: 1
+
+  - name: "CAST AS DECIMAL"
+    sql: "SELECT CAST('7' AS DECIMAL) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 7 }
+
+  # --- CONVERT ---
+  - name: "CONVERT to DECIMAL(13,2)"
+    sql: "SELECT CONVERT('123.45', DECIMAL(13,2)) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 123.45 }
+
+  - name: "CONVERT to DECIMAL(10)"
+    sql: "SELECT CONVERT('42', DECIMAL(10)) AS v"
+    expect:
+      rows: 1
+
+  - name: "CONVERT to DECIMAL"
+    sql: "SELECT CONVERT('55', DECIMAL) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 55 }
+
+  - name: "CONVERT to UNSIGNED"
+    sql: "SELECT CONVERT('100', UNSIGNED) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 100 }
+
+  - name: "CONVERT to SIGNED"
+    sql: "SELECT CONVERT('-50', SIGNED) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: -50 }
+
+  - name: "CONVERT to INTEGER"
+    sql: "SELECT CONVERT('200', INTEGER) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 200 }
+
+  - name: "CONVERT with COALESCE (erpl pattern)"
+    sql: "SELECT CONVERT(COALESCE(NULL, '0'), DECIMAL(13,2)) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 0 }
+
+  - name: "CONVERT arithmetic expression"
+    sql: "SELECT CONVERT(10 + 20, DECIMAL(10,2)) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 30 }
+
+  # --- REGEXP_REPLACE ---
+  - name: "REGEXP_REPLACE extract digits"
+    sql: "SELECT REGEXP_REPLACE('abc123def', '[^0-9]', '') AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: "123" }
+
+  - name: "REGEXP_REPLACE with capture group"
+    sql: "SELECT REGEXP_REPLACE('R-00042-suffix', '^.*-(\\d+).*$', '$1') AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: "00042" }
+
+  - name: "REGEXP_REPLACE strip leading zeros"
+    sql: "SELECT REGEXP_REPLACE('00042', '^0+', '') AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: "42" }
+
+  - name: "REGEXP_REPLACE with NULL"
+    sql: "SELECT REGEXP_REPLACE(NULL, 'x', 'y') AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: null }
+
+  - name: "REGEXP_REPLACE no match"
+    sql: "SELECT REGEXP_REPLACE('hello', '[0-9]', 'X') AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: "hello" }
+
+  # --- Combined erpl pattern: CAST(REGEXP_REPLACE(SUBSTR(...))) ---
+  - name: "erpl number extraction pattern"
+    sql: "SELECT CAST(REGEXP_REPLACE(SUBSTR('INV-00042-A', 5), '^(\\d+).*', '$1') AS UNSIGNED) AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: 42 }

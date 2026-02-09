@@ -410,9 +410,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p psql_expression) ")") '('parse_date p))
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
-		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p)) /* TODO: proper implement CAST; for now make vscode work */
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "SIGNED" true) ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) "(" sql_int "," sql_int ")" ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) "(" sql_int ")" ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) "(" sql_int "," sql_int ")" ")") '('simplify p))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) "(" sql_int ")" ")") '('simplify p))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) ")") '('simplify p))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "UNSIGNED" true) ")") '('simplify p))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "SIGNED" true) ")") '('simplify p))
+		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "INTEGER" true) ")") '('simplify p))
 		(parser '((atom "CONCAT" true) "(" (define p (+ sql_expression ",")) ")") (cons 'concat p))
 		/* TRIM/LTRIM/RTRIM as explicit parser rules for reliable dispatch */
 		(parser '((atom "TRIM" true) "(" (define e sql_expression) ")") '((quote sql_trim) e))

@@ -799,4 +799,24 @@ func init_strings() {
 		}, true,
 	})
 
+	Declare(&Globalenv, &Declaration{
+		"regexp_replace", "replaces matches of a regex pattern in a string",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"str", "string", "input string"},
+			DeclarationParameter{"pattern", "string", "regex pattern"},
+			DeclarationParameter{"replacement", "string", "replacement string"},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			re, err := regexp.Compile(String(a[1]))
+			if err != nil {
+				panic("regexp_replace: invalid pattern: " + err.Error())
+			}
+			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
+		}, true,
+	})
+
 }

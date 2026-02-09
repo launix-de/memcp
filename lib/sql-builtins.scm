@@ -40,6 +40,7 @@
 /* SQL SUBSTR/SUBSTRING: 1-based index via Go primitive */
 (sql_builtins "SUBSTR" sql_substr)
 (sql_builtins "SUBSTRING" sql_substr)
+(sql_builtins "REGEXP_REPLACE" regexp_replace)
 
 /* vectors */
 (sql_builtins "VECTOR_DISTANCE" dot)
