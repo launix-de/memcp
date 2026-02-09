@@ -867,6 +867,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					0
 		)))
 
+		/* SHOW CREATE TABLE [schema.]table */
+		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier))
+			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema2 id))))
+		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define id sql_identifier))
+			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema id))))
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true) (? (atom "FROM" true) (define schema sql_identifier))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '((quote resultrow) '((quote list) "Table" (quote tbl))))))
 		(parser '((atom "SHOW" true) (atom "TABLE" true) (atom "STATUS" true) (? (atom "FROM" true) (define schema sql_identifier) (? (atom "LIKE" true) (define likepattern sql_expression)))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '('if '('strlike 'tbl '('coalesce 'likepattern "%")) '((quote resultrow) '('list "name" 'tbl "rows" "1")))))) /* TODO: engine version row_format avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time collation checksum create_options comment max_index_length temporary */

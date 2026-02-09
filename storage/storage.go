@@ -883,11 +883,12 @@ func Init(en scm.Env) {
 		}, false,
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"show", "show databases/tables/columns\n\n(show) will list all databases as a list of strings\n(show schema) will list all tables as a list of strings\n(show schema tbl) will list all columns as a list of dictionaries with the keys (name type dimensions)",
-		0, 2,
+		"show", "show databases/tables/columns/meta\n\n(show) lists databases\n(show schema) lists tables\n(show schema tbl) lists columns\n(show schema tbl \"meta\") returns table metadata dict",
+		0, 3,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "(optional) name of the database if you want to list tables or columns"},
-			scm.DeclarationParameter{"table", "string", "(optional) name of the table if you want to list columns"},
+			{"schema", "string", "(optional) database name"},
+			{"table", "string", "(optional) table name"},
+			{"property", "string", "(optional) \"meta\" for table metadata"},
 		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
@@ -916,8 +917,86 @@ func Init(en scm.Env) {
 					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
 				return t.ShowColumns()
+			} else if len(a) == 3 {
+				// show table metadata
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				// engine
+				engine := "SAFE"
+				switch t.PersistencyMode {
+				case Logged:
+					engine = "LOGGING"
+				case Sloppy:
+					engine = "SLOPPY"
+				case Memory:
+					engine = "MEMORY"
+				}
+				// unique keys as list of (id, cols...)
+				uniques := make([]scm.Scmer, len(t.Unique))
+				for i, uk := range t.Unique {
+					cols := make([]scm.Scmer, len(uk.Cols))
+					for j, c := range uk.Cols {
+						cols[j] = scm.NewString(c)
+					}
+					uniques[i] = scm.NewSlice([]scm.Scmer{
+						scm.NewString("Id"), scm.NewString(uk.Id),
+						scm.NewString("Cols"), scm.NewSlice(cols),
+					})
+				}
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewString("Name"), scm.NewString(t.Name),
+					scm.NewString("Engine"), scm.NewString(engine),
+					scm.NewString("Collation"), scm.NewString(t.Collation),
+					scm.NewString("Charset"), scm.NewString(t.Charset),
+					scm.NewString("Comment"), scm.NewString(t.Comment),
+					scm.NewString("Unique"), scm.NewSlice(uniques),
+				})
 			}
 			panic("invalid call of show")
+		}, false,
+	})
+
+	// show_statistics(): returns INFORMATION_SCHEMA.STATISTICS rows for all unique constraints
+	scm.Declare(&en, &scm.Declaration{
+		"show_statistics", "returns INFORMATION_SCHEMA.STATISTICS rows for all unique constraints across all databases",
+		0, 0,
+		[]scm.DeclarationParameter{}, "any",
+		func(a ...scm.Scmer) scm.Scmer {
+			var result []scm.Scmer
+			for _, db := range databases.GetAll() {
+				db.ensureLoaded()
+				for _, t := range db.tables.GetAll() {
+					for _, uk := range t.Unique {
+						for seq, col := range uk.Cols {
+							result = append(result, scm.NewSlice([]scm.Scmer{
+								scm.NewString("table_catalog"), scm.NewString("def"),
+								scm.NewString("table_schema"), scm.NewString(db.Name),
+								scm.NewString("table_name"), scm.NewString(t.Name),
+								scm.NewString("non_unique"), scm.NewInt(0),
+								scm.NewString("index_schema"), scm.NewString(db.Name),
+								scm.NewString("index_name"), scm.NewString(uk.Id),
+								scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
+								scm.NewString("column_name"), scm.NewString(col),
+								scm.NewString("collation"), scm.NewString("A"),
+								scm.NewString("cardinality"), scm.NewNil(),
+								scm.NewString("sub_part"), scm.NewNil(),
+								scm.NewString("packed"), scm.NewNil(),
+								scm.NewString("nullable"), scm.NewString(""),
+								scm.NewString("index_type"), scm.NewString("BTREE"),
+								scm.NewString("comment"), scm.NewString(""),
+								scm.NewString("index_comment"), scm.NewString(""),
+							}))
+						}
+					}
+				}
+			}
+			return scm.NewSlice(result)
 		}, false,
 	})
 

@@ -673,6 +673,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")") (if unique '('createkey schema tbl id unique (cons (quote list) cols)) true))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define id psql_identifier)) true)
 
+		/* SHOW CREATE TABLE [schema.]table */
+		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define schema2 psql_identifier) (atom "." true) (define id psql_identifier))
+			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema2 id))))
+		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define id psql_identifier))
+			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema id))))
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true) (? (atom "FROM" true) (define schema psql_identifier))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '((quote resultrow) '((quote list) "Table" (quote tbl))))))
 		(parser '((atom "SHOW" true) (atom "TABLE" true) (atom "STATUS" true) (? (atom "FROM" true) (define schema psql_identifier) (? (atom "LIKE" true) (define likepattern psql_expression)))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '('if '('strlike 'tbl '('coalesce 'likepattern "%")) '((quote resultrow) '('list "name" 'tbl "rows" "1")))))) /* TODO: engine version row_format avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time collation checksum create_options comment max_index_length temporary */

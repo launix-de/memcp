@@ -15,6 +15,31 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+/* format_create_table: build a CREATE TABLE statement from show metadata */
+(define format_create_table (lambda (schema tbl) (begin
+	(define cols (filter (show schema tbl) (lambda (col) (not (col "IsTemp")))))
+	(define meta (show schema tbl "meta"))
+	(define col_defs (map cols (lambda (col)
+		(concat "  `" (col "Field") "` " (col "Type")
+			(if (not (col "Null")) " NOT NULL" "")
+			(if (equal? (col "Extra") "auto_increment") " AUTO_INCREMENT" "")
+			(if (not (equal? (col "Comment") "")) (concat " COMMENT '" (col "Comment") "'") "")
+		)
+	)))
+	(define uk_defs (map (meta "Unique") (lambda (uk)
+		(concat "  UNIQUE KEY `" (uk "Id") "` ("
+			(reduce (map (uk "Cols") (lambda (c) (concat "`" c "`"))) (lambda (a b) (concat a "," b)))
+			")")
+	)))
+	(define all_defs (merge col_defs uk_defs))
+	(define body (reduce all_defs (lambda (acc item) (concat acc ",\n" item))))
+	(concat "CREATE TABLE `" tbl "` (\n" body
+		"\n) ENGINE=" (meta "Engine")
+		(if (not (equal? (meta "Collation") "")) (concat " COLLATE=" (meta "Collation")) "")
+		(if (not (equal? (meta "Comment") "")) (concat " COMMENT='" (meta "Comment") "'") "")
+	)
+)))
+
 /* emulate metadata tables */
 (define get_schema (lambda (schema tbl) (match '(schema tbl)
 	/* special tables */
@@ -97,6 +122,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'("Field" "tablespace_name")
 	)
 
+	'((ignorecase "information_schema") (ignorecase "statistics")) '(
+		'("Field" "table_catalog")
+		'("Field" "table_schema")
+		'("Field" "table_name")
+		'("Field" "non_unique")
+		'("Field" "index_schema")
+		'("Field" "index_name")
+		'("Field" "seq_in_index")
+		'("Field" "column_name")
+		'("Field" "collation")
+		'("Field" "cardinality")
+		'("Field" "sub_part")
+		'("Field" "packed")
+		'("Field" "nullable")
+		'("Field" "index_type")
+		'("Field" "comment")
+		'("Field" "index_comment")
+	)
+
 	/* Unknown INFORMATION_SCHEMA table → clear SCM-side error */
 	'((ignorecase "information_schema") _)
 	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
@@ -119,6 +163,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
 	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
+	'((ignorecase "information_schema") (ignorecase "statistics"))
+	(merge '(scanfn schema '('show_statistics)) rest)
 	'((ignorecase "information_schema") (ignorecase "files"))
 	(merge '(scanfn schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
 	'((ignorecase "information_schema") (ignorecase "partitions"))
