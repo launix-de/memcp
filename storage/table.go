@@ -276,6 +276,9 @@ func (c *column) UpdateSanitizer() {
 	// string to int
 	case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
 		c.sanitizer = func(v scm.Scmer) scm.Scmer {
+			if v.IsNil() {
+				return v
+			}
 			return scm.NewInt(int64(scm.ToInt(v)))
 		}
 	}
