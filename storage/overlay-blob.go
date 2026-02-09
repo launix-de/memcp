@@ -30,10 +30,10 @@ type OverlayBlob struct {
 	// every overlay has a base
 	Base ColumnStorage
 	// values: used during build() for dedup, and for legacy inline data
-	values      map[[32]byte]string
-	size        uint
-	persistence PersistenceEngine // reference to database persistence
-	refs        map[string]bool   // hex-hashes referenced in this build()
+	values map[[32]byte]string
+	size   uint
+	schema *database          // reference to owning database
+	refs   map[string]bool    // hex-hashes referenced in this build()
 }
 
 func (s *OverlayBlob) ComputeSize() uint {
@@ -79,19 +79,18 @@ func (s *OverlayBlob) Deserialize(f io.Reader) uint {
 	return l
 }
 
-// SetPersistence sets the persistence engine and migrates legacy inline blobs.
-func (s *OverlayBlob) SetPersistence(p PersistenceEngine) {
-	s.persistence = p
+// SetSchema sets the owning database and migrates legacy inline blobs.
+func (s *OverlayBlob) SetSchema(db *database) {
+	s.schema = db
 	s.refs = make(map[string]bool)
 	for hash, data := range s.values {
 		hexHash := fmt.Sprintf("%x", hash[:])
-		w := p.WriteBlob(hexHash)
+		w := db.persistence.WriteBlob(hexHash)
 		io.WriteString(w, data)
 		w.Close()
-		p.IncrBlobRefcount(hexHash)
+		db.IncrBlobRefcount(hexHash)
 		s.refs[hexHash] = true
 	}
-	p.FlushBlobRefcounts()
 	s.values = nil
 	s.size = 0
 }
@@ -118,9 +117,9 @@ func (s *OverlayBlob) GetValue(i uint) scm.Scmer {
 			hashKey := *(*[32]byte)(unsafe.Pointer(unsafe.StringData(vs[1:])))
 
 			// load from persistence (no RAM caching)
-			if s.persistence != nil {
+			if s.schema != nil && s.schema.persistence != nil {
 				hexHash := fmt.Sprintf("%x", hashKey[:])
-				r := s.persistence.ReadBlob(hexHash)
+				r := s.schema.persistence.ReadBlob(hexHash)
 				data, err := io.ReadAll(r)
 				r.Close()
 				if err == nil && len(data) > 0 {
@@ -190,13 +189,13 @@ func (s *OverlayBlob) build(i uint, value scm.Scmer) {
 				s.values[hashKey] = gzipped
 
 				// write-through to persistence
-				if s.persistence != nil {
+				if s.schema != nil && s.schema.persistence != nil {
 					hexHash := fmt.Sprintf("%x", hashKey[:])
-					w := s.persistence.WriteBlob(hexHash)
+					w := s.schema.persistence.WriteBlob(hexHash)
 					io.WriteString(w, gzipped)
 					w.Close()
 					if !s.refs[hexHash] {
-						s.persistence.IncrBlobRefcount(hexHash)
+						s.schema.IncrBlobRefcount(hexHash)
 						s.refs[hexHash] = true
 					}
 				}
@@ -213,10 +212,9 @@ func (s *OverlayBlob) build(i uint, value scm.Scmer) {
 	s.Base.build(i, value)
 }
 func (s *OverlayBlob) finish() {
-	if s.persistence != nil {
+	if s.schema != nil {
 		s.values = nil
 		s.size = 0
-		s.persistence.FlushBlobRefcounts()
 	}
 	s.Base.finish()
 }
@@ -227,17 +225,16 @@ func (s *OverlayBlob) proposeCompression(i uint) ColumnStorage {
 
 // ReleaseBlobs decrements RC for all blob hashes referenced by this OverlayBlob.
 func (s *OverlayBlob) ReleaseBlobs(count uint) {
-	if s.persistence == nil {
+	if s.schema == nil {
 		return
 	}
 
 	// Case 1: refs from build() available
 	if s.refs != nil && len(s.refs) > 0 {
 		for hexHash := range s.refs {
-			s.persistence.DecrBlobRefcount(hexHash)
+			s.schema.DecrBlobRefcount(hexHash)
 		}
 		s.refs = nil
-		s.persistence.FlushBlobRefcounts()
 		return
 	}
 
@@ -253,12 +250,9 @@ func (s *OverlayBlob) ReleaseBlobs(count uint) {
 				hexHash := fmt.Sprintf("%x", hashKey[:])
 				if !seen[hexHash] {
 					seen[hexHash] = true
-					s.persistence.DecrBlobRefcount(hexHash)
+					s.schema.DecrBlobRefcount(hexHash)
 				}
 			}
 		}
-	}
-	if len(seen) > 0 {
-		s.persistence.FlushBlobRefcounts()
 	}
 }

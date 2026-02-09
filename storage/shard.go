@@ -157,7 +157,7 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		cnt := columnstorage.Deserialize(f)
 		f.Close()
 		if blob, ok := columnstorage.(*OverlayBlob); ok {
-			blob.SetPersistence(u.t.schema.persistence)
+			blob.SetSchema(u.t.schema)
 		}
 		if cnt > u.main_count {
 			u.main_count = cnt
@@ -878,6 +878,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	}
 	result := new(storageShard)
 	result.t = t.t
+	result.srState = WRITE // mark as live so ensureLoaded() won't reset columns
 	t.next = result
 	result.mu.Lock() // interlock so no one will rebuild the shard twice
 	defer result.mu.Unlock()
@@ -980,7 +981,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			}
 			// build phase
 			if blob, ok := newcol.(*OverlayBlob); ok {
-				blob.persistence = result.t.schema.persistence
+				blob.schema = result.t.schema
 			}
 			newcol.init(i)
 			i = 0

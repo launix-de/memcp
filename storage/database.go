@@ -31,6 +31,7 @@ type database struct {
 	persistence PersistenceEngine                                  `json:"-"`
 	tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"-"`
 	schemalock  sync.RWMutex                                       `json:"-"` // TODO: rw-locks for schemalock
+	blobMu      sync.Mutex                                         `json:"-"` // serializes IncrBlobRefcount/DecrBlobRefcount
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
@@ -105,32 +106,20 @@ func UnloadDatabases() {
 	StopGlobalEstimator()
 }
 
-// createPersistenceFromConfig creates a PersistenceEngine based on the backend configuration.
-func createPersistenceFromConfig(dbName string, config *BackendConfig) PersistenceEngine {
-	switch config.Backend {
-	case "ceph":
-		factory := &CephFactory{
-			UserName:    config.UserName,
-			ClusterName: config.ClusterName,
-			ConfFile:    config.ConfFile,
-			Pool:        config.Pool,
-			Prefix:      config.Prefix,
-		}
-		return factory.CreateDatabase(dbName)
-	case "s3":
-		factory := &S3Factory{
-			AccessKeyID:     config.AccessKeyID,
-			SecretAccessKey: config.SecretAccessKey,
-			Region:          config.Region,
-			Endpoint:        config.Endpoint,
-			Bucket:          config.Bucket,
-			Prefix:          config.Prefix,
-			ForcePathStyle:  config.ForcePathStyle,
-		}
-		return factory.CreateDatabase(dbName)
-	default:
+// createPersistenceFromConfig creates a PersistenceEngine by looking up the
+// "backend" field in the JSON config and dispatching to the registered factory.
+func createPersistenceFromConfig(dbName string, raw json.RawMessage) PersistenceEngine {
+	var header struct {
+		Backend string `json:"backend"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
 		return nil
 	}
+	factory, ok := BackendRegistry[header.Backend]
+	if !ok {
+		return nil
+	}
+	return factory(dbName, raw)
 }
 
 func LoadDatabases() {
@@ -168,17 +157,12 @@ func LoadDatabases() {
 				fmt.Println("error: failed to read backend config", configPath, ":", err)
 				continue
 			}
-			var config BackendConfig
-			if err := json.Unmarshal(configData, &config); err != nil {
-				fmt.Println("error: failed to parse backend config", configPath, ":", err)
-				continue
-			}
-			persistence := createPersistenceFromConfig(dbName, &config)
+			persistence := createPersistenceFromConfig(dbName, json.RawMessage(configData))
 			if persistence == nil {
-				fmt.Println("error: unknown backend type", config.Backend, "in", configPath)
+				fmt.Println("error: unknown or invalid backend in", configPath)
 				continue
 			}
-			fmt.Println("loading database", dbName, "from", config.Backend, "backend")
+			fmt.Println("loading database", dbName, "from backend config", configPath)
 			db := new(database)
 			db.Name = dbName
 			db.persistence = persistence
@@ -272,13 +256,19 @@ func (db *database) rebuild(all bool, repartition bool) {
 		return
 	}
 	var done sync.WaitGroup
+	// Collect pre-rebuild shards that were superseded. Their cleanup
+	// (RemoveFromDisk → ReleaseBlobs → DecrBlobRefcount) must run after
+	// ALL table rebuilds finish to avoid deadlocks with concurrent .blobs
+	// repartition holding shard read-locks.
+	var replacedMu sync.Mutex
+	var allReplaced []*storageShard
 	dbs := db.tables.GetAll()
 	done.Add(len(dbs))
 	for _, t := range dbs {
 		go func(t *table) {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Println("error: rebuild failed for table", db.Name+".", t.Name, ":", r)
+					fmt.Println("error: rebuild failed for table", db.Name+".", t.Name, ":", r, "\n", r)
 					// best-effort unlock if still locked
 					func() { defer func() { _ = recover() }(); t.mu.Unlock() }()
 				}
@@ -328,7 +318,7 @@ func (db *database) rebuild(all bool, repartition bool) {
 					go func(i int, s *storageShard) {
 						defer func() {
 							if r := recover(); r != nil {
-								fmt.Println("error: shard rebuild failed for", db.Name+".", t.Name, "shard", i, ":", r)
+								fmt.Println("error: shard rebuild failed for", db.Name+".", t.Name, "shard", i, ":", r, "\n", r)
 							}
 							sdone.Done()
 						}()
@@ -364,15 +354,23 @@ func (db *database) rebuild(all bool, repartition bool) {
 			}
 			sdone.Wait()
 
+			// Collect pre-rebuild shards that were replaced so we can clean them up.
+			var replaced []*storageShard
 			// Publish the new shard list only after completion.
 			// To avoid slice header races for concurrent readers, update in place.
 			if targetIsP {
 				for i := range newShardList {
+					if origShardList[i] != nil && origShardList[i] != newShardList[i] && origShardList[i].uuid != newShardList[i].uuid {
+						replaced = append(replaced, origShardList[i])
+					}
 					origShardList[i] = newShardList[i]
 				}
 				t.PShards = origShardList
 			} else {
 				for i := range newShardList {
+					if origShardList[i] != nil && origShardList[i] != newShardList[i] && origShardList[i].uuid != newShardList[i].uuid {
+						replaced = append(replaced, origShardList[i])
+					}
 					origShardList[i] = newShardList[i]
 				}
 				t.Shards = origShardList
@@ -386,10 +384,23 @@ func (db *database) rebuild(all bool, repartition bool) {
 				}
 			}
 
+			// Collect replaced shards for deferred cleanup (see comment above).
+			if len(replaced) > 0 {
+				replacedMu.Lock()
+				allReplaced = append(allReplaced, replaced...)
+				replacedMu.Unlock()
+			}
+
 			t.mu.Unlock()
 		}(t)
 	}
 	done.Wait()
+
+	// All table rebuilds (including .blobs) are complete. Safe to clean up
+	// replaced pre-rebuild shards without risk of deadlocking with repartition.
+	for _, s := range allReplaced {
+		s.RemoveFromDisk()
+	}
 }
 
 func GetDatabase(schema string) *database {

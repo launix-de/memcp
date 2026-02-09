@@ -36,6 +36,33 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func init() {
+	BackendRegistry["s3"] = func(dbName string, raw json.RawMessage) PersistenceEngine {
+		var cfg struct {
+			AccessKeyID     string `json:"access_key_id"`
+			SecretAccessKey string `json:"secret_access_key"`
+			Region          string `json:"region"`
+			Endpoint        string `json:"endpoint"`
+			Bucket          string `json:"bucket"`
+			Prefix          string `json:"prefix"`
+			ForcePathStyle  bool   `json:"force_path_style"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			panic("s3 backend: invalid config: " + err.Error())
+		}
+		factory := &S3Factory{
+			AccessKeyID:     cfg.AccessKeyID,
+			SecretAccessKey: cfg.SecretAccessKey,
+			Region:          cfg.Region,
+			Endpoint:        cfg.Endpoint,
+			Bucket:          cfg.Bucket,
+			Prefix:          cfg.Prefix,
+			ForcePathStyle:  cfg.ForcePathStyle,
+		}
+		return factory.CreateDatabase(dbName)
+	}
+}
+
 // S3 layout:
 //  - schema:   <prefix>/schema.json
 //  - column:   <prefix>/<shard>-<colhash>
@@ -72,8 +99,6 @@ type S3Storage struct {
 	client *s3.Client
 	opened bool
 
-	blobMu   sync.Mutex
-	blobRefs map[string]int // lazy-loaded from blob/refcounts.json
 }
 
 func NewS3Storage(f *S3Factory, prefix string) *S3Storage {
@@ -251,70 +276,6 @@ func (s *S3Storage) DeleteBlob(hash string) {
 		Bucket: aws.String(s.factory.Bucket),
 		Key:    aws.String(key),
 	})
-}
-
-func (s *S3Storage) loadBlobRefs() {
-	if s.blobRefs != nil {
-		return
-	}
-	s.blobRefs = make(map[string]int)
-	s.ensureOpen()
-	key := s.key("blob/refcounts.json")
-	resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
-		Bucket: aws.String(s.factory.Bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err == nil && len(data) > 0 {
-		json.Unmarshal(data, &s.blobRefs)
-	}
-}
-
-func (s *S3Storage) IncrBlobRefcount(hash string) {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	s.loadBlobRefs()
-	s.blobRefs[hash]++
-}
-
-func (s *S3Storage) DecrBlobRefcount(hash string) {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	s.loadBlobRefs()
-	rc, ok := s.blobRefs[hash]
-	if !ok {
-		return
-	}
-	rc--
-	if rc <= 0 {
-		delete(s.blobRefs, hash)
-		s.DeleteBlob(hash)
-	} else {
-		s.blobRefs[hash] = rc
-	}
-}
-
-func (s *S3Storage) FlushBlobRefcounts() {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	if s.blobRefs == nil {
-		return
-	}
-	s.ensureOpen()
-	data, _ := json.Marshal(s.blobRefs)
-	key := s.key("blob/refcounts.json")
-	_, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
-		Bucket: aws.String(s.factory.Bucket),
-		Key:    aws.String(key),
-		Body:   bytes.NewReader(data),
-	})
-	if err != nil {
-		panic(fmt.Sprintf("S3Storage: failed to flush blob refcounts: %v", err))
-	}
 }
 
 func (s *S3Storage) Remove() {

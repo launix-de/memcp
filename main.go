@@ -429,6 +429,9 @@ func main() {
 	writeDocu := ""
 	flag.StringVar(&writeDocu, "write-docu", "", "Write documentation as .md documents to that folder and exit")
 
+	noRepl := false
+	flag.BoolVar(&noRepl, "no-repl", false, "Run without interactive REPL (wait for SIGTERM/SIGINT instead)")
+
 	// Parse only known flags, ignore unknown ones for Scheme to handle
 	flag.CommandLine.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -459,6 +462,8 @@ func main() {
 				knownArgs = append(knownArgs, os.Args[i+2])
 				skipNext = true
 			}
+		} else if arg == "-no-repl" {
+			knownArgs = append(knownArgs, arg)
 		} else if arg == "-h" || arg == "-help" || arg == "--help" {
 			knownArgs = append(knownArgs, arg)
 		} else if len(arg) > 2 && arg[:2] == "--" {
@@ -542,8 +547,14 @@ func main() {
 	// start cron
 	go cronroutine()
 
-	// REPL shell
-	scm.Repl(&IOEnv)
+	// REPL shell or wait for signal
+	if noRepl {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+		<-sig
+	} else {
+		scm.Repl(&IOEnv)
+	}
 
 	// normal shutdown
 	exitroutine()

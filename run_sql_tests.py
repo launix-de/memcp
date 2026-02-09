@@ -241,7 +241,7 @@ class SQLTestRunner:
         print(f"    Reason: {reason}")
         if query:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
-        if response:
+        if response is not None:
             print(f"    HTTP {response.status_code}: {response.text[:500]}{'...' if len(response.text) > 500 else ''}")
         if expect is not None:
             print(f"    Expected: {expect}\n")

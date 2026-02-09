@@ -35,6 +35,29 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func init() {
+	BackendRegistry["ceph"] = func(dbName string, raw json.RawMessage) PersistenceEngine {
+		var cfg struct {
+			UserName    string `json:"username"`
+			ClusterName string `json:"cluster"`
+			ConfFile    string `json:"conf_file"`
+			Pool        string `json:"pool"`
+			Prefix      string `json:"prefix"`
+		}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			panic("ceph backend: invalid config: " + err.Error())
+		}
+		factory := &CephFactory{
+			UserName:    cfg.UserName,
+			ClusterName: cfg.ClusterName,
+			ConfFile:    cfg.ConfFile,
+			Pool:        cfg.Pool,
+			Prefix:      cfg.Prefix,
+		}
+		return factory.CreateDatabase(dbName)
+	}
+}
+
 // Ceph/RADOS layout
 //  - schema:   <prefix>/schema.json
 //  - column:   <prefix>/<shard>-<colhash>
@@ -69,8 +92,6 @@ type CephStorage struct {
 	ioctx  *rados.IOContext
 	opened bool
 
-	blobMu   sync.Mutex
-	blobRefs map[string]int // lazy-loaded from blob/refcounts.json
 }
 
 func NewCephStorage(f *CephFactory, prefix string) *CephStorage {
@@ -221,62 +242,6 @@ func (s *CephStorage) WriteBlob(hash string) io.WriteCloser {
 func (s *CephStorage) DeleteBlob(hash string) {
 	s.ensureOpen()
 	_ = s.ioctx.Delete(s.obj("blob/" + hash))
-}
-
-func (s *CephStorage) loadBlobRefs() {
-	if s.blobRefs != nil {
-		return
-	}
-	s.blobRefs = make(map[string]int)
-	s.ensureOpen()
-	obj := s.obj("blob/refcounts.json")
-	stat, err := s.ioctx.Stat(obj)
-	if err != nil || stat.Size == 0 {
-		return
-	}
-	data := make([]byte, stat.Size)
-	n, err := s.ioctx.Read(obj, data, 0)
-	if err == nil && n > 0 {
-		json.Unmarshal(data[:n], &s.blobRefs)
-	}
-}
-
-func (s *CephStorage) IncrBlobRefcount(hash string) {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	s.loadBlobRefs()
-	s.blobRefs[hash]++
-}
-
-func (s *CephStorage) DecrBlobRefcount(hash string) {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	s.loadBlobRefs()
-	rc, ok := s.blobRefs[hash]
-	if !ok {
-		return
-	}
-	rc--
-	if rc <= 0 {
-		delete(s.blobRefs, hash)
-		s.DeleteBlob(hash)
-	} else {
-		s.blobRefs[hash] = rc
-	}
-}
-
-func (s *CephStorage) FlushBlobRefcounts() {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	if s.blobRefs == nil {
-		return
-	}
-	s.ensureOpen()
-	data, _ := json.Marshal(s.blobRefs)
-	obj := s.obj("blob/refcounts.json")
-	if err := s.ioctx.WriteFull(obj, data); err != nil {
-		panic(err)
-	}
 }
 
 func (s *CephStorage) Remove() {

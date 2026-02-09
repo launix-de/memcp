@@ -19,7 +19,6 @@ package storage
 import "io"
 import "os"
 import "fmt"
-import "sync"
 import "bufio"
 import "bytes"
 import "strings"
@@ -28,9 +27,7 @@ import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 
 type FileStorage struct {
-	path     string
-	blobMu   sync.Mutex
-	blobRefs map[string]int // lazy-loaded from blob/refcounts.json
+	path string
 }
 
 type FileFactory struct {
@@ -124,52 +121,6 @@ func (s *FileStorage) WriteBlob(hash string) io.WriteCloser {
 
 func (s *FileStorage) DeleteBlob(hash string) {
 	os.Remove(s.blobPath(hash))
-}
-
-func (s *FileStorage) loadBlobRefs() {
-	if s.blobRefs != nil {
-		return
-	}
-	s.blobRefs = make(map[string]int)
-	data, err := os.ReadFile(s.path + "blob/refcounts.json")
-	if err == nil && len(data) > 0 {
-		json.Unmarshal(data, &s.blobRefs)
-	}
-}
-
-func (s *FileStorage) IncrBlobRefcount(hash string) {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	s.loadBlobRefs()
-	s.blobRefs[hash]++
-}
-
-func (s *FileStorage) DecrBlobRefcount(hash string) {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	s.loadBlobRefs()
-	rc, ok := s.blobRefs[hash]
-	if !ok {
-		return // unknown hash (legacy data), no-op
-	}
-	rc--
-	if rc <= 0 {
-		delete(s.blobRefs, hash)
-		s.DeleteBlob(hash)
-	} else {
-		s.blobRefs[hash] = rc
-	}
-}
-
-func (s *FileStorage) FlushBlobRefcounts() {
-	s.blobMu.Lock()
-	defer s.blobMu.Unlock()
-	if s.blobRefs == nil {
-		return
-	}
-	os.MkdirAll(s.path+"blob", 0750)
-	data, _ := json.Marshal(s.blobRefs)
-	os.WriteFile(s.path+"blob/refcounts.json", data, 0640)
 }
 
 func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
