@@ -11,6 +11,7 @@
 
 /* time */
 (sql_builtins "FROM_UNIXTIME" (lambda (ts) (if (nil? ts) nil (format_date (simplify ts) "%Y-%m-%d %H:%i:%s"))))
+(sql_builtins "DATE_FORMAT" format_date)
 
 /* math */
 (sql_builtins "FLOOR" floor)

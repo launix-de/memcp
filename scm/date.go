@@ -17,6 +17,7 @@ Copyright (C) 2024  Carl-Philip Hänsch
 package scm
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -61,24 +62,66 @@ func init_date() {
 		true,
 	})
 	Declare(&Globalenv, &Declaration{
-		"format_date", "formats a unix timestamp into a date string",
+		"format_date", "formats a unix timestamp or datetime string into a date string",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"timestamp", "number", "unix timestamp"},
+			DeclarationParameter{"timestamp", "any", "unix timestamp or datetime string"},
 			DeclarationParameter{"format", "string", "MySQL-style format string (e.g. %Y-%m-%d %H:%i:%s)"},
 		}, "string",
 		func(a ...Scmer) Scmer {
-			ts := ToInt(a[0])
-			t := time.Unix(int64(ts), 0).UTC()
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			var t time.Time
+			if a[0].IsString() {
+				// parse datetime string
+				parsed := false
+				for _, fmt := range allowed_formats {
+					if pt, err := time.Parse(fmt, String(a[0])); err == nil {
+						t = pt
+						parsed = true
+						break
+					}
+				}
+				if !parsed {
+					return NewNil()
+				}
+			} else {
+				ts := ToInt(a[0])
+				t = time.Unix(int64(ts), 0).UTC()
+			}
 			format := String(a[1])
-			// convert MySQL format specifiers to Go layout
-			r := strings.NewReplacer(
-				"%Y", "2006", "%m", "01", "%d", "02",
-				"%H", "15", "%i", "04", "%s", "05",
-				"%T", "15:04:05",
-			)
-			goFmt := r.Replace(format)
-			return NewString(t.Format(goFmt))
+			// replace MySQL format specifiers manually to avoid Go magic number collisions
+			var buf strings.Builder
+			for i := 0; i < len(format); i++ {
+				if format[i] == '%' && i+1 < len(format) {
+					switch format[i+1] {
+					case 'Y':
+						buf.WriteString(fmt.Sprintf("%04d", t.Year()))
+					case 'm':
+						buf.WriteString(fmt.Sprintf("%02d", t.Month()))
+					case 'd':
+						buf.WriteString(fmt.Sprintf("%02d", t.Day()))
+					case 'H':
+						buf.WriteString(fmt.Sprintf("%02d", t.Hour()))
+					case 'i':
+						buf.WriteString(fmt.Sprintf("%02d", t.Minute()))
+					case 's':
+						buf.WriteString(fmt.Sprintf("%02d", t.Second()))
+					case 'T':
+						buf.WriteString(fmt.Sprintf("%02d:%02d:%02d", t.Hour(), t.Minute(), t.Second()))
+					case '%':
+						buf.WriteByte('%')
+					default:
+						buf.WriteByte('%')
+						buf.WriteByte(format[i+1])
+					}
+					i++ // skip format char
+				} else {
+					buf.WriteByte(format[i])
+				}
+			}
+			return NewString(buf.String())
 		},
 		true,
 	})

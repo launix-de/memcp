@@ -1,0 +1,69 @@
+# DATE_FORMAT function
+
+metadata:
+  version: "1.0"
+  description: "DATE_FORMAT with various format specifiers"
+
+test_cases:
+  - name: "DATE_FORMAT from unix timestamp via FROM_UNIXTIME"
+    sql: "SELECT DATE_FORMAT(FROM_UNIXTIME(0), '%Y-%m-%d') AS d"
+    expect:
+      rows: 1
+      data:
+        - { d: "1970-01-01" }
+
+  - name: "DATE_FORMAT datetime string"
+    sql: "SELECT DATE_FORMAT('2024-06-15 14:30:45', '%Y-%m-%d') AS d"
+    expect:
+      rows: 1
+      data:
+        - { d: "2024-06-15" }
+
+  - name: "DATE_FORMAT time part"
+    sql: "SELECT DATE_FORMAT('2024-06-15 14:30:45', '%H:%i:%s') AS t"
+    expect:
+      rows: 1
+      data:
+        - { t: "14:30:45" }
+
+  - name: "DATE_FORMAT full datetime"
+    sql: "SELECT DATE_FORMAT('2024-06-15 14:30:45', '%Y-%m-%d %H:%i:%s') AS dt"
+    expect:
+      rows: 1
+      data:
+        - { dt: "2024-06-15 14:30:45" }
+
+  - name: "DATE_FORMAT year-month only"
+    sql: "SELECT DATE_FORMAT('2024-06-15 14:30:45', '%Y-%m') AS ym"
+    expect:
+      rows: 1
+      data:
+        - { ym: "2024-06" }
+
+  - name: "DATE_FORMAT with NULL"
+    sql: "SELECT DATE_FORMAT(NULL, '%Y-%m-%d') AS d"
+    expect:
+      rows: 1
+      data:
+        - { d: null }
+
+  - name: "DATE_FORMAT epoch timestamp"
+    sql: "SELECT DATE_FORMAT(FROM_UNIXTIME(1718451045), '%Y-%m-%d') AS d"
+    expect:
+      rows: 1
+      data:
+        - { d: "2024-06-15" }
+
+  - name: "DATE_FORMAT year-first-day pattern (erpl YEAR grouping)"
+    sql: "SELECT DATE_FORMAT('2024-06-15', '%Y-01-01') AS yd"
+    expect:
+      rows: 1
+      data:
+        - { yd: "2024-01-01" }
+
+  - name: "DATE_FORMAT month-first-day pattern (erpl MONTH grouping)"
+    sql: "SELECT DATE_FORMAT('2024-06-15', '%Y-%m-01') AS md"
+    expect:
+      rows: 1
+      data:
+        - { md: "2024-06-01" }
