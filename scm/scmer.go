@@ -71,6 +71,12 @@ const (
 	// custom tags >= 100
 )
 
+// Exported tag constants for type checking in other packages
+const (
+	TagString = tagString
+	TagSymbol = tagSymbol
+)
+
 var scmerIntSentinel byte
 var scmerFloatSentinel byte
 

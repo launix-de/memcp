@@ -357,8 +357,16 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					if !ok {
 						panic("UPDATE on invalid column: " + scm.String(changes[j]))
 					}
-					if !scm.Equal(d2[colidx], changes[j+1]) {
-						d2[colidx] = changes[j+1]
+					newVal := changes[j+1]
+					// apply type sanitizer
+					for _, colDesc := range t.t.Columns {
+						if colDesc.Name == scm.String(changes[j]) && colDesc.sanitizer != nil {
+							newVal = colDesc.sanitizer(newVal)
+							break
+						}
+					}
+					if !scm.Equal(d2[colidx], newVal) {
+						d2[colidx] = newVal
 						result = true // mark that something has changed
 					}
 				}

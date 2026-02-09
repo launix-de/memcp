@@ -272,14 +272,87 @@ func (c *column) Show() scm.Scmer {
 
 func (c *column) UpdateSanitizer() {
 	typ := strings.ToUpper(c.Typ)
+	allowNull := c.AllowNull
+	name := c.Name
+	var inner func(scm.Scmer) scm.Scmer
 	switch typ {
-	// string to int
 	case "INT", "INTEGER", "BIGINT", "SMALLINT", "MEDIUMINT", "TINYINT":
+		inner = func(v scm.Scmer) scm.Scmer {
+			tag := v.GetTag()
+			if tag == scm.TagString || tag == scm.TagSymbol {
+				// try numeric string
+				if _, err := strconv.ParseInt(v.String(), 10, 64); err != nil {
+					if _, err2 := strconv.ParseFloat(v.String(), 64); err2 != nil {
+						panic("cannot convert string to INT for column " + name + ": " + v.String())
+					}
+				}
+			}
+			return scm.NewInt(int64(scm.ToInt(v)))
+		}
+	case "FLOAT", "DOUBLE", "REAL":
+		inner = func(v scm.Scmer) scm.Scmer {
+			tag := v.GetTag()
+			if tag == scm.TagString || tag == scm.TagSymbol {
+				if _, err := strconv.ParseFloat(v.String(), 64); err != nil {
+					panic("cannot convert string to FLOAT for column " + name + ": " + v.String())
+				}
+			}
+			return scm.NewFloat(v.Float())
+		}
+	case "DECIMAL", "NUMERIC":
+		dims := c.Typdimensions
+		inner = func(v scm.Scmer) scm.Scmer {
+			tag := v.GetTag()
+			if tag == scm.TagString || tag == scm.TagSymbol {
+				if _, err := strconv.ParseFloat(v.String(), 64); err != nil {
+					panic("cannot convert string to DECIMAL for column " + name + ": " + v.String())
+				}
+			}
+			f := v.Float()
+			if len(dims) >= 2 && dims[1] == 0 {
+				// DECIMAL(n,0) → round to integer
+				if f >= 0 {
+					return scm.NewInt(int64(f + 0.5))
+				}
+				return scm.NewInt(int64(f - 0.5))
+			}
+			return scm.NewFloat(f)
+		}
+	case "VARCHAR", "CHAR":
+		dims := c.Typdimensions
+		if len(dims) >= 1 && dims[0] > 0 {
+			maxLen := dims[0]
+			inner = func(v scm.Scmer) scm.Scmer {
+				s := scm.String(v)
+				if len(s) > maxLen {
+					s = s[:maxLen]
+				}
+				return scm.NewString(s)
+			}
+		}
+	}
+	// wrap with NOT NULL check
+	if !allowNull && inner != nil {
+		base := inner
+		c.sanitizer = func(v scm.Scmer) scm.Scmer {
+			if v.IsNil() {
+				panic("column " + name + " cannot be NULL")
+			}
+			return base(v)
+		}
+	} else if !allowNull {
+		c.sanitizer = func(v scm.Scmer) scm.Scmer {
+			if v.IsNil() {
+				panic("column " + name + " cannot be NULL")
+			}
+			return v
+		}
+	} else if inner != nil {
 		c.sanitizer = func(v scm.Scmer) scm.Scmer {
 			if v.IsNil() {
 				return v
 			}
-			return scm.NewInt(int64(scm.ToInt(v)))
+			return inner(v)
 		}
 	}
 }
@@ -302,6 +375,7 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 				dims[i] = scm.ToInt(v)
 			}
 			c.Typdimensions = dims
+			c.UpdateSanitizer()
 			return scm.NewSlice(l)
 		}
 		panic("invalid dimensions value for alter column")
@@ -310,6 +384,7 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 		return c.Default
 	case "null":
 		c.AllowNull = scm.ToBool(val)
+		c.UpdateSanitizer()
 		return scm.NewBool(c.AllowNull)
 	case "temp":
 		c.IsTemp = scm.ToBool(val)
@@ -446,7 +521,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		for _, colDesc := range t.Columns {
 			if col == colDesc.Name && colDesc.sanitizer != nil {
 				for _, row := range values {
-					row[i] = colDesc.sanitizer(row[i])
+					if i < len(row) {
+						row[i] = colDesc.sanitizer(row[i])
+					}
 				}
 			}
 		}
