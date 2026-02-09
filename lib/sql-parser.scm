@@ -361,6 +361,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((define a sql_expression3) (atom "COLLATE" true) (define collation sql_identifier) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b collation))
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2)) '('not '('strlike a b "utf8mb4_general_ci")))
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('contains? (cons list b) a))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") (list (quote not) (cons (quote contains?) (cons (cons (quote list) b) (list a)))))
 		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
@@ -429,6 +430,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DATE_ADD" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_add e n unit))
 		/* DATE_SUB(expr, INTERVAL n UNIT) */
 		(parser '((atom "DATE_SUB" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_sub e n unit))
+
+		/* SUBSTRING(expr FROM start FOR len) - SQL standard syntax */
+		(parser '((atom "SUBSTRING" true) "(" (define s sql_expression) (atom "FROM" true) (define start sql_expression) (atom "FOR" true) (define len sql_expression) ")") '((quote sql_substr) s start len))
 
 		/* DATE(expr) - extract date part */
 		(parser '((atom "DATE" true) "(" (define e sql_expression) ")") '('date_trunc_day e))

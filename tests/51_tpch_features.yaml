@@ -1,0 +1,64 @@
+metadata:
+  version: "1.0"
+  description: "TPC-H required SQL features: NOT LIKE, SUBSTRING FROM FOR"
+
+test_cases:
+  # --- Setup ---
+  - name: "Create test table"
+    sql: "CREATE TABLE tpch_test (id INT PRIMARY KEY, name VARCHAR(50), category VARCHAR(20), value INT)"
+
+  - name: "Insert test data"
+    sql: |
+      INSERT INTO tpch_test (id, name, category, value) VALUES
+        (1, 'Brand#23', 'A', 10),
+        (2, 'Brand#45', 'B', 20),
+        (3, 'Generic', 'A', 30),
+        (4, 'Brand#12', 'C', 40),
+        (5, 'NoName', 'B', 50),
+        (6, 'Brand#99', 'A', 60),
+        (7, 'Special', 'C', 70),
+        (8, 'Brand#23', 'B', 80)
+
+  # --- NOT LIKE ---
+  - name: "NOT LIKE basic"
+    sql: "SELECT id FROM tpch_test WHERE name NOT LIKE 'Brand%' ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 3
+        - id: 5
+        - id: 7
+
+  - name: "NOT LIKE with underscore wildcard"
+    sql: "SELECT id FROM tpch_test WHERE name NOT LIKE 'Brand#__' ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 3
+        - id: 5
+        - id: 7
+
+  # --- SUBSTRING FROM FOR ---
+  - name: "SUBSTRING FROM FOR basic"
+    sql: "SELECT SUBSTRING('Hello World' FROM 1 FOR 5) AS s"
+    expect:
+      rows: 1
+      data:
+        - s: "Hello"
+
+  - name: "SUBSTRING FROM FOR on column"
+    sql: "SELECT SUBSTRING(name FROM 1 FOR 5) AS prefix FROM tpch_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - prefix: "Brand"
+
+  - name: "SUBSTRING FROM FOR middle"
+    sql: "SELECT SUBSTRING('abcdef' FROM 3 FOR 2) AS s"
+    expect:
+      rows: 1
+      data:
+        - s: "cd"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS tpch_test"
