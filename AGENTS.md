@@ -13,6 +13,7 @@
 ## Build, Test, and Dev Commands
 - Build: `go build -o memcp` or `make` (default builds).
 - Run: `./memcp --api-port=4321 lib/main.scm` (MySQL off by default in tests).
+- Background run: always use `--no-repl` when running memcp in the background, otherwise closing stdin causes the REPL to exit: `./memcp --no-repl --api-port=4321 lib/main.scm &`
 - Quick test (single file): `python3 run_sql_tests.py tests/01_basic_sql.yaml`.
 - Connect-only (reuse a running instance): `python3 run_sql_tests.py tests/02_functions.yaml 4321 --connect-only`.
 - Pre-commit: `git commit` runs all `tests/[0-9][0-9]_*.yaml` via a single `memcp` instance (port 4400). Bypass only if necessary: `git commit --no-verify -m "..."`.

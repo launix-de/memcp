@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023-2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -58,6 +58,9 @@ func mustSymbol(v Scmer) Symbol {
 func mustNthLocalVar(v Scmer) NthLocalVar {
 	if v.IsSourceInfo() {
 		return mustNthLocalVar(v.SourceInfo().value)
+	}
+	if v.GetTag() == tagNthLocalVar {
+		return v.NthLocalVar()
 	}
 	if v.GetTag() == tagAny {
 		if idx, ok := v.Any().(NthLocalVar); ok {
@@ -243,6 +246,9 @@ restart:
 				if target == nil {
 					target = &Globalenv
 				}
+				if target.Vars == nil {
+					target.Vars = make(Vars)
+				}
 				target.Vars[mustSymbol(list[1])] = val
 				return val
 			case "setN":
@@ -321,18 +327,34 @@ restart:
 		switch procedure.GetTag() {
 		case tagFunc:
 			// Native funcs
+			fn := procedure.Func()
+			if n := len(operands); n <= 4 {
+				var buf [4]Scmer
+				for i := 0; i < n; i++ {
+					buf[i] = Eval(operands[i], en)
+				}
+				return fn(buf[:n]...)
+			}
 			args := make([]Scmer, len(operands))
 			for i, x := range operands {
 				args[i] = Eval(x, en)
 			}
-			return procedure.Func()(args...)
+			return fn(args...)
 		case tagFuncEnv:
 			// Native funcs with env
+			fn := procedure.FuncEnv()
+			if n := len(operands); n <= 4 {
+				var buf [4]Scmer
+				for i := 0; i < n; i++ {
+					buf[i] = Eval(operands[i], en)
+				}
+				return fn(en, buf[:n]...)
+			}
 			args := make([]Scmer, len(operands))
 			for i, x := range operands {
 				args[i] = Eval(x, en)
 			}
-			return procedure.FuncEnv()(en, args...)
+			return fn(en, args...)
 		case tagProc:
 			// Lambdas (procs)
 			en, expression = prepareProcCall(procedure.Proc(), operands, en)
@@ -387,7 +409,11 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 		panic("apply: nil procedure")
 	}
 	proc := *p
-	env := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
+	var vars Vars
+	if proc.NumVars == 0 {
+		vars = make(Vars)
+	}
+	env := &Env{Vars: vars, VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
 	switch proc.Params.GetTag() {
 	case tagSlice:
 		params := proc.Params.Slice()
@@ -435,7 +461,11 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 		panic("apply: nil procedure")
 	}
 	proc := *p
-	env := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
+	var vars Vars
+	if proc.NumVars == 0 {
+		vars = make(Vars)
+	}
+	env := &Env{Vars: vars, VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En, Nodefine: false}
 	switch proc.Params.GetTag() {
 	case tagSlice:
 		params := proc.Params.Slice()

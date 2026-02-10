@@ -99,7 +99,11 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 		}
 	}
 
-	en := &Env{Vars: make(Vars), VarsNumbered: make([]Scmer, p.NumVars), Outer: p.En, Nodefine: false}
+	var vars Vars
+	if p.NumVars == 0 {
+		vars = make(Vars)
+	}
+	en := &Env{Vars: vars, VarsNumbered: make([]Scmer, p.NumVars), Outer: p.En, Nodefine: false}
 	params := p.Params
 	if stripped, ok := scmerStripSourceInfo(params); ok {
 		params = stripped
@@ -394,6 +398,14 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 		ome2 := ome.Copy()
+		// begin shares VarsNumbered with parent — strip (outer ...) for NthLocalVar
+		for sym, content := range ome2.variableReplacement {
+			if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
+				if slice[1].IsNthLocalVar() {
+					ome2.variableReplacement[sym] = slice[1]
+				}
+			}
+		}
 		for sym, content := range variableContent {
 			normalized := content
 			if stripped, ok := scmerStripSourceInfo(content); ok {
@@ -495,15 +507,40 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if stripped, ok := scmerStripSourceInfo(params); ok {
 			params = stripped
 		}
+		// Skip lambdas that already have explicit NumVars
+		if len(v) > 3 {
+			ome2 := ome.Copy()
+			if list, ok := scmerSlice(params); ok {
+				for _, param := range list {
+					if sym, ok := scmerSymbol(param); ok {
+						delete(ome2.variableReplacement, sym)
+					}
+				}
+			} else if sym, ok := scmerSymbol(params); ok {
+				delete(ome2.variableReplacement, sym)
+			}
+			v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
+			return NewSlice(v), transferOwnership, false
+		}
+		// Auto-number parameters
 		ome2 := ome.Copy()
+		slotIndex := 0
 		if list, ok := scmerSlice(params); ok {
 			for _, param := range list {
 				if sym, ok := scmerSymbol(param); ok {
-					delete(ome2.variableReplacement, sym)
+					if sym != Symbol("_") {
+						ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
+					}
 				}
+				slotIndex++
 			}
 		} else if sym, ok := scmerSymbol(params); ok {
-			delete(ome2.variableReplacement, sym)
+			ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
+			slotIndex++
+		}
+		// Set NumVars
+		if slotIndex > 0 {
+			v = append(v[:len(v):len(v)], NewInt(int64(slotIndex)))
 		}
 		v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
 		return NewSlice(v), transferOwnership, false
@@ -532,6 +569,14 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		v[1], transferOwnership, _ = OptimizeEx(v[1], env, ome, true)
 		for i := 3; i < len(v); i += 2 {
 			ome2 := ome.Copy()
+			// match shares VarsNumbered with parent — strip (outer ...) for NthLocalVar
+			for sym, content := range ome2.variableReplacement {
+				if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
+					if slice[1].IsNthLocalVar() {
+						ome2.variableReplacement[sym] = slice[1]
+					}
+				}
+			}
 			v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2)
 			v[i], transferOwnership, _ = OptimizeEx(v[i], env, &ome2, useResult)
 		}
@@ -630,7 +675,7 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 		}
 		headSym, headOk := scmerSymbol(slice[0])
 		if headOk && headSym == Symbol("eval") && len(slice) > 1 {
-			slice[1], _, _ = OptimizeEx(slice[1], env, ome, true)
+			slice[1], _, _ = OptimizeEx(slice[1], env, ome2, true)
 			return NewSlice(slice)
 		}
 		if headOk && headSym == Symbol("var") && len(slice) == 2 {
