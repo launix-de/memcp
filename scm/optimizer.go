@@ -183,6 +183,22 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	return
 }
 
+// CopySharedScope is like Copy but for scopes that share VarsNumbered with
+// their parent (begin, match). NthLocalVar entries are kept as-is instead of
+// being wrapped in (outer ...) since they access the same VarsNumbered array.
+func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
+	result.variableReplacement = make(map[Symbol]Scmer)
+	for k, v := range ome.variableReplacement {
+		if v.IsNthLocalVar() {
+			result.variableReplacement[k] = v
+		} else {
+			result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
+		}
+	}
+	result.setBlacklist = ome.setBlacklist
+	return
+}
+
 func scmerIsSymbol(v Scmer, name string) bool {
 	if s, ok := symbolName(v); ok {
 		return s == name
@@ -397,15 +413,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
-		ome2 := ome.Copy()
-		// begin shares VarsNumbered with parent — strip (outer ...) for NthLocalVar
-		for sym, content := range ome2.variableReplacement {
-			if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
-				if slice[1].IsNthLocalVar() {
-					ome2.variableReplacement[sym] = slice[1]
-				}
-			}
-		}
+		ome2 := ome.CopySharedScope()
 		for sym, content := range variableContent {
 			normalized := content
 			if stripped, ok := scmerStripSourceInfo(content); ok {
@@ -568,15 +576,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	case headOk && headSym == Symbol("match"):
 		v[1], transferOwnership, _ = OptimizeEx(v[1], env, ome, true)
 		for i := 3; i < len(v); i += 2 {
-			ome2 := ome.Copy()
-			// match shares VarsNumbered with parent — strip (outer ...) for NthLocalVar
-			for sym, content := range ome2.variableReplacement {
-				if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
-					if slice[1].IsNthLocalVar() {
-						ome2.variableReplacement[sym] = slice[1]
-					}
-				}
-			}
+			ome2 := ome.CopySharedScope()
 			v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2)
 			v[i], transferOwnership, _ = OptimizeEx(v[i], env, &ome2, useResult)
 		}
