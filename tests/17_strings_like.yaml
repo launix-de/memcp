@@ -69,3 +69,35 @@ test_cases:
       rows: 1
       data:
         - r: false
+
+  # --- NOT LIKE ---
+  - name: "Create NOT LIKE test table"
+    sql: "CREATE TABLE notlike_test (id INT PRIMARY KEY, name VARCHAR(50))"
+
+  - name: "Insert NOT LIKE test data"
+    sql: |
+      INSERT INTO notlike_test (id, name) VALUES
+        (1, 'Brand#23'), (2, 'Brand#45'), (3, 'Generic'),
+        (4, 'Brand#12'), (5, 'NoName'), (6, 'Brand#99'),
+        (7, 'Special'), (8, 'Brand#23')
+
+  - name: "NOT LIKE basic"
+    sql: "SELECT id FROM notlike_test WHERE name NOT LIKE 'Brand%' ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 3
+        - id: 5
+        - id: 7
+
+  - name: "NOT LIKE with underscore wildcard"
+    sql: "SELECT id FROM notlike_test WHERE name NOT LIKE 'Brand#__' ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 3
+        - id: 5
+        - id: 7
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS notlike_test"

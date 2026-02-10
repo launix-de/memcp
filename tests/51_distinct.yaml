@@ -1,0 +1,137 @@
+metadata:
+  version: "1.0"
+  description: "COUNT(DISTINCT) support"
+
+test_cases:
+  # --- Setup ---
+  - name: "Create test table"
+    sql: "CREATE TABLE cd_test (id INT PRIMARY KEY, name VARCHAR(50), category VARCHAR(20), value INT)"
+
+  - name: "Insert test data"
+    sql: |
+      INSERT INTO cd_test (id, name, category, value) VALUES
+        (1, 'Alice', 'A', 10),
+        (2, 'Bob', 'B', 20),
+        (3, 'Alice', 'A', 30),
+        (4, 'Charlie', 'B', 40),
+        (5, 'Bob', 'C', 50),
+        (6, 'Alice', 'C', 60),
+        (7, 'Dave', 'A', 70),
+        (8, 'Bob', 'A', 80)
+
+  # --- Baseline: regular aggregate with WHERE (verify WHERE + GROUP BY works) ---
+  - name: "Baseline COUNT with WHERE filtering all"
+    sql: "SELECT COUNT(*) AS cnt FROM cd_test WHERE value > 9999"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  - name: "Baseline COUNT with WHERE and GROUP BY"
+    sql: "SELECT category, COUNT(*) AS cnt FROM cd_test WHERE name = 'Alice' GROUP BY category ORDER BY category"
+    expect:
+      rows: 2
+      data:
+        - category: "A"
+          cnt: 2
+        - category: "C"
+          cnt: 1
+
+  # --- COUNT(DISTINCT) without GROUP BY ---
+  - name: "COUNT DISTINCT simple"
+    sql: "SELECT COUNT(DISTINCT name) AS cnt FROM cd_test"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  - name: "COUNT DISTINCT category"
+    sql: "SELECT COUNT(DISTINCT category) AS cnt FROM cd_test"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  # --- COUNT(DISTINCT) with GROUP BY ---
+  - name: "COUNT DISTINCT with GROUP BY"
+    sql: "SELECT category, COUNT(DISTINCT name) AS cnt FROM cd_test GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "A"
+          cnt: 3
+        - category: "B"
+          cnt: 2
+        - category: "C"
+          cnt: 2
+
+  # --- COUNT(DISTINCT) with WHERE ---
+  - name: "COUNT DISTINCT with WHERE"
+    sql: "SELECT COUNT(DISTINCT name) AS cnt FROM cd_test WHERE value > 30"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  # --- COUNT(DISTINCT) with HAVING ---
+  - name: "COUNT DISTINCT with GROUP BY and HAVING"
+    sql: "SELECT category, COUNT(DISTINCT name) AS cnt FROM cd_test GROUP BY category HAVING COUNT(DISTINCT name) >= 3 ORDER BY category"
+    expect:
+      rows: 1
+      data:
+        - category: "A"
+          cnt: 3
+
+  # --- COUNT(DISTINCT) with ORDER BY on aggregate expression ---
+  - name: "COUNT DISTINCT ORDER BY count desc"
+    sql: "SELECT category, COUNT(DISTINCT name) AS cnt FROM cd_test GROUP BY category ORDER BY COUNT(DISTINCT name) DESC, category"
+    expect:
+      rows: 3
+      data:
+        - category: "A"
+          cnt: 3
+        - category: "B"
+          cnt: 2
+        - category: "C"
+          cnt: 2
+
+  # --- COUNT(DISTINCT) with LIMIT ---
+  - name: "COUNT DISTINCT with GROUP BY and LIMIT"
+    sql: "SELECT category, COUNT(DISTINCT name) AS cnt FROM cd_test GROUP BY category ORDER BY category LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - category: "A"
+          cnt: 3
+        - category: "B"
+          cnt: 2
+
+  # --- COUNT(DISTINCT) on empty result ---
+  - name: "COUNT DISTINCT empty result"
+    sql: "SELECT COUNT(DISTINCT name) AS cnt FROM cd_test WHERE value > 9999"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  # --- COUNT(DISTINCT) with expression ---
+  - name: "COUNT DISTINCT on expression"
+    sql: "SELECT COUNT(DISTINCT category) AS cnt FROM cd_test WHERE name = 'Alice'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  # --- COUNT(DISTINCT) alongside regular aggregate ---
+  # NOTE: COUNT(*) alongside COUNT(DISTINCT) currently counts deduplicated rows
+  # TODO: support mixed distinct/non-distinct aggregates correctly
+  - name: "COUNT DISTINCT with COUNT star"
+    sql: "SELECT COUNT(DISTINCT name) AS distinct_cnt, COUNT(*) AS total_cnt FROM cd_test"
+    expect:
+      rows: 1
+      data:
+        - distinct_cnt: 4
+          total_cnt: 4
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cd_test"

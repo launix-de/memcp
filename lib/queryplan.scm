@@ -152,6 +152,35 @@ if there is a group function, create a temporary preaggregate table
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
+
+	/* COUNT(DISTINCT) rewrite helpers */
+	(define _cd_find (lambda (expr) (match expr
+		'((symbol count_distinct) _) true
+		(cons sym args) (reduce args (lambda (a b) (or a (_cd_find b))) false)
+		false)))
+	(define _cd_extract (lambda (expr) (match expr
+		'((symbol count_distinct) e) (list e)
+		(cons sym args) (merge (map args _cd_extract))
+		'())))
+	(define _cd_replace (lambda (expr) (match expr
+		'((symbol count_distinct) e) '((quote aggregate) 1 (quote +) 0)
+		(cons sym args) (cons sym (map args _cd_replace))
+		expr)))
+	(define _cd_has (reduce_assoc fields (lambda (a k v) (or a (_cd_find v))) false))
+	/* if count_distinct present: save original having/order/limit/offset, replace fields,
+	clear having/order/limit/offset (they belong to the outer/final group stage) */
+	(define _cd_distinct_exprs (if _cd_has (reduce_assoc fields (lambda (a k v) (merge a (_cd_extract v))) '()) nil))
+	(define _cd_having (if _cd_has having nil))
+	(define _cd_order (if _cd_has order nil))
+	(define _cd_limit (if _cd_has limit nil))
+	(define _cd_offset (if _cd_has offset nil))
+	(define _cd_user_group group)
+	(define fields (if _cd_has (map_assoc fields (lambda (k v) (_cd_replace v))) fields))
+	(define having (if _cd_has nil having))
+	(define order (if _cd_has nil order))
+	(define limit (if _cd_has nil limit))
+	(define offset (if _cd_has nil offset))
+
 	(define make_group_stage (lambda (group having order limit offset)
 		(list
 			(cons (quote group-cols) (coalesce group '()))
@@ -159,6 +188,17 @@ if there is a group function, create a temporary preaggregate table
 			(list (quote order) (coalesce order '()))
 			(list (quote limit) limit)
 			(list (quote offset) offset)
+			(list (quote dedup) false)
+		)
+	))
+	(define make_dedup_stage (lambda (group)
+		(list
+			(cons (quote group-cols) (coalesce group '()))
+			(list (quote having) nil)
+			(list (quote order) '())
+			(list (quote limit) nil)
+			(list (quote offset) nil)
+			(list (quote dedup) true)
 		)
 	))
 	(define stage_group_cols (lambda (stage) (reduce stage (lambda (acc item)
@@ -191,6 +231,12 @@ if there is a group function, create a temporary preaggregate table
 			_ nil
 		) acc)
 	) nil)))
+	(define stage_is_dedup (lambda (stage) (reduce stage (lambda (acc item)
+		(if acc acc (match item
+			'((quote dedup) true) true
+			_ false
+		))
+	) false)))
 
 	(define make_replace_find_column_subselect (lambda (schemas2 outer_schemas) (begin
 		(define alias_exists_in_schema (lambda (schemas alias_name table_insensitive) (reduce_assoc schemas (lambda (acc alias cols)
@@ -879,7 +925,18 @@ if there is a group function, create a temporary preaggregate table
 			(set group (map group replace_rename))
 			(set having (replace_rename having))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename col) dir)))))
-			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
+			(define groups (if (coalesce _cd_distinct_exprs false)
+				/* COUNT(DISTINCT): two group stages - first dedup, then aggregate */
+				(list
+					(make_dedup_stage
+						(merge (map (coalesce _cd_user_group '()) replace_rename) (map _cd_distinct_exprs (lambda (e) (replace_find_column (replace_rename e))))))
+					(make_group_stage
+						(if (nil? _cd_user_group) '(1) (map _cd_user_group (lambda (e) (replace_find_column (replace_rename e)))))
+						(_cd_replace (replace_rename _cd_having))
+						(map (coalesce _cd_order '()) (lambda (o) (match o '(col dir) (list (_cd_replace (replace_rename col)) dir))))
+						_cd_limit _cd_offset))
+				/* normal: single group stage */
+				(if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil)))
 			(list schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll groups schemas replace_find_column)
 		)
 	)
@@ -908,8 +965,15 @@ if there is a group function, create a temporary preaggregate table
 			(list (quote order) (coalesce order '()))
 			(list (quote limit) limit)
 			(list (quote offset) offset)
+			(list (quote dedup) false)
 		)
 	))
+	(define stage_is_dedup (lambda (stage) (reduce stage (lambda (acc item)
+		(if acc acc (match item
+			'((quote dedup) true) true
+			_ false
+		))
+	) false)))
 	(define stage_group_cols (lambda (stage) (reduce stage (lambda (acc item)
 		(if (nil? acc) (match item
 			(cons (quote group-cols) cols) cols
@@ -956,9 +1020,10 @@ if there is a group function, create a temporary preaggregate table
 		(set stage_group (map stage_group replace_find_column))
 		(set stage_having (replace_find_column stage_having))
 		(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))
-		(define ags (merge_unique (extract_assoc fields (lambda (key expr) (extract_aggregates expr))))) /* aggregates in fields */
-		(define ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col))))))) /* aggregates in order */
-		(define ags (merge_unique ags (extract_aggregates (coalesce stage_having true)))) /* aggregates in having */
+		(define is_dedup (stage_is_dedup stage))
+		(define ags (if is_dedup '() (merge_unique (extract_assoc fields (lambda (key expr) (extract_aggregates expr)))))) /* aggregates in fields */
+		(define ags (if is_dedup ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col)))))))) /* aggregates in order */
+		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce stage_having true))))) /* aggregates in having */
 
 		/* TODO: replace (get_column nil ti col ci) in group, having and order with (coalesce (fields col) '('get_column nil false col false)) */
 
@@ -969,7 +1034,9 @@ if there is a group function, create a temporary preaggregate table
 				/* prepare preaggregate */
 
 				/* TODO: check if there is a foreign key on tbl.groupcol and then reuse that table */
-				(set grouptbl (concat "." tbl ":" stage_group))
+				/* dedup stages must include the WHERE condition in the name to prevent stale keys from
+				prior queries with different WHERE clauses; normal stages recompute from source so stale keys are harmless */
+				(set grouptbl (if is_dedup (concat "." tbl ":" stage_group "|" condition) (concat "." tbl ":" stage_group)))
 				(createtable schema grouptbl (cons
 					/* unique key over all identiying columns */ '("unique" "group" (map stage_group (lambda (col) (concat col))))
 					/* all identifying columns */ (map stage_group (lambda (col) '("column" (concat col) "any"/* TODO get type from schema */ '() '())))
@@ -983,27 +1050,7 @@ if there is a group function, create a temporary preaggregate table
 				(set condition (replace_find_column (coalesceNil condition true)))
 				(set filtercols (extract_columns_for_tblvar tblvar condition))
 
-				(define replace_agg_with_fetch (lambda (expr)
-					(match expr
-						(cons (symbol aggregate) rest) '('get_column grouptbl false (concat rest "|" condition) false) /* aggregate helper column */
-						'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (concat '('get_column tblvar ti col ci)) ci) /* grouped col */
-						(cons sym args) /* function call */ (cons sym (map args replace_agg_with_fetch))
-						expr /* literals */
-					)
-				))
-
-				(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_agg_with_fetch col) dir))))))
-				(define next_groups (merge
-					(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset)) '())
-					rest_groups
-				))
-				(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
-					(map_assoc fields (lambda (k v) (replace_agg_with_fetch v)))
-					(replace_agg_with_fetch stage_having)
-					next_groups
-					schemas
-					replace_find_column))
-
+				/* collect plan: insert unique group keys into group table (shared by dedup and normal stages) */
 				(define collect_plan
 					'('time '('begin
 						/* If grouping is global (group='(1)), avoid base scan and insert one key row */
@@ -1033,26 +1080,78 @@ if there is a group function, create a temporary preaggregate table
 						)
 					) "collect"))
 
-				(define compute_plan
-					'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
-						(set cols (extract_columns_for_tblvar tblvar expr))
-						/* TODO: name that column (concat ag "|" condition) */
-						'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) '(list "temp" true) (cons list (map stage_group (lambda (col) (concat col)))) '((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
-							(scan_wrapper 'scan schema tbl
-								(cons list (merge tblvar_cols filtercols))
-								/* check group equality AND WHERE-condition */
-								'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))))
-								(cons list cols)
-								'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))/* TODO: (build_scan tables condition)*/
-								reduce
-								neutral
-								nil
-								isOuter
+				(if is_dedup (begin
+					/* DEDUP-ONLY stage: no aggregate computation, just collect unique keys and pass through to next stage */
+					(define replace_col_for_dedup (lambda (expr)
+						(match expr
+							(cons (symbol aggregate) rest) expr /* leave aggregates intact for next stage */
+							'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (concat '('get_column tblvar ti col ci)) ci) /* map source col to grouptbl col */
+							(cons sym args) (cons sym (map args replace_col_for_dedup))
+							expr /* literals */
+						)
+					))
+					/* transform rest_groups to reference grouptbl columns instead of source table columns;
+					first resolve nil -> tblvar via replace_find_column, then map tblvar -> grouptbl */
+					(define _dedup_resolve (lambda (e) (replace_col_for_dedup (replace_find_column e))))
+					(define transformed_rest_groups (map rest_groups (lambda (s)
+						(make_group_stage
+							(map (stage_group_cols s) _dedup_resolve)
+							(_dedup_resolve (stage_having_expr s))
+							(map (coalesce (stage_order_list s) '()) (lambda (o) (match o '(col dir) (list (_dedup_resolve col) dir))))
+							(stage_limit_val s)
+							(stage_offset_val s))
+					)))
+					(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
+						(map_assoc fields (lambda (k v) (_dedup_resolve v)))
+						nil /* condition already applied in collect */
+						transformed_rest_groups
+						schemas
+						replace_find_column))
+					(list 'begin collect_plan grouped_plan)
+				) (begin
+						/* NORMAL group stage: extract aggregates, compute, and continue */
+						(define replace_agg_with_fetch (lambda (expr)
+							(match expr
+								(cons (symbol aggregate) rest) '('get_column grouptbl false (concat rest "|" condition) false) /* aggregate helper column */
+								'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (concat '('get_column tblvar ti col ci)) ci) /* grouped col */
+								(cons sym args) /* function call */ (cons sym (map args replace_agg_with_fetch))
+								expr /* literals */
 							)
 						))
-					))))) "compute"))
 
-				(list 'begin collect_plan compute_plan grouped_plan)
+						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_agg_with_fetch col) dir))))))
+						(define next_groups (merge
+							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset)) '())
+							rest_groups
+						))
+						(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
+							(map_assoc fields (lambda (k v) (replace_agg_with_fetch v)))
+							(replace_agg_with_fetch stage_having)
+							next_groups
+							schemas
+							replace_find_column))
+
+						(define compute_plan
+							'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
+								(set cols (extract_columns_for_tblvar tblvar expr))
+								/* TODO: name that column (concat ag "|" condition) */
+								'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) '(list "temp" true) (cons list (map stage_group (lambda (col) (concat col)))) '((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
+									(scan_wrapper 'scan schema tbl
+										(cons list (merge tblvar_cols filtercols))
+										/* check group equality AND WHERE-condition */
+										'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))))
+										(cons list cols)
+										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))/* TODO: (build_scan tables condition)*/
+										reduce
+										neutral
+										nil
+										isOuter
+									)
+								))
+							))))) "compute"))
+
+						(list 'begin collect_plan compute_plan grouped_plan)
+				))
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
 		)

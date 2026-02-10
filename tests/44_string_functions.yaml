@@ -184,5 +184,27 @@ test_cases:
       data:
         - n: null
 
+  # --- SUBSTRING FROM FOR (SQL standard syntax) ---
+  - name: "SUBSTRING FROM FOR basic"
+    sql: "SELECT SUBSTRING('Hello World' FROM 1 FOR 5) AS s"
+    expect:
+      rows: 1
+      data:
+        - s: "Hello"
+
+  - name: "SUBSTRING FROM FOR on column"
+    sql: "SELECT SUBSTRING(name FROM 1 FOR 5) AS prefix FROM fn_str_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - prefix: "  Ali"
+
+  - name: "SUBSTRING FROM FOR middle"
+    sql: "SELECT SUBSTRING('abcdef' FROM 3 FOR 2) AS s"
+    expect:
+      rows: 1
+      data:
+        - s: "cd"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS fn_str_test"

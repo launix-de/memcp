@@ -208,11 +208,11 @@ if the user is not allowed to access this property, the function will throw an e
 					(set result (eval (scheme code)))
 					((res "print") (json_encode result))
 				)) (lambda(e) (begin
-					(print "SCM code: " code)
-					(print "error: " e)
-					((res "header") "Content-Type" "text/plain")
-					((res "status") 500)
-					((res "print") "SCM Error: " e)
+						(print "SCM code: " code)
+						(print "error: " e)
+						((res "header") "Content-Type" "text/plain")
+						((res "status") 500)
+						((res "print") "SCM Error: " e)
 				)))
 			)
 			(begin
