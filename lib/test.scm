@@ -467,6 +467,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (optimize '('begin '('define 'x 4) '(+ 'x 1))) 5 "optimize inlines define use-once")
 	(assert (optimize '('and '('and '('and '(> 'LINEITEM.L_QUANTITY 10)) true) '('equal? 1 '('outer 1)))) '(> 'LINEITEM.L_QUANTITY 10) "SQL filter optimization")
 
+	/* Flatten nested + and * (associative operators) */
+	(assert (optimize '('+ 1 '('+ 2 3))) 6 "optimize flattens nested + constants")
+	(assert (optimize '('* 2 '('* 3 4))) 24 "optimize flattens nested * constants")
+	(assert (optimize '('+ 1 '('+ 2 '('+ 3 4)))) 10 "optimize flattens deeply nested +")
+	(assert (optimize '('* 1 '('* 2 '('* 3 4)))) 24 "optimize flattens deeply nested *")
+	/* - and / must NOT be flattened (non-associative) */
+	(assert (- 10 (- 3 1)) 8 "subtraction not flattened: 10-(3-1)=8")
+	(assert (/ 100 (/ 10 2)) 20 "division not flattened: 100/(10/2)=20")
+
+	/* Flatten nested !begin blocks */
+	(assert (begin (define xb1 1) (!begin (!begin (set xb1 2) (set xb1 (+ xb1 3))) (set xb1 (* xb1 10))) xb1) 50 "nested !begin flattens correctly")
+
 	/* Lambda params overshadow outer variables */
 	(define y 10)
 	(assert ((lambda (y) (+ y 1)) 5) 6 "param shadows outer value")

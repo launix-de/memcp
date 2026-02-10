@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -15,6 +15,8 @@ Copyright (C) 2024  Carl-Philip Hänsch
 	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 package scm
+
+import "regexp"
 
 var SettingsHaveGoodBacktraces bool
 
@@ -450,6 +452,19 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
+		// Flatten nested !begin blocks
+		if scmerIsSymbol(v[0], "!begin") {
+			for i := 1; i < len(v); i++ {
+				if inner, ok := scmerSlice(v[i]); ok && len(inner) > 1 && scmerIsSymbol(inner[0], "!begin") {
+					newV := make([]Scmer, 0, len(v)+len(inner)-2)
+					newV = append(newV, v[:i]...)
+					newV = append(newV, inner[1:]...)
+					newV = append(newV, v[i+1:]...)
+					v = newV
+					i-- // re-examine this position
+				}
+			}
+		}
 		if scmerIsSymbol(v[0], "!begin") && len(v) == 2 {
 			return OptimizeEx(v[1], env, &ome2, useResult)
 		}
@@ -535,6 +550,19 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				allConstArgs = false
 			}
 		}
+		// Flatten nested + and * (associative operators)
+		if headOk && (headSym == Symbol("+") || headSym == Symbol("*")) {
+			for i := 1; i < len(v); i++ {
+				if inner, ok := scmerSlice(v[i]); ok && len(inner) > 1 && scmerIsSymbol(inner[0], string(headSym)) {
+					newV := make([]Scmer, 0, len(v)+len(inner)-2)
+					newV = append(newV, v[:i]...)
+					newV = append(newV, inner[1:]...)
+					newV = append(newV, v[i+1:]...)
+					v = newV
+					i-- // re-examine this position
+				}
+			}
+		}
 		// If this expression is an eval/import call, globally disable further begin inlining
 		if headOk && (headSym == Symbol("eval") || headSym == Symbol("import")) {
 			optimizerSeenEvalImport = true
@@ -607,6 +635,21 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 		}
 		if headOk && headSym == Symbol("var") && len(slice) == 2 {
 			return NewNthLocalVar(NthLocalVar(ToInt(slice[1])))
+		}
+		if headOk && headSym == Symbol("regex") && len(slice) > 1 {
+			// Precompile constant regex patterns at optimization time
+			if slice[1].IsString() {
+				patternStr := slice[1].String()
+				re, err := regexp.Compile(patternStr)
+				if err != nil {
+					panic("invalid regex pattern: " + patternStr + ": " + err.Error())
+				}
+				slice[1] = NewRegex(re)
+			}
+			for i := 2; i < len(slice); i++ {
+				slice[i] = OptimizeMatchPattern(NewNil(), slice[i], env, ome, ome2)
+			}
+			return NewSlice(slice)
 		}
 		for i := 1; i < len(slice); i++ {
 			slice[i] = OptimizeMatchPattern(NewNil(), slice[i], env, ome, ome2)

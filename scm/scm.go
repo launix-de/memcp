@@ -1013,6 +1013,8 @@ func ComputeSize(v Scmer) uint {
 		}
 		sz += ComputeSize(si.value)
 		return sz
+	case tagRegex:
+		return base + goAllocOverhead
 	case tagAny:
 		payload := v.Any()
 		return base + goAllocOverhead + computeGoPayload(payload)

@@ -53,7 +53,7 @@ func init_alu() {
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			tag := a[0].GetTag()
-			return NewBool(tag == tagFloat || tag == tagInt)
+			return NewBool(tag == tagFloat || tag == tagInt || tag == tagDate)
 		},
 		true,
 	})

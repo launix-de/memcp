@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -24,6 +24,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -70,6 +71,7 @@ const (
 	tagFastDict
 	tagDate
 	tagAny
+	tagRegex // *regexp.Regexp
 	// custom tags >= 100
 )
 
@@ -220,6 +222,14 @@ func NewAny(v any) Scmer {
 	p := new(any)
 	*p = v
 	return Scmer{(*byte)(unsafe.Pointer(p)), makeAux(tagAny, 0)}
+}
+
+func NewRegex(re *regexp.Regexp) Scmer {
+	var ptr *byte
+	if re != nil {
+		ptr = (*byte)(unsafe.Pointer(re))
+	}
+	return Scmer{ptr, makeAux(tagRegex, 0)}
 }
 
 func FromAny(v any) Scmer {
@@ -665,6 +675,20 @@ func (s Scmer) SourceInfo() *SourceInfo {
 	return (*SourceInfo)(unsafe.Pointer(s.ptr))
 }
 
+func (s Scmer) IsRegex() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagRegex
+}
+
+func (s Scmer) Regex() *regexp.Regexp {
+	if s.GetTag() != tagRegex {
+		panic("not regexp")
+	}
+	return (*regexp.Regexp)(unsafe.Pointer(s.ptr))
+}
+
 // Symbol returns the Scheme symbol value as Go string.
 func (s Scmer) Symbol() Symbol {
 	if s.GetTag() != tagSymbol {
@@ -708,6 +732,8 @@ func (s Scmer) Any() any {
 		return s.FastDict()
 	case tagParser:
 		return s.Parser()
+	case tagRegex:
+		return s.Regex()
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
 	default:

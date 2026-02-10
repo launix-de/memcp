@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023-2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -121,33 +121,27 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	 - (number? Symbol) will match if value is a number and put the value into Symbol
 	 - (list? Symbol) will match if value is a list and put the value into Symbol
 	*/
-	if pattern.IsSourceInfo() {
+	switch pattern.GetTag() {
+	case tagSourceInfo:
 		return match(val, pattern.SourceInfo().value, en)
-	}
-	// literals
-	if pattern.IsInt() || pattern.IsFloat() || pattern.IsString() {
+	case tagInt, tagFloat, tagString:
 		return Equal(val, pattern)
-	}
-	if pattern.IsSymbol() {
+	case tagSymbol:
 		switch pattern.String() {
 		case "nil":
 			return val.IsNil()
 		case "true":
-			// Strict boolean match: only match literal true
 			return val.IsBool() && val.Bool()
 		case "false":
-			// Strict boolean match: only match literal false
 			return val.IsBool() && !val.Bool()
 		default:
 			en.Vars[Symbol(pattern.String())] = val
 			return true
 		}
-	}
-	if pattern.IsNthLocalVar() {
+	case tagNthLocalVar:
 		en.VarsNumbered[pattern.NthLocalVar()] = val
 		return true
-	}
-	if pattern.IsSlice() {
+	case tagSlice:
 		p := pattern.Slice()
 		// Support nested head wrappers like ((symbol get_column) ...)
 		// by structurally matching lists element-wise when the first
@@ -270,41 +264,49 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			// for multiline parsing, use (?ms:<REGEXP>)
 			// for additional info, see https://github.com/google/re2/wiki/Syntax
 			if str, ok := scmerAsString(valueFromPattern(val, en)); ok {
-				if patternStr, ok := scmerAsString(valueFromPattern(p[1], en)); ok {
-					re, err := regexp.Compile(patternStr)
+				var re *regexp.Regexp
+				if p[1].IsRegex() {
+					re = p[1].Regex()
+				} else if patternStr, ok := scmerAsString(valueFromPattern(p[1], en)); ok {
+					var err error
+					re, err = regexp.Compile(patternStr)
 					if err != nil {
 						panic(err)
 					}
-					if re.NumSubexp() != len(p)-3 {
-						panic("regex " + patternStr + " contains " + fmt.Sprint(re.NumSubexp()) + " subexpressions, found " + fmt.Sprint(len(p)))
-					}
-					match := re.FindStringSubmatch(str)
-					if match != nil {
-						for i := 0; i <= re.NumSubexp(); i++ {
-							if name, ok := symbolName(p[i+2]); ok && name == "_" {
-								continue
-							}
-							if idx, ok := p[i+2].Any().(NthLocalVar); ok {
-								en.VarsNumbered[idx] = NewString(match[i])
-								continue
-							}
-							if sym, ok := symbolName(p[i+2]); ok {
-								en.Vars[Symbol(sym)] = NewString(match[i])
-								continue
-							}
-							panic("regex variable invalid: " + SerializeToString(p[i+2], en))
-						}
-						return true
-					}
-					return false
+				} else {
+					panic("regex expects string or precompiled regexp")
 				}
+				if re.NumSubexp() != len(p)-3 {
+					panic("regex " + re.String() + " contains " + fmt.Sprint(re.NumSubexp()) + " subexpressions, found " + fmt.Sprint(len(p)-3))
+				}
+				match := re.FindStringSubmatch(str)
+				if match != nil {
+					for i := 0; i <= re.NumSubexp(); i++ {
+						if name, ok := symbolName(p[i+2]); ok && name == "_" {
+							continue
+						}
+						if p[i+2].IsNthLocalVar() {
+							en.VarsNumbered[p[i+2].NthLocalVar()] = NewString(match[i])
+							continue
+						}
+						if sym, ok := symbolName(p[i+2]); ok {
+							en.Vars[Symbol(sym)] = NewString(match[i])
+							continue
+						}
+						panic("regex variable invalid: " + SerializeToString(p[i+2], en))
+					}
+					return true
+				}
+				return false
 			}
 			panic("regex expects string")
 		default:
 			panic("unknown match pattern: " + fmt.Sprint(p))
 		}
+	default:
+		panic("unknown match pattern: " + SerializeToString(pattern, en))
 	}
-	panic("unknown match pattern: " + SerializeToString(pattern, en))
+	panic("unreachable")
 }
 
 func matchConcat(val Scmer, p []Scmer, en *Env) bool {

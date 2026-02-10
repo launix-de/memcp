@@ -196,6 +196,8 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteByte(')')
 	case tagSourceInfo:
 		SerializeEx(b, v.SourceInfo().value, en, glob, p)
+	case tagRegex:
+		b.WriteString(v.Regex().String())
 	case tagAny:
 		if si, ok := v.Any().(SourceInfo); ok {
 			SerializeEx(b, si.value, en, glob, p)
