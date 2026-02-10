@@ -1,0 +1,325 @@
+metadata:
+  version: "1.0"
+  description: "Group stage corner cases: limits in subqueries, DISTINCT+joins, nested staging"
+
+test_cases:
+  # --- Setup: two related tables ---
+  - name: "Create orders table"
+    sql: "CREATE TABLE gs_orders (id INT PRIMARY KEY, customer VARCHAR(50), amount INT, priority INT)"
+
+  - name: "Create items table"
+    sql: "CREATE TABLE gs_items (id INT PRIMARY KEY, order_id INT, product VARCHAR(50), qty INT)"
+
+  - name: "Insert orders"
+    sql: |
+      INSERT INTO gs_orders (id, customer, amount, priority) VALUES
+        (1, 'Alice', 100, 3),
+        (2, 'Bob', 200, 1),
+        (3, 'Alice', 150, 2),
+        (4, 'Charlie', 300, 1),
+        (5, 'Bob', 50, 2),
+        (6, 'Alice', 250, 1)
+
+  - name: "Insert items"
+    sql: |
+      INSERT INTO gs_items (id, order_id, product, qty) VALUES
+        (1, 1, 'Widget', 2),
+        (2, 1, 'Gadget', 1),
+        (3, 2, 'Widget', 5),
+        (4, 3, 'Gadget', 3),
+        (5, 3, 'Doohickey', 1),
+        (6, 4, 'Widget', 10),
+        (7, 5, 'Gadget', 2),
+        (8, 6, 'Doohickey', 4),
+        (9, 6, 'Widget', 1)
+
+  # =================================================================
+  # 1. GROUP BY inside FROM subquery (derived table with aggregation)
+  # =================================================================
+  - name: "Derived table with GROUP BY"
+    noncritical: true
+    sql: |
+      SELECT t.customer, t.total
+      FROM (SELECT customer, SUM(amount) AS total FROM gs_orders GROUP BY customer) t
+      ORDER BY t.total DESC
+    expect:
+      rows: 3
+      data:
+        - customer: "Alice"
+          total: 500
+        - customer: "Charlie"
+          total: 300
+        - customer: "Bob"
+          total: 250
+
+  # =================================================================
+  # 2. LIMIT 1 + ORDER BY inside FROM subquery (top-1 per group pattern)
+  # =================================================================
+  - name: "Derived table with ORDER BY and LIMIT 1"
+    noncritical: true
+    sql: |
+      SELECT t.customer, t.amount
+      FROM (SELECT customer, amount FROM gs_orders ORDER BY amount DESC LIMIT 1) t
+    expect:
+      rows: 1
+      data:
+        - customer: "Charlie"
+          amount: 300
+
+  - name: "Derived table ORDER BY LIMIT 2 with outer ORDER BY"
+    noncritical: true
+    sql: |
+      SELECT t.customer, t.amount
+      FROM (SELECT customer, amount FROM gs_orders ORDER BY amount DESC LIMIT 3) t
+      ORDER BY t.amount ASC
+    expect:
+      rows: 3
+      data:
+        - customer: "Alice"
+          amount: 150
+        - customer: "Bob"
+          amount: 200
+        - customer: "Alice"
+          amount: 250
+
+  # =================================================================
+  # 3. Nested LIMIT: LIMIT in subquery + LIMIT in outer
+  # =================================================================
+  - name: "Nested LIMIT: inner LIMIT 4, outer LIMIT 2"
+    noncritical: true
+    sql: |
+      SELECT t.customer, t.amount
+      FROM (SELECT customer, amount FROM gs_orders ORDER BY amount DESC LIMIT 4) t
+      ORDER BY t.amount ASC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - customer: "Alice"
+          amount: 150
+        - customer: "Bob"
+          amount: 200
+
+  # =================================================================
+  # 4. GROUP BY in FROM subquery + outer ORDER BY
+  # =================================================================
+  - name: "Aggregated subquery with outer ORDER BY and LIMIT"
+    noncritical: true
+    sql: |
+      SELECT t.customer, t.cnt
+      FROM (SELECT customer, COUNT(*) AS cnt FROM gs_orders GROUP BY customer) t
+      ORDER BY t.cnt DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - customer: "Alice"
+          cnt: 3
+        - customer: "Bob"
+          cnt: 2
+
+  # =================================================================
+  # 5. COUNT(DISTINCT) with JOIN
+  # =================================================================
+  - name: "COUNT DISTINCT on joined column"
+    noncritical: true
+    sql: |
+      SELECT o.customer, COUNT(DISTINCT i.product) AS products
+      FROM gs_orders o
+      JOIN gs_items i ON i.order_id = o.id
+      GROUP BY o.customer
+      ORDER BY o.customer
+    expect:
+      rows: 3
+      data:
+        - customer: "Alice"
+          products: 3
+        - customer: "Bob"
+          products: 2
+        - customer: "Charlie"
+          products: 1
+
+  # =================================================================
+  # 6. COUNT(DISTINCT) with WHERE + JOIN
+  # =================================================================
+  - name: "COUNT DISTINCT joined with WHERE filter"
+    noncritical: true
+    sql: |
+      SELECT o.customer, COUNT(DISTINCT i.product) AS products
+      FROM gs_orders o
+      JOIN gs_items i ON i.order_id = o.id
+      WHERE o.amount >= 150
+      GROUP BY o.customer
+      ORDER BY o.customer
+    expect:
+      rows: 2
+      data:
+        - customer: "Alice"
+          products: 3
+        - customer: "Charlie"
+          products: 1
+
+  # =================================================================
+  # 7. Scalar subquery with COUNT(DISTINCT)
+  # =================================================================
+  - name: "Scalar subquery returning COUNT DISTINCT"
+    sql: |
+      SELECT (SELECT COUNT(DISTINCT product) FROM gs_items) AS total_products
+    expect:
+      rows: 1
+      data:
+        - total_products: 3
+
+  # =================================================================
+  # 8. GROUP BY with scalar subquery in SELECT
+  # =================================================================
+  - name: "GROUP BY with correlated scalar subquery"
+    sql: |
+      SELECT o.customer,
+             COUNT(*) AS order_cnt,
+             (SELECT SUM(qty) FROM gs_items i WHERE i.order_id = o.id) AS item_qty
+      FROM gs_orders o
+      GROUP BY o.customer
+      ORDER BY o.customer
+    expect:
+      rows: 3
+      data:
+        - customer: "Alice"
+          order_cnt: 3
+        - customer: "Bob"
+          order_cnt: 2
+        - customer: "Charlie"
+          order_cnt: 1
+
+  # =================================================================
+  # 9. Aggregated subquery in JOIN
+  # =================================================================
+  - name: "JOIN with aggregated derived table"
+    noncritical: true
+    sql: |
+      SELECT o.customer, o.amount, t.total_qty
+      FROM gs_orders o
+      JOIN (SELECT order_id, SUM(qty) AS total_qty FROM gs_items GROUP BY order_id) t ON t.order_id = o.id
+      ORDER BY o.id
+    expect:
+      rows: 6
+      data:
+        - customer: "Alice"
+          amount: 100
+          total_qty: 3
+        - customer: "Bob"
+          amount: 200
+          total_qty: 5
+        - customer: "Alice"
+          amount: 150
+          total_qty: 4
+        - customer: "Charlie"
+          amount: 300
+          total_qty: 10
+        - customer: "Bob"
+          amount: 50
+          total_qty: 2
+        - customer: "Alice"
+          amount: 250
+          total_qty: 5
+
+  # =================================================================
+  # 10. COUNT(DISTINCT) with ORDER BY DESC + LIMIT
+  # =================================================================
+  - name: "COUNT DISTINCT with ORDER BY aggregate and LIMIT"
+    sql: |
+      SELECT customer, COUNT(DISTINCT amount) AS uniq_amounts
+      FROM gs_orders
+      GROUP BY customer
+      ORDER BY COUNT(DISTINCT amount) DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - customer: "Alice"
+          uniq_amounts: 3
+        - customer: "Bob"
+          uniq_amounts: 2
+
+  # =================================================================
+  # 11. Multiple different aggregates in same query (ORDER BY expression, not alias)
+  # =================================================================
+  - name: "Mixed aggregates SUM COUNT with GROUP BY ORDER"
+    noncritical: true
+    sql: |
+      SELECT customer, SUM(amount) AS total, COUNT(*) AS cnt
+      FROM gs_orders
+      GROUP BY customer
+      ORDER BY SUM(amount) DESC
+    expect:
+      rows: 3
+      data:
+        - customer: "Alice"
+          total: 500
+          cnt: 3
+        - customer: "Charlie"
+          total: 300
+          cnt: 1
+        - customer: "Bob"
+          total: 250
+          cnt: 2
+
+  # =================================================================
+  # 12. GROUP BY with HAVING + ORDER BY + LIMIT combined
+  # =================================================================
+  - name: "GROUP BY HAVING ORDER LIMIT together"
+    sql: |
+      SELECT customer, SUM(amount) AS total
+      FROM gs_orders
+      GROUP BY customer
+      HAVING SUM(amount) > 200
+      ORDER BY SUM(amount) ASC
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - customer: "Bob"
+          total: 250
+
+  # =================================================================
+  # 13. Subquery with LIMIT 1 in WHERE (scalar subselect)
+  # =================================================================
+  - name: "WHERE with LIMIT 1 subquery"
+    noncritical: true
+    sql: |
+      SELECT customer, amount
+      FROM gs_orders
+      WHERE amount = (SELECT amount FROM gs_orders ORDER BY amount DESC LIMIT 1)
+    expect:
+      rows: 1
+      data:
+        - customer: "Charlie"
+          amount: 300
+
+  # =================================================================
+  # 14. Outer ORDER BY on column from aggregated subquery in JOIN
+  # =================================================================
+  - name: "Outer ORDER BY on aggregated JOIN column"
+    noncritical: true
+    sql: |
+      SELECT o.customer, o.amount, t.total_qty
+      FROM gs_orders o
+      JOIN (SELECT order_id, SUM(qty) AS total_qty FROM gs_items GROUP BY order_id) t ON t.order_id = o.id
+      ORDER BY t.total_qty DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - customer: "Charlie"
+          amount: 300
+          total_qty: 10
+        - customer: "Bob"
+          amount: 200
+          total_qty: 5
+        - customer: "Alice"
+          amount: 250
+          total_qty: 5
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS gs_items"
+  - sql: "DROP TABLE IF EXISTS gs_orders"

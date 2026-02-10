@@ -241,18 +241,23 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 
-	/* COUNT(DISTINCT) rewrite helpers */
+	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
+	(define _cd_is_subquery (lambda (sym) (match sym
+		'inner_select true '(quote inner_select) true (symbol inner_select) true
+		'inner_select_in true '(quote inner_select_in) true (symbol inner_select_in) true
+		'inner_select_exists true '(quote inner_select_exists) true (symbol inner_select_exists) true
+		_ false)))
 	(define _cd_find (lambda (expr) (match expr
 		'((symbol count_distinct) _) true
-		(cons sym args) (reduce args (lambda (a b) (or a (_cd_find b))) false)
+		(cons sym args) (if (_cd_is_subquery sym) false (reduce args (lambda (a b) (or a (_cd_find b))) false))
 		false)))
 	(define _cd_extract (lambda (expr) (match expr
 		'((symbol count_distinct) e) (list e)
-		(cons sym args) (merge (map args _cd_extract))
+		(cons sym args) (if (_cd_is_subquery sym) '() (merge (map args _cd_extract)))
 		'())))
 	(define _cd_replace (lambda (expr) (match expr
 		'((symbol count_distinct) e) '((quote aggregate) 1 (quote +) 0)
-		(cons sym args) (cons sym (map args _cd_replace))
+		(cons sym args) (if (_cd_is_subquery sym) expr (cons sym (map args _cd_replace)))
 		expr)))
 	(define _cd_has (reduce_assoc fields (lambda (a k v) (or a (_cd_find v))) false))
 	/* if count_distinct present: save original having/order/limit/offset, replace fields,
