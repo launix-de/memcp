@@ -978,7 +978,16 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	)
 )
 ))
-/* build queryplan from parsed query */
+/* build queryplan from parsed query
+   GROUP BY aggregate pipeline:
+   When a GROUP BY query has aggregates (SUM, COUNT, etc.), three phases run:
+   1. collect_plan: extract unique group keys from base table into a keytable
+   2. compute_plan: for each aggregate in 'ags', scan base table per group key
+      and store results as keytable columns named "expr|condition"
+   3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
+   All aggregates from fields, ORDER BY, and HAVING are collected into 'ags' so that
+   e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
+*/
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
 	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
@@ -1011,7 +1020,11 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 		(set stage_having (replace_find_column stage_having))
 		(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))
 		(define is_dedup (stage_is_dedup stage))
-		(define ags (if is_dedup '() (merge_unique (extract_assoc fields (lambda (key expr) (extract_aggregates expr)))))) /* aggregates in fields */
+		/* collect all unique aggregate tuples (expr reduce neutral) from fields, ORDER BY, and HAVING.
+		   Each tuple becomes a computed column on the keytable, e.g. SUM(amount) -> ((get_column t amount) + 0).
+		   ORDER BY SUM(x) requires SUM(x) to be pre-computed here even if not in SELECT. */
+		(define ags_raw (if is_dedup '() (extract_assoc fields (lambda (key expr) (extract_aggregates expr)))))
+		(define ags (if is_dedup '() (merge_unique ags_raw))) /* aggregates in fields */
 		(define ags (if is_dedup ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col)))))))) /* aggregates in order */
 		(define ags (if is_dedup ags (merge_unique ags (extract_aggregates (coalesce stage_having true))))) /* aggregates in having */
 
@@ -1082,7 +1095,9 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 						replace_find_column))
 					(list 'begin collect_plan grouped_plan)
 				) (begin
-						/* NORMAL group stage: extract aggregates, compute, and continue */
+						/* NORMAL group stage: extract aggregates, compute, and continue.
+						   replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
+						   so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false))
 
 						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_agg_with_fetch col) dir))))))
@@ -1100,7 +1115,6 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 						(define compute_plan
 							'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 								(set cols (extract_columns_for_tblvar tblvar expr))
-								/* TODO: name that column (concat ag "|" condition) */
 								'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) '(list "temp" true) (cons list (map stage_group (lambda (col) (concat col)))) '((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
 									(scan_wrapper 'scan schema tbl
 										(cons list (merge tblvar_cols filtercols))

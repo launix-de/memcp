@@ -118,7 +118,10 @@ func Equal(a, b Scmer) bool {
 		if tb == tagString || tb == tagSymbol {
 			return a.Int() == b.Int()
 		}
-		return a.Int() == b.Int()
+		if tb == tagBool || tb == tagDate {
+			return a.Int() == b.Int()
+		}
+		return false
 	case tagFloat:
 		if tb == tagInt {
 			return a.Float() == float64(b.Int())
@@ -126,7 +129,10 @@ func Equal(a, b Scmer) bool {
 		if tb == tagString || tb == tagSymbol {
 			return a.Float() == b.Float()
 		}
-		return a.Float() == b.Float()
+		if tb == tagBool || tb == tagDate {
+			return a.Float() == b.Float()
+		}
+		return false
 	case tagString, tagSymbol:
 		if tb == tagDate {
 			if ts, ok := ParseDateString(a.String()); ok {

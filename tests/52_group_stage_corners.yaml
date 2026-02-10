@@ -245,7 +245,6 @@ test_cases:
   # 11. Multiple different aggregates in same query (ORDER BY expression, not alias)
   # =================================================================
   - name: "Mixed aggregates SUM COUNT with GROUP BY ORDER"
-    noncritical: true
     sql: |
       SELECT customer, SUM(amount) AS total, COUNT(*) AS cnt
       FROM gs_orders
