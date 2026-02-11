@@ -65,6 +65,27 @@ func DeclareTitle(title string) {
 	declaration_titles = append(declaration_titles, "#"+title)
 }
 
+// returnTypeAnnotations stores rich return-type info for declared functions.
+// The optimizer queries this to determine ownership transfer (e.g., fresh allocation).
+var returnTypeAnnotations = map[string]*TypeDescriptor{}
+
+// FreshAlloc is a reusable TypeDescriptor for functions whose return value
+// is always a fresh allocation — safe for _mut swap by the optimizer.
+var FreshAlloc = &TypeDescriptor{Kind: "list", Transfer: true}
+
+// AnnotateReturnType attaches a return TypeDescriptor to named functions.
+// Use FreshAlloc for functions that always return freshly allocated values.
+func AnnotateReturnType(td *TypeDescriptor, names ...string) {
+	for _, name := range names {
+		returnTypeAnnotations[name] = td
+	}
+}
+
+// ReturnTypeOf returns the return TypeDescriptor for a declared function, or nil.
+func ReturnTypeOf(name string) *TypeDescriptor {
+	return returnTypeAnnotations[name]
+}
+
 func Declare(env *Env, def *Declaration) {
 	if !def.Forbidden {
 		declaration_titles = append(declaration_titles, def.Name)

@@ -603,31 +603,20 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				allConstArgs = false
 			}
 		}
-		// _mut swap: when first arg is a freshly allocated value from a known allocating
-		// function, replace with in-place variant. Only functions that allocate fresh results
-		// qualify — NOT coalesce/car/cdr/nth/show/if which return references to existing values.
+		// _mut swap: when first arg comes from a function annotated with FreshAlloc
+		// return type, replace with in-place variant. This excludes functions like
+		// coalesce/car/cdr which return references to existing values.
 		firstArgFresh := false
 		if len(v) >= 2 {
-			freshAllocators := map[Symbol]bool{
-				Symbol("list"): true, Symbol("cons"): true,
-				Symbol("map"): true, Symbol("map_mut"): true,
-				Symbol("mapIndex"): true, Symbol("mapIndex_mut"): true,
-				Symbol("filter"): true, Symbol("filter_mut"): true,
-				Symbol("append"): true, Symbol("append_mut"): true,
-				Symbol("merge"): true, Symbol("merge_unique"): true,
-				Symbol("merge_assoc"): true, Symbol("merge_assoc_mut"): true,
-				Symbol("map_assoc"): true, Symbol("map_assoc_mut"): true,
-				Symbol("filter_assoc"): true, Symbol("filter_assoc_mut"): true,
-				Symbol("extract_assoc"): true, Symbol("extract_assoc_mut"): true,
-				Symbol("produce"): true, Symbol("produceN"): true,
-			}
 			arg1 := v[1]
 			if si, ok := arg1.Any().(SourceInfo); ok {
 				arg1 = si.value
 			}
 			if inner, ok := scmerSlice(arg1); ok && len(inner) > 0 {
-				if s, ok2 := scmerSymbol(inner[0]); ok2 {
-					firstArgFresh = freshAllocators[s]
+				if d := DeclarationForValue(inner[0]); d != nil {
+					if rt := ReturnTypeOf(d.Name); rt != nil && rt.Transfer {
+						firstArgFresh = true
+					}
 				}
 			}
 		}

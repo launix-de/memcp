@@ -965,4 +965,18 @@ func init_list() {
 		},
 		true, true,
 	})
+
+	// Annotate functions whose return value is always a fresh allocation.
+	// The optimizer uses ReturnTypeOf() to safely apply _mut swaps on their results.
+	AnnotateReturnType(FreshAlloc,
+		"append", "append_unique", "cons", "cdr", "zip",
+		"merge", "merge_unique",
+		"filter", "map", "mapIndex", "produce", "produceN",
+		"filter_assoc", "map_assoc", "extract_assoc",
+		"set_assoc", "merge_assoc", "fastdict",
+		// _mut variants (also return fresh/owned values)
+		"map_mut", "mapIndex_mut", "map_assoc_mut",
+		"filter_mut", "filter_assoc_mut", "extract_assoc_mut",
+		"set_assoc_mut", "append_mut", "append_unique_mut", "merge_assoc_mut",
+	)
 }
