@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025  Carl-Philip Hänsch
+Copyright (C) 2025-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -192,6 +192,19 @@ func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 	pos := len(d.Pairs)
 	d.Pairs = append(d.Pairs, key, value)
 	d.index[h] = append(d.index[h], pos)
+}
+
+// Copy returns a deep copy of the FastDict (pairs and index).
+func (d *FastDict) Copy() *FastDict {
+	pairs := make([]Scmer, len(d.Pairs))
+	copy(pairs, d.Pairs)
+	idx := make(map[uint64][]int, len(d.index))
+	for h, bucket := range d.index {
+		b := make([]int, len(bucket))
+		copy(b, bucket)
+		idx[h] = b
+	}
+	return &FastDict{Pairs: pairs, index: idx}
 }
 
 func (d *FastDict) ToList() []Scmer { return d.Pairs }

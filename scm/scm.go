@@ -287,6 +287,16 @@ restart:
 				}
 				expression = list[len(list)-1]
 				goto restart
+			case "!list":
+				// Stack-allocated list: (!list NthLocalVar(start) count expr...)
+				// Evaluates exprs into VarsNumbered[start..start+count] and returns
+				// a slice view. The slice MUST NOT escape the current lambda frame.
+				start := int(list[1].NthLocalVar())
+				count := int(ToInt(list[2]))
+				for i := 0; i < count && i+3 < len(list); i++ {
+					en.VarsNumbered[start+i] = Eval(list[i+3], en)
+				}
+				return NewSlice(en.VarsNumbered[start : start+count])
 			case "parallel":
 				// execute all childs parallely, return nil after finish
 				childExprs := list[1:]
@@ -664,30 +674,30 @@ func init() {
 		"quote", "returns a symbol or list without evaluating it",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"symbol", "symbol", "symbol to quote"},
-		}, "symbol", nil, true,
+			DeclarationParameter{"symbol", "symbol", "symbol to quote", nil},
+		}, "symbol", nil, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"eval", "executes the given scheme program in the current environment",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"code", "list", "list with head and optional parameters"},
-		}, "any", nil, false,
+			DeclarationParameter{"code", "list", "list with head and optional parameters", nil},
+		}, "any", nil, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"size", "compute the memory size of a value",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "value to examine"},
+			DeclarationParameter{"value", "any", "value to examine", nil},
 		}, "int", func(a ...Scmer) Scmer {
 			return NewInt(int64(ComputeSize(a[0])))
-		}, true,
+		}, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"code", "list", "list with head and optional parameters"},
+			DeclarationParameter{"code", "list", "list with head and optional parameters", nil},
 		}, "any", func(a ...Scmer) Scmer {
 			// Reset the optimizer eval/import barrier per optimize() call.
 			// The global guard is needed during a single optimization pass, but it must
@@ -697,68 +707,68 @@ func init() {
 			defer func() { optimizerSeenEvalImport = saved }()
 			//fmt.Println("optimize", SerializeToString(a[0], &Globalenv), " -> ", SerializeToString(Optimize(a[0], &Globalenv), &Globalenv))
 			return Optimize(a[0], &Globalenv)
-		}, true,
+		}, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"time", "measures the time it takes to compute the first argument",
 		1, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"code", "any", "code to execute"},
-			DeclarationParameter{"label", "string", "label to print in the log or trace"},
-		}, "any", nil, false,
+			DeclarationParameter{"code", "any", "code to execute", nil},
+			DeclarationParameter{"label", "string", "label to print in the log or trace", nil},
+		}, "any", nil, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"if", "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
 		2, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"condition...", "any", "condition to evaluate"},
-			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true"},
-			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false"},
-		}, "returntype", nil, true,
+			DeclarationParameter{"condition...", "any", "condition to evaluate", nil},
+			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true", nil},
+			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false", nil},
+		}, "returntype", nil, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"and", "returns true if all conditions evaluate to true",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"condition", "bool", "condition to evaluate"},
-		}, "bool", nil, true,
+			DeclarationParameter{"condition", "bool", "condition to evaluate", nil},
+		}, "bool", nil, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"or", "returns true if at least one condition evaluates to true",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"condition", "any", "condition to evaluate"},
-		}, "bool", nil, true,
+			DeclarationParameter{"condition", "any", "condition to evaluate", nil},
+		}, "bool", nil, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"coalesce", "returns the first value that has a non-zero value",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "returntype", "value to examine"},
-		}, "returntype", nil, true,
+			DeclarationParameter{"value", "returntype", "value to examine", nil},
+		}, "returntype", nil, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"coalesceNil", "returns the first value that has a non-nil value",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "returntype", "value to examine"},
-		}, "returntype", nil, true,
+			DeclarationParameter{"value", "returntype", "value to examine", nil},
+		}, "returntype", nil, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"define", "defines or sets a variable in the current environment",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"variable", "symbol", "variable to set"},
-			DeclarationParameter{"value", "returntype", "value to set the variable to"},
-		}, "bool", nil, false,
+			DeclarationParameter{"variable", "symbol", "variable to set", nil},
+			DeclarationParameter{"value", "returntype", "value to set the variable to", nil},
+		}, "bool", nil, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"set", "defines or sets a variable in the current environment",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"variable", "symbol", "variable to set"},
-			DeclarationParameter{"value", "returntype", "value to set the variable to"},
-		}, "bool", nil, false,
+			DeclarationParameter{"variable", "symbol", "variable to set", nil},
+			DeclarationParameter{"value", "returntype", "value to set the variable to", nil},
+		}, "bool", nil, false, false,
 	})
 
 	// basic
@@ -766,7 +776,7 @@ func init() {
 		"error", "halts the whole execution thread and throws an error message",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"value...", "any", "value or message to throw"},
+			DeclarationParameter{"value...", "any", "value or message to throw", nil},
 		}, "string",
 		func(a ...Scmer) Scmer {
 			if len(a) == 1 {
@@ -778,14 +788,14 @@ func init() {
 				}
 				panic(b.String())
 			}
-		}, false,
+		}, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"func", "func", "function with no parameters that will be called"},
-			DeclarationParameter{"errorhandler", "func", "function that takes the error as parameter"},
+			DeclarationParameter{"func", "func", "function with no parameters that will be called", nil},
+			DeclarationParameter{"errorhandler", "func", "function that takes the error as parameter", nil},
 		}, "any",
 		func(a ...Scmer) (result Scmer) {
 			defer func() {
@@ -796,55 +806,55 @@ func init() {
 			}()
 			result = Apply(a[0])
 			return
-		}, true,
+		}, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply", "runs the function with its arguments",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"function", "func", "function to execute"},
-			DeclarationParameter{"arguments", "list", "list of arguments to apply"},
+			DeclarationParameter{"function", "func", "function to execute", nil},
+			DeclarationParameter{"arguments", "list", "list of arguments to apply", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			return Apply(a[0], asSlice(a[1], "apply")...)
-		}, true,
+		}, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"function", "func", "function to execute (must be a lambda)"},
-			DeclarationParameter{"arguments", "list", "assoc list of arguments to apply"},
+			DeclarationParameter{"function", "func", "function to execute (must be a lambda)", nil},
+			DeclarationParameter{"arguments", "list", "assoc list of arguments to apply", nil},
 		}, "symbol",
 		func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
-		}, true,
+		}, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "string", "string value that will be converted into a symbol"},
+			DeclarationParameter{"value", "string", "string value that will be converted into a symbol", nil},
 		}, "symbol",
 		func(a ...Scmer) Scmer {
 			return NewSymbol(String(a[0]))
-		}, false,
+		}, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list", "returns a list containing the parameters as alements",
 		0, 10000,
 		[]DeclarationParameter{
-			DeclarationParameter{"value...", "any", "value for the list"},
+			DeclarationParameter{"value...", "any", "value for the list", nil},
 		}, "list",
-		nil, false,
+		nil, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"for", "Sequential loop over a list state; applies a condition and step function and returns the final state list.\nUse only when iterations have strong data dependencies and must run sequentially.\n\nExamples:\n- Count to 10: (for '(0) (lambda (x) (< x 10)) (lambda (x) (list (+ x 1))))  => '(10)\n- Sum 0..9:   (for '(0 0) (lambda (x sum) (< x 10)) (lambda (x sum) (list (+ x 1) (+ sum x)))) => '(10 45)",
 		3, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"init", "list", "initial state as a list"},
-			DeclarationParameter{"condition", "func", "func that receives the current state as parameters and must return true if the loop shall be continued"},
-			DeclarationParameter{"step", "func", "step func that returns the next state as a list"},
+			DeclarationParameter{"init", "list", "initial state as a list", nil},
+			DeclarationParameter{"condition", "func", "func that receives the current state as parameters and must return true if the loop shall be continued", nil},
+			DeclarationParameter{"step", "func", "step func that returns the next state as a list", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			state := append([]Scmer{}, asSlice(a[0], "for init")...)
@@ -859,17 +869,40 @@ func init() {
 				state = append([]Scmer{}, asSlice(v, "for step")...)
 			}
 			return NewSlice(state)
-		}, true,
+		}, true, false,
+	})
+	Declare(&Globalenv, &Declaration{
+		"for_mut", "in-place for loop (optimizer-only, skips defensive state copy)",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"init", "list", "owned initial state", nil},
+			DeclarationParameter{"condition", "func", "func(state...) -> bool", nil},
+			DeclarationParameter{"step", "func", "step func returning next state as list", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			state := asSlice(a[0], "for_mut init")
+			cond := OptimizeProcToSerialFunction(a[1])
+			next := OptimizeProcToSerialFunction(a[2])
+			for ToBool(cond(state...)) {
+				v := next(state...)
+				if v.IsNil() {
+					state = []Scmer{}
+					continue
+				}
+				state = asSlice(v, "for_mut step")
+			}
+			return NewSlice(state)
+		}, true, true,
 	})
 	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "any value"},
+			DeclarationParameter{"value", "any", "any value", nil},
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(String(a[0]))
-		}, true,
+		}, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"match", `takes a value evaluates the branch that first matches the given pattern
@@ -885,49 +918,49 @@ Patterns can be any of:
 `,
 		3, 10000,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "value to evaluate"},
-			DeclarationParameter{"pattern...", "any", "pattern"},
-			DeclarationParameter{"result...", "returntype", "result value when the pattern matches; this code can use the variables matched in the pattern"},
-			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches"}, /* TODO: turn to returntype as soon as pattern+result are properly repeaded in Validate */
+			DeclarationParameter{"value", "any", "value to evaluate", nil},
+			DeclarationParameter{"pattern...", "any", "pattern", nil},
+			DeclarationParameter{"result...", "returntype", "result value when the pattern matches; this code can use the variables matched in the pattern", nil},
+			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches", nil}, /* TODO: turn to returntype as soon as pattern+result are properly repeaded in Validate */
 		}, "any", // TODO: returntype as soon as repead validate is implemented */
-		nil, true,
+		nil, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"lambda", "returns a function (func) constructed from the given code",
 		2, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"parameters", "symbol|list|nil", "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"},
-			DeclarationParameter{"code", "any", "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"},
-			DeclarationParameter{"numvars", "number", "number of unnamed variables that can be accessed via (var 0) (var 1) etc."},
+			DeclarationParameter{"parameters", "symbol|list|nil", "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol", nil},
+			DeclarationParameter{"code", "any", "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above", nil},
+			DeclarationParameter{"numvars", "number", "number of unnamed variables that can be accessed via (var 0) (var 1) etc.", nil},
 		}, "func", // TODO: func(...)->returntype as soon as function types are implemented
-		nil, false,
+		nil, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"begin", "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
 		0, 10000,
 		[]DeclarationParameter{
-			DeclarationParameter{"expression...", "any", "expressions to evaluate"},
+			DeclarationParameter{"expression...", "any", "expressions to evaluate", nil},
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any", // TODO: returntype as soon as repeat is implemented
-		nil, false,
+		nil, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"parallel", "executes all parameters in parallel and returns nil if they are finished",
 		1, 10000,
 		[]DeclarationParameter{
-			DeclarationParameter{"expression...", "any", "expressions to evaluate in parallel"},
+			DeclarationParameter{"expression...", "any", "expressions to evaluate in parallel", nil},
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any", // TODO: returntype as soon as repeat is implemented
-		nil, false,
+		nil, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"source", "annotates the node with filename and line information for better backtraces",
 		4, 4,
 		[]DeclarationParameter{
-			DeclarationParameter{"filename", "string", "Filename of the code"},
-			DeclarationParameter{"line", "number", "Line of the code"},
-			DeclarationParameter{"column", "number", "Column of the code"},
-			DeclarationParameter{"code", "returntype", "code"},
+			DeclarationParameter{"filename", "string", "Filename of the code", nil},
+			DeclarationParameter{"line", "number", "Line of the code", nil},
+			DeclarationParameter{"column", "number", "Column of the code", nil},
+			DeclarationParameter{"code", "returntype", "code", nil},
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "returntype",
 		func(a ...Scmer) Scmer {
@@ -937,14 +970,14 @@ Patterns can be any of:
 				ToInt(a[2]),
 				a[3],
 			})
-		}, true,
+		}, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"scheme", "parses a scheme expression into a list",
 		1, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"code", "string", "Scheme code"},
-			DeclarationParameter{"filename", "string", "optional filename"},
+			DeclarationParameter{"code", "string", "Scheme code", nil},
+			DeclarationParameter{"filename", "string", "optional filename", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			filename := "eval"
@@ -952,17 +985,17 @@ Patterns can be any of:
 				filename = String(a[1])
 			}
 			return Read(filename, String(a[0]))
-		}, true,
+		}, true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"serialize", "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"code", "list", "Scheme code"},
+			DeclarationParameter{"code", "list", "Scheme code", nil},
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(SerializeToString(a[0], &Globalenv))
-		}, false,
+		}, false, false,
 	})
 
 	init_alu()

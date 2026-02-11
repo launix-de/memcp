@@ -32,7 +32,7 @@ func init_streams() {
 		"streamString", "creates a stream that contains a string",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"content", "string", "content to put into the stream"},
+			DeclarationParameter{"content", "string", "content to put into the stream", nil},
 		}, "stream",
 		func(a ...Scmer) Scmer {
 			reader, writer := io.Pipe()
@@ -41,13 +41,13 @@ func init_streams() {
 				writer.Close()
 			}()
 			return NewAny(io.Reader(reader))
-		}, false,
+		}, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"gzip", "compresses a stream with gzip. Create streams with (stream filename)",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"stream", "stream", "input stream"},
+			DeclarationParameter{"stream", "stream", "input stream", nil},
 		}, "stream",
 		func(a ...Scmer) Scmer {
 			stream, ok := a[0].Any().(io.Reader)
@@ -64,13 +64,13 @@ func init_streams() {
 				writer.Close()
 			}()
 			return NewAny(io.Reader(reader))
-		}, false,
+		}, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"xz", "compresses a stream with xz. Create streams with (stream filename)",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"stream", "stream", "input stream"},
+			DeclarationParameter{"stream", "stream", "input stream", nil},
 		}, "stream",
 		func(a ...Scmer) Scmer {
 			stream, ok := a[0].Any().(io.Reader)
@@ -90,13 +90,13 @@ func init_streams() {
 				panic(err)
 			}
 			return NewAny(io.Reader(reader))
-		}, false,
+		}, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"zcat", "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"stream", "stream", "input stream"},
+			DeclarationParameter{"stream", "stream", "input stream", nil},
 		}, "stream",
 		func(a ...Scmer) Scmer {
 			stream, ok := a[0].Any().(io.Reader)
@@ -108,13 +108,13 @@ func init_streams() {
 				panic(err)
 			}
 			return NewAny(reader)
-		}, false,
+		}, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"xzcat", "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"stream", "stream", "input stream"},
+			DeclarationParameter{"stream", "stream", "input stream", nil},
 		}, "stream",
 		func(a ...Scmer) Scmer {
 			stream, ok := a[0].Any().(io.Reader)
@@ -126,6 +126,6 @@ func init_streams() {
 				panic(err)
 			}
 			return NewAny(reader)
-		}, false,
+		}, false, false,
 	})
 }

@@ -168,6 +168,7 @@ func Optimize(val Scmer, env *Env) Scmer {
 type optimizerMetainfo struct {
 	variableReplacement map[Symbol]Scmer
 	setBlacklist        []Symbol
+	nextSlot            *int // pointer to lambda's slot counter; nil outside lambda
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -180,6 +181,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 		result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
 	}
 	result.setBlacklist = ome.setBlacklist
+	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
 }
 
@@ -196,6 +198,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 		}
 	}
 	result.setBlacklist = ome.setBlacklist
+	result.nextSlot = ome.nextSlot // shared scope shares VarsNumbered
 	return
 }
 
@@ -546,11 +549,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
 			slotIndex++
 		}
-		// Set NumVars
+		ome2.nextSlot = &slotIndex // allow !list to allocate extra slots
+		v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
+		// Set NumVars (may have grown due to !list allocations)
 		if slotIndex > 0 {
 			v = append(v[:len(v):len(v)], NewInt(int64(slotIndex)))
 		}
-		v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
 		return NewSlice(v), transferOwnership, false
 	}
 
@@ -588,11 +592,72 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		return OptimizeParser(NewSlice(v), env, ome, false), true, false
 	case !headOk || headSym != Symbol("quote"):
 		allConstArgs := true
+		firstArgOwned := false // tracks whether arg[1] (the list/dict) has transferOwnership
 		for i := 0; i < len(v); i++ {
 			var constant bool
 			v[i], transferOwnership, constant = OptimizeEx(v[i], env, ome, true)
+			if i == 1 {
+				firstArgOwned = transferOwnership
+			}
 			if i > 0 && !constant {
 				allConstArgs = false
+			}
+		}
+		// _mut swap: when first arg is owned, replace with in-place variant
+		if headOk && firstArgOwned && len(v) >= 2 {
+			mutSwap := map[Symbol]string{
+				Symbol("map"):            "map_mut",
+				Symbol("mapIndex"):       "mapIndex_mut",
+				Symbol("map_assoc"):      "map_assoc_mut",
+				Symbol("filter"):         "filter_mut",
+				Symbol("filter_assoc"):   "filter_assoc_mut",
+				Symbol("extract_assoc"):  "extract_assoc_mut",
+				Symbol("append"):         "append_mut",
+				Symbol("append_unique"):  "append_unique_mut",
+				Symbol("merge_assoc"):    "merge_assoc_mut",
+				Symbol("set_assoc"):      "set_assoc_mut",
+				Symbol("for"):            "for_mut",
+			}
+			if mutName, ok := mutSwap[headSym]; ok {
+				v[0] = NewSymbol(mutName)
+				headSym = Symbol(mutName)
+				transferOwnership = true // result of _mut is also owned
+			}
+		}
+		// !list rewrite: when an argument is (list expr...) passed to a function
+		// whose parameter is annotated Escape:false, replace with (!list start count expr...)
+		// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
+		if headOk && ome.nextSlot != nil {
+			if decl := DeclarationForValue(v[0]); decl != nil {
+				for i := 1; i < len(v); i++ {
+					paramIdx := i - 1
+					if paramIdx >= len(decl.Params) {
+						paramIdx = len(decl.Params) - 1 // variadic: use last param
+					}
+					if paramIdx < 0 {
+						continue
+					}
+					ti := decl.Params[paramIdx].TypeInfo
+					if ti == nil || ti.Escape {
+						continue // unknown or escaping parameter
+					}
+					// Check if this argument is a (list ...) call
+					if inner, ok := scmerSlice(v[i]); ok && len(inner) >= 1 && scmerIsSymbol(inner[0], "list") {
+						count := len(inner) - 1
+						if count == 0 {
+							continue // empty list, no benefit
+						}
+						start := *ome.nextSlot
+						*ome.nextSlot += count
+						// Build (!list NthLocalVar(start) count expr1 expr2 ...)
+						rewritten := make([]Scmer, 0, count+3)
+						rewritten = append(rewritten, NewSymbol("!list"))
+						rewritten = append(rewritten, NewNthLocalVar(NthLocalVar(start)))
+						rewritten = append(rewritten, NewInt(int64(count)))
+						rewritten = append(rewritten, inner[1:]...)
+						v[i] = NewSlice(rewritten)
+					}
+				}
 			}
 		}
 		// Flatten nested + and * (associative operators)

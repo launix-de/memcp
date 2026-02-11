@@ -29,9 +29,9 @@ func init_vector() {
 		"dot", "produced the dot product",
 		2, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"v1", "list", "vector1"},
-			DeclarationParameter{"v2", "list", "vector2"},
-			DeclarationParameter{"mode", "string", "DOT, COSINE, EUCLIDEAN, default is DOT"},
+			DeclarationParameter{"v1", "list", "vector1", nil},
+			DeclarationParameter{"v2", "list", "vector2", nil},
+			DeclarationParameter{"mode", "string", "DOT, COSINE, EUCLIDEAN, default is DOT", nil},
 		}, "number",
 		func(a ...Scmer) Scmer {
 			var result float64
@@ -63,6 +63,6 @@ func init_vector() {
 				}
 			}
 			return NewFloat(result)
-		}, true,
+		}, true, false,
 	})
 }

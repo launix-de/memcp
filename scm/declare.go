@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -30,13 +30,32 @@ type Declaration struct {
 	Returns      string // any | string | number | int | bool | func | list | symbol | nil
 	Fn           func(...Scmer) Scmer
 	Foldable     bool // safe to constant-fold when all args are literals
+	Forbidden    bool // optimizer-only: hidden from help, blocked from .scm code
+}
+
+// TypeDescriptor describes the type of any Scmer value at arbitrary depth.
+// Uses pointers throughout — nil means "unknown / don't care" (conservative).
+type TypeDescriptor struct {
+	Kind     string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
+	Escape   bool                       // value may outlive its scope
+	Transfer bool                       // callee receives ownership, can mutate
+	Const    bool                       // value is a compile-time constant
+	Params   []*TypeDescriptor          // for Kind="func": parameter types
+	Return   *TypeDescriptor            // for Kind="func": return type
+	Keys     map[string]*TypeDescriptor // for Kind="assoc": per-key type info
+	Element  *TypeDescriptor            // for Kind="list": element type
 }
 
 type DeclarationParameter struct {
-	Name string
-	Type string // any | string | number | int | bool | func | list | symbol | nil
-	Desc string
+	Name     string
+	Type     string          // any | string | number | int | bool | func | list | symbol | nil
+	Desc     string
+	TypeInfo *TypeDescriptor // rich type info (nil = unknown / no annotation)
 }
+
+// NoEscape is a reusable TypeDescriptor annotation for parameters that
+// the callee reads but never stores — safe to back with stack-allocated !list.
+var NoEscape = &TypeDescriptor{Kind: "any", Escape: false}
 
 var declaration_titles []string
 var declarations map[string]*Declaration = make(map[string]*Declaration)
@@ -47,7 +66,9 @@ func DeclareTitle(title string) {
 }
 
 func Declare(env *Env, def *Declaration) {
-	declaration_titles = append(declaration_titles, def.Name)
+	if !def.Forbidden {
+		declaration_titles = append(declaration_titles, def.Name)
+	}
 	declarations[def.Name] = def
 	if def.Fn != nil {
 		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
@@ -178,7 +199,7 @@ func WriteDocumentation(folder string) error {
 			fmt.Fprintln(f, "### Parameters\n")
 			if len(def.Params) == 0 {
 				fmt.Fprintln(f, "_This function has no parameters._\n")
-			} else {
+			} else if d, ok := declarations[def.Name]; ok && !d.Forbidden {
 				for _, p := range def.Params {
 					fmt.Fprintf(f, "- **%s** (`%s`): %s\n", p.Name, p.Type, p.Desc)
 				}
@@ -351,8 +372,8 @@ func Help(fn Scmer) {
 			if title[0] == '#' {
 				fmt.Println("")
 				fmt.Println("-- " + title[1:] + " --")
-			} else {
-				fmt.Println("  " + title + ": " + strings.Split(declarations[title].Desc, "\n")[0])
+			} else if d, ok := declarations[title]; ok && !d.Forbidden {
+				fmt.Println("  " + title + ": " + strings.Split(d.Desc, "\n")[0])
 			}
 		}
 		fmt.Println("")

@@ -498,6 +498,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* Use-once inlining safety: begin with unused define should not change result */
 	(assert (begin (define tmp_unused 42) 7) 7 "unused define eliminated")
 
+	/* !list optimization: (list ...) passed to NoEscape parameter uses stack allocation */
+	(assert ((eval (optimize '('lambda '('a 'b) '(count '(list 'a 'b))))) 10 20) 2 "!list count")
+	(assert ((eval (optimize '('lambda '('a 'b) '(car '(list 'a 'b))))) 5 6) 5 "!list car")
+	(assert ((eval (optimize '('lambda '('a 'b 'c) '(nth '(list 'a 'b 'c) 1)))) 10 20 30) 20 "!list nth")
+	(assert ((eval (optimize '('lambda '('a 'b) '(has? '(list 'a 'b) 'a)))) 5 6) true "!list has?")
+	(assert ((eval (optimize '('lambda '('a 'b) '(get_assoc '(list "x" 'a "y" 'b) "x")))) 42 99) 42 "!list get_assoc")
+	(assert ((eval (optimize '('lambda '('a 'b) '(cdr '(list 'a 'b))))) 5 6) '(6) "!list cdr")
+	(assert ((eval (optimize '('lambda '('a 'b) '(reduce '(list 'a 'b) '('lambda '('acc 'x) '(+ 'acc 'x)) 0)))) 10 20) 30 "!list reduce")
+
+	/* _mut optimization: freshly constructed list triggers in-place operations */
+	(assert ((eval (optimize '('lambda '('a 'b 'c) '(map '(list 'a 'b 'c) '('lambda '('x) '(+ 'x 1)))))) 10 20 30) '(11 21 31) "_mut map on fresh list")
+	(assert ((eval (optimize '('lambda '('a 'b 'c 'd) '(filter '(list 'a 'b 'c 'd) '('lambda '('x) '(> 'x 2)))))) 1 2 3 4) '(3 4) "_mut filter on fresh list")
+
 	/* Numbered parameter semantics (NthLocalVar / NumVars) */
 	(print "testing numbered parameters ...")
 

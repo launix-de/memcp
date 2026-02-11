@@ -77,7 +77,7 @@ func init_date() {
 		func(a ...Scmer) Scmer {
 			return NewDate(time.Now().Unix())
 		},
-		false,
+		false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"current_date", "returns the current date (midnight UTC)",
@@ -88,13 +88,13 @@ func init_date() {
 			midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
-		false,
+		false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"parse_date", "parses a date from a string",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "string", "values to parse"},
+			DeclarationParameter{"value", "string", "values to parse", nil},
 		}, "date",
 		func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
@@ -111,14 +111,14 @@ func init_date() {
 			}
 			return NewNil()
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"format_date", "formats a unix timestamp, date, or datetime string into a date string",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"timestamp", "any", "unix timestamp, date, or datetime string"},
-			DeclarationParameter{"format", "string", "MySQL-style format string (e.g. %Y-%m-%d %H:%i:%s)"},
+			DeclarationParameter{"timestamp", "any", "unix timestamp, date, or datetime string", nil},
+			DeclarationParameter{"format", "string", "MySQL-style format string (e.g. %Y-%m-%d %H:%i:%s)", nil},
 		}, "string",
 		func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
@@ -161,7 +161,7 @@ func init_date() {
 			}
 			return NewString(buf.String())
 		},
-		true,
+		true, false,
 	})
 
 	// EXTRACT(field FROM expr) - implemented as extract_date(expr, field)
@@ -169,8 +169,8 @@ func init_date() {
 		"extract_date", "extracts a date field (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND) from a date value",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "date value"},
-			DeclarationParameter{"field", "string", "field name: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND"},
+			DeclarationParameter{"value", "any", "date value", nil},
+			DeclarationParameter{"field", "string", "field name: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND", nil},
 		}, "int",
 		func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
@@ -198,7 +198,7 @@ func init_date() {
 				panic("unknown EXTRACT field: " + field)
 			}
 		},
-		true,
+		true, false,
 	})
 
 	// DATE_ADD(expr, interval_seconds)
@@ -206,9 +206,9 @@ func init_date() {
 		"date_add", "adds an interval to a date value",
 		3, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "date value"},
-			DeclarationParameter{"amount", "int", "interval amount"},
-			DeclarationParameter{"unit", "string", "interval unit: DAY, WEEK, MONTH, YEAR, HOUR, MINUTE, SECOND"},
+			DeclarationParameter{"value", "any", "date value", nil},
+			DeclarationParameter{"amount", "int", "interval amount", nil},
+			DeclarationParameter{"unit", "string", "interval unit: DAY, WEEK, MONTH, YEAR, HOUR, MINUTE, SECOND", nil},
 		}, "date",
 		func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
@@ -240,7 +240,7 @@ func init_date() {
 			}
 			return NewDate(t.Unix())
 		},
-		true,
+		true, false,
 	})
 
 	// DATE_SUB(expr, amount, unit)
@@ -248,9 +248,9 @@ func init_date() {
 		"date_sub", "subtracts an interval from a date value",
 		3, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "date value"},
-			DeclarationParameter{"amount", "int", "interval amount"},
-			DeclarationParameter{"unit", "string", "interval unit: DAY, WEEK, MONTH, YEAR, HOUR, MINUTE, SECOND"},
+			DeclarationParameter{"value", "any", "date value", nil},
+			DeclarationParameter{"amount", "int", "interval amount", nil},
+			DeclarationParameter{"unit", "string", "interval unit: DAY, WEEK, MONTH, YEAR, HOUR, MINUTE, SECOND", nil},
 		}, "date",
 		func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
@@ -282,7 +282,7 @@ func init_date() {
 			}
 			return NewDate(t.Unix())
 		},
-		true,
+		true, false,
 	})
 
 	// DATE(expr) - truncate to date only (midnight)
@@ -290,7 +290,7 @@ func init_date() {
 		"date_trunc_day", "truncates a datetime to date (midnight UTC)",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "date/datetime value"},
+			DeclarationParameter{"value", "any", "date/datetime value", nil},
 		}, "date",
 		func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
@@ -303,7 +303,7 @@ func init_date() {
 			midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
-		true,
+		true, false,
 	})
 
 	// STR_TO_DATE(str, format) - parse string with MySQL format to date
@@ -311,8 +311,8 @@ func init_date() {
 		"str_to_date", "parses a string with MySQL format specifiers to a date",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "string", "date string"},
-			DeclarationParameter{"format", "string", "MySQL format string (e.g. %Y-%m-%d)"},
+			DeclarationParameter{"value", "string", "date string", nil},
+			DeclarationParameter{"format", "string", "MySQL format string (e.g. %Y-%m-%d)", nil},
 		}, "date",
 		func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
@@ -326,7 +326,7 @@ func init_date() {
 			}
 			return NewNil()
 		},
-		true,
+		true, false,
 	})
 }
 

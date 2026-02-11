@@ -72,6 +72,8 @@ github.com/launix-de/go-mysqlstack v0.0.0-20241101205441-bc39b4e0fb04 h1:UptMvGG
 github.com/launix-de/go-mysqlstack v0.0.0-20241101205441-bc39b4e0fb04/go.mod h1:YNDPcAUMZzFT4UPyIAq5uW4+QrrW64Q3iQAvjZAvASQ=
 github.com/launix-de/go-packrat/v2 v2.1.19 h1:t5S9dIFdtjwBxrX9rEVaWnN+pv+b3cYr77OYfTBdM60=
 github.com/launix-de/go-packrat/v2 v2.1.19/go.mod h1:Xb1/gZg0UMb2CPgmCfBdwvpMZYhKLjZ5BdqoWa/oQjw=
+github.com/launix-de/go-packrat/v2 v2.1.20 h1:0vpJ3KOPjGVEniYlZKDHCAMY8Ga5e/Fk5WZAzzLDYZ0=
+github.com/launix-de/go-packrat/v2 v2.1.20/go.mod h1:Xb1/gZg0UMb2CPgmCfBdwvpMZYhKLjZ5BdqoWa/oQjw=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/shopspring/decimal v1.4.0 h1:bxl37RwXBklmTi0C79JfXCEBD1cqqHt0bbgBAGFp81k=

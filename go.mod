@@ -50,3 +50,5 @@ require (
 )
 
 replace github.com/launix-de/NonLockingReadMap => ./third_party/NonLockingReadMap
+
+replace github.com/launix-de/go-packrat/v2 => /home/carli/projekte/go-packrat/v2

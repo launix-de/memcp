@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023-2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -60,7 +60,7 @@ func init_list() {
 		"count", "counts the number of elements in the list",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list"},
+			DeclarationParameter{"list", "list", "base list", NoEscape},
 		}, "int",
 		func(a ...Scmer) Scmer {
 			if a[0].GetTag() == tagSlice {
@@ -75,14 +75,14 @@ func init_list() {
 			}
 			panic("count expects a list")
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nth", "get the nth item of a list",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list"},
-			DeclarationParameter{"index", "number", "index beginning from 0"},
+			DeclarationParameter{"list", "list", "base list", NoEscape},
+			DeclarationParameter{"index", "number", "index beginning from 0", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "nth")
@@ -92,28 +92,28 @@ func init_list() {
 			}
 			return list[idx]
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
 		2, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list"},
-			DeclarationParameter{"item...", "any", "items to add"},
+			DeclarationParameter{"list", "list", "base list", nil},
+			DeclarationParameter{"item...", "any", "items to add", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			base := append([]Scmer{}, asSlice(a[0], "append")...)
 			base = append(base, a[1:]...)
 			return NewSlice(base)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
 		2, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list"},
-			DeclarationParameter{"item...", "any", "items to add"},
+			DeclarationParameter{"list", "list", "base list", nil},
+			DeclarationParameter{"item...", "any", "items to add", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := append([]Scmer{}, asSlice(a[0], "append_unique")...)
@@ -129,14 +129,14 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cons", "constructs a list from a head and a tail list",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"car", "any", "new head element"},
-			DeclarationParameter{"cdr", "list", "tail that is appended after car"},
+			DeclarationParameter{"car", "any", "new head element", nil},
+			DeclarationParameter{"cdr", "list", "tail that is appended after car", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			car := a[0]
@@ -145,13 +145,13 @@ func init_list() {
 			}
 			return NewSlice([]Scmer{car, a[1]})
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"car", "extracts the head of a list",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list"},
+			DeclarationParameter{"list", "list", "list", NoEscape},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "car")
@@ -160,13 +160,13 @@ func init_list() {
 			}
 			return list[0]
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cdr", "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list"},
+			DeclarationParameter{"list", "list", "list", NoEscape},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "cdr")
@@ -175,13 +175,13 @@ func init_list() {
 			}
 			return NewSlice(list[1:])
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "any", "list of lists of items"},
+			DeclarationParameter{"list", "any", "list of lists of items", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			lists := a
@@ -207,13 +207,13 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge", "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "any", "list of lists of items"},
+			DeclarationParameter{"list", "any", "list of lists of items", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			lists := a
@@ -230,13 +230,13 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge_unique", "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
 		1, 1000,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list of lists of items"},
+			DeclarationParameter{"list", "list", "list of lists of items", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			lists := a
@@ -264,14 +264,14 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"has?", "checks if a list has a certain item (equal?)",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"haystack", "list", "list to search in"},
-			DeclarationParameter{"needle", "any", "item to search for"},
+			DeclarationParameter{"haystack", "list", "list to search in", NoEscape},
+			DeclarationParameter{"needle", "any", "item to search for", nil},
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "has?")
@@ -282,14 +282,14 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"filter", "returns a list that only contains elements that pass the filter function",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list that has to be filtered"},
-			DeclarationParameter{"condition", "func", "filter condition func(any)->bool"},
+			DeclarationParameter{"list", "list", "list that has to be filtered", NoEscape},
+			DeclarationParameter{"condition", "func", "filter condition func(any)->bool", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "filter")
@@ -302,14 +302,14 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"map", "returns a list that contains the results of a map function that is applied to the list",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list that has to be mapped"},
-			DeclarationParameter{"map", "func", "map function func(any)->any that is applied to each item"},
+			DeclarationParameter{"list", "list", "list that has to be mapped", NoEscape},
+			DeclarationParameter{"map", "func", "map function func(any)->any that is applied to each item", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "map")
@@ -320,14 +320,14 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list that has to be mapped"},
-			DeclarationParameter{"map", "func", "map function func(i, any)->any that is applied to each item"},
+			DeclarationParameter{"list", "list", "list that has to be mapped", NoEscape},
+			DeclarationParameter{"map", "func", "map function func(i, any)->any that is applied to each item", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "mapIndex")
@@ -338,15 +338,15 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce", "returns a list that contains the result of a map function",
 		2, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list that has to be reduced"},
-			DeclarationParameter{"reduce", "func", "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item"},
-			DeclarationParameter{"neutral", "any", "(optional) initial value of the accumulator, defaults to nil"},
+			DeclarationParameter{"list", "list", "list that has to be reduced", NoEscape},
+			DeclarationParameter{"reduce", "func", "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", nil},
+			DeclarationParameter{"neutral", "any", "(optional) initial value of the accumulator, defaults to nil", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "reduce")
@@ -365,16 +365,16 @@ func init_list() {
 			}
 			return result
 		},
-		true,
+		true, false,
 	})
 
 	Declare(&Globalenv, &Declaration{
 		"produce", "returns a list that contains produced items - it works like for(state = startstate, condition(state), state = iterator(state)) {yield state}",
 		3, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"startstate", "any", "start state to begin with"},
-			DeclarationParameter{"condition", "func", "func that returns true whether the state will be inserted into the result or the loop is stopped"},
-			DeclarationParameter{"iterator", "func", "func that produces the next state"},
+			DeclarationParameter{"startstate", "any", "start state to begin with", nil},
+			DeclarationParameter{"condition", "func", "func that returns true whether the state will be inserted into the result or the loop is stopped", nil},
+			DeclarationParameter{"iterator", "func", "func that produces the next state", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			result := make([]Scmer, 0)
@@ -387,13 +387,13 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"produceN", "returns a list with numbers from 0..n-1",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"n", "number", "number of elements to produce"},
+			DeclarationParameter{"n", "number", "number of elements to produce", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			n := int(a[0].Int())
@@ -406,13 +406,13 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list?", "checks if a value is a list",
 		1, 1,
 		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "value to check"},
+			DeclarationParameter{"value", "any", "value to check", nil},
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			if a[0].IsSlice() {
@@ -420,14 +420,14 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"contains?", "checks if a value is in a list; uses the equal?? operator",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list to check"},
-			DeclarationParameter{"value", "any", "value to check"},
+			DeclarationParameter{"list", "list", "list to check", NoEscape},
+			DeclarationParameter{"value", "any", "value to check", nil},
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			arr := asSlice(a[0], "contains?")
@@ -438,7 +438,7 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		true,
+		true, false,
 	})
 
 	// dictionary functions
@@ -448,8 +448,8 @@ func init_list() {
 		"filter_assoc", "returns a filtered dictionary according to a filter function",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be filtered"},
-			DeclarationParameter{"condition", "func", "filter function func(string any)->bool where the first parameter is the key, the second is the value"},
+			DeclarationParameter{"dict", "list", "dictionary that has to be filtered", NoEscape},
+			DeclarationParameter{"condition", "func", "filter function func(string any)->bool where the first parameter is the key, the second is the value", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			result := make([]Scmer, 0)
@@ -470,14 +470,14 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"map_assoc", "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be mapped"},
-			DeclarationParameter{"map", "func", "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value."},
+			DeclarationParameter{"dict", "list", "dictionary that has to be mapped", NoEscape},
+			DeclarationParameter{"map", "func", "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value.", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -502,15 +502,15 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce_assoc", "reduces a dictionary according to a reduce function",
 		3, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be reduced"},
-			DeclarationParameter{"reduce", "func", "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator."},
-			DeclarationParameter{"neutral", "any", "initial value for the accumulator"},
+			DeclarationParameter{"dict", "list", "dictionary that has to be reduced", NoEscape},
+			DeclarationParameter{"reduce", "func", "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", nil},
+			DeclarationParameter{"neutral", "any", "initial value for the accumulator", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			result := a[2]
@@ -524,14 +524,14 @@ func init_list() {
 			}
 			return result
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"has_assoc?", "checks if a dictionary has a key present",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be checked"},
-			DeclarationParameter{"key", "string", "key to test"},
+			DeclarationParameter{"dict", "list", "dictionary that has to be checked", NoEscape},
+			DeclarationParameter{"key", "string", "key to test", nil},
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			if slice, fd := asAssoc(a[0], "has_assoc?"); fd == nil {
@@ -547,15 +547,15 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"get_assoc", "gets a value from a dictionary by key, returns nil if not found",
 		2, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary to look up"},
-			DeclarationParameter{"key", "any", "key to look up"},
-			DeclarationParameter{"default", "any", "optional default value if key not found"},
+			DeclarationParameter{"dict", "list", "dictionary to look up", NoEscape},
+			DeclarationParameter{"key", "any", "key to look up", nil},
+			DeclarationParameter{"default", "any", "optional default value if key not found", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
 			if slice, fd := asAssoc(a[0], "get_assoc"); fd == nil {
@@ -575,14 +575,14 @@ func init_list() {
 			}
 			return NewNil()
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"extract_assoc", "applies a function (key value) on the dictionary and returns the results as a flat list",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be checked"},
-			DeclarationParameter{"map", "func", "func(string any)->any that flattens down each element"},
+			DeclarationParameter{"dict", "list", "dictionary that has to be checked", NoEscape},
+			DeclarationParameter{"map", "func", "func(string any)->any that flattens down each element", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -606,16 +606,16 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		true,
+		true, false,
 	})
 	Declare(&Globalenv, &Declaration{
-		"set_assoc", "returns a dictionary where a single value has been changed.\nThis function may destroy the input value for the sake of performance. You must not use the input value again.",
+		"set_assoc", "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
 		3, 4,
 		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "input dictionary that has to be changed. You must not use this value again."},
-			DeclarationParameter{"key", "string", "key that has to be set"},
-			DeclarationParameter{"value", "any", "new value to set"},
-			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be pysically stored in the new dictionary."},
+			DeclarationParameter{"dict", "list", "input dictionary", nil},
+			DeclarationParameter{"key", "string", "key that has to be set", nil},
+			DeclarationParameter{"value", "any", "new value to set", nil},
+			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be physically stored in the new dictionary.", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
@@ -624,6 +624,251 @@ func init_list() {
 				mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
 			}
 			slice, fd := asAssoc(a[0], "set_assoc")
+			if fd == nil {
+				// immutable: copy the slice before modifying
+				list := append([]Scmer{}, slice...)
+				for i := 0; i < len(list); i += 2 {
+					if Equal(list[i], a[1]) {
+						if mergeFn != nil {
+							list[i+1] = mergeFn(list[i+1], a[2])
+						} else {
+							list[i+1] = a[2]
+						}
+						return NewSlice(list)
+					}
+				}
+				list = append(list, a[1], a[2])
+				if len(list) >= 10 {
+					fd := NewFastDictValue(len(list)/2 + 4)
+					for i := 0; i < len(list); i += 2 {
+						fd.Set(list[i], list[i+1], nil)
+					}
+					return NewFastDict(fd)
+				}
+				return NewSlice(list)
+			} else {
+				// immutable: copy the FastDict before modifying
+				fd2 := fd.Copy()
+				fd2.Set(a[1], a[2], mergeFn)
+				return NewFastDict(fd2)
+			}
+		},
+		true, false,
+	})
+	Declare(&Globalenv, &Declaration{
+		"merge_assoc", "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"dict1", "list", "first input dictionary that has to be changed. You must not use this value again.", nil},
+			DeclarationParameter{"dict2", "list", "input dictionary that contains the new values that have to be added", nil},
+			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
+			dst := a[0]
+			if slice, fd := asAssoc(a[1], "merge_assoc"); fd == nil {
+				for i := 0; i < len(slice); i += 2 {
+					if len(a) > 2 {
+						dst = setAssoc(dst, slice[i], slice[i+1], a[2])
+					} else {
+						dst = setAssoc(dst, slice[i], slice[i+1])
+					}
+				}
+			} else {
+				if len(a) > 2 {
+					fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v, a[2]); return true })
+				} else {
+					fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v); return true })
+				}
+			}
+			return dst
+		},
+		true, false,
+	})
+
+	// fastdict: returns an empty FastDict (avoids upgrade from list to FastDict)
+	Declare(&Globalenv, &Declaration{
+		"fastdict", "returns an empty FastDict for use as a dictionary neutral value",
+		0, 0,
+		[]DeclarationParameter{}, "list",
+		func(a ...Scmer) Scmer {
+			return NewFastDict(NewFastDictValue(8))
+		},
+		true, false,
+	})
+
+	// _mut variants: optimizer-only, forbidden from .scm code
+	// Tier 1: same-length, zero-copy
+
+	Declare(&Globalenv, &Declaration{
+		"map_mut", "in-place map (optimizer-only)",
+		2, 2,
+		[]DeclarationParameter{
+			{"list", "list", "owned list to map in-place", nil},
+			{"map", "func", "map function", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			list := a[0].Slice()
+			fn := OptimizeProcToSerialFunction(a[1])
+			for i, v := range list {
+				list[i] = fn(v)
+			}
+			return NewSlice(list)
+		},
+		true, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"mapIndex_mut", "in-place mapIndex (optimizer-only)",
+		2, 2,
+		[]DeclarationParameter{
+			{"list", "list", "owned list to map in-place", nil},
+			{"map", "func", "map function func(i, any)->any", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			list := a[0].Slice()
+			fn := OptimizeProcToSerialFunction(a[1])
+			for i, v := range list {
+				list[i] = fn(NewInt(int64(i)), v)
+			}
+			return NewSlice(list)
+		},
+		true, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"map_assoc_mut", "in-place map_assoc (optimizer-only, slice path only)",
+		2, 2,
+		[]DeclarationParameter{
+			{"dict", "list", "owned dictionary to map in-place", nil},
+			{"map", "func", "map function func(key, value)->value", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			fn := OptimizeProcToSerialFunction(a[1])
+			if slice, fd := asAssoc(a[0], "map_assoc_mut"); fd == nil {
+				var key Scmer
+				for i, v := range slice {
+					if i%2 == 0 {
+						key = v
+					} else {
+						slice[i] = fn(key, v)
+					}
+				}
+				return NewSlice(slice)
+			} else {
+				// FastDict path: cannot mutate in-place, fall back to allocating
+				result := make([]Scmer, 0, len(fd.Pairs))
+				fd.Iterate(func(k, v Scmer) bool {
+					result = append(result, k, fn(k, v))
+					return true
+				})
+				return NewSlice(result)
+			}
+		},
+		true, true,
+	})
+
+	// Tier 2: shrinking, write-cursor
+
+	Declare(&Globalenv, &Declaration{
+		"filter_mut", "in-place filter (optimizer-only)",
+		2, 2,
+		[]DeclarationParameter{
+			{"list", "list", "owned list to filter in-place", nil},
+			{"condition", "func", "filter condition func(any)->bool", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			input := a[0].Slice()
+			fn := OptimizeProcToSerialFunction(a[1])
+			w := 0
+			for _, v := range input {
+				if fn(v).Bool() {
+					input[w] = v
+					w++
+				}
+			}
+			return NewSlice(input[:w])
+		},
+		true, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"filter_assoc_mut", "in-place filter_assoc (optimizer-only)",
+		2, 2,
+		[]DeclarationParameter{
+			{"dict", "list", "owned dictionary to filter in-place", nil},
+			{"condition", "func", "filter function func(key, value)->bool", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			fn := OptimizeProcToSerialFunction(a[1])
+			if slice, fd := asAssoc(a[0], "filter_assoc_mut"); fd == nil {
+				w := 0
+				for i := 0; i < len(slice); i += 2 {
+					if fn(slice[i], slice[i+1]).Bool() {
+						slice[w] = slice[i]
+						slice[w+1] = slice[i+1]
+						w += 2
+					}
+				}
+				return NewSlice(slice[:w])
+			} else {
+				result := make([]Scmer, 0)
+				fd.Iterate(func(k, v Scmer) bool {
+					if fn(k, v).Bool() {
+						result = append(result, k, v)
+					}
+					return true
+				})
+				return NewSlice(result)
+			}
+		},
+		true, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"extract_assoc_mut", "in-place extract_assoc (optimizer-only)",
+		2, 2,
+		[]DeclarationParameter{
+			{"dict", "list", "owned dictionary to extract from in-place", nil},
+			{"map", "func", "func(key, value)->any that extracts each element", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			fn := OptimizeProcToSerialFunction(a[1])
+			if slice, fd := asAssoc(a[0], "extract_assoc_mut"); fd == nil {
+				w := 0
+				for i := 0; i < len(slice); i += 2 {
+					slice[w] = fn(slice[i], slice[i+1])
+					w++
+				}
+				return NewSlice(slice[:w])
+			} else {
+				result := make([]Scmer, 0, len(fd.Pairs)/2)
+				fd.Iterate(func(k, v Scmer) bool {
+					result = append(result, fn(k, v))
+					return true
+				})
+				return NewSlice(result)
+			}
+		},
+		true, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"set_assoc_mut", "in-place set_assoc (optimizer-only, mutates input directly)",
+		3, 4,
+		[]DeclarationParameter{
+			{"dict", "list", "owned dictionary to mutate", nil},
+			{"key", "string", "key to set", nil},
+			{"value", "any", "new value", nil},
+			{"merge", "func", "(optional) merge function", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			var mergeFn func(Scmer, Scmer) Scmer
+			if len(a) > 3 {
+				mfn := OptimizeProcToSerialFunction(a[3])
+				mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
+			}
+			slice, fd := asAssoc(a[0], "set_assoc_mut")
 			if fd == nil {
 				list := slice
 				for i := 0; i < len(list); i += 2 {
@@ -650,20 +895,61 @@ func init_list() {
 				return NewFastDict(fd)
 			}
 		},
-		true,
+		true, true,
 	})
+
+	// Tier 3: append/grow
+
 	Declare(&Globalenv, &Declaration{
-		"merge_assoc", "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
+		"append_mut", "in-place append (optimizer-only)",
+		2, 1000,
+		[]DeclarationParameter{
+			{"list", "list", "owned base list", nil},
+			{"item...", "any", "items to add", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			base := asSlice(a[0], "append_mut")
+			base = append(base, a[1:]...)
+			return NewSlice(base)
+		},
+		true, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"append_unique_mut", "in-place append_unique (optimizer-only)",
+		2, 1000,
+		[]DeclarationParameter{
+			{"list", "list", "owned base list", nil},
+			{"item...", "any", "items to add", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			list := asSlice(a[0], "append_unique_mut")
+			for _, el := range a[1:] {
+				for _, el2 := range list {
+					if Equal(el, el2) {
+						goto skipItem
+					}
+				}
+				list = append(list, el)
+			skipItem:
+			}
+			return NewSlice(list)
+		},
+		true, true,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"merge_assoc_mut", "in-place merge_assoc (optimizer-only)",
 		2, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"dict1", "list", "first input dictionary that has to be changed. You must not use this value again."},
-			DeclarationParameter{"dict2", "list", "input dictionary that contains the new values that have to be added"},
-			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary."},
+			{"dict1", "list", "owned first dictionary", nil},
+			{"dict2", "list", "dictionary with new values", nil},
+			{"merge", "func", "(optional) merge function", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
 			dst := a[0]
-			if slice, fd := asAssoc(a[1], "merge_assoc"); fd == nil {
+			if slice, fd := asAssoc(a[1], "merge_assoc_mut"); fd == nil {
 				for i := 0; i < len(slice); i += 2 {
 					if len(a) > 2 {
 						dst = setAssoc(dst, slice[i], slice[i+1], a[2])
@@ -680,6 +966,6 @@ func init_list() {
 			}
 			return dst
 		},
-		true,
+		true, true,
 	})
 }

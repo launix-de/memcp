@@ -231,19 +231,19 @@ func init_scheduler() {
 		"setTimeout", "Schedules a callback to run after the given delay in milliseconds (fractional values allowed for sub-millisecond precision).",
 		2, 1000,
 		[]DeclarationParameter{
-			{"callback", "func", "function to execute once the timeout expires"},
-			{"milliseconds", "number", "milliseconds until execution"},
-			{"args...", "any", "optional arguments forwarded to the callback"},
+			{"callback", "func", "function to execute once the timeout expires", nil},
+			{"milliseconds", "number", "milliseconds until execution", nil},
+			{"args...", "any", "optional arguments forwarded to the callback", nil},
 		}, "int",
-		setTimeout, false,
+		setTimeout, false, false,
 	})
 	Declare(&Globalenv, &Declaration{
 		"clearTimeout", "Cancels a timeout created with setTimeout.",
 		1, 1,
 		[]DeclarationParameter{
-			{"id", "number", "identifier returned by setTimeout"},
+			{"id", "number", "identifier returned by setTimeout", nil},
 		}, "bool",
-		clearTimeout, false,
+		clearTimeout, false, false,
 	})
 }
 

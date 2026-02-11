@@ -431,11 +431,11 @@ for further details on packrat parsers, take a look at https://github.com/launix
 `,
 		1, 3,
 		[]DeclarationParameter{
-			DeclarationParameter{"syntax", "any", "syntax of the grammar (see docs)"},
-			DeclarationParameter{"generator", "any", "(optional) expressions to evaluate. All captured variables are available in the scope."},
-			DeclarationParameter{"skipper", "string", "(optional) string that defines the skip mechanism for whitespaces as regexp"},
+			DeclarationParameter{"syntax", "any", "syntax of the grammar (see docs)", nil},
+			DeclarationParameter{"generator", "any", "(optional) expressions to evaluate. All captured variables are available in the scope.", nil},
+			DeclarationParameter{"skipper", "string", "(optional) string that defines the skip mechanism for whitespaces as regexp", nil},
 		}, "func",
 		nil,
-		false,
+		false, false,
 	})
 }

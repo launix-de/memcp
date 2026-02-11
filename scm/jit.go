@@ -231,10 +231,10 @@ func init_jit() {
 		"jit", "compiles a lambda to optimized native code; passes through already compiled functions",
 		1, 1,
 		[]DeclarationParameter{
-			{"fn", "procedure", "the function to compile"},
+			{"fn", "procedure", "the function to compile", nil},
 		}, "procedure",
 		jitCompile,
-		false, // not pure because it allocates executable memory
+		false, false, // not pure because it allocates executable memory
 	})
 }
 

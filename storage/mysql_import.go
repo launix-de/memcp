@@ -37,14 +37,14 @@ func initMySQLImport(en scm.Env) {
 		"mysql_import", "imports schema+data from a MySQL server into MemCP",
 		4, 8,
 		[]scm.DeclarationParameter{
-			{"host", "string|nil", "MySQL host (nil => 127.0.0.1)"},
-			{"port", "int|nil", "MySQL port (nil => 3306)"},
-			{"username", "string", "MySQL username"},
-			{"password", "string", "MySQL password"},
-			{"sourcedb", "string|nil", "source database (omit/nil => all non-system dbs)"},
-			{"targetdb", "string|nil", "target database (omit/nil => sourcedb)"},
-			{"sourcetable", "string|nil", "source table (omit/nil => all tables in sourcedb)"},
-			{"targettable", "string|nil", "target table (omit/nil => sourcetable)"},
+			{"host", "string|nil", "MySQL host (nil => 127.0.0.1)", nil},
+			{"port", "int|nil", "MySQL port (nil => 3306)", nil},
+			{"username", "string", "MySQL username", nil},
+			{"password", "string", "MySQL password", nil},
+			{"sourcedb", "string|nil", "source database (omit/nil => all non-system dbs)", nil},
+			{"targetdb", "string|nil", "target database (omit/nil => sourcedb)", nil},
+			{"sourcetable", "string|nil", "source table (omit/nil => all tables in sourcedb)", nil},
+			{"targettable", "string|nil", "target table (omit/nil => sourcetable)", nil},
 		},
 		"bool",
 		func(a ...scm.Scmer) scm.Scmer {
@@ -158,7 +158,7 @@ func initMySQLImport(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		false,
+		false, false,
 	})
 }
 
