@@ -603,8 +603,16 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				allConstArgs = false
 			}
 		}
-		// _mut swap: when first arg is owned, replace with in-place variant
-		if headOk && firstArgOwned && len(v) >= 2 {
+		// _mut swap: when first arg is a freshly constructed value (function call result),
+		// replace with in-place variant. We require that v[1] is a function call (slice),
+		// not a bare variable, because variables may be referenced multiple times.
+		firstArgIsFuncCall := len(v) >= 2 && v[1].IsSlice()
+		if !firstArgIsFuncCall && len(v) >= 2 {
+			if si, ok := v[1].Any().(SourceInfo); ok {
+				firstArgIsFuncCall = si.value.IsSlice()
+			}
+		}
+		if headOk && firstArgOwned && firstArgIsFuncCall && len(v) >= 2 {
 			mutSwap := map[Symbol]string{
 				Symbol("map"):            "map_mut",
 				Symbol("mapIndex"):       "mapIndex_mut",

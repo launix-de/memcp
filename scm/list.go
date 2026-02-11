@@ -625,8 +625,7 @@ func init_list() {
 			}
 			slice, fd := asAssoc(a[0], "set_assoc")
 			if fd == nil {
-				// immutable: copy the slice before modifying
-				list := append([]Scmer{}, slice...)
+				list := slice
 				for i := 0; i < len(list); i += 2 {
 					if Equal(list[i], a[1]) {
 						if mergeFn != nil {
@@ -647,10 +646,8 @@ func init_list() {
 				}
 				return NewSlice(list)
 			} else {
-				// immutable: copy the FastDict before modifying
-				fd2 := fd.Copy()
-				fd2.Set(a[1], a[2], mergeFn)
-				return NewFastDict(fd2)
+				fd.Set(a[1], a[2], mergeFn)
+				return NewFastDict(fd)
 			}
 		},
 		true, false,
