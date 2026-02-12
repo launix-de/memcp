@@ -111,6 +111,18 @@ curl -s -u root:admin "http://localhost:4399/sql/DBNAME" -d "SELECT 1"
 - No explicit coverage threshold; add tests for every feature/bugfix.
 - Don't forget to also add must-fail tests with expect: { error: true }
 
+### Coverage Measurement
+- Build with coverage: `go build -cover -o memcp -covermode=atomic`
+- Run with coverage: `GOCOVERDIR=/tmp/memcp-coverage ./memcp ...`
+- The `make test` / `git-pre-commit` script supports `MEMCP_COVERAGE=1 MEMCP_COVERDIR=/tmp/memcp-coverage` environment variables to automatically build with coverage, collect profiles, and report.
+- Generate report: `go tool covdata textfmt -i=/tmp/memcp-coverage -o=/tmp/memcp-coverage/coverage.out && go tool cover -func=/tmp/memcp-coverage/coverage.out`
+- HTML report: `go tool cover -html=/tmp/memcp-coverage/coverage.out`
+- Current coverage: **61.6%** (537 Scheme unit tests in `lib/test.scm`, 72 storage type tests + ~500 SQL tests in `tests/*.yaml`)
+- Two test layers:
+  - `lib/test.scm`: Scheme-level unit tests for the runtime (match, compare, date, strings, lists, scheduler, sync, optimizer, JIT). These run at startup before the SQL frontend.
+  - `tests/*.yaml`: SQL integration tests via HTTP API. Cover SQL parsing, query planning, storage compression, triggers, persistence, DML/DDL.
+- To bypass static type validation in Scheme tests (e.g., passing an int to a function declared as accepting string), wrap with an identity function: `(define _i (lambda (x) x))` then `(parse_date (_i 1718451045))`.
+
 ## Debugging Strategy
 - run memcp with enabled mysql frontend on port 3307, make sure to capture its output and enable TracePrint in settings
 - run some unit tests or let the user click through the software
