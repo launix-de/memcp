@@ -29,6 +29,57 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* equal? */
 	(assert (equal? "a" "a") true "equality check")
 	(assert (equal? "a" "b") false "inequality check")
+	/* equal? cross-type coverage (compare.go:Equal) */
+	(assert (equal? nil nil) true "equal? nil nil")
+	(assert (equal? nil 0) true "equal? nil vs 0 (falsy)")
+	(assert (equal? nil 1) false "equal? nil vs 1 (truthy)")
+	(assert (equal? 0 nil) true "equal? 0 vs nil (falsy)")
+	(assert (equal? 1 nil) false "equal? 1 vs nil (truthy)")
+	(assert (equal? nil false) true "equal? nil vs false")
+	(assert (equal? nil "") true "equal? nil vs empty string")
+	(assert (equal? true true) true "equal? bool same true")
+	(assert (equal? false false) true "equal? bool same false")
+	(assert (equal? true false) false "equal? bool different")
+	(assert (equal? 3.14 3.14) true "equal? float same")
+	(assert (equal? 3.14 2.71) false "equal? float different")
+	(assert (equal? 3 3.0) true "equal? int vs float")
+	(assert (equal? 3.0 3) true "equal? float vs int")
+	(assert (equal? 42 "42") true "equal? int vs string")
+	(assert (equal? "42" 42) true "equal? string vs int")
+	(assert (equal? 3.14 "3.14") true "equal? float vs string")
+	(assert (equal? "3.14" 3.14) true "equal? string vs float")
+	(assert (equal? 1 true) true "equal? int 1 vs true")
+	(assert (equal? 0 false) true "equal? int 0 vs false")
+	(assert (equal? 1.0 true) true "equal? float 1.0 vs true")
+	(assert (equal? "true" true) true "equal? string vs bool true")
+	(assert (equal? '(1 2) '(1 2 3)) false "equal? unequal length lists")
+	(assert (equal? '(1 2) '(1 3)) false "equal? lists different elements")
+	(assert (equal? '() false) true "equal? empty list vs false")
+	(assert (equal? + +) true "equal? same native function")
+	/* equal?? (EqualSQL) cross-type coverage (compare.go:EqualSQL) */
+	(assert (nil? (equal?? nil nil)) true "equal?? nil nil returns nil")
+	(assert (nil? (equal?? nil 42)) true "equal?? nil int returns nil")
+	(assert (nil? (equal?? 42 nil)) true "equal?? int nil returns nil")
+	(assert (equal?? 1 1.0) true "equal?? int vs float")
+	(assert (equal?? 1.0 1) true "equal?? float vs int")
+	(assert (equal?? "42" 42) true "equal?? string vs int")
+	(assert (equal?? 42 "42") true "equal?? int vs string")
+	(assert (equal?? 3.14 "3.14") true "equal?? float vs string")
+	(assert (equal?? "3.14" 3.14) true "equal?? string vs float")
+	(assert (equal?? "true" true) true "equal?? string vs bool")
+	(assert (equal?? true true) true "equal?? bool same")
+	(assert (equal?? + +) true "equal?? same func")
+	(assert (equal?? + -) false "equal?? different func")
+	/* Less cross-type coverage (compare.go:Less) */
+	(assert (< nil nil) false "less nil nil")
+	(assert (< nil 5) true "less nil vs value")
+	(assert (< 5 nil) false "less value vs nil")
+	(assert (< 1.5 2.5) true "less float vs float")
+	(assert (< 2.5 1.5) false "less float vs float reverse")
+	(assert (< "apple" "banana") true "less string vs string")
+	(assert (< "banana" "apple") false "less string vs string reverse")
+	(assert (< false true) true "less bool false < true")
+	(assert (< "1" 2) true "less string vs int coerced")
 
 	/* strlike */
 	(assert (strlike "a" "a") true "strlike simple")
@@ -655,6 +706,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (context (lambda () (sleep 0.005))) true "sleep inside context")
 	/* context session */
 	(assert (context (lambda () (begin (define s (context "session")) (s "k" 7) (equal? (s "k") 7)))) true "context session set/get")
+	/* context check inside valid context */
+	(assert (context (lambda () (context "check"))) true "context check returns true in valid context")
 	/* once */
 	(define once_calls (newsession))
 	(once_calls "n" 0)
@@ -680,6 +733,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(clearTimeout tid)
 	(context (lambda () (sleep 0.02)))
 	(assert (sched "done") false "clearTimeout cancels callback")
+	/* setTimeout with negative delay fires immediately */
+	(sched "done" false)
+	(setTimeout (lambda () (sched "done" true)) -50)
+	(context (lambda () (sleep 0.01)))
+	(assert (sched "done") true "setTimeout negative delay fires")
+	/* clearTimeout on non-existent ID */
+	(assert (clearTimeout 999999) false "clearTimeout non-existent ID returns false")
 
 	/* Date */
 	(print "testing date helpers ...")
@@ -837,11 +897,39 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (format_date dt7 "%Y-%m-%d") "2024-06-15") true "str_to_date custom format")
 	(assert (nil? (str_to_date nil "%Y-%m-%d")) true "str_to_date nil returns nil")
 	(assert (nil? (str_to_date "invalid" "%Y-%m-%d")) true "str_to_date invalid returns nil")
+	/* date_sub MINUTE, SECOND, WEEK */
+	(define dt_sm (date_sub (date_add dt1 (_i 30) "MINUTE") (_i 15) "MINUTE"))
+	(assert (equal? (format_date dt_sm "%i") "15") true "date_sub MINUTE")
+	(define dt_ss (date_sub (date_add dt1 (_i 45) "SECOND") (_i 20) "SECOND"))
+	(assert (equal? (format_date dt_ss "%s") "25") true "date_sub SECOND")
+	(define dt_sw (date_sub (date_add dt1 (_i 2) "WEEK") (_i 1) "WEEK"))
+	(assert (equal? (format_date dt_sw "%Y-%m-%d") "2024-06-22") true "date_sub WEEK")
+	/* format_date with float timestamp (toTime tagFloat) - use _i to bypass type check */
+	(assert (equal? (format_date (_i 0.0) "%Y") "1970") true "format_date float timestamp epoch")
+	/* format_date with invalid string returns nil (toTime tagString fail) */
+	(assert (nil? (format_date (_i "not-a-date") "%Y")) true "format_date bad string returns nil")
+	/* format_date %% literal percent */
+	(assert (equal? (format_date dt1 "100%%") "100%") true "format_date %% literal percent")
+	/* str_to_date with time components %H %i %s */
+	(define dt_hms (str_to_date "14:30:45" "%H:%i:%s"))
+	(assert (equal? (format_date dt_hms "%H:%i:%s") "14:30:45") true "str_to_date time %H:%i:%s")
+	/* parse_date on already-parsed date (tagDate passthrough) */
+	(assert (equal? (parse_date dt1) dt1) true "parse_date on date is identity")
+	/* parse_date on integer (tagInt) - use _i to bypass static type check */
+	(assert (number? (parse_date (_i 1718451045))) true "parse_date on int returns date")
 
 	/* list.go: produce */
 	(print "testing produce ...")
 	(assert (equal? (produce 0 (lambda (x) (< x 5)) (lambda (x) (+ x 1))) '(0 1 2 3 4)) true "produce 0..4")
 	(assert (equal? (produce 10 (lambda (x) false) (lambda (x) x)) '()) true "produce empty on false init")
+	/* list.go: edge cases */
+	(assert (equal? (cdr '()) '()) true "cdr on empty list returns empty")
+	(assert (equal? (reduce '(10 20 30) (lambda (acc x) (+ acc x)) 0) 60) true "reduce with neutral")
+	(assert (nil? (reduce '() (lambda (acc x) (+ acc x)))) true "reduce empty list no neutral returns nil")
+	(assert (equal? (merge '(1 2) '(3 4)) '(1 2 3 4)) true "merge multi-arg")
+	(assert (equal? (merge_unique '(1 2) '(2 3)) '(1 2 3)) true "merge_unique multi-arg")
+	(assert (has_assoc? nil "key") false "has_assoc? on nil returns false")
+	(assert (nil? (get_assoc nil "key")) true "get_assoc on nil returns nil")
 
 	/* list.go: get_assoc */
 	(print "testing get_assoc ...")
@@ -880,11 +968,36 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (string_repeat "ab" 3) "ababab") true "string_repeat 3x")
 	(assert (equal? (string_repeat "x" 0) "") true "string_repeat 0 = empty")
 	(assert (nil? (string_repeat nil 3)) true "string_repeat nil returns nil")
+	/* strings.go: strlike with explicit collation */
+	(assert (strlike "Hello" "h%" "utf8_general_ci") true "strlike explicit ci collation")
+	(assert (strlike "Hello" "h%" "utf8_bin") false "strlike explicit bin collation is CS")
+	/* strings.go: sql_substr edge cases */
+	(assert (equal? (sql_substr "hello" 0 3) "hel") true "sql_substr start=0 clamped")
+	(assert (equal? (sql_substr "hello" 4 10) "lo") true "sql_substr length exceeds remaining")
+	/* strings.go: regexp_replace nil + direct */
+	(assert (nil? (regexp_replace nil "foo" "bar")) true "regexp_replace nil returns nil")
+	/* strings.go: collate with language aliases */
+	(define less_en (collate "en"))
+	(assert (less_en "a" "b") true "english collation a<b")
+	(define less_rev (collate "en" true))
+	(assert (less_rev "b" "a") true "english reverse b before a")
 
-	/* scm.go: string (type conversion) */
+	/* scm.go: string (type conversion) / printer.go coverage */
 	(print "testing type conversion and apply ...")
 	(assert (equal? (string 42) "42") true "string converts number to string")
 	(assert (equal? (string "abc") "abc") true "string on string is identity")
+	(assert (equal? (string nil) "nil") true "string of nil")
+	(assert (equal? (string true) "true") true "string of true")
+	(assert (equal? (string false) "false") true "string of false")
+	(assert (equal? (string 3.14) "3.14") true "string of float")
+	(assert (equal? (string +) "[native func]") true "string of native func")
+	/* serialize coverage (printer.go:SerializeEx) - use _i to bypass type checks */
+	(assert (equal? (serialize (_i true)) "true") true "serialize true")
+	(assert (equal? (serialize (_i false)) "false") true "serialize false")
+	(assert (equal? (serialize (_i nil)) "nil") true "serialize nil")
+	(assert (equal? (serialize (_i 42)) "42") true "serialize int")
+	(assert (equal? (serialize (_i 3.14)) "3.14") true "serialize float")
+	(assert (equal? (serialize (_i "hello")) "\"hello\"") true "serialize string")
 
 	/* scm.go: apply */
 	(assert (equal? (apply + '(1 2 3)) 6) true "apply + to list")
