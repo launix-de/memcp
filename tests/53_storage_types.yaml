@@ -1,0 +1,439 @@
+# Storage type coverage test suite
+# Exercises StorageFloat, StorageInt, StorageSeq, StorageString, StorageSCMER
+# by inserting typed data, forcing compression via SHUTDOWN, and verifying after restart.
+
+metadata:
+  version: "1.0"
+  description: "Storage type selection and compression coverage"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS st_float"
+  - sql: "DROP TABLE IF EXISTS st_int"
+  - sql: "DROP TABLE IF EXISTS st_seq"
+  - sql: "DROP TABLE IF EXISTS st_string"
+  - sql: "DROP TABLE IF EXISTS st_mixed"
+
+test_cases:
+
+  # === StorageFloat: columns with only float values ===
+  - name: "Create float table"
+    sql: "CREATE TABLE st_float (id INT, temperature DOUBLE, ratio FLOAT)"
+    expect:
+      rows: 0
+
+  - name: "Insert float data (8 rows for compression)"
+    sql: |
+      INSERT INTO st_float VALUES
+        (1, 98.6, 0.5),
+        (2, 100.4, 0.75),
+        (3, 37.2, 1.25),
+        (4, -40.0, 0.001),
+        (5, 0.0, 99.99),
+        (6, 3.14159, 2.71828),
+        (7, 1000000.5, 0.0001),
+        (8, -273.15, 1.0)
+    expect:
+      affected_rows: 8
+
+  - name: "Float: select before compression"
+    sql: "SELECT temperature, ratio FROM st_float WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - temperature: 98.6
+          ratio: 0.5
+
+  - name: "Float: NULL handling"
+    sql: "INSERT INTO st_float VALUES (9, NULL, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Float: verify NULL"
+    sql: "SELECT temperature, ratio FROM st_float WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - temperature: null
+          ratio: null
+
+  # === StorageInt: columns with only integer values (non-sequential) ===
+  - name: "Create int table"
+    sql: "CREATE TABLE st_int (id INT, score INT, flags INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert integer data (non-sequential for StorageInt)"
+    sql: |
+      INSERT INTO st_int VALUES
+        (1, 100, 7),
+        (2, 500, 3),
+        (3, 42, 15),
+        (4, 9999, 1),
+        (5, -50, 0),
+        (6, 0, 255),
+        (7, 1000000, 128),
+        (8, -1000000, 64)
+    expect:
+      affected_rows: 8
+
+  - name: "Int: select before compression"
+    sql: "SELECT score, flags FROM st_int WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - score: 42
+          flags: 15
+
+  - name: "Int: NULL handling"
+    sql: "INSERT INTO st_int VALUES (9, NULL, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Int: verify NULL"
+    sql: "SELECT score FROM st_int WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - score: null
+
+  # === StorageSeq: sequential/arithmetic progression ===
+  - name: "Create sequence table"
+    sql: "CREATE TABLE st_seq (id INT PRIMARY KEY AUTO_INCREMENT, label VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Insert sequential data (AUTO_INCREMENT triggers StorageSeq)"
+    sql: |
+      INSERT INTO st_seq (label) VALUES
+        ('a'), ('b'), ('c'), ('d'), ('e'),
+        ('f'), ('g'), ('h'), ('i'), ('j')
+    expect:
+      affected_rows: 10
+
+  - name: "Seq: verify auto-increment ids"
+    sql: "SELECT id, label FROM st_seq WHERE id <= 3 ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          label: "a"
+        - id: 2
+          label: "b"
+        - id: 3
+          label: "c"
+
+  - name: "Seq: count all"
+    sql: "SELECT COUNT(*) AS cnt FROM st_seq"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10
+
+  # === StorageString: dictionary-compressed strings ===
+  - name: "Create string table"
+    sql: "CREATE TABLE st_string (id INT, category VARCHAR(30), tag VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Insert string data (low cardinality for dictionary mode)"
+    sql: |
+      INSERT INTO st_string VALUES
+        (1, 'electronics', 'sale'),
+        (2, 'clothing', 'new'),
+        (3, 'electronics', 'sale'),
+        (4, 'books', 'clearance'),
+        (5, 'clothing', 'sale'),
+        (6, 'electronics', 'new'),
+        (7, 'books', 'sale'),
+        (8, 'clothing', 'clearance')
+    expect:
+      affected_rows: 8
+
+  - name: "String: query with filter"
+    sql: "SELECT id, category FROM st_string WHERE tag = 'sale' ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          category: "electronics"
+        - id: 3
+          category: "electronics"
+        - id: 5
+          category: "clothing"
+        - id: 7
+          category: "books"
+
+  - name: "String: NULL handling"
+    sql: "INSERT INTO st_string VALUES (9, NULL, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "String: verify NULL"
+    sql: "SELECT category, tag FROM st_string WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - category: null
+          tag: null
+
+  # === StorageSCMER: mixed types that can't compress ===
+  - name: "Create mixed table"
+    sql: "CREATE TABLE st_mixed (id INT, data TEXT)"
+    expect:
+      rows: 0
+
+  - name: "Insert mixed data"
+    sql: |
+      INSERT INTO st_mixed VALUES
+        (1, 'text value'),
+        (2, '42'),
+        (3, 'true'),
+        (4, NULL),
+        (5, '{"key":"val"}'),
+        (6, 'another string'),
+        (7, ''),
+        (8, 'final')
+    expect:
+      affected_rows: 8
+
+  # === SHUTDOWN to force compression cycle ===
+  - name: "SHUTDOWN to trigger compression"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # === Post-compression verification (after restart) ===
+
+  # StorageFloat: verify after compression
+  - name: "Float: post-compression select"
+    sql: "SELECT temperature, ratio FROM st_float WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - temperature: 98.6
+          ratio: 0.5
+
+  - name: "Float: negative values after compression"
+    sql: "SELECT temperature FROM st_float WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - temperature: -40
+
+  - name: "Float: NULL after compression"
+    sql: "SELECT temperature FROM st_float WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - temperature: null
+
+  - name: "Float: count all after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM st_float"
+    expect:
+      rows: 1
+      data:
+        - cnt: 9
+
+  - name: "Float: aggregate after compression"
+    sql: "SELECT MIN(temperature) AS mn, MAX(temperature) AS mx FROM st_float"
+    expect:
+      rows: 1
+      data:
+        - mn: -273.15
+          mx: 1000000.5
+
+  # StorageInt: verify after compression
+  - name: "Int: post-compression select"
+    sql: "SELECT score, flags FROM st_int WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - score: 42
+          flags: 15
+
+  - name: "Int: negative after compression"
+    sql: "SELECT score FROM st_int WHERE id = 8"
+    expect:
+      rows: 1
+      data:
+        - score: -1000000
+
+  - name: "Int: NULL after compression"
+    sql: "SELECT score FROM st_int WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - score: null
+
+  - name: "Int: aggregate after compression"
+    sql: "SELECT MIN(score) AS mn, MAX(score) AS mx FROM st_int"
+    expect:
+      rows: 1
+      data:
+        - mn: -1000000
+          mx: 1000000
+
+  # StorageSeq: verify after compression
+  - name: "Seq: post-compression sequential ids"
+    sql: "SELECT id, label FROM st_seq WHERE id <= 3 ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          label: "a"
+        - id: 2
+          label: "b"
+        - id: 3
+          label: "c"
+
+  - name: "Seq: last value"
+    sql: "SELECT id, label FROM st_seq WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - id: 10
+          label: "j"
+
+  - name: "Seq: count after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM st_seq"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10
+
+  # StorageString: verify after compression
+  - name: "String: post-compression query"
+    sql: "SELECT category FROM st_string WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - category: "electronics"
+
+  - name: "String: filter after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM st_string WHERE category = 'electronics'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  - name: "String: NULL after compression"
+    sql: "SELECT category FROM st_string WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - category: null
+
+  # StorageSCMER/mixed: verify after compression
+  - name: "Mixed: post-compression select"
+    sql: "SELECT data FROM st_mixed WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - data: "{\"key\":\"val\"}"
+
+  - name: "Mixed: count after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM st_mixed"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  # === Second SHUTDOWN to test serialization of compressed storage ===
+  - name: "Second SHUTDOWN to test persistence of compressed storage"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # === Post-persistence verification ===
+  - name: "Float: after persistence roundtrip"
+    sql: "SELECT temperature FROM st_float WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - temperature: 3.14159
+
+  - name: "Int: after persistence roundtrip"
+    sql: "SELECT score FROM st_int WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - score: 9999
+
+  - name: "Seq: after persistence roundtrip"
+    sql: "SELECT id, label FROM st_seq WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - id: 5
+          label: "e"
+
+  - name: "String: after persistence roundtrip"
+    sql: "SELECT tag FROM st_string WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - tag: "clearance"
+
+  - name: "Mixed: after persistence roundtrip"
+    sql: "SELECT data FROM st_mixed WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - data: "text value"
+
+  # === DML on compressed storage ===
+  - name: "Float: UPDATE compressed value"
+    sql: "UPDATE st_float SET temperature = 42.42 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Float: verify UPDATE"
+    sql: "SELECT temperature FROM st_float WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - temperature: 42.42
+
+  - name: "Int: DELETE from compressed"
+    sql: "DELETE FROM st_int WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "Int: verify DELETE"
+    sql: "SELECT COUNT(*) AS cnt FROM st_int"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  - name: "String: INSERT into compressed"
+    sql: "INSERT INTO st_string VALUES (10, 'toys', 'new')"
+    expect:
+      affected_rows: 1
+
+  - name: "String: verify INSERT"
+    sql: "SELECT category FROM st_string WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - category: "toys"
+
+  - name: "Seq: INSERT into auto_increment after compression"
+    sql: "INSERT INTO st_seq (label) VALUES ('k')"
+    expect:
+      affected_rows: 1
+
+  - name: "Seq: verify auto_increment continues"
+    sql: "SELECT id, label FROM st_seq WHERE label = 'k'"
+    expect:
+      rows: 1
+      data:
+        - id: 11
+          label: "k"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS st_float"
+  - sql: "DROP TABLE IF EXISTS st_int"
+  - sql: "DROP TABLE IF EXISTS st_seq"
+  - sql: "DROP TABLE IF EXISTS st_string"
+  - sql: "DROP TABLE IF EXISTS st_mixed"

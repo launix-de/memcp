@@ -321,7 +321,12 @@ func setupIO(wd string) {
 		0, 0,
 		[]scm.DeclarationParameter{}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
-			scm.ReplInstance.Close()
+			if scm.ReplInstance != nil {
+				scm.ReplInstance.Close()
+			} else {
+				// no-repl mode: send SIGTERM to self to unblock signal wait
+				syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+			}
 			return scm.NewBool(true)
 		}, false, false, nil,
 	})

@@ -699,6 +699,183 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (x) (if (nil? x) 0 x))) nil) 0 "jit: nil? check true")
 	(assert ((jit (lambda (x) (if (nil? x) 0 x))) 42) 42 "jit: nil? check false")
 
+	/* alu.go: sql_abs */
+	(print "testing sql_abs ...")
+	(assert (equal? (sql_abs -5) 5) true "sql_abs of -5 = 5")
+	(assert (equal? (sql_abs 3) 3) true "sql_abs of 3 = 3")
+	(assert (equal? (sql_abs 0) 0) true "sql_abs of 0 = 0")
+	(assert (nil? (sql_abs nil)) true "sql_abs of nil = nil")
+	(assert (equal? (sql_abs -3.7) 3.7) true "sql_abs of -3.7 = 3.7")
+
+	/* alu.go: equal_collate / notequal_collate */
+	(print "testing collation equality ...")
+	(assert (equal_collate "hello" "HELLO" "utf8_general_ci") true "equal_collate ci: hello=HELLO")
+	(assert (equal_collate "hello" "HELLO" "utf8_bin") false "equal_collate bin: hello!=HELLO")
+	(assert (equal_collate "hello" "hello" "utf8_bin") true "equal_collate bin: hello=hello")
+	(assert (nil? (equal_collate nil "x" "utf8_bin")) true "equal_collate nil returns nil")
+	(assert (notequal_collate "hello" "HELLO" "utf8_bin") true "notequal_collate bin: hello!=HELLO")
+	(assert (notequal_collate "hello" "HELLO" "utf8_general_ci") false "notequal_collate ci: hello=HELLO -> false")
+	(assert (nil? (notequal_collate nil "x" "utf8_bin")) true "notequal_collate nil returns nil")
+
+	/* date.go: full coverage */
+	(print "testing date functions ...")
+	/* helper: identity function returning "any" type to bypass static int validation */
+	(define _i (lambda (x) x))
+	/* current_date returns a number <= now */
+	(assert (number? (current_date)) true "current_date returns number")
+	(assert (<= (current_date) (now)) true "current_date <= now")
+	/* parse_date */
+	(define dt1 (parse_date "2024-06-15"))
+	(assert (number? dt1) true "parse_date returns number")
+	(assert (nil? (parse_date nil)) true "parse_date nil returns nil")
+	/* format_date */
+	(assert (equal? (format_date dt1 "%Y-%m-%d") "2024-06-15") true "format_date Y-m-d")
+	(assert (equal? (format_date dt1 "%Y") "2024") true "format_date year only")
+	(assert (nil? (format_date nil "%Y")) true "format_date nil returns nil")
+	/* extract_date */
+	(assert (equal? (extract_date dt1 "YEAR") 2024) true "extract_date YEAR")
+	(assert (equal? (extract_date dt1 "MONTH") 6) true "extract_date MONTH")
+	(assert (equal? (extract_date dt1 "DAY") 15) true "extract_date DAY")
+	(assert (nil? (extract_date nil "YEAR")) true "extract_date nil returns nil")
+	/* date_add / date_sub (use _i to bypass static type validator for int param) */
+	(define dt2 (date_add dt1 (_i 1) "DAY"))
+	(assert (equal? (format_date dt2 "%Y-%m-%d") "2024-06-16") true "date_add 1 DAY")
+	(define dt3 (date_add dt1 (_i 1) "MONTH"))
+	(assert (equal? (format_date dt3 "%Y-%m-%d") "2024-07-15") true "date_add 1 MONTH")
+	(define dt4 (date_add dt1 (_i 1) "YEAR"))
+	(assert (equal? (format_date dt4 "%Y-%m-%d") "2025-06-15") true "date_add 1 YEAR")
+	(define dt5 (date_sub dt1 (_i 1) "DAY"))
+	(assert (equal? (format_date dt5 "%Y-%m-%d") "2024-06-14") true "date_sub 1 DAY")
+	(assert (nil? (date_add nil (_i 1) "DAY")) true "date_add nil returns nil")
+	(assert (nil? (date_sub nil (_i 1) "DAY")) true "date_sub nil returns nil")
+	/* date_add units: HOUR, MINUTE, SECOND, WEEK */
+	(define dt_h (date_add dt1 (_i 2) "HOUR"))
+	(assert (equal? (format_date dt_h "%H") "02") true "date_add 2 HOUR")
+	(define dt_m (date_add dt1 (_i 30) "MINUTE"))
+	(assert (equal? (format_date dt_m "%i") "30") true "date_add 30 MINUTE")
+	(define dt_s (date_add dt1 (_i 45) "SECOND"))
+	(assert (equal? (format_date dt_s "%s") "45") true "date_add 45 SECOND")
+	(define dt_w (date_add dt1 (_i 1) "WEEK"))
+	(assert (equal? (format_date dt_w "%Y-%m-%d") "2024-06-22") true "date_add 1 WEEK")
+	/* date_sub units: HOUR, MINUTE, SECOND, WEEK */
+	(define dt_sh (date_sub (date_add dt1 (_i 5) "HOUR") (_i 2) "HOUR"))
+	(assert (equal? (format_date dt_sh "%H") "03") true "date_sub 2 HOUR")
+	/* extract_date: HOUR, MINUTE, SECOND */
+	(define dt6 (parse_date "2024-06-15 14:30:45"))
+	(assert (equal? (extract_date dt6 "HOUR") 14) true "extract_date HOUR")
+	(assert (equal? (extract_date dt6 "MINUTE") 30) true "extract_date MINUTE")
+	(assert (equal? (extract_date dt6 "SECOND") 45) true "extract_date SECOND")
+	/* date_trunc_day */
+	(assert (equal? (format_date (date_trunc_day dt6) "%H:%i:%s") "00:00:00") true "date_trunc_day zeroes time")
+	(assert (nil? (date_trunc_day nil)) true "date_trunc_day nil returns nil")
+	/* str_to_date */
+	(define dt7 (str_to_date "15/06/2024" "%d/%m/%Y"))
+	(assert (equal? (format_date dt7 "%Y-%m-%d") "2024-06-15") true "str_to_date custom format")
+	(assert (nil? (str_to_date nil "%Y-%m-%d")) true "str_to_date nil returns nil")
+	(assert (nil? (str_to_date "invalid" "%Y-%m-%d")) true "str_to_date invalid returns nil")
+
+	/* list.go: produce */
+	(print "testing produce ...")
+	(assert (equal? (produce 0 (lambda (x) (< x 5)) (lambda (x) (+ x 1))) '(0 1 2 3 4)) true "produce 0..4")
+	(assert (equal? (produce 10 (lambda (x) false) (lambda (x) x)) '()) true "produce empty on false init")
+
+	/* list.go: get_assoc */
+	(print "testing get_assoc ...")
+	(assert (equal? (get_assoc (list "a" 1 "b" 2) "a") 1) true "get_assoc finds key")
+	(assert (nil? (get_assoc (list "a" 1) "z")) true "get_assoc missing key returns nil")
+	(assert (equal? (get_assoc (list "a" 1) "z" 99) 99) true "get_assoc missing key returns default")
+	/* get_assoc on FastDict */
+	(define big_ga (reduce (produceN 20) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
+	(assert (equal? (get_assoc big_ga "k5") 5) true "get_assoc on FastDict")
+	(assert (equal? (get_assoc big_ga "missing" -1) -1) true "get_assoc FastDict missing key with default")
+
+	/* strings.go: sql_substr (1-based) */
+	(print "testing additional string functions ...")
+	(assert (equal? (sql_substr "hello" 2 3) "ell") true "sql_substr 1-based with length")
+	(assert (equal? (sql_substr "hello" 2) "ello") true "sql_substr 1-based to end")
+	(assert (equal? (sql_substr "hello" 10) "") true "sql_substr out of bounds returns empty")
+	(assert (nil? (sql_substr nil 1 3)) true "sql_substr nil returns nil")
+
+	/* strings.go: strlike_cs (case-sensitive) */
+	(assert (strlike_cs "Hello" "H%") true "strlike_cs case-sensitive prefix match")
+	(assert (strlike_cs "Hello" "h%") false "strlike_cs case-sensitive no match")
+	(assert (strlike_cs "abc" "a_c") true "strlike_cs single char wildcard")
+
+	/* strings.go: trim functions */
+	(assert (equal? (strtrim "  hello  ") "hello") true "strtrim both ends")
+	(assert (equal? (strltrim "  hello  ") "hello  ") true "strltrim left only")
+	(assert (equal? (strrtrim "  hello  ") "  hello") true "strrtrim right only")
+	(assert (equal? (sql_trim "  hello  ") "hello") true "sql_trim both ends")
+	(assert (equal? (sql_ltrim "  hello  ") "hello  ") true "sql_ltrim left only")
+	(assert (equal? (sql_rtrim "  hello  ") "  hello") true "sql_rtrim right only")
+	(assert (nil? (sql_trim nil)) true "sql_trim nil returns nil")
+	(assert (nil? (sql_ltrim nil)) true "sql_ltrim nil returns nil")
+	(assert (nil? (sql_rtrim nil)) true "sql_rtrim nil returns nil")
+
+	/* strings.go: string_repeat */
+	(assert (equal? (string_repeat "ab" 3) "ababab") true "string_repeat 3x")
+	(assert (equal? (string_repeat "x" 0) "") true "string_repeat 0 = empty")
+	(assert (nil? (string_repeat nil 3)) true "string_repeat nil returns nil")
+
+	/* scm.go: string (type conversion) */
+	(print "testing type conversion and apply ...")
+	(assert (equal? (string 42) "42") true "string converts number to string")
+	(assert (equal? (string "abc") "abc") true "string on string is identity")
+
+	/* scm.go: apply */
+	(assert (equal? (apply + '(1 2 3)) 6) true "apply + to list")
+	(assert (equal? (apply concat '("a" "b" "c")) "abc") true "apply concat to list")
+
+	/* scm.go: error (via try) */
+	(define err_caught (newsession))
+	(try (lambda () (error "test error")) (lambda (e) (err_caught "msg" e)))
+	(assert (strlike (err_caught "msg") "%test error%") true "error throws and try catches")
+
+	/* scm.go: time */
+	(define time_result (time (+ 2 3)))
+	(assert (equal? time_result 5) true "time returns the computed value")
+
+	/* scm.go: parallel */
+	(define par_done (newsession))
+	(par_done "a" false)
+	(par_done "b" false)
+	(parallel (par_done "a" true) (par_done "b" true))
+	(assert (par_done "a") true "parallel executed branch a")
+	(assert (par_done "b") true "parallel executed branch b")
+
+	/* scm.go: for_mut (optimizer-internal but callable) */
+	(assert (equal? (for_mut (list 0) (lambda (x) (< x 5)) (lambda (x) (list (+ x 1)))) '(5)) true "for_mut counts to 5")
+
+	/* sync.go: numcpu / memstats */
+	(print "testing system info ...")
+	(assert (> (numcpu) 0) true "numcpu > 0")
+	(define ms (memstats))
+	(assert (> (ms "alloc") 0) true "memstats alloc > 0")
+	(assert (> (ms "sys") 0) true "memstats sys > 0")
+	(assert (has_assoc? ms "heap_alloc") true "memstats has heap_alloc")
+	(assert (has_assoc? ms "heap_sys") true "memstats has heap_sys")
+	(assert (has_assoc? ms "total_alloc") true "memstats has total_alloc")
+
+	/* _mut variants (optimizer internal, but test directly for coverage) */
+	(print "testing _mut variants ...")
+	(assert (equal? (map_mut '(1 2 3) (lambda (x) (* x 2))) '(2 4 6)) true "map_mut doubles")
+	(assert (equal? (mapIndex_mut '(10 20) (lambda (i v) (string i))) '("0" "1")) true "mapIndex_mut")
+	(assert (equal? (filter_mut '(1 2 3 4) (lambda (x) (> x 2))) '(3 4)) true "filter_mut keeps >2")
+	(assert (equal? (append_mut '(1 2) 3 4) '(1 2 3 4)) true "append_mut extends list")
+	(assert (equal? (append_unique_mut '(1 2 2) 2 3) '(1 2 2 3)) true "append_unique_mut deduplicates")
+	(define d_mut (list "a" 1))
+	(set d_mut (set_assoc_mut d_mut "b" 2))
+	(assert (equal? (get_assoc d_mut "b") 2) true "set_assoc_mut adds key")
+	(define d_mut2 (merge_assoc_mut (list "x" 1) (list "y" 2)))
+	(assert (equal? (get_assoc d_mut2 "y") 2) true "merge_assoc_mut merges")
+	(define d_mut3 (map_assoc_mut (list "a" 1 "b" 2) (lambda (k v) (+ v 10))))
+	(assert (equal? (get_assoc d_mut3 "a") 11) true "map_assoc_mut increments")
+	(define d_mut4 (filter_assoc_mut (list "a" 1 "b" 20) (lambda (k v) (> v 5))))
+	(assert (has_assoc? d_mut4 "b") true "filter_assoc_mut keeps b")
+	(assert (has_assoc? d_mut4 "a") false "filter_assoc_mut drops a")
+	(define d_mut5 (extract_assoc_mut (list "a" 1 "b" 2) (lambda (k v) v)))
+	(assert (equal? d_mut5 '(1 2)) true "extract_assoc_mut extracts values")
+
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
 	(if (< (teststat "success") (teststat "count")) (begin
