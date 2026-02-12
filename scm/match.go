@@ -90,7 +90,11 @@ func valueFromPattern(pattern Scmer, en *Env) Scmer {
 		return pattern
 	}
 	if pattern.IsNthLocalVar() {
-		return en.VarsNumbered[pattern.NthLocalVar()]
+		idx := int(pattern.NthLocalVar())
+		if idx < len(en.VarsNumbered) {
+			return en.VarsNumbered[idx]
+		}
+		return pattern // NthLocalVar from a different scope (data, not a local variable)
 	}
 	if pattern.IsSlice() {
 		v := pattern.Slice()
@@ -139,8 +143,13 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			return true
 		}
 	case tagNthLocalVar:
-		en.VarsNumbered[pattern.NthLocalVar()] = val
-		return true
+		idx := int(pattern.NthLocalVar())
+		if idx < len(en.VarsNumbered) {
+			en.VarsNumbered[idx] = val
+			return true
+		}
+		// NthLocalVar from a different scope — match only if equal
+		return Equal(val, pattern)
 	case tagSlice:
 		p := pattern.Slice()
 		// Support nested head wrappers like ((symbol get_column) ...)

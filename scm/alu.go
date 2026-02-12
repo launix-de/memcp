@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023-2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 
     This program is free software: you can redistribute it and/or modify
@@ -43,7 +43,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(a[0].GetTag() == tagInt)
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"number?", "tells if the value is a number",
@@ -55,7 +55,7 @@ func init_alu() {
 			tag := a[0].GetTag()
 			return NewBool(tag == tagFloat || tag == tagInt || tag == tagDate)
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"+", "adds two or more numbers",
@@ -90,7 +90,7 @@ func init_alu() {
 			}
 			return NewFloat(sumFloat)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Optimize: optimizeAssociative},
 	})
 	Declare(&Globalenv, &Declaration{
 		"-", "subtracts two or more numbers from the first one",
@@ -129,7 +129,7 @@ func init_alu() {
 			}
 			return NewFloat(diffFloat)
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"*", "multiplies two or more numbers",
@@ -172,7 +172,7 @@ func init_alu() {
 			}
 			return NewFloat(prodFloat)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Optimize: optimizeAssociative},
 	})
 	Declare(&Globalenv, &Declaration{
 		"/", "divides two or more numbers from the first one",
@@ -193,7 +193,7 @@ func init_alu() {
 			}
 			return NewFloat(v)
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<=", "compares two numbers or strings",
@@ -204,7 +204,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(!Less(a[1], a[0]))
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<", "compares two numbers or strings",
@@ -215,7 +215,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(Less(a[0], a[1]))
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		">", "compares two numbers or strings",
@@ -226,7 +226,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(Less(a[1], a[0]))
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		">=", "compares two numbers or strings",
@@ -237,7 +237,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(!Less(a[0], a[1]))
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal?", "compares two values of the same type, (equal? nil nil) is true",
@@ -248,7 +248,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(Equal(a[0], a[1]))
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal??", "performs a SQL compliant sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive, (equal? nil nil) is nil",
@@ -259,7 +259,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return EqualSQL(a[0], a[1])
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal_collate", "performs SQL equality with a specified collation (e.g. *_ci case-insensitive, *_bin case-sensitive); returns nil if either arg is nil",
@@ -286,7 +286,7 @@ func init_alu() {
 			}
 			return EqualSQL(a[0], a[1])
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"notequal_collate", "performs SQL inequality with a specified collation; returns nil if either arg is nil",
@@ -303,7 +303,7 @@ func init_alu() {
 			}
 			return NewBool(!r.Bool())
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"!", "negates the boolean value",
@@ -314,7 +314,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(!a[0].Bool())
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"not", "negates the boolean value",
@@ -325,7 +325,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(!a[0].Bool())
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nil?", "returns true if value is nil",
@@ -336,7 +336,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewBool(a[0].IsNil())
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"min", "returns the smallest value",
@@ -355,7 +355,7 @@ func init_alu() {
 			}
 			return result
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"max", "returns the highest value",
@@ -374,7 +374,7 @@ func init_alu() {
 			}
 			return result
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"floor", "rounds the number down",
@@ -385,7 +385,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewFloat(math.Floor(a[0].Float()))
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"ceil", "rounds the number up",
@@ -396,7 +396,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewFloat(math.Ceil(a[0].Float()))
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"round", "rounds the number",
@@ -407,7 +407,7 @@ func init_alu() {
 		func(a ...Scmer) Scmer {
 			return NewFloat(math.Round(a[0].Float()))
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_abs", "SQL ABS(): returns absolute value, NULL-safe",
@@ -429,6 +429,6 @@ func init_alu() {
 			}
 			return NewFloat(v)
 		},
-		true, false,
+		true, false, nil,
 	})
 }

@@ -63,6 +63,6 @@ func init_vector() {
 				}
 			}
 			return NewFloat(result)
-		}, true, false,
+		}, true, false, nil,
 	})
 }

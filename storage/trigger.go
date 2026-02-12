@@ -276,8 +276,8 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset) dataset {
 		}
 		// Trigger receives (OLD NEW)
 		returned := scm.Apply(tr.Func, oldDict, newDict)
-		// If trigger returns a dict, use it as the new NEW
-		if !returned.IsNil() && returned.IsFastDict() {
+		// If trigger returns a dict (FastDict or assoc slice), use it as the new NEW
+		if !returned.IsNil() && (returned.IsFastDict() || returned.IsSlice()) {
 			newDict = returned
 		}
 	}

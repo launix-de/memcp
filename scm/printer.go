@@ -198,6 +198,18 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		SerializeEx(b, v.SourceInfo().value, en, glob, p)
 	case tagRegex:
 		b.WriteString(v.Regex().String())
+	case tagNthLocalVar:
+		idx := v.NthLocalVar()
+		if p != nil && p.NumVars >= int(idx) && p.Params.GetTag() == tagSlice {
+			params := p.Params.Slice()
+			if int(idx) < len(params) && params[idx].IsSymbol() {
+				b.WriteString(params[idx].String())
+				return
+			}
+		}
+		b.WriteString("(var ")
+		b.WriteString(fmt.Sprint(idx))
+		b.WriteByte(')')
 	case tagAny:
 		if si, ok := v.Any().(SourceInfo); ok {
 			SerializeEx(b, si.value, en, glob, p)

@@ -436,6 +436,6 @@ for further details on packrat parsers, take a look at https://github.com/launix
 			DeclarationParameter{"skipper", "string", "(optional) string that defines the skip mechanism for whitespaces as regexp", nil},
 		}, "func",
 		nil,
-		false, false,
+		false, false, nil,
 	})
 }

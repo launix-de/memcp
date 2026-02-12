@@ -757,6 +757,17 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 							)
 						)
 						'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+						'((symbol outer) outer_arg) (begin
+							/* prefix outer variable reference if it refers to a table in schemas2 */
+							(define s (string outer_arg))
+							(define parts (split s "."))
+							(match parts
+								(list tbl col) (if (not (nil? (schemas2 tbl)))
+									(list (quote outer) (symbol (concat id ":" tbl "." col)))
+									(list (quote outer) outer_arg))
+								_ (list (quote outer) (replace_column_alias outer_arg))
+							)
+						)
 						(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
 						expr
 					)))
@@ -979,14 +990,14 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 )
 ))
 /* build queryplan from parsed query
-   GROUP BY aggregate pipeline:
-   When a GROUP BY query has aggregates (SUM, COUNT, etc.), three phases run:
-   1. collect_plan: extract unique group keys from base table into a keytable
-   2. compute_plan: for each aggregate in 'ags', scan base table per group key
-      and store results as keytable columns named "expr|condition"
-   3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
-   All aggregates from fields, ORDER BY, and HAVING are collected into 'ags' so that
-   e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
+GROUP BY aggregate pipeline:
+When a GROUP BY query has aggregates (SUM, COUNT, etc.), three phases run:
+1. collect_plan: extract unique group keys from base table into a keytable
+2. compute_plan: for each aggregate in 'ags', scan base table per group key
+and store results as keytable columns named "expr|condition"
+3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
+All aggregates from fields, ORDER BY, and HAVING are collected into 'ags' so that
+e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
@@ -1021,8 +1032,8 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 		(set stage_order (map stage_order (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))
 		(define is_dedup (stage_is_dedup stage))
 		/* collect all unique aggregate tuples (expr reduce neutral) from fields, ORDER BY, and HAVING.
-		   Each tuple becomes a computed column on the keytable, e.g. SUM(amount) -> ((get_column t amount) + 0).
-		   ORDER BY SUM(x) requires SUM(x) to be pre-computed here even if not in SELECT. */
+		Each tuple becomes a computed column on the keytable, e.g. SUM(amount) -> ((get_column t amount) + 0).
+		ORDER BY SUM(x) requires SUM(x) to be pre-computed here even if not in SELECT. */
 		(define ags_raw (if is_dedup '() (extract_assoc fields (lambda (key expr) (extract_aggregates expr)))))
 		(define ags (if is_dedup '() (merge_unique ags_raw))) /* aggregates in fields */
 		(define ags (if is_dedup ags (merge_unique ags (merge_unique (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (extract_aggregates col)))))))) /* aggregates in order */
@@ -1096,8 +1107,8 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 					(list 'begin collect_plan grouped_plan)
 				) (begin
 						/* NORMAL group stage: extract aggregates, compute, and continue.
-						   replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
-						   so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
+						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
+						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false))
 
 						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_agg_with_fetch col) dir))))))
@@ -1135,7 +1146,7 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 			)
 			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
 		)
-	) (begin
+	) (optimize (begin
 			/* grouping has been removed; now to the real data: */
 			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '()))) (error "non-group stage must be last"))
 			(if (coalesce stage_order stage_limit stage_offset) (begin
@@ -1163,7 +1174,7 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 								)
 							))
 							(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-								(set filtercols (extract_columns_for_tblvar tblvar now_condition))
+								(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 								/* TODO: add columns from rest condition into cols list */
 
 								/* extract order cols for this tblvar */
@@ -1226,7 +1237,7 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 								))
 								/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-									(set filtercols (extract_columns_for_tblvar tblvar now_condition))
+									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
 
 									(scan_wrapper 'scan schema tbl
 										/* condition */
@@ -1247,5 +1258,5 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 					))
 					(build_scan tables (replace_find_column condition))
 			))
-	))
+	)))
 )))

@@ -41,7 +41,7 @@ func init_streams() {
 				writer.Close()
 			}()
 			return NewAny(io.Reader(reader))
-		}, false, false,
+		}, false, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"gzip", "compresses a stream with gzip. Create streams with (stream filename)",
@@ -64,7 +64,7 @@ func init_streams() {
 				writer.Close()
 			}()
 			return NewAny(io.Reader(reader))
-		}, false, false,
+		}, false, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"xz", "compresses a stream with xz. Create streams with (stream filename)",
@@ -90,7 +90,7 @@ func init_streams() {
 				panic(err)
 			}
 			return NewAny(io.Reader(reader))
-		}, false, false,
+		}, false, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"zcat", "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
@@ -108,7 +108,7 @@ func init_streams() {
 				panic(err)
 			}
 			return NewAny(reader)
-		}, false, false,
+		}, false, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"xzcat", "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
@@ -126,6 +126,6 @@ func init_streams() {
 				panic(err)
 			}
 			return NewAny(reader)
-		}, false, false,
+		}, false, false, nil,
 	})
 }

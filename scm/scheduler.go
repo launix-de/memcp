@@ -235,7 +235,7 @@ func init_scheduler() {
 			{"milliseconds", "number", "milliseconds until execution", nil},
 			{"args...", "any", "optional arguments forwarded to the callback", nil},
 		}, "int",
-		setTimeout, false, false,
+		setTimeout, false, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"clearTimeout", "Cancels a timeout created with setTimeout.",
@@ -243,7 +243,7 @@ func init_scheduler() {
 		[]DeclarationParameter{
 			{"id", "number", "identifier returned by setTimeout", nil},
 		}, "bool",
-		clearTimeout, false, false,
+		clearTimeout, false, false, nil,
 	})
 }
 

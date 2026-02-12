@@ -98,7 +98,6 @@ type S3Storage struct {
 	mu     sync.Mutex
 	client *s3.Client
 	opened bool
-
 }
 
 func NewS3Storage(f *S3Factory, prefix string) *S3Storage {

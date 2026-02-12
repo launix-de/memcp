@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023-2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -134,7 +134,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			_, ok := a[0].Any().(string)
 			return NewBool(ok)
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"concat", "concatenates stringable values and returns a string",
@@ -152,7 +152,7 @@ func init_strings() {
 				}
 			}
 			return NewString(sb.String())
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"substr", "returns a substring (0-based index)",
@@ -169,7 +169,7 @@ func init_strings() {
 				return NewString(s[i : i+ToInt(a[2])])
 			}
 			return NewString(s[i:])
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_substr", "SQL SUBSTR/SUBSTRING with 1-based index and bounds checking",
@@ -203,7 +203,7 @@ func init_strings() {
 				return NewString(s[start : start+n])
 			}
 			return NewString(s[start:])
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"simplify", "turns a stringable input value in the easiest-most value (e.g. turn strings into numbers if they are numeric",
@@ -214,7 +214,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			// turn string to number or so
 			return Simplify(String(a[0]))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlen", "returns the length of a string",
@@ -224,7 +224,7 @@ func init_strings() {
 		}, "int",
 		func(a ...Scmer) Scmer {
 			return NewInt(int64(len(String(a[0]))))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlike", "matches the string against a wildcard pattern (SQL compliant)",
@@ -246,7 +246,7 @@ func init_strings() {
 				pattern = strings.ToLower(pattern)
 			}
 			return NewBool(StrLike(value, pattern))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlike_cs", "matches the string against a wildcard pattern (case-sensitive)",
@@ -258,7 +258,7 @@ func init_strings() {
 		}, "bool",
 		func(a ...Scmer) Scmer {
 			return NewBool(StrLike(String(a[0]), String(a[1])))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"toLower", "turns a string into lower case",
@@ -268,7 +268,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ToLower(String(a[0])))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"toUpper", "turns a string into upper case",
@@ -278,7 +278,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ToUpper(String(a[0])))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"replace", "replaces all occurances in a string with another string",
@@ -290,7 +290,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2])))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strtrim", "trims whitespace from both ends of a string",
@@ -300,7 +300,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimSpace(String(a[0])))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strltrim", "trims whitespace from the left of a string",
@@ -310,7 +310,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strrtrim", "trims whitespace from the right of a string",
@@ -320,7 +320,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
-		}, true, false,
+		}, true, false, nil,
 	})
 	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
 	Declare(&Globalenv, &Declaration{
@@ -334,7 +334,7 @@ func init_strings() {
 				return NewNil()
 			}
 			return NewString(strings.TrimSpace(String(a[0])))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_ltrim", "SQL LTRIM(): NULL-safe trim of whitespace from left",
@@ -347,7 +347,7 @@ func init_strings() {
 				return NewNil()
 			}
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_rtrim", "SQL RTRIM(): NULL-safe trim of whitespace from right",
@@ -360,7 +360,7 @@ func init_strings() {
 				return NewNil()
 			}
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"split", "splits a string using a separator or space",
@@ -380,7 +380,7 @@ func init_strings() {
 				result[i] = NewString(v)
 			}
 			return NewSlice(result)
-		}, true, false,
+		}, true, false, nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -399,7 +399,7 @@ func init_strings() {
 				return NewString("")
 			}
 			return NewString(strings.Repeat(String(a[0]), int(n)))
-		}, true, false,
+		}, true, false, nil,
 	})
 
 	/* comparison */
@@ -585,7 +585,7 @@ func init_strings() {
 				}
 				return NewFunc(LessScm)
 			}
-		}, true, false,
+		}, true, false, nil,
 	})
 
 	/* escaping functions similar to PHP */
@@ -597,7 +597,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(html.EscapeString(String(a[0])))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"urlencode", "encodes a string according to URI coding schema",
@@ -607,7 +607,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(url.QueryEscape(String(a[0])))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"urldecode", "decodes a string according to URI coding schema",
@@ -621,7 +621,7 @@ func init_strings() {
 				panic("error while decoding URL: " + fmt.Sprint(err))
 			}
 			return NewString(result)
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode", "encodes a value in JSON, treats lists as lists",
@@ -635,7 +635,7 @@ func init_strings() {
 				panic(err)
 			}
 			return NewString(string(b))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode_assoc", "encodes a value in JSON, treats lists as associative arrays",
@@ -675,7 +675,7 @@ func init_strings() {
 				panic(err)
 			}
 			return NewString(string(b))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_decode", "parses JSON into a map",
@@ -690,7 +690,7 @@ func init_strings() {
 				panic(err)
 			}
 			return TransformFromJSON(result)
-		}, true, false,
+		}, true, false, nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -701,7 +701,7 @@ func init_strings() {
 		}, "string",
 		func(a ...Scmer) Scmer {
 			return NewString(base64.StdEncoding.EncodeToString([]byte(String(a[0]))))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"base64_decode", "decodes a Base64 string (standard encoding)",
@@ -715,7 +715,7 @@ func init_strings() {
 				panic("error while decoding base64: " + fmt.Sprint(err))
 			}
 			return NewString(string(decoded))
-		}, true, false,
+		}, true, false, nil,
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
 	Declare(&Globalenv, &Declaration{
@@ -744,7 +744,7 @@ func init_strings() {
 				return m
 			})
 			return NewString(out)
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"bin2hex", "turns binary data into hex with lowercase letters",
@@ -761,7 +761,7 @@ func init_strings() {
 				result[2*i+1] = hexmap[input[i]%16]
 			}
 			return NewString(string(result))
-		}, true, false,
+		}, true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"hex2bin", "decodes a hex string into binary data",
@@ -775,7 +775,7 @@ func init_strings() {
 				panic("error while decoding hex: " + fmt.Sprint(err))
 			}
 			return NewString(string(decoded))
-		}, true, false,
+		}, true, false, nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -796,7 +796,7 @@ func init_strings() {
 				}
 			}
 			return NewString(string(buf))
-		}, true, false,
+		}, true, false, nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -816,7 +816,39 @@ func init_strings() {
 				panic("regexp_replace: invalid pattern: " + err.Error())
 			}
 			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
-		}, true, false,
+		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpReplace},
 	})
 
+}
+
+// optimizeRegexpReplace precompiles the regex when the pattern argument is a constant string.
+// This avoids calling regexp.Compile() on every invocation at runtime.
+func optimizeRegexpReplace(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	// Optimize all arguments first
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	if td != nil && td.Const {
+		return result, td // already constant-folded
+	}
+	rv, ok := scmerSlice(result)
+	if !ok || len(rv) < 4 {
+		return result, td
+	}
+	// Check if the pattern (arg 2, index 2) is a constant string
+	if !rv[2].IsString() {
+		return result, td
+	}
+	pattern := rv[2].String()
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return result, td // let runtime handle the error
+	}
+	// Replace call with a precompiled closure
+	compiled := NewFunc(func(a ...Scmer) Scmer {
+		if a[0].IsNil() {
+			return NewNil()
+		}
+		return NewString(re.ReplaceAllString(String(a[0]), String(a[1])))
+	})
+	// Rewrite: (regexp_replace str pattern repl) -> (compiled_fn str repl)
+	return NewSlice([]Scmer{compiled, rv[1], rv[3]}), td
 }

@@ -32,8 +32,8 @@ type OverlayBlob struct {
 	// values: used during build() for dedup, and for legacy inline data
 	values map[[32]byte]string
 	size   uint
-	schema *database          // reference to owning database
-	refs   map[string]bool    // hex-hashes referenced in this build()
+	schema *database       // reference to owning database
+	refs   map[string]bool // hex-hashes referenced in this build()
 }
 
 func (s *OverlayBlob) ComputeSize() uint {

@@ -29,8 +29,9 @@ type Declaration struct {
 	Params       []DeclarationParameter
 	Returns      string // any | string | number | int | bool | func | list | symbol | nil
 	Fn           func(...Scmer) Scmer
-	Foldable     bool // safe to constant-fold when all args are literals
-	Forbidden    bool // optimizer-only: hidden from help, blocked from .scm code
+	Foldable     bool            // safe to constant-fold when all args are literals
+	Forbidden    bool            // optimizer-only: hidden from help, blocked from .scm code
+	Type         *TypeDescriptor // function type with optional Optimize hook; nil = derive from Params/Returns
 }
 
 // TypeDescriptor describes the type of any Scmer value at arbitrary depth.
@@ -44,11 +45,25 @@ type TypeDescriptor struct {
 	Return   *TypeDescriptor            // for Kind="func": return type
 	Keys     map[string]*TypeDescriptor // for Kind="assoc": per-key type info
 	Element  *TypeDescriptor            // for Kind="list": element type
+	// Custom optimizer hook for function types. When set, the optimizer calls this
+	// INSTEAD of the default arg optimization + post-processing.
+	// v[0] is head, v[1:] are UN-optimized args. The hook optimizes its own args
+	// via oc.OptimizeSub() and may rewrite the entire call.
+	// Returns (optimized_expr, result_type) where result_type describes the
+	// optimized expression's type for full transfer/escape analysis.
+	Optimize func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
+}
+
+// OptimizerContext is an exported wrapper so packages like storage can use
+// optimizer hooks without importing unexported optimizerMetainfo.
+type OptimizerContext struct {
+	Env *Env
+	Ome *optimizerMetainfo
 }
 
 type DeclarationParameter struct {
 	Name     string
-	Type     string          // any | string | number | int | bool | func | list | symbol | nil
+	Type     string // any | string | number | int | bool | func | list | symbol | nil
 	Desc     string
 	TypeInfo *TypeDescriptor // rich type info (nil = unknown / no annotation)
 }
@@ -65,26 +80,9 @@ func DeclareTitle(title string) {
 	declaration_titles = append(declaration_titles, "#"+title)
 }
 
-// returnTypeAnnotations stores rich return-type info for declared functions.
-// The optimizer queries this to determine ownership transfer (e.g., fresh allocation).
-var returnTypeAnnotations = map[string]*TypeDescriptor{}
-
 // FreshAlloc is a reusable TypeDescriptor for functions whose return value
 // is always a fresh allocation — safe for _mut swap by the optimizer.
 var FreshAlloc = &TypeDescriptor{Kind: "list", Transfer: true}
-
-// AnnotateReturnType attaches a return TypeDescriptor to named functions.
-// Use FreshAlloc for functions that always return freshly allocated values.
-func AnnotateReturnType(td *TypeDescriptor, names ...string) {
-	for _, name := range names {
-		returnTypeAnnotations[name] = td
-	}
-}
-
-// ReturnTypeOf returns the return TypeDescriptor for a declared function, or nil.
-func ReturnTypeOf(name string) *TypeDescriptor {
-	return returnTypeAnnotations[name]
-}
 
 func Declare(env *Env, def *Declaration) {
 	if !def.Forbidden {

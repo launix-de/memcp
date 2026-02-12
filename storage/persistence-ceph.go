@@ -91,7 +91,6 @@ type CephStorage struct {
 	conn   *rados.Conn
 	ioctx  *rados.IOContext
 	opened bool
-
 }
 
 func NewCephStorage(f *CephFactory, prefix string) *CephStorage {

@@ -273,6 +273,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (has_assoc? bigf "k1500") true "filter keeps large values")
 	(assert (has_assoc? bigf "k1") false "filter drops small values")
 
+	/* set_assoc immutability: original must not be modified */
+	(define orig '("a" 1 "b" 2))
+	(define modified (set_assoc orig "a" 99))
+	(assert (orig "a") 1 "set_assoc immutable: original unchanged on slice path")
+	(assert (modified "a") 99 "set_assoc immutable: modified has new value")
+	(define orig_fd (reduce (produceN 20) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
+	(define modified_fd (set_assoc orig_fd "k5" 999))
+	(assert (orig_fd "k5") 5 "set_assoc immutable: original FastDict unchanged")
+	(assert (modified_fd "k5") 999 "set_assoc immutable: modified FastDict has new value")
 
 	/* Strings / JSON */
 	(print "testing strings ...")
@@ -510,6 +519,29 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* _mut optimization: freshly constructed list triggers in-place operations */
 	(assert ((eval (optimize '('lambda '('a 'b 'c) '(map '(list 'a 'b 'c) '('lambda '('x) '(+ 'x 1)))))) 10 20 30) '(11 21 31) "_mut map on fresh list")
 	(assert ((eval (optimize '('lambda '('a 'b 'c 'd) '(filter '(list 'a 'b 'c 'd) '('lambda '('x) '(> 'x 2)))))) 1 2 3 4) '(3 4) "_mut filter on fresh list")
+
+	/* Declaration-driven optimizer hooks */
+	/* and hook: short-circuit on constant-false, remove constant-true */
+	(assert (optimize '('and '(equal? 1 1) '(equal? 1 1) '(equal? 1 2))) false "and hook: short-circuit false")
+	(assert (optimize '('and '(equal? 1 1) 'x)) 'x "and hook: removes true constant")
+	(assert (optimize '('and '(equal? 1 1) '(equal? 1 1))) true "and hook: all true constants fold")
+	(assert (serialize (optimize '('and 'x 'y))) "(and x y)" "and hook: non-const args preserved")
+
+	/* +/* hooks: associative flattening with symbolic args */
+	(assert (serialize (optimize '('+ 'a '('+ 'b 'c)))) "(+ a b c)" "+ hook: flattens nested +")
+	(assert (serialize (optimize '('* 'a '('* 'b 'c)))) "(* a b c)" "* hook: flattens nested *")
+	(assert (serialize (optimize '('+ 'a '('+ 'b '('+ 'c 'd))))) "(+ a b c d)" "+ hook: deeply nested flatten")
+
+	/* _mut hook via FirstParameterMutable: set_assoc on filter result */
+	(assert (serialize (optimize '('set_assoc '('filter '('list) '('lambda '('x) true)) "k" "v"))) "(set_assoc_mut (filter '() (lambda (x) true 1)) \"k\" \"v\")" "_mut hook: set_assoc -> set_assoc_mut")
+	/* _mut on append with fresh list arg */
+	(assert ((eval (optimize '('lambda '('a 'b) '(append '(list 'a) 'b)))) 10 20) '(10 20) "_mut append on fresh list")
+	/* scan callback ownership: reduce accumulator enables _mut inside reduce body */
+	(assert (serialize (optimize '('scan "db" "tbl" '("x") '('lambda '('x) true) '("x") '('lambda '('x) 'x) '('lambda '('acc 'row) '(set_assoc 'acc 'row true)) '(list) nil false))) "(scan \"db\" \"tbl\" (\"x\") (lambda (x) true 1) (\"x\") (lambda (x) (var 0) 1) (lambda (acc row) (set_assoc_mut (var 0) (var 1) true) 2) (list) nil false)" "scan hook: reduce acc enables set_assoc_mut")
+
+	/* REGEXP_REPLACE precompilation: constant pattern gets precompiled */
+	(assert ((eval (optimize '('lambda '('s) '(regexp_replace 's "[^0-9]" "")))) "abc123def") "123" "regexp_replace precompilation works")
+	(assert ((eval (optimize '('lambda '('s) '(regexp_replace 's "^0+" "")))) "000042") "42" "regexp_replace precompiled strips leading zeros")
 
 	/* Numbered parameter semantics (NthLocalVar / NumVars) */
 	(print "testing numbered parameters ...")

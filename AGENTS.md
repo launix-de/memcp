@@ -18,6 +18,32 @@
 - Connect-only (reuse a running instance): `python3 run_sql_tests.py tests/02_functions.yaml 4321 --connect-only`.
 - Pre-commit: `git commit` runs all `tests/[0-9][0-9]_*.yaml` via a single `memcp` instance (port 4400). Bypass only if necessary: `git commit --no-verify -m "..."`.
 
+### Exact Server Invocation (used by test runner)
+The test runner (`run_sql_tests.py`) starts the server exactly like this:
+```
+./memcp -data /tmp/memcp-sql-tests-PORT --api-port=PORT --mysql-port=PORT+1000 --disable-mysql lib/main.scm
+```
+- The binary MUST be `./memcp` (hardcoded in the test runner at line 727).
+- `-data DIR` sets the data directory (positional dash flag, not `--datadir`).
+- `--api-port=PORT` sets the HTTP API port (default 4321).
+- `--no-repl` for background daemon use (test runner uses stdin pipe instead).
+- GODEBUG=invalidptr=0 is set in the environment.
+
+### Manual Server Testing
+To start a server manually for debugging:
+```
+mkdir -p /tmp/memcp-manual-test
+GODEBUG=invalidptr=0 ./memcp -data /tmp/memcp-manual-test --api-port=4399 --no-repl lib/main.scm </dev/null &>/tmp/memcp_manual.log &
+```
+Then send queries via the HTTP API:
+```
+curl -s -u root:admin "http://localhost:4399/sql/DBNAME" -d "SELECT 1"
+```
+- Auth: HTTP Basic `root:admin` (default password for fresh data dirs).
+- API endpoint: `/sql/<database-name>` (NOT `/schema` or bare root).
+- Database is auto-created on first use.
+- Tests use database name `memcp-tests` on port 4321 (or custom port).
+
 ## Coding Style & Naming
 - in every source file: include license header
 - Go: format with `go fmt ./...` after each patch; keep idiomatic Go (short, cohesive funcs). Tabs and gofmt defaults are expected.

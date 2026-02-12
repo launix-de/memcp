@@ -229,11 +229,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(list (symbol "lambda") params nil))
 					/* BEFORE trigger: wrap with changed_rows handling */
 					/* Use outer begin for define, inner !begin (no new scope) for statements */
-					/* set returns the value, so last (set changed_rows ...) returns the final dict */
+					/* Wrap in begin: define changed_rows, execute stmts, return changed_rows */
 					(list (symbol "lambda") params
 						(list (symbol "begin")
 							(list (symbol "define") changed_rows_sym (symbol "NEW"))
-							(cons '!begin valid_stmts))))
+							(cons '!begin valid_stmts)
+							changed_rows_sym)))
 			)
 			/* SET assignments (legacy format) - body is AST (list (col1 expr1) ...), eval to get actual list */
 			(cons (symbol list) assignments) (begin

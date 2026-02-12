@@ -166,9 +166,11 @@ func Optimize(val Scmer, env *Env) Scmer {
 }
 
 type optimizerMetainfo struct {
-	variableReplacement map[Symbol]Scmer
-	setBlacklist        []Symbol
-	nextSlot            *int // pointer to lambda's slot counter; nil outside lambda
+	variableReplacement  map[Symbol]Scmer
+	setBlacklist         []Symbol
+	nextSlot             *int            // pointer to lambda's slot counter; nil outside lambda
+	ownedVars            map[Symbol]bool // variables known to hold exclusively owned values (e.g. reduce accumulators)
+	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -198,7 +200,8 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 		}
 	}
 	result.setBlacklist = ome.setBlacklist
-	result.nextSlot = ome.nextSlot // shared scope shares VarsNumbered
+	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
+	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
 	return
 }
 
@@ -319,7 +322,22 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	headSym, headOk := scmerSymbol(v[0])
 
 	if headOk && headSym == Symbol("outer") && len(v) == 2 {
-		inner, transferOwnership, isConstant := OptimizeEx(v[1], env, ome, useResult)
+		// When we see (outer expr), expr should be resolved in the parent scope.
+		// Copy() wraps inherited variable replacements in (outer ...), but (outer expr)
+		// already represents one scope transition. We need to "unwrap" one (outer ...)
+		// level from the variable replacements to avoid double-wrapping.
+		outerOme := optimizerMetainfo{
+			variableReplacement: make(map[Symbol]Scmer),
+			setBlacklist:        ome.setBlacklist,
+		}
+		for k, repl := range ome.variableReplacement {
+			if slice, ok := scmerSlice(repl); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
+				outerOme.variableReplacement[k] = slice[1]
+			}
+			// Local NthLocalVar replacements (current lambda params) are NOT
+			// accessible in the outer scope, so we intentionally exclude them.
+		}
+		inner, transferOwnership, isConstant := OptimizeEx(v[1], env, &outerOme, useResult)
 		if isConstant {
 			return inner, true, true
 		}
@@ -362,6 +380,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						visitNode(sub[2], depth+1, blacklist2)
 					}
 				} else if !subHeadOk || subHead != Symbol("begin") {
+					// Also visit the head — it may be a variable used in call position (e.g., (accsess "key"))
+					visitNode(sub[0], depth+1, blacklist)
 					for i := 1; i < len(sub); i++ {
 						visitNode(sub[i], depth+1, blacklist)
 					}
@@ -550,6 +570,22 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			slotIndex++
 		}
 		ome2.nextSlot = &slotIndex // allow !list to allocate extra slots
+		// Propagate callback parameter ownership from pendingCallbackOwned
+		if ome.pendingCallbackOwned != nil {
+			if ome2.ownedVars == nil {
+				ome2.ownedVars = make(map[Symbol]bool)
+			}
+			if list, ok := scmerSlice(params); ok {
+				for pi, param := range list {
+					if pi < len(ome.pendingCallbackOwned) && ome.pendingCallbackOwned[pi] {
+						if sym, ok := scmerSymbol(param); ok {
+							ome2.ownedVars[sym] = true
+						}
+					}
+				}
+			}
+			ome.pendingCallbackOwned = nil // consumed
+		}
 		v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
 		// Set NumVars (may have grown due to !list allocations)
 		if slotIndex > 0 {
@@ -591,21 +627,103 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	case headOk && headSym == Symbol("parser"):
 		return OptimizeParser(NewSlice(v), env, ome, false), true, false
 	case !headOk || headSym != Symbol("quote"):
-		allConstArgs := true
-		firstArgOwned := false // tracks whether arg[1] (the list/dict) has transferOwnership
-		for i := 0; i < len(v); i++ {
-			var constant bool
-			v[i], transferOwnership, constant = OptimizeEx(v[i], env, ome, true)
-			if i == 1 {
-				firstArgOwned = transferOwnership
+		// Look up declaration for hook dispatch
+		if callDecl := DeclarationForValue(v[0]); callDecl != nil && callDecl.Type != nil && callDecl.Type.Optimize != nil {
+			oc := &OptimizerContext{Env: env, Ome: ome}
+			result, td := callDecl.Type.Optimize(v, oc, useResult)
+			if td != nil {
+				return result, td.Transfer, td.Const
 			}
-			if i > 0 && !constant {
-				allConstArgs = false
+			return result, false, false
+		}
+		// Default optimization path
+		oc := &OptimizerContext{Env: env, Ome: ome}
+		result, td := oc.applyDefaultOptimization(v, useResult, "")
+		if td != nil {
+			return result, td.Transfer, td.Const
+		}
+		return result, false, false
+	}
+
+	return NewSlice(v), transferOwnership, false
+}
+
+// OptimizeSub optimizes a sub-expression and returns its result TypeDescriptor.
+func (oc *OptimizerContext) OptimizeSub(val Scmer, useResult bool) (Scmer, *TypeDescriptor) {
+	result, to, ic := OptimizeEx(val, oc.Env, oc.Ome, useResult)
+	return result, &TypeDescriptor{Transfer: to, Const: ic}
+}
+
+// SetCallbackOwned sets pendingCallbackOwned for the next lambda argument.
+func (oc *OptimizerContext) SetCallbackOwned(owned []bool) {
+	oc.Ome.pendingCallbackOwned = owned
+}
+
+// ApplyDefaultOptimization runs the standard optimization pipeline on a call
+// expression: callback ownership propagation, arg optimization, !list rewrite,
+// and constant folding. Hooks can call this for default behavior.
+func (oc *OptimizerContext) ApplyDefaultOptimization(v []Scmer, useResult bool) (Scmer, *TypeDescriptor) {
+	return oc.applyDefaultOptimization(v, useResult, "")
+}
+
+// FirstParameterMutable returns an Optimize hook that runs default optimization
+// and swaps to mutName when the first argument is exclusively owned.
+func FirstParameterMutable(mutName string) func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	return func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+		return oc.applyDefaultOptimization(v, useResult, mutName)
+	}
+}
+
+// applyDefaultOptimization runs the standard optimization pipeline on a function
+// call expression: callback ownership propagation, arg optimization, _mut swap
+// (when mutName is non-empty), !list rewrite, and constant folding.
+func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, mutName string) (Scmer, *TypeDescriptor) {
+	env := oc.Env
+	ome := oc.Ome
+	headSym, headOk := scmerSymbol(v[0])
+
+	allConstArgs := true
+	var transferOwnership bool
+
+	// Look up declaration for callback ownership propagation
+	var callDecl *Declaration
+	if headOk {
+		callDecl = DeclarationForValue(v[0])
+	}
+
+	// Optimize all args with callback ownership propagation
+	for i := 0; i < len(v); i++ {
+		if i > 0 && callDecl != nil {
+			paramIdx := i - 1
+			if paramIdx >= len(callDecl.Params) {
+				paramIdx = len(callDecl.Params) - 1
+			}
+			if paramIdx >= 0 {
+				if ti := callDecl.Params[paramIdx].TypeInfo; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
+					owned := make([]bool, len(ti.Params))
+					hasAny := false
+					for pi, pt := range ti.Params {
+						if pt != nil && pt.Transfer {
+							owned[pi] = true
+							hasAny = true
+						}
+					}
+					if hasAny {
+						ome.pendingCallbackOwned = owned
+					}
+				}
 			}
 		}
-		// _mut swap: when first arg comes from a function annotated with FreshAlloc
-		// return type, replace with in-place variant. This excludes functions like
-		// coalesce/car/cdr which return references to existing values.
+		var constant bool
+		v[i], transferOwnership, constant = OptimizeEx(v[i], env, ome, true)
+		if i > 0 && !constant {
+			allConstArgs = false
+		}
+	}
+
+	// _mut swap: when mutName is set and first arg is exclusively owned,
+	// swap to the in-place variant
+	if mutName != "" {
 		firstArgFresh := false
 		if len(v) >= 2 {
 			arg1 := v[1]
@@ -614,130 +732,155 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 			if inner, ok := scmerSlice(arg1); ok && len(inner) > 0 {
 				if d := DeclarationForValue(inner[0]); d != nil {
-					if rt := ReturnTypeOf(d.Name); rt != nil && rt.Transfer {
+					if d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
 						firstArgFresh = true
 					}
 				}
-			}
-		}
-		if headOk && firstArgOwned && firstArgFresh && len(v) >= 2 {
-			mutSwap := map[Symbol]string{
-				Symbol("map"):            "map_mut",
-				Symbol("mapIndex"):       "mapIndex_mut",
-				Symbol("map_assoc"):      "map_assoc_mut",
-				Symbol("filter"):         "filter_mut",
-				Symbol("filter_assoc"):   "filter_assoc_mut",
-				Symbol("extract_assoc"):  "extract_assoc_mut",
-				Symbol("append"):         "append_mut",
-				Symbol("append_unique"):  "append_unique_mut",
-				Symbol("merge_assoc"):    "merge_assoc_mut",
-				Symbol("set_assoc"):      "set_assoc_mut",
-				Symbol("for"):            "for_mut",
-			}
-			if mutName, ok := mutSwap[headSym]; ok {
-				v[0] = NewSymbol(mutName)
-				headSym = Symbol(mutName)
-				transferOwnership = true // result of _mut is also owned
-			}
-		}
-		// !list rewrite: when an argument is (list expr...) passed to a function
-		// whose parameter is annotated Escape:false, replace with (!list start count expr...)
-		// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
-		if headOk && ome.nextSlot != nil {
-			if decl := DeclarationForValue(v[0]); decl != nil {
-				for i := 1; i < len(v); i++ {
-					paramIdx := i - 1
-					if paramIdx >= len(decl.Params) {
-						paramIdx = len(decl.Params) - 1 // variadic: use last param
-					}
-					if paramIdx < 0 {
-						continue
-					}
-					ti := decl.Params[paramIdx].TypeInfo
-					if ti == nil || ti.Escape {
-						continue // unknown or escaping parameter
-					}
-					// Check if this argument is a (list ...) call
-					if inner, ok := scmerSlice(v[i]); ok && len(inner) >= 1 && scmerIsSymbol(inner[0], "list") {
-						count := len(inner) - 1
-						if count == 0 {
-							continue // empty list, no benefit
+			} else if arg1.IsNthLocalVar() {
+				for sym, owned := range ome.ownedVars {
+					if owned {
+						if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() && repl.NthLocalVar() == arg1.NthLocalVar() {
+							firstArgFresh = true
+							break
 						}
-						start := *ome.nextSlot
-						*ome.nextSlot += count
-						// Build (!list NthLocalVar(start) count expr1 expr2 ...)
-						rewritten := make([]Scmer, 0, count+3)
-						rewritten = append(rewritten, NewSymbol("!list"))
-						rewritten = append(rewritten, NewNthLocalVar(NthLocalVar(start)))
-						rewritten = append(rewritten, NewInt(int64(count)))
-						rewritten = append(rewritten, inner[1:]...)
-						v[i] = NewSlice(rewritten)
 					}
 				}
 			}
 		}
-		// Flatten nested + and * (associative operators)
-		if headOk && (headSym == Symbol("+") || headSym == Symbol("*")) {
-			for i := 1; i < len(v); i++ {
-				if inner, ok := scmerSlice(v[i]); ok && len(inner) > 1 && scmerIsSymbol(inner[0], string(headSym)) {
-					newV := make([]Scmer, 0, len(v)+len(inner)-2)
-					newV = append(newV, v[:i]...)
-					newV = append(newV, inner[1:]...)
-					newV = append(newV, v[i+1:]...)
-					v = newV
-					i-- // re-examine this position
-				}
-			}
-		}
-		// If this expression is an eval/import call, globally disable further begin inlining
-		if headOk && (headSym == Symbol("eval") || headSym == Symbol("import")) {
-			optimizerSeenEvalImport = true
-		}
-		if scmerIsSymbol(v[0], "!begin") && allConstArgs {
-			return v[len(v)-1], true, true
-		}
-		if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
-			for i := range v {
-				if list, ok := scmerSlice(v[i]); ok && len(list) > 0 && (isList(list[0]) || scmerIsSymbol(list[0], "list")) {
-					v[i] = NewSlice(list[1:])
-				}
-			}
-			result, transferOwnership, isConstant = d.Fn(v[1:]...), true, true
-			if list, ok := scmerSlice(result); ok {
-				packed := make([]Scmer, 1, len(list)+1)
-				packed[0] = NewFunc(List)
-				packed = append(packed, list...)
-				result = NewSlice(packed)
-			}
-			return result, transferOwnership, isConstant
-		}
-		if scmerIsSymbol(v[0], "and") {
-			if len(v) == 2 {
-				return OptimizeEx(v[1], env, ome, useResult)
-			}
-			allTrue := true
-			for i := 1; i < len(v); i++ {
-				arg := v[i]
-				switch arg.GetTag() {
-				case tagNil, tagBool, tagInt, tagFloat, tagString:
-					if !ToBool(arg) {
-						return NewBool(false), true, true
-					}
-					newArgs := append([]Scmer{}, v[:i]...)
-					newArgs = append(newArgs, v[i+1:]...)
-					return OptimizeEx(NewSlice(newArgs), env, ome, useResult)
-				default:
-					allTrue = false
-				}
-			}
-			if allTrue {
-				return NewBool(true), true, true
-			}
-			return NewSlice(v), transferOwnership, false
+		if firstArgFresh && len(v) >= 2 {
+			v[0] = NewSymbol(mutName)
+			headSym = Symbol(mutName)
+			transferOwnership = true
 		}
 	}
 
-	return NewSlice(v), transferOwnership, false
+	// !list rewrite: when an argument is (list expr...) passed to a function
+	// whose parameter is annotated Escape:false, replace with (!list start count expr...)
+	// so the list is stack-allocated into VarsNumbered instead of heap-allocated.
+	if headOk && ome.nextSlot != nil {
+		if decl := DeclarationForValue(v[0]); decl != nil {
+			for i := 1; i < len(v); i++ {
+				paramIdx := i - 1
+				if paramIdx >= len(decl.Params) {
+					paramIdx = len(decl.Params) - 1 // variadic: use last param
+				}
+				if paramIdx < 0 {
+					continue
+				}
+				ti := decl.Params[paramIdx].TypeInfo
+				if ti == nil || ti.Escape {
+					continue // unknown or escaping parameter
+				}
+				// Check if this argument is a (list ...) call
+				if inner, ok := scmerSlice(v[i]); ok && len(inner) >= 1 && scmerIsSymbol(inner[0], "list") {
+					count := len(inner) - 1
+					if count == 0 {
+						continue // empty list, no benefit
+					}
+					start := *ome.nextSlot
+					*ome.nextSlot += count
+					rewritten := make([]Scmer, 0, count+3)
+					rewritten = append(rewritten, NewSymbol("!list"))
+					rewritten = append(rewritten, NewNthLocalVar(NthLocalVar(start)))
+					rewritten = append(rewritten, NewInt(int64(count)))
+					rewritten = append(rewritten, inner[1:]...)
+					v[i] = NewSlice(rewritten)
+				}
+			}
+		}
+	}
+
+	// If this expression is an eval/import call, globally disable further begin inlining
+	if headOk && (headSym == Symbol("eval") || headSym == Symbol("import")) {
+		optimizerSeenEvalImport = true
+	}
+	if scmerIsSymbol(v[0], "!begin") && allConstArgs {
+		return v[len(v)-1], &TypeDescriptor{Transfer: true, Const: true}
+	}
+	if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
+		for i := range v {
+			if list, ok := scmerSlice(v[i]); ok && len(list) > 0 && (isList(list[0]) || scmerIsSymbol(list[0], "list")) {
+				v[i] = NewSlice(list[1:])
+			}
+		}
+		result := d.Fn(v[1:]...)
+		if list, ok := scmerSlice(result); ok {
+			packed := make([]Scmer, 1, len(list)+1)
+			packed[0] = NewFunc(List)
+			packed = append(packed, list...)
+			result = NewSlice(packed)
+		}
+		return result, &TypeDescriptor{Transfer: true, Const: true}
+	}
+	return NewSlice(v), &TypeDescriptor{Transfer: transferOwnership}
+}
+
+// optimizeAnd is the Optimize hook for the (and ...) special form.
+// It short-circuits on constant-false and removes constant-true arguments.
+func optimizeAnd(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	// Optimize all args
+	for i := 1; i < len(v); i++ {
+		v[i], _ = oc.OptimizeSub(v[i], true)
+	}
+	// Single arg: unwrap
+	if len(v) == 2 {
+		return oc.OptimizeSub(v[1], useResult)
+	}
+	// Short-circuit: remove constant-true, early-exit on constant-false
+	for i := 1; i < len(v); i++ {
+		switch v[i].GetTag() {
+		case tagNil, tagBool, tagInt, tagFloat, tagString:
+			if !ToBool(v[i]) {
+				return NewBool(false), &TypeDescriptor{Transfer: true, Const: true}
+			}
+			v = append(v[:i], v[i+1:]...)
+			i--
+		}
+	}
+	if len(v) == 1 {
+		return NewBool(true), &TypeDescriptor{Transfer: true, Const: true}
+	}
+	if len(v) == 2 {
+		return oc.OptimizeSub(v[1], useResult)
+	}
+	return NewSlice(v), nil
+}
+
+// optimizeAssociative is the Optimize hook for associative operators (+ and *).
+// It runs default optimization and then flattens nested same-operator calls.
+func optimizeAssociative(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	if td != nil && td.Const {
+		return result, td
+	}
+	// Flatten nested same-operator calls
+	rv, ok := scmerSlice(result)
+	if !ok || len(rv) <= 1 {
+		return result, td
+	}
+	headName := ""
+	if s, ok := scmerSymbol(rv[0]); ok {
+		headName = string(s)
+	}
+	if headName == "" {
+		return result, td
+	}
+	changed := false
+	for i := 1; i < len(rv); i++ {
+		if inner, ok := scmerSlice(rv[i]); ok && len(inner) > 1 && scmerIsSymbol(inner[0], headName) {
+			newV := make([]Scmer, 0, len(rv)+len(inner)-2)
+			newV = append(newV, rv[:i]...)
+			newV = append(newV, inner[1:]...)
+			newV = append(newV, rv[i+1:]...)
+			rv = newV
+			changed = true
+			i--
+		}
+	}
+	if changed {
+		return NewSlice(rv), td
+	}
+	return result, td
 }
 
 func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMetainfo, ome2 *optimizerMetainfo) Scmer {

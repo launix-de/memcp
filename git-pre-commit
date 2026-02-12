@@ -39,6 +39,7 @@ if [[ "$godebug" != *"invalidptr="* ]]; then
   fi
 fi
 run_memcp_forever() {
+  trap 'kill $memcp_pid 2>/dev/null; exit 0' TERM INT
   while true; do
     echo "🚀 (re)Starting MemCP on port $test_port..."
     pkill -f "memcp.*--api-port=$test_port" || true

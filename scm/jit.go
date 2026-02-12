@@ -234,7 +234,7 @@ func init_jit() {
 			{"fn", "procedure", "the function to compile", nil},
 		}, "procedure",
 		jitCompile,
-		false, false, // not pure because it allocates executable memory
+		false, false, nil, // not pure because it allocates executable memory
 	})
 }
 

@@ -77,7 +77,7 @@ func init_date() {
 		func(a ...Scmer) Scmer {
 			return NewDate(time.Now().Unix())
 		},
-		false, false,
+		false, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"current_date", "returns the current date (midnight UTC)",
@@ -88,7 +88,7 @@ func init_date() {
 			midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
-		false, false,
+		false, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"parse_date", "parses a date from a string",
@@ -111,7 +111,7 @@ func init_date() {
 			}
 			return NewNil()
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"format_date", "formats a unix timestamp, date, or datetime string into a date string",
@@ -161,7 +161,7 @@ func init_date() {
 			}
 			return NewString(buf.String())
 		},
-		true, false,
+		true, false, nil,
 	})
 
 	// EXTRACT(field FROM expr) - implemented as extract_date(expr, field)
@@ -198,7 +198,7 @@ func init_date() {
 				panic("unknown EXTRACT field: " + field)
 			}
 		},
-		true, false,
+		true, false, nil,
 	})
 
 	// DATE_ADD(expr, interval_seconds)
@@ -240,7 +240,7 @@ func init_date() {
 			}
 			return NewDate(t.Unix())
 		},
-		true, false,
+		true, false, nil,
 	})
 
 	// DATE_SUB(expr, amount, unit)
@@ -282,7 +282,7 @@ func init_date() {
 			}
 			return NewDate(t.Unix())
 		},
-		true, false,
+		true, false, nil,
 	})
 
 	// DATE(expr) - truncate to date only (midnight)
@@ -303,7 +303,7 @@ func init_date() {
 			midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
-		true, false,
+		true, false, nil,
 	})
 
 	// STR_TO_DATE(str, format) - parse string with MySQL format to date
@@ -326,7 +326,7 @@ func init_date() {
 			}
 			return NewNil()
 		},
-		true, false,
+		true, false, nil,
 	})
 }
 

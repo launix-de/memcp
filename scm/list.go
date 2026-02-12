@@ -75,7 +75,7 @@ func init_list() {
 			}
 			panic("count expects a list")
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nth", "get the nth item of a list",
@@ -92,7 +92,7 @@ func init_list() {
 			}
 			return list[idx]
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
@@ -106,7 +106,7 @@ func init_list() {
 			base = append(base, a[1:]...)
 			return NewSlice(base)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
@@ -129,7 +129,7 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_unique_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"cons", "constructs a list from a head and a tail list",
@@ -145,7 +145,7 @@ func init_list() {
 			}
 			return NewSlice([]Scmer{car, a[1]})
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc},
 	})
 	Declare(&Globalenv, &Declaration{
 		"car", "extracts the head of a list",
@@ -160,7 +160,7 @@ func init_list() {
 			}
 			return list[0]
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cdr", "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
@@ -175,7 +175,7 @@ func init_list() {
 			}
 			return NewSlice(list[1:])
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc},
 	})
 	Declare(&Globalenv, &Declaration{
 		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
@@ -207,7 +207,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc},
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge", "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
@@ -230,7 +230,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc},
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge_unique", "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
@@ -264,7 +264,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc},
 	})
 	Declare(&Globalenv, &Declaration{
 		"has?", "checks if a list has a certain item (equal?)",
@@ -282,7 +282,7 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"filter", "returns a list that only contains elements that pass the filter function",
@@ -302,7 +302,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"map", "returns a list that contains the results of a map function that is applied to the list",
@@ -320,7 +320,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("map_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
@@ -338,14 +338,14 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("mapIndex_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce", "returns a list that contains the result of a map function",
 		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list that has to be reduced", NoEscape},
-			DeclarationParameter{"reduce", "func", "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", nil},
+			DeclarationParameter{"reduce", "func", "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Transfer: true}, nil}}},
 			DeclarationParameter{"neutral", "any", "(optional) initial value of the accumulator, defaults to nil", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
@@ -365,7 +365,7 @@ func init_list() {
 			}
 			return result
 		},
-		true, false,
+		true, false, nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -387,7 +387,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc},
 	})
 	Declare(&Globalenv, &Declaration{
 		"produceN", "returns a list with numbers from 0..n-1",
@@ -406,7 +406,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc},
 	})
 	Declare(&Globalenv, &Declaration{
 		"list?", "checks if a value is a list",
@@ -420,7 +420,7 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"contains?", "checks if a value is in a list; uses the equal?? operator",
@@ -438,7 +438,7 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		true, false,
+		true, false, nil,
 	})
 
 	// dictionary functions
@@ -470,7 +470,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_assoc_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"map_assoc", "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
@@ -502,14 +502,14 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("map_assoc_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce_assoc", "reduces a dictionary according to a reduce function",
 		3, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"dict", "list", "dictionary that has to be reduced", NoEscape},
-			DeclarationParameter{"reduce", "func", "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", nil},
+			DeclarationParameter{"reduce", "func", "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Transfer: true}, nil, nil}}},
 			DeclarationParameter{"neutral", "any", "initial value for the accumulator", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
@@ -524,7 +524,7 @@ func init_list() {
 			}
 			return result
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"has_assoc?", "checks if a dictionary has a key present",
@@ -547,7 +547,7 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"get_assoc", "gets a value from a dictionary by key, returns nil if not found",
@@ -575,7 +575,7 @@ func init_list() {
 			}
 			return NewNil()
 		},
-		true, false,
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"extract_assoc", "applies a function (key value) on the dictionary and returns the results as a flat list",
@@ -606,7 +606,7 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("extract_assoc_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"set_assoc", "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
@@ -625,7 +625,8 @@ func init_list() {
 			}
 			slice, fd := asAssoc(a[0], "set_assoc")
 			if fd == nil {
-				list := slice
+				// defensive copy — set_assoc must not mutate the original
+				list := append([]Scmer{}, slice...)
 				for i := 0; i < len(list); i += 2 {
 					if Equal(list[i], a[1]) {
 						if mergeFn != nil {
@@ -646,11 +647,12 @@ func init_list() {
 				}
 				return NewSlice(list)
 			} else {
+				fd = fd.Copy()
 				fd.Set(a[1], a[2], mergeFn)
 				return NewFastDict(fd)
 			}
 		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("set_assoc_mut")},
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge_assoc", "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
@@ -680,18 +682,7 @@ func init_list() {
 			}
 			return dst
 		},
-		true, false,
-	})
-
-	// fastdict: returns an empty FastDict (avoids upgrade from list to FastDict)
-	Declare(&Globalenv, &Declaration{
-		"fastdict", "returns an empty FastDict for use as a dictionary neutral value",
-		0, 0,
-		[]DeclarationParameter{}, "list",
-		func(a ...Scmer) Scmer {
-			return NewFastDict(NewFastDictValue(8))
-		},
-		true, false,
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("merge_assoc_mut")},
 	})
 
 	// _mut variants: optimizer-only, forbidden from .scm code
@@ -712,7 +703,7 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -730,7 +721,7 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -762,7 +753,7 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	// Tier 2: shrinking, write-cursor
@@ -786,7 +777,7 @@ func init_list() {
 			}
 			return NewSlice(input[:w])
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -819,7 +810,7 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -847,7 +838,7 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -892,7 +883,7 @@ func init_list() {
 				return NewFastDict(fd)
 			}
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	// Tier 3: append/grow
@@ -909,7 +900,7 @@ func init_list() {
 			base = append(base, a[1:]...)
 			return NewSlice(base)
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -932,7 +923,7 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -944,7 +935,7 @@ func init_list() {
 			{"merge", "func", "(optional) merge function", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
-			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
+			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc_mut"])
 			dst := a[0]
 			if slice, fd := asAssoc(a[1], "merge_assoc_mut"); fd == nil {
 				for i := 0; i < len(slice); i += 2 {
@@ -963,20 +954,6 @@ func init_list() {
 			}
 			return dst
 		},
-		true, true,
+		true, true, &TypeDescriptor{Return: FreshAlloc},
 	})
-
-	// Annotate functions whose return value is always a fresh allocation.
-	// The optimizer uses ReturnTypeOf() to safely apply _mut swaps on their results.
-	AnnotateReturnType(FreshAlloc,
-		"append", "append_unique", "cons", "cdr", "zip",
-		"merge", "merge_unique",
-		"filter", "map", "mapIndex", "produce", "produceN",
-		"filter_assoc", "map_assoc", "extract_assoc",
-		"set_assoc", "merge_assoc", "fastdict",
-		// _mut variants (also return fresh/owned values)
-		"map_mut", "mapIndex_mut", "map_assoc_mut",
-		"filter_mut", "filter_assoc_mut", "extract_assoc_mut",
-		"set_assoc_mut", "append_mut", "append_unique_mut", "merge_assoc_mut",
-	)
 }
