@@ -132,7 +132,9 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 	// storage is so simple, dont need scan
 	var v string
 	if value.IsNil() {
-		if !s.nodict {
+		if s.nodict {
+			s.starts.scan(i, scm.NewNil())
+		} else {
 			s.values.scan(i, scm.NewNil())
 		}
 		return

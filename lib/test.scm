@@ -101,6 +101,70 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define expr_star (list 'get_column "t" true "*" false))
 	(assert (match expr_star '((symbol get_column) (eval tblx) ignorecase "*" _) "ok" "no") "ok" "match tbl.* with case-insensitive flag")
 
+	/* match/matchConcat patterns (scm/match.go coverage) */
+	(print "testing match/matchConcat patterns ...")
+
+	/* matchConcat: prefix + variable */
+	(assert (match "hello_world" (concat "hello_" rest) rest "no") "world" "matchConcat prefix+var")
+	/* matchConcat: variable + suffix */
+	(assert (match "foo_bar" (concat prefix "_bar") prefix "no") "foo" "matchConcat var+suffix")
+	/* matchConcat: prefix + middle + suffix */
+	(assert (match "pre_mid_suf" (concat "pre_" middle "_suf") middle "no") "mid" "matchConcat 3-part split")
+	/* matchConcat: var + delim + var (infix) */
+	(assert (equal? (match "key.value" (concat mc_left "." mc_right) (concat mc_left ":" mc_right) "no") "key:value") true "matchConcat infix split")
+	/* matchConcat: single var captures all */
+	(assert (match "everything" (concat mc_x) mc_x "no") "everything" "matchConcat single var")
+	/* matchConcat: prefix mismatch */
+	(assert (match "xyz" (concat "abc" mc_rest) mc_rest "no") "no" "matchConcat prefix mismatch")
+	/* matchConcat: suffix mismatch */
+	(assert (match "xyz" (concat mc_pfx "abc") mc_pfx "no") "no" "matchConcat suffix mismatch")
+	/* matchConcat: delimiter not found */
+	(assert (match "nocolon" (concat mc_l ":" mc_r) "yes" "no") "no" "matchConcat delim not found")
+	/* matchConcat: non-string input */
+	(assert (match 42 (concat mc_x) mc_x "no") "no" "matchConcat rejects non-string")
+
+	/* match: type-checking patterns */
+	(assert (match "hello" (string? mc_s) mc_s "no") "hello" "match string? captures")
+	(assert (match 42 (string? mc_s) mc_s "no") "no" "match string? rejects number")
+	(assert (match 3.14 (number? mc_n) mc_n "no") 3.14 "match number? captures")
+	(assert (match "abc" (number? mc_n) mc_n "no") "no" "match number? rejects string")
+	(assert (match (list 10 20 30) (list? mc_l) (count mc_l) "no") 3 "match list? captures list")
+	(assert (match "abc" (list? mc_l) mc_l "no") "no" "match list? rejects string")
+
+	/* match: ignorecase */
+	(assert (match "Hello" (ignorecase "hello") "yes" "no") "yes" "match ignorecase match")
+	(assert (match "Hello" (ignorecase "world") "yes" "no") "no" "match ignorecase mismatch")
+
+	/* match: regex */
+	(assert (match "v=5" (regex "^v=(.*)" _ mc_v) mc_v "no") "5" "match regex single capture")
+	(assert (match "abc" (regex "^v=(.*)" _ mc_v) mc_v "no") "no" "match regex no match")
+	(assert (equal? (match "key=val" (regex "^(.*)=(.*)$" _ mc_k mc_v) (concat mc_k ":" mc_v) "no") "key:val") true "match regex multi-capture")
+
+	/* match: list destructuring */
+	(assert (match (list 10 20 30) (list mc_a mc_b mc_c) (+ mc_a mc_b mc_c) "no") 60 "match list destructure")
+	(assert (match (list 10 20) (list mc_a mc_b mc_c) "yes" "no") "no" "match list length mismatch")
+	(assert (match "notalist" (list mc_a) "yes" "no") "no" "match list rejects non-list")
+
+	/* match: quote/symbol literal */
+	(assert (match 'foo (quote foo) "yes" "no") "yes" "match quote literal match")
+	(assert (match 'foo (quote bar) "yes" "no") "no" "match quote literal mismatch")
+	(assert (match 'bar (symbol bar) "yes" "no") "yes" "match symbol literal match")
+	(assert (match 'bar (symbol baz) "yes" "no") "no" "match symbol literal mismatch")
+	(assert (match "str" (quote foo) "yes" "no") "no" "match quote rejects non-symbol")
+	(assert (match "str" (symbol foo) "yes" "no") "no" "match symbol rejects non-symbol")
+
+	/* match: cons */
+	(assert (match (list 10 20 30) (cons mc_h mc_t) mc_h "no") 10 "match cons head")
+	(assert (match (list 10 20 30) (cons mc_h mc_t) (count mc_t) "no") 2 "match cons tail length")
+	(assert (match (list) (cons mc_h mc_t) "yes" "no") "no" "match cons empty list")
+
+	/* match: literal value matching */
+	(assert (match 42 42 "yes" "no") "yes" "match literal int")
+	(assert (match "abc" "abc" "yes" "no") "yes" "match literal string")
+	(assert (match nil nil "yes" "no") "yes" "match nil symbol")
+	(assert (match true true "yes" "no") "yes" "match true symbol")
+	(assert (match false false "yes" "no") "yes" "match false symbol")
+
 	/* Tests for scm package */
 	/* Tests for alu.go */
 
