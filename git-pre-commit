@@ -12,7 +12,15 @@ active_pids=()
 
 # Build memcp to ensure latest changes are included
 echo "🔨 Building memcp..."
-if ! go build -o memcp; then
+build_flags=""
+if [ "${MEMCP_COVERAGE:-}" = "1" ]; then
+    build_flags="-cover"
+    export GOCOVERDIR="${MEMCP_COVERDIR:-/tmp/memcp-coverage}"
+    rm -rf "$GOCOVERDIR"
+    mkdir -p "$GOCOVERDIR"
+    echo "📊 Coverage mode enabled (GOCOVERDIR=$GOCOVERDIR)"
+fi
+if ! go build $build_flags -o memcp; then
     echo "❌ Build failed, commit aborted"
     exit 1
 fi
@@ -213,6 +221,21 @@ if [ "$all_passed" != true ]; then
 fi
 
 rm -rf "$tmpdir"
+
+# Generate coverage report if coverage mode was enabled
+if [ "${MEMCP_COVERAGE:-}" = "1" ] && [ -d "$GOCOVERDIR" ]; then
+    echo ""
+    echo "📊 Generating Go coverage report..."
+    if ls "$GOCOVERDIR"/*.* >/dev/null 2>&1; then
+        go tool covdata textfmt -i="$GOCOVERDIR" -o="$GOCOVERDIR/coverage.out" 2>/dev/null
+        if [ -f "$GOCOVERDIR/coverage.out" ]; then
+            go tool cover -func="$GOCOVERDIR/coverage.out" | tail -1
+            echo "   Full report: go tool cover -html=$GOCOVERDIR/coverage.out"
+        fi
+    else
+        echo "   ⚠️  No coverage data collected"
+    fi
+fi
 
 if [ "$all_passed" = true ]; then
     echo "🎉 All tests passed, commit allowed"

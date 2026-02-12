@@ -12,7 +12,7 @@ perf:
 
 test:
 	# run `cp git-pre-commit .git/hooks/pre-commit` to activate the trigger
-	./git-pre-commit
+	MEMCP_COVERAGE=1 MEMCP_COVERDIR=/tmp/memcp-coverage ./git-pre-commit
 
 memcp.sif:
 	sudo singularity build memcp.sif memcp.singularity.recipe
