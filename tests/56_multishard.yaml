@@ -1,0 +1,306 @@
+# Multi-shard test cases
+# Exercises code paths that only run when tables exceed ShardSize (60000 rows):
+# - iterateShards parallel scan (storage/partition.go)
+# - globalqueue.Less merge-sort across shards (storage/scan_order.go)
+# - computeShardIndex insert routing (storage/partition.go)
+# - cross-shard DELETE, UPDATE, aggregation
+
+metadata:
+  version: "1.0"
+  description: "Multi-shard scan, order, and DML coverage"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS `ms_data`"
+  - sql: |
+      CREATE TABLE `ms_data` (
+        id INT PRIMARY KEY,
+        val INT,
+        name TEXT
+      )
+
+test_cases:
+  # ---- Data generation: 61000 rows in 3 batches ----
+  - name: "Insert batch 1 (rows 0-19999)"
+    scm: |
+      (begin
+        (set b (map (produceN 20000) (lambda (i) (list i i (concat "n" i)))))
+        (insert "memcp-tests" "ms_data" '("id" "val" "name") b)
+        20000)
+
+  - name: "Insert batch 2 (rows 20000-39999)"
+    scm: |
+      (begin
+        (set b (map (produceN 20000) (lambda (i) (list (+ i 20000) (+ i 20000) (concat "n" (+ i 20000))))))
+        (insert "memcp-tests" "ms_data" '("id" "val" "name") b)
+        20000)
+
+  - name: "Insert batch 3 (rows 40000-60999)"
+    scm: |
+      (begin
+        (set b (map (produceN 21000) (lambda (i) (list (+ i 40000) (+ i 40000) (concat "n" (+ i 40000))))))
+        (insert "memcp-tests" "ms_data" '("id" "val" "name") b)
+        21000)
+
+  - name: "Rebuild to trigger repartition into multiple shards"
+    scm: "(rebuild)"
+
+  # ---- Unordered scans across shards (iterateShards) ----
+  - name: "COUNT(*) across shards"
+    sql: "SELECT COUNT(*) AS cnt FROM ms_data"
+    expect:
+      rows: 1
+      data:
+        - cnt: 61000
+
+  - name: "SUM across shards"
+    sql: "SELECT SUM(val) AS total FROM ms_data"
+    expect:
+      rows: 1
+      data:
+        - total: 1860469500
+
+  - name: "COUNT with WHERE filter across shards"
+    sql: "SELECT COUNT(*) AS cnt FROM ms_data WHERE val > 60000"
+    expect:
+      rows: 1
+      data:
+        - cnt: 999
+
+  - name: "COUNT with BETWEEN filter across shards"
+    sql: "SELECT COUNT(*) AS cnt FROM ms_data WHERE val BETWEEN 30000 AND 30009"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10
+
+  - name: "MIN/MAX across shards"
+    sql: "SELECT MIN(val) AS lo, MAX(val) AS hi FROM ms_data"
+    expect:
+      rows: 1
+      data:
+        - lo: 0
+          hi: 60999
+
+  # ---- Ordered scans: globalqueue.Less merge-sort ----
+  - name: "ORDER BY ASC LIMIT across shards"
+    sql: "SELECT id, val FROM ms_data ORDER BY val ASC LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 0
+          val: 0
+        - id: 1
+          val: 1
+        - id: 2
+          val: 2
+        - id: 3
+          val: 3
+        - id: 4
+          val: 4
+
+  - name: "ORDER BY DESC LIMIT across shards"
+    sql: "SELECT id, val FROM ms_data ORDER BY val DESC LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 60999
+          val: 60999
+        - id: 60998
+          val: 60998
+        - id: 60997
+          val: 60997
+        - id: 60996
+          val: 60996
+        - id: 60995
+          val: 60995
+
+  - name: "ORDER BY with WHERE filter across shards"
+    sql: "SELECT id, val FROM ms_data WHERE val >= 60990 ORDER BY val ASC"
+    expect:
+      rows: 10
+      data:
+        - id: 60990
+          val: 60990
+        - id: 60991
+          val: 60991
+        - id: 60992
+          val: 60992
+        - id: 60993
+          val: 60993
+        - id: 60994
+          val: 60994
+        - id: 60995
+          val: 60995
+        - id: 60996
+          val: 60996
+        - id: 60997
+          val: 60997
+        - id: 60998
+          val: 60998
+        - id: 60999
+          val: 60999
+
+  - name: "ORDER BY non-PK column across shards"
+    sql: "SELECT id, name FROM ms_data ORDER BY name ASC LIMIT 5"
+    expect:
+      rows: 5
+
+  # ---- Primary key lookup across shards ----
+  - name: "PK lookup in first shard range"
+    sql: "SELECT id, val FROM ms_data WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - id: 100
+          val: 100
+
+  - name: "PK lookup in middle shard range"
+    sql: "SELECT id, val FROM ms_data WHERE id = 30000"
+    expect:
+      rows: 1
+      data:
+        - id: 30000
+          val: 30000
+
+  - name: "PK lookup in last shard range"
+    sql: "SELECT id, val FROM ms_data WHERE id = 60999"
+    expect:
+      rows: 1
+      data:
+        - id: 60999
+          val: 60999
+
+  - name: "PK lookup nonexistent"
+    sql: "SELECT id, val FROM ms_data WHERE id = 99999"
+    expect:
+      rows: 0
+
+  # ---- DML across shards ----
+  - name: "DELETE across shards"
+    sql: "DELETE FROM ms_data WHERE val > 60900"
+    expect:
+      affected_rows: 99
+
+  - name: "COUNT after cross-shard DELETE"
+    sql: "SELECT COUNT(*) AS cnt FROM ms_data"
+    expect:
+      rows: 1
+      data:
+        - cnt: 60901
+
+  - name: "Verify DELETE boundary - last remaining row"
+    sql: "SELECT id, val FROM ms_data WHERE id = 60900"
+    expect:
+      rows: 1
+      data:
+        - id: 60900
+          val: 60900
+
+  - name: "Verify DELETE - first deleted row gone"
+    sql: "SELECT id, val FROM ms_data WHERE id = 60901"
+    expect:
+      rows: 0
+
+  - name: "UPDATE across shards"
+    sql: "UPDATE ms_data SET val = -1 WHERE id = 30000"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify cross-shard UPDATE"
+    sql: "SELECT id, val FROM ms_data WHERE id = 30000"
+    expect:
+      rows: 1
+      data:
+        - id: 30000
+          val: -1
+
+  # ---- INSERT after repartition (computeShardIndex routing) ----
+  - name: "INSERT into repartitioned table"
+    sql: "INSERT INTO ms_data (id, val, name) VALUES (70000, 70000, 'new_row')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify INSERT routing to correct shard"
+    sql: "SELECT id, val, name FROM ms_data WHERE id = 70000"
+    expect:
+      rows: 1
+      data:
+        - id: 70000
+          val: 70000
+          name: "new_row"
+
+  - name: "Duplicate PK insert across shards should fail"
+    sql: "INSERT INTO ms_data (id, val, name) VALUES (500, 999, 'dup')"
+    expect:
+      error: true
+
+  - name: "COUNT after INSERT and DELETE combined"
+    sql: "SELECT COUNT(*) AS cnt FROM ms_data"
+    expect:
+      rows: 1
+      data:
+        - cnt: 60902
+
+  # ---- ORDER BY after mutations ----
+  - name: "ORDER BY ASC after mutations"
+    sql: "SELECT id, val FROM ms_data ORDER BY val ASC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 30000
+          val: -1
+        - id: 0
+          val: 0
+        - id: 1
+          val: 1
+
+  - name: "ORDER BY DESC after mutations"
+    sql: "SELECT id, val FROM ms_data ORDER BY val DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 70000
+          val: 70000
+        - id: 60900
+          val: 60900
+        - id: 60899
+          val: 60899
+
+  # ---- Rebuild again and verify consistency ----
+  - name: "Rebuild after mutations"
+    scm: "(rebuild)"
+
+  - name: "COUNT after second rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM ms_data"
+    expect:
+      rows: 1
+      data:
+        - cnt: 60902
+
+  - name: "ORDER BY after second rebuild"
+    sql: "SELECT id, val FROM ms_data ORDER BY val ASC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 30000
+          val: -1
+        - id: 0
+          val: 0
+        - id: 1
+          val: 1
+
+  - name: "SUM after mutations and rebuild"
+    sql: "SELECT SUM(val) AS total FROM ms_data"
+    expect:
+      rows: 1
+
+  - name: "PK lookup after second rebuild"
+    sql: "SELECT id, val FROM ms_data WHERE id = 70000"
+    expect:
+      rows: 1
+      data:
+        - id: 70000
+          val: 70000
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS `ms_data`"

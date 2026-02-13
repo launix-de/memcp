@@ -1159,6 +1159,14 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.hashmaps1 = t.hashmaps1
 		result.hashmaps2 = t.hashmaps2
 		result.hashmaps3 = t.hashmaps3
+		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+			if t.logfile != nil {
+				t.logfile.Close()
+			}
+			t.t.schema.persistence.RemoveLog(t.uuid.String())
+			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
+		}
+		t.logfile = nil
 		t.mu.Unlock()
 		locked = false
 	}
