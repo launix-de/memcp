@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -122,6 +122,57 @@ func GetContext() context.Context {
 	return r.(context.Context)
 }
 
+// GetCurrentTx returns the current transaction context by looking up the
+// session from GLS and reading the "__memcp_tx" key. Returns nil if no
+// transaction is active or no session is available.
+func GetCurrentTx() any {
+	if mgr == nil {
+		return nil
+	}
+	val, ok := mgr.GetValue("session")
+	if !ok {
+		return nil
+	}
+	sessionScmer := val.(Scmer)
+	txScmer := Apply(sessionScmer, NewString("__memcp_tx"))
+	if txScmer.IsNil() {
+		return nil
+	}
+	return txScmer.Any()
+}
+
+// SetValues wraps mgr.SetValues for use by other packages (e.g. MySQL
+// frontend) that need to install session/context into GLS.
+func SetValues(vals map[string]any, fn func()) {
+	if mgr == nil {
+		mgr = gls.NewContextManager()
+	}
+	glsVals := make(gls.Values, len(vals))
+	for k, v := range vals {
+		glsVals[k] = v
+	}
+	mgr.SetValues(glsVals, fn)
+}
+
+// TxSyncer is implemented by TxContext to allow deferred sync from
+// the MySQL/HTTP frontends without importing the storage package.
+type TxSyncer interface {
+	SyncTouchedShards()
+}
+
+// WithSession executes fn with the given session installed in GLS,
+// so that GetCurrentTx() and other GLS-based lookups use this session.
+func WithSession(session Scmer, fn Scmer) Scmer {
+	var result Scmer
+	if mgr == nil {
+		mgr = gls.NewContextManager()
+	}
+	mgr.SetValues(gls.Values{"session": session}, func() {
+		result = Apply(fn)
+	})
+	return result
+}
+
 func init_sync() {
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
@@ -129,6 +180,17 @@ func init_sync() {
 		0, 0,
 		[]DeclarationParameter{}, "func",
 		NewSession, false, false, nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"with_session", "Executes a function with the given session installed in the execution context, so storage operations can access the session's transaction state.",
+		2, 2,
+		[]DeclarationParameter{
+			{"session", "func", "the session to install", nil},
+			{"fn", "func", "the function to execute", nil},
+		}, "any",
+		func(a ...Scmer) Scmer {
+			return WithSession(a[0], a[1])
+		}, false, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"context", "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",

@@ -757,10 +757,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* USE database - change current schema */
 		(parser '((atom "USE" true) (define db psql_identifier)) '('session "schema" db))
 
-		/* TODO: draw transaction number, commit */
-		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('session "transaction" 1))
-		(parser '((atom "COMMIT" true)) '('session "transaction" nil))
-		(parser '((atom "ROLLBACK" true)) '('session "transaction" nil))
+		/* transaction control */
+		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) '('tx_begin_acid 'session))
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) '('tx_begin 'session))
+		(parser '((atom "BEGIN" true)) '('tx_begin 'session))
+		(parser '((atom "COMMIT" true)) '('tx_commit 'session))
+		(parser '((atom "ROLLBACK" true)) '('tx_rollback 'session))
 		"" /* comment only command */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)

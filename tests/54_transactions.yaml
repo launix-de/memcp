@@ -1,0 +1,1075 @@
+# Transaction Tests (Cursor-Stability Mode)
+# Testing BEGIN/COMMIT/ROLLBACK with undo-log based rollback
+
+metadata:
+  version: "1.0"
+  description: "Transaction semantics tests for cursor-stability mode"
+
+cleanup:
+  - action: "Clean up test table"
+    sql: "DROP TABLE IF EXISTS tx_test"
+
+setup:
+  - action: "Create test table"
+    sql: "CREATE TABLE tx_test (id INT, val INT, name VARCHAR(50))"
+
+test_cases:
+  # Basic transaction semantics
+  - name: "START TRANSACTION begins a transaction"
+
+    session_id: "tx_basic1"
+    sql: "START TRANSACTION"
+
+  - name: "COMMIT ends transaction"
+
+    session_id: "tx_basic1"
+    sql: "COMMIT"
+
+  - name: "BEGIN starts a transaction"
+
+    session_id: "tx_basic2"
+    sql: "BEGIN"
+
+  - name: "ROLLBACK ends transaction"
+
+    session_id: "tx_basic2"
+    sql: "ROLLBACK"
+
+  # INSERT + COMMIT
+  - name: "INSERT inside transaction then COMMIT - setup"
+
+    session_id: "tx_insert_commit"
+    sql: "START TRANSACTION"
+
+  - name: "INSERT inside transaction then COMMIT - insert"
+
+    session_id: "tx_insert_commit"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (1, 100, 'committed')"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT inside transaction then COMMIT - commit"
+
+    session_id: "tx_insert_commit"
+    sql: "COMMIT"
+
+  - name: "INSERT inside transaction then COMMIT - verify"
+
+    sql: "SELECT id, val, name FROM tx_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          val: 100
+          name: "committed"
+
+  # INSERT + ROLLBACK
+  - name: "INSERT inside transaction then ROLLBACK - cleanup"
+
+    sql: "DELETE FROM tx_test WHERE id = 2"
+
+  - name: "INSERT inside transaction then ROLLBACK - begin"
+
+    session_id: "tx_insert_rollback"
+    sql: "START TRANSACTION"
+
+  - name: "INSERT inside transaction then ROLLBACK - insert"
+
+    session_id: "tx_insert_rollback"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (2, 200, 'rolledback')"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT inside transaction then ROLLBACK - rollback"
+
+    session_id: "tx_insert_rollback"
+    sql: "ROLLBACK"
+
+  - name: "INSERT inside transaction then ROLLBACK - verify row gone"
+
+    sql: "SELECT id FROM tx_test WHERE id = 2"
+    expect:
+      rows: 0
+
+  # Multiple INSERTs + ROLLBACK
+  - name: "Multiple INSERTs then ROLLBACK - begin"
+
+    session_id: "tx_multi_insert"
+    sql: "START TRANSACTION"
+
+  - name: "Multiple INSERTs then ROLLBACK - insert 1"
+
+    session_id: "tx_multi_insert"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (10, 10, 'multi1')"
+
+  - name: "Multiple INSERTs then ROLLBACK - insert 2"
+
+    session_id: "tx_multi_insert"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (11, 11, 'multi2')"
+
+  - name: "Multiple INSERTs then ROLLBACK - insert 3"
+
+    session_id: "tx_multi_insert"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (12, 12, 'multi3')"
+
+  - name: "Multiple INSERTs then ROLLBACK - rollback"
+
+    session_id: "tx_multi_insert"
+    sql: "ROLLBACK"
+
+  - name: "Multiple INSERTs then ROLLBACK - verify all gone"
+
+    sql: "SELECT id FROM tx_test WHERE id IN (10, 11, 12)"
+    expect:
+      rows: 0
+
+  # DELETE + ROLLBACK
+  - name: "DELETE then ROLLBACK - ensure row exists"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (3, 300, 'deleteme')"
+
+  - name: "DELETE then ROLLBACK - begin"
+
+    session_id: "tx_delete_rollback"
+    sql: "START TRANSACTION"
+
+  - name: "DELETE then ROLLBACK - delete"
+
+    session_id: "tx_delete_rollback"
+    sql: "DELETE FROM tx_test WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "DELETE then ROLLBACK - rollback"
+
+    session_id: "tx_delete_rollback"
+    sql: "ROLLBACK"
+
+  - name: "DELETE then ROLLBACK - verify row reappears"
+
+    sql: "SELECT id, val, name FROM tx_test WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - id: 3
+          val: 300
+          name: "deleteme"
+
+  # DELETE + COMMIT
+  - name: "DELETE then COMMIT - begin"
+
+    session_id: "tx_delete_commit"
+    sql: "START TRANSACTION"
+
+  - name: "DELETE then COMMIT - delete"
+
+    session_id: "tx_delete_commit"
+    sql: "DELETE FROM tx_test WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "DELETE then COMMIT - commit"
+
+    session_id: "tx_delete_commit"
+    sql: "COMMIT"
+
+  - name: "DELETE then COMMIT - verify row gone"
+
+    sql: "SELECT id FROM tx_test WHERE id = 3"
+    expect:
+      rows: 0
+
+  # UPDATE + ROLLBACK
+  - name: "UPDATE then ROLLBACK - ensure row exists"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (4, 400, 'original')"
+
+  - name: "UPDATE then ROLLBACK - begin"
+
+    session_id: "tx_update_rollback"
+    sql: "START TRANSACTION"
+
+  - name: "UPDATE then ROLLBACK - update"
+
+    session_id: "tx_update_rollback"
+    sql: "UPDATE tx_test SET val = 999, name = 'modified' WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "UPDATE then ROLLBACK - rollback"
+
+    session_id: "tx_update_rollback"
+    sql: "ROLLBACK"
+
+  - name: "UPDATE then ROLLBACK - verify original values"
+
+    sql: "SELECT id, val, name FROM tx_test WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - id: 4
+          val: 400
+          name: "original"
+
+  # UPDATE + COMMIT
+  - name: "UPDATE then COMMIT - begin"
+
+    session_id: "tx_update_commit"
+    sql: "START TRANSACTION"
+
+  - name: "UPDATE then COMMIT - update"
+
+    session_id: "tx_update_commit"
+    sql: "UPDATE tx_test SET val = 888, name = 'updated' WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "UPDATE then COMMIT - commit"
+
+    session_id: "tx_update_commit"
+    sql: "COMMIT"
+
+  - name: "UPDATE then COMMIT - verify new values"
+
+    sql: "SELECT id, val, name FROM tx_test WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - id: 4
+          val: 888
+          name: "updated"
+
+  # Mixed DML + ROLLBACK
+  - name: "Mixed DML then ROLLBACK - setup"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (5, 500, 'mixed')"
+
+  - name: "Mixed DML then ROLLBACK - begin"
+
+    session_id: "tx_mixed_rollback"
+    sql: "START TRANSACTION"
+
+  - name: "Mixed DML then ROLLBACK - insert"
+
+    session_id: "tx_mixed_rollback"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (6, 600, 'newrow')"
+
+  - name: "Mixed DML then ROLLBACK - update"
+
+    session_id: "tx_mixed_rollback"
+    sql: "UPDATE tx_test SET val = 555 WHERE id = 5"
+
+  - name: "Mixed DML then ROLLBACK - delete"
+
+    session_id: "tx_mixed_rollback"
+    sql: "DELETE FROM tx_test WHERE id = 1"
+
+  - name: "Mixed DML then ROLLBACK - rollback"
+
+    session_id: "tx_mixed_rollback"
+    sql: "ROLLBACK"
+
+  - name: "Mixed DML then ROLLBACK - verify insert undone"
+
+    sql: "SELECT id FROM tx_test WHERE id = 6"
+    expect:
+      rows: 0
+
+  - name: "Mixed DML then ROLLBACK - verify update undone"
+
+    sql: "SELECT val FROM tx_test WHERE id = 5"
+    expect:
+      data:
+        - val: 500
+
+  - name: "Mixed DML then ROLLBACK - verify delete undone"
+
+    sql: "SELECT id FROM tx_test WHERE id = 1"
+    expect:
+      rows: 1
+
+  # Empty transactions
+  - name: "Empty transaction BEGIN + COMMIT is no-op"
+
+    session_id: "tx_empty1"
+    sql: "START TRANSACTION"
+
+  - name: "Empty transaction BEGIN + COMMIT - commit"
+
+    session_id: "tx_empty1"
+    sql: "COMMIT"
+
+  - name: "Empty transaction BEGIN + ROLLBACK is no-op"
+
+    session_id: "tx_empty2"
+    sql: "START TRANSACTION"
+
+  - name: "Empty transaction BEGIN + ROLLBACK - rollback"
+
+    session_id: "tx_empty2"
+    sql: "ROLLBACK"
+
+  # Autocommit behavior
+  - name: "Single INSERT without BEGIN is visible immediately"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (20, 2000, 'autocommit')"
+    expect:
+      affected_rows: 1
+
+  - name: "Single INSERT without BEGIN - verify visible"
+
+    sql: "SELECT id, val FROM tx_test WHERE id = 20"
+    expect:
+      rows: 1
+      data:
+        - id: 20
+          val: 2000
+
+  - name: "Single DELETE without BEGIN is effective immediately"
+
+    sql: "DELETE FROM tx_test WHERE id = 20"
+    expect:
+      affected_rows: 1
+
+  - name: "Single DELETE without BEGIN - verify gone"
+
+    sql: "SELECT id FROM tx_test WHERE id = 20"
+    expect:
+      rows: 0
+
+  # ========================================
+  # ACID Transaction Tests
+  # ========================================
+
+  # ACID INSERT + COMMIT
+  - name: "ACID INSERT + COMMIT - begin acid tx"
+
+    session_id: "acid_insert_commit"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID INSERT + COMMIT - insert"
+
+    session_id: "acid_insert_commit"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (100, 1000, 'acid_committed')"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID INSERT + COMMIT - row NOT visible from other session before commit"
+
+    session_id: "acid_other1"
+    sql: "SELECT id FROM tx_test WHERE id = 100"
+    expect:
+      rows: 0
+
+  - name: "ACID INSERT + COMMIT - row visible within own session"
+
+    session_id: "acid_insert_commit"
+    sql: "SELECT id, val, name FROM tx_test WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - id: 100
+          val: 1000
+          name: "acid_committed"
+
+  - name: "ACID INSERT + COMMIT - commit"
+
+    session_id: "acid_insert_commit"
+    sql: "COMMIT"
+
+  - name: "ACID INSERT + COMMIT - row visible after commit"
+
+    sql: "SELECT id, val, name FROM tx_test WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - id: 100
+          val: 1000
+          name: "acid_committed"
+
+  # ACID INSERT + ROLLBACK
+  - name: "ACID INSERT + ROLLBACK - begin acid tx"
+
+    session_id: "acid_insert_rollback"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID INSERT + ROLLBACK - insert"
+
+    session_id: "acid_insert_rollback"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (101, 1010, 'acid_rolledback')"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID INSERT + ROLLBACK - row NOT visible from other session"
+
+    sql: "SELECT id FROM tx_test WHERE id = 101"
+    expect:
+      rows: 0
+
+  - name: "ACID INSERT + ROLLBACK - rollback"
+
+    session_id: "acid_insert_rollback"
+    sql: "ROLLBACK"
+
+  - name: "ACID INSERT + ROLLBACK - row still invisible after rollback"
+
+    sql: "SELECT id FROM tx_test WHERE id = 101"
+    expect:
+      rows: 0
+
+  # ACID DELETE + COMMIT
+  - name: "ACID DELETE + COMMIT - ensure row exists"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (102, 1020, 'acid_delete_me')"
+
+  - name: "ACID DELETE + COMMIT - begin acid tx"
+
+    session_id: "acid_delete_commit"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID DELETE + COMMIT - delete"
+
+    session_id: "acid_delete_commit"
+    sql: "DELETE FROM tx_test WHERE id = 102"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID DELETE + COMMIT - row still visible from other session"
+
+    sql: "SELECT id FROM tx_test WHERE id = 102"
+    expect:
+      rows: 1
+
+  - name: "ACID DELETE + COMMIT - row NOT visible within own session"
+
+    session_id: "acid_delete_commit"
+    sql: "SELECT id FROM tx_test WHERE id = 102"
+    expect:
+      rows: 0
+
+  - name: "ACID DELETE + COMMIT - commit"
+
+    session_id: "acid_delete_commit"
+    sql: "COMMIT"
+
+  - name: "ACID DELETE + COMMIT - row gone after commit"
+
+    sql: "SELECT id FROM tx_test WHERE id = 102"
+    expect:
+      rows: 0
+
+  # ACID DELETE + ROLLBACK
+  - name: "ACID DELETE + ROLLBACK - ensure row exists"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (103, 1030, 'acid_keep_me')"
+
+  - name: "ACID DELETE + ROLLBACK - begin acid tx"
+
+    session_id: "acid_delete_rollback"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID DELETE + ROLLBACK - delete"
+
+    session_id: "acid_delete_rollback"
+    sql: "DELETE FROM tx_test WHERE id = 103"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID DELETE + ROLLBACK - rollback"
+
+    session_id: "acid_delete_rollback"
+    sql: "ROLLBACK"
+
+  - name: "ACID DELETE + ROLLBACK - row reappears after rollback"
+
+    sql: "SELECT id, val FROM tx_test WHERE id = 103"
+    expect:
+      rows: 1
+      data:
+        - id: 103
+          val: 1030
+
+  # ACID UPDATE + COMMIT
+  - name: "ACID UPDATE + COMMIT - ensure row exists"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (104, 1040, 'acid_original')"
+
+  - name: "ACID UPDATE + COMMIT - begin acid tx"
+
+    session_id: "acid_update_commit"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID UPDATE + COMMIT - update"
+
+    session_id: "acid_update_commit"
+    sql: "UPDATE tx_test SET val = 9999, name = 'acid_updated' WHERE id = 104"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID UPDATE + COMMIT - other session sees old value"
+
+    sql: "SELECT val, name FROM tx_test WHERE id = 104"
+    expect:
+      data:
+        - val: 1040
+          name: "acid_original"
+
+  - name: "ACID UPDATE + COMMIT - own session sees new value"
+
+    session_id: "acid_update_commit"
+    sql: "SELECT val, name FROM tx_test WHERE id = 104"
+    expect:
+      data:
+        - val: 9999
+          name: "acid_updated"
+
+  - name: "ACID UPDATE + COMMIT - commit"
+
+    session_id: "acid_update_commit"
+    sql: "COMMIT"
+
+  - name: "ACID UPDATE + COMMIT - everyone sees new value"
+
+    sql: "SELECT val, name FROM tx_test WHERE id = 104"
+    expect:
+      data:
+        - val: 9999
+          name: "acid_updated"
+
+  # ACID UPDATE + ROLLBACK
+  - name: "ACID UPDATE + ROLLBACK - ensure row exists"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (105, 1050, 'acid_keep_original')"
+
+  - name: "ACID UPDATE + ROLLBACK - begin acid tx"
+
+    session_id: "acid_update_rollback"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID UPDATE + ROLLBACK - update"
+
+    session_id: "acid_update_rollback"
+    sql: "UPDATE tx_test SET val = 7777, name = 'acid_changed' WHERE id = 105"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID UPDATE + ROLLBACK - rollback"
+
+    session_id: "acid_update_rollback"
+    sql: "ROLLBACK"
+
+  - name: "ACID UPDATE + ROLLBACK - original value restored"
+
+    sql: "SELECT val, name FROM tx_test WHERE id = 105"
+    expect:
+      data:
+        - val: 1050
+          name: "acid_keep_original"
+
+  # ========================================
+  # ACID Commit Conflict Tests
+  # ========================================
+
+  # Two sessions delete the same row → second ACID commit must fail
+  - name: "ACID commit conflict - setup row"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (200, 2000, 'conflict_row')"
+
+  - name: "ACID commit conflict - session A begins"
+
+    session_id: "acid_conflict_a"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID commit conflict - session B begins"
+
+    session_id: "acid_conflict_b"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID commit conflict - session A deletes row"
+
+    session_id: "acid_conflict_a"
+    sql: "DELETE FROM tx_test WHERE id = 200"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID commit conflict - session B deletes same row"
+
+    session_id: "acid_conflict_b"
+    sql: "DELETE FROM tx_test WHERE id = 200"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID commit conflict - session A commits successfully"
+
+    session_id: "acid_conflict_a"
+    sql: "COMMIT"
+
+  - name: "ACID commit conflict - session B commit fails"
+
+    session_id: "acid_conflict_b"
+    sql: "COMMIT"
+    expect:
+      error: true
+
+  # ========================================
+  # Double COMMIT / Double ROLLBACK (no-ops)
+  # ========================================
+
+  - name: "Double COMMIT on cursor-stability - begin"
+
+    session_id: "tx_double_commit"
+    sql: "START TRANSACTION"
+
+  - name: "Double COMMIT on cursor-stability - first commit"
+
+    session_id: "tx_double_commit"
+    sql: "COMMIT"
+
+  - name: "Double COMMIT on cursor-stability - second commit is no-op"
+
+    session_id: "tx_double_commit"
+    sql: "COMMIT"
+
+  - name: "Double ROLLBACK - begin"
+
+    session_id: "tx_double_rollback"
+    sql: "START TRANSACTION"
+
+  - name: "Double ROLLBACK - first rollback"
+
+    session_id: "tx_double_rollback"
+    sql: "ROLLBACK"
+
+  - name: "Double ROLLBACK - second rollback is no-op"
+
+    session_id: "tx_double_rollback"
+    sql: "ROLLBACK"
+
+  # ========================================
+  # ACID: implicit commit on nested BEGIN
+  # ========================================
+
+  - name: "ACID implicit commit - setup row"
+
+    sql: "DELETE FROM tx_test WHERE id = 201"
+
+  - name: "ACID implicit commit - begin first ACID tx"
+
+    session_id: "acid_implicit"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID implicit commit - insert in first tx"
+
+    session_id: "acid_implicit"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (201, 2010, 'implicit_committed')"
+
+  - name: "ACID implicit commit - begin second tx implicitly commits first"
+
+    session_id: "acid_implicit"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID implicit commit - row from first tx visible after implicit commit"
+
+    sql: "SELECT id, val FROM tx_test WHERE id = 201"
+    expect:
+      rows: 1
+      data:
+        - id: 201
+          val: 2010
+
+  - name: "ACID implicit commit - rollback second (empty) tx"
+
+    session_id: "acid_implicit"
+    sql: "ROLLBACK"
+
+  # ========================================
+  # ACID: ROLLBACK on ACID tx discards overlays
+  # ========================================
+
+  - name: "ACID rollback discards all - setup"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (202, 2020, 'acid_rollback_all')"
+
+  - name: "ACID rollback discards all - begin"
+
+    session_id: "acid_rollback_all"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID rollback discards all - insert"
+
+    session_id: "acid_rollback_all"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (203, 2030, 'acid_new')"
+
+  - name: "ACID rollback discards all - delete"
+
+    session_id: "acid_rollback_all"
+    sql: "DELETE FROM tx_test WHERE id = 202"
+
+  - name: "ACID rollback discards all - update"
+
+    session_id: "acid_rollback_all"
+    sql: "UPDATE tx_test SET val = 8888 WHERE id = 201"
+
+  - name: "ACID rollback discards all - rollback"
+
+    session_id: "acid_rollback_all"
+    sql: "ROLLBACK"
+
+  - name: "ACID rollback discards all - inserted row invisible"
+
+    sql: "SELECT id FROM tx_test WHERE id = 203"
+    expect:
+      rows: 0
+
+  - name: "ACID rollback discards all - deleted row reappears"
+
+    sql: "SELECT id, val FROM tx_test WHERE id = 202"
+    expect:
+      rows: 1
+      data:
+        - id: 202
+          val: 2020
+
+  - name: "ACID rollback discards all - updated row has original value"
+
+    sql: "SELECT val FROM tx_test WHERE id = 201"
+    expect:
+      data:
+        - val: 2010
+
+  # ========================================
+  # ACID: multiple INSERTs in one tx
+  # ========================================
+
+  - name: "ACID multiple inserts - begin"
+
+    session_id: "acid_multi_ins"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID multiple inserts - insert 1"
+
+    session_id: "acid_multi_ins"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (210, 10, 'multi_acid_1')"
+
+  - name: "ACID multiple inserts - insert 2"
+
+    session_id: "acid_multi_ins"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (211, 11, 'multi_acid_2')"
+
+  - name: "ACID multiple inserts - insert 3"
+
+    session_id: "acid_multi_ins"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (212, 12, 'multi_acid_3')"
+
+  - name: "ACID multiple inserts - none visible outside"
+
+    sql: "SELECT id FROM tx_test WHERE id IN (210, 211, 212)"
+    expect:
+      rows: 0
+
+  - name: "ACID multiple inserts - all visible inside"
+
+    session_id: "acid_multi_ins"
+    sql: "SELECT id FROM tx_test WHERE id IN (210, 211, 212) ORDER BY id"
+    expect:
+      rows: 3
+
+  - name: "ACID multiple inserts - commit"
+
+    session_id: "acid_multi_ins"
+    sql: "COMMIT"
+
+  - name: "ACID multiple inserts - all visible after commit"
+
+    sql: "SELECT id FROM tx_test WHERE id IN (210, 211, 212) ORDER BY id"
+    expect:
+      rows: 3
+
+  # ========================================
+  # COMMIT/ROLLBACK without active transaction (no-op, no error)
+  # ========================================
+
+  - name: "COMMIT without transaction is no-op"
+
+    sql: "COMMIT"
+
+  - name: "ROLLBACK without transaction is no-op"
+
+    sql: "ROLLBACK"
+
+  # ========================================
+  # ACID: INSERT then UPDATE own row in same tx
+  # ========================================
+
+  - name: "ACID insert-then-update own row - begin"
+
+    session_id: "acid_ins_upd"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID insert-then-update own row - insert"
+
+    session_id: "acid_ins_upd"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (220, 2200, 'initial')"
+
+  - name: "ACID insert-then-update own row - update"
+
+    session_id: "acid_ins_upd"
+    sql: "UPDATE tx_test SET val = 2222, name = 'updated_in_tx' WHERE id = 220"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID insert-then-update own row - see updated value inside tx"
+
+    session_id: "acid_ins_upd"
+    sql: "SELECT val, name FROM tx_test WHERE id = 220"
+    expect:
+      data:
+        - val: 2222
+          name: "updated_in_tx"
+
+  - name: "ACID insert-then-update own row - not visible outside"
+
+    sql: "SELECT id FROM tx_test WHERE id = 220"
+    expect:
+      rows: 0
+
+  - name: "ACID insert-then-update own row - commit"
+
+    session_id: "acid_ins_upd"
+    sql: "COMMIT"
+
+  - name: "ACID insert-then-update own row - visible after commit"
+
+    sql: "SELECT val, name FROM tx_test WHERE id = 220"
+    expect:
+      data:
+        - val: 2222
+          name: "updated_in_tx"
+
+  # ========================================
+  # ACID: INSERT then DELETE own row in same tx
+  # ========================================
+
+  - name: "ACID insert-then-delete own row - begin"
+
+    session_id: "acid_ins_del"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID insert-then-delete own row - insert"
+
+    session_id: "acid_ins_del"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (230, 2300, 'will_delete')"
+
+  - name: "ACID insert-then-delete own row - visible inside before delete"
+
+    session_id: "acid_ins_del"
+    sql: "SELECT id FROM tx_test WHERE id = 230"
+    expect:
+      rows: 1
+
+  - name: "ACID insert-then-delete own row - delete"
+
+    session_id: "acid_ins_del"
+    sql: "DELETE FROM tx_test WHERE id = 230"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID insert-then-delete own row - invisible inside after delete"
+
+    session_id: "acid_ins_del"
+    sql: "SELECT id FROM tx_test WHERE id = 230"
+    expect:
+      rows: 0
+
+  - name: "ACID insert-then-delete own row - invisible outside"
+
+    sql: "SELECT id FROM tx_test WHERE id = 230"
+    expect:
+      rows: 0
+
+  - name: "ACID insert-then-delete own row - commit"
+
+    session_id: "acid_ins_del"
+    sql: "COMMIT"
+
+  - name: "ACID insert-then-delete own row - still invisible after commit"
+
+    sql: "SELECT id FROM tx_test WHERE id = 230"
+    expect:
+      rows: 0
+
+  # ========================================
+  # Error path: ACID commit conflict on UPDATE
+  # ========================================
+
+  - name: "ACID update conflict - setup row"
+
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (240, 2400, 'update_conflict')"
+
+  - name: "ACID update conflict - session A begins"
+
+    session_id: "acid_upd_conflict_a"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID update conflict - session B begins"
+
+    session_id: "acid_upd_conflict_b"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID update conflict - session A updates"
+
+    session_id: "acid_upd_conflict_a"
+    sql: "UPDATE tx_test SET val = 9001 WHERE id = 240"
+
+  - name: "ACID update conflict - session B updates same row"
+
+    session_id: "acid_upd_conflict_b"
+    sql: "UPDATE tx_test SET val = 9002 WHERE id = 240"
+
+  - name: "ACID update conflict - session A commits"
+
+    session_id: "acid_upd_conflict_a"
+    sql: "COMMIT"
+
+  - name: "ACID update conflict - session B commit fails"
+
+    session_id: "acid_upd_conflict_b"
+    sql: "COMMIT"
+    expect:
+      error: true
+
+  - name: "ACID update conflict - A's value wins"
+
+    sql: "SELECT val FROM tx_test WHERE id = 240"
+    expect:
+      data:
+        - val: 9001
+
+  # ========================================
+  # Error path: START ACID TRANSACTION parsing
+  # ========================================
+
+  - name: "START ACID TRANSACTION is valid SQL"
+
+    session_id: "acid_parse_test"
+    sql: "START ACID TRANSACTION"
+
+  - name: "START ACID TRANSACTION - cleanup"
+
+    session_id: "acid_parse_test"
+    sql: "ROLLBACK"
+
+  # ========================================
+  # ACID: empty ACID tx commit/rollback
+  # ========================================
+
+  - name: "Empty ACID tx commit"
+
+    session_id: "acid_empty_commit"
+    sql: "START ACID TRANSACTION"
+
+  - name: "Empty ACID tx commit - commit"
+
+    session_id: "acid_empty_commit"
+    sql: "COMMIT"
+
+  - name: "Empty ACID tx rollback"
+
+    session_id: "acid_empty_rollback"
+    sql: "START ACID TRANSACTION"
+
+  - name: "Empty ACID tx rollback - rollback"
+
+    session_id: "acid_empty_rollback"
+    sql: "ROLLBACK"
+
+  # ========================================
+  # Cursor-stability: BEGIN implicitly commits previous
+  # ========================================
+
+  - name: "Cursor-stability implicit commit - begin first"
+
+    session_id: "cs_implicit"
+    sql: "START TRANSACTION"
+
+  - name: "Cursor-stability implicit commit - insert"
+
+    session_id: "cs_implicit"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (250, 2500, 'cs_implicit')"
+
+  - name: "Cursor-stability implicit commit - begin second implicitly commits"
+
+    session_id: "cs_implicit"
+    sql: "START TRANSACTION"
+
+  - name: "Cursor-stability implicit commit - row visible after implicit commit"
+
+    sql: "SELECT id, val FROM tx_test WHERE id = 250"
+    expect:
+      rows: 1
+      data:
+        - id: 250
+          val: 2500
+
+  - name: "Cursor-stability implicit commit - cleanup"
+
+    session_id: "cs_implicit"
+    sql: "ROLLBACK"
+
+  # ========================================
+  # ACID: multi-table transaction (covers sort in commitACID)
+  # ========================================
+
+  - name: "Multi-table ACID - create second table"
+
+    sql: "CREATE TABLE tx_test2 (id INT, val INT)"
+
+  - name: "Multi-table ACID - begin"
+
+    session_id: "acid_multi"
+    sql: "START ACID TRANSACTION"
+
+  - name: "Multi-table ACID - insert into first table"
+
+    session_id: "acid_multi"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (300, 3000, 'multi1')"
+
+  - name: "Multi-table ACID - insert into second table"
+
+    session_id: "acid_multi"
+    sql: "INSERT INTO tx_test2 (id, val) VALUES (300, 3000)"
+
+  - name: "Multi-table ACID - not visible outside table 1"
+
+    sql: "SELECT id FROM tx_test WHERE id = 300"
+    expect:
+      rows: 0
+
+  - name: "Multi-table ACID - not visible outside table 2"
+
+    sql: "SELECT id FROM tx_test2 WHERE id = 300"
+    expect:
+      rows: 0
+
+  - name: "Multi-table ACID - commit"
+
+    session_id: "acid_multi"
+    sql: "COMMIT"
+
+  - name: "Multi-table ACID - visible after commit table 1"
+
+    sql: "SELECT val FROM tx_test WHERE id = 300"
+    expect:
+      data:
+        - val: 3000
+
+  - name: "Multi-table ACID - visible after commit table 2"
+
+    sql: "SELECT val FROM tx_test2 WHERE id = 300"
+    expect:
+      data:
+        - val: 3000
+
+  - name: "Multi-table ACID - cleanup second table"
+
+    sql: "DROP TABLE IF EXISTS tx_test2"

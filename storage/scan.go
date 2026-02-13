@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -244,9 +244,16 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 
 	// iterate over items (indexed)
 	hadValue := false
+	currentTx := CurrentTx()
 	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint) {
-		if t.deletions.Get(idx) {
-			return // item is on delete list
+		if currentTx != nil && currentTx.Mode == TxACID {
+			if !currentTx.IsVisible(t, idx) {
+				return
+			}
+		} else {
+			if t.deletions.Get(idx) {
+				return // item is on delete list
+			}
 		}
 
 		// prepare mdataset

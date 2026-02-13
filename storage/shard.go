@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023-2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -318,6 +318,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 		if len(a) > 0 {
 			// update command
 			var triggerOldRow, triggerNewRow dataset // for AFTER UPDATE triggers
+			var newRecid uint                        // recid of the newly inserted row (for tx undo)
 			func() {
 				t.mu.Lock()         // write lock
 				defer t.mu.Unlock() // write lock
@@ -395,7 +396,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 
 				// unique constraint checking
 				if t.t.Unique != nil {
-					t.deletions.Set(idx, true) // mark as deleted
+					t.deletions.Set(idx, true) // mark as deleted temporarily for unique check
 					t.mu.Unlock()              // release write lock, so the scan can be performed
 					t.t.ProcessUniqueCollision(cols, [][]scm.Scmer{d2}, false, func(values [][]scm.Scmer) {
 						t.mu.Lock() // start write lock
@@ -408,14 +409,54 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					t.deletions.Set(idx, true) // mark as deleted
 				}
 
+				newRecid = t.main_count + uint(len(t.inserts))
 				t.insertDataset(cols, [][]scm.Scmer{d2}, nil)
-				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-					t.logfile.Write(LogEntryDelete{idx})
-					t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
+
+				if tx := CurrentTx(); tx != nil && tx.Mode == TxACID {
+					// Check if old row was staged by this tx (in UndeleteMask)
+					tx.mu.Lock()
+					um := tx.UndeleteMask[t]
+					tx.mu.Unlock()
+					wasStaged := um != nil && um.Has(idx)
+					if wasStaged {
+						// Row was staged by this tx → remove from UndeleteMask.
+						// Keep shard.deletions[idx]=true (already globally hidden).
+						// Don't add to DeleteMask (not a pre-existing row).
+						um.Bitmap.Set(idx, false)
+					} else {
+						// Pre-existing committed row → undo temporary global deletion
+						t.deletions.Set(idx, false)
+						tx.AddToDeleteMask(t, idx)
+					}
+					// Stage new version: hide globally, add to undelete mask
+					t.deletions.Set(newRecid, true)
+					tx.AddToUndeleteMask(t, newRecid)
+					// Only log the insert (delete applied at commit)
+					if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+						t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
+					}
+				} else {
+					// Cursor-stability / no-tx: existing behavior
+					if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+						t.logfile.Write(LogEntryDelete{idx})
+						t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
+					}
 				}
 			}()
-			if t.t.PersistencyMode == Safe {
-				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
+			// transaction bookkeeping + deferred sync
+			if result {
+				if tx := CurrentTx(); tx != nil {
+					switch tx.Mode {
+					case TxACID:
+						tx.RegisterTouchedShard(t)
+					case TxCursorStability:
+						tx.LogDelete(t, idx)
+						tx.LogInsert(t, newRecid)
+						tx.RegisterTouchedShard(t)
+					}
+				} else if t.t.PersistencyMode == Safe {
+					defer t.logfile.Sync()
+				}
 			}
 			if withTrigger && triggerOldRow != nil {
 				t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
@@ -444,18 +485,40 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 				}
 			}
 
-			func() {
-				t.mu.Lock()         // write lock
-				defer t.mu.Unlock() // write lock
-
-				t.deletions.Set(idx, true) // mark as deleted
-				if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-					t.logfile.Write(LogEntryDelete{idx})
+			if tx := CurrentTx(); tx != nil && tx.Mode == TxACID {
+				// Check if row was staged by this tx
+				tx.mu.Lock()
+				um := tx.UndeleteMask[t]
+				tx.mu.Unlock()
+				wasStaged := um != nil && um.Has(idx)
+				if wasStaged {
+					// Row was staged by this tx → remove from UndeleteMask.
+					// Keep shard.deletions[idx]=true (already globally hidden).
+					um.Bitmap.Set(idx, false)
+				} else {
+					// Pre-existing committed row → add to delete mask
+					tx.AddToDeleteMask(t, idx)
 				}
+				tx.RegisterTouchedShard(t)
 				result = true
-			}()
-			if t.t.PersistencyMode == Safe {
-				defer t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
+			} else {
+				func() {
+					t.mu.Lock()         // write lock
+					defer t.mu.Unlock() // write lock
+
+					t.deletions.Set(idx, true) // mark as deleted
+					if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+						t.logfile.Write(LogEntryDelete{idx})
+					}
+					result = true
+				}()
+				// deferred sync
+				if tx != nil {
+					tx.RegisterTouchedShard(t)
+					tx.LogDelete(t, idx)
+				} else if t.t.PersistencyMode == Safe {
+					defer t.logfile.Sync()
+				}
 			}
 			if withTrigger && triggerDeletedRow != nil {
 				t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
@@ -491,6 +554,8 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	if !alreadyLocked {
 		t.mu.Lock()
 	}
+	// capture starting row index for undo logging
+	firstNewRecid := t.main_count + uint(len(t.inserts))
 	t.insertDataset(columns, values, onFirstInsertId)
 	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
 		t.logfile.Write(LogEntryInsert{columns, values})
@@ -502,8 +567,26 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	if !alreadyLocked {
 		t.mu.Unlock()
 	}
-	if t.t.PersistencyMode == Safe {
-		t.logfile.Sync() // write barrier after the lock, so other threads can continue without waiting for the other thread to write
+	// transaction bookkeeping
+	if tx := CurrentTx(); tx != nil {
+		switch tx.Mode {
+		case TxACID:
+			// ACID: hide rows globally, add to undelete mask so this tx can see them
+			for i := range values {
+				recid := firstNewRecid + uint(i)
+				t.deletions.Set(recid, true)
+				tx.AddToUndeleteMask(t, recid)
+			}
+			tx.RegisterTouchedShard(t)
+		case TxCursorStability:
+			// Cursor-stability: log inserts for undo on rollback
+			for i := range values {
+				tx.LogInsert(t, firstNewRecid+uint(i))
+			}
+			tx.RegisterTouchedShard(t)
+		}
+	} else if t.t.PersistencyMode == Safe {
+		t.logfile.Sync() // write barrier; no tx means immediate sync
 	}
 	// execute AFTER INSERT triggers
 	if len(t.t.Triggers) > 0 {
@@ -782,6 +865,8 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 		}
 	}
 	var recid uint
+	currentTx := CurrentTx()
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	for i := uint(0); i < t.main_count; i++ {
 		for j, v := range values {
 			if !scm.Equal(mcols[j].GetValue(i), v) {
@@ -789,7 +874,13 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 			}
 		}
 		// prefer non-deleted main rows; if deleted, keep searching
-		if !t.deletions.Get(i) {
+		if acidMode {
+			if currentTx.IsVisible(t, i) {
+				result = i
+				present = true
+				goto found
+			}
+		} else if !t.deletions.Get(i) {
 			result = i
 			present = true
 			goto found
@@ -817,7 +908,13 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 		}
 		// prefer non-deleted delta rows
 		recid = i + t.main_count
-		if !t.deletions.Get(recid) {
+		if acidMode {
+			if currentTx.IsVisible(t, recid) {
+				result = recid
+				present = true
+				goto found
+			}
+		} else if !t.deletions.Get(recid) {
 			result = recid
 			present = true
 			goto found

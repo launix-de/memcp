@@ -267,14 +267,16 @@ class SQLTestRunner:
         except Exception:
             pass
 
-    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None) -> Optional[requests.Response]:
+    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None) -> Optional[requests.Response]:
         # proactively ensure database exists (works for connect-only too)
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
         normalized = self._normalize_syntax(syntax)
         route = "psql" if normalized == "postgresql" else "sql"
         url = f"{self.base_url}/{route}/{encoded_db}"
-        headers = auth_header if auth_header is not None else self.auth_header
+        headers = dict(auth_header if auth_header is not None else self.auth_header)
+        if session_id:
+            headers["X-Session-Id"] = session_id
         # Try request; if connection fails, wait for memcp to be ready and retry a few times
         for attempt in range(5):
             try:
@@ -497,6 +499,7 @@ class SQLTestRunner:
         auth_header = {"Authorization": f"Basic {b64encode(creds).decode()}"}
         test_syntax = test_case.get("syntax")
         active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
+        session_id = test_case.get("session_id")
 
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
@@ -539,7 +542,7 @@ class SQLTestRunner:
 
             # Execute query (with timing for perf tests)
             start_time = time.monotonic()
-            response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
+            response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id)
             elapsed_ms = (time.monotonic() - start_time) * 1000
             elapsed_sec = elapsed_ms / 1000
 

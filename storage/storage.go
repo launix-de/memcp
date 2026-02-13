@@ -1346,6 +1346,7 @@ func Init(en scm.Env) {
 	})
 
 	initMySQLImport(en)
+	initTransaction(en)
 }
 
 func PrintMemUsage() string {

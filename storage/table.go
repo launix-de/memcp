@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -778,7 +778,15 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				// ensure shard is loaded for read during unique check
 				r := s.GetRead()
 				uid, present := s.GetRecordidForUnique(uniq.Cols, key)
-				if present && !s.deletions.Get(uid) {
+				isVisible := false
+				if present {
+					if currentTx := CurrentTx(); currentTx != nil && currentTx.Mode == TxACID {
+						isVisible = currentTx.IsVisible(s, uid)
+					} else {
+						isVisible = !s.deletions.Get(uid)
+					}
+				}
+				if isVisible {
 					// found a unique collision
 					if j != last_j {
 						t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1) // flush

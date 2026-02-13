@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -240,10 +240,31 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			result.Rows = append(result.Rows, newitem)
 			return NewBool(true)
 		})
-		return Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)
+		// Execute query within GLS context so storage layer can access
+		// the session (and its TxContext) via GetCurrentTx().
+		var rc Scmer
+		SetValues(map[string]any{
+			"session": scmSessionScmer,
+		}, func() {
+			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)
+		})
+		return rc
 	}()
 	if myerr != nil {
 		return myerr
+	}
+	// Post-query deferred sync: if no explicit transaction is active,
+	// sync touched shards now (autocommit behavior).
+	txVal := sessionFunc(NewString("__memcp_tx"))
+	if txVal.IsNil() {
+		// No transaction → sync touched shards from GLS tx if present
+	} else if txObj, ok := txVal.Any().(TxSyncer); ok {
+		// If inside a transaction, only sync if the transaction is
+		// not explicit (autocommit). Check by looking at session["transaction"].
+		txFlag := sessionFunc(NewString("transaction"))
+		if txFlag.IsNil() {
+			txObj.SyncTouchedShards()
+		}
 	}
 	// TODO: also set result.InsertID (maybe as a callback as 4th parameter to m.querycallback?)
 	result.RowsAffected = uint64(rowcount.Int())

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -130,6 +130,21 @@ func (b *NonBlockingBitMap) Count() (result uint) {
 		result += uint(bits.OnesCount64(v))
 	}
 	return
+}
+
+// Iterate calls fn for each set bit index.
+func (b *NonBlockingBitMap) Iterate(fn func(uint)) {
+	dataptr := b.data.Load()
+	if dataptr == nil {
+		return
+	}
+	for i, v := range *dataptr {
+		for v != 0 {
+			bit := uint(bits.TrailingZeros64(v))
+			fn(uint(i)*64 + bit)
+			v &= v - 1 // clear lowest set bit
+		}
+	}
 }
 
 func (b *NonBlockingBitMap) CountUntil(idx uint) (result uint) {

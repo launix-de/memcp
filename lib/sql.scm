@@ -98,6 +98,9 @@ if the user is not allowed to access this property, the function will throw an e
 (globalvars "character_set_server" "utf8mb4")
 (globalvars "collation_server" "utf8mb4_general_ci")
 
+/* persistent HTTP sessions for transaction support */
+(set http_sessions (newsession))
+
 /* http hook for handling SQL */
 (define http_handler (begin
 	(set old_handler http_handler)
@@ -110,7 +113,19 @@ if the user is not allowed to access this property, the function will throw an e
 					(define formula (parse_sql schema query (sql_policy (req "username"))))
 					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 					(define resultrow (res "jsonl"))
-					(define session (context "session"))
+					/* Use persistent session if X-Session-Id header is present */
+					(define session_id ((req "header") "X-Session-Id"))
+					(define session (if session_id
+						(begin
+							(define existing (http_sessions session_id))
+							(if existing existing (begin
+								(define new_sess (newsession))
+								(http_sessions session_id new_sess)
+								new_sess
+							))
+						)
+						(context "session")
+					))
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
 					(set last_row nil)
@@ -119,7 +134,8 @@ if the user is not allowed to access this property, the function will throw an e
 						(if (equal? row last_row)
 							true
 							(begin (set last_row row) (original_resultrow row))))))
-					(set query_result (eval (source "SQL Query" 1 1 formula)))
+					/* Execute with session in GLS so storage layer can access tx state */
+					(set query_result (with_session session (lambda () (eval (source "SQL Query" 1 1 formula)))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
