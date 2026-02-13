@@ -1,0 +1,706 @@
+# Scan & Shard Coverage Tests
+# Targeted tests to exercise uncovered code paths in scan.go, scan_order.go, shard.go
+
+metadata:
+  version: "1.0"
+  description: "Coverage tests for scan, scan_order, and shard code paths"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cov_main"
+  - sql: "DROP TABLE IF EXISTS cov_child"
+  - sql: "DROP TABLE IF EXISTS cov_big"
+  - sql: "DROP TABLE IF EXISTS cov_uniq"
+  - sql: "DROP TABLE IF EXISTS cov_trig"
+  - sql: "DROP TABLE IF EXISTS cov_trig_log"
+  - sql: "DROP TABLE IF EXISTS cov_collate"
+  - sql: "DROP TABLE IF EXISTS cov_main_store"
+
+setup:
+  - sql: "CREATE TABLE cov_main (id INT, val INT, label VARCHAR(50))"
+  - sql: "CREATE TABLE cov_child (pid INT, note VARCHAR(50))"
+  - sql: "CREATE TABLE cov_big (id INT, val INT, cat VARCHAR(20))"
+  - sql: "CREATE TABLE cov_uniq (id INT UNIQUE, val INT)"
+  - sql: "CREATE TABLE cov_trig (id INT, val INT, name VARCHAR(50))"
+  - sql: "CREATE TABLE cov_trig_log (action VARCHAR(20), row_id INT)"
+  - sql: "CREATE TABLE cov_collate (id INT, name VARCHAR(50) COLLATE utf8mb4_unicode_ci)"
+
+test_cases:
+
+  # ==========================================================
+  # Outer join: LEFT JOIN with match and no match
+  # Exercises scan.go isOuter paths (lines 166-171)
+  # ==========================================================
+
+  - name: "Setup outer join data"
+    sql: "INSERT INTO cov_main (id, val, label) VALUES (1, 10, 'a'), (2, 20, 'b')"
+
+  - name: "LEFT JOIN match exists"
+    sql: "INSERT INTO cov_child (pid, note) VALUES (1, 'child1')"
+
+  - name: "LEFT JOIN with match - returns row"
+    sql: "SELECT m.id, c.note FROM cov_main m LEFT JOIN cov_child c ON m.id = c.pid WHERE m.id = 1"
+    expect:
+      data:
+        - id: 1
+          note: "child1"
+
+  - name: "LEFT JOIN no match - NULL row injected (isOuter)"
+    sql: "SELECT m.id, c.note FROM cov_main m LEFT JOIN cov_child c ON m.id = c.pid WHERE m.id = 2"
+    expect:
+      data:
+        - id: 2
+          note: null
+
+  - name: "LEFT JOIN all rows - match and null"
+    sql: "SELECT m.id, c.note FROM cov_main m LEFT JOIN cov_child c ON m.id = c.pid ORDER BY m.id"
+    expect:
+      rows: 2
+
+  - name: "LEFT JOIN no match with ORDER BY (isOuter ordered)"
+    sql: "SELECT m.id, c.note FROM cov_main m LEFT JOIN cov_child c ON m.id = c.pid WHERE m.id = 2 ORDER BY m.id"
+    expect:
+      data:
+        - id: 2
+          note: null
+
+  # ==========================================================
+  # Statistics logging paths — needs >50 rows
+  # Exercises scan.go lines 100-114, 139-155, 174-189
+  # and scan_order.go lines 239-265
+  # ==========================================================
+
+  - name: "Insert 60 rows for statistics logging"
+    sql: >
+      INSERT INTO cov_big (id, val, cat) VALUES
+      (1,1,'a'),(2,2,'a'),(3,3,'a'),(4,4,'a'),(5,5,'a'),
+      (6,6,'a'),(7,7,'a'),(8,8,'a'),(9,9,'a'),(10,10,'a'),
+      (11,11,'b'),(12,12,'b'),(13,13,'b'),(14,14,'b'),(15,15,'b'),
+      (16,16,'b'),(17,17,'b'),(18,18,'b'),(19,19,'b'),(20,20,'b'),
+      (21,21,'a'),(22,22,'a'),(23,23,'a'),(24,24,'a'),(25,25,'a'),
+      (26,26,'a'),(27,27,'a'),(28,28,'a'),(29,29,'a'),(30,30,'a'),
+      (31,31,'b'),(32,32,'b'),(33,33,'b'),(34,34,'b'),(35,35,'b'),
+      (36,36,'b'),(37,37,'b'),(38,38,'b'),(39,39,'b'),(40,40,'b'),
+      (41,41,'a'),(42,42,'a'),(43,43,'a'),(44,44,'a'),(45,45,'a'),
+      (46,46,'a'),(47,47,'a'),(48,48,'a'),(49,49,'a'),(50,50,'a'),
+      (51,51,'b'),(52,52,'b'),(53,53,'b'),(54,54,'b'),(55,55,'b'),
+      (56,56,'b'),(57,57,'b'),(58,58,'b'),(59,59,'b'),(60,60,'b')
+
+  - name: "Full scan >50 rows without aggregate (stats logging)"
+    sql: "SELECT id FROM cov_big WHERE val > 0"
+    expect:
+      rows: 60
+
+  - name: "Full scan >50 rows with aggregate (stats logging)"
+    sql: "SELECT SUM(val) AS s FROM cov_big WHERE val > 0"
+    expect:
+      data:
+        - s: 1830
+
+  - name: "Full scan >50 rows with GROUP BY (aggregate2 stats logging)"
+    sql: "SELECT cat, SUM(val) AS s FROM cov_big GROUP BY cat"
+    expect:
+      rows: 2
+
+  - name: "Ordered scan >50 rows (stats logging)"
+    sql: "SELECT id FROM cov_big WHERE val > 0 ORDER BY id"
+    expect:
+      rows: 60
+
+  - name: "Ordered scan >50 rows with LIMIT"
+    sql: "SELECT id FROM cov_big WHERE val > 0 ORDER BY id LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+        - id: 4
+        - id: 5
+
+  - name: "Ordered scan >50 rows with OFFSET"
+    sql: "SELECT id FROM cov_big WHERE val > 0 ORDER BY id LIMIT 3 OFFSET 57"
+    expect:
+      rows: 3
+      data:
+        - id: 58
+        - id: 59
+        - id: 60
+
+  - name: "Ordered scan >50 rows DESC"
+    sql: "SELECT id FROM cov_big WHERE val > 0 ORDER BY id DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 60
+        - id: 59
+        - id: 58
+
+  # ==========================================================
+  # Column collation in ORDER BY — exercises scan_order.go
+  # (lines 322-369)
+  # ==========================================================
+
+  - name: "Insert collated data"
+    sql: "INSERT INTO cov_collate (id, name) VALUES (1, 'banana'), (2, 'Apple'), (3, 'cherry'), (4, 'apricot')"
+
+  - name: "ORDER BY collated column"
+    sql: "SELECT id, name FROM cov_collate ORDER BY name"
+    expect:
+      rows: 4
+
+  - name: "ORDER BY collated column DESC"
+    sql: "SELECT id, name FROM cov_collate ORDER BY name DESC"
+    expect:
+      rows: 4
+
+  # ==========================================================
+  # Unique constraint violation during UPDATE — exercises shard.go
+  # (lines 397-407)
+  # ==========================================================
+
+  - name: "Insert unique rows"
+    sql: "INSERT INTO cov_uniq (id, val) VALUES (1, 100), (2, 200), (3, 300)"
+
+  - name: "UPDATE violating unique constraint"
+    sql: "UPDATE cov_uniq SET id = 2 WHERE id = 1"
+    expect:
+      error: true
+
+  - name: "Verify data unchanged after unique violation"
+    sql: "SELECT id, val FROM cov_uniq WHERE id = 1"
+    expect:
+      data:
+        - id: 1
+          val: 100
+
+  - name: "UPDATE not violating unique (change non-unique col)"
+    sql: "UPDATE cov_uniq SET val = 150 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify unique update succeeded"
+    sql: "SELECT id, val FROM cov_uniq WHERE id = 1"
+    expect:
+      data:
+        - id: 1
+          val: 150
+
+  # ==========================================================
+  # BEFORE UPDATE trigger modifying values — exercises shard.go
+  # (lines 375-386: ExecuteBeforeUpdateTriggers modifying d2)
+  # ==========================================================
+
+  - name: "Setup data for trigger test"
+    sql: "INSERT INTO cov_trig (id, val, name) VALUES (1, 100, 'original'), (2, 200, 'delete_me')"
+
+  - name: "Create BEFORE UPDATE trigger that modifies values"
+    sql: "CREATE TRIGGER cov_before_upd BEFORE UPDATE ON cov_trig FOR EACH ROW SET NEW.name = CONCAT(NEW.name, '_mod')"
+
+  - name: "Update with BEFORE UPDATE trigger modification"
+    sql: "UPDATE cov_trig SET name = 'updated' WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEFORE UPDATE trigger modified the value"
+    sql: "SELECT name FROM cov_trig WHERE id = 1"
+    expect:
+      data:
+        - name: "updated_mod"
+
+  # ==========================================================
+  # AFTER INSERT/UPDATE/DELETE triggers — exercises trigger paths
+  # in shard.go Insert() and UpdateFunction()
+  # ==========================================================
+
+  - name: "Create AFTER INSERT trigger"
+    sql: "CREATE TRIGGER cov_after_ins AFTER INSERT ON cov_trig FOR EACH ROW BEGIN INSERT INTO cov_trig_log (action, row_id) VALUES ('inserted', NEW.id); END"
+
+  - name: "Insert with AFTER INSERT trigger"
+    sql: "INSERT INTO cov_trig (id, val, name) VALUES (10, 1000, 'trigger_test')"
+
+  - name: "Verify AFTER INSERT trigger fired"
+    sql: "SELECT action, row_id FROM cov_trig_log WHERE row_id = 10 AND action = 'inserted'"
+    expect:
+      rows: 1
+
+  - name: "Create AFTER DELETE trigger"
+    sql: "CREATE TRIGGER cov_after_del AFTER DELETE ON cov_trig FOR EACH ROW BEGIN INSERT INTO cov_trig_log (action, row_id) VALUES ('deleted', OLD.id); END"
+
+  - name: "Delete with AFTER DELETE trigger"
+    sql: "DELETE FROM cov_trig WHERE id = 10"
+
+  - name: "Verify AFTER DELETE trigger fired"
+    sql: "SELECT action, row_id FROM cov_trig_log WHERE row_id = 10 AND action = 'deleted'"
+    expect:
+      rows: 1
+
+  # ==========================================================
+  # ACID unique constraint checks — exercises shard.go
+  # (lines 877-881, 911-915: ACID visibility in GetRecordidForUnique)
+  # ==========================================================
+
+  - name: "ACID unique check - begin"
+    session_id: "acid_uniq"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID unique check - insert"
+    session_id: "acid_uniq"
+    sql: "INSERT INTO cov_uniq (id, val) VALUES (10, 1000)"
+
+  - name: "ACID unique check - duplicate in same tx fails"
+    session_id: "acid_uniq"
+    sql: "INSERT INTO cov_uniq (id, val) VALUES (10, 2000)"
+    expect:
+      error: true
+
+  - name: "ACID unique check - rollback"
+    session_id: "acid_uniq"
+    sql: "ROLLBACK"
+
+  - name: "ACID unique check - row gone after rollback"
+    sql: "SELECT id FROM cov_uniq WHERE id = 10"
+    expect:
+      rows: 0
+
+  - name: "ACID unique update violation - begin"
+    session_id: "acid_uniq2"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID unique update violation - update to conflict"
+    session_id: "acid_uniq2"
+    sql: "UPDATE cov_uniq SET id = 2 WHERE id = 3"
+    expect:
+      error: true
+
+  - name: "ACID unique update violation - rollback"
+    session_id: "acid_uniq2"
+    sql: "ROLLBACK"
+
+  # ==========================================================
+  # UPDATE on recently inserted (delta) row — exercises scan.go
+  # (lines 279-300: delta storage path including $update)
+  # ==========================================================
+
+  - name: "Insert then immediately update (delta storage path)"
+    sql: "INSERT INTO cov_main (id, val, label) VALUES (100, 1000, 'new_row')"
+
+  - name: "Update delta row"
+    sql: "UPDATE cov_main SET val = 1001, label = 'updated_new' WHERE id = 100"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify delta row updated"
+    sql: "SELECT val, label FROM cov_main WHERE id = 100"
+    expect:
+      data:
+        - val: 1001
+          label: "updated_new"
+
+  - name: "Delete from delta storage"
+    sql: "DELETE FROM cov_main WHERE id = 100"
+
+  - name: "Verify delta row deleted"
+    sql: "SELECT id FROM cov_main WHERE id = 100"
+    expect:
+      rows: 0
+
+  # ==========================================================
+  # ORDER BY with aggregate — exercises scan_order.go
+  # (lines 134-137)
+  # ==========================================================
+
+  - name: "Ordered aggregate query"
+    sql: "SELECT cat, COUNT(*) AS cnt FROM cov_big GROUP BY cat ORDER BY cat"
+    expect:
+      rows: 2
+
+  # ==========================================================
+  # UPDATE with no actual change (result=false path)
+  # Exercises shard.go line 388-389
+  # ==========================================================
+
+  - name: "Setup no-change update"
+    sql: "INSERT INTO cov_main (id, val, label) VALUES (200, 2000, 'same')"
+
+  - name: "UPDATE with identical values (no change)"
+    sql: "UPDATE cov_main SET val = 2000, label = 'same' WHERE id = 200"
+    expect:
+      affected_rows: 0
+
+  - name: "Verify row unchanged"
+    sql: "SELECT val, label FROM cov_main WHERE id = 200"
+    expect:
+      data:
+        - val: 2000
+          label: "same"
+
+  # ==========================================================
+  # Multi-column ORDER BY — exercises scan_order.go multi-level comparison
+  # ==========================================================
+
+  - name: "Multi-column ORDER BY"
+    sql: "SELECT id, val, cat FROM cov_big WHERE id <= 10 ORDER BY cat, val DESC"
+    expect:
+      rows: 10
+
+  - name: "ORDER BY same column values forces tie-break"
+    sql: "SELECT id, cat FROM cov_big WHERE cat = 'a' ORDER BY cat, id LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          cat: "a"
+        - id: 2
+          cat: "a"
+        - id: 3
+          cat: "a"
+        - id: 4
+          cat: "a"
+        - id: 5
+          cat: "a"
+
+  # ==========================================================
+  # Error paths — exercises shard.go getColumnStorageOrPanic
+  # (lines 200-201)
+  # ==========================================================
+
+  - name: "SELECT non-existent column"
+    sql: "SELECT nonexistent_col FROM cov_main"
+    expect:
+      error: true
+
+  - name: "UPDATE non-existent column"
+    sql: "UPDATE cov_main SET nonexistent_col = 1 WHERE id = 1"
+    expect:
+      error: true
+
+  # ==========================================================
+  # Delete with trigger captures delta row data
+  # Exercises shard.go lines 468-480 (triggerDeletedRow from delta)
+  # ==========================================================
+
+  - name: "Insert row for trigger delete from delta"
+    sql: "INSERT INTO cov_trig (id, val, name) VALUES (20, 2000, 'delta_del')"
+
+  - name: "Delete recently inserted row with trigger (delta path)"
+    sql: "DELETE FROM cov_trig WHERE id = 20"
+
+  - name: "Verify delta delete trigger logged"
+    sql: "SELECT action, row_id FROM cov_trig_log WHERE row_id = 20 AND action = 'deleted'"
+    expect:
+      rows: 1
+
+  # ==========================================================
+  # INSERT duplicate into unique table — tests unique collision path
+  # ==========================================================
+
+  - name: "INSERT duplicate unique key"
+    sql: "INSERT INTO cov_uniq (id, val) VALUES (1, 999)"
+    expect:
+      error: true
+
+  - name: "Verify original row intact after duplicate insert"
+    sql: "SELECT id, val FROM cov_uniq WHERE id = 1"
+    expect:
+      data:
+        - id: 1
+          val: 150
+
+  # ==========================================================
+  # ACID unique: insert+commit then new tx checks uniqueness
+  # Exercises shard.go ACID visibility in GetRecordidForUnique
+  # on committed delta data (lines 911-915)
+  # ==========================================================
+
+  - name: "ACID commit then unique check - begin tx1"
+    session_id: "acid_commit_uniq"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID commit then unique check - insert"
+    session_id: "acid_commit_uniq"
+    sql: "INSERT INTO cov_uniq (id, val) VALUES (50, 5000)"
+
+  - name: "ACID commit then unique check - commit"
+    session_id: "acid_commit_uniq"
+    sql: "COMMIT"
+
+  - name: "ACID commit then unique check - verify visible"
+    sql: "SELECT id, val FROM cov_uniq WHERE id = 50"
+    expect:
+      data:
+        - id: 50
+          val: 5000
+
+  - name: "ACID commit then unique check - begin tx2"
+    session_id: "acid_commit_uniq2"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID commit then unique check - duplicate fails"
+    session_id: "acid_commit_uniq2"
+    sql: "INSERT INTO cov_uniq (id, val) VALUES (50, 9999)"
+    expect:
+      error: true
+
+  - name: "ACID commit then unique check - rollback tx2"
+    session_id: "acid_commit_uniq2"
+    sql: "ROLLBACK"
+
+  # ==========================================================
+  # ACID: delete + commit visibility
+  # Exercises ACID write paths in shard.go UpdateFunction()
+  # ==========================================================
+
+  - name: "ACID delete commit - begin"
+    session_id: "acid_del"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID delete commit - delete row"
+    session_id: "acid_del"
+    sql: "DELETE FROM cov_uniq WHERE id = 50"
+
+  - name: "ACID delete commit - row still visible outside tx"
+    sql: "SELECT id FROM cov_uniq WHERE id = 50"
+    expect:
+      rows: 1
+
+  - name: "ACID delete commit - row invisible inside tx"
+    session_id: "acid_del"
+    sql: "SELECT id FROM cov_uniq WHERE id = 50"
+    expect:
+      rows: 0
+
+  - name: "ACID delete commit - commit"
+    session_id: "acid_del"
+    sql: "COMMIT"
+
+  - name: "ACID delete commit - row gone after commit"
+    sql: "SELECT id FROM cov_uniq WHERE id = 50"
+    expect:
+      rows: 0
+
+  # ==========================================================
+  # ACID: update + commit
+  # Exercises ACID update path in shard.go (delete old + insert new)
+  # ==========================================================
+
+  - name: "ACID update commit - begin"
+    session_id: "acid_upd"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID update commit - update row"
+    session_id: "acid_upd"
+    sql: "UPDATE cov_uniq SET val = 999 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "ACID update commit - see new value inside tx"
+    session_id: "acid_upd"
+    sql: "SELECT val FROM cov_uniq WHERE id = 1"
+    expect:
+      data:
+        - val: 999
+
+  - name: "ACID update commit - see old value outside tx"
+    sql: "SELECT val FROM cov_uniq WHERE id = 1"
+    expect:
+      data:
+        - val: 150
+
+  - name: "ACID update commit - commit"
+    session_id: "acid_upd"
+    sql: "COMMIT"
+
+  - name: "ACID update commit - new value visible after commit"
+    sql: "SELECT val FROM cov_uniq WHERE id = 1"
+    expect:
+      data:
+        - val: 999
+
+  # ==========================================================
+  # LEFT JOIN with empty right table (no rows at all)
+  # Exercises isOuter null injection when right table is empty
+  # ==========================================================
+
+  - name: "Create empty right table"
+    sql: "DROP TABLE IF EXISTS cov_empty"
+
+  - name: "Create empty right table DDL"
+    sql: "CREATE TABLE cov_empty (id INT, val INT)"
+
+  - name: "LEFT JOIN with empty right table"
+    sql: "SELECT m.id, e.val FROM cov_main m LEFT JOIN cov_empty e ON m.id = e.id WHERE m.id = 1"
+    expect:
+      data:
+        - id: 1
+          val: null
+
+  - name: "LEFT JOIN empty right with ORDER BY"
+    sql: "SELECT m.id, e.val FROM cov_main m LEFT JOIN cov_empty e ON m.id = e.id ORDER BY m.id LIMIT 2"
+    expect:
+      rows: 2
+
+  - name: "Cleanup empty table"
+    sql: "DROP TABLE IF EXISTS cov_empty"
+
+  # ==========================================================
+  # Cursor-stability: multi-row insert + rollback (undo log)
+  # Exercises tx undo for batch inserts
+  # ==========================================================
+
+  - name: "CS batch insert rollback - begin"
+    session_id: "cs_batch"
+    sql: "START TRANSACTION"
+
+  - name: "CS batch insert rollback - insert batch"
+    session_id: "cs_batch"
+    sql: "INSERT INTO cov_main (id, val, label) VALUES (300, 3000, 'batch1'), (301, 3001, 'batch2'), (302, 3002, 'batch3')"
+
+  - name: "CS batch insert rollback - verify visible in tx"
+    session_id: "cs_batch"
+    sql: "SELECT id FROM cov_main WHERE id >= 300 AND id <= 302"
+    expect:
+      rows: 3
+
+  - name: "CS batch insert rollback - rollback"
+    session_id: "cs_batch"
+    sql: "ROLLBACK"
+
+  - name: "CS batch insert rollback - rows gone"
+    sql: "SELECT id FROM cov_main WHERE id >= 300 AND id <= 302"
+    expect:
+      rows: 0
+
+  # ==========================================================
+  # Ordered scan with LIMIT 0 — immediate return
+  # Exercises scan_order.go limit==0 early exit (line 203)
+  # ==========================================================
+
+  - name: "ORDER BY with LIMIT 0"
+    sql: "SELECT id FROM cov_big ORDER BY id LIMIT 0"
+    expect:
+      rows: 0
+
+  # ==========================================================
+  # Scan with no matching rows (empty result, no isOuter)
+  # Exercises normal empty-result path
+  # ==========================================================
+
+  - name: "SELECT with impossible WHERE returns 0 rows"
+    sql: "SELECT id FROM cov_big WHERE val < 0"
+    expect:
+      rows: 0
+
+  - name: "SELECT with impossible WHERE + ORDER BY"
+    sql: "SELECT id FROM cov_big WHERE val < 0 ORDER BY id"
+    expect:
+      rows: 0
+
+  - name: "SELECT with impossible WHERE + aggregate"
+    sql: "SELECT COUNT(*) AS cnt FROM cov_big WHERE val < 0"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "SELECT with impossible WHERE + GROUP BY"
+    sql: "SELECT cat, COUNT(*) AS cnt FROM cov_big WHERE val < 0 GROUP BY cat"
+    expect:
+      rows: 2
+
+  # ==========================================================
+  # SHUTDOWN to rebuild: moves delta data into main storage
+  # After restart, exercises main-storage code paths:
+  # - shard.go:474-476 (trigger reads from main storage)
+  # - shard.go:877-881 (ACID unique check on main storage)
+  # - shard.go:112-125 (load/log replay)
+  # - shard.go:694-733 (insertDatasetFromLog)
+  # ==========================================================
+
+  - name: "Create main storage unique table"
+    sql: "CREATE TABLE cov_main_store (id INT UNIQUE, val INT)"
+
+  - name: "Insert data for main storage tests"
+    sql: "INSERT INTO cov_main_store (id, val) VALUES (1, 100), (2, 200), (3, 300)"
+
+  - name: "Shutdown to trigger save and rebuild"
+    sql: "SHUTDOWN"
+
+  - name: "Verify data survived restart (main storage)"
+    sql: "SELECT id, val FROM cov_main_store WHERE id = 1"
+    expect:
+      data:
+        - id: 1
+          val: 100
+
+  - name: "Verify all rows survived restart"
+    sql: "SELECT id FROM cov_main_store ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+
+  - name: "ACID unique check on main storage - begin"
+    session_id: "acid_main"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID unique check on main storage - duplicate fails"
+    session_id: "acid_main"
+    sql: "INSERT INTO cov_main_store (id, val) VALUES (1, 999)"
+    expect:
+      error: true
+
+  - name: "ACID unique check on main storage - rollback"
+    session_id: "acid_main"
+    sql: "ROLLBACK"
+
+  - name: "ACID update on main storage - begin"
+    session_id: "acid_main2"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID update on main storage - update to conflict"
+    session_id: "acid_main2"
+    sql: "UPDATE cov_main_store SET id = 2 WHERE id = 3"
+    expect:
+      error: true
+
+  - name: "ACID update on main storage - rollback"
+    session_id: "acid_main2"
+    sql: "ROLLBACK"
+
+  - name: "Delete from rebuilt table (main storage delete path)"
+    sql: "DELETE FROM cov_main_store WHERE id = 2"
+
+  - name: "Verify main storage delete"
+    sql: "SELECT id FROM cov_main_store WHERE id = 2"
+    expect:
+      rows: 0
+
+  - name: "Update in rebuilt table (main storage update path)"
+    sql: "UPDATE cov_main_store SET val = 999 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify main storage update"
+    sql: "SELECT val FROM cov_main_store WHERE id = 1"
+    expect:
+      data:
+        - val: 999
+
+  - name: "Delete from cov_trig after rebuild (main storage trigger path)"
+    sql: "DELETE FROM cov_trig WHERE id = 2"
+
+  - name: "Verify trigger fired on main storage delete"
+    sql: "SELECT action, row_id FROM cov_trig_log WHERE row_id = 2 AND action = 'deleted'"
+    expect:
+      rows: 1
+
+  - name: "SELECT with ORDER BY on rebuilt table"
+    sql: "SELECT id FROM cov_main_store ORDER BY id"
+    expect:
+      data:
+        - id: 1
+        - id: 3
+
+  - name: "Cleanup main storage table"
+    sql: "DROP TABLE IF EXISTS cov_main_store"
