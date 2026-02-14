@@ -411,8 +411,9 @@ func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset) bool {
 			}()
 			returned = scm.Apply(tr.Func, oldDict, scm.NewNil())
 		}()
-		// If trigger returns false/nil, abort delete
-		if returned.IsNil() || (returned.IsBool() && !scm.ToBool(returned)) {
+		// If trigger explicitly returns false, abort delete.
+		// nil return (side-effect-only triggers) does NOT abort.
+		if returned.IsBool() && !scm.ToBool(returned) {
 			return false
 		}
 	}

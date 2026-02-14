@@ -664,3 +664,775 @@ test_cases:
     sql: "DROP TRIGGER IF EXISTS guard_update"
     expect:
       affected_rows: 0
+
+  # =====================================================
+  # BEFORE DELETE trigger tests (coverage gap: 11.1%)
+  # =====================================================
+
+  - name: "Clean up for BEFORE DELETE trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert rows for BEFORE DELETE test"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (900, 10, 'keep'), (901, 20, 'del1'), (902, 30, 'del2')"
+    expect:
+      affected_rows: 3
+
+  - name: "Clear trigger_log for BEFORE DELETE test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE BEFORE DELETE trigger that logs OLD values"
+    sql: "CREATE TRIGGER bd_log_old BEFORE DELETE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'before_delete', OLD.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "DELETE row 901, BEFORE DELETE trigger logs OLD"
+    sql: "DELETE FROM trigger_test WHERE id = 901"
+    expect:
+      affected_rows: 1
+
+  - name: "DELETE row 902, BEFORE DELETE trigger logs OLD"
+    sql: "DELETE FROM trigger_test WHERE id = 902"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEFORE DELETE trigger logged OLD values for both rows"
+    sql: "SELECT id, action, old_val FROM trigger_log WHERE action = 'before_delete' ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { id: 901, action: "before_delete", old_val: 20 }
+        - { id: 902, action: "before_delete", old_val: 30 }
+
+  - name: "Verify remaining row was not deleted"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_test WHERE id = 900"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "DROP BEFORE DELETE logging trigger"
+    sql: "DROP TRIGGER IF EXISTS bd_log_old"
+    expect:
+      affected_rows: 0
+
+  # BEFORE DELETE trigger with conditional logic (IF)
+
+  - name: "Clean up for conditional BEFORE DELETE"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert rows with mixed val for conditional delete"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (910, 5, 'low'), (911, 50, 'high'), (912, 3, 'low2')"
+    expect:
+      affected_rows: 3
+
+  - name: "CREATE BEFORE DELETE trigger with IF that logs high-val deletes"
+    sql: "CREATE TRIGGER bd_cond BEFORE DELETE ON trigger_test FOR EACH ROW BEGIN IF OLD.val > 10 THEN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'highval_del', OLD.val); END IF; END"
+    expect:
+      affected_rows: 0
+
+  - name: "Clear trigger_log for conditional delete test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "DELETE row with val <= 10 proceeds normally"
+    sql: "DELETE FROM trigger_test WHERE id = 910"
+    expect:
+      affected_rows: 1
+
+  - name: "DELETE row with val > 10 deletes and logs"
+    sql: "DELETE FROM trigger_test WHERE id = 911"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify log entry for high-val delete"
+    sql: "SELECT id, action, old_val FROM trigger_log WHERE action = 'highval_del'"
+    expect:
+      rows: 1
+      data:
+        - { id: 911, action: "highval_del", old_val: 50 }
+
+  - name: "Verify low-val delete did not log"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_log WHERE id = 910"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "DROP conditional BEFORE DELETE trigger"
+    sql: "DROP TRIGGER IF EXISTS bd_cond"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # AFTER UPDATE trigger tests (covers ExecuteTriggers AfterUpdate branch)
+  # =====================================================
+
+  - name: "Clean up for AFTER UPDATE trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for AFTER UPDATE test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert rows for AFTER UPDATE trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (950, 100, 'upd1'), (951, 200, 'upd2')"
+    expect:
+      affected_rows: 2
+
+  - name: "CREATE AFTER UPDATE trigger that logs changes"
+    sql: "CREATE TRIGGER au_log AFTER UPDATE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val, new_val) VALUES (OLD.id, 'after_update', OLD.val, NEW.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "UPDATE single row fires AFTER UPDATE"
+    sql: "UPDATE trigger_test SET val = 150 WHERE id = 950"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify AFTER UPDATE logged the change"
+    sql: "SELECT id, action, old_val, new_val FROM trigger_log WHERE id = 950"
+    expect:
+      rows: 1
+      data:
+        - { id: 950, action: "after_update", old_val: 100, new_val: 150 }
+
+  - name: "UPDATE multiple rows fires AFTER UPDATE for each"
+    sql: "UPDATE trigger_test SET val = val + 1"
+    expect:
+      affected_rows: 2
+
+  - name: "Verify AFTER UPDATE logged both changes"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_log WHERE action = 'after_update'"
+    expect:
+      data:
+        - cnt: 3
+
+  - name: "DROP AFTER UPDATE trigger"
+    sql: "DROP TRIGGER IF EXISTS au_log"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # SHOW TRIGGERS test
+  # =====================================================
+
+  - name: "Clean up triggers before SHOW test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE trigger for SHOW TRIGGERS test"
+    sql: "CREATE TRIGGER show_test_bi BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = 42"
+    expect:
+      affected_rows: 0
+
+  - name: "SHOW TRIGGERS returns at least one trigger"
+    sql: "SHOW TRIGGERS"
+    expect:
+      min_rows: 1
+
+  - name: "DROP SHOW test trigger"
+    sql: "DROP TRIGGER IF EXISTS show_test_bi"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Multi-row INSERT with BEFORE INSERT trigger
+  # =====================================================
+
+  - name: "Clean up for multi-row BEFORE INSERT"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE BEFORE INSERT trigger for multi-row test"
+    sql: "CREATE TRIGGER multi_bi BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = NEW.val * 2"
+    expect:
+      affected_rows: 0
+
+  - name: "Multi-row INSERT all modified by BEFORE INSERT trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1, 5, 'a'), (2, 10, 'b'), (3, 15, 'c'), (4, 20, 'd')"
+    expect:
+      affected_rows: 4
+
+  - name: "Verify all rows doubled by BEFORE INSERT trigger"
+    sql: "SELECT id, val FROM trigger_test ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - { id: 1, val: 10 }
+        - { id: 2, val: 20 }
+        - { id: 3, val: 30 }
+        - { id: 4, val: 40 }
+
+  - name: "DROP multi-row BEFORE INSERT trigger"
+    sql: "DROP TRIGGER IF EXISTS multi_bi"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Multi-row DELETE with BEFORE DELETE trigger
+  # =====================================================
+
+  - name: "CREATE BEFORE DELETE trigger for multi-row delete test"
+    sql: "CREATE TRIGGER multi_bd BEFORE DELETE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'multi_del', OLD.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "Clear trigger_log for multi-row delete"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "DELETE multiple rows fires BEFORE DELETE for each"
+    sql: "DELETE FROM trigger_test WHERE val >= 30"
+    expect:
+      affected_rows: 2
+
+  - name: "Verify BEFORE DELETE logged each deleted row"
+    sql: "SELECT id, old_val FROM trigger_log WHERE action = 'multi_del' ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { id: 3, old_val: 30 }
+        - { id: 4, old_val: 40 }
+
+  - name: "Verify remaining rows not deleted"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_test"
+    expect:
+      data:
+        - cnt: 2
+
+  - name: "DROP multi-row BEFORE DELETE trigger"
+    sql: "DROP TRIGGER IF EXISTS multi_bd"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # AFTER DELETE trigger (covers ExecuteTriggers AfterDelete branch)
+  # =====================================================
+
+  - name: "Clean up for AFTER DELETE with OLD access"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for AFTER DELETE test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert rows for AFTER DELETE test"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1000, 77, 'ad_test1'), (1001, 88, 'ad_test2')"
+    expect:
+      affected_rows: 2
+
+  - name: "CREATE AFTER DELETE trigger accessing OLD columns"
+    sql: "CREATE TRIGGER ad_old_access AFTER DELETE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'after_del_old', OLD.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "DELETE fires AFTER DELETE with OLD access"
+    sql: "DELETE FROM trigger_test WHERE id = 1000"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify AFTER DELETE logged OLD values correctly"
+    sql: "SELECT id, action, old_val FROM trigger_log WHERE action = 'after_del_old'"
+    expect:
+      rows: 1
+      data:
+        - { id: 1000, action: "after_del_old", old_val: 77 }
+
+  - name: "DELETE remaining row fires AFTER DELETE again"
+    sql: "DELETE FROM trigger_test WHERE id = 1001"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify both AFTER DELETE log entries"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_log WHERE action = 'after_del_old'"
+    expect:
+      data:
+        - cnt: 2
+
+  - name: "DROP AFTER DELETE OLD access trigger"
+    sql: "DROP TRIGGER IF EXISTS ad_old_access"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Trigger with NULL values in OLD/NEW dicts
+  # =====================================================
+
+  - name: "Clean up for NULL value trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert row with NULL values"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1100, NULL, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE BEFORE UPDATE trigger that handles NULLs"
+    sql: "CREATE TRIGGER null_upd BEFORE UPDATE ON trigger_test FOR EACH ROW BEGIN IF NEW.val IS NULL THEN SET NEW.val = 0; END IF; END"
+    expect:
+      affected_rows: 0
+
+  - name: "UPDATE row with NULL val, trigger converts to 0"
+    sql: "UPDATE trigger_test SET name = 'updated' WHERE id = 1100"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify NULL val converted to 0 by trigger"
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 1100"
+    expect:
+      rows: 1
+      data:
+        - { id: 1100, val: 0, name: "updated" }
+
+  - name: "DROP NULL handling trigger"
+    sql: "DROP TRIGGER IF EXISTS null_upd"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # BEFORE INSERT trigger that sets val to NULL
+  # =====================================================
+
+  - name: "Clean up for set-NULL trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE BEFORE INSERT trigger that NULLifies val"
+    sql: "CREATE TRIGGER null_bi BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = NULL"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT with trigger that sets val to NULL"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1200, 999, 'nullified')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify trigger set val to NULL"
+    sql: "SELECT id, val, name FROM trigger_test WHERE id = 1200"
+    expect:
+      rows: 1
+      data:
+        - { id: 1200, val: null, name: "nullified" }
+
+  - name: "DROP NULL-setting trigger"
+    sql: "DROP TRIGGER IF EXISTS null_bi"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Multiple triggers on same event (execution order)
+  # =====================================================
+
+  - name: "Clean up for multiple triggers test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE first BEFORE INSERT trigger (adds 100)"
+    sql: "CREATE TRIGGER multi1_bi BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = NEW.val + 100"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE second BEFORE INSERT trigger (doubles)"
+    sql: "CREATE TRIGGER multi2_bi BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = NEW.val * 2"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT fires both triggers sequentially"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1300, 5, 'multi_trigger')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify both triggers applied (5+100=105, 105*2=210)"
+    sql: "SELECT val FROM trigger_test WHERE id = 1300"
+    expect:
+      rows: 1
+      data:
+        - val: 210
+
+  - name: "DROP first multi trigger"
+    sql: "DROP TRIGGER IF EXISTS multi1_bi"
+    expect:
+      affected_rows: 0
+
+  - name: "DROP second multi trigger"
+    sql: "DROP TRIGGER IF EXISTS multi2_bi"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # BEFORE UPDATE trigger with multi-row UPDATE
+  # =====================================================
+
+  - name: "Clean up for multi-row BEFORE UPDATE"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert rows for multi-row BEFORE UPDATE"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1400, 10, 'mr1'), (1401, 20, 'mr2'), (1402, 30, 'mr3')"
+    expect:
+      affected_rows: 3
+
+  - name: "CREATE BEFORE UPDATE trigger for multi-row"
+    sql: "CREATE TRIGGER mr_bu BEFORE UPDATE ON trigger_test FOR EACH ROW SET NEW.val = OLD.val + NEW.val"
+    expect:
+      affected_rows: 0
+
+  - name: "Multi-row UPDATE fires BEFORE UPDATE for each row"
+    sql: "UPDATE trigger_test SET val = 5"
+    expect:
+      affected_rows: 3
+
+  - name: "Verify trigger added OLD.val + NEW.val for each row"
+    sql: "SELECT id, val FROM trigger_test ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1400, val: 15 }
+        - { id: 1401, val: 25 }
+        - { id: 1402, val: 35 }
+
+  - name: "DROP multi-row BEFORE UPDATE trigger"
+    sql: "DROP TRIGGER IF EXISTS mr_bu"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # BEFORE DELETE with AFTER DELETE on same table
+  # =====================================================
+
+  - name: "Clean up for combined DELETE triggers"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for combined DELETE"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert rows for combined DELETE triggers"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1500, 55, 'combo_del')"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE BEFORE DELETE trigger for combined test"
+    sql: "CREATE TRIGGER combo_bd BEFORE DELETE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'combo_before', OLD.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE AFTER DELETE trigger for combined test"
+    sql: "CREATE TRIGGER combo_ad AFTER DELETE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'combo_after', OLD.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "DELETE fires both BEFORE and AFTER DELETE"
+    sql: "DELETE FROM trigger_test WHERE id = 1500"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEFORE DELETE logged"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_log WHERE action = 'combo_before' AND id = 1500"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Verify AFTER DELETE logged"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_log WHERE action = 'combo_after' AND id = 1500"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "DROP combined BEFORE DELETE trigger"
+    sql: "DROP TRIGGER IF EXISTS combo_bd"
+    expect:
+      affected_rows: 0
+
+  - name: "DROP combined AFTER DELETE trigger"
+    sql: "DROP TRIGGER IF EXISTS combo_ad"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # BEFORE INSERT + AFTER INSERT combined on same table
+  # =====================================================
+
+  - name: "Clean up for combined INSERT triggers"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for combined INSERT"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE BEFORE INSERT that doubles val"
+    sql: "CREATE TRIGGER combo_bi BEFORE INSERT ON trigger_test FOR EACH ROW SET NEW.val = NEW.val * 2"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE AFTER INSERT that logs the final value"
+    sql: "CREATE TRIGGER combo_ai AFTER INSERT ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, new_val) VALUES (NEW.id, 'combo_after_ins', NEW.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT fires BEFORE then AFTER trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1600, 25, 'combo_ins')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEFORE INSERT doubled the value"
+    sql: "SELECT val FROM trigger_test WHERE id = 1600"
+    expect:
+      data:
+        - val: 50
+
+  - name: "Verify AFTER INSERT logged the doubled value"
+    sql: "SELECT new_val FROM trigger_log WHERE action = 'combo_after_ins' AND id = 1600"
+    expect:
+      rows: 1
+      data:
+        - new_val: 50
+
+  - name: "DROP combined BEFORE INSERT trigger"
+    sql: "DROP TRIGGER IF EXISTS combo_bi"
+    expect:
+      affected_rows: 0
+
+  - name: "DROP combined AFTER INSERT trigger"
+    sql: "DROP TRIGGER IF EXISTS combo_ai"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # BEFORE UPDATE + AFTER UPDATE combined on same table
+  # =====================================================
+
+  - name: "Clean up for combined UPDATE triggers"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for combined UPDATE"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert row for combined UPDATE triggers"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1700, 10, 'combo_upd')"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE BEFORE UPDATE that triples val"
+    sql: "CREATE TRIGGER combo_bu BEFORE UPDATE ON trigger_test FOR EACH ROW SET NEW.val = NEW.val * 3"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE AFTER UPDATE that logs OLD and NEW"
+    sql: "CREATE TRIGGER combo_au AFTER UPDATE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val, new_val) VALUES (OLD.id, 'combo_after_upd', OLD.val, NEW.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "UPDATE fires BEFORE then AFTER UPDATE"
+    sql: "UPDATE trigger_test SET val = 7 WHERE id = 1700"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEFORE UPDATE tripled the value"
+    sql: "SELECT val FROM trigger_test WHERE id = 1700"
+    expect:
+      data:
+        - val: 21
+
+  - name: "Verify AFTER UPDATE logged OLD=10, NEW=21"
+    sql: "SELECT old_val, new_val FROM trigger_log WHERE action = 'combo_after_upd' AND id = 1700"
+    expect:
+      rows: 1
+      data:
+        - { old_val: 10, new_val: 21 }
+
+  - name: "DROP combined BEFORE UPDATE trigger"
+    sql: "DROP TRIGGER IF EXISTS combo_bu"
+    expect:
+      affected_rows: 0
+
+  - name: "DROP combined AFTER UPDATE trigger"
+    sql: "DROP TRIGGER IF EXISTS combo_au"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # DELETE with no matching rows (trigger should NOT fire)
+  # =====================================================
+
+  - name: "Clean up for no-match DELETE test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for no-match test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE BEFORE DELETE trigger for no-match test"
+    sql: "CREATE TRIGGER nomatch_bd BEFORE DELETE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, old_val) VALUES (OLD.id, 'nomatch', OLD.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "DELETE with no matching rows does not fire trigger"
+    sql: "DELETE FROM trigger_test WHERE id = 99999"
+    expect:
+      affected_rows: 0
+
+  - name: "Verify trigger did NOT fire"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_log WHERE action = 'nomatch'"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "DROP no-match BEFORE DELETE trigger"
+    sql: "DROP TRIGGER IF EXISTS nomatch_bd"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # UPDATE with no matching rows (trigger should NOT fire)
+  # =====================================================
+
+  - name: "Clear trigger_log for no-match UPDATE test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE AFTER UPDATE trigger for no-match test"
+    sql: "CREATE TRIGGER nomatch_au AFTER UPDATE ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, new_val) VALUES (NEW.id, 'nomatch_upd', NEW.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "UPDATE with no matching rows does not fire trigger"
+    sql: "UPDATE trigger_test SET val = 999 WHERE id = 99999"
+    expect:
+      affected_rows: 0
+
+  - name: "Verify AFTER UPDATE trigger did NOT fire"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_log WHERE action = 'nomatch_upd'"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "DROP no-match AFTER UPDATE trigger"
+    sql: "DROP TRIGGER IF EXISTS nomatch_au"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Error cases: DROP TRIGGER that doesn't exist
+  # =====================================================
+
+  - name: "DROP TRIGGER without IF EXISTS on non-existent trigger"
+    sql: "DROP TRIGGER nonexistent_trigger_xyz"
+    expect:
+      error: true
+
+  # =====================================================
+  # Trigger on NOT NULL column: BEFORE INSERT trigger
+  # that violates constraint should error
+  # =====================================================
+
+  - name: "Create table with NOT NULL for trigger error test"
+    sql: "CREATE TABLE trigger_nn (id INT, val INT NOT NULL)"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE BEFORE INSERT trigger that sets NOT NULL col to NULL"
+    sql: "CREATE TRIGGER nn_violate BEFORE INSERT ON trigger_nn FOR EACH ROW SET NEW.val = NULL"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT into NOT NULL col where trigger sets NULL should error"
+    noncritical: true
+    sql: "INSERT INTO trigger_nn (id, val) VALUES (1, 42)"
+    expect:
+      error: true
+
+  - name: "DROP NOT NULL violation trigger"
+    sql: "DROP TRIGGER IF EXISTS nn_violate"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop NOT NULL test table"
+    sql: "DROP TABLE IF EXISTS trigger_nn"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Trigger on table with BEFORE INSERT + INSERT IGNORE
+  # where trigger modifies value but PK collision
+  # =====================================================
+
+  - name: "Create PK table for INSERT IGNORE multi-trigger test"
+    sql: "CREATE TABLE trigger_ign2 (id INT PRIMARY KEY, val INT, tag VARCHAR(20))"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE BEFORE INSERT trigger that adds 500"
+    sql: "CREATE TRIGGER ign2_bi BEFORE INSERT ON trigger_ign2 FOR EACH ROW SET NEW.val = NEW.val + 500"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert initial rows"
+    sql: "INSERT INTO trigger_ign2 (id, val, tag) VALUES (1, 10, 'first'), (2, 20, 'second')"
+    expect:
+      affected_rows: 2
+
+  - name: "Verify initial rows have trigger-modified values"
+    sql: "SELECT id, val FROM trigger_ign2 ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { id: 1, val: 510 }
+        - { id: 2, val: 520 }
+
+  - name: "INSERT IGNORE batch with some collisions"
+    sql: "INSERT IGNORE INTO trigger_ign2 (id, val, tag) VALUES (2, 30, 'dup'), (3, 40, 'new1'), (1, 50, 'dup2'), (4, 60, 'new2')"
+    expect:
+      affected_rows: 2
+
+  - name: "Verify collisions skipped, new rows have trigger values"
+    sql: "SELECT id, val, tag FROM trigger_ign2 ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - { id: 1, val: 510, tag: "first" }
+        - { id: 2, val: 520, tag: "second" }
+        - { id: 3, val: 540, tag: "new1" }
+        - { id: 4, val: 560, tag: "new2" }
+
+  - name: "DROP INSERT IGNORE multi trigger"
+    sql: "DROP TRIGGER IF EXISTS ign2_bi"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop INSERT IGNORE multi test table"
+    sql: "DROP TABLE IF EXISTS trigger_ign2"
+    expect:
+      affected_rows: 0
