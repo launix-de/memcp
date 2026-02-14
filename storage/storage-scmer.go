@@ -25,14 +25,19 @@ import "github.com/launix-de/memcp/scm"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
 type StorageSCMER struct {
-	values       []scm.Scmer
-	onlyInt      bool
-	onlyFloat    bool
+	values      []scm.Scmer
+	minIntScale int8 // power-of-ten exponent of finest granularity
+	//   0 = pure ints, -2 = 2 decimal places, 2 = multiples of 100
+	//   math.MinInt8 = not representable as scaled int
 	hasString    bool
 	longStrings  int
 	null         uint  // amount of NULL values (sparse map!)
 	numSeq       uint  // sequence statistics
 	last1, last2 int64 // sequence statistics
+
+	// enum detection: collect up to enumMaxSymbols distinct values
+	enumVals [enumMaxSymbols]scm.Scmer
+	enumK    uint8 // number of distinct values seen so far (0xFF = abandoned)
 }
 
 func (s *StorageSCMER) ComputeSize() uint {
@@ -80,6 +85,25 @@ func (s *StorageSCMER) GetValue(i uint) scm.Scmer {
 }
 
 func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
+	// enum detection: track up to enumMaxSymbols distinct values
+	if s.enumK != 0xFF {
+		found := false
+		for j := uint8(0); j < s.enumK; j++ {
+			if scm.Equal(s.enumVals[j], value) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if s.enumK < enumMaxSymbols {
+				s.enumVals[s.enumK] = value
+				s.enumK++
+			} else {
+				s.enumK = 0xFF // abandon enum tracking
+			}
+		}
+	}
+
 	if value.IsNil() {
 		s.null++
 		return
@@ -95,6 +119,13 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 	}
 	if value.IsInt() {
 		v2 := value.Int()
+		// scale detection: only if not yet abandoned
+		if s.minIntScale > math.MinInt8 {
+			exp := trailingZeroPow10(v2)
+			if exp < s.minIntScale {
+				s.minIntScale = exp
+			}
+		}
 		if v2-s.last1 == s.last1-s.last2 {
 			s.numSeq++
 		}
@@ -104,9 +135,15 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 	}
 	if value.IsFloat() {
 		f := value.Float()
-		if _, frac := math.Modf(f); frac != 0.0 {
-			s.onlyInt = false
-		} else {
+		// scale detection: only if not yet abandoned
+		if s.minIntScale > math.MinInt8 {
+			exp := detectFloatScale(f)
+			if exp < s.minIntScale {
+				s.minIntScale = exp
+			}
+		}
+		// sequence statistics for integer-valued floats
+		if _, frac := math.Modf(f); frac == 0.0 {
 			v := int64(f)
 			if v-s.last1 == s.last1-s.last2 {
 				s.numSeq++
@@ -116,21 +153,19 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 		}
 		return
 	}
-	s.onlyInt = false
+	// non-numeric → no integer scaling possible
+	s.minIntScale = math.MinInt8
 	if value.IsString() {
-		s.onlyFloat = false
 		s.hasString = true
 		if len(value.String()) > 255 {
 			s.longStrings++
 		}
-	} else {
-		s.onlyFloat = false
 	}
 }
 func (s *StorageSCMER) prepare() {
-	s.onlyInt = true
-	s.onlyFloat = true
+	s.minIntScale = math.MaxInt8 // neutral, gets driven down by scan
 	s.hasString = false
+	s.enumK = 0
 }
 func (s *StorageSCMER) init(i uint) {
 	// allocate
@@ -154,6 +189,10 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 		}
 		return new(StorageSparse)
 	}
+	// enum detection: if <=8 distinct values and not abandoned, propose StorageEnum
+	if s.enumK != 0xFF && s.enumK >= 2 && i > 0 {
+		return new(StorageEnum)
+	}
 	if s.hasString {
 		if s.longStrings > 2 {
 			b := new(OverlayBlob)
@@ -162,21 +201,26 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 		}
 		return new(StorageString)
 	}
-	if s.onlyInt { // TODO: OverlaySCMER?
-		// propose sequence compression in the form (recordid, startvalue, length, stride) using binary search on recordid for reading
-		if i > 5 && 2*(i-s.numSeq) < i {
-			return new(StorageSeq)
+	// scalable numerics (replaces onlyInt and onlyFloat)
+	if s.minIntScale > math.MinInt8 {
+		if s.minIntScale == 0 {
+			// pure integers
+			if i > 5 && 2*(i-s.numSeq) < i {
+				return new(StorageSeq)
+			}
+			return new(StorageInt)
 		}
-		return new(StorageInt)
+		// scaled integers: multiples of 10^n or decimal places
+		return &StorageDecimal{scaleExp: s.minIntScale}
 	}
-	if s.onlyFloat {
-		// tight float packing
+	// arbitrary floats (minIntScale == MinInt8 && !hasString)
+	if !s.hasString {
 		return new(StorageFloat)
 	}
 	if s.null*2 > i {
 		// sparse payoff against StorageSCMER is at 2.1
 		return new(StorageSparse)
 	}
-	// dont't propose another pass
+	// don't propose another pass
 	return nil
 }

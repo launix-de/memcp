@@ -181,8 +181,10 @@ func (t *table) dictToRow(dict scm.Scmer, columns []string) dataset {
 	return row
 }
 
-// ExecuteTriggers executes all triggers for a specific timing (AFTER triggers)
-// oldRow is nil for INSERT, newRow is nil for DELETE
+// ExecuteTriggers executes all triggers for a specific timing (AFTER triggers).
+// oldRow is nil for INSERT, newRow is nil for DELETE.
+// If a transaction is active, a savepoint is created before each trigger;
+// on panic the savepoint is rolled back before re-panicking.
 func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 	triggers := t.GetTriggers(timing)
 	for _, tr := range triggers {
@@ -200,9 +202,25 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 			oldDict = t.rowToDict(oldRow)
 			newDict = t.rowToDict(newRow)
 		}
-		// Execute trigger with (OLD NEW) arguments
-		// OLD and NEW are dicts: {"col1": val1, "col2": val2, ...}
-		scm.Apply(tr.Func, oldDict, newDict)
+		// Execute trigger with savepoint for proper rollback
+		func() {
+			tx := CurrentTx()
+			var sp Savepoint
+			hasSavepoint := false
+			if tx != nil {
+				sp = tx.CreateSavepoint()
+				hasSavepoint = true
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					if hasSavepoint {
+						tx.RollbackToSavepoint(sp)
+					}
+					panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
+				}
+			}()
+			scm.Apply(tr.Func, oldDict, newDict)
+		}()
 	}
 }
 
@@ -220,40 +238,90 @@ func (t *table) rowToDictWithColumns(row dataset, columns []string) scm.Scmer {
 	return scm.NewFastDict(fd)
 }
 
-// ExecuteBeforeInsertTriggers executes BEFORE INSERT triggers and returns modified rows
-// The trigger function can modify NEW values by returning a modified dict
-func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer) [][]scm.Scmer {
+// ExecuteBeforeInsertTriggers executes BEFORE INSERT triggers and returns modified rows.
+// The trigger function can modify NEW values by returning a modified dict.
+// When isIgnore is true, rows whose triggers panic are silently skipped
+// and any partial transaction effects are rolled back via savepoints.
+// When isIgnore is false, trigger panics propagate to the caller.
+func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer, isIgnore bool) [][]scm.Scmer {
 	triggers := t.GetTriggers(BeforeInsert)
 	if len(triggers) == 0 {
 		return values
 	}
 
-	result := make([][]scm.Scmer, len(values))
-	for i, row := range values {
+	result := make([][]scm.Scmer, 0, len(values))
+	for _, row := range values {
 		// Build dict using the columns that are being inserted
 		newDict := t.rowToDictWithColumns(row, columns)
+		triggerOk := true
 		// Execute all BEFORE INSERT triggers, each can modify NEW
 		for _, tr := range triggers {
 			if tr.Func.IsNil() {
 				continue
 			}
-			// Trigger receives (OLD NEW), OLD is nil for INSERT
-			returned := scm.Apply(tr.Func, scm.NewNil(), newDict)
-			// If trigger returns a dict, use it as the new NEW
-			if !returned.IsNil() && returned.IsFastDict() {
-				newDict = returned
+			if isIgnore {
+				// Per-row savepoint + panic recovery for INSERT IGNORE
+				func() {
+					tx := CurrentTx()
+					var sp Savepoint
+					hasSavepoint := false
+					if tx != nil {
+						sp = tx.CreateSavepoint()
+						hasSavepoint = true
+					}
+					defer func() {
+						if r := recover(); r != nil {
+							if hasSavepoint {
+								tx.RollbackToSavepoint(sp)
+							}
+							triggerOk = false
+						}
+					}()
+					returned := scm.Apply(tr.Func, scm.NewNil(), newDict)
+					if !returned.IsNil() && returned.IsFastDict() {
+						newDict = returned
+					}
+				}()
+				if !triggerOk {
+					break
+				}
+			} else {
+				// Normal mode: savepoint for proper rollback on propagated panic
+				func() {
+					tx := CurrentTx()
+					var sp Savepoint
+					hasSavepoint := false
+					if tx != nil {
+						sp = tx.CreateSavepoint()
+						hasSavepoint = true
+					}
+					defer func() {
+						if r := recover(); r != nil {
+							if hasSavepoint {
+								tx.RollbackToSavepoint(sp)
+							}
+							panic(fmt.Sprintf("trigger %s (BEFORE INSERT) on %s failed: %v", tr.Name, t.Name, r))
+						}
+					}()
+					returned := scm.Apply(tr.Func, scm.NewNil(), newDict)
+					if !returned.IsNil() && returned.IsFastDict() {
+						newDict = returned
+					}
+				}()
 			}
 		}
-		// Convert modified dict back to row using same columns
-		result[i] = t.dictToRow(newDict, columns)
+		if triggerOk {
+			// Convert modified dict back to row using same columns
+			result = append(result, t.dictToRow(newDict, columns))
+		}
 	}
 	return result
 }
 
-// ExecuteBeforeUpdateTriggers executes BEFORE UPDATE triggers
+// ExecuteBeforeUpdateTriggers executes BEFORE UPDATE triggers.
 // oldRow: the current row values (all columns in table order)
 // newRow: the row with changes applied (all columns in table order)
-// Returns the modified newRow
+// Returns the modified newRow. Panics from triggers propagate to the caller.
 func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset) dataset {
 	triggers := t.GetTriggers(BeforeUpdate)
 	if len(triggers) == 0 {
@@ -274,21 +342,37 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset) dataset {
 		if tr.Func.IsNil() {
 			continue
 		}
-		// Trigger receives (OLD NEW)
-		returned := scm.Apply(tr.Func, oldDict, newDict)
-		// If trigger returns a dict (FastDict or assoc slice), use it as the new NEW
-		if !returned.IsNil() && (returned.IsFastDict() || returned.IsSlice()) {
-			newDict = returned
-		}
+		func() {
+			tx := CurrentTx()
+			var sp Savepoint
+			hasSavepoint := false
+			if tx != nil {
+				sp = tx.CreateSavepoint()
+				hasSavepoint = true
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					if hasSavepoint {
+						tx.RollbackToSavepoint(sp)
+					}
+					panic(fmt.Sprintf("trigger %s (BEFORE UPDATE) on %s failed: %v", tr.Name, t.Name, r))
+				}
+			}()
+			returned := scm.Apply(tr.Func, oldDict, newDict)
+			if !returned.IsNil() && (returned.IsFastDict() || returned.IsSlice()) {
+				newDict = returned
+			}
+		}()
 	}
 
 	// Convert modified dict back to row
 	return t.dictToRow(newDict, columns)
 }
 
-// ExecuteBeforeDeleteTriggers executes BEFORE DELETE triggers
+// ExecuteBeforeDeleteTriggers executes BEFORE DELETE triggers.
 // oldRow: the row being deleted (all columns in table order)
-// Returns true if delete should proceed, false to abort
+// Returns true if delete should proceed, false to abort.
+// Panics from triggers propagate to the caller.
 func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset) bool {
 	triggers := t.GetTriggers(BeforeDelete)
 	if len(triggers) == 0 {
@@ -308,8 +392,25 @@ func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset) bool {
 		if tr.Func.IsNil() {
 			continue
 		}
-		// Trigger receives (OLD nil) for DELETE
-		returned := scm.Apply(tr.Func, oldDict, scm.NewNil())
+		var returned scm.Scmer
+		func() {
+			tx := CurrentTx()
+			var sp Savepoint
+			hasSavepoint := false
+			if tx != nil {
+				sp = tx.CreateSavepoint()
+				hasSavepoint = true
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					if hasSavepoint {
+						tx.RollbackToSavepoint(sp)
+					}
+					panic(fmt.Sprintf("trigger %s (BEFORE DELETE) on %s failed: %v", tr.Name, t.Name, r))
+				}
+			}()
+			returned = scm.Apply(tr.Func, oldDict, scm.NewNil())
+		}()
 		// If trigger returns false/nil, abort delete
 		if returned.IsNil() || (returned.IsBool() && !scm.ToBool(returned)) {
 			return false

@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "math"
 import "sync"
 import "errors"
 import "strings"
@@ -316,6 +317,11 @@ func (c *column) UpdateSanitizer() {
 				}
 				return scm.NewInt(int64(f - 0.5))
 			}
+			if len(dims) >= 2 && dims[1] > 0 {
+				// DECIMAL(n,s) → round to s decimal places
+				mult := math.Pow(10, float64(dims[1]))
+				return scm.NewFloat(math.Round(f*mult) / mult)
+			}
 			return scm.NewFloat(f)
 		}
 	case "DATE", "DATETIME", "TIMESTAMP":
@@ -533,6 +539,7 @@ func (t *table) DropColumn(name string) bool {
 
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64)) int {
 	result := 0
+	isIgnore := !onCollision.IsNil() // INSERT IGNORE or ON DUPLICATE KEY UPDATE
 	// TODO: check foreign keys (new value of column must be present in referenced table)
 
 	// sanitize values
@@ -588,7 +595,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			// check unique constraints in a thread safe manner
 			if len(t.Unique) > 0 {
 				t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
-					shard.Insert(columns, chunk, false, onFirstInsertId)
+					shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore)
 					result += len(chunk)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 					if !onCollision.IsNil() {
@@ -617,7 +624,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				}, 0)
 			} else {
 				// physically insert (no unique constraints)
-				shard.Insert(columns, chunk, false, onFirstInsertId)
+				shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore)
 				result += len(chunk)
 			}
 			release()
@@ -645,7 +652,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer) {
 					// physically insert
-					s.Insert(columns, values, false, onFirstInsertId)
+					s.Insert(columns, values, false, onFirstInsertId, isIgnore)
 					result += len(values)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 					if !onCollision.IsNil() {
@@ -671,7 +678,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				}, 0)
 			} else {
 				// physically insert (parallel)
-				s.Insert(columns, values, false, onFirstInsertId)
+				s.Insert(columns, values, false, onFirstInsertId, isIgnore)
 				result += len(values)
 			}
 		}

@@ -530,3 +530,137 @@ test_cases:
     sql: "DROP TRIGGER IF EXISTS persist_bu"
     expect:
       affected_rows: 0
+
+  # --- Trigger + INSERT IGNORE interaction ---
+  - name: "Create table with PK for INSERT IGNORE trigger test"
+    sql: "CREATE TABLE trigger_ignore_t (id INT PRIMARY KEY, val INT, name VARCHAR(50))"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE BEFORE INSERT trigger on PK table"
+    sql: "CREATE TRIGGER ignore_bi BEFORE INSERT ON trigger_ignore_t FOR EACH ROW SET NEW.val = NEW.val + 1000"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert base row for PK conflict"
+    sql: "INSERT INTO trigger_ignore_t (id, val, name) VALUES (600, 1, 'base')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify base row has trigger-modified value"
+    sql: "SELECT val FROM trigger_ignore_t WHERE id = 600"
+    expect:
+      data:
+        - val: 1001
+
+  - name: "INSERT IGNORE with PK conflict skips duplicate"
+    sql: "INSERT IGNORE INTO trigger_ignore_t (id, val, name) VALUES (600, 2, 'dup'), (601, 3, 'new')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify original row unchanged and new row has trigger value"
+    sql: "SELECT id, val FROM trigger_ignore_t WHERE id IN (600, 601) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { id: 600, val: 1001 }
+        - { id: 601, val: 1003 }
+
+  - name: "DROP INSERT IGNORE trigger"
+    sql: "DROP TRIGGER IF EXISTS ignore_bi"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop INSERT IGNORE test table"
+    sql: "DROP TABLE IF EXISTS trigger_ignore_t"
+    expect:
+      affected_rows: 0
+
+  # --- AFTER INSERT trigger: insert into another table ---
+  - name: "Clean up for AFTER INSERT cross-table trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for cross-table test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE AFTER INSERT trigger that logs to another table"
+    sql: "CREATE TRIGGER after_ins_cross AFTER INSERT ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, new_val) VALUES (NEW.id, 'cross_insert', NEW.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert row triggers cross-table AFTER INSERT"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (700, 42, 'cross_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify AFTER INSERT logged to trigger_log"
+    sql: "SELECT id, action, new_val FROM trigger_log WHERE id = 700"
+    expect:
+      rows: 1
+      data:
+        - { id: 700, action: "cross_insert", new_val: 42 }
+
+  - name: "Insert multiple rows, each triggers cross-table log"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (701, 10, 'multi1'), (702, 20, 'multi2')"
+    expect:
+      affected_rows: 2
+
+  - name: "Verify multiple AFTER INSERT log entries"
+    sql: "SELECT id, action, new_val FROM trigger_log WHERE id IN (701, 702) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { id: 701, action: "cross_insert", new_val: 10 }
+        - { id: 702, action: "cross_insert", new_val: 20 }
+
+  - name: "DROP cross-table AFTER INSERT trigger"
+    sql: "DROP TRIGGER IF EXISTS after_ins_cross"
+    expect:
+      affected_rows: 0
+
+  # --- BEFORE UPDATE trigger with complex modification ---
+  - name: "Clean up for complex BEFORE UPDATE test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert rows for complex UPDATE trigger test"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (800, 50, 'test1'), (801, 100, 'test2')"
+    expect:
+      affected_rows: 2
+
+  - name: "CREATE BEFORE UPDATE trigger with IF condition"
+    sql: "CREATE TRIGGER guard_update BEFORE UPDATE ON trigger_test FOR EACH ROW BEGIN IF NEW.val > 1000 THEN SET NEW.val = 1000; END IF; END"
+    expect:
+      affected_rows: 0
+
+  - name: "UPDATE within limit passes through"
+    sql: "UPDATE trigger_test SET val = 500 WHERE id = 800"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify within-limit UPDATE"
+    sql: "SELECT val FROM trigger_test WHERE id = 800"
+    expect:
+      data:
+        - val: 500
+
+  - name: "UPDATE exceeding limit gets capped by trigger"
+    sql: "UPDATE trigger_test SET val = 9999 WHERE id = 801"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify over-limit UPDATE was capped to 1000"
+    sql: "SELECT val FROM trigger_test WHERE id = 801"
+    expect:
+      data:
+        - val: 1000
+
+  - name: "DROP guard UPDATE trigger"
+    sql: "DROP TRIGGER IF EXISTS guard_update"
+    expect:
+      affected_rows: 0

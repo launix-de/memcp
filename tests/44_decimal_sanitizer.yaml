@@ -364,6 +364,130 @@ test_cases:
       data:
         - { price: 0.01 }
 
+  # === DECIMAL REBUILD VERIFICATION ===
+  # Insert enough rows to fill the column storage, then SHUTDOWN to force
+  # rebuild (compress via StorageDecimal). Readback verifies correct
+  # serialize/deserialize round-trip.
+
+  - name: "Create table for decimal rebuild test"
+    sql: "CREATE TABLE dec_rebuild (id INT, price DECIMAL(12,2), qty INT)"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert batch of decimal values for rebuild"
+    sql: |
+      INSERT INTO dec_rebuild (id, price, qty) VALUES
+        (1, 10.50, 100), (2, 20.75, 200), (3, 30.25, 300),
+        (4, 40.99, 400), (5, 50.01, 500), (6, 60.00, 600),
+        (7, 70.33, 700), (8, 80.80, 800), (9, 90.55, 900),
+        (10, 100.10, 1000), (11, -5.25, 11), (12, 0.01, 12),
+        (13, 999.99, 13), (14, 0.00, 14), (15, -100.50, 15)
+    expect:
+      affected_rows: 15
+
+  - name: "Verify pre-rebuild SUM"
+    sql: "SELECT SUM(price) AS total FROM dec_rebuild"
+    expect:
+      rows: 1
+
+  - name: "SHUTDOWN to force rebuild and persistence"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "After rebuild: readback all decimal values"
+    sql: "SELECT id, price, qty FROM dec_rebuild ORDER BY id"
+    expect:
+      rows: 15
+      data:
+        - { id: 1, price: 10.50, qty: 100 }
+        - { id: 2, price: 20.75, qty: 200 }
+        - { id: 3, price: 30.25, qty: 300 }
+        - { id: 4, price: 40.99, qty: 400 }
+        - { id: 5, price: 50.01, qty: 500 }
+        - { id: 6, price: 60.00, qty: 600 }
+        - { id: 7, price: 70.33, qty: 700 }
+        - { id: 8, price: 80.80, qty: 800 }
+        - { id: 9, price: 90.55, qty: 900 }
+        - { id: 10, price: 100.10, qty: 1000 }
+        - { id: 11, price: -5.25, qty: 11 }
+        - { id: 12, price: 0.01, qty: 12 }
+        - { id: 13, price: 999.99, qty: 13 }
+        - { id: 14, price: 0.00, qty: 14 }
+        - { id: 15, price: -100.50, qty: 15 }
+
+  - name: "After rebuild: verify SUM is correct"
+    sql: "SELECT SUM(price) AS total FROM dec_rebuild"
+    expect:
+      rows: 1
+
+  - name: "After rebuild: insert new row and readback"
+    sql: "INSERT INTO dec_rebuild (id, price, qty) VALUES (16, 42.42, 16)"
+    expect:
+      affected_rows: 1
+
+  - name: "After rebuild: readback new row"
+    sql: "SELECT price FROM dec_rebuild WHERE id = 16"
+    expect:
+      rows: 1
+      data:
+        - { price: 42.42 }
+
+  - name: "After rebuild: verify NULL handling"
+    sql: "INSERT INTO dec_rebuild (id, price, qty) VALUES (17, NULL, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "After rebuild: readback NULL values"
+    sql: "SELECT price, qty FROM dec_rebuild WHERE id = 17"
+    expect:
+      rows: 1
+      data:
+        - { price: null, qty: null }
+
+  # === INTEGER MULTIPLES OF 10 (positive scaleExp) ===
+
+  - name: "Create table for multiples-of-10 test"
+    sql: "CREATE TABLE dec_multiples (id INT, val INT)"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert multiples of 100"
+    sql: |
+      INSERT INTO dec_multiples (id, val) VALUES
+        (1, 100), (2, 200), (3, 300), (4, 400), (5, 500),
+        (6, 600), (7, 700), (8, 800), (9, 900), (10, 1000)
+    expect:
+      affected_rows: 10
+
+  - name: "SHUTDOWN to force rebuild of multiples column"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "After rebuild: readback multiples of 100"
+    sql: "SELECT id, val FROM dec_multiples ORDER BY id"
+    expect:
+      rows: 10
+      data:
+        - { id: 1, val: 100 }
+        - { id: 2, val: 200 }
+        - { id: 3, val: 300 }
+        - { id: 4, val: 400 }
+        - { id: 5, val: 500 }
+        - { id: 6, val: 600 }
+        - { id: 7, val: 700 }
+        - { id: 8, val: 800 }
+        - { id: 9, val: 900 }
+        - { id: 10, val: 1000 }
+
+  - name: "After rebuild: SUM of multiples"
+    sql: "SELECT SUM(val) AS total FROM dec_multiples"
+    expect:
+      rows: 1
+      data:
+        - { total: 5500 }
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS dec_basic"
   - sql: "DROP TABLE IF EXISTS dec_nn"
@@ -373,3 +497,5 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS vc_strict"
   - sql: "DROP TABLE IF EXISTS mixed_col"
   - sql: "DROP TABLE IF EXISTS dec_scale0"
+  - sql: "DROP TABLE IF EXISTS dec_rebuild"
+  - sql: "DROP TABLE IF EXISTS dec_multiples"

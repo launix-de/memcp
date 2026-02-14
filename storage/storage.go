@@ -56,10 +56,12 @@ var storages = map[uint8]reflect.Type{
 	10: reflect.TypeOf(StorageInt{}),
 	11: reflect.TypeOf(StorageSeq{}),
 	12: reflect.TypeOf(StorageFloat{}),
+	13: reflect.TypeOf(StorageDecimal{}),
 	20: reflect.TypeOf(StorageString{}),
 	21: reflect.TypeOf(StoragePrefix{}),
 	//30: reflect.TypeOf(OverlaySCMER{}),
 	31: reflect.TypeOf(OverlayBlob{}),
+	40: reflect.TypeOf(StorageEnum{}),
 }
 
 func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {

@@ -545,10 +545,13 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 	}
 }
 
-func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64)) {
-	// Execute BEFORE INSERT triggers (can modify values)
+func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) {
+	// Execute BEFORE INSERT triggers (can modify values; isIgnore skips failing rows)
 	if len(t.t.Triggers) > 0 {
-		values = t.t.ExecuteBeforeInsertTriggers(columns, values)
+		values = t.t.ExecuteBeforeInsertTriggers(columns, values, isIgnore)
+		if len(values) == 0 {
+			return // all rows skipped by triggers
+		}
 	}
 
 	if !alreadyLocked {
@@ -562,7 +565,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	}
 	if t.next != nil {
 		// also insert into next storage
-		t.next.Insert(columns, values, false, nil)
+		t.next.Insert(columns, values, false, nil, false)
 	}
 	if !alreadyLocked {
 		t.mu.Unlock()

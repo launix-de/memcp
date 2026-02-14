@@ -35,7 +35,7 @@ const (
 type TxState uint8
 
 const (
-	TxActive    TxState = iota
+	TxActive TxState = iota
 	TxCommitted
 	TxAborted
 )
@@ -74,6 +74,15 @@ func (o *shardOverlay) Add(recid uint) {
 // Has checks whether a recid is in this overlay (O(1) via bitmap).
 func (o *shardOverlay) Has(recid uint) bool {
 	return o.Bitmap.Get(recid)
+}
+
+// Savepoint captures the state of a transaction at a point in time.
+// Used for nested transactions (trigger recovery, savepoints).
+type Savepoint struct {
+	UndoLogLen       int                   // cursor-stability: UndoLog length at savepoint
+	DeleteMaskLens   map[*storageShard]int // ACID: Recids length per shard in DeleteMask
+	UndeleteMaskLens map[*storageShard]int // ACID: Recids length per shard in UndeleteMask
+	Depth            uint32                // nesting depth at creation
 }
 
 // global transaction ID counter
@@ -120,6 +129,83 @@ func NewTxContext(mode TxMode) *TxContext {
 		tx.UndeleteMask = make(map[*storageShard]*shardOverlay)
 	}
 	return tx
+}
+
+// CreateSavepoint captures the current transaction state for later rollback.
+func (tx *TxContext) CreateSavepoint() Savepoint {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	sp := Savepoint{Depth: tx.Depth}
+	tx.Depth++
+	switch tx.Mode {
+	case TxCursorStability:
+		sp.UndoLogLen = len(tx.UndoLog)
+	case TxACID:
+		sp.DeleteMaskLens = make(map[*storageShard]int, len(tx.DeleteMask))
+		for s, overlay := range tx.DeleteMask {
+			overlay.mu.Lock()
+			sp.DeleteMaskLens[s] = len(overlay.Recids)
+			overlay.mu.Unlock()
+		}
+		sp.UndeleteMaskLens = make(map[*storageShard]int, len(tx.UndeleteMask))
+		for s, overlay := range tx.UndeleteMask {
+			overlay.mu.Lock()
+			sp.UndeleteMaskLens[s] = len(overlay.Recids)
+			overlay.mu.Unlock()
+		}
+	}
+	return sp
+}
+
+// RollbackToSavepoint undoes all changes made since the savepoint was created.
+func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.Depth = sp.Depth
+	switch tx.Mode {
+	case TxCursorStability:
+		// Replay undo entries from current position back to savepoint
+		for i := len(tx.UndoLog) - 1; i >= sp.UndoLogLen; i-- {
+			entry := tx.UndoLog[i]
+			entry.Shard.mu.Lock()
+			switch entry.Type {
+			case UndoInsert:
+				entry.Shard.deletions.Set(entry.RowIndex, true)
+				if entry.Shard.logfile != nil {
+					entry.Shard.logfile.Write(LogEntryDelete{entry.RowIndex})
+				}
+			case UndoDelete:
+				entry.Shard.deletions.Set(entry.RowIndex, false)
+			}
+			entry.Shard.mu.Unlock()
+		}
+		tx.UndoLog = tx.UndoLog[:sp.UndoLogLen]
+	case TxACID:
+		// Rollback DeleteMask entries added since savepoint
+		for shard, overlay := range tx.DeleteMask {
+			savedLen := sp.DeleteMaskLens[shard] // 0 if shard was new
+			overlay.mu.Lock()
+			for i := len(overlay.Recids) - 1; i >= savedLen; i-- {
+				recid := overlay.Recids[i]
+				overlay.Bitmap.Set(recid, false)
+			}
+			overlay.Recids = overlay.Recids[:savedLen]
+			overlay.mu.Unlock()
+		}
+		// Rollback UndeleteMask entries added since savepoint
+		for shard, overlay := range tx.UndeleteMask {
+			savedLen := sp.UndeleteMaskLens[shard] // 0 if shard was new
+			overlay.mu.Lock()
+			for i := len(overlay.Recids) - 1; i >= savedLen; i-- {
+				recid := overlay.Recids[i]
+				overlay.Bitmap.Set(recid, false)
+				// Re-hide the row globally (it was un-hidden by AddToUndeleteMask)
+				shard.deletions.Set(recid, true)
+			}
+			overlay.Recids = overlay.Recids[:savedLen]
+			overlay.mu.Unlock()
+		}
+	}
 }
 
 // LogInsert records that a row was inserted; on rollback it will be deleted.
