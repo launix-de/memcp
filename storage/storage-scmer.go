@@ -36,8 +36,9 @@ type StorageSCMER struct {
 	last1, last2 int64 // sequence statistics
 
 	// enum detection: collect up to enumMaxSymbols distinct values
-	enumVals [enumMaxSymbols]scm.Scmer
-	enumK    uint8 // number of distinct values seen so far (0xFF = abandoned)
+	enumVals  [enumMaxSymbols]scm.Scmer
+	enumFreqs [enumMaxSymbols]uint64
+	enumK     uint8 // number of distinct values seen so far (0xFF = abandoned)
 }
 
 func (s *StorageSCMER) ComputeSize() uint {
@@ -85,11 +86,12 @@ func (s *StorageSCMER) GetValue(i uint) scm.Scmer {
 }
 
 func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
-	// enum detection: track up to enumMaxSymbols distinct values
+	// enum detection: track up to enumMaxSymbols distinct values with frequencies
 	if s.enumK != 0xFF {
 		found := false
 		for j := uint8(0); j < s.enumK; j++ {
 			if scm.Equal(s.enumVals[j], value) {
+				s.enumFreqs[j]++
 				found = true
 				break
 			}
@@ -97,6 +99,7 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 		if !found {
 			if s.enumK < enumMaxSymbols {
 				s.enumVals[s.enumK] = value
+				s.enumFreqs[s.enumK] = 1
 				s.enumK++
 			} else {
 				s.enumK = 0xFF // abandon enum tracking
@@ -190,8 +193,23 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 		return new(StorageSparse)
 	}
 	// enum detection: if <=8 distinct values and not abandoned, propose StorageEnum
+	// but only when the distribution is skewed enough to beat PFOR's ceil(log2(k)) bits/element
 	if s.enumK != 0xFF && s.enumK >= 2 && i > 0 {
-		return new(StorageEnum)
+		// compute Shannon entropy in bits
+		n := float64(i)
+		entropy := 0.0
+		for j := uint8(0); j < s.enumK; j++ {
+			if s.enumFreqs[j] > 0 {
+				p := float64(s.enumFreqs[j]) / n
+				entropy -= p * math.Log2(p)
+			}
+		}
+		// PFOR cost: ceil(log2(k)) bits/element
+		pforBits := math.Ceil(math.Log2(float64(s.enumK)))
+		// only propose rANS when entropy is significantly below PFOR
+		if entropy < pforBits*0.8 {
+			return new(StorageEnum)
+		}
 	}
 	if s.hasString {
 		if s.longStrings > 2 {
