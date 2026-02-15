@@ -91,6 +91,8 @@ func (s *StorageSparse) Deserialize(f io.Reader) uint {
 	return uint(l)
 }
 
+func (s *StorageSparse) GetCachedReader() ColumnReader { return s }
+
 func (s *StorageSparse) GetValue(i uint) scm.Scmer {
 	var lower uint = 0
 	var upper uint = uint(s.i)

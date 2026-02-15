@@ -19,6 +19,7 @@ package storage
 import "io"
 import "fmt"
 import "encoding/binary"
+import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
 type StorageSeq struct {
@@ -29,10 +30,11 @@ type StorageSeq struct {
 	count    uint // number of values
 	seqCount uint // number of sequences
 
-	// analysis
-	lastValue, lastStride int64
-	lastValueNil          bool
-	lastValueFirst        bool
+	// analysis (lastValue also used as atomic pivot cache for concurrent GetValue)
+	lastValue      atomic.Int64
+	lastStride     int64
+	lastValueNil   bool
+	lastValueFirst bool
 }
 
 func (s *StorageSeq) ComputeSize() uint {
@@ -68,9 +70,11 @@ func (s *StorageSeq) Deserialize(f io.Reader) uint {
 	return uint(l)
 }
 
+func (s *StorageSeq) GetCachedReader() ColumnReader { return s }
+
 func (s *StorageSeq) GetValue(i uint) scm.Scmer {
 	// bisect to the correct index where to find (lowest idx to find our sequence)
-	pivot := uint(s.lastValue) // reuse lastValue field to cache last pivot
+	pivot := uint(s.lastValue.Load()) // atomic pivot cache for concurrent access
 	min := uint(0)
 	max := s.seqCount - 1
 	for {
@@ -100,7 +104,7 @@ func (s *StorageSeq) GetValue(i uint) scm.Scmer {
 	}
 
 	// remember match for next time
-	s.lastValue = int64(min)
+	s.lastValue.Store(int64(min))
 
 	var value, stride int64
 	value = int64(s.start.GetValueUInt(min)) + s.start.offset
@@ -144,16 +148,16 @@ func (s *StorageSeq) scan(i uint, value scm.Scmer) {
 		if s.lastValueFirst {
 			// learn stride from second value
 			s.lastValueFirst = false
-			s.lastStride = v - s.lastValue
-			s.lastValue = v
+			s.lastStride = v - s.lastValue.Load()
+			s.lastValue.Store(v)
 			s.stride.scan(s.seqCount-1, scm.NewInt(s.lastStride))
-		} else if i != 0 && v == s.lastValue+s.lastStride {
+		} else if i != 0 && v == s.lastValue.Load()+s.lastStride {
 			// sequence stays the same
-			s.lastValue = v
+			s.lastValue.Store(v)
 		} else {
 			// restart with new sequence
 			s.seqCount = s.seqCount + 1
-			s.lastValue = v
+			s.lastValue.Store(v)
 			s.lastValueFirst = true
 			s.lastValueNil = false
 			s.recordId.scan(s.seqCount-1, scm.NewInt(int64(i)))
@@ -165,7 +169,7 @@ func (s *StorageSeq) init(i uint) {
 	s.recordId.init(s.seqCount)
 	s.start.init(s.seqCount)
 	s.stride.init(s.seqCount)
-	s.lastValue = 0
+	s.lastValue.Store(0)
 	s.lastStride = 0
 	s.lastValueNil = false
 	s.lastValueFirst = false
@@ -198,16 +202,16 @@ func (s *StorageSeq) build(i uint, value scm.Scmer) {
 		if s.lastValueFirst {
 			// learn stride from second value
 			s.lastValueFirst = false
-			s.lastStride = v - s.lastValue
-			s.lastValue = v
+			s.lastStride = v - s.lastValue.Load()
+			s.lastValue.Store(v)
 			s.stride.build(s.seqCount-1, scm.NewInt(s.lastStride))
-		} else if i != 0 && v == s.lastValue+s.lastStride {
+		} else if i != 0 && v == s.lastValue.Load()+s.lastStride {
 			// sequence stays the same
-			s.lastValue = v
+			s.lastValue.Store(v)
 		} else {
 			// restart with new sequence
 			s.seqCount = s.seqCount + 1
-			s.lastValue = v
+			s.lastValue.Store(v)
 			s.lastValueFirst = true
 			s.lastValueNil = false
 			s.recordId.build(s.seqCount-1, scm.NewInt(int64(i)))
@@ -220,7 +224,7 @@ func (s *StorageSeq) finish() {
 	s.start.finish()
 	s.stride.finish()
 
-	s.lastValue = int64(s.seqCount / 2) // initialize pivot cache
+	s.lastValue.Store(int64(s.seqCount / 2)) // initialize pivot cache
 
 	/* debug output of the sequence:
 	for i := uint(0); i < s.seqCount; i++ {

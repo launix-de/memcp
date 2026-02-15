@@ -103,6 +103,8 @@ func (s *StorageDecimal) String() string {
 	return fmt.Sprintf("decimal[1e%d]", s.scaleExp)
 }
 
+func (s *StorageDecimal) GetCachedReader() ColumnReader { return s }
+
 func (s *StorageDecimal) GetValue(i uint) scm.Scmer {
 	raw := s.inner.GetValueUInt(i)
 	if s.inner.hasNull && raw == s.inner.null {

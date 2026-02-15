@@ -757,12 +757,10 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 				t.mu.RUnlock()
 				t.mu.Lock()
 				hm := make(map[[1]scm.Scmer]uint)
-				col := []ColumnStorage{
-					t.columns[columns[0]],
-				}
+				r0 := newCachedColumnReader(t.columns[columns[0]])
 				for i := uint(0); i < t.main_count; i++ {
 					hm[[1]scm.Scmer{
-						col[0].GetValue(i),
+						r0.GetValue(i),
 					}] = i
 				}
 				dcolids := []int{
@@ -788,14 +786,12 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 				t.mu.RUnlock()
 				t.mu.Lock()
 				hm := make(map[[2]scm.Scmer]uint)
-				col := []ColumnStorage{
-					t.columns[columns[0]],
-					t.columns[columns[1]],
-				}
+				r0 := newCachedColumnReader(t.columns[columns[0]])
+				r1 := newCachedColumnReader(t.columns[columns[1]])
 				for i := uint(0); i < t.main_count; i++ {
 					hm[[2]scm.Scmer{
-						col[0].GetValue(i),
-						col[1].GetValue(i),
+						r0.GetValue(i),
+						r1.GetValue(i),
 					}] = i
 				}
 				dcolids := []int{
@@ -823,16 +819,14 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 				t.mu.RUnlock()
 				t.mu.Lock()
 				hm := make(map[[3]scm.Scmer]uint)
-				col := []ColumnStorage{
-					t.columns[columns[0]],
-					t.columns[columns[1]],
-					t.columns[columns[2]],
-				}
+				r0 := newCachedColumnReader(t.columns[columns[0]])
+				r1 := newCachedColumnReader(t.columns[columns[1]])
+				r2 := newCachedColumnReader(t.columns[columns[2]])
 				for i := uint(0); i < t.main_count; i++ {
 					hm[[3]scm.Scmer{
-						col[0].GetValue(i),
-						col[1].GetValue(i),
-						col[2].GetValue(i),
+						r0.GetValue(i),
+						r1.GetValue(i),
+						r2.GetValue(i),
 					}] = i
 				}
 				dcolids := []int{
@@ -1054,9 +1048,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			}
 			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages
 			var i uint
+			var reader ColumnReader
 			for {
 				// scan phase
 				i = 0
+				reader = newCachedColumnReader(c) // fresh cached reader for each scan pass
 				newcol.prepare()
 				// scan main
 				for idx := uint(0); idx < t.main_count; idx++ {
@@ -1065,7 +1061,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 						continue
 					}
 					// scan
-					newcol.scan(i, c.GetValue(idx))
+					newcol.scan(i, reader.GetValue(idx))
 					i++
 				}
 				// scan delta
@@ -1093,6 +1089,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			}
 			newcol.init(i)
 			i = 0
+			reader = newCachedColumnReader(c) // fresh cached reader for build pass
 			// build main
 			for idx := uint(0); idx < t.main_count; idx++ {
 				// check for deletion
@@ -1100,7 +1097,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					continue
 				}
 				// build
-				newcol.build(i, c.GetValue(idx))
+				newcol.build(i, reader.GetValue(idx))
 				i++
 			}
 			// build delta

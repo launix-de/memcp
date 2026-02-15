@@ -95,6 +95,8 @@ func (s *StorageInt) String() string {
 	}
 }
 
+func (s *StorageInt) GetCachedReader() ColumnReader { return s }
+
 func (s *StorageInt) GetValue(i uint) scm.Scmer {
 	v := s.GetValueUInt(i)
 	if s.hasNull && v == s.null {

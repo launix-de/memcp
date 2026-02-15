@@ -566,8 +566,382 @@ test_cases:
       data:
         - cnt: 21
 
+  # === Enum with single distinct value (degenerate k=1) ===
+  - name: "Create single-value table"
+    sql: "CREATE TABLE se_single (id INT, val TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert 30 identical values"
+    scm: |
+      (begin
+        (set b (map (produceN 30) (lambda (i) (list i 42))))
+        (insert "memcp-tests" "se_single" '("id" "val") b)
+        30)
+
+  - name: "Single: verify cell id=0"
+    sql: "SELECT val FROM se_single WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Single: verify cell id=29"
+    sql: "SELECT val FROM se_single WHERE id = 29"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Single: count total"
+    sql: "SELECT COUNT(*) AS cnt FROM se_single"
+    expect:
+      rows: 1
+      data:
+        - cnt: 30
+
+  # === Enum with 8 distinct values (maximum k) ===
+  - name: "Create 8-symbol table"
+    sql: "CREATE TABLE se_max8 (id INT, color VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Insert 8-symbol data (highly skewed)"
+    scm: |
+      (begin
+        (define colors '("red" "green" "blue" "yellow" "purple" "orange" "pink" "black"))
+        (set b (map (produceN 200) (lambda (i)
+          (if (< i 150)
+            (list i "red")
+            (if (< i 170)
+              (list i "green")
+              (if (< i 180)
+                (list i "blue")
+                (if (< i 185)
+                  (list i "yellow")
+                  (if (< i 189)
+                    (list i "purple")
+                    (if (< i 192)
+                      (list i "orange")
+                      (if (< i 196)
+                        (list i "pink")
+                        (list i "black")))))))))))
+        (insert "memcp-tests" "se_max8" '("id" "color") b)
+        200)
+
+  - name: "Max8: verify red"
+    sql: "SELECT color FROM se_max8 WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - color: "red"
+
+  - name: "Max8: verify green"
+    sql: "SELECT color FROM se_max8 WHERE id = 155"
+    expect:
+      rows: 1
+      data:
+        - color: "green"
+
+  - name: "Max8: verify black (rarest)"
+    sql: "SELECT color FROM se_max8 WHERE id = 199"
+    expect:
+      rows: 1
+      data:
+        - color: "black"
+
+  - name: "Max8: count red (most frequent)"
+    sql: "SELECT COUNT(*) AS cnt FROM se_max8 WHERE color = 'red'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 150
+
+  - name: "Max8: count distinct"
+    sql: "SELECT COUNT(DISTINCT color) AS cnt FROM se_max8"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  # === SHUTDOWN 3: compress degenerate + max-k tables ===
+  - name: "SHUTDOWN to compress degenerate+max8 tables"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # --- Post-compression verification ---
+  - name: "Single: cell id=0 after compression"
+    sql: "SELECT val FROM se_single WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Single: cell id=15 after compression"
+    sql: "SELECT val FROM se_single WHERE id = 15"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Single: cell id=29 after compression"
+    sql: "SELECT val FROM se_single WHERE id = 29"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Single: count after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_single"
+    expect:
+      rows: 1
+      data:
+        - cnt: 30
+
+  - name: "Max8: cell id=0 after compression (red)"
+    sql: "SELECT color FROM se_max8 WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - color: "red"
+
+  - name: "Max8: cell id=155 after compression (green)"
+    sql: "SELECT color FROM se_max8 WHERE id = 155"
+    expect:
+      rows: 1
+      data:
+        - color: "green"
+
+  - name: "Max8: cell id=175 after compression (blue)"
+    sql: "SELECT color FROM se_max8 WHERE id = 175"
+    expect:
+      rows: 1
+      data:
+        - color: "blue"
+
+  - name: "Max8: cell id=183 after compression (yellow)"
+    sql: "SELECT color FROM se_max8 WHERE id = 183"
+    expect:
+      rows: 1
+      data:
+        - color: "yellow"
+
+  - name: "Max8: cell id=187 after compression (purple)"
+    sql: "SELECT color FROM se_max8 WHERE id = 187"
+    expect:
+      rows: 1
+      data:
+        - color: "purple"
+
+  - name: "Max8: cell id=190 after compression (orange)"
+    sql: "SELECT color FROM se_max8 WHERE id = 190"
+    expect:
+      rows: 1
+      data:
+        - color: "orange"
+
+  - name: "Max8: cell id=194 after compression (pink)"
+    sql: "SELECT color FROM se_max8 WHERE id = 194"
+    expect:
+      rows: 1
+      data:
+        - color: "pink"
+
+  - name: "Max8: cell id=199 after compression (black)"
+    sql: "SELECT color FROM se_max8 WHERE id = 199"
+    expect:
+      rows: 1
+      data:
+        - color: "black"
+
+  - name: "Max8: count all after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_max8"
+    expect:
+      rows: 1
+      data:
+        - cnt: 200
+
+  - name: "Max8: count red after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_max8 WHERE color = 'red'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 150
+
+  # --- Persistence roundtrip for degenerate+max8 ---
+  - name: "SHUTDOWN 4: serialize degenerate+max8"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Single: cell id=0 after persistence"
+    sql: "SELECT val FROM se_single WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Single: cell id=29 after persistence"
+    sql: "SELECT val FROM se_single WHERE id = 29"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Max8: cell id=0 after persistence (red)"
+    sql: "SELECT color FROM se_max8 WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - color: "red"
+
+  - name: "Max8: cell id=199 after persistence (black)"
+    sql: "SELECT color FROM se_max8 WHERE id = 199"
+    expect:
+      rows: 1
+      data:
+        - color: "black"
+
+  - name: "Max8: count distinct after persistence"
+    sql: "SELECT COUNT(DISTINCT color) AS cnt FROM se_max8"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  # === Aggregation over enum columns (sequential scan) ===
+  - name: "Bulk: SUM over compressed enum"
+    sql: "SELECT SUM(category) AS s FROM se_bulk"
+    expect:
+      rows: 1
+      data:
+        - s: 100
+
+  - name: "Bulk: AVG over compressed enum"
+    sql: "SELECT AVG(category) AS a FROM se_bulk"
+    expect:
+      rows: 1
+      data:
+        - a: 0.01
+
+  # === Random access pattern over many chunks (forces binary search) ===
+  - name: "Bulk: random access middle after persistence"
+    sql: "SELECT category FROM se_bulk WHERE id = 5000"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: random access near-end after persistence"
+    sql: "SELECT category FROM se_bulk WHERE id = 9900"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: random access exact boundary"
+    sql: "SELECT category FROM se_bulk WHERE id = 9899"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  # === DML on degenerate single-value column ===
+  - name: "Single: UPDATE to new value"
+    sql: "UPDATE se_single SET val = 99 WHERE id = 15"
+    expect:
+      affected_rows: 1
+
+  - name: "Single: verify update"
+    sql: "SELECT val FROM se_single WHERE id = 15"
+    expect:
+      rows: 1
+      data:
+        - val: 99
+
+  - name: "Single: DELETE from degenerate"
+    sql: "DELETE FROM se_single WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "Single: count after DELETE"
+    sql: "SELECT COUNT(*) AS cnt FROM se_single"
+    expect:
+      rows: 1
+      data:
+        - cnt: 29
+
+  # === Enum with mostly-one-value + NULLs (degenerate k=2 with NULL) ===
+  - name: "Create almost-constant table"
+    sql: "CREATE TABLE se_constish (id INT, val TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert mostly-constant with NULLs"
+    sql: |
+      INSERT INTO se_constish VALUES
+        (0, NULL), (1, 0), (2, 0), (3, 0), (4, 0),
+        (5, 0), (6, 0), (7, 0), (8, 0), (9, 0),
+        (10, NULL), (11, 0), (12, 0), (13, 0), (14, 0),
+        (15, 0), (16, 0), (17, 0), (18, 0), (19, 0),
+        (20, NULL), (21, 0), (22, 0), (23, 0), (24, 0),
+        (25, 0), (26, 0), (27, 0), (28, 0), (29, 0)
+    expect:
+      affected_rows: 30
+
+  - name: "Constish: count NULLs"
+    sql: "SELECT COUNT(*) AS cnt FROM se_constish WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  - name: "Constish: count zeros"
+    sql: "SELECT COUNT(*) AS cnt FROM se_constish WHERE val = 0"
+    expect:
+      rows: 1
+      data:
+        - cnt: 27
+
+  - name: "Constish: SHUTDOWN to compress"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Constish: verify zero at id=1"
+    sql: "SELECT val FROM se_constish WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: 0
+
+  - name: "Constish: verify NULL at id=0"
+    sql: "SELECT val FROM se_constish WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Constish: verify NULL at id=10"
+    sql: "SELECT val FROM se_constish WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Constish: count NULLs after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_constish WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS se_bool"
   - sql: "DROP TABLE IF EXISTS se_status"
   - sql: "DROP TABLE IF EXISTS se_nullable"
   - sql: "DROP TABLE IF EXISTS se_bulk"
+  - sql: "DROP TABLE IF EXISTS se_single"
+  - sql: "DROP TABLE IF EXISTS se_max8"
+  - sql: "DROP TABLE IF EXISTS se_constish"

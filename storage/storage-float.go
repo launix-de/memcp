@@ -62,6 +62,8 @@ func (s *StorageFloat) Deserialize(f io.Reader) uint {
 	return uint(l)
 }
 
+func (s *StorageFloat) GetCachedReader() ColumnReader { return s }
+
 func (s *StorageFloat) GetValue(i uint) scm.Scmer {
 	// NULL is encoded as NaN in SQL
 	if math.IsNaN(s.values[i]) {

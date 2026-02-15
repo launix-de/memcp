@@ -97,6 +97,8 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 	return uint(l)
 }
 
+func (s *StorageString) GetCachedReader() ColumnReader { return s }
+
 func (s *StorageString) GetValue(i uint) scm.Scmer {
 	if s.nodict {
 		start := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)

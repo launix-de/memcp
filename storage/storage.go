@@ -28,11 +28,18 @@ import "strings"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
 
+// ColumnReader provides sequential-access-optimized reads. Returned by
+// ColumnStorage.GetCachedReader(). Must not be shared between goroutines.
+type ColumnReader interface {
+	GetValue(uint) scm.Scmer
+}
+
 // THE basic storage pattern
 type ColumnStorage interface {
 	// info
-	GetValue(uint) scm.Scmer // read function
-	String() string          // self-description
+	GetValue(uint) scm.Scmer       // read function (concurrent-safe, no mutable state)
+	GetCachedReader() ColumnReader  // returns a per-goroutine cached reader for O(1) sequential access
+	String() string                 // self-description
 	scm.Sizable
 
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice

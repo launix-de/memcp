@@ -81,6 +81,8 @@ func (s *StorageSCMER) Deserialize(f io.Reader) uint {
 	return uint(l)
 }
 
+func (s *StorageSCMER) GetCachedReader() ColumnReader { return s }
+
 func (s *StorageSCMER) GetValue(i uint) scm.Scmer {
 	return s.values[i]
 }

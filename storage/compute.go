@@ -23,6 +23,18 @@ import "runtime/debug"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
+// newCachedColumnReader returns a per-goroutine ColumnReader for the given storage.
+// For StorageEnum this gives O(1) sequential decode; for others it's a no-op.
+// When the storage is OverlayBlob wrapping StorageEnum, unwraps to cache the
+// enum directly (blob overlay is only used for large-value storage, not compute inputs).
+func newCachedColumnReader(col ColumnStorage) ColumnReader {
+	// unwrap OverlayBlob: compute inputs are stored in the base, not the blob layer
+	if ob, ok := col.(*OverlayBlob); ok {
+		return ob.Base.GetCachedReader()
+	}
+	return col.GetCachedReader()
+}
+
 func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer) {
 	for i, c := range t.Columns {
 		if c.Name == name {
@@ -87,11 +99,16 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		progress := make(chan uint, runtime.NumCPU()/2) // don't go all at once, we don't have enough RAM
 		for i := 0; i < runtime.NumCPU()/2; i++ {
 			gls.Go(func() { // threadpool with half of the cores
-				// allocate a private parameter buffer per worker to avoid data races
+				// allocate private buffers per worker to avoid data races
 				colvalues := make([]scm.Scmer, len(cols))
+				// per-worker cached readers for O(1) sequential StorageEnum decode
+				readers := make([]ColumnReader, len(cols))
+				for j, col := range cols {
+					readers[j] = newCachedColumnReader(col)
+				}
 				for i := range progress {
-					for j, col := range cols {
-						colvalues[j] = col.GetValue(i) // read values from main storage into lambda params
+					for j := range readers {
+						colvalues[j] = readers[j].GetValue(i) // read values from main storage into lambda params
 					}
 					vals[i] = scm.Apply(computor, colvalues...) // execute computor kernel (but the onoptimized version for non-serial use)
 					done.Done()
@@ -108,9 +125,14 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		// allocate a common param buffer to save allocations
 		colvalues := make([]scm.Scmer, len(cols))
 		fn := scm.OptimizeProcToSerialFunction(computor) // optimize for serial application
+		// per-column cached readers for O(1) sequential StorageEnum decode
+		readers := make([]ColumnReader, len(cols))
+		for j, col := range cols {
+			readers[j] = newCachedColumnReader(col)
+		}
 		for i := uint(0); i < s.main_count; i++ {
-			for j, col := range cols {
-				colvalues[j] = col.GetValue(i) // read values from main storage into lambda params
+			for j := range readers {
+				colvalues[j] = readers[j].GetValue(i) // read values from main storage into lambda params
 			}
 			vals[i] = fn(colvalues...) // execute computor kernel
 		}

@@ -106,6 +106,8 @@ func gunzipValue(gzipped string) scm.Scmer {
 	return scm.NewString(b.String())
 }
 
+func (s *OverlayBlob) GetCachedReader() ColumnReader { return s }
+
 func (s *OverlayBlob) GetValue(i uint) scm.Scmer {
 	v := s.Base.GetValue(i)
 	if v.IsString() {

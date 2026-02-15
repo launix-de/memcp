@@ -40,15 +40,16 @@ import (
 	  jumpL2[]  — uint16 relative cumulative counts per chunk
 
 	Access patterns:
-	  Sequential scan:  O(1) per element via decode cache
-	  Sparse scan:      O(1) amortized via next-chunk fast path
-	  Random access:    O(log(chunks)) via binary search on jump index
+	  With cache hint:  O(chunk_size) — skips binary search, decodes from chunk start
+	  Random access:    O(log(chunks) + chunk_size) via binary search on jump index
+	  With per-thread EnumDecodeCache: O(1) sequential via GetValueCached
 */
 
 const enumBitShift = 8
 const enumBitMask = ^uint64(0) >> (64 - enumBitShift) // 0xFF
 const enumBitModulo = uint64(1) << enumBitShift       // 256
 const enumMaxSymbols = 8
+
 
 type StorageEnum struct {
 	// rANS coded payload
@@ -72,17 +73,12 @@ type StorageEnum struct {
 	scanFreqs [enumMaxSymbols]uint64
 	scanTotal uint64
 
-	// decode cache for sequential access
-	cacheFwdChunk int
-	cacheStart    int
-	cachePos      int
-	cacheBuf      uint64
-	cacheValid    bool
 
 	// build-phase temporaries: we need to reverse-buffer elements
 	// because rANS encodes in reverse order
 	buildBuf []scm.Scmer
 }
+
 
 func enumFastDivMod(n, d, inv uint64) (q, r uint64) {
 	q, _ = bits.Mul64(n, inv)
@@ -183,7 +179,6 @@ func (s *StorageEnum) proposeCompression(i uint) ColumnStorage {
 
 func (s *StorageEnum) init(i uint) {
 	s.count = uint64(i)
-	s.cacheValid = false
 
 	if s.k < 2 {
 		// degenerate: 0 or 1 distinct values; pad to 2 symbols
@@ -321,24 +316,73 @@ func (s *StorageEnum) finish() {
 	}
 }
 
+// EnumDecodeCache holds per-goroutine rANS decode state for O(1) sequential access.
+// Allocate one per worker goroutine and pass to GetValueCached.
+type EnumDecodeCache struct {
+	fwdChunk int
+	start    int
+	pos      int
+	buf      uint64
+	valid    bool
+}
+
+// cachedEnumReader wraps a StorageEnum with a private EnumDecodeCache.
+// Returned by StorageEnum.GetCachedReader(). Must not be shared between goroutines.
+type cachedEnumReader struct {
+	s     *StorageEnum
+	cache EnumDecodeCache
+}
+
+func (r *cachedEnumReader) GetValue(i uint) scm.Scmer {
+	return r.s.GetValueCached(i, &r.cache)
+}
+
+func (s *StorageEnum) GetCachedReader() ColumnReader {
+	return &cachedEnumReader{s: s}
+}
+
+// GetValue is safe for concurrent use — it is fully read-only on the struct.
+// Uses binary search + sequential decode from chunk start. For O(1) sequential
+// access, use GetCachedReader() which returns a per-goroutine cached wrapper.
 func (s *StorageEnum) GetValue(i uint) scm.Scmer {
 	idx := int(i)
+	fwdIdx := s.findChunk(idx)
+	chunkStart := 0
+	if fwdIdx > 0 {
+		chunkStart = s.jumpCum(fwdIdx - 1)
+	}
+	dataIdx := len(s.data) - 1 - fwdIdx
+	buffer := s.data[dataIdx]
+	posInChunk := idx - chunkStart
+	var result scm.Scmer
+	for j := 0; j <= posInChunk; j++ {
+		result, buffer = s.decodeOne(buffer)
+	}
+	return result
+}
 
-	if s.cacheValid {
-		chunkEnd := s.jumpCum(s.cacheFwdChunk)
-		if idx >= s.cacheStart+s.cachePos && idx < chunkEnd {
-			buffer := s.cacheBuf
+// GetValueCached provides O(1) sequential access using a per-goroutine cache.
+// The cache must not be shared between goroutines.
+func (s *StorageEnum) GetValueCached(i uint, c *EnumDecodeCache) scm.Scmer {
+	idx := int(i)
+
+	if c.valid {
+		chunkEnd := s.jumpCum(c.fwdChunk)
+		// fast path: index is ahead of cache position in same chunk
+		if idx >= c.start+c.pos && idx < chunkEnd {
+			buffer := c.buf
 			var result scm.Scmer
-			target := idx - s.cacheStart
-			for j := s.cachePos; j <= target; j++ {
+			target := idx - c.start
+			for j := c.pos; j <= target; j++ {
 				result, buffer = s.decodeOne(buffer)
 			}
-			s.cachePos = target + 1
-			s.cacheBuf = buffer
+			c.pos = target + 1
+			c.buf = buffer
 			return result
 		}
+		// next chunk fast path
 		if idx >= chunkEnd {
-			nextFwd := s.cacheFwdChunk + 1
+			nextFwd := c.fwdChunk + 1
 			if nextFwd < len(s.jumpL2) && idx < s.jumpCum(nextFwd) {
 				dataIdx := len(s.data) - 1 - nextFwd
 				buffer := s.data[dataIdx]
@@ -347,26 +391,17 @@ func (s *StorageEnum) GetValue(i uint) scm.Scmer {
 				for j := 0; j <= posInChunk; j++ {
 					result, buffer = s.decodeOne(buffer)
 				}
-				s.cacheFwdChunk = nextFwd
-				s.cacheStart = chunkEnd
-				s.cachePos = posInChunk + 1
-				s.cacheBuf = buffer
+				c.fwdChunk = nextFwd
+				c.start = chunkEnd
+				c.pos = posInChunk + 1
+				c.buf = buffer
 				return result
 			}
 		}
 	}
 
-	// Binary search
-	lo, hi := 0, len(s.jumpL2)
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		if s.jumpCum(mid) <= idx {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	fwdIdx := lo
+	// Binary search fallback
+	fwdIdx := s.findChunk(idx)
 	chunkStart := 0
 	if fwdIdx > 0 {
 		chunkStart = s.jumpCum(fwdIdx - 1)
@@ -380,14 +415,28 @@ func (s *StorageEnum) GetValue(i uint) scm.Scmer {
 		result, buffer = s.decodeOne(buffer)
 	}
 
-	s.cacheValid = true
-	s.cacheFwdChunk = fwdIdx
-	s.cacheStart = chunkStart
-	s.cachePos = posInChunk + 1
-	s.cacheBuf = buffer
-
+	c.valid = true
+	c.fwdChunk = fwdIdx
+	c.start = chunkStart
+	c.pos = posInChunk + 1
+	c.buf = buffer
 	return result
 }
+
+// findChunk returns the chunk index containing element idx via binary search.
+func (s *StorageEnum) findChunk(idx int) int {
+	lo, hi := 0, len(s.jumpL2)
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if s.jumpCum(mid) <= idx {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
 
 // --- Serialization ---
 
@@ -475,7 +524,6 @@ func (s *StorageEnum) Deserialize(f io.Reader) uint {
 		s.jumpL2 = unsafe.Slice((*uint16)(unsafe.Pointer(&raw[0])), l2Len)
 	}
 
-	s.cacheValid = false
 	return uint(s.count)
 }
 

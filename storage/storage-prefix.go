@@ -35,6 +35,8 @@ func (s *StoragePrefix) String() string {
 	return fmt.Sprintf("prefix[%s]-%s", s.prefixdictionary[1], s.values.String())
 }
 
+func (s *StoragePrefix) GetCachedReader() ColumnReader { return s }
+
 func (s *StoragePrefix) GetValue(i uint) scm.Scmer {
 	inner := s.values.GetValue(i)
 	if inner.IsNil() {
