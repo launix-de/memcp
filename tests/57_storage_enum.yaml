@@ -1,0 +1,573 @@
+# StorageEnum (rANS entropy coding) test suite
+# Exercises enum detection, compression, value correctness, serialization,
+# and DML on compressed enum columns.
+
+metadata:
+  version: "1.0"
+  description: "StorageEnum rANS compression correctness and persistence"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS se_bool"
+  - sql: "DROP TABLE IF EXISTS se_status"
+  - sql: "DROP TABLE IF EXISTS se_nullable"
+  - sql: "DROP TABLE IF EXISTS se_bulk"
+
+test_cases:
+
+  # === 1. Boolean column: 2 distinct values ===
+  - name: "Create boolean table"
+    sql: "CREATE TABLE se_bool (id INT, flag TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert boolean data (skewed: mostly 0)"
+    sql: |
+      INSERT INTO se_bool VALUES
+        (1, 0), (2, 0), (3, 0), (4, 0), (5, 1),
+        (6, 0), (7, 0), (8, 0), (9, 0), (10, 1),
+        (11, 0), (12, 0), (13, 0), (14, 0), (15, 0),
+        (16, 0), (17, 0), (18, 1), (19, 0), (20, 0)
+    expect:
+      affected_rows: 20
+
+  - name: "Bool: verify cell id=1 before compression"
+    sql: "SELECT flag FROM se_bool WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - flag: 0
+
+  - name: "Bool: verify cell id=5 before compression"
+    sql: "SELECT flag FROM se_bool WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - flag: 1
+
+  - name: "Bool: verify cell id=18 before compression"
+    sql: "SELECT flag FROM se_bool WHERE id = 18"
+    expect:
+      rows: 1
+      data:
+        - flag: 1
+
+  - name: "Bool: count ones before compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bool WHERE flag = 1"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  # === 2. Status column: 4 distinct string values ===
+  - name: "Create status table"
+    sql: "CREATE TABLE se_status (id INT, status VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Insert status data (4 enum values)"
+    sql: |
+      INSERT INTO se_status VALUES
+        (1, 'active'), (2, 'active'), (3, 'pending'),
+        (4, 'active'), (5, 'inactive'), (6, 'active'),
+        (7, 'pending'), (8, 'active'), (9, 'deleted'),
+        (10, 'active'), (11, 'active'), (12, 'pending'),
+        (13, 'active'), (14, 'inactive'), (15, 'active'),
+        (16, 'active'), (17, 'active'), (18, 'deleted'),
+        (19, 'active'), (20, 'pending')
+    expect:
+      affected_rows: 20
+
+  - name: "Status: verify cell id=1"
+    sql: "SELECT status FROM se_status WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - status: "active"
+
+  - name: "Status: verify cell id=3"
+    sql: "SELECT status FROM se_status WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - status: "pending"
+
+  - name: "Status: verify cell id=5"
+    sql: "SELECT status FROM se_status WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - status: "inactive"
+
+  - name: "Status: verify cell id=9"
+    sql: "SELECT status FROM se_status WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - status: "deleted"
+
+  - name: "Status: count active"
+    sql: "SELECT COUNT(*) AS cnt FROM se_status WHERE status = 'active'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 12
+
+  # === 3. Nullable boolean: 3 distinct values (0, 1, NULL) ===
+  - name: "Create nullable table"
+    sql: "CREATE TABLE se_nullable (id INT, val TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert nullable data (0, 1, NULL mix)"
+    sql: |
+      INSERT INTO se_nullable VALUES
+        (1, 0), (2, NULL), (3, 1), (4, 0), (5, 0),
+        (6, NULL), (7, 0), (8, 1), (9, 0), (10, 0),
+        (11, 0), (12, NULL), (13, 0), (14, 0), (15, 1),
+        (16, 0), (17, 0), (18, 0), (19, NULL), (20, 0)
+    expect:
+      affected_rows: 20
+
+  - name: "Nullable: verify cell id=1 (zero)"
+    sql: "SELECT val FROM se_nullable WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: 0
+
+  - name: "Nullable: verify cell id=2 (NULL)"
+    sql: "SELECT val FROM se_nullable WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Nullable: verify cell id=3 (one)"
+    sql: "SELECT val FROM se_nullable WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - val: 1
+
+  - name: "Nullable: count NULLs"
+    sql: "SELECT COUNT(*) AS cnt FROM se_nullable WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  # === 4. Bulk data with probability distribution via scm: ===
+  - name: "Create bulk table"
+    sql: "CREATE TABLE se_bulk (id INT, category TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Bulk insert 10000 rows with skewed distribution (99% = 0, 1% = 1)"
+    scm: |
+      (begin
+        (set b (map (produceN 10000) (lambda (i)
+          (if (equal? 99 (- i (* 100 (floor (/ i 100))))) (list i 1) (list i 0)))))
+        (insert "memcp-tests" "se_bulk" '("id" "category") b)
+        10000)
+
+  - name: "Bulk: verify cell id=0 (should be 0)"
+    sql: "SELECT category FROM se_bulk WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: verify cell id=99 (should be 1)"
+    sql: "SELECT category FROM se_bulk WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  - name: "Bulk: verify cell id=100 (should be 0)"
+    sql: "SELECT category FROM se_bulk WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: verify cell id=199 (should be 1)"
+    sql: "SELECT category FROM se_bulk WHERE id = 199"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  - name: "Bulk: verify cell id=5000 (should be 0)"
+    sql: "SELECT category FROM se_bulk WHERE id = 5000"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: verify cell id=9999 (should be 1)"
+    sql: "SELECT category FROM se_bulk WHERE id = 9999"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  - name: "Bulk: count total"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bulk"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10000
+
+  - name: "Bulk: count ones"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bulk WHERE category = 1"
+    expect:
+      rows: 1
+      data:
+        - cnt: 100
+
+  - name: "Bulk: count zeros"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bulk WHERE category = 0"
+    expect:
+      rows: 1
+      data:
+        - cnt: 9900
+
+  # === SHUTDOWN 1: force compression ===
+  - name: "SHUTDOWN to trigger compression"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # === Post-compression: verify every cell value we checked before ===
+
+  - name: "Bool: cell id=1 after compression"
+    sql: "SELECT flag FROM se_bool WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - flag: 0
+
+  - name: "Bool: cell id=5 after compression"
+    sql: "SELECT flag FROM se_bool WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - flag: 1
+
+  - name: "Bool: cell id=18 after compression"
+    sql: "SELECT flag FROM se_bool WHERE id = 18"
+    expect:
+      rows: 1
+      data:
+        - flag: 1
+
+  - name: "Bool: cell id=20 after compression (boundary)"
+    sql: "SELECT flag FROM se_bool WHERE id = 20"
+    expect:
+      rows: 1
+      data:
+        - flag: 0
+
+  - name: "Bool: count ones after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bool WHERE flag = 1"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  - name: "Bool: count total after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bool"
+    expect:
+      rows: 1
+      data:
+        - cnt: 20
+
+  - name: "Status: cell id=1 after compression"
+    sql: "SELECT status FROM se_status WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - status: "active"
+
+  - name: "Status: cell id=3 after compression"
+    sql: "SELECT status FROM se_status WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - status: "pending"
+
+  - name: "Status: cell id=5 after compression"
+    sql: "SELECT status FROM se_status WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - status: "inactive"
+
+  - name: "Status: cell id=9 after compression"
+    sql: "SELECT status FROM se_status WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - status: "deleted"
+
+  - name: "Status: cell id=20 after compression"
+    sql: "SELECT status FROM se_status WHERE id = 20"
+    expect:
+      rows: 1
+      data:
+        - status: "pending"
+
+  - name: "Status: count active after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_status WHERE status = 'active'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 12
+
+  - name: "Nullable: cell id=1 after compression (zero)"
+    sql: "SELECT val FROM se_nullable WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: 0
+
+  - name: "Nullable: cell id=2 after compression (NULL)"
+    sql: "SELECT val FROM se_nullable WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Nullable: cell id=3 after compression (one)"
+    sql: "SELECT val FROM se_nullable WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - val: 1
+
+  - name: "Nullable: cell id=15 after compression (one)"
+    sql: "SELECT val FROM se_nullable WHERE id = 15"
+    expect:
+      rows: 1
+      data:
+        - val: 1
+
+  - name: "Nullable: cell id=19 after compression (NULL)"
+    sql: "SELECT val FROM se_nullable WHERE id = 19"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Nullable: count NULLs after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_nullable WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  - name: "Bulk: cell id=0 after compression"
+    sql: "SELECT category FROM se_bulk WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: cell id=99 after compression"
+    sql: "SELECT category FROM se_bulk WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  - name: "Bulk: cell id=100 after compression"
+    sql: "SELECT category FROM se_bulk WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: cell id=199 after compression"
+    sql: "SELECT category FROM se_bulk WHERE id = 199"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  - name: "Bulk: cell id=5000 after compression"
+    sql: "SELECT category FROM se_bulk WHERE id = 5000"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: cell id=9999 after compression"
+    sql: "SELECT category FROM se_bulk WHERE id = 9999"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  - name: "Bulk: count total after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bulk"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10000
+
+  - name: "Bulk: count ones after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bulk WHERE category = 1"
+    expect:
+      rows: 1
+      data:
+        - cnt: 100
+
+  # === SHUTDOWN 2: test serialization persistence ===
+  - name: "Second SHUTDOWN to test serialization roundtrip"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # === Post-persistence: verify cell values survive serialize/deserialize ===
+
+  - name: "Bool: cell id=1 after persistence"
+    sql: "SELECT flag FROM se_bool WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - flag: 0
+
+  - name: "Bool: cell id=5 after persistence"
+    sql: "SELECT flag FROM se_bool WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - flag: 1
+
+  - name: "Bool: cell id=18 after persistence"
+    sql: "SELECT flag FROM se_bool WHERE id = 18"
+    expect:
+      rows: 1
+      data:
+        - flag: 1
+
+  - name: "Status: cell id=3 after persistence"
+    sql: "SELECT status FROM se_status WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - status: "pending"
+
+  - name: "Status: cell id=9 after persistence"
+    sql: "SELECT status FROM se_status WHERE id = 9"
+    expect:
+      rows: 1
+      data:
+        - status: "deleted"
+
+  - name: "Nullable: cell id=2 after persistence (NULL)"
+    sql: "SELECT val FROM se_nullable WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Nullable: cell id=3 after persistence (one)"
+    sql: "SELECT val FROM se_nullable WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - val: 1
+
+  - name: "Bulk: cell id=0 after persistence"
+    sql: "SELECT category FROM se_bulk WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: cell id=99 after persistence"
+    sql: "SELECT category FROM se_bulk WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  - name: "Bulk: cell id=5000 after persistence"
+    sql: "SELECT category FROM se_bulk WHERE id = 5000"
+    expect:
+      rows: 1
+      data:
+        - category: 0
+
+  - name: "Bulk: cell id=9999 after persistence"
+    sql: "SELECT category FROM se_bulk WHERE id = 9999"
+    expect:
+      rows: 1
+      data:
+        - category: 1
+
+  - name: "Bulk: count total after persistence"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bulk"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10000
+
+  - name: "Bulk: count ones after persistence"
+    sql: "SELECT COUNT(*) AS cnt FROM se_bulk WHERE category = 1"
+    expect:
+      rows: 1
+      data:
+        - cnt: 100
+
+  # === DML on compressed enum storage ===
+  - name: "Bool: UPDATE compressed cell"
+    sql: "UPDATE se_bool SET flag = 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Bool: verify UPDATE"
+    sql: "SELECT flag FROM se_bool WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - flag: 1
+
+  - name: "Status: DELETE from compressed"
+    sql: "DELETE FROM se_status WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "Status: verify DELETE"
+    sql: "SELECT COUNT(*) AS cnt FROM se_status WHERE status = 'deleted'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 1
+
+  - name: "Nullable: INSERT into compressed"
+    sql: "INSERT INTO se_nullable VALUES (21, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Nullable: verify INSERT"
+    sql: "SELECT val FROM se_nullable WHERE id = 21"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Nullable: count total after DML"
+    sql: "SELECT COUNT(*) AS cnt FROM se_nullable"
+    expect:
+      rows: 1
+      data:
+        - cnt: 21
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS se_bool"
+  - sql: "DROP TABLE IF EXISTS se_status"
+  - sql: "DROP TABLE IF EXISTS se_nullable"
+  - sql: "DROP TABLE IF EXISTS se_bulk"
