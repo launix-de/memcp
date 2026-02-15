@@ -1,0 +1,1058 @@
+# Storage format coverage tests: exercises StorageFloat, StorageString (dict + nodict),
+# StorageSparse, StorageSeq, StorageInt, and StorageDecimal compression paths
+# including Serialize/Deserialize roundtrips via SHUTDOWN.
+
+metadata:
+  version: "1.0"
+  description: "Comprehensive storage format coverage"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sf_float"
+  - sql: "DROP TABLE IF EXISTS sf_string_dict"
+  - sql: "DROP TABLE IF EXISTS sf_string_nodict"
+  - sql: "DROP TABLE IF EXISTS sf_sparse"
+  - sql: "DROP TABLE IF EXISTS sf_seq"
+  - sql: "DROP TABLE IF EXISTS sf_int_null"
+  - sql: "DROP TABLE IF EXISTS sf_int_wide"
+  - sql: "DROP TABLE IF EXISTS sf_decimal_neg"
+  - sql: "DROP TABLE IF EXISTS sf_mixed"
+
+test_cases:
+
+  # ========================================================================
+  # 1. StorageFloat: columns with non-integer, non-decimal-aligned floats
+  # ========================================================================
+  - name: "Create float table"
+    sql: "CREATE TABLE sf_float (id INT, val DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "Insert float data (non-aligned floats)"
+    scm: |
+      (begin
+        (set b (map (produceN 30) (lambda (i)
+          (list i (/ (* (+ i 1) 3.14159265) (+ i 2.71828))))))
+        (insert "memcp-tests" "sf_float" '("id" "val") b)
+        30)
+
+  - name: "Float: verify cell id=0"
+    sql: "SELECT ROUND(val, 4) AS v FROM sf_float WHERE id = 0"
+    expect:
+      rows: 1
+
+  - name: "Float: count total"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_float"
+    expect:
+      rows: 1
+      data:
+        - cnt: 30
+
+  - name: "Float: insert NULL"
+    sql: "INSERT INTO sf_float VALUES (30, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Float: verify NULL"
+    sql: "SELECT val FROM sf_float WHERE id = 30"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Float: count non-null"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_float WHERE val IS NOT NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 30
+
+  # ========================================================================
+  # 2. StorageString with dictionary (few distinct values, many rows)
+  # ========================================================================
+  - name: "Create string-dict table"
+    sql: "CREATE TABLE sf_string_dict (id INT, city VARCHAR(50))"
+    expect:
+      rows: 0
+
+  - name: "Insert string-dict data (5 cities repeated)"
+    scm: |
+      (begin
+        (define cities '("Berlin" "Munich" "Hamburg" "Cologne" "Frankfurt"))
+        (set b (map (produceN 200) (lambda (i)
+          (list i (nth cities (- i (* 5 (floor (/ i 5)))))))))
+        (insert "memcp-tests" "sf_string_dict" '("id" "city") b)
+        200)
+
+  - name: "Dict: verify id=0 Berlin"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - city: "Berlin"
+
+  - name: "Dict: verify id=3 Cologne"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - city: "Cologne"
+
+  - name: "Dict: count Berlin"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_string_dict WHERE city = 'Berlin'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 40
+
+  - name: "Dict: insert NULL string"
+    sql: "INSERT INTO sf_string_dict VALUES (200, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Dict: verify NULL"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 200"
+    expect:
+      rows: 1
+      data:
+        - city: null
+
+  - name: "Dict: count total"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_string_dict"
+    expect:
+      rows: 1
+      data:
+        - cnt: 201
+
+  # ========================================================================
+  # 3. StorageString without dictionary (many unique values)
+  # ========================================================================
+  - name: "Create string-nodict table"
+    sql: "CREATE TABLE sf_string_nodict (id INT, description VARCHAR(200))"
+    expect:
+      rows: 0
+
+  - name: "Insert unique strings (>100 distinct in first 100 triggers nodict)"
+    scm: |
+      (begin
+        (set b (map (produceN 150) (lambda (i)
+          (list i (concat "item_" i "_description_unique_" (* i 7))))))
+        (insert "memcp-tests" "sf_string_nodict" '("id" "description") b)
+        150)
+
+  - name: "Nodict: verify id=0"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - description: "item_0_description_unique_0"
+
+  - name: "Nodict: verify id=99"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - description: "item_99_description_unique_693"
+
+  - name: "Nodict: verify id=149"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 149"
+    expect:
+      rows: 1
+      data:
+        - description: "item_149_description_unique_1043"
+
+  - name: "Nodict: insert NULL"
+    sql: "INSERT INTO sf_string_nodict VALUES (150, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Nodict: verify NULL"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 150"
+    expect:
+      rows: 1
+      data:
+        - description: null
+
+  - name: "Nodict: count total"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_string_nodict"
+    expect:
+      rows: 1
+      data:
+        - cnt: 151
+
+  # ========================================================================
+  # 4. StorageSparse: column that is mostly NULL
+  # ========================================================================
+  - name: "Create sparse table"
+    sql: "CREATE TABLE sf_sparse (id INT, rare_val INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert sparse non-null values only (10 rows with values)"
+    scm: |
+      (begin
+        (set b (map (produceN 10) (lambda (i)
+          (list (* i 20) (* i 200)))))
+        (insert "memcp-tests" "sf_sparse" '("id" "rare_val") b)
+        10)
+
+  - name: "Insert sparse NULL rows batch 1 (id 1-19)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),
+        (11),(12),(13),(14),(15),(16),(17),(18),(19)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 2 (id 21-39)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (21),(22),(23),(24),(25),(26),(27),(28),(29),(30),
+        (31),(32),(33),(34),(35),(36),(37),(38),(39)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 3 (id 41-59)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (41),(42),(43),(44),(45),(46),(47),(48),(49),(50),
+        (51),(52),(53),(54),(55),(56),(57),(58),(59)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 4 (id 61-79)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (61),(62),(63),(64),(65),(66),(67),(68),(69),(70),
+        (71),(72),(73),(74),(75),(76),(77),(78),(79)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 5 (id 81-99)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (81),(82),(83),(84),(85),(86),(87),(88),(89),(90),
+        (91),(92),(93),(94),(95),(96),(97),(98),(99)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 6 (id 101-119)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (101),(102),(103),(104),(105),(106),(107),(108),(109),(110),
+        (111),(112),(113),(114),(115),(116),(117),(118),(119)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 7 (id 121-139)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (121),(122),(123),(124),(125),(126),(127),(128),(129),(130),
+        (131),(132),(133),(134),(135),(136),(137),(138),(139)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 8 (id 141-159)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (141),(142),(143),(144),(145),(146),(147),(148),(149),(150),
+        (151),(152),(153),(154),(155),(156),(157),(158),(159)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 9 (id 161-179)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (161),(162),(163),(164),(165),(166),(167),(168),(169),(170),
+        (171),(172),(173),(174),(175),(176),(177),(178),(179)
+    expect:
+      affected_rows: 19
+
+  - name: "Insert sparse NULL rows batch 10 (id 181-199)"
+    sql: |
+      INSERT INTO sf_sparse (id) VALUES
+        (181),(182),(183),(184),(185),(186),(187),(188),(189),(190),
+        (191),(192),(193),(194),(195),(196),(197),(198),(199)
+    expect:
+      affected_rows: 19
+
+  - name: "Sparse: verify non-null at id=0"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 0
+
+  - name: "Sparse: verify non-null at id=20"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 20"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 200
+
+  - name: "Sparse: verify non-null at id=100"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 1000
+
+  - name: "Sparse: verify NULL at id=1"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - rare_val: null
+
+  - name: "Sparse: verify NULL at id=19"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 19"
+    expect:
+      rows: 1
+      data:
+        - rare_val: null
+
+  - name: "Sparse: count non-null"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_sparse WHERE rare_val IS NOT NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10
+
+  - name: "Sparse: count NULL"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_sparse WHERE rare_val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 190
+
+  - name: "Sparse: SUM non-null"
+    sql: "SELECT SUM(rare_val) AS s FROM sf_sparse"
+    expect:
+      rows: 1
+
+  # ========================================================================
+  # 5. StorageSeq: sequential/arithmetic patterns
+  # ========================================================================
+  - name: "Create seq table"
+    sql: "CREATE TABLE sf_seq (id INT, seq_val INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert sequential data (arithmetic: 100,102,104,...)"
+    scm: |
+      (begin
+        (set b (map (produceN 100) (lambda (i)
+          (list i (+ 100 (* i 2))))))
+        (insert "memcp-tests" "sf_seq" '("id" "seq_val") b)
+        100)
+
+  - name: "Seq: verify id=0 (start=100)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 100
+
+  - name: "Seq: verify id=50 (start+100=200)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 50"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 200
+
+  - name: "Seq: verify id=99 (start+198=298)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 298
+
+  - name: "Seq: SUM"
+    sql: "SELECT SUM(seq_val) AS s FROM sf_seq"
+    expect:
+      rows: 1
+      data:
+        - s: 19900
+
+  # Second sequence: different stride (3 instead of 2)
+  - name: "Insert second arithmetic run (stride 3, start 500)"
+    scm: |
+      (begin
+        (set b (map (produceN 50) (lambda (i)
+          (list (+ i 100) (+ 500 (* i 3))))))
+        (insert "memcp-tests" "sf_seq" '("id" "seq_val") b)
+        50)
+
+  - name: "Seq: verify second run id=100 (500)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 500
+
+  - name: "Seq: verify second run id=149 (647)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 149"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 647
+
+  - name: "Seq: count total"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_seq"
+    expect:
+      rows: 1
+      data:
+        - cnt: 150
+
+  # ========================================================================
+  # 6. StorageInt with NULLs and wide range
+  # ========================================================================
+  - name: "Create int-null table"
+    sql: "CREATE TABLE sf_int_null (id INT, val INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert ints with NULLs"
+    sql: |
+      INSERT INTO sf_int_null VALUES
+        (1, 100), (2, NULL), (3, -50), (4, 0), (5, NULL),
+        (6, 999), (7, -999), (8, NULL), (9, 1), (10, -1),
+        (11, 500), (12, NULL), (13, 250), (14, -250), (15, 0),
+        (16, 100), (17, -100), (18, NULL), (19, 42), (20, -42)
+    expect:
+      affected_rows: 20
+
+  - name: "IntNull: verify positive"
+    sql: "SELECT val FROM sf_int_null WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: 100
+
+  - name: "IntNull: verify NULL"
+    sql: "SELECT val FROM sf_int_null WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "IntNull: verify negative"
+    sql: "SELECT val FROM sf_int_null WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - val: -50
+
+  - name: "IntNull: verify zero"
+    sql: "SELECT val FROM sf_int_null WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - val: 0
+
+  - name: "IntNull: count NULLs"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_int_null WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 5
+
+  # Wide-range ints (forces more bits per element)
+  - name: "Create int-wide table"
+    sql: "CREATE TABLE sf_int_wide (id INT, val BIGINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert wide-range ints"
+    sql: |
+      INSERT INTO sf_int_wide VALUES
+        (1, 0), (2, 1), (3, -1), (4, 1000000), (5, -1000000),
+        (6, 2147483647), (7, -2147483648), (8, 100), (9, -100), (10, 0),
+        (11, 999999999), (12, -999999999), (13, 42), (14, -42), (15, 1),
+        (16, 2147483646), (17, -2147483647), (18, 500000), (19, -500000), (20, 0)
+    expect:
+      affected_rows: 20
+
+  - name: "IntWide: verify max positive"
+    sql: "SELECT val FROM sf_int_wide WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - val: 2147483647
+
+  - name: "IntWide: verify max negative"
+    sql: "SELECT val FROM sf_int_wide WHERE id = 7"
+    expect:
+      rows: 1
+      data:
+        - val: -2147483648
+
+  - name: "IntWide: SUM"
+    sql: "SELECT SUM(val) AS s FROM sf_int_wide"
+    expect:
+      rows: 1
+
+  # ========================================================================
+  # 7. StorageDecimal: negative decimals + mixed precision
+  # ========================================================================
+  - name: "Create decimal-neg table"
+    sql: "CREATE TABLE sf_decimal_neg (id INT, amount DECIMAL(12,2))"
+    expect:
+      rows: 0
+
+  - name: "Insert negative decimals"
+    sql: |
+      INSERT INTO sf_decimal_neg VALUES
+        (1, 12.50), (2, -12.50), (3, 0.01), (4, -0.01), (5, NULL),
+        (6, 99999.99), (7, -99999.99), (8, 0.00), (9, -0.00), (10, 100.00),
+        (11, -100.00), (12, 1.23), (13, -1.23), (14, 45.67), (15, -45.67),
+        (16, NULL), (17, 0.50), (18, -0.50), (19, 10.10), (20, -10.10)
+    expect:
+      affected_rows: 20
+
+  - name: "DecNeg: verify positive"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - amount: 12.5
+
+  - name: "DecNeg: verify negative"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - amount: -12.5
+
+  - name: "DecNeg: verify small positive"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - amount: 0.01
+
+  - name: "DecNeg: verify NULL"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - amount: null
+
+  - name: "DecNeg: count NULLs"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_decimal_neg WHERE amount IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "DecNeg: SUM"
+    sql: "SELECT SUM(amount) AS s FROM sf_decimal_neg"
+    expect:
+      rows: 1
+
+  # ========================================================================
+  # SHUTDOWN: trigger compression for all tables
+  # ========================================================================
+  - name: "SHUTDOWN to compress all tables"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # ========================================================================
+  # Post-compression verification
+  # ========================================================================
+  - name: "Float: cell id=0 after compression"
+    sql: "SELECT ROUND(val, 4) AS v FROM sf_float WHERE id = 0"
+    expect:
+      rows: 1
+
+  - name: "Float: NULL after compression"
+    sql: "SELECT val FROM sf_float WHERE id = 30"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Float: count after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_float"
+    expect:
+      rows: 1
+      data:
+        - cnt: 31
+
+  - name: "Dict: id=0 after compression (Berlin)"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - city: "Berlin"
+
+  - name: "Dict: id=3 after compression (Cologne)"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - city: "Cologne"
+
+  - name: "Dict: NULL after compression"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 200"
+    expect:
+      rows: 1
+      data:
+        - city: null
+
+  - name: "Dict: count Berlin after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_string_dict WHERE city = 'Berlin'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 40
+
+  - name: "Nodict: id=0 after compression"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - description: "item_0_description_unique_0"
+
+  - name: "Nodict: id=99 after compression"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - description: "item_99_description_unique_693"
+
+  - name: "Nodict: NULL after compression"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 150"
+    expect:
+      rows: 1
+      data:
+        - description: null
+
+  - name: "Nodict: count after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_string_nodict"
+    expect:
+      rows: 1
+      data:
+        - cnt: 151
+
+  - name: "Sparse: non-null id=0 after compression"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 0
+
+  - name: "Sparse: non-null id=20 after compression"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 20"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 200
+
+  - name: "Sparse: non-null id=180 after compression"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 180"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 1800
+
+  - name: "Sparse: NULL id=1 after compression"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - rare_val: null
+
+  - name: "Sparse: count non-null after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_sparse WHERE rare_val IS NOT NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10
+
+  - name: "Seq: id=0 after compression (100)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 100
+
+  - name: "Seq: id=50 after compression (200)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 50"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 200
+
+  - name: "Seq: id=99 after compression (298)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 298
+
+  - name: "Seq: second run id=100 after compression (500)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 500
+
+  - name: "Seq: second run id=149 after compression (647)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 149"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 647
+
+  - name: "Seq: count after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_seq"
+    expect:
+      rows: 1
+      data:
+        - cnt: 150
+
+  - name: "IntNull: positive after compression"
+    sql: "SELECT val FROM sf_int_null WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: 100
+
+  - name: "IntNull: NULL after compression"
+    sql: "SELECT val FROM sf_int_null WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "IntNull: negative after compression"
+    sql: "SELECT val FROM sf_int_null WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - val: -50
+
+  - name: "IntNull: count NULLs after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_int_null WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 5
+
+  - name: "IntWide: max positive after compression"
+    sql: "SELECT val FROM sf_int_wide WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - val: 2147483647
+
+  - name: "IntWide: max negative after compression"
+    sql: "SELECT val FROM sf_int_wide WHERE id = 7"
+    expect:
+      rows: 1
+      data:
+        - val: -2147483648
+
+  - name: "DecNeg: positive after compression"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - amount: 12.5
+
+  - name: "DecNeg: negative after compression"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - amount: -12.5
+
+  - name: "DecNeg: small after compression"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - amount: 0.01
+
+  - name: "DecNeg: NULL after compression"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - amount: null
+
+  - name: "DecNeg: large positive after compression"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - amount: 99999.99
+
+  - name: "DecNeg: large negative after compression"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 7"
+    expect:
+      rows: 1
+      data:
+        - amount: -99999.99
+
+  # ========================================================================
+  # SHUTDOWN 2: Serialize/Deserialize roundtrip
+  # ========================================================================
+  - name: "SHUTDOWN 2: serialize all formats"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # Post-persistence: verify each format survives serialize/deserialize
+
+  - name: "Float: id=0 after persistence"
+    sql: "SELECT ROUND(val, 4) AS v FROM sf_float WHERE id = 0"
+    expect:
+      rows: 1
+
+  - name: "Float: NULL after persistence"
+    sql: "SELECT val FROM sf_float WHERE id = 30"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Dict: id=0 after persistence"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - city: "Berlin"
+
+  - name: "Dict: NULL after persistence"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 200"
+    expect:
+      rows: 1
+      data:
+        - city: null
+
+  - name: "Nodict: id=0 after persistence"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - description: "item_0_description_unique_0"
+
+  - name: "Nodict: id=149 after persistence"
+    sql: "SELECT description FROM sf_string_nodict WHERE id = 149"
+    expect:
+      rows: 1
+      data:
+        - description: "item_149_description_unique_1043"
+
+  - name: "Sparse: non-null id=0 after persistence"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 0
+
+  - name: "Sparse: non-null id=60 after persistence"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 60"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 600
+
+  - name: "Sparse: NULL id=5 after persistence"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - rare_val: null
+
+  - name: "Seq: id=0 after persistence (100)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 100
+
+  - name: "Seq: id=99 after persistence (298)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 298
+
+  - name: "Seq: second run id=100 after persistence (500)"
+    sql: "SELECT seq_val FROM sf_seq WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - seq_val: 500
+
+  - name: "IntNull: id=1 after persistence"
+    sql: "SELECT val FROM sf_int_null WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: 100
+
+  - name: "IntNull: NULL id=2 after persistence"
+    sql: "SELECT val FROM sf_int_null WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "IntWide: max after persistence"
+    sql: "SELECT val FROM sf_int_wide WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - val: 2147483647
+
+  - name: "DecNeg: positive after persistence"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - amount: 12.5
+
+  - name: "DecNeg: negative after persistence"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - amount: -12.5
+
+  - name: "DecNeg: NULL after persistence"
+    sql: "SELECT amount FROM sf_decimal_neg WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - amount: null
+
+  # ========================================================================
+  # DML on compressed storage formats
+  # ========================================================================
+  - name: "Float: UPDATE compressed"
+    sql: "UPDATE sf_float SET val = 3.14159 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "Float: verify UPDATE"
+    sql: "SELECT val FROM sf_float WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - val: 3.14159
+
+  - name: "Dict: UPDATE compressed"
+    sql: "UPDATE sf_string_dict SET city = 'Stuttgart' WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "Dict: verify UPDATE"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - city: "Stuttgart"
+
+  - name: "Sparse: INSERT non-null into sparse"
+    sql: "INSERT INTO sf_sparse VALUES (200, 9999)"
+    expect:
+      affected_rows: 1
+
+  - name: "Sparse: verify INSERT"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 200"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 9999
+
+  - name: "Seq: DELETE from compressed seq"
+    sql: "DELETE FROM sf_seq WHERE id = 50"
+    expect:
+      affected_rows: 1
+
+  - name: "Seq: count after DELETE"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_seq"
+    expect:
+      rows: 1
+      data:
+        - cnt: 149
+
+  - name: "IntNull: UPDATE NULL to value"
+    sql: "UPDATE sf_int_null SET val = 777 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "IntNull: verify UPDATE"
+    sql: "SELECT val FROM sf_int_null WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - val: 777
+
+  - name: "DecNeg: DELETE compressed"
+    sql: "DELETE FROM sf_decimal_neg WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "DecNeg: count after DELETE"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_decimal_neg"
+    expect:
+      rows: 1
+      data:
+        - cnt: 19
+
+  # ========================================================================
+  # Rebuild to recompress after DML (exercises rebuild from delta storage)
+  # ========================================================================
+  - name: "Rebuild to recompress after DML"
+    scm: "(rebuild)"
+
+  - name: "Float: verify after rebuild"
+    sql: "SELECT val FROM sf_float WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - val: 3.14159
+
+  - name: "Dict: verify after rebuild"
+    sql: "SELECT city FROM sf_string_dict WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - city: "Stuttgart"
+
+  - name: "Sparse: verify after rebuild"
+    sql: "SELECT rare_val FROM sf_sparse WHERE id = 200"
+    expect:
+      rows: 1
+      data:
+        - rare_val: 9999
+
+  - name: "IntNull: verify after rebuild"
+    sql: "SELECT val FROM sf_int_null WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - val: 777
+
+  - name: "Seq: count after rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM sf_seq"
+    expect:
+      rows: 1
+      data:
+        - cnt: 149
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sf_float"
+  - sql: "DROP TABLE IF EXISTS sf_string_dict"
+  - sql: "DROP TABLE IF EXISTS sf_string_nodict"
+  - sql: "DROP TABLE IF EXISTS sf_sparse"
+  - sql: "DROP TABLE IF EXISTS sf_seq"
+  - sql: "DROP TABLE IF EXISTS sf_int_null"
+  - sql: "DROP TABLE IF EXISTS sf_int_wide"
+  - sql: "DROP TABLE IF EXISTS sf_decimal_neg"
+  - sql: "DROP TABLE IF EXISTS sf_mixed"
