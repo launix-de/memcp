@@ -1,0 +1,179 @@
+# CASE expressions, COALESCE edge cases, and NULLIF coverage
+# Targets scan.go conditional branches, compute.go expression evaluation
+
+metadata:
+  version: "1.0"
+  description: "CASE WHEN, COALESCE, NULLIF expressions and aggregates"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ccn_data"
+  - sql: |
+      CREATE TABLE ccn_data (
+        id INT, category VARCHAR(20), amount DOUBLE, status INT
+      )
+  - sql: |
+      INSERT INTO ccn_data VALUES
+        (1, 'A', 100.0, 1),
+        (2, 'B', 200.0, 0),
+        (3, 'A', NULL, 1),
+        (4, 'C', 50.0, NULL),
+        (5, 'B', 0.0, 0),
+        (6, 'A', 300.0, 1),
+        (7, NULL, 150.0, 0),
+        (8, 'C', NULL, NULL)
+
+test_cases:
+
+  # === Simple CASE WHEN ===
+
+  - name: "CASE with literal comparison"
+    sql: "SELECT CASE WHEN 1 = 1 THEN 'yes' ELSE 'no' END AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "yes"
+
+  - name: "CASE with column"
+    sql: "SELECT id, CASE WHEN status = 1 THEN 'active' ELSE 'inactive' END AS label FROM ccn_data WHERE id <= 2 ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          label: "active"
+        - id: 2
+          label: "inactive"
+
+  - name: "CASE with NULL status"
+    sql: "SELECT CASE WHEN status IS NULL THEN 'unknown' ELSE 'known' END AS r FROM ccn_data WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - r: "unknown"
+
+  - name: "CASE with multiple WHEN"
+    sql: |
+      SELECT id, CASE
+        WHEN amount > 200 THEN 'high'
+        WHEN amount > 50 THEN 'medium'
+        WHEN amount IS NOT NULL THEN 'low'
+        ELSE 'none'
+      END AS tier
+      FROM ccn_data WHERE id IN (1, 5, 6, 3) ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          tier: "medium"
+        - id: 3
+          tier: "none"
+        - id: 5
+          tier: "low"
+        - id: 6
+          tier: "high"
+
+  # === CASE inside aggregates ===
+
+  - name: "SUM with CASE"
+    sql: "SELECT SUM(CASE WHEN status = 1 THEN amount ELSE 0 END) AS active_total FROM ccn_data WHERE amount IS NOT NULL"
+    expect:
+      rows: 1
+      data:
+        - active_total: 400
+
+  - name: "COUNT with CASE"
+    sql: "SELECT COUNT(CASE WHEN category = 'A' THEN 1 END) AS a_count FROM ccn_data"
+    expect:
+      rows: 1
+      data:
+        - a_count: 3
+
+  # === COALESCE edge cases ===
+
+  - name: "COALESCE with all NULLs"
+    sql: "SELECT COALESCE(NULL, NULL, NULL) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "COALESCE with one arg"
+    sql: "SELECT COALESCE(42) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 42
+
+  - name: "COALESCE with column NULLs"
+    sql: "SELECT COALESCE(amount, -1) AS r FROM ccn_data WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - r: -1
+
+  - name: "COALESCE with category NULL"
+    sql: "SELECT COALESCE(category, 'UNKNOWN') AS r FROM ccn_data WHERE id = 7"
+    expect:
+      rows: 1
+      data:
+        - r: "UNKNOWN"
+
+  - name: "COALESCE in WHERE"
+    sql: "SELECT COUNT(*) AS c FROM ccn_data WHERE COALESCE(status, 0) = 0"
+    expect:
+      rows: 1
+      data:
+        - c: 5
+
+  # === Nested CASE ===
+
+  - name: "Nested CASE"
+    sql: |
+      SELECT CASE
+        WHEN category IS NULL THEN 'no_cat'
+        ELSE CASE WHEN amount IS NULL THEN 'no_amt' ELSE 'ok' END
+      END AS label
+      FROM ccn_data WHERE id = 7
+    expect:
+      rows: 1
+      data:
+        - label: "no_cat"
+
+  - name: "Nested CASE inner branch"
+    sql: |
+      SELECT CASE
+        WHEN category IS NULL THEN 'no_cat'
+        ELSE CASE WHEN amount IS NULL THEN 'no_amt' ELSE 'ok' END
+      END AS label
+      FROM ccn_data WHERE id = 3
+    expect:
+      rows: 1
+      data:
+        - label: "no_amt"
+
+  # === CASE with GROUP BY ===
+
+  - name: "CASE in ORDER BY"
+    sql: |
+      SELECT id, CASE WHEN status = 1 THEN 0 ELSE 1 END AS priority
+      FROM ccn_data
+      WHERE id <= 4
+      ORDER BY CASE WHEN status = 1 THEN 0 ELSE 1 END, id
+    expect:
+      rows: 4
+
+  # === Expression edge cases ===
+
+  - name: "CASE with zero"
+    sql: "SELECT CASE WHEN 0 THEN 'truthy' ELSE 'falsy' END AS r"
+    expect:
+      rows: 1
+
+  - name: "COALESCE chain: first non-null wins"
+    sql: "SELECT COALESCE(NULL, NULL, 3, 4) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 3
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ccn_data"

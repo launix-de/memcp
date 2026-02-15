@@ -1,0 +1,193 @@
+# Complex UPDATE and DELETE operations
+# Targets table.go UpdateSanitizer, shard.go UpdateFunction, trigger paths,
+# ProcessUniqueCollision, and partition.go repartition after heavy DML.
+
+metadata:
+  version: "1.0"
+  description: "UPDATE/DELETE with expressions, multi-column changes, edge cases"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ud_main"
+  - sql: "DROP TABLE IF EXISTS ud_types"
+  - sql: "DROP TABLE IF EXISTS ud_single"
+
+test_cases:
+
+  # === Multi-column UPDATE ===
+
+  - name: "Create main table"
+    sql: "CREATE TABLE ud_main (id INT, name VARCHAR(50), score INT, active INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert test data"
+    sql: |
+      INSERT INTO ud_main VALUES
+        (1, 'alice', 80, 1),
+        (2, 'bob', 90, 1),
+        (3, 'carol', 70, 0),
+        (4, 'dave', 60, 0),
+        (5, 'eve', 95, 1),
+        (6, 'frank', 50, 0),
+        (7, 'grace', 85, 1),
+        (8, 'henry', 40, 0)
+    expect:
+      affected_rows: 8
+
+  - name: "UPDATE single column with expression"
+    sql: "UPDATE ud_main SET score = score + 10 WHERE active = 1"
+    expect:
+      affected_rows: 4
+
+  - name: "Verify updated scores"
+    sql: "SELECT score FROM ud_main WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - score: 90
+
+  - name: "UPDATE multiple columns"
+    sql: "UPDATE ud_main SET active = 1, score = 100 WHERE name = 'carol'"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify multi-column update"
+    sql: "SELECT active, score FROM ud_main WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - active: 1
+          score: 100
+
+  - name: "UPDATE set to NULL"
+    sql: "UPDATE ud_main SET name = NULL WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify NULL update"
+    sql: "SELECT name FROM ud_main WHERE id = 8"
+    expect:
+      rows: 1
+      data:
+        - name: null
+
+  - name: "UPDATE with comparison expression"
+    sql: "UPDATE ud_main SET score = score * 2 WHERE score < 60"
+    expect:
+      affected_rows: 2
+
+  - name: "DELETE with complex WHERE"
+    sql: "DELETE FROM ud_main WHERE active = 0 AND score < 100"
+    expect:
+      affected_rows: 2
+
+  - name: "Remaining row count"
+    sql: "SELECT COUNT(*) AS c FROM ud_main"
+    expect:
+      rows: 1
+      data:
+        - c: 6
+
+  - name: "DELETE all remaining inactive"
+    sql: "DELETE FROM ud_main WHERE active = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "Final count"
+    sql: "SELECT COUNT(*) AS c FROM ud_main"
+    expect:
+      rows: 1
+      data:
+        - c: 5
+
+  # === Type changes during UPDATE ===
+
+  - name: "Create type table"
+    sql: "CREATE TABLE ud_types (id INT, val VARCHAR(50))"
+    expect:
+      rows: 0
+
+  - name: "Insert string data"
+    sql: "INSERT INTO ud_types VALUES (1, 'hello'), (2, 'world'), (3, NULL)"
+    expect:
+      affected_rows: 3
+
+  - name: "UPDATE string value"
+    sql: "UPDATE ud_types SET val = 'updated' WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify string update"
+    sql: "SELECT val FROM ud_types WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: "updated"
+
+  - name: "UPDATE NULL to value"
+    sql: "UPDATE ud_types SET val = 'was_null' WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify NULL to value"
+    sql: "SELECT val FROM ud_types WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - val: "was_null"
+
+  # === Single-row table edge case ===
+
+  - name: "Create single-row table"
+    sql: "CREATE TABLE ud_single (id INT, val INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert one row"
+    sql: "INSERT INTO ud_single VALUES (1, 42)"
+    expect:
+      affected_rows: 1
+
+  - name: "UPDATE single row"
+    sql: "UPDATE ud_single SET val = 99"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify single-row update"
+    sql: "SELECT val FROM ud_single"
+    expect:
+      rows: 1
+      data:
+        - val: 99
+
+  - name: "DELETE single row"
+    sql: "DELETE FROM ud_single WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify empty after delete"
+    sql: "SELECT COUNT(*) AS c FROM ud_single"
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
+  # === DELETE then reinsert ===
+
+  - name: "Reinsert after delete"
+    sql: "INSERT INTO ud_single VALUES (2, 77)"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify reinsert"
+    sql: "SELECT id, val FROM ud_single"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+          val: 77
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ud_main"
+  - sql: "DROP TABLE IF EXISTS ud_types"
+  - sql: "DROP TABLE IF EXISTS ud_single"

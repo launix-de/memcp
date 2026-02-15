@@ -1,0 +1,151 @@
+# Multi-column GROUP BY, HAVING with complex conditions
+# Targets scan.go group-by paths, scan_helper.go aggregate combination,
+# partition.go iterateShards, and compute.go ComputeColumn.
+
+metadata:
+  version: "1.0"
+  description: "Multi-column GROUP BY, HAVING with aggregates, edge cases"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ghm_sales"
+  - sql: |
+      CREATE TABLE ghm_sales (
+        region VARCHAR(20), product VARCHAR(20),
+        year INT, quarter INT, amount DOUBLE, units INT
+      )
+  - sql: |
+      INSERT INTO ghm_sales VALUES
+        ('North', 'Widget', 2024, 1, 1000.50, 10),
+        ('North', 'Widget', 2024, 2, 1500.00, 15),
+        ('North', 'Gadget', 2024, 1, 800.00, 5),
+        ('South', 'Widget', 2024, 1, 2000.00, 20),
+        ('South', 'Widget', 2024, 2, 2500.75, 25),
+        ('South', 'Gadget', 2024, 1, 300.00, 3),
+        ('South', 'Gadget', 2024, 2, 450.00, 4),
+        ('North', 'Gadget', 2024, 2, 900.00, 6),
+        ('North', 'Widget', 2024, 1, 500.00, 5),
+        ('South', 'Widget', 2024, 1, 1000.00, 10)
+
+test_cases:
+
+  # === Single-column GROUP BY (baseline) ===
+
+  - name: "GROUP BY region"
+    sql: "SELECT region, SUM(amount) AS total FROM ghm_sales GROUP BY region ORDER BY region"
+    expect:
+      rows: 2
+
+  - name: "GROUP BY with COUNT"
+    sql: "SELECT region, COUNT(*) AS c FROM ghm_sales GROUP BY region ORDER BY region"
+    expect:
+      rows: 2
+      data:
+        - region: "North"
+          c: 5
+        - region: "South"
+          c: 5
+
+  # === Multi-column GROUP BY ===
+
+  - name: "GROUP BY two columns"
+    sql: "SELECT region, product, SUM(amount) AS total FROM ghm_sales GROUP BY region, product ORDER BY region, product"
+    expect:
+      rows: 4
+
+  - name: "GROUP BY three columns"
+    sql: "SELECT region, product, quarter, SUM(units) AS u FROM ghm_sales GROUP BY region, product, quarter ORDER BY region, product, quarter"
+    expect:
+      rows: 8
+
+  - name: "GROUP BY with multiple aggregates"
+    sql: |
+      SELECT region, product,
+        SUM(amount) AS total,
+        COUNT(*) AS cnt,
+        MIN(amount) AS lo,
+        MAX(amount) AS hi,
+        AVG(amount) AS avg_amt
+      FROM ghm_sales
+      GROUP BY region, product
+      ORDER BY region, product
+    expect:
+      rows: 4
+
+  # === HAVING clause ===
+
+  - name: "HAVING with SUM"
+    sql: "SELECT region, SUM(amount) AS total FROM ghm_sales GROUP BY region HAVING SUM(amount) > 5000 ORDER BY region"
+    expect:
+      rows: 1
+      data:
+        - region: "South"
+
+  - name: "HAVING with COUNT"
+    sql: "SELECT product, COUNT(*) AS c FROM ghm_sales GROUP BY product HAVING COUNT(*) > 4"
+    expect:
+      rows: 1
+      data:
+        - product: "Widget"
+          c: 6
+
+  - name: "HAVING with AVG"
+    sql: "SELECT region, AVG(amount) AS avg_amt FROM ghm_sales GROUP BY region HAVING AVG(amount) > 1000"
+    expect:
+      rows: 1
+
+  - name: "HAVING returns no rows"
+    sql: "SELECT region, SUM(amount) AS total FROM ghm_sales GROUP BY region HAVING SUM(amount) > 99999"
+    expect:
+      rows: 0
+
+  - name: "HAVING with multi-column GROUP BY"
+    sql: |
+      SELECT region, product, SUM(units) AS u
+      FROM ghm_sales
+      GROUP BY region, product
+      HAVING SUM(units) > 10
+      ORDER BY region, product
+    expect:
+      rows: 3
+
+  # === GROUP BY with WHERE + HAVING combination ===
+
+  - name: "WHERE + GROUP BY + HAVING"
+    sql: |
+      SELECT region, SUM(amount) AS total
+      FROM ghm_sales
+      WHERE quarter = 1
+      GROUP BY region
+      HAVING SUM(amount) > 2500
+      ORDER BY region
+    expect:
+      rows: 1
+      data:
+        - region: "South"
+
+  # === GROUP BY with ORDER BY + LIMIT ===
+
+  - name: "GROUP BY + ORDER BY SUM DESC + LIMIT"
+    sql: "SELECT product, SUM(amount) AS total FROM ghm_sales GROUP BY product ORDER BY SUM(amount) DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - product: "Widget"
+
+  # === GROUP BY edge cases ===
+
+  - name: "GROUP BY with all same group"
+    sql: "SELECT year, COUNT(*) AS c FROM ghm_sales GROUP BY year"
+    expect:
+      rows: 1
+      data:
+        - year: 2024
+          c: 10
+
+  - name: "GROUP BY on empty result"
+    sql: "SELECT region, COUNT(*) AS c FROM ghm_sales WHERE year = 9999 GROUP BY region"
+    expect:
+      rows: 2
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ghm_sales"

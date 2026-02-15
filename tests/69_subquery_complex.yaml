@@ -1,0 +1,157 @@
+# Complex subquery coverage
+# Targets scan.go subquery evaluation, compute.go expression paths,
+# and scan_helper.go various scan strategies.
+
+metadata:
+  version: "1.0"
+  description: "Subqueries: scalar, IN, EXISTS, correlated, in HAVING and WHERE"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sq_dept"
+  - sql: "DROP TABLE IF EXISTS sq_emp"
+  - sql: |
+      CREATE TABLE sq_dept (did INT, dname VARCHAR(30))
+  - sql: |
+      INSERT INTO sq_dept VALUES
+        (1, 'Engineering'), (2, 'Marketing'), (3, 'Sales'), (4, 'Empty')
+  - sql: |
+      CREATE TABLE sq_emp (eid INT, name VARCHAR(30), did INT, salary DOUBLE)
+  - sql: |
+      INSERT INTO sq_emp VALUES
+        (1, 'Alice', 1, 90000),
+        (2, 'Bob', 1, 80000),
+        (3, 'Carol', 2, 70000),
+        (4, 'Dave', 2, 75000),
+        (5, 'Eve', 3, 60000),
+        (6, 'Frank', 1, 95000),
+        (7, 'Grace', 3, 65000),
+        (8, 'Henry', NULL, 50000)
+
+test_cases:
+
+  # === Scalar subquery in SELECT ===
+
+  - name: "Scalar subquery: total count"
+    sql: "SELECT name, (SELECT COUNT(*) FROM sq_emp) AS total FROM sq_emp WHERE eid = 1"
+    expect:
+      rows: 1
+      data:
+        - name: "Alice"
+          total: 8
+
+  - name: "Scalar subquery: department name"
+    sql: |
+      SELECT e.name, (SELECT d.dname FROM sq_dept d WHERE d.did = e.did) AS dept
+      FROM sq_emp e WHERE e.eid = 1
+    expect:
+      rows: 1
+      data:
+        - name: "Alice"
+          dept: "Engineering"
+
+  # === IN subquery ===
+
+  - name: "IN with subquery"
+    sql: |
+      SELECT name FROM sq_emp
+      WHERE did IN (SELECT did FROM sq_dept WHERE dname = 'Engineering')
+      ORDER BY name
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+        - name: "Bob"
+        - name: "Frank"
+
+  - name: "NOT IN with subquery"
+    sql: |
+      SELECT name FROM sq_emp
+      WHERE did NOT IN (SELECT did FROM sq_dept WHERE dname = 'Engineering')
+      AND did IS NOT NULL
+      ORDER BY name
+    expect:
+      rows: 4
+
+  # === EXISTS subquery ===
+
+  - name: "EXISTS: departments with employees"
+    sql: |
+      SELECT dname FROM sq_dept d
+      WHERE EXISTS (SELECT 1 FROM sq_emp e WHERE e.did = d.did)
+      ORDER BY dname
+    expect:
+      rows: 3
+
+  - name: "NOT EXISTS: departments without employees"
+    sql: |
+      SELECT dname FROM sq_dept d
+      WHERE NOT EXISTS (SELECT 1 FROM sq_emp e WHERE e.did = d.did)
+    expect:
+      rows: 1
+      data:
+        - dname: "Empty"
+
+  # === Subquery in WHERE with comparison ===
+
+  - name: "Subquery comparison: salary above average"
+    sql: |
+      SELECT e.name, e.salary
+      FROM sq_emp e
+      WHERE e.salary > (SELECT AVG(salary) FROM sq_emp)
+      ORDER BY e.salary DESC
+    expect:
+      rows: 4
+
+  - name: "Subquery: MAX from subquery"
+    sql: |
+      SELECT name FROM sq_emp
+      WHERE salary = (SELECT MAX(salary) FROM sq_emp)
+    expect:
+      rows: 1
+      data:
+        - name: "Frank"
+
+  # === Subquery in HAVING ===
+
+  - name: "HAVING with scalar subquery"
+    sql: |
+      SELECT did, AVG(salary) AS avg_sal
+      FROM sq_emp
+      WHERE did IS NOT NULL
+      GROUP BY did
+      HAVING AVG(salary) > (SELECT AVG(salary) FROM sq_emp)
+    expect:
+      rows: 1
+
+  # === Nested subqueries ===
+
+  - name: "Nested IN subquery"
+    sql: |
+      SELECT name FROM sq_emp
+      WHERE did IN (
+        SELECT did FROM sq_dept
+        WHERE dname IN ('Engineering', 'Sales')
+      )
+      ORDER BY name
+    expect:
+      rows: 5
+
+  # === Subquery returning empty result ===
+
+  - name: "IN empty subquery"
+    sql: |
+      SELECT name FROM sq_emp
+      WHERE did IN (SELECT did FROM sq_dept WHERE dname = 'Nonexistent')
+    expect:
+      rows: 0
+
+  - name: "EXISTS on empty subquery"
+    sql: |
+      SELECT dname FROM sq_dept d
+      WHERE EXISTS (SELECT 1 FROM sq_emp e WHERE e.did = d.did AND e.salary > 999999)
+    expect:
+      rows: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sq_emp"
+  - sql: "DROP TABLE IF EXISTS sq_dept"

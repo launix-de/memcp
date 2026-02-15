@@ -1,0 +1,157 @@
+# Complex ORDER BY and LIMIT/OFFSET coverage
+# Targets scan_order.go scan_order (69.7%), scan_order.go Less (87.5%),
+# partition.go iterateShards (48.9%).
+
+metadata:
+  version: "1.0"
+  description: "ORDER BY with multiple columns, NULL ordering, expressions, LIMIT/OFFSET"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS obc_data"
+  - sql: |
+      CREATE TABLE obc_data (
+        id INT, name VARCHAR(30), score INT, grade VARCHAR(5), weight DOUBLE
+      )
+  - sql: |
+      INSERT INTO obc_data VALUES
+        (1, 'alice', 90, 'A', 1.5),
+        (2, 'bob', 90, 'A', 2.0),
+        (3, 'carol', 80, 'B', 1.0),
+        (4, 'dave', 80, 'B', NULL),
+        (5, 'eve', 95, 'A', 3.0),
+        (6, 'frank', NULL, NULL, NULL),
+        (7, 'grace', 70, 'C', 0.5),
+        (8, 'henry', 70, 'C', 0.5),
+        (9, NULL, 85, 'B', 1.0),
+        (10, 'ivy', 85, 'B', 2.5)
+
+test_cases:
+
+  # === Multi-column ORDER BY ===
+
+  - name: "ORDER BY two columns ASC"
+    sql: "SELECT name, score FROM obc_data WHERE score IS NOT NULL ORDER BY score, name LIMIT 4"
+    expect:
+      rows: 4
+      data:
+        - name: "grace"
+          score: 70
+        - name: "henry"
+          score: 70
+        - name: "carol"
+          score: 80
+        - name: "dave"
+          score: 80
+
+  - name: "ORDER BY ASC, DESC mixed"
+    sql: "SELECT name, score FROM obc_data WHERE score IS NOT NULL ORDER BY score DESC, name ASC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - name: "eve"
+          score: 95
+        - name: "alice"
+          score: 90
+        - name: "bob"
+          score: 90
+
+  # === NULL ordering ===
+
+  - name: "ORDER BY with NULLs (ASC puts NULL last)"
+    sql: "SELECT id, name FROM obc_data ORDER BY name ASC LIMIT 10"
+    expect:
+      rows: 10
+
+  - name: "ORDER BY with NULLs (DESC puts NULL last)"
+    sql: "SELECT id, name FROM obc_data ORDER BY name DESC LIMIT 10"
+    expect:
+      rows: 10
+
+  # === LIMIT / OFFSET ===
+
+  - name: "LIMIT only"
+    sql: "SELECT id FROM obc_data ORDER BY id LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+
+  - name: "LIMIT with OFFSET"
+    sql: "SELECT id FROM obc_data ORDER BY id LIMIT 3 OFFSET 3"
+    expect:
+      rows: 3
+      data:
+        - id: 4
+        - id: 5
+        - id: 6
+
+  - name: "OFFSET beyond data"
+    sql: "SELECT id FROM obc_data ORDER BY id LIMIT 3 OFFSET 100"
+    expect:
+      rows: 0
+
+  - name: "LIMIT 0"
+    sql: "SELECT id FROM obc_data ORDER BY id LIMIT 0"
+    expect:
+      rows: 0
+
+  - name: "LIMIT larger than data"
+    sql: "SELECT id FROM obc_data ORDER BY id LIMIT 100"
+    expect:
+      rows: 10
+
+  # === ORDER BY with float column ===
+
+  - name: "ORDER BY float with NULLs"
+    sql: "SELECT id, weight FROM obc_data WHERE weight IS NOT NULL ORDER BY weight ASC"
+    expect:
+      rows: 8
+
+  - name: "ORDER BY float DESC"
+    sql: "SELECT id, weight FROM obc_data WHERE weight IS NOT NULL ORDER BY weight DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 5
+          weight: 3
+        - id: 10
+          weight: 2.5
+        - id: 2
+          weight: 2
+
+  # === ORDER BY with GROUP BY ===
+
+  - name: "GROUP BY + ORDER BY aggregate"
+    sql: "SELECT grade, COUNT(*) AS c FROM obc_data WHERE grade IS NOT NULL GROUP BY grade ORDER BY COUNT(*) DESC"
+    expect:
+      rows: 3
+
+  - name: "GROUP BY + ORDER BY aggregate ASC"
+    sql: "SELECT grade, AVG(score) AS avg_s FROM obc_data WHERE grade IS NOT NULL GROUP BY grade ORDER BY AVG(score) ASC"
+    expect:
+      rows: 3
+
+  # === ORDER BY string column ===
+
+  - name: "ORDER BY string"
+    sql: "SELECT name FROM obc_data WHERE name IS NOT NULL ORDER BY name ASC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - name: "alice"
+        - name: "bob"
+        - name: "carol"
+
+  - name: "ORDER BY string DESC"
+    sql: "SELECT name FROM obc_data WHERE name IS NOT NULL ORDER BY name DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - name: "ivy"
+        - name: "henry"
+        - name: "grace"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS obc_data"

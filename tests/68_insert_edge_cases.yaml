@@ -1,0 +1,220 @@
+# INSERT edge cases and storage type selection coverage
+# Targets shard.go Insert/insertDataset, table.go Insert,
+# storage-int.go init (76.9%), storage-scmer.go proposeCompression (81.8%).
+
+metadata:
+  version: "1.0"
+  description: "INSERT edge cases, bulk inserts, type coercion, storage heuristics"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS iec_bulk"
+  - sql: "DROP TABLE IF EXISTS iec_types"
+  - sql: "DROP TABLE IF EXISTS iec_negatives"
+  - sql: "DROP TABLE IF EXISTS iec_wide"
+  - sql: "DROP TABLE IF EXISTS iec_constants"
+
+test_cases:
+
+  # === Bulk INSERT ===
+
+  - name: "Create bulk table"
+    sql: "CREATE TABLE iec_bulk (id INT, val INT)"
+    expect:
+      rows: 0
+
+  - name: "Multi-row INSERT"
+    sql: |
+      INSERT INTO iec_bulk VALUES
+        (1, 10), (2, 20), (3, 30), (4, 40), (5, 50),
+        (6, 60), (7, 70), (8, 80), (9, 90), (10, 100)
+    expect:
+      affected_rows: 10
+
+  - name: "Verify bulk count"
+    sql: "SELECT COUNT(*) AS c FROM iec_bulk"
+    expect:
+      rows: 1
+      data:
+        - c: 10
+
+  - name: "Verify bulk sum"
+    sql: "SELECT SUM(val) AS s FROM iec_bulk"
+    expect:
+      rows: 1
+      data:
+        - s: 550
+
+  # === Type coercion on INSERT ===
+
+  - name: "Create typed table"
+    sql: "CREATE TABLE iec_types (id INT, name VARCHAR(50), score DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "INSERT string into INT column"
+    sql: "INSERT INTO iec_types VALUES (1, 'test', 3.14)"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT NULL into all columns"
+    sql: "INSERT INTO iec_types VALUES (NULL, NULL, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify NULL row"
+    sql: "SELECT id, name, score FROM iec_types WHERE id IS NULL"
+    expect:
+      rows: 1
+      data:
+        - id: null
+          name: null
+          score: null
+
+  - name: "INSERT with explicit column list"
+    sql: "INSERT INTO iec_types (name, id) VALUES ('partial', 3)"
+    expect:
+      affected_rows: 1
+
+  - name: "Missing column defaults to NULL"
+    sql: "SELECT score FROM iec_types WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - score: null
+
+  # === Negative integers and bit-width edge cases ===
+
+  - name: "Create negatives table"
+    sql: "CREATE TABLE iec_negatives (id INT, val INT)"
+    expect:
+      rows: 0
+
+  - name: "INSERT negative values"
+    sql: |
+      INSERT INTO iec_negatives VALUES
+        (1, -1), (2, -100), (3, -32768), (4, 0), (5, 32767),
+        (6, -1000000), (7, 1000000), (8, -1)
+    expect:
+      affected_rows: 8
+
+  - name: "Verify negative min"
+    sql: "SELECT MIN(val) AS m FROM iec_negatives"
+    expect:
+      rows: 1
+      data:
+        - m: -1000000
+
+  - name: "Verify positive max"
+    sql: "SELECT MAX(val) AS m FROM iec_negatives"
+    expect:
+      rows: 1
+      data:
+        - m: 1000000
+
+  - name: "Verify range query"
+    sql: "SELECT COUNT(*) AS c FROM iec_negatives WHERE val BETWEEN -100 AND 100"
+    expect:
+      rows: 1
+      data:
+        - c: 4
+
+  # === Wide table (many columns) ===
+
+  - name: "Create wide table"
+    sql: "CREATE TABLE iec_wide (a INT, b INT, c INT, d INT, e INT, f VARCHAR(20), g DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "INSERT wide row"
+    sql: "INSERT INTO iec_wide VALUES (1, 2, 3, 4, 5, 'wide', 6.6)"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify wide row"
+    sql: "SELECT a, b, c, d, e, f, g FROM iec_wide"
+    expect:
+      rows: 1
+      data:
+        - a: 1
+          b: 2
+          c: 3
+          d: 4
+          e: 5
+          f: "wide"
+          g: 6.6
+
+  # === Constant column (triggers StorageSeq/single-value optimization) ===
+
+  - name: "Create constant column table"
+    sql: "CREATE TABLE iec_constants (id INT, const_val INT, const_str VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Insert all-same-value data"
+    sql: |
+      INSERT INTO iec_constants VALUES
+        (1, 42, 'same'), (2, 42, 'same'), (3, 42, 'same'),
+        (4, 42, 'same'), (5, 42, 'same'), (6, 42, 'same'),
+        (7, 42, 'same'), (8, 42, 'same')
+    expect:
+      affected_rows: 8
+
+  - name: "Constant column: all values equal"
+    sql: "SELECT const_val, COUNT(*) AS c FROM iec_constants GROUP BY const_val"
+    expect:
+      rows: 1
+      data:
+        - const_val: 42
+          c: 8
+
+  - name: "Constant string: all values equal"
+    sql: "SELECT const_str, COUNT(*) AS c FROM iec_constants GROUP BY const_str"
+    expect:
+      rows: 1
+      data:
+        - const_str: "same"
+          c: 8
+
+  # === SHUTDOWN and verify compression ===
+
+  - name: "SHUTDOWN to compress"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Post-compress: bulk data intact"
+    sql: "SELECT SUM(val) AS s FROM iec_bulk"
+    expect:
+      rows: 1
+      data:
+        - s: 550
+
+  - name: "Post-compress: negative values"
+    sql: "SELECT val FROM iec_negatives WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - val: -1000000
+
+  - name: "Post-compress: wide row"
+    sql: "SELECT a, f, g FROM iec_wide WHERE a = 1"
+    expect:
+      rows: 1
+      data:
+        - a: 1
+          f: "wide"
+          g: 6.6
+
+  - name: "Post-compress: constant column"
+    sql: "SELECT const_val FROM iec_constants WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - const_val: 42
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS iec_bulk"
+  - sql: "DROP TABLE IF EXISTS iec_types"
+  - sql: "DROP TABLE IF EXISTS iec_negatives"
+  - sql: "DROP TABLE IF EXISTS iec_wide"
+  - sql: "DROP TABLE IF EXISTS iec_constants"

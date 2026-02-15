@@ -1,0 +1,353 @@
+# Float and Decimal storage coverage
+# Exercises StorageFloat NULL paths, StorageDecimal scale detection,
+# float aggregation, decimal arithmetic, and type coercion edge cases.
+
+metadata:
+  version: "1.0"
+  description: "Float/Decimal storage paths, NULL handling, aggregation, and coercion"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS fdc_float"
+  - sql: "DROP TABLE IF EXISTS fdc_decimal"
+  - sql: "DROP TABLE IF EXISTS fdc_mixed"
+  - sql: "DROP TABLE IF EXISTS fdc_allnull"
+  - sql: "DROP TABLE IF EXISTS fdc_empty"
+
+test_cases:
+
+  # === StorageFloat: NULL branch in GetValue and build ===
+
+  - name: "Create float table"
+    sql: "CREATE TABLE fdc_float (id INT, val DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "Insert floats with NULLs"
+    sql: |
+      INSERT INTO fdc_float VALUES
+        (1, 3.14), (2, NULL), (3, -0.001), (4, NULL),
+        (5, 999999.999), (6, 0.0), (7, NULL), (8, -273.15)
+    expect:
+      affected_rows: 8
+
+  - name: "Float: SUM ignores NULLs"
+    sql: "SELECT SUM(val) AS s FROM fdc_float"
+    expect:
+      rows: 1
+
+  - name: "Float: AVG ignores NULLs"
+    sql: "SELECT AVG(val) AS a FROM fdc_float"
+    expect:
+      rows: 1
+
+  - name: "Float: COUNT(col) ignores NULLs"
+    sql: "SELECT COUNT(val) AS c FROM fdc_float"
+    expect:
+      rows: 1
+      data:
+        - c: 5
+
+  - name: "Float: COUNT(*) counts all rows"
+    sql: "SELECT COUNT(*) AS c FROM fdc_float"
+    expect:
+      rows: 1
+      data:
+        - c: 8
+
+  - name: "Float: MIN ignores NULLs"
+    sql: "SELECT MIN(val) AS m FROM fdc_float"
+    expect:
+      rows: 1
+      data:
+        - m: -273.15
+
+  - name: "Float: MAX ignores NULLs"
+    sql: "SELECT MAX(val) AS m FROM fdc_float"
+    expect:
+      rows: 1
+      data:
+        - m: 999999.999
+
+  - name: "Float: WHERE on NULL"
+    sql: "SELECT COUNT(*) AS c FROM fdc_float WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - c: 3
+
+  - name: "Float: WHERE IS NOT NULL"
+    sql: "SELECT COUNT(*) AS c FROM fdc_float WHERE val IS NOT NULL"
+    expect:
+      rows: 1
+      data:
+        - c: 5
+
+  - name: "Float: COALESCE with float NULL"
+    sql: "SELECT COALESCE(val, -1) AS v FROM fdc_float WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - v: -1
+
+  - name: "Float: arithmetic on NULLs returns NULL"
+    sql: "SELECT val + 1 AS v FROM fdc_float WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - v: null
+
+  # === StorageDecimal paths ===
+
+  - name: "Create decimal table"
+    sql: "CREATE TABLE fdc_decimal (id INT, price DECIMAL(10,2), qty DECIMAL(8,0))"
+    expect:
+      rows: 0
+
+  - name: "Insert decimal data"
+    sql: |
+      INSERT INTO fdc_decimal VALUES
+        (1, 19.99, 100),
+        (2, 0.01, 1),
+        (3, -5.50, 0),
+        (4, NULL, NULL),
+        (5, 99999.99, 50000),
+        (6, 0.00, 0),
+        (7, 123.45, 678),
+        (8, -0.01, -1)
+    expect:
+      affected_rows: 8
+
+  - name: "Decimal: SUM"
+    sql: "SELECT SUM(price) AS s FROM fdc_decimal"
+    expect:
+      rows: 1
+
+  - name: "Decimal: AVG"
+    sql: "SELECT AVG(price) AS a FROM fdc_decimal"
+    expect:
+      rows: 1
+
+  - name: "Decimal: MIN"
+    sql: "SELECT MIN(price) AS m FROM fdc_decimal"
+    expect:
+      rows: 1
+      data:
+        - m: -5.50
+
+  - name: "Decimal: MAX"
+    sql: "SELECT MAX(price) AS m FROM fdc_decimal"
+    expect:
+      rows: 1
+      data:
+        - m: 99999.99
+
+  - name: "Decimal: NULL handling in COUNT"
+    sql: "SELECT COUNT(price) AS c FROM fdc_decimal"
+    expect:
+      rows: 1
+      data:
+        - c: 7
+
+  - name: "Decimal: multiplication"
+    sql: "SELECT ROUND(price * qty, 2) AS total FROM fdc_decimal WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - total: 1999
+
+  - name: "Decimal: zero value"
+    sql: "SELECT price FROM fdc_decimal WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - price: 0
+
+  - name: "Decimal: negative value"
+    sql: "SELECT price FROM fdc_decimal WHERE id = 8"
+    expect:
+      rows: 1
+      data:
+        - price: -0.01
+
+  # === Type coercion: float/int mixed operations ===
+
+  - name: "Create mixed type table"
+    sql: "CREATE TABLE fdc_mixed (id INT, ival INT, fval DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "Insert mixed types"
+    sql: |
+      INSERT INTO fdc_mixed VALUES
+        (1, 10, 2.5), (2, 0, 0.0), (3, -1, -0.5), (4, NULL, 3.0), (5, 7, NULL)
+    expect:
+      affected_rows: 5
+
+  - name: "Mixed: int + float"
+    sql: "SELECT ival + fval AS r FROM fdc_mixed WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - r: 12.5
+
+  - name: "Mixed: int * float"
+    sql: "SELECT ival * fval AS r FROM fdc_mixed WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - r: 0.5
+
+  - name: "Mixed: NULL int + float = NULL"
+    sql: "SELECT ival + fval AS r FROM fdc_mixed WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "Mixed: int + NULL float = NULL"
+    sql: "SELECT ival + fval AS r FROM fdc_mixed WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "Mixed: GROUP BY aggregate across types"
+    sql: "SELECT SUM(ival) AS si, SUM(fval) AS sf FROM fdc_mixed"
+    expect:
+      rows: 1
+
+  # === Aggregates on empty table ===
+
+  - name: "Create empty table"
+    sql: "CREATE TABLE fdc_empty (id INT, val DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "Empty: COUNT(*)"
+    sql: "SELECT COUNT(*) AS c FROM fdc_empty"
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
+  - name: "Empty: SUM returns zero"
+    sql: "SELECT SUM(val) AS s FROM fdc_empty"
+    expect:
+      rows: 1
+      data:
+        - s: 0
+
+  - name: "Empty: single-row with NULL"
+    sql: "INSERT INTO fdc_empty VALUES (1, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Empty: AVG of single NULL"
+    sql: "SELECT AVG(val) AS a FROM fdc_empty"
+    expect:
+      rows: 1
+      data:
+        - a: null
+
+  - name: "Empty: MIN returns NULL"
+    sql: "SELECT MIN(val) AS m FROM fdc_empty"
+    expect:
+      rows: 1
+      data:
+        - m: null
+
+  - name: "Empty: MAX returns NULL"
+    sql: "SELECT MAX(val) AS m FROM fdc_empty"
+    expect:
+      rows: 1
+      data:
+        - m: null
+
+  # === All-NULL column aggregates ===
+
+  - name: "Create all-null table"
+    sql: "CREATE TABLE fdc_allnull (id INT, val DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "Insert all NULLs"
+    sql: "INSERT INTO fdc_allnull VALUES (1, NULL), (2, NULL), (3, NULL)"
+    expect:
+      affected_rows: 3
+
+  - name: "AllNull: SUM"
+    sql: "SELECT SUM(val) AS s FROM fdc_allnull"
+    expect:
+      rows: 1
+      data:
+        - s: null
+
+  - name: "AllNull: AVG"
+    sql: "SELECT AVG(val) AS a FROM fdc_allnull"
+    expect:
+      rows: 1
+      data:
+        - a: null
+
+  - name: "AllNull: COUNT(col)"
+    sql: "SELECT COUNT(val) AS c FROM fdc_allnull"
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
+  - name: "AllNull: COUNT(*)"
+    sql: "SELECT COUNT(*) AS c FROM fdc_allnull"
+    expect:
+      rows: 1
+      data:
+        - c: 3
+
+  # === Shutdown to trigger compression, then verify ===
+
+  - name: "SHUTDOWN to compress storage"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Post-SHUTDOWN: float NULLs preserved"
+    sql: "SELECT COUNT(*) AS c FROM fdc_float WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - c: 3
+
+  - name: "Post-SHUTDOWN: float values preserved"
+    sql: "SELECT val FROM fdc_float WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: 3.14
+
+  - name: "Post-SHUTDOWN: decimal values preserved"
+    sql: "SELECT price FROM fdc_decimal WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - price: 19.99
+
+  - name: "Post-SHUTDOWN: decimal NULL preserved"
+    sql: "SELECT price FROM fdc_decimal WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - price: null
+
+  - name: "Post-SHUTDOWN: negative decimal preserved"
+    sql: "SELECT price FROM fdc_decimal WHERE id = 8"
+    expect:
+      rows: 1
+      data:
+        - price: -0.01
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS fdc_float"
+  - sql: "DROP TABLE IF EXISTS fdc_decimal"
+  - sql: "DROP TABLE IF EXISTS fdc_mixed"
+  - sql: "DROP TABLE IF EXISTS fdc_allnull"
+  - sql: "DROP TABLE IF EXISTS fdc_empty"

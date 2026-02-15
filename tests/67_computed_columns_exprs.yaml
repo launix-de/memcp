@@ -1,0 +1,160 @@
+# Computed columns and expression coverage
+# Targets compute.go ComputeColumn (79.1%/88.5%),
+# newCachedColumnReader (66.7%), scan.go expression evaluation.
+
+metadata:
+  version: "1.0"
+  description: "Computed columns, expression evaluation, type conversions in SELECT"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cce_data"
+  - sql: |
+      CREATE TABLE cce_data (
+        id INT, name VARCHAR(30), price DOUBLE, qty INT, discount DOUBLE, tag VARCHAR(20)
+      )
+  - sql: |
+      INSERT INTO cce_data VALUES
+        (1, 'Widget', 25.50, 10, 0.1, 'sale'),
+        (2, 'Gadget', 50.00, 5, 0.0, 'regular'),
+        (3, 'Doohickey', 10.00, 100, 0.25, 'clearance'),
+        (4, 'Thingamajig', 75.00, 0, NULL, NULL),
+        (5, 'Whatchamacallit', 30.00, 8, 0.05, 'sale'),
+        (6, NULL, NULL, NULL, NULL, NULL)
+
+test_cases:
+
+  # === Arithmetic expressions in SELECT ===
+
+  - name: "Multiply columns"
+    sql: "SELECT price * qty AS total FROM cce_data WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - total: 255
+
+  - name: "Complex arithmetic expression"
+    sql: "SELECT price * qty * (1 - discount) AS net FROM cce_data WHERE id = 1"
+    expect:
+      rows: 1
+
+  - name: "Division"
+    sql: "SELECT price / qty AS unit FROM cce_data WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - unit: 0.1
+
+  - name: "Arithmetic with NULL propagates NULL"
+    sql: "SELECT price * qty AS total FROM cce_data WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - total: null
+
+  - name: "Expression with zero"
+    sql: "SELECT price * qty AS total FROM cce_data WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - total: 0
+
+  # === String concatenation via CONCAT ===
+
+  - name: "CONCAT two columns"
+    sql: "SELECT CONCAT(name, '-', tag) AS label FROM cce_data WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - label: "Widget-sale"
+
+  - name: "CONCAT with NULL"
+    sql: "SELECT CONCAT(name, '-', tag) AS label FROM cce_data WHERE id = 4"
+    expect:
+      rows: 1
+
+  # === Comparison expressions ===
+
+  - name: "Greater than in SELECT"
+    sql: "SELECT id, price > 30 AS expensive FROM cce_data WHERE id <= 3 ORDER BY id"
+    expect:
+      rows: 3
+
+  - name: "Equality check"
+    sql: "SELECT id, tag = 'sale' AS on_sale FROM cce_data WHERE id = 1"
+    expect:
+      rows: 1
+
+  # === Aliased expressions ===
+
+  - name: "Multiple computed columns"
+    sql: |
+      SELECT id,
+        price * qty AS subtotal,
+        COALESCE(discount, 0) AS disc,
+        price * qty * (1 - COALESCE(discount, 0)) AS net_total
+      FROM cce_data
+      WHERE id = 1
+    expect:
+      rows: 1
+
+  # === Expression in WHERE clause ===
+
+  - name: "Expression in WHERE"
+    sql: "SELECT name FROM cce_data WHERE price * qty > 200"
+    expect:
+      rows: 4
+
+  - name: "COALESCE in WHERE"
+    sql: "SELECT name FROM cce_data WHERE COALESCE(discount, 0) > 0 ORDER BY name"
+    expect:
+      rows: 3
+
+  # === Expression in ORDER BY ===
+
+  - name: "ORDER BY expression"
+    sql: "SELECT name, price * qty AS total FROM cce_data WHERE price IS NOT NULL ORDER BY price * qty DESC LIMIT 3"
+    expect:
+      rows: 3
+
+  # === Aggregate of expression ===
+
+  - name: "SUM of expression"
+    sql: "SELECT SUM(price * qty) AS grand_total FROM cce_data"
+    expect:
+      rows: 1
+
+  - name: "AVG of expression"
+    sql: "SELECT AVG(price * qty) AS avg_total FROM cce_data WHERE qty > 0"
+    expect:
+      rows: 1
+
+  # === Subquery as expression ===
+
+  - name: "Scalar subquery in SELECT"
+    sql: "SELECT name, (SELECT COUNT(*) FROM cce_data) AS total_rows FROM cce_data WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - name: "Widget"
+          total_rows: 6
+
+  # === CAST / type conversion ===
+
+  - name: "Concat int into string"
+    sql: "SELECT CONCAT('qty:', qty) AS q FROM cce_data WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - q: "qty:10"
+
+  - name: "Implicit int to float comparison"
+    sql: "SELECT id FROM cce_data WHERE price > 25 AND qty > 0 ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 2
+        - id: 5
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cce_data"

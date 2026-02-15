@@ -1,0 +1,245 @@
+# Sparse and prefix storage compression coverage
+# Targets storage-sparse.go (binary search GetValue, serialize/deserialize),
+# storage-prefix.go (prefix detection, compression), and storage-scmer.go
+# proposeCompression (81.8%) heuristic paths.
+
+metadata:
+  version: "1.0"
+  description: "Sparse columns, prefix compression, and storage type selection"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sp_sparse"
+  - sql: "DROP TABLE IF EXISTS sp_prefix"
+  - sql: "DROP TABLE IF EXISTS sp_mixed_null"
+  - sql: "DROP TABLE IF EXISTS sp_bool_skewed"
+
+test_cases:
+
+  # === Sparse column: mostly NULLs ===
+
+  - name: "Create sparse table"
+    sql: "CREATE TABLE sp_sparse (id INT, rare_val VARCHAR(50))"
+    expect:
+      rows: 0
+
+  - name: "Insert mostly NULL data (sparse pattern)"
+    sql: |
+      INSERT INTO sp_sparse VALUES
+        (1, NULL), (2, NULL), (3, NULL), (4, NULL), (5, NULL),
+        (6, NULL), (7, NULL), (8, NULL), (9, NULL), (10, 'found'),
+        (11, NULL), (12, NULL), (13, NULL), (14, NULL), (15, NULL),
+        (16, NULL), (17, NULL), (18, NULL), (19, NULL), (20, 'also'),
+        (21, NULL), (22, NULL), (23, NULL), (24, NULL), (25, NULL),
+        (26, NULL), (27, NULL), (28, NULL), (29, NULL), (30, 'rare'),
+        (31, NULL), (32, NULL), (33, NULL), (34, NULL), (35, NULL),
+        (36, NULL), (37, NULL), (38, NULL), (39, NULL), (40, NULL)
+    expect:
+      affected_rows: 40
+
+  - name: "Sparse: query non-NULL value"
+    sql: "SELECT rare_val FROM sp_sparse WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - rare_val: "found"
+
+  - name: "Sparse: query NULL value"
+    sql: "SELECT rare_val FROM sp_sparse WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - rare_val: null
+
+  - name: "Sparse: COUNT non-NULL"
+    sql: "SELECT COUNT(rare_val) AS c FROM sp_sparse"
+    expect:
+      rows: 1
+      data:
+        - c: 3
+
+  - name: "Sparse: COUNT(*)"
+    sql: "SELECT COUNT(*) AS c FROM sp_sparse"
+    expect:
+      rows: 1
+      data:
+        - c: 40
+
+  - name: "Sparse: IS NOT NULL filter"
+    sql: "SELECT id, rare_val FROM sp_sparse WHERE rare_val IS NOT NULL ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 10
+          rare_val: "found"
+        - id: 20
+          rare_val: "also"
+        - id: 30
+          rare_val: "rare"
+
+  # === Prefix compression: strings with common prefix ===
+
+  - name: "Create prefix table"
+    sql: "CREATE TABLE sp_prefix (id INT, url VARCHAR(200))"
+    expect:
+      rows: 0
+
+  - name: "Insert strings with common prefix"
+    sql: |
+      INSERT INTO sp_prefix VALUES
+        (1, 'https://example.com/page/alpha'),
+        (2, 'https://example.com/page/beta'),
+        (3, 'https://example.com/page/gamma'),
+        (4, 'https://example.com/page/delta'),
+        (5, 'https://example.com/page/epsilon'),
+        (6, 'https://example.com/page/zeta'),
+        (7, 'https://example.com/page/eta'),
+        (8, 'https://example.com/page/theta'),
+        (9, 'https://example.com/api/v1'),
+        (10, 'https://example.com/api/v2')
+    expect:
+      affected_rows: 10
+
+  - name: "Prefix: exact value lookup"
+    sql: "SELECT url FROM sp_prefix WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - url: "https://example.com/page/gamma"
+
+  - name: "Prefix: LIKE filter"
+    sql: "SELECT COUNT(*) AS c FROM sp_prefix WHERE url LIKE '%page%'"
+    expect:
+      rows: 1
+      data:
+        - c: 8
+
+  - name: "Prefix: ORDER BY compressed strings"
+    sql: "SELECT url FROM sp_prefix ORDER BY url LIMIT 3"
+    expect:
+      rows: 3
+
+  # === Mixed NULL patterns triggering different storage ===
+
+  - name: "Create mixed null table"
+    sql: "CREATE TABLE sp_mixed_null (id INT, a INT, b VARCHAR(20), c DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "Insert with NULL pattern"
+    sql: |
+      INSERT INTO sp_mixed_null VALUES
+        (1, 100, 'x', 1.1),
+        (2, NULL, 'y', NULL),
+        (3, 200, NULL, 2.2),
+        (4, NULL, NULL, NULL),
+        (5, 300, 'z', 3.3),
+        (6, 100, 'x', 1.1),
+        (7, NULL, NULL, NULL),
+        (8, 200, 'y', 2.2)
+    expect:
+      affected_rows: 8
+
+  - name: "Mixed NULL: multi-column filter"
+    sql: "SELECT id FROM sp_mixed_null WHERE a IS NOT NULL AND c IS NOT NULL ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+        - id: 3
+        - id: 5
+        - id: 6
+        - id: 8
+
+  - name: "Mixed NULL: aggregate mix"
+    sql: "SELECT COUNT(a) AS ca, COUNT(b) AS cb, COUNT(c) AS cc FROM sp_mixed_null"
+    expect:
+      rows: 1
+      data:
+        - ca: 5
+          cb: 5
+          cc: 5
+
+  # === Boolean skewed (triggers StorageEnum) ===
+
+  - name: "Create boolean-skewed table"
+    sql: "CREATE TABLE sp_bool_skewed (id INT, flag INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert skewed booleans (99% zero)"
+    sql: |
+      INSERT INTO sp_bool_skewed VALUES
+        (1, 0), (2, 0), (3, 0), (4, 0), (5, 0),
+        (6, 0), (7, 0), (8, 0), (9, 0), (10, 0),
+        (11, 0), (12, 0), (13, 0), (14, 0), (15, 0),
+        (16, 0), (17, 0), (18, 0), (19, 0), (20, 1),
+        (21, 0), (22, 0), (23, 0), (24, 0), (25, 0),
+        (26, 0), (27, 0), (28, 0), (29, 0), (30, 0),
+        (31, 0), (32, 0), (33, 0), (34, 0), (35, 0),
+        (36, 0), (37, 0), (38, 0), (39, 0), (40, 0)
+    expect:
+      affected_rows: 40
+
+  - name: "Bool skewed: count ones"
+    sql: "SELECT COUNT(*) AS c FROM sp_bool_skewed WHERE flag = 1"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+  - name: "Bool skewed: SUM"
+    sql: "SELECT SUM(flag) AS s FROM sp_bool_skewed"
+    expect:
+      rows: 1
+      data:
+        - s: 1
+
+  # === SHUTDOWN and verify compressed storage ===
+
+  - name: "SHUTDOWN to trigger compression"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Post-compress: sparse value"
+    sql: "SELECT rare_val FROM sp_sparse WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - rare_val: "found"
+
+  - name: "Post-compress: sparse NULL"
+    sql: "SELECT rare_val FROM sp_sparse WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - rare_val: null
+
+  - name: "Post-compress: prefix value"
+    sql: "SELECT url FROM sp_prefix WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - url: "https://example.com/page/alpha"
+
+  - name: "Post-compress: skewed bool"
+    sql: "SELECT flag FROM sp_bool_skewed WHERE id = 20"
+    expect:
+      rows: 1
+      data:
+        - flag: 1
+
+  - name: "Post-compress: mixed NULL"
+    sql: "SELECT a, b, c FROM sp_mixed_null WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - a: null
+          b: null
+          c: null
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sp_sparse"
+  - sql: "DROP TABLE IF EXISTS sp_prefix"
+  - sql: "DROP TABLE IF EXISTS sp_mixed_null"
+  - sql: "DROP TABLE IF EXISTS sp_bool_skewed"

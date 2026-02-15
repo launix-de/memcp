@@ -1,0 +1,187 @@
+# ALTER TABLE and column operations
+# Targets table.go Alter, DropColumn, CreateColumn, ShowColumns,
+# and storage.go Init paths.
+
+metadata:
+  version: "1.0"
+  description: "ALTER TABLE ADD/DROP COLUMN, column metadata, schema changes"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS alt_base"
+  - sql: "DROP TABLE IF EXISTS alt_modify"
+
+test_cases:
+
+  # === ADD COLUMN ===
+
+  - name: "Create base table"
+    sql: "CREATE TABLE alt_base (id INT, name VARCHAR(50))"
+    expect:
+      rows: 0
+
+  - name: "Insert initial data"
+    sql: "INSERT INTO alt_base VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')"
+    expect:
+      affected_rows: 3
+
+  - name: "ADD COLUMN"
+    sql: "ALTER TABLE alt_base ADD COLUMN score INT"
+    expect:
+      rows: 0
+
+  - name: "New column is NULL for existing rows"
+    sql: "SELECT score FROM alt_base WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - score: null
+
+  - name: "Insert with new column"
+    sql: "INSERT INTO alt_base (id, name, score) VALUES (4, 'dave', 100)"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify new column data"
+    sql: "SELECT name, score FROM alt_base WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - name: "dave"
+          score: 100
+
+  - name: "UPDATE new column"
+    sql: "UPDATE alt_base SET score = 50 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify updated new column"
+    sql: "SELECT score FROM alt_base WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - score: 50
+
+  # === DROP COLUMN ===
+
+  - name: "DROP COLUMN"
+    sql: "ALTER TABLE alt_base DROP COLUMN score"
+    expect:
+      rows: 0
+
+  - name: "Dropped column not queryable"
+    sql: "SELECT score FROM alt_base WHERE id = 1"
+    expect:
+      error: true
+
+  - name: "Other columns still work"
+    sql: "SELECT name FROM alt_base WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - name: "alice"
+
+  # === ADD multiple columns ===
+
+  - name: "ADD COLUMN float type"
+    sql: "ALTER TABLE alt_base ADD COLUMN weight DOUBLE"
+    expect:
+      rows: 0
+
+  - name: "ADD COLUMN varchar type"
+    sql: "ALTER TABLE alt_base ADD COLUMN tag VARCHAR(20)"
+    expect:
+      rows: 0
+
+  - name: "Insert with all new columns"
+    sql: "INSERT INTO alt_base (id, name, weight, tag) VALUES (5, 'eve', 65.5, 'vip')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify multiple new columns"
+    sql: "SELECT weight, tag FROM alt_base WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - weight: 65.5
+          tag: "vip"
+
+  # === SHOW COLUMNS ===
+
+  - name: "Verify column count via SELECT *"
+    sql: "SELECT * FROM alt_base WHERE id = 5"
+    expect:
+      rows: 1
+
+  # === Persistence after ALTER ===
+
+  - name: "SHUTDOWN to persist"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Post-SHUTDOWN: verify added columns"
+    sql: "SELECT name, weight, tag FROM alt_base WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - name: "eve"
+          weight: 65.5
+          tag: "vip"
+
+  - name: "Post-SHUTDOWN: NULLs in added columns"
+    sql: "SELECT weight, tag FROM alt_base WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - weight: null
+          tag: null
+
+  # === Modify table with many changes ===
+
+  - name: "Create modify table"
+    sql: "CREATE TABLE alt_modify (a INT, b INT, c INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert data"
+    sql: "INSERT INTO alt_modify VALUES (1, 2, 3), (4, 5, 6)"
+    expect:
+      affected_rows: 2
+
+  - name: "DROP middle column"
+    sql: "ALTER TABLE alt_modify DROP COLUMN b"
+    expect:
+      rows: 0
+
+  - name: "Remaining columns work"
+    sql: "SELECT a, c FROM alt_modify ORDER BY a"
+    expect:
+      rows: 2
+      data:
+        - a: 1
+          c: 3
+        - a: 4
+          c: 6
+
+  - name: "ADD column after drop"
+    sql: "ALTER TABLE alt_modify ADD COLUMN d VARCHAR(10)"
+    expect:
+      rows: 0
+
+  - name: "Insert with new schema"
+    sql: "INSERT INTO alt_modify (a, c, d) VALUES (7, 8, 'new')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify new schema"
+    sql: "SELECT a, c, d FROM alt_modify WHERE a = 7"
+    expect:
+      rows: 1
+      data:
+        - a: 7
+          c: 8
+          d: "new"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS alt_base"
+  - sql: "DROP TABLE IF EXISTS alt_modify"
