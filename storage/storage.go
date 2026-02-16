@@ -38,8 +38,8 @@ type ColumnReader interface {
 type ColumnStorage interface {
 	// info
 	GetValue(uint) scm.Scmer       // read function (concurrent-safe, no mutable state)
-	GetCachedReader() ColumnReader  // returns a per-goroutine cached reader for O(1) sequential access
-	String() string                 // self-description
+	GetCachedReader() ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
+	String() string                // self-description
 	scm.Sizable
 
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
@@ -504,9 +504,11 @@ func Init(en scm.Env) {
 						if len(def) > 6 {
 							deletemode = getForeignKeyMode(def[6])
 						}
-						t.Foreign = append(t.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode})
+						fk := foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode}
+						t.Foreign = append(t.Foreign, fk)
 						if t2 != nil {
-							t2.Foreign = append(t2.Foreign, foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode})
+							t2.Foreign = append(t2.Foreign, fk)
+							installFKTriggers(t.schema, t, t2, fk)
 						}
 					case "column":
 						colname := scm.String(def[1])
@@ -522,13 +524,15 @@ func Init(en scm.Env) {
 						panic("unknown column definition: " + head)
 					}
 				}
-				// add constraints that are added onto us
+				// add constraints that are added onto us (forward-declared FKs)
 				for _, t2 := range t.schema.tables.GetAll() {
 					if t2 != t {
 						for _, foreign := range t2.Foreign {
 							if foreign.Tbl2 == t.Name {
-								// copy foward declaration to our definition list
+								// copy forward declaration to our definition list
 								t.Foreign = append(t.Foreign, foreign)
+								// install FK triggers now that parent table exists
+								installFKTriggers(t.schema, t2, t, foreign)
 							}
 						}
 					}
@@ -663,6 +667,10 @@ func Init(en scm.Env) {
 			k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[6]), getForeignKeyMode(a[7])}
 			t1.Foreign = append(t1.Foreign, k)
 			t2.Foreign = append(t2.Foreign, k)
+
+			// auto-generate system triggers for FK enforcement
+			installFKTriggers(db, t1, t2, k)
+
 			db.save()
 
 			return scm.NewBool(true)
@@ -1356,6 +1364,7 @@ func Init(en scm.Env) {
 
 	initMySQLImport(en)
 	initTransaction(en)
+	initFKBuiltins(en)
 }
 
 func PrintMemUsage() string {
@@ -1455,4 +1464,369 @@ func (t *table) PrintMemUsage() string {
 	}
 	b.WriteString(fmt.Sprintf("= total %s\n\n", units.BytesSize(float64(dsize))))
 	return b.String()
+}
+
+// fkExistenceCheck checks if values exist in tbl[filterCols]. Returns true if found or all NULL.
+func fkExistenceCheck(tbl *table, filterCols []string, vals []scm.Scmer) bool {
+	for _, v := range vals {
+		if v.IsNil() {
+			return true // NULL FK is always valid
+		}
+	}
+	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		for i := range filterCols {
+			if !scm.Equal(a[i], vals[i]) {
+				return scm.NewBool(false)
+			}
+		}
+		return scm.NewBool(true)
+	})
+	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	reduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		if scm.ToBool(a[0]) || scm.ToBool(a[1]) {
+			return scm.NewBool(true)
+		}
+		return scm.NewBool(false)
+	})
+	return scm.ToBool(tbl.scan(filterCols, condition, filterCols[:0], mapFn, reduceFn, scm.NewBool(false), reduceFn, false))
+}
+
+// fkCascadeDelete deletes rows in childTbl where cols match vals.
+func fkCascadeDelete(childTbl *table, cols []string, vals []scm.Scmer) {
+	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		for i := range cols {
+			if !scm.Equal(a[i], vals[i]) {
+				return scm.NewBool(false)
+			}
+		}
+		return scm.NewBool(true)
+	})
+	mapCols := make([]string, len(cols)+1)
+	copy(mapCols, cols)
+	mapCols[len(cols)] = "$update"
+	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		scm.Apply(a[len(cols)]) // $update() with no args = delete
+		return scm.NewNil()
+	})
+	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+}
+
+// fkCascadeSetNull sets FK cols to NULL in childTbl where cols match vals.
+func fkCascadeSetNull(childTbl *table, cols []string, vals []scm.Scmer) {
+	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		for i := range cols {
+			if !scm.Equal(a[i], vals[i]) {
+				return scm.NewBool(false)
+			}
+		}
+		return scm.NewBool(true)
+	})
+	payload := make([]scm.Scmer, len(cols)*2)
+	for i, col := range cols {
+		payload[i*2] = scm.NewString(col)
+		payload[i*2+1] = scm.NewNil()
+	}
+	mapCols := make([]string, len(cols)+1)
+	copy(mapCols, cols)
+	mapCols[len(cols)] = "$update"
+	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		scm.Apply(a[len(cols)], scm.NewSlice(payload))
+		return scm.NewNil()
+	})
+	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+}
+
+// fkCascadeUpdate updates FK cols in childTbl from oldVals to newVals.
+func fkCascadeUpdate(childTbl *table, cols []string, oldVals, newVals []scm.Scmer) {
+	condition := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		for i := range cols {
+			if !scm.Equal(a[i], oldVals[i]) {
+				return scm.NewBool(false)
+			}
+		}
+		return scm.NewBool(true)
+	})
+	payload := make([]scm.Scmer, len(cols)*2)
+	for i, col := range cols {
+		payload[i*2] = scm.NewString(col)
+		payload[i*2+1] = newVals[i]
+	}
+	mapCols := make([]string, len(cols)+1)
+	copy(mapCols, cols)
+	mapCols[len(cols)] = "$update"
+	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		scm.Apply(a[len(cols)], scm.NewSlice(payload))
+		return scm.NewNil()
+	})
+	childTbl.scan(cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+}
+
+// initFKBuiltins declares the FK enforcement builtins used by trigger Procs.
+func initFKBuiltins(en scm.Env) {
+	scm.Declare(&en, &scm.Declaration{
+		"__fk_check_ref", "check that FK values exist in the parent table, panic if not",
+		5, 5,
+		[]scm.DeclarationParameter{
+			{"schema", "string", "database name", nil},
+			{"parent_table", "string", "parent table name", nil},
+			{"parent_cols", "list", "parent column names", nil},
+			{"values", "list", "FK values to check", nil},
+			{"fk_id", "string", "FK constraint name", nil},
+		}, "nil",
+		func(a ...scm.Scmer) scm.Scmer {
+			schema := scm.String(a[0])
+			parentTable := scm.String(a[1])
+			parentCols := scmerSliceToStrings(mustScmerSlice(a[2], "parent_cols"))
+			values := mustScmerSlice(a[3], "values")
+			fkId := scm.String(a[4])
+			// NULL FK values are always valid
+			for _, v := range values {
+				if v.IsNil() {
+					return scm.NewNil()
+				}
+			}
+			db := GetDatabase(schema)
+			if db == nil {
+				panic("foreign key " + fkId + ": database " + schema + " does not exist")
+			}
+			tbl := db.GetTable(parentTable)
+			if tbl == nil {
+				panic("foreign key " + fkId + ": parent table " + schema + "." + parentTable + " does not exist")
+			}
+			if !fkExistenceCheck(tbl, parentCols, values) {
+				panic("foreign key constraint " + fkId + " failed: value does not exist in " + parentTable)
+			}
+			return scm.NewNil()
+		},
+		false, true, nil,
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		"__fk_on_parent_delete", "enforce FK constraint when parent row is deleted",
+		6, 6,
+		[]scm.DeclarationParameter{
+			{"schema", "string", "database name", nil},
+			{"child_table", "string", "child table name", nil},
+			{"child_cols", "list", "child FK column names", nil},
+			{"parent_vals", "list", "old parent PK values", nil},
+			{"fk_id", "string", "FK constraint name", nil},
+			{"mode", "string", "RESTRICT, CASCADE, or SETNULL", nil},
+		}, "nil",
+		func(a ...scm.Scmer) scm.Scmer {
+			schema := scm.String(a[0])
+			childTable := scm.String(a[1])
+			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
+			parentVals := mustScmerSlice(a[3], "parent_vals")
+			fkId := scm.String(a[4])
+			mode := scm.String(a[5])
+			db := GetDatabase(schema)
+			if db == nil {
+				return scm.NewNil()
+			}
+			tbl := db.GetTable(childTable)
+			if tbl == nil {
+				return scm.NewNil()
+			}
+			if !fkExistenceCheck(tbl, childCols, parentVals) {
+				return scm.NewNil() // no references
+			}
+			switch mode {
+			case "RESTRICT":
+				panic("foreign key constraint " + fkId + " failed: cannot delete because rows in " + childTable + " reference it")
+			case "CASCADE":
+				fkCascadeDelete(tbl, childCols, parentVals)
+			case "SETNULL":
+				fkCascadeSetNull(tbl, childCols, parentVals)
+			}
+			return scm.NewNil()
+		},
+		false, true, nil,
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		"__fk_on_parent_update", "enforce FK constraint when parent PK is updated",
+		7, 7,
+		[]scm.DeclarationParameter{
+			{"schema", "string", "database name", nil},
+			{"child_table", "string", "child table name", nil},
+			{"child_cols", "list", "child FK column names", nil},
+			{"old_vals", "list", "old parent PK values", nil},
+			{"new_vals", "list", "new parent PK values", nil},
+			{"fk_id", "string", "FK constraint name", nil},
+			{"mode", "string", "RESTRICT, CASCADE, or SETNULL", nil},
+		}, "nil",
+		func(a ...scm.Scmer) scm.Scmer {
+			schema := scm.String(a[0])
+			childTable := scm.String(a[1])
+			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
+			oldVals := mustScmerSlice(a[3], "old_vals")
+			newVals := mustScmerSlice(a[4], "new_vals")
+			fkId := scm.String(a[5])
+			mode := scm.String(a[6])
+			// check if PK actually changed
+			if len(oldVals) == len(newVals) {
+				changed := false
+				for i := range oldVals {
+					if !scm.Equal(oldVals[i], newVals[i]) {
+						changed = true
+						break
+					}
+				}
+				if !changed {
+					return scm.NewNil()
+				}
+			}
+			db := GetDatabase(schema)
+			if db == nil {
+				return scm.NewNil()
+			}
+			tbl := db.GetTable(childTable)
+			if tbl == nil {
+				return scm.NewNil()
+			}
+			switch mode {
+			case "RESTRICT":
+				if fkExistenceCheck(tbl, childCols, oldVals) {
+					panic("foreign key constraint " + fkId + " failed: cannot update because rows in " + childTable + " reference it")
+				}
+			case "CASCADE":
+				fkCascadeUpdate(tbl, childCols, oldVals, newVals)
+			case "SETNULL":
+				fkCascadeSetNull(tbl, childCols, oldVals)
+			}
+			return scm.NewNil()
+		},
+		false, true, nil,
+	})
+}
+
+// buildFKProc constructs a serializable Proc that calls a builtin with the given args.
+// body is the Scheme expression as an S-expression (a Scmer list).
+func buildFKProc(body scm.Scmer) scm.Scmer {
+	return scm.NewProc(&scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("OLD"), scm.NewSymbol("NEW")}),
+		Body:   body,
+		En:     &scm.Globalenv,
+	})
+}
+
+// fkGetAssocExpr builds (get_assoc <sym> <colName>) expression
+func fkGetAssocExpr(sym string, col string) scm.Scmer {
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("get_assoc"), scm.NewSymbol(sym), scm.NewString(col)})
+}
+
+// fkValListExpr builds (list (get_assoc sym col1) (get_assoc sym col2) ...) expression
+func fkValListExpr(sym string, cols []string) scm.Scmer {
+	elems := make([]scm.Scmer, 1+len(cols))
+	elems[0] = scm.NewSymbol("list")
+	for i, col := range cols {
+		elems[1+i] = fkGetAssocExpr(sym, col)
+	}
+	return scm.NewSlice(elems)
+}
+
+// fkQuotedList builds a quoted literal list: (quote ("col1" "col2" ...))
+func fkQuotedList(cols []string) scm.Scmer {
+	elems := make([]scm.Scmer, len(cols))
+	for i, col := range cols {
+		elems[i] = scm.NewString(col)
+	}
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(elems)})
+}
+
+// installFKTriggers creates system triggers on child (t1) and parent (t2) tables
+// to enforce the foreign key constraint. All trigger functions are serializable Procs
+// that call declared builtins (__fk_check_ref, __fk_on_parent_delete, __fk_on_parent_update).
+func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
+	triggerPrefix := "__fk_" + fk.Id + "_"
+	dbName := db.Name
+
+	// 1) BEFORE INSERT on child: (lambda (OLD NEW) (begin (__fk_check_ref ...) NEW))
+	t1.AddTrigger(TriggerDescription{
+		Name:     triggerPrefix + "child_insert",
+		Timing:   BeforeInsert,
+		IsSystem: true,
+		Priority: -100,
+		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("begin"),
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("__fk_check_ref"),
+				scm.NewString(dbName), scm.NewString(fk.Tbl2),
+				fkQuotedList(fk.Cols2), fkValListExpr("NEW", fk.Cols1),
+				scm.NewString(fk.Id),
+			}),
+			scm.NewSymbol("NEW"),
+		})),
+	})
+
+	// 2) BEFORE UPDATE on child: (lambda (OLD NEW) (begin (__fk_check_ref ...) NEW))
+	t1.AddTrigger(TriggerDescription{
+		Name:     triggerPrefix + "child_update",
+		Timing:   BeforeUpdate,
+		IsSystem: true,
+		Priority: -100,
+		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("begin"),
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("__fk_check_ref"),
+				scm.NewString(dbName), scm.NewString(fk.Tbl2),
+				fkQuotedList(fk.Cols2), fkValListExpr("NEW", fk.Cols1),
+				scm.NewString(fk.Id),
+			}),
+			scm.NewSymbol("NEW"),
+		})),
+	})
+
+	// 3) BEFORE DELETE on parent: (lambda (OLD NEW) (__fk_on_parent_delete ...))
+	modeStr := "RESTRICT"
+	switch fk.Deletemode {
+	case CASCADE:
+		modeStr = "CASCADE"
+	case SETNULL:
+		modeStr = "SETNULL"
+	}
+	t2.AddTrigger(TriggerDescription{
+		Name:     triggerPrefix + "parent_delete",
+		Timing:   BeforeDelete,
+		IsSystem: true,
+		Priority: -100,
+		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("__fk_on_parent_delete"),
+			scm.NewString(dbName), scm.NewString(fk.Tbl1),
+			fkQuotedList(fk.Cols1), fkValListExpr("OLD", fk.Cols2),
+			scm.NewString(fk.Id), scm.NewString(modeStr),
+		})),
+	})
+
+	// 4) Parent UPDATE: RESTRICT uses BEFORE UPDATE, CASCADE/SET NULL use AFTER UPDATE
+	// (BEFORE UPDATE triggers run inside shard write lock; cascaded child updates
+	// that scan back to the parent would deadlock)
+	updateModeStr := "RESTRICT"
+	switch fk.Updatemode {
+	case CASCADE:
+		updateModeStr = "CASCADE"
+	case SETNULL:
+		updateModeStr = "SETNULL"
+	}
+	timing := BeforeUpdate
+	if fk.Updatemode != RESTRICT {
+		timing = AfterUpdate
+	}
+	t2.AddTrigger(TriggerDescription{
+		Name:     triggerPrefix + "parent_update",
+		Timing:   timing,
+		IsSystem: true,
+		Priority: -100,
+		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("begin"),
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("__fk_on_parent_update"),
+				scm.NewString(dbName), scm.NewString(fk.Tbl1),
+				fkQuotedList(fk.Cols1),
+				fkValListExpr("OLD", fk.Cols2), fkValListExpr("NEW", fk.Cols2),
+				scm.NewString(fk.Id), scm.NewString(updateModeStr),
+			}),
+			scm.NewSymbol("NEW"),
+		})),
+	})
 }

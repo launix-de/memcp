@@ -35,7 +35,7 @@ type column struct {
 	AutoIncrement     bool
 	Default           scm.Scmer
 	OnUpdate          scm.Scmer
-	AllowNull         bool // TODO: respect this
+	AllowNull         bool
 	IsTemp            bool // columns with IsTemp may be removed without consequences
 	Collation         string
 	Comment           string
@@ -540,15 +540,64 @@ func (t *table) DropColumn(name string) bool {
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64)) int {
 	result := 0
 	isIgnore := !onCollision.IsNil() // INSERT IGNORE or ON DUPLICATE KEY UPDATE
-	// TODO: check foreign keys (new value of column must be present in referenced table)
+	// FK checks are enforced via auto-generated system triggers (see createforeignkey)
 
-	// sanitize values
-	for i, col := range columns {
-		for _, colDesc := range t.Columns {
-			if col == colDesc.Name && colDesc.sanitizer != nil {
-				for _, row := range values {
-					if i < len(row) {
-						row[i] = colDesc.sanitizer(row[i])
+	// check NOT NULL for omitted columns (not skippable by IGNORE)
+	for _, colDesc := range t.Columns {
+		if !colDesc.AllowNull && !colDesc.Default.IsNil() {
+			continue // has a default value
+		}
+		if !colDesc.AllowNull && !colDesc.AutoIncrement {
+			found := false
+			for _, col := range columns {
+				if col == colDesc.Name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				panic("column " + colDesc.Name + " cannot be NULL")
+			}
+		}
+	}
+
+	// sanitize values (per-row recovery for INSERT IGNORE)
+	if isIgnore {
+		filtered := values[:0]
+		for _, row := range values {
+			ok := true
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						ok = false
+					}
+				}()
+				for i, col := range columns {
+					for _, colDesc := range t.Columns {
+						if col == colDesc.Name && colDesc.sanitizer != nil {
+							if i < len(row) {
+								row[i] = colDesc.sanitizer(row[i])
+							}
+						}
+					}
+				}
+			}()
+			if ok {
+				filtered = append(filtered, row)
+			}
+		}
+		values = filtered
+		if len(values) == 0 {
+			return 0
+		}
+	} else {
+		for i, col := range columns {
+			for _, colDesc := range t.Columns {
+				if col == colDesc.Name && colDesc.sanitizer != nil {
+					for _, row := range values {
+						if i < len(row) {
+							row[i] = colDesc.sanitizer(row[i])
+						}
 					}
 				}
 			}
@@ -760,8 +809,18 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 
 		var lock *sync.Mutex
 		lock = &t.uniquelock
+		uniquelockHeld := false
 		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
 			lock.Lock()
+			uniquelockHeld = true
+			defer func() {
+				if r := recover(); r != nil {
+					if uniquelockHeld {
+						lock.Unlock()
+					}
+					panic(r) // re-panic after releasing lock
+				}
+			}()
 		}
 
 		last_j := 0
@@ -800,6 +859,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					}
 					last_j = j + 1
 					lock.Unlock()
+					uniquelockHeld = false
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {
 						if p == "$update" {
@@ -814,8 +874,20 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 							params[i] = s.ColumnReader(p)(uid)
 						}
 					}
-					failure(uniq.Id, params) // notify about failure
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								// Re-lock before re-panicking so the outer
+								// defer at idx==0 can safely release it.
+								lock.Lock()
+								uniquelockHeld = true
+								panic(r)
+							}
+						}()
+						failure(uniq.Id, params) // notify about failure
+					}()
 					lock.Lock()
+					uniquelockHeld = true
 					r()
 					goto nextrow
 				}
@@ -832,7 +904,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1) // flush the rest
 		}
 		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
-			lock.Unlock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
+			lock.Unlock()
 		}
 	} else {
 		if idx == 0 {

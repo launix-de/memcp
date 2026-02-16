@@ -1,39 +1,345 @@
-# MySQL Compatibility v1 — Foreign Key DDL acceptance
+# Foreign key DDL acceptance and enforcement tests
 
 metadata:
-  version: "1.0"
-  description: "MySQL v1: accept FK DDL (metadata/no-op)"
+  version: "2.0"
+  description: "FK DDL acceptance + runtime enforcement (RESTRICT, CASCADE, SET NULL)"
 
 setup:
-  - sql: "DROP TABLE IF EXISTS child"
-  - sql: "DROP TABLE IF EXISTS parent"
+  - sql: "DROP TABLE IF EXISTS fk_child"
+  - sql: "DROP TABLE IF EXISTS fk_parent"
+  - sql: "DROP TABLE IF EXISTS fk_child_cas"
+  - sql: "DROP TABLE IF EXISTS fk_parent_cas"
+  - sql: "DROP TABLE IF EXISTS fk_child_sn"
+  - sql: "DROP TABLE IF EXISTS fk_parent_sn"
+  - sql: "DROP TABLE IF EXISTS nn_test"
 
 test_cases:
-  - name: "CREATE parent/child with FK"
-    sql: |
-      CREATE TABLE parent (id INT PRIMARY KEY, name VARCHAR(50))
+  # ==== RESTRICT mode (default) ====
+  - name: "Create parent table"
+    sql: "CREATE TABLE fk_parent (id INT PRIMARY KEY, name VARCHAR(50))"
     expect:
       affected_rows: 1
 
-  - name: "CREATE child with FK references"
+  - name: "Create child table with FK RESTRICT"
     sql: |
-      CREATE TABLE child (
+      CREATE TABLE fk_child (
         id INT PRIMARY KEY,
         parent_id INT,
-        CONSTRAINT fk_p FOREIGN KEY (parent_id) REFERENCES parent(id)
+        CONSTRAINT fk_restrict FOREIGN KEY (parent_id) REFERENCES fk_parent(id)
       )
     expect: {}
 
-  - name: "INSERT matching FK"
-    sql: |
-      INSERT INTO parent (id, name) VALUES (1, 'p1')
+  - name: "Insert parent row"
+    sql: "INSERT INTO fk_parent (id, name) VALUES (1, 'Alice')"
     expect:
       affected_rows: 1
 
-  - name: "Insert child referencing parent"
-    sql: "INSERT INTO child (id, parent_id) VALUES (10, 1)"
+  - name: "Insert parent row 2"
+    sql: "INSERT INTO fk_parent (id, name) VALUES (2, 'Bob')"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert child referencing existing parent"
+    sql: "INSERT INTO fk_child (id, parent_id) VALUES (10, 1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert child with NULL FK (allowed)"
+    sql: "INSERT INTO fk_child (id, parent_id) VALUES (11, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert child referencing non-existing parent (must fail)"
+    sql: "INSERT INTO fk_child (id, parent_id) VALUES (12, 999)"
+    expect:
+      error: true
+
+  - name: "Verify only valid children exist"
+    sql: "SELECT COUNT(*) AS cnt FROM fk_child"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "Update child FK to valid parent"
+    sql: "UPDATE fk_child SET parent_id = 2 WHERE id = 10"
+    expect:
+      affected_rows: 1
+
+  - name: "Update child FK to invalid parent (must fail)"
+    sql: "UPDATE fk_child SET parent_id = 999 WHERE id = 10"
+    expect:
+      error: true
+
+  - name: "Verify child FK unchanged after failed update"
+    sql: "SELECT parent_id FROM fk_child WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - parent_id: 2
+
+  - name: "Delete parent not referenced (allowed)"
+    sql: "DELETE FROM fk_parent WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Delete parent referenced by child (RESTRICT - must fail)"
+    sql: "DELETE FROM fk_parent WHERE id = 2"
+    expect:
+      error: true
+
+  - name: "Verify parent still exists after RESTRICT"
+    sql: "SELECT COUNT(*) AS cnt FROM fk_parent WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - cnt: 1
+
+  - name: "Update parent PK referenced by child (RESTRICT - must fail)"
+    sql: "UPDATE fk_parent SET id = 99 WHERE id = 2"
+    expect:
+      error: true
+
+  # ==== CASCADE mode ====
+  - name: "Create cascade parent"
+    sql: "CREATE TABLE fk_parent_cas (id INT PRIMARY KEY, name VARCHAR(50))"
+    expect:
+      affected_rows: 1
+
+  - name: "Create cascade child"
+    sql: |
+      CREATE TABLE fk_child_cas (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        CONSTRAINT fk_cascade FOREIGN KEY (parent_id) REFERENCES fk_parent_cas(id) ON DELETE CASCADE ON UPDATE CASCADE
+      )
     expect: {}
 
+  - name: "Insert cascade parent rows"
+    sql: "INSERT INTO fk_parent_cas (id, name) VALUES (1, 'X'), (2, 'Y'), (3, 'Z')"
+    expect:
+      affected_rows: 3
+
+  - name: "Insert cascade child rows"
+    sql: "INSERT INTO fk_child_cas (id, parent_id) VALUES (10, 1), (11, 1), (12, 2), (13, 3)"
+    expect:
+      affected_rows: 4
+
+  - name: "Delete cascade parent - children should be deleted"
+    sql: "DELETE FROM fk_parent_cas WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify cascaded child deletion"
+    sql: "SELECT COUNT(*) AS cnt FROM fk_child_cas"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "Verify remaining children are correct"
+    sql: "SELECT id, parent_id FROM fk_child_cas ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 12
+          parent_id: 2
+        - id: 13
+          parent_id: 3
+
+  - name: "Update cascade parent PK - children FK should update"
+    sql: "UPDATE fk_parent_cas SET id = 20 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify cascaded FK update in child"
+    sql: "SELECT id, parent_id FROM fk_child_cas WHERE id = 12"
+    expect:
+      rows: 1
+      data:
+        - id: 12
+          parent_id: 20
+
+  # ==== SET NULL mode ====
+  - name: "Create set-null parent"
+    sql: "CREATE TABLE fk_parent_sn (id INT PRIMARY KEY, name VARCHAR(50))"
+    expect:
+      affected_rows: 1
+
+  - name: "Create set-null child"
+    sql: |
+      CREATE TABLE fk_child_sn (
+        id INT PRIMARY KEY,
+        parent_id INT,
+        CONSTRAINT fk_setnull FOREIGN KEY (parent_id) REFERENCES fk_parent_sn(id) ON DELETE SET NULL ON UPDATE SET NULL
+      )
+    expect: {}
+
+  - name: "Insert set-null parent rows"
+    sql: "INSERT INTO fk_parent_sn (id, name) VALUES (1, 'A'), (2, 'B')"
+    expect:
+      affected_rows: 2
+
+  - name: "Insert set-null child rows"
+    sql: "INSERT INTO fk_child_sn (id, parent_id) VALUES (10, 1), (11, 1), (12, 2)"
+    expect:
+      affected_rows: 3
+
+  - name: "Delete set-null parent - children FK should become NULL"
+    sql: "DELETE FROM fk_parent_sn WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify children FK set to NULL after parent delete"
+    sql: "SELECT id, parent_id FROM fk_child_sn ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 10
+          parent_id: null
+        - id: 11
+          parent_id: null
+        - id: 12
+          parent_id: 2
+
+  - name: "Update set-null parent PK - children FK should become NULL"
+    sql: "UPDATE fk_parent_sn SET id = 20 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify children FK set to NULL after parent update"
+    sql: "SELECT id, parent_id FROM fk_child_sn WHERE id = 12"
+    expect:
+      rows: 1
+      data:
+        - id: 12
+          parent_id: null
+
+  # ==== FK enforcement after persistence ====
+  - name: "SHUTDOWN to persist FK metadata"
+    sql: "SHUTDOWN"
+
+  - name: "Insert into fk_child after persistence with invalid FK (must fail)"
+    sql: "INSERT INTO fk_child (id, parent_id) VALUES (99, 777)"
+    expect:
+      error: true
+
+  - name: "Insert valid FK reference after persistence"
+    sql: "INSERT INTO fk_child (id, parent_id) VALUES (99, 2)"
+    expect:
+      affected_rows: 1
+
+  # ==== NOT NULL enforcement ====
+  - name: "Create table with NOT NULL column"
+    sql: "CREATE TABLE nn_test (id INT PRIMARY KEY, name VARCHAR(50) NOT NULL, val INT)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert with NOT NULL column value"
+    sql: "INSERT INTO nn_test (id, name, val) VALUES (1, 'hello', 42)"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert with NULL into NOT NULL column (must fail)"
+    sql: "INSERT INTO nn_test (id, name, val) VALUES (2, NULL, 10)"
+    expect:
+      error: true
+
+  - name: "Insert omitting NOT NULL column (must fail)"
+    sql: "INSERT INTO nn_test (id, val) VALUES (3, 10)"
+    expect:
+      error: true
+
+  - name: "Insert with NULL into nullable column (allowed)"
+    sql: "INSERT INTO nn_test (id, name, val) VALUES (4, 'world', NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "Update NOT NULL column to NULL (must fail)"
+    sql: "UPDATE nn_test SET name = NULL WHERE id = 1"
+    expect:
+      error: true
+
+  - name: "Verify NOT NULL column unchanged after failed update"
+    sql: "SELECT name FROM nn_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - name: "hello"
+
+  - name: "Verify row count"
+    sql: "SELECT COUNT(*) AS cnt FROM nn_test"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  # ==== INSERT vs INSERT IGNORE on NOT NULL ====
+  - name: "INSERT IGNORE with NULL into NOT NULL column (skips row)"
+    sql: "INSERT IGNORE INTO nn_test (id, name, val) VALUES (10, NULL, 10)"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT IGNORE mixed valid and NULL rows"
+    sql: "INSERT IGNORE INTO nn_test (id, name, val) VALUES (11, 'ok', 1), (12, NULL, 2), (13, 'also_ok', 3)"
+    expect:
+      affected_rows: 2
+
+  - name: "Verify INSERT IGNORE kept only valid rows"
+    sql: "SELECT id, name FROM nn_test WHERE id >= 10 ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 11
+          name: "ok"
+        - id: 13
+          name: "also_ok"
+
+  - name: "Regular INSERT with NULL into NOT NULL still fails"
+    sql: "INSERT INTO nn_test (id, name, val) VALUES (20, NULL, 99)"
+    expect:
+      error: true
+
+  - name: "Verify count after INSERT IGNORE tests"
+    sql: "SELECT COUNT(*) AS cnt FROM nn_test"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  # ==== Trigger BEGIN...END block ====
+  - name: "Create audit table"
+    sql: "CREATE TABLE fk_audit (id INT PRIMARY KEY AUTO_INCREMENT, msg VARCHAR(200))"
+    expect:
+      affected_rows: 1
+
+  - name: "Create trigger with BEGIN...END"
+    sql: |
+      CREATE TRIGGER trg_audit AFTER INSERT ON nn_test
+      FOR EACH ROW
+      BEGIN
+        INSERT INTO fk_audit (msg) VALUES (NEW.name);
+      END
+    expect: {}
+
+  - name: "Insert to fire BEGIN...END trigger"
+    sql: "INSERT INTO nn_test (id, name, val) VALUES (5, 'triggered', 0)"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify audit row from BEGIN...END trigger"
+    sql: "SELECT msg FROM fk_audit ORDER BY id LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - msg: "triggered"
+
 cleanup:
-  - sql: "DROP TABLE IF EXISTS child"
-  - sql: "DROP TABLE IF EXISTS parent"
+  - sql: "DROP TABLE IF EXISTS fk_audit"
+  - sql: "DROP TABLE IF EXISTS nn_test"
+  - sql: "DROP TABLE IF EXISTS fk_child"
+  - sql: "DROP TABLE IF EXISTS fk_parent"
+  - sql: "DROP TABLE IF EXISTS fk_child_cas"
+  - sql: "DROP TABLE IF EXISTS fk_parent_cas"
+  - sql: "DROP TABLE IF EXISTS fk_child_sn"
+  - sql: "DROP TABLE IF EXISTS fk_parent_sn"

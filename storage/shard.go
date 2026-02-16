@@ -311,8 +311,7 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
-		// TODO: check foreign keys (new value of column must be present in referenced table)
-		// TODO: check foreign key removal (old value is referenced in another table)
+		// FK checks are enforced via auto-generated system triggers (see createforeignkey)
 
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		if len(a) > 0 {

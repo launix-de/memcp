@@ -224,6 +224,8 @@ func (db *database) ensureLoaded() {
 			}
 		}
 	}
+	// FK enforcement triggers are serializable Procs and persist with the table JSON.
+	// No re-installation needed on load.
 	db.srState = SHARED
 }
 

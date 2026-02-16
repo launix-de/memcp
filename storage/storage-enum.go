@@ -50,7 +50,6 @@ const enumBitMask = ^uint64(0) >> (64 - enumBitShift) // 0xFF
 const enumBitModulo = uint64(1) << enumBitShift       // 256
 const enumMaxSymbols = 8
 
-
 type StorageEnum struct {
 	// rANS coded payload
 	data []uint64
@@ -73,12 +72,10 @@ type StorageEnum struct {
 	scanFreqs [enumMaxSymbols]uint64
 	scanTotal uint64
 
-
 	// build-phase temporaries: we need to reverse-buffer elements
 	// because rANS encodes in reverse order
 	buildBuf []scm.Scmer
 }
-
 
 func enumFastDivMod(n, d, inv uint64) (q, r uint64) {
 	q, _ = bits.Mul64(n, inv)
@@ -436,7 +433,6 @@ func (s *StorageEnum) findChunk(idx int) int {
 	}
 	return lo
 }
-
 
 // --- Serialization ---
 

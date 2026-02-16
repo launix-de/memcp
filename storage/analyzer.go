@@ -45,7 +45,8 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		// fallback for legacy tagAny procs
 		p = si
 	} else {
-		panic("expected lambda for condition analysis")
+		// native Go function - no boundary extraction possible (full scan)
+		return nil
 	}
 	symbolmapping := make(map[scm.Symbol]string)
 	if p.Params.IsSlice() {
