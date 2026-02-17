@@ -109,6 +109,47 @@ test_cases:
         - ID: 3
           name: "image3.png"
 
+  # === UNION ALL inside IN subselect ===
+  # Can be compiled to (or (scan...) (scan...))
+
+  - name: "IN with UNION ALL subselect"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (
+        SELECT result FROM renderjob WHERE ID = 101
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 102
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+  - name: "NOT IN with UNION ALL subselect"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID NOT IN (
+        SELECT result FROM renderjob WHERE ID = 101
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 102
+      )
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 2
+          name: "image2.png"
+        - ID: 4
+          name: "image4.png"
+        - ID: 5
+          name: "image5.png"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS renderjob"
   - sql: "DROP TABLE IF EXISTS fop_files"

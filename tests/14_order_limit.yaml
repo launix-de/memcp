@@ -44,5 +44,115 @@ test_cases:
         - a: 2
           b: 2
 
+  # === UPDATE ORDER BY LIMIT ===
+
+  - name: "UPDATE ORDER BY LIMIT modifies only lowest rows"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_upd"
+      - sql: "CREATE TABLE ord_upd (id INT, val INT)"
+      - sql: "INSERT INTO ord_upd (id, val) VALUES (1,10),(2,20),(3,30),(4,40),(5,50)"
+    sql: "UPDATE ord_upd SET val = 0 ORDER BY id ASC LIMIT 2"
+    expect:
+      affected_rows: 2
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_upd"
+
+  - name: "UPDATE ORDER BY LIMIT verify results"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_upd2"
+      - sql: "CREATE TABLE ord_upd2 (id INT, val INT)"
+      - sql: "INSERT INTO ord_upd2 (id, val) VALUES (1,10),(2,20),(3,30),(4,40),(5,50)"
+      - sql: "UPDATE ord_upd2 SET val = 0 ORDER BY id ASC LIMIT 2"
+    sql: "SELECT id, val FROM ord_upd2 ORDER BY id ASC"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          val: 0
+        - id: 2
+          val: 0
+        - id: 3
+          val: 30
+        - id: 4
+          val: 40
+        - id: 5
+          val: 50
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_upd2"
+
+  - name: "UPDATE ORDER BY DESC LIMIT"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_upd3"
+      - sql: "CREATE TABLE ord_upd3 (id INT, val INT)"
+      - sql: "INSERT INTO ord_upd3 (id, val) VALUES (1,10),(2,20),(3,30),(4,40),(5,50)"
+      - sql: "UPDATE ord_upd3 SET val = 99 ORDER BY id DESC LIMIT 3"
+    sql: "SELECT id, val FROM ord_upd3 ORDER BY id ASC"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          val: 10
+        - id: 2
+          val: 20
+        - id: 3
+          val: 99
+        - id: 4
+          val: 99
+        - id: 5
+          val: 99
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_upd3"
+
+  # === DELETE ORDER BY LIMIT ===
+
+  - name: "DELETE ORDER BY LIMIT removes only highest rows"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_del"
+      - sql: "CREATE TABLE ord_del (id INT, val INT)"
+      - sql: "INSERT INTO ord_del (id, val) VALUES (1,10),(2,20),(3,30),(4,40),(5,50)"
+      - sql: "DELETE FROM ord_del ORDER BY id DESC LIMIT 2"
+    sql: "SELECT id, val FROM ord_del ORDER BY id ASC"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          val: 10
+        - id: 2
+          val: 20
+        - id: 3
+          val: 30
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_del"
+
+  - name: "DELETE ORDER BY ASC LIMIT"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_del2"
+      - sql: "CREATE TABLE ord_del2 (id INT, val INT)"
+      - sql: "INSERT INTO ord_del2 (id, val) VALUES (1,10),(2,20),(3,30)"
+      - sql: "DELETE FROM ord_del2 ORDER BY id ASC LIMIT 1"
+    sql: "SELECT id FROM ord_del2 ORDER BY id ASC"
+    expect:
+      rows: 2
+      data:
+        - id: 2
+        - id: 3
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_del2"
+
+  - name: "ORDER BY with aggregate (SUM via scan_order)"
+    sql: "SELECT a, SUM(b) AS s FROM ord_t GROUP BY a ORDER BY a ASC LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - a: 1
+          s: 3
+        - a: 2
+          s: 2
+
+  - name: "ORDER BY DESC OFFSET beyond rows returns empty"
+    sql: "SELECT a FROM ord_t ORDER BY a DESC LIMIT 2 OFFSET 10"
+    expect:
+      rows: 0
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ord_t"

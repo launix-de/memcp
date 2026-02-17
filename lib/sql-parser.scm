@@ -589,6 +589,31 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(atom "WHERE" true)
 			(define condition sql_expression)
 		))
+		/* ORDER BY + LIMIT for partial updates */
+		(?
+			(atom "ORDER" true)
+			(atom "BY" true)
+			(define order (+
+				(parser '(
+					(define col sql_expression)
+					(? (atom "COLLATE" true) (define coll sql_identifier))
+					(define direction_desc (or
+						(parser (atom "DESC" true) >)
+						(parser (atom "ASC" true) <)
+						(parser empty <)
+					))
+				) (list col (if coll (collate coll (equal? direction_desc >)) direction_desc)))
+				(atom "," true)
+			))
+		)
+		(?
+			(atom "LIMIT" true)
+			(or
+				'((define offset sql_expression) (atom "," true) (define limit sql_expression))
+				'((define limit sql_expression) (atom "OFFSET" true) (define offset sql_expression))
+				'((define limit sql_expression))
+			)
+		)
 	) (begin
 			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
@@ -602,18 +627,43 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(set condition (replace_find_column (coalesceNil condition true)))
 			(set filtercols (extract_columns_for_tblvar tbl condition))
 			(set scancols (merge_unique (extract_assoc cols (lambda (col expr) (extract_columns_for_tblvar tbl expr)))))
-			'((quote scan)
-				schema
-				tbl
-				(cons list filtercols)
-				'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
-				(cons list (cons "$update" scancols))
-				'('lambda
-					(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-					'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
+			(define mapcols (cons list (cons "$update" scancols)))
+			(define mapfn '('lambda
+				(cons (quote $update) (map scancols (lambda (col) (symbol (concat tbl "." col)))))
+				'((quote if) '((quote $update) (cons (quote list) (map_assoc cols (lambda (col expr) (replace_columns_from_expr expr))))) 1 0)
+			))
+			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
+			(if (or (not (nil? order)) (not (nil? limit)))
+				(begin
+					(define ordercols (if (nil? order) '() (map order (lambda (x)
+						(car (cdr (cdr (cdr (replace_find_column (car x))))))
+					))))
+					(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
+					'((quote scan_order)
+						schema
+						tbl
+						(cons list filtercols)
+						filterfn
+						(cons list ordercols)
+						(cons list dirs)
+						(coalesceNil offset 0)
+						(coalesceNil limit -1)
+						mapcols
+						mapfn
+						(quote +)
+						0
+					)
 				)
-				(quote +)
-				0
+				'((quote scan)
+					schema
+					tbl
+					(cons list filtercols)
+					filterfn
+					mapcols
+					mapfn
+					(quote +)
+					0
+				)
 			)
 	)))
 
@@ -625,7 +675,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(? '(
 			(atom "WHERE" true)
 			(define condition sql_expression)
-	))) (begin
+		))
+		/* ORDER BY + LIMIT for partial deletes */
+		(?
+			(atom "ORDER" true)
+			(atom "BY" true)
+			(define order (+
+				(parser '(
+					(define col sql_expression)
+					(? (atom "COLLATE" true) (define coll sql_identifier))
+					(define direction_desc (or
+						(parser (atom "DESC" true) >)
+						(parser (atom "ASC" true) <)
+						(parser empty <)
+					))
+				) (list col (if coll (collate coll (equal? direction_desc >)) direction_desc)))
+				(atom "," true)
+			))
+		)
+		(?
+			(atom "LIMIT" true)
+			(or
+				'((define offset sql_expression) (atom "," true) (define limit sql_expression))
+				'((define limit sql_expression) (atom "OFFSET" true) (define offset sql_expression))
+				'((define limit sql_expression))
+			)
+		)
+	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define replace_find_column (lambda (expr) (match expr
@@ -636,15 +712,38 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
 			(set condition (replace_find_column (coalesceNil condition true)))
 			(set filtercols (extract_columns_for_tblvar tbl condition))
-			'((quote scan)
-				(coalesce schema2 schema)
-				tbl
-				(cons list filtercols)
-				'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
-				'(list "$update")
-				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-				(quote +)
-				0
+			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
+			(if (or (not (nil? order)) (not (nil? limit)))
+				(begin
+					(define ordercols (if (nil? order) '() (map order (lambda (x)
+						(car (cdr (cdr (cdr (replace_find_column (car x))))))
+					))))
+					(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
+					'((quote scan_order)
+						(coalesce schema2 schema)
+						tbl
+						(cons list filtercols)
+						filterfn
+						(cons list ordercols)
+						(cons list dirs)
+						(coalesceNil offset 0)
+						(coalesceNil limit -1)
+						'(list "$update")
+						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						(quote +)
+						0
+					)
+				)
+				'((quote scan)
+					(coalesce schema2 schema)
+					tbl
+					(cons list filtercols)
+					filterfn
+					'(list "$update")
+					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+					(quote +)
+					0
+				)
 			)
 	)))
 

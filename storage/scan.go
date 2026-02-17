@@ -202,49 +202,54 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	if !aggregate.IsNil() {
 		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
 	}
-	cdataset := make([]scm.Scmer, len(conditionCols))
-	mdataset := make([]scm.Scmer, len(callbackCols))
-	for i := range cdataset {
-		cdataset[i] = scm.NewNil()
-	}
-	for i := range mdataset {
-		mdataset[i] = scm.NewNil()
-	}
 
-	// main storage
+	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
-	mcols := make([]ColumnStorage, len(callbackCols))
-	for i, k := range conditionCols { // iterate over columns
-		// obtain a safe pointer to column storage (loads on demand)
+	for i, k := range conditionCols {
 		ccols[i] = t.getColumnStorageOrPanic(k)
 	}
-	for i, k := range callbackCols { // iterate over columns
-		if k == "$update" {
-			mcols[i] = nil
-		} else if len(k) >= 4 && k[:4] == "NEW." {
-			// ignore NEW.
-			mcols[i] = nil
-		} else {
-			mcols[i] = t.getColumnStorageOrPanic(k)
-		}
+	cdataset := make([]scm.Scmer, len(conditionCols))
+
+	// MapReducer for map+reduce phase (builds column readers internally)
+	wrappedMapFn := func(args ...scm.Scmer) scm.Scmer {
+		outCount++
+		return callbackFn(args...)
 	}
+	mapper := t.OpenMapReducer(callbackCols, wrappedMapFn, aggregateFn)
+	defer mapper.Close()
+
 	// initialize main_count lazily if needed
 	t.ensureMainCount(false)
-	// remember current insert status (so don't scan things that are inserted during map)
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
-	t.mu.RLock() // lock whole shard for reading since we frequently read deletions
+	t.mu.RLock()
 	locked := true
 	defer func() {
 		if locked {
-			// Ensure lock is not leaked on early return/panic
 			t.mu.RUnlock()
 		}
 	}()
 	maxInsertIndex := len(t.inserts)
 
-	// iterate over items (indexed)
+	// filter phase: collect matching IDs into stack buffer, flush to MapReducer
+	var buf [1024]uint
+	bufN := 0
 	hadValue := false
 	currentTx := CurrentTx()
+
+	flush := func() {
+		if bufN == 0 {
+			return
+		}
+		// release lock for map+reduce (UpdateFunction needs write lock)
+		t.mu.RUnlock()
+		locked = false
+		akkumulator = mapper.Stream(akkumulator, buf[:bufN])
+		hadValue = true
+		bufN = 0
+		t.mu.RLock()
+		locked = true
+	}
+
 	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint) {
 		if currentTx != nil && currentTx.Mode == TxACID {
 			if !currentTx.IsVisible(t, idx) {
@@ -256,59 +261,29 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			}
 		}
 
-		// prepare mdataset
+		// condition check
 		if idx < t.main_count {
-			// value from main storage
-			// check condition
-			for i, k := range ccols { // iterate over columns
+			for i, k := range ccols {
 				cdataset[i] = k.GetValue(idx)
 			}
-			if !scm.ToBool(conditionFn(cdataset...)) {
-				return // condition did not match
-			}
-
-			// call map function
-			for i, k := range mcols { // iterate over columns
-				if k == nil {
-					// update/delete function
-					mdataset[i] = scm.NewFunc(t.UpdateFunction(idx, true))
-				} else {
-					mdataset[i] = k.GetValue(idx)
-				}
-			}
 		} else {
-			// value from delta storage
-			// prepare&call condition function
-			for i, k := range conditionCols { // iterate over columns
+			for i, k := range conditionCols {
 				cdataset[i] = t.getDelta(int(idx-t.main_count), k)
 			}
-			// check condition
-			if !scm.ToBool(conditionFn(cdataset...)) {
-				return // condition did not match
-			}
-
-			// prepare&call map function
-			for i, k := range callbackCols { // iterate over columns
-				if k == "$update" {
-					mdataset[i] = scm.NewFunc(t.UpdateFunction(idx, true))
-				} else if len(k) >= 4 && k[:4] == "NEW." {
-					// ignore NEW.
-					mdataset[i] = scm.NewNil()
-				} else {
-					mdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
-				}
-			}
 		}
-		// unlock while map callback, so we don't get into deadlocks when a user is updating
-		t.mu.RUnlock()
-		locked = false
-		intermediate := callbackFn(mdataset...)
-		akkumulator = aggregateFn(akkumulator, intermediate)
-		hadValue = true
-		outCount++
-		t.mu.RLock()
-		locked = true
+		if !scm.ToBool(conditionFn(cdataset...)) {
+			return
+		}
+
+		// collect matching ID into buffer
+		buf[bufN] = idx
+		bufN++
+		if bufN == 1024 {
+			flush()
+		}
 	})
+	flush() // flush remaining
+
 	// finished reading
 	t.mu.RUnlock()
 	locked = false

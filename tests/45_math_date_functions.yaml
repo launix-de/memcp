@@ -111,5 +111,21 @@ test_cases:
       data:
         - v: null
 
+  # === RAND() / RANDOM() ===
+
+  - name: "RAND returns value between 0 and 1"
+    noncritical: true
+    sql: "SELECT CASE WHEN RAND() >= 0 AND RAND() < 1 THEN 'ok' ELSE 'fail' END AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "ok"
+
+  - name: "ORDER BY RAND with LIMIT"
+    noncritical: true
+    sql: "SELECT id FROM fn_math_test ORDER BY RAND() LIMIT 2"
+    expect:
+      rows: 2
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS fn_math_test"

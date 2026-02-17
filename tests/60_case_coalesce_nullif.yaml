@@ -175,5 +175,89 @@ test_cases:
       data:
         - r: 3
 
+  # === IFNULL — MySQL alias for COALESCE(a, b) ===
+
+  - name: "IFNULL with non-null value"
+    noncritical: true
+    sql: "SELECT IFNULL(42, 0) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 42
+
+  - name: "IFNULL with null value"
+    noncritical: true
+    sql: "SELECT IFNULL(NULL, 99) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 99
+
+  - name: "IFNULL with column"
+    noncritical: true
+    sql: "SELECT id, IFNULL(amount, -1) AS amt FROM ccn_data WHERE id IN (1, 3) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          amt: 100
+        - id: 3
+          amt: -1
+
+  - name: "IFNULL with string default"
+    noncritical: true
+    sql: "SELECT IFNULL(NULL, 'unknown') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "unknown"
+
+  # === IF(cond, true, false) — MySQL 3-arg conditional ===
+
+  - name: "IF function true branch"
+    noncritical: true
+    sql: "SELECT IF(1 = 1, 'yes', 'no') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "yes"
+
+  - name: "IF function false branch"
+    noncritical: true
+    sql: "SELECT IF(1 = 0, 'yes', 'no') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "no"
+
+  - name: "IF with column comparison"
+    noncritical: true
+    sql: "SELECT id, IF(amount > 100, 'high', 'low') AS tier FROM ccn_data WHERE id IN (1, 2, 5) ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          tier: "low"
+        - id: 2
+          tier: "high"
+        - id: 5
+          tier: "low"
+
+  - name: "IF with NULL condition"
+    noncritical: true
+    sql: "SELECT IF(NULL, 'yes', 'no') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "no"
+
+  - name: "SUM with IF for permission-style aggregation"
+    noncritical: true
+    sql: "SELECT SUM(IF(category = 'A', 1, 0)) AS a_count FROM ccn_data"
+    expect:
+      rows: 1
+      data:
+        - a_count: 3
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ccn_data"

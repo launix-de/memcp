@@ -111,6 +111,41 @@ test_cases:
   - name: "SHOW CREATE TABLE with schema prefix"
     sql: "SHOW CREATE TABLE `memcp-tests`.dbc_t"
 
+  # --- Type aliases: LONGTEXT, LONGBLOB, DATETIME, DOUBLE ---
+  - name: "CREATE TABLE with LONGTEXT column"
+    noncritical: true
+    sql: "CREATE TABLE dbc_longtext (id INT PRIMARY KEY, notes LONGTEXT)"
+
+  - name: "INSERT and read LONGTEXT"
+    noncritical: true
+    sql: "INSERT INTO dbc_longtext (id, notes) VALUES (1, 'hello world')"
+    expect:
+      affected_rows: 1
+
+  - name: "SELECT from LONGTEXT column"
+    noncritical: true
+    sql: "SELECT notes FROM dbc_longtext WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - notes: "hello world"
+
+  - name: "CREATE TABLE with LONGBLOB column"
+    noncritical: true
+    sql: "CREATE TABLE dbc_longblob (id INT PRIMARY KEY, data LONGBLOB)"
+
+  - name: "CREATE TABLE with DATETIME column"
+    noncritical: true
+    sql: "CREATE TABLE dbc_datetime (id INT PRIMARY KEY, created DATETIME)"
+
+  - name: "CREATE TABLE with DOUBLE column"
+    noncritical: true
+    sql: "CREATE TABLE dbc_double (id INT PRIMARY KEY, val DOUBLE)"
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS dbc_double"
+  - sql: "DROP TABLE IF EXISTS dbc_datetime"
+  - sql: "DROP TABLE IF EXISTS dbc_longblob"
+  - sql: "DROP TABLE IF EXISTS dbc_longtext"
   - sql: "DROP TABLE IF EXISTS dbc_child"
   - sql: "DROP TABLE IF EXISTS dbc_t"

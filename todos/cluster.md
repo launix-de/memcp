@@ -457,35 +457,117 @@ ScanResponse {
 - Reduziert RPCs von N×M auf **1×M**
 - **Erfordert Änderung in `queryplan.scm`:** der `compute_plan` muss alle Aggregate in einen Scan fusionieren können, statt `(cons 'parallel (map ags ...))` mit separaten Scans
 
-### 15.7 Fehlende Funktionen: scan_order distributed
+### 15.7 ShardMapReducer: Universelles Interface für scan und scan_order
 
-**Problem:** `scan_order` hält `shardqueue`-Closures über lokalen Shard-Speicher (`scan_order.go:28-35`).
-Die `mcols`/`scols`-Felder sind `func(uint) Scmer`-Reader, die direkt auf Column-Speicher zugreifen.
-Für Remote-Shards geht das nicht – die Daten liegen auf einer anderen Node.
+> **Status: lokal implementiert** (`storage/shard.go: ShardMapReducer`, `storage/scan_order.go`).
+> Für Remote-Shards fehlt nur die RPC-Implementierung von `Stream()`.
 
-**Ablauf beim Merge:** Die `globalqueue` (`scan_order.go:66`) zieht immer das kleinste Element aus dem Heap. Items, die zum selben Shard gehören, kommen **aufeinanderfolgend** aus derselben `shardqueue`. Erst wenn das nächste Shard-Element nicht mehr das global-kleinste ist, wechselt der Heap zu einem anderen Shard.
+**Problem:** `scan` und `scan_order` hatten getrennte Map+Reduce-Pfade mit duplizierter Logik
+(Column-Read, Main/Delta-Branching, Map-Call, Reduce-Call). Für JIT, Netzwerk-Transparenz und
+Optimierung brauchen wir **ein einheitliches Interface**.
 
-**Schlüsselidee:** Items pro Shard batchen – so lange Items pullen, wie sie zum selben Shard gehören. Dann den Batch an die Remote-Node schicken.
+**Design: Batch-MapReduce**
 
-**Variante A – IDs + map() an den Shard schicken (favorisiert):**
-- Coordinator sammelt Item-IDs (Shard-interne Indizes) aus der `shardqueue`
-- Schickt `{shard_uuid, item_ids[], map_ast}` an die Remote-Node
-- Remote-Node führt `map()` lokal aus – **Daten-Lokalität bleibt erhalten**, keine unnötige Spaltenübertragung
-- Remote-Node liefert `map()`-Ergebnisse zurück (nur die projizierten Werte)
-- **Vorteil:** Minimaler Netzwerk-Transfer, map() kann Indexes und Column-Kompression direkt nutzen
-- **Nachteil:** Mehr Roundtrips (pro Batch ein RPC)
+```go
+// storage/shard.go – bereits implementiert
+type ShardMapReducer struct {
+    shard      *storageShard
+    mainCols   []ColumnStorage        // direkte Main-Storage-Referenzen
+    colNames   []string               // Spalten-Namen für Delta-Zugriff
+    isUpdate   []bool                 // true für $update-Spalten
+    args       []scm.Scmer            // pre-allokierter Args-Buffer
+    mapFn      func(...scm.Scmer) scm.Scmer
+    reduceFn   func(...scm.Scmer) scm.Scmer
+    mainCount  uint
+}
 
-**Variante B – IDs + Spaltenliste an den Shard schicken:**
-- Coordinator sammelt Item-IDs aus der `shardqueue`
-- Schickt `{shard_uuid, item_ids[], column_names[]}` an die Remote-Node
-- Remote-Node liefert die rohen Spaltenwerte zurück
-- Coordinator führt `map()` lokal aus
-- **Vorteil:** map()-Logik bleibt beim Coordinator, einfacheres Debugging
-- **Nachteil:** Mehr Daten über das Netzwerk (alle angefragten Spalten, nicht nur map()-Output)
+// Universelles Interface
+func (m *ShardMapReducer) Stream(acc Scmer, recids []uint) Scmer
+func (m *ShardMapReducer) Close()
 
-**Empfehlung:** Variante A – Daten-Lokalität ist bei großen Shards und komplexen map()-Funktionen der dominierende Faktor. Die map()-Funktion muss ohnehin serialisierbar sein (siehe 15.3), und auf der Remote-Seite kann `OptimizeProcToSerialFunction` die volle Column-Reader-Performance nutzen.
+// Konstruktor – baut Column-Reader intern auf
+func (s *storageShard) OpenMapReducer(cols []string, mapFn, reduceFn) *ShardMapReducer
+```
 
-**Für die Filter+Sort-Phase** (die bereits in `scan_order` vor dem Merge passiert): hier bleibt der bestehende Ansatz – jeder Shard filtert und sortiert lokal. Für Remote-Shards wird dies über den Scan-RPC (15.4) abgedeckt: die Remote-Node liefert sortierte Item-IDs zurück, die dann in die `globalqueue` eingereiht werden.
+**Run-Detection für Main/Delta-Blöcke:**
+
+Die `Stream()`-Methode partitioniert die recid-Liste **ordnungserhaltend** in Runs gleichen Typs:
+
+```
+recids: [3, 7, 12, 15, 1001, 1003, 18, 22, 1005]
+         \_____________/  \________/  \_____/ \__/
+          MainBlock(4)   DeltaBlock(2) Main(2) Delta(1)
+```
+
+```go
+func (m *ShardMapReducer) Stream(acc Scmer, recids []uint) Scmer {
+    i := 0
+    for i < len(recids) {
+        j := i + 1
+        if recids[i] < m.mainCount {
+            for j < len(recids) && recids[j] < m.mainCount { j++ }
+            acc = m.processMainBlock(acc, recids[i:j])
+        } else {
+            for j < len(recids) && recids[j] >= m.mainCount { j++ }
+            acc = m.processDeltaBlock(acc, recids[i:j])
+        }
+        i = j
+    }
+    return acc
+}
+```
+
+**`processMainBlock` und `processDeltaBlock`** sind die JIT-Kandidaten:
+- `processMainBlock`: tight loop mit `ColumnStorage.GetValue(id)` – kein Branching, keine Closures
+- `processDeltaBlock`: `getDelta(id - mainCount, col)` – nur für die wenigen Delta-Einträge
+- Im Normalfall (99%+ Main-Storage) → ein einziger `processMainBlock`-Aufruf
+
+**Nutzung in scan_order (bereits implementiert):**
+
+```go
+// scan_order.go
+for _, sq := range q.q {
+    sq.mapper = sq.shard.OpenMapReducer(callbackCols, callbackFn, aggregateFn)
+}
+// Merge-Loop: zero-allocation batch=1 via Subslice
+akkumulator = qx.mapper.Stream(akkumulator, qx.items[0:1])
+```
+
+**Nutzung in scan (lokal):**
+
+```go
+// scan.go – Filter-Phase sammelt IDs in Stack-Buffer
+var buf [1024]uint
+n := 0
+iterateIndex(boundaries, func(idx uint) {
+    if !deleted && filter(idx) {
+        buf[n] = idx; n++
+        if n == 1024 {
+            acc = mapper.Stream(acc, buf[:n]); n = 0
+        }
+    }
+})
+if n > 0 { acc = mapper.Stream(acc, buf[:n]) }
+```
+
+1024 Items × 8 Bytes = 8 KB → passt in L1-Cache, kein Heap-Alloc.
+
+**Remote-Pfad (TODO):**
+
+Für Remote-Shards wird `Stream()` als **RPC-Batch-Call** implementiert:
+- Coordinator sendet `(acc, recids[])` an Remote-Node
+- Remote-Node führt lokal `processMainBlock`/`processDeltaBlock` aus
+- Remote-Node sendet nur den **neuen Akkumulator** zurück (minimaler Datentransfer)
+- Pro Batch nur 1 RPC → bei 1024er-Chunks: max 60 RPCs pro 60K-Shard
+
+**Vorteile des Batch-MapReduce gegenüber Streaming:**
+- **Minimaler Datentransfer**: nur Akkumulator über die Leitung (nicht mapped Values)
+- **Universell**: gleiches Interface für scan und scan_order
+- **JIT-freundlich**: processMainBlock ist eine einfache Schleife ohne Branching
+- **Kein Reorder-Buffer nötig**: Batches sind synchron, Reihenfolge durch Caller garantiert
+- **Graceful Degradation**: batch=1 (scan_order interleaved) → batch=1024 (scan) → batch=all (trivial)
+
+**Filter+Sort-Phase:** Bleibt wie bei ungeordneten Scans – jeder Shard filtert und sortiert lokal (via Scan-RPC, siehe 15.4). Die Remote-Node liefert sortierte Item-IDs zurück, die in die `globalqueue` eingereiht werden. Der MapReducer wird erst für die Map+Reduce-Phase genutzt.
 
 ### 15.8 Fehlende Funktionen: Zusammengesetzte Aggregate
 
@@ -506,13 +588,13 @@ Da `scan()` die Zwei-Phasen-Architektur (reduce/reduce2) bereits transparent han
 ### 15.9 Zusammenfassung: Prioritäten
 
 1. ~~**NthLocalVar-Serialisierung fixen**~~ – **erledigt** (`scmer.go`: MarshalJSON/UnmarshalJSON für `tagNthLocalVar` als `{"var": idx}`)
-2. **Binäres Scmer-Wire-Format** – Voraussetzung für effizienten Transfer
-3. **Scan-RPC für ungeordnete Scans** – direkter Cluster-Nutzen, passt in bestehende Zwei-Phasen-Architektur
-4. **Batched-Aggregate-Push-Down** – größter Performance-Gewinn für den häufigsten Workload (GROUP BY)
-5. **Scan-Delegation in iterateShards** – Integration in bestehende Scan-Orchestrierung
-6. **Materialisierte scan_order für Remote-Shards** – für ORDER BY + LIMIT Queries
-7. **Dekomponierbare Aggregate** – für korrekte verteilte AVG, STDDEV etc.
-8. **Streaming scan_order** – Optimierung für große ORDER BY ohne LIMIT (spät)
+2. ~~**ShardMapReducer lokal implementieren**~~ – **erledigt** (`shard.go`: `OpenMapReducer`, `Stream`, `processMainBlock`/`processDeltaBlock` mit Run-Detection; `scan_order.go` portiert)
+3. **Binäres Scmer-Wire-Format** – Voraussetzung für effizienten Transfer
+4. **Scan-RPC für ungeordnete Scans** – direkter Cluster-Nutzen, passt in bestehende Zwei-Phasen-Architektur
+5. **Batched-Aggregate-Push-Down** – größter Performance-Gewinn für den häufigsten Workload (GROUP BY)
+6. **Scan-Delegation in iterateShards** – Integration in bestehende Scan-Orchestrierung
+7. **Remote ShardMapReducer** – RPC-Implementierung von `Stream()` für entfernte Shards
+8. **Dekomponierbare Aggregate** – für korrekte verteilte AVG, STDDEV etc.
 
 ---
 

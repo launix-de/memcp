@@ -29,9 +29,9 @@ type shardqueue struct {
 	shard    *storageShard
 	items    []uint // TODO: refactor to chan, so we can block generating too much entries
 	err      scanError
-	mcols    []func(uint) scm.Scmer // map column reader
 	scols    []func(uint) scm.Scmer // sort criteria column reader
 	sortdirs []func(...scm.Scmer) scm.Scmer
+	mapper   *ShardMapReducer
 }
 
 // scanOrderResult bundles per-shard outputs for ordered scans.
@@ -183,21 +183,22 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 
 	// collect values from parallel scan
 	akkumulator := neutral
-	// TODO: do queue polling instead of this naive testing code
 	hadValue := false
+	// initialize MapReducers: pre-allocate args per shard
+	for _, sq := range q.q {
+		sq.mapper = sq.shard.OpenMapReducer(callbackCols, callbackFn, aggregateFn)
+	}
+
 	for len(q.q) > 0 {
-		qx := q.q[0] // draw a random queue element
+		qx := q.q[0]
 
 		if len(qx.items) == 0 {
-			heap.Pop(&q) // remove empty element from stack
+			heap.Pop(&q)
 			continue
 		}
 
-		idx := qx.items[0] // draw the smallest element from shard
-		qx.items = qx.items[1:]
-
 		if offset > 0 {
-			// skip offset
+			qx.items = qx.items[1:]
 			offset--
 		} else {
 			if limit == 0 {
@@ -207,16 +208,9 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 				limit--
 			}
 
-			// prepare args for map function (map is guaranteed to run in order)
-			mapargs := make([]scm.Scmer, len(callbackCols))
-			for i, reader := range qx.mcols {
-				mapargs[i] = reader(idx) // read column value into map argument
-			}
-			// call map function
-			value := callbackFn(mapargs...)
-
-			// aggregate
-			akkumulator = aggregateFn(akkumulator, value)
+			// batch MapReduce: items[0:1] is a zero-allocation subslice
+			akkumulator = qx.mapper.Stream(akkumulator, qx.items[0:1])
+			qx.items = qx.items[1:]
 			hadValue = true
 		}
 
@@ -369,17 +363,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		adjustedSortdirs[i] = cmpFn
 	}
 
-	// prepare map columns (but only caller will use them)
-	result.mcols = make([]func(uint) scm.Scmer, len(callbackCols))
-	for i, arg := range callbackCols {
-		if arg == "$update" {
-			result.mcols[i] = func(idx uint) scm.Scmer {
-				return scm.NewFunc(t.UpdateFunction(idx, true))
-			}
-		} else {
-			result.mcols[i] = t.ColumnReader(arg)
-		}
-	}
+	// map columns are now built by OpenMapReducer in the caller
 
 	// main storage
 	ccols := make([]ColumnStorage, len(conditionCols))

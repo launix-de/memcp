@@ -544,6 +544,108 @@ func (t *storageShard) ColumnReader(col string) func(uint) scm.Scmer {
 	}
 }
 
+// ShardMapReducer pre-allocates args and applies map+reduce over batches of record IDs.
+// Local implementation of the streaming MapReducer pattern (see todos/cluster.md §15.7).
+// Stream() partitions recid batches into main/delta runs and dispatches to
+// processMainBlock/processDeltaBlock – tight loops suitable for JIT compilation.
+// For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
+type ShardMapReducer struct {
+	shard     *storageShard
+	mainCols  []ColumnStorage // direct main storage access (nil for $update cols)
+	colNames  []string        // column names for delta getDelta access
+	isUpdate  []bool          // true for $update columns
+	args      []scm.Scmer     // pre-allocated args buffer
+	mapFn     func(...scm.Scmer) scm.Scmer
+	reduceFn  func(...scm.Scmer) scm.Scmer
+	mainCount uint
+}
+
+// OpenMapReducer creates a MapReducer for the given columns. Column readers and
+// main storage references are built once; the args buffer is pre-allocated.
+func (t *storageShard) OpenMapReducer(cols []string, mapFn func(...scm.Scmer) scm.Scmer, reduceFn func(...scm.Scmer) scm.Scmer) *ShardMapReducer {
+	mr := &ShardMapReducer{
+		shard:     t,
+		mainCols:  make([]ColumnStorage, len(cols)),
+		colNames:  cols,
+		isUpdate:  make([]bool, len(cols)),
+		args:      make([]scm.Scmer, len(cols)),
+		mapFn:     mapFn,
+		reduceFn:  reduceFn,
+		mainCount: t.main_count,
+	}
+	for i, col := range cols {
+		if col == "$update" {
+			mr.isUpdate[i] = true
+		} else if len(col) >= 4 && col[:4] == "NEW." {
+			mr.isUpdate[i] = true // NEW. columns always return nil
+		} else {
+			mr.mainCols[i] = t.getColumnStorageOrPanic(col)
+		}
+	}
+	return mr
+}
+
+// Stream applies map+reduce over a batch of record IDs. The recid list is
+// partitioned order-preserving into runs of main-storage IDs and delta IDs.
+// Callers can pass subslices (e.g. items[0:1]) for zero-allocation single-item batches.
+func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint) scm.Scmer {
+	i := 0
+	n := len(recids)
+	for i < n {
+		j := i + 1
+		if recids[i] < m.mainCount {
+			for j < n && recids[j] < m.mainCount {
+				j++
+			}
+			acc = m.processMainBlock(acc, recids[i:j])
+		} else {
+			for j < n && recids[j] >= m.mainCount {
+				j++
+			}
+			acc = m.processDeltaBlock(acc, recids[i:j])
+		}
+		i = j
+	}
+	return acc
+}
+
+// processMainBlock is a tight loop over main-storage records – no branching
+// on main vs delta, direct ColumnStorage.GetValue calls. JIT candidate.
+func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint) scm.Scmer {
+	for _, id := range recids {
+		for i, col := range m.mainCols {
+			if m.isUpdate[i] {
+				m.args[i] = scm.NewFunc(m.shard.UpdateFunction(id, true))
+			} else {
+				m.args[i] = col.GetValue(id)
+			}
+		}
+		acc = m.reduceFn(acc, m.mapFn(m.args...))
+	}
+	return acc
+}
+
+// processDeltaBlock handles delta-storage records via getDelta. JIT candidate.
+func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint) scm.Scmer {
+	for _, id := range recids {
+		for i, col := range m.colNames {
+			if m.isUpdate[i] {
+				m.args[i] = scm.NewFunc(m.shard.UpdateFunction(id, true))
+			} else if len(col) >= 4 && col[:4] == "NEW." {
+				m.args[i] = scm.NewNil()
+			} else {
+				m.args[i] = m.shard.getDelta(int(id-m.mainCount), col)
+			}
+		}
+		acc = m.reduceFn(acc, m.mapFn(m.args...))
+	}
+	return acc
+}
+
+// Close releases resources held by the MapReducer. No-op for local shards.
+func (m *ShardMapReducer) Close() {
+}
+
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) {
 	// Execute BEFORE INSERT triggers (can modify values; isIgnore skips failing rows)
 	if len(t.t.Triggers) > 0 {
