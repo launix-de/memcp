@@ -804,6 +804,8 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			return map[string]any{"symbol": "?"}
 		case tagFuncEnv:
 			return map[string]any{"symbol": "?"}
+		case tagNthLocalVar:
+			return map[string]any{"var": int(v.NthLocalVar())}
 		case tagProc:
 			p := v.Proc()
 			arr := make([]any, 0, 4)
@@ -927,6 +929,21 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 			if sym, ok := t["symbol"]; ok {
 				if name, ok2 := sym.(string); ok2 {
 					return NewSymbol(name)
+				}
+			}
+			// decode NthLocalVar encoded by MarshalJSON
+			if idx, ok := t["var"]; ok && len(t) == 1 {
+				switch v := idx.(type) {
+				case json.Number:
+					if i, err := v.Int64(); err == nil {
+						return NewNthLocalVar(NthLocalVar(i))
+					}
+				case float64:
+					return NewNthLocalVar(NthLocalVar(int(v)))
+				case int64:
+					return NewNthLocalVar(NthLocalVar(v))
+				case int:
+					return NewNthLocalVar(NthLocalVar(v))
 				}
 			}
 			// decode binary strings encoded by MarshalJSON

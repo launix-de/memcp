@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025  Carl-Philip Hänsch
+Copyright (C) 2025-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -170,5 +170,68 @@ func TestScmerJSON_PrimitivesRoundTrip(t *testing.T) {
 		if !Equal(c, r) && !(c.IsNil() && !r.Bool()) { // tolerate nil encoding
 			t.Fatalf("roundtrip mismatch: %v vs %v", SerializeToString(c, &Globalenv), SerializeToString(r, &Globalenv))
 		}
+	}
+}
+
+func TestScmerJSON_NthLocalVarRoundtrip(t *testing.T) {
+	for _, idx := range []NthLocalVar{0, 1, 5, 127, 255} {
+		v := NewNthLocalVar(idx)
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal NthLocalVar(%d): %v", idx, err)
+		}
+		// structure check: {"var": N}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("decode NthLocalVar JSON: %v", err)
+		}
+		if m["var"] == nil {
+			t.Fatalf("expected {\"var\": %d}, got %v", idx, m)
+		}
+		// round-trip
+		var v2 Scmer
+		if err := json.Unmarshal(b, &v2); err != nil {
+			t.Fatalf("unmarshal NthLocalVar(%d): %v", idx, err)
+		}
+		if !v2.IsNthLocalVar() {
+			t.Fatalf("roundtrip NthLocalVar(%d) not NthLocalVar: tag=%d", idx, v2.GetTag())
+		}
+		if v2.NthLocalVar() != idx {
+			t.Fatalf("roundtrip NthLocalVar mismatch: want %d, got %d", idx, v2.NthLocalVar())
+		}
+	}
+}
+
+func TestScmerJSON_LambdaWithNthLocalVar(t *testing.T) {
+	// lambda with optimized body: (+ (var 0) (var 1))
+	params := NewSlice([]Scmer{NewSymbol("a"), NewSymbol("b")})
+	body := NewSlice([]Scmer{NewSymbol("+"), NewNthLocalVar(0), NewNthLocalVar(1)})
+	p := Proc{Params: params, Body: body, En: &Globalenv, NumVars: 2}
+	s := NewProcStruct(p)
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal lambda with NthLocalVar: %v", err)
+	}
+	// round-trip
+	var s2 Scmer
+	if err := json.Unmarshal(b, &s2); err != nil {
+		t.Fatalf("unmarshal lambda with NthLocalVar: %v", err)
+	}
+	if !s2.IsProc() {
+		t.Fatalf("roundtrip not a proc: %v", s2)
+	}
+	p2 := s2.Proc()
+	if p2.NumVars != 2 {
+		t.Fatalf("NumVars mismatch: want 2, got %d", p2.NumVars)
+	}
+	bs := p2.Body.Slice()
+	if len(bs) != 3 {
+		t.Fatalf("body length mismatch: want 3, got %d", len(bs))
+	}
+	if !bs[1].IsNthLocalVar() || bs[1].NthLocalVar() != 0 {
+		t.Fatalf("body[1] not NthLocalVar(0): tag=%d", bs[1].GetTag())
+	}
+	if !bs[2].IsNthLocalVar() || bs[2].NthLocalVar() != 1 {
+		t.Fatalf("body[2] not NthLocalVar(1): tag=%d", bs[2].GetTag())
 	}
 }
