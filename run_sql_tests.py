@@ -109,7 +109,7 @@ def get_max_rows_for_ram(bytes_per_row: int = 100) -> int:
                     return max_bytes // bytes_per_row
     except:
         pass
-    return 100_000_000  # fallback: 100M rows
+    return 10_000_000  # fallback: 10M rows
 
 class SQLTestRunner:
     def __init__(self, base_url="http://localhost:4321", username="root", password="admin"):
@@ -156,34 +156,32 @@ class SQLTestRunner:
 
         max_rows = get_max_rows_for_ram()
 
-        # Find the slowest test to determine shared scaling
-        slowest_time = max((r["time_ms"] for r in self.perf_results.values()), default=0)
-        # Get current row count (should be same for all tests in suite)
-        current_rows = max((r["rows"] for r in self.perf_results.values()), default=PERF_DEFAULT_ROWS)
-
         if PERF_NORECALIBRATE:
             # Just update times, keep existing rows
             for name, result in self.perf_results.items():
+                current_rows = result["rows"]
                 if name in self.perf_baselines:
                     self.perf_baselines[name]["time_ms"] = round(result["time_ms"], 1)
                 else:
                     self.perf_baselines[name] = {"time_ms": round(result["time_ms"], 1), "rows": current_rows}
         else:
-            # Scale based on slowest test (all tests use same row count)
-            if slowest_time < PERF_TARGET_MIN_MS:
-                new_rows = int(current_rows * PERF_SCALE_FACTOR)
-            elif slowest_time > PERF_TARGET_MAX_MS:
-                new_rows = max(1000, int(current_rows / PERF_SCALE_FACTOR))
-            else:
-                new_rows = current_rows
-
-            # Apply RAM limit and hard cap
-            new_rows = min(new_rows, max_rows, PERF_MAX_ROWS)
-
-            # Update all baselines with shared row count
+            # Scale each test independently to target 10-20s
             for name, result in self.perf_results.items():
+                current_rows = result["rows"]
+                test_time = result["time_ms"]
+
+                if test_time < PERF_TARGET_MIN_MS:
+                    new_rows = int(current_rows * PERF_SCALE_FACTOR)
+                elif test_time > PERF_TARGET_MAX_MS:
+                    new_rows = max(1000, int(current_rows / PERF_SCALE_FACTOR))
+                else:
+                    new_rows = current_rows
+
+                # Apply RAM limit and hard cap
+                new_rows = min(new_rows, max_rows, PERF_MAX_ROWS)
+
                 self.perf_baselines[name] = {
-                    "time_ms": round(result["time_ms"], 1),
+                    "time_ms": round(test_time, 1),
                     "rows": new_rows
                 }
 
@@ -604,6 +602,7 @@ class SQLTestRunner:
         if PERF_TEST_ENABLED:
             self.load_perf_baselines()
             if PERF_CALIBRATE:
+                self.perf_baselines = {}  # reset rows to PERF_DEFAULT_ROWS
                 print("🔧 Calibration mode: resetting baselines to current times")
 
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
