@@ -682,3 +682,29 @@ func TestStringDescriptions(t *testing.T) {
 		}
 	}
 }
+
+// --- Constish edge case: all-zeros + NULLs ---
+
+func TestConstishZerosAndNulls(t *testing.T) {
+	// Reproduces the Constish test case: 27 zeros, 3 NULLs at positions 0, 10, 20
+	n := 30
+	gen := func(i int) scm.Scmer {
+		if i == 0 || i == 10 || i == 20 {
+			return scm.NewNil()
+		}
+		return scm.NewInt(0)
+	}
+	col := buildViaCompression(n, gen)
+	if _, ok := col.(*StorageEnum); !ok {
+		t.Fatalf("expected *StorageEnum, got %T", col)
+	}
+	verifyStorage(t, col, n, gen)
+
+	// Also test serialize roundtrip
+	col2 := serializeDeserialize(col)
+	if col2 == nil {
+		t.Fatal("deserialization returned nil")
+	}
+	t.Logf("After roundtrip: %T (%s)", col2, col2.String())
+	verifyStorage(t, col2, n, gen)
+}

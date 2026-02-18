@@ -24,6 +24,30 @@ import "container/heap"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
+// optimizeScanOrder is the Optimize hook for the scan_order declaration.
+// scan_order args: 1=schema, 2=table, 3=filterCols, 4=filter, 5=sortcols, 6=sortdirs,
+// 7=offset, 8=limit, 9=mapCols, 10=map, 11=reduce, 12=neutral, 13=isOuter
+func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	// Optimize args 1-10 normally
+	for i := 1; i <= 10 && i < len(v); i++ {
+		v[i], _ = oc.OptimizeSub(v[i], true)
+	}
+	// Arg 11 (reduce callback): set callback ownership before optimizing
+	if len(v) > 11 && !v[11].IsNil() {
+		oc.SetCallbackOwned([]bool{true, false}) // acc is owned
+		v[11], _ = oc.OptimizeSub(v[11], true)
+	}
+	// Arg 12 (neutral)
+	if len(v) > 12 {
+		v[12], _ = oc.OptimizeSub(v[12], true)
+	}
+	// Arg 13 (isOuter)
+	if len(v) > 13 {
+		v[13], _ = oc.OptimizeSub(v[13], true)
+	}
+	return scm.NewSlice(v), nil
+}
+
 type shardqueue struct {
 	shard    *storageShard
 	items    []uint // TODO: refactor to chan, so we can block generating too much entries
@@ -31,6 +55,21 @@ type shardqueue struct {
 	scols    []func(uint) scm.Scmer // sort criteria column reader
 	sortdirs []func(...scm.Scmer) scm.Scmer
 	mapper   *ShardMapReducer
+}
+
+// itemSortsBefore returns true if item aItem from shard a sorts strictly before the front element of shard b.
+func itemSortsBefore(a *shardqueue, aItem uint, b *shardqueue) bool {
+	for c := 0; c < len(a.scols); c++ {
+		av := a.scols[c](aItem)
+		bv := b.scols[c](b.items[0])
+		if scm.ToBool(a.sortdirs[c](av, bv)) {
+			return true
+		}
+		if scm.ToBool(a.sortdirs[c](bv, av)) {
+			return false
+		}
+	}
+	return false // equal is not strictly before
 }
 
 // scanOrderResult bundles per-shard outputs for ordered scans.
@@ -95,21 +134,6 @@ func (s *globalqueue) Pop() any {
 	s.q[len(s.q)-1] = nil // already free the memory, so GC can also run during an uncompleted ordered scan
 	s.q = s.q[0 : len(s.q)-1]
 	return result
-}
-
-// itemSortsBefore returns true if item aItem from shard a sorts strictly before the front element of shard b.
-func itemSortsBefore(a *shardqueue, aItem uint, b *shardqueue) bool {
-	for c := 0; c < len(a.scols); c++ {
-		av := a.scols[c](aItem)
-		bv := b.scols[c](b.items[0])
-		if scm.ToBool(a.sortdirs[c](av, bv)) {
-			return true
-		}
-		if scm.ToBool(a.sortdirs[c](bv, av)) {
-			return false
-		}
-	}
-	return false // equal is not strictly before
 }
 
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
@@ -407,8 +431,6 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		cmpFn := scm.OptimizeProcToSerialFunction(cmpScm)
 		adjustedSortdirs[i] = cmpFn
 	}
-
-	// map columns are now built by OpenMapReducer in the caller
 
 	// main storage
 	ccols := make([]ColumnStorage, len(conditionCols))

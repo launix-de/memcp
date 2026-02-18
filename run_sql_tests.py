@@ -33,6 +33,7 @@ except Exception as e:
 import json
 import subprocess
 import time
+import threading
 import multiprocessing
 from pathlib import Path
 from base64 import b64encode
@@ -587,6 +588,27 @@ class SQLTestRunner:
             pass
 
     # ----------------------
+    # Parallel test groups
+    # ----------------------
+    def _run_parallel_group(self, tests: List[Dict], database: str) -> None:
+        """Run a list of test cases concurrently using threads."""
+        results = [None] * len(tests)  # True/False per test
+        lock = threading.Lock()
+
+        def run_one(idx, tc):
+            ok = self.run_test_case(tc, database)
+            with lock:
+                results[idx] = ok
+
+        threads = []
+        for idx, tc in enumerate(tests):
+            t = threading.Thread(target=run_one, args=(idx, tc), daemon=True)
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join(timeout=120)
+
+    # ----------------------
     # Spec Runner
     # ----------------------
     def run_test_spec(self, spec_file: str) -> bool:
@@ -616,8 +638,25 @@ class SQLTestRunner:
             print("❌ Setup failed")
             return False
 
-        for test in spec.get('test_cases', []):
-            self.run_test_case(test, database)
+        # Group consecutive test cases by 'parallel' key and run groups concurrently
+        test_cases = spec.get('test_cases', [])
+        i = 0
+        while i < len(test_cases):
+            tc = test_cases[i]
+            group = tc.get('parallel')
+            if group:
+                # Collect all consecutive tests with the same parallel group
+                group_tests = [tc]
+                j = i + 1
+                while j < len(test_cases) and test_cases[j].get('parallel') == group:
+                    group_tests.append(test_cases[j])
+                    j += 1
+                print(f"⚡ Running {len(group_tests)} tests in parallel group '{group}'")
+                self._run_parallel_group(group_tests, database)
+                i = j
+            else:
+                self.run_test_case(tc, database)
+                i += 1
 
         if spec.get('cleanup'):
             self.run_cleanup(spec['cleanup'], database)
@@ -662,12 +701,13 @@ def start_memcp_process(port: int) -> subprocess.Popen | None:
         godebug = env.get("GODEBUG", "")
         if "invalidptr=" not in godebug:
             env["GODEBUG"] = f"{godebug},invalidptr=0" if godebug else "invalidptr=0"
+        devnull = open(os.devnull, 'w')
         proc = subprocess.Popen([
             "./memcp", "-data", datadir,
             f"--api-port={port}", f"--mysql-port={port+1000}",
             "--disable-mysql", "lib/main.scm"
         ], cwd=os.path.dirname(os.path.abspath(__file__)),
-           env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+           env=env, stdin=subprocess.PIPE, stdout=devnull, stderr=devnull, text=True)
         if not wait_for_memcp(port):
             return None
         return proc

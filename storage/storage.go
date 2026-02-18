@@ -93,36 +93,6 @@ func scmerSliceToStrings(list []scm.Scmer) []string {
 	return out
 }
 
-// optimizeScan is the Optimize hook for the scan declaration.
-// It explicitly controls callback ownership for the reduce and reduce2 lambdas,
-// ensuring the accumulator parameter is marked as owned (enabling _mut swaps
-// like set_assoc → set_assoc_mut inside the reduce body).
-func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	// Optimize args 1-6 normally (schema, table, filterCols, filter, mapCols, map)
-	for i := 1; i <= 6 && i < len(v); i++ {
-		v[i], _ = oc.OptimizeSub(v[i], true)
-	}
-	// Arg 7 (reduce callback): set callback ownership before optimizing
-	if len(v) > 7 && !v[7].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false}) // acc is owned
-		v[7], _ = oc.OptimizeSub(v[7], true)
-	}
-	// Arg 8 (neutral)
-	if len(v) > 8 {
-		v[8], _ = oc.OptimizeSub(v[8], true)
-	}
-	// Arg 9 (reduce2): also set callback ownership
-	if len(v) > 9 && !v[9].IsNil() {
-		oc.SetCallbackOwned([]bool{true, false})
-		v[9], _ = oc.OptimizeSub(v[9], true)
-	}
-	// Arg 10 (isOuter)
-	if len(v) > 10 {
-		v[10], _ = oc.OptimizeSub(v[10], true)
-	}
-	return scm.NewSlice(v), nil
-}
-
 func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
@@ -398,7 +368,7 @@ func Init(en scm.Env) {
 			}
 
 			return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
-		}, false, false, nil,
+		}, false, false, &scm.TypeDescriptor{Optimize: optimizeScanOrder},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createdatabase", "creates a new database",
@@ -701,7 +671,7 @@ func Init(en scm.Env) {
 			}
 			if numPartitions == 0 {
 				// check if that paritition dimension already exists
-				if t.Shards == nil && t.PShards != nil {
+				if t.ShardMode == ShardModePartition {
 					for _, sd := range t.PDimensions {
 						if sd.Column == scm.String(a[2]) {
 							return scm.NewSlice(sd.Pivots) // found the column in partition schema: return exactly the same pivots as we found already
@@ -736,7 +706,7 @@ func Init(en scm.Env) {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
 			cols := dataset(mustScmerSlice(a[2], "partition columns"))
-			if t.PDimensions == nil {
+			if t.ShardMode == ShardModeFree {
 				// apply partitioning schema
 				ps := make([]shardDimension, len(cols)/2)
 				for i := 0; i < len(ps); i++ {
@@ -1078,10 +1048,7 @@ func Init(en scm.Env) {
 				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 			}
 			// choose current shard list (partitioned or simple)
-			shards := t.Shards
-			if shards == nil {
-				shards = t.PShards
-			}
+			shards := t.ActiveShards()
 			rows := make([]scm.Scmer, 0, len(shards))
 			for i, s := range shards {
 				if s == nil {
@@ -1422,9 +1389,8 @@ func (db *database) PrintMemUsage() string {
 func (t *table) PrintMemUsage() string {
 	var b strings.Builder
 	var dsize uint = 0
-	shards := t.Shards
-	if shards == nil {
-		shards = t.PShards
+	shards := t.ActiveShards()
+	if t.ShardMode == ShardModePartition {
 		b.WriteString(fmt.Sprint("Partitioning Schema:", t.PDimensions) + "\n\n")
 	}
 	for i, s := range shards {

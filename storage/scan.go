@@ -33,6 +33,36 @@ func (s scanError) Error() string {
 
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
+// optimizeScan is the Optimize hook for the scan declaration.
+// It explicitly controls callback ownership for the reduce and reduce2 lambdas,
+// ensuring the accumulator parameter is marked as owned (enabling _mut swaps
+// like set_assoc → set_assoc_mut inside the reduce body).
+func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	// Optimize args 1-6 normally (schema, table, filterCols, filter, mapCols, map)
+	for i := 1; i <= 6 && i < len(v); i++ {
+		v[i], _ = oc.OptimizeSub(v[i], true)
+	}
+	// Arg 7 (reduce callback): set callback ownership before optimizing
+	if len(v) > 7 && !v[7].IsNil() {
+		oc.SetCallbackOwned([]bool{true, false}) // acc is owned
+		v[7], _ = oc.OptimizeSub(v[7], true)
+	}
+	// Arg 8 (neutral)
+	if len(v) > 8 {
+		v[8], _ = oc.OptimizeSub(v[8], true)
+	}
+	// Arg 9 (reduce2): also set callback ownership
+	if len(v) > 9 && !v[9].IsNil() {
+		oc.SetCallbackOwned([]bool{true, false})
+		v[9], _ = oc.OptimizeSub(v[9], true)
+	}
+	// Arg 10 (isOuter)
+	if len(v) > 10 {
+		v[10], _ = oc.OptimizeSub(v[10], true)
+	}
+	return scm.NewSlice(v), nil
+}
+
 // scanResult bundles per-shard outputs to minimize allocations and type assertions.
 type scanResult struct {
 	res        scm.Scmer
@@ -197,11 +227,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	var outCount int64
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
-	callbackFn := scm.OptimizeProcToSerialFunction(callback)
-	aggregateFn := func(...scm.Scmer) scm.Scmer { return scm.NewNil() }
-	if !aggregate.IsNil() {
-		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
-	}
 
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -211,11 +236,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	// MapReducer for map+reduce phase (builds column readers internally)
-	wrappedMapFn := func(args ...scm.Scmer) scm.Scmer {
-		outCount++
-		return callbackFn(args...)
-	}
-	mapper := t.OpenMapReducer(callbackCols, wrappedMapFn, aggregateFn)
+	mapper := t.OpenMapReducer(callbackCols, callback, aggregate)
 	defer mapper.Close()
 
 	// initialize main_count lazily if needed
@@ -243,6 +264,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		// release lock for map+reduce (UpdateFunction needs write lock)
 		t.mu.RUnlock()
 		locked = false
+		outCount += int64(bufN)
 		akkumulator = mapper.Stream(akkumulator, buf[:bufN])
 		hadValue = true
 		bufN = 0

@@ -92,7 +92,10 @@ func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
 	if s.enumK != 0xFF {
 		found := false
 		for j := uint8(0); j < s.enumK; j++ {
-			if scm.Equal(s.enumVals[j], value) {
+			// Use strict comparison: NULL is only equal to NULL
+			// (scm.Equal treats NULL == 0 == false per Scheme semantics,
+			// but storage needs them distinguished)
+			if value.IsNil() == s.enumVals[j].IsNil() && (value.IsNil() || scm.Equal(s.enumVals[j], value)) {
 				s.enumFreqs[j]++
 				found = true
 				break
@@ -223,8 +226,8 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 	}
 	// scalable numerics (replaces onlyInt and onlyFloat)
 	if s.minIntScale > math.MinInt8 {
-		if s.minIntScale == 0 || s.minIntScale >= 18 {
-			// pure integers (or uninitialized — no numeric values scanned)
+		if s.minIntScale == 0 || s.minIntScale == math.MaxInt8 {
+			// pure integers (MaxInt8 = all values were 0 or no non-NULL numerics)
 			if i > 5 && 2*(i-s.numSeq) < i {
 				return new(StorageSeq)
 			}

@@ -318,6 +318,8 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 			// update command
 			var triggerOldRow, triggerNewRow dataset // for AFTER UPDATE triggers
 			var newRecid uint                        // recid of the newly inserted row (for tx undo)
+			var dualWriteCols []string               // captured for dual-write forwarding
+			var dualWriteRow [][]scm.Scmer           // captured for dual-write forwarding
 			func() {
 				t.mu.Lock()         // write lock
 				defer t.mu.Unlock() // write lock
@@ -410,6 +412,11 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 
 				newRecid = t.main_count + uint(len(t.inserts))
 				t.insertDataset(cols, [][]scm.Scmer{d2}, nil)
+				// Capture for dual-write forwarding (cols/d2 are closure-local)
+				if t.t.repartitionActive {
+					dualWriteCols = cols
+					dualWriteRow = [][]scm.Scmer{d2}
+				}
 
 				if tx := CurrentTx(); tx != nil && tx.Mode == TxACID {
 					// Check if old row was staged by this tx (in UndeleteMask)
@@ -442,6 +449,10 @@ func (t *storageShard) UpdateFunction(idx uint, withTrigger bool) func(...scm.Sc
 					}
 				}
 			}()
+			// Dual-write: forward the new row to the secondary shard set
+			if result && dualWriteRow != nil {
+				t.t.dualWriteInsert(dualWriteCols, dualWriteRow)
+			}
 			// transaction bookkeeping + deferred sync
 			if result {
 				if tx := CurrentTx(); tx != nil {
@@ -557,21 +568,27 @@ type ShardMapReducer struct {
 	args      []scm.Scmer     // pre-allocated args buffer
 	mapFn     func(...scm.Scmer) scm.Scmer
 	reduceFn  func(...scm.Scmer) scm.Scmer
+	mapScmer  scm.Scmer       // original Scmer for network serialization
+	reduceScmer scm.Scmer     // original Scmer for network serialization
 	mainCount uint
 }
 
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
 // main storage references are built once; the args buffer is pre-allocated.
-func (t *storageShard) OpenMapReducer(cols []string, mapFn func(...scm.Scmer) scm.Scmer, reduceFn func(...scm.Scmer) scm.Scmer) *ShardMapReducer {
+// mapFn and reduceFn are stored as Scmer for future network serialization;
+// OptimizeProcToSerialFunction is called here (TODO: replace with JIT compilation).
+func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer) *ShardMapReducer {
 	mr := &ShardMapReducer{
-		shard:     t,
-		mainCols:  make([]ColumnStorage, len(cols)),
-		colNames:  cols,
-		isUpdate:  make([]bool, len(cols)),
-		args:      make([]scm.Scmer, len(cols)),
-		mapFn:     mapFn,
-		reduceFn:  reduceFn,
-		mainCount: t.main_count,
+		shard:       t,
+		mainCols:    make([]ColumnStorage, len(cols)),
+		colNames:    cols,
+		isUpdate:    make([]bool, len(cols)),
+		args:        make([]scm.Scmer, len(cols)),
+		mapFn:       scm.OptimizeProcToSerialFunction(mapFn),
+		reduceFn:    scm.OptimizeProcToSerialFunction(reduceFn),
+		mapScmer:    mapFn,
+		reduceScmer: reduceFn,
+		mainCount:   t.main_count,
 	}
 	for i, col := range cols {
 		if col == "$update" {
