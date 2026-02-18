@@ -21,7 +21,6 @@ import "sort"
 import "strings"
 import "runtime/debug"
 import "container/heap"
-import "sync/atomic"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
@@ -98,6 +97,21 @@ func (s *globalqueue) Pop() any {
 	return result
 }
 
+// itemSortsBefore returns true if item aItem from shard a sorts strictly before the front element of shard b.
+func itemSortsBefore(a *shardqueue, aItem uint, b *shardqueue) bool {
+	for c := 0; c < len(a.scols); c++ {
+		av := a.scols[c](aItem)
+		bv := b.scols[c](b.items[0])
+		if scm.ToBool(a.sortdirs[c](av, bv)) {
+			return true
+		}
+		if scm.ToBool(a.sortdirs[c](bv, av)) {
+			return false
+		}
+	}
+	return false // equal is not strictly before
+}
+
 // TODO: helper function for priority-q. golangs implementation is kinda quirky, so do our own. container/heap especially lacks the function to test the value at front instead of popping it
 
 // map reduce implementation based on scheme scripts
@@ -123,18 +137,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	}
 	analyzeNs := time.Since(analyzeStart).Nanoseconds()
 
-	callbackFn := scm.OptimizeProcToSerialFunction(callback)
-	// wrap map callback to count outputs
 	var outCount int64
-	innerCallback := callbackFn
-	callbackFn = func(args ...scm.Scmer) scm.Scmer {
-		atomic.AddInt64(&outCount, 1)
-		return innerCallback(args...)
-	}
-	aggregateFn := func(...scm.Scmer) scm.Scmer { return scm.NewNil() }
-	if !aggregate.IsNil() {
-		aggregateFn = scm.OptimizeProcToSerialFunction(aggregate)
-	}
 
 	// total_limit helps the shard-scanners to early-out
 	total_limit := -1
@@ -186,9 +189,10 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	hadValue := false
 	// initialize MapReducers: pre-allocate args per shard
 	for _, sq := range q.q {
-		sq.mapper = sq.shard.OpenMapReducer(callbackCols, callbackFn, aggregateFn)
+		sq.mapper = sq.shard.OpenMapReducer(callbackCols, callback, aggregate)
 	}
 
+	var buf [1024]uint // stack-allocated batch buffer (8 KB, fits in L1)
 	for len(q.q) > 0 {
 		qx := q.q[0]
 
@@ -198,30 +202,71 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		}
 
 		if offset > 0 {
+			// offset skip (typically small)
 			qx.items = qx.items[1:]
 			offset--
-		} else {
-			if limit == 0 {
-				return akkumulator
+			if len(qx.items) > 0 {
+				heap.Fix(&q, 0)
+			} else {
+				heap.Pop(&q)
 			}
-			if limit > 0 {
-				limit--
-			}
+			continue
+		}
 
-			// batch MapReduce: items[0:1] is a zero-allocation subslice
-			akkumulator = qx.mapper.Stream(akkumulator, qx.items[0:1])
-			qx.items = qx.items[1:]
+		if limit == 0 {
+			break
+		}
+
+		// Determine batch size: how many items from qx before another shard takes over?
+		maxBatch := len(qx.items)
+		if limit >= 0 && limit < maxBatch {
+			maxBatch = limit
+		}
+
+		batchEnd := maxBatch // default: take all (single shard or no competitor)
+		if len(q.q) > 1 {
+			// Find the "second" shard via heap children (indices 1, 2)
+			peekIdx := 1
+			if len(q.q) > 2 && q.Less(2, 1) {
+				peekIdx = 2
+			}
+			peek := q.q[peekIdx]
+			// Binary search: find first k where qx.items[k] >= peek.items[0]
+			batchEnd = sort.Search(maxBatch, func(k int) bool {
+				return !itemSortsBefore(qx, qx.items[k], peek)
+			})
+			if batchEnd == 0 {
+				batchEnd = 1 // at least 1 (heap guarantees qx is min)
+			}
+		}
+
+		// Stream in chunks of 1024 via stack buffer
+		outCount += int64(batchEnd)
+		remaining := batchEnd
+		for remaining > 0 {
+			n := remaining
+			if n > 1024 {
+				n = 1024
+			}
+			copy(buf[:n], qx.items[:n])
+			akkumulator = qx.mapper.Stream(akkumulator, buf[:n])
 			hadValue = true
+			qx.items = qx.items[n:]
+			remaining -= n
+		}
+		if limit >= 0 {
+			limit -= batchEnd
 		}
 
 		if len(qx.items) > 0 {
-			heap.Fix(&q, 0) // sink up since we have the next value
+			heap.Fix(&q, 0)
 		} else {
-			// sub-queue is empty -> remove
 			heap.Pop(&q)
 		}
 	}
 	if !hadValue && isOuter {
+		callbackFn := scm.OptimizeProcToSerialFunction(callback)
+		aggregateFn := scm.OptimizeProcToSerialFunction(aggregate)
 		nullRow := make([]scm.Scmer, len(callbackCols))
 		for i := range nullRow {
 			nullRow[i] = scm.NewNil()

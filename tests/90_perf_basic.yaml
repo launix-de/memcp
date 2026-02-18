@@ -83,6 +83,24 @@ test_cases:
     expect:
       rows: 1
 
+  # GROUP BY aggregation
+  - name: "Perf: GROUP BY"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i (* i 54) (* i 71) (concat "str_" i)))))
+            (set cnt (insert "{database}" "perf_main" '("id" "category" "value" "name") rows))
+            (rebuild)
+            (set mem (memstats))
+            (list cnt (mem "heap_alloc")))
+    sql: "SELECT category % 100 AS cat, COUNT(*) AS cnt, SUM(value) AS total FROM perf_main GROUP BY category % 100"
+    threshold_ms: 30000
+    expect:
+      rows: 100
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS perf_main"
   - sql: "DROP TABLE IF EXISTS perf_small"
