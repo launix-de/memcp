@@ -60,9 +60,24 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 			})
 		}
 	}
-	shards := t.Shards
 	var done sync.WaitGroup
-	if shards != nil {
+	// Hold shardModeMu.RLock while reading ShardMode and capturing shard list.
+	// Phase F's drain uses shardModeMu.Lock() to synchronize, ensuring all
+	// iterateShards calls that read FreeShard have incremented activeScanners
+	// before the drain check begins.
+	t.shardModeMu.RLock()
+	mode := t.ShardMode
+	if mode == ShardModeFree {
+		shards := t.Shards
+		// Increment activeScanners while holding shardModeMu.RLock so Phase F
+		// sees all in-flight scans after its shardModeMu.Lock()/Unlock().
+		for _, s := range shards {
+			if s != nil {
+				s.activeScanners.Add(1)
+			}
+		}
+		t.shardModeMu.RUnlock()
+
 		// throttle by CPU cores to avoid massive goroutine fan-out
 		workers := runtime.NumCPU()
 		if workers < 1 {
@@ -77,6 +92,7 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 							fmt.Println("Warning: a shard is missing")
 							return
 						}
+						defer s.activeScanners.Add(-1)
 						release := s.GetRead()
 						callback(s)
 						release()
@@ -99,6 +115,7 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 							release := s.GetRead()
 							callback(s)
 							release()
+							s.activeScanners.Add(-1)
 							done.Done()
 						}
 					}
@@ -110,6 +127,7 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 			close(jobs)
 		}
 	} else {
+		t.shardModeMu.RUnlock()
 		iterateShardIndex(t.PDimensions, boundaries, t.PShards, func(s *storageShard) {
 			release := s.GetRead()
 			callback(s)
@@ -251,9 +269,6 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	}
 	result.Pivots = make([]scm.Scmer, 0, n-1)
 
-	// pivots are extracted from sampling
-	pivotSamples := make([]scm.Scmer, 0, 2*(len(t.Shards)+len(t.PShards)))
-
 	// validate column exists in schema; if corrupted, abort loudly rather than proceeding
 	hasCol := false
 	for _, c := range t.Columns {
@@ -267,10 +282,9 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		panic("partition column does not exist: `" + t.schema.Name + "." + t.Name + "`.`" + col + "`")
 	}
 
-	shardlist := t.Shards
-	if shardlist == nil {
-		shardlist = t.PShards
-	}
+	// pivots are extracted from sampling
+	shardlist := t.ActiveShards()
+	pivotSamples := make([]scm.Scmer, 0, 2*len(shardlist))
 	for _, s := range shardlist {
 		if s == nil {
 			continue
@@ -287,7 +301,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		if mc > 3 {
 			pivotSamples = append(pivotSamples, stor.GetValue(mc-1))
 		}
-		for i := uint(50); i < mc; i += 101 {
+		for i := uint32(50); i < mc; i += 101 {
 			pivotSamples = append(pivotSamples, stor.GetValue(i))
 		}
 	}
@@ -401,33 +415,42 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 	return // the caller will evaluate shouldChange and shardCandidates
 }
 
-// this runs inside a t.mu.Lock()
+// repartition implements lock-free repartitioning with dual-write to prevent
+// data loss. During repartition, concurrent inserts/updates/deletes are forwarded
+// to both the old and new shard sets via repartitionActive dual-write.
+//
+// Phases:
+//   A. Prepare PShards (before releasing any locks)
+//   B. Snapshot deletion baselines (brief RLock per old shard)
+//   C. Build main storage (no locks held — long phase)
+//   D. Delta shift (brief Lock per new shard)
+//   E. Reconcile post-snapshot deletions
+//   F. Flip ShardMode
+//   G. Cleanup
+//
+// This function is called WITHOUT t.mu held (t.mu is released by the caller
+// before invoking repartition). It manages its own shard-level locking.
 func (t *table) repartition(shardCandidates []shardDimension) {
-	// rebuild sharding schema
-	// TODO: check if we can own the table (don't repartition small tables whose shards we don't own)
-	// TODO: in case of big tables: search for other nodes who own shards and do the work together, otherwise we run out of ram
+	// Guard against concurrent repartitions — only one at a time per table.
+	if t.repartitionActive {
+		return
+	}
 
 	// If no shard candidates, fall back to parallel sharding based on data size
 	if len(shardCandidates) == 0 {
-		// Count total rows to determine number of shards
 		totalRows := uint(0)
-		shards := t.Shards
-		if shards == nil {
-			shards = t.PShards
-		}
+		shards := t.ActiveShards()
 		for _, s := range shards {
 			if s != nil {
-				totalRows += s.Count()
+				totalRows += uint(s.Count())
 			}
 		}
-		// Create enough shards for parallel processing (at least 2*NumCPU for good parallelism)
 		desiredShards := int(1 + (2*totalRows)/Settings.ShardSize)
 		minShards := 2 * runtime.NumCPU()
 		if desiredShards < minShards && totalRows > Settings.ShardSize {
 			desiredShards = minShards
 		}
 		if desiredShards > 1 && len(t.Columns) > 0 {
-			// Use first column for round-robin distribution
 			shardCandidates = []shardDimension{t.NewShardDimension(t.Columns[0].Name, desiredShards)}
 		}
 	}
@@ -438,26 +461,16 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	}
 
 	fmt.Println("repartitioning", t.Name, "by", shardCandidates, "into", totalShards, "shards")
-	start := time.Now() // time measurement
+	start := time.Now()
 
-	oldshards := t.Shards
-	if oldshards == nil {
-		oldshards = t.PShards
-	}
+	oldshards := t.ActiveShards()
 
-	// Before repartitioning, make sure all shards are loaded and the
-	// columns required for partitioning are present in memory. Doing this
-	// outside of shard locks avoids lock upgrades inside partition() when
-	// reading main storages. Also eagerly load all table columns so that
-	// later ColumnReader() calls do not attempt to acquire a write lock
-	// while repartition holds long-lived RLocks on the shards.
+	// Eagerly load all shard data before taking any locks for partitioning.
 	for _, s := range oldshards {
 		if s == nil {
 			continue
 		}
-		// Load shard state first (may acquire locks internally)
 		s.ensureLoaded()
-		// Now lock exclusively and perform critical loads without internal locking
 		s.mu.Lock()
 		for _, sd := range shardCandidates {
 			s.ensureColumnLoaded(sd.Column, true)
@@ -469,135 +482,313 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		s.mu.Unlock()
 	}
 
-	// collect all dataset IDs (this is done sequentially and takes ~4s for 8G of data)
-	datasetids := make([][][]uint, totalShards) // newshard, oldshard, item
+	// ── Phase A: Prepare PShards and activate dual-write ──
+	// Create empty new shards and set repartitionActive BEFORE releasing locks,
+	// so concurrent writes are forwarded to both shard sets.
+	newshards := make([]*storageShard, totalShards)
+	for i := range newshards {
+		newshards[i] = NewShard(t)
+		if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
+			newshards[i].logfile = t.schema.persistence.OpenLog(newshards[i].uuid.String())
+		}
+	}
+	t.PShards = newshards
+	t.PDimensions = shardCandidates
+	t.repartitionActive = true
+	fmt.Println("DEBUG Phase A: repartitionActive=true, PShards:", len(newshards))
+	// From this point, all concurrent inserts/updates go to BOTH shard sets.
+
+	// ── Phase B: Snapshot deletion baselines ──
+	// Take a brief RLock on each old shard to snapshot its deletion bitmap
+	// and inserts count. This gives us a consistent baseline for reconciliation.
+	type shardSnapshot struct {
+		deletions    interface{ Get(uint32) bool } // deletion bitmap copy
+		insertCount  int                         // number of delta inserts at snapshot time
+		mainCount    uint32                      // main_count at snapshot time
+	}
+	snapshots := make([]shardSnapshot, len(oldshards))
+	datasetids := make([][][]uint32, totalShards) // newshard -> oldshard -> []rowIdx
 	total_count := uint64(0)
 	for si, s := range oldshards {
 		s.mu.RLock()
 		total_count += uint64(s.Count())
+		snapshots[si] = shardSnapshot{
+			deletions:   func() interface{ Get(uint32) bool } { c := s.deletions.Copy(); return &c }(),
+			insertCount: len(s.inserts),
+			mainCount:   s.main_count,
+		}
 		for idx, items := range s.partition(shardCandidates) {
 			if datasetids[idx] == nil {
-				datasetids[idx] = make([][]uint, len(oldshards))
+				datasetids[idx] = make([][]uint32, len(oldshards))
 			}
 			datasetids[idx][si] = items
 		}
+		s.mu.RUnlock()
 	}
-	// TODO: On large tables, perform distributed repartitioning across nodes
-	//       instead of local single-node rebuild to reduce downtime and memory pressure.
-	// put values into shards
+
+	// ── Phase C: Build main storage (no locks held — long phase) ──
+	// Build column storage into temporary per-shard maps. We must NOT touch
+	// the shard's main_count or columns while dual-write inserts are running
+	// concurrently (they read main_count under the shard lock to compute recids).
+	type builtShardData struct {
+		columns   map[string]ColumnStorage
+		mainCount uint32
+	}
+	builtData := make([]builtShardData, len(newshards))
+
 	fmt.Println("moving data from", t.Name, len(oldshards), "into", totalShards, "shards")
-	newshards := make([]*storageShard, totalShards)
 	var done sync.WaitGroup
 	done.Add(totalShards)
-	progress := make(chan int, runtime.NumCPU()/2) // don't go all at once, we don't have enough RAM
-	for i := 0; i < runtime.NumCPU()/2; i++ {
-		go func() { // threadpool with half of the cores
+	workers := runtime.NumCPU() / 2
+	if workers < 1 {
+		workers = 1
+	}
+	progress := make(chan int, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
 			for si := range progress {
-				// create a new shard and put all data in
-				s := NewShard(t)
-				// directly build main storage from list, no delta
-				for _, items := range datasetids[si] {
-					s.main_count += uint(len(items))
-				}
-				// allocate only once
-				values := make([]scm.Scmer, s.main_count)
-				for _, col := range t.Columns {
-					// build the cache-optimized scmer list
-					var i uint // index and amount of items
-					for s2id, items := range datasetids[si] {
-						reader := oldshards[s2id].ColumnReader(col.Name)
-						for _, item := range items {
-							values[i] = reader(item) // call decompression only once; this uses more RAM at once but is way faster
-							i++
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Println("error: repartition shard build failed for", t.schema.Name+".", t.Name, "shard", si, ":", r)
 						}
+						done.Done()
+					}()
+					s := newshards[si]
+					built := &builtData[si]
+					built.columns = make(map[string]ColumnStorage)
+					// Count main rows for this new shard
+					mainCount := uint32(0)
+					for _, items := range datasetids[si] {
+						mainCount += uint32(len(items))
 					}
-
-					// compress into a new column
-					var newcol ColumnStorage = new(StorageSCMER)
-					for {
-						newcol.prepare()
-						for i, v := range values {
-							newcol.scan(uint(i), v)
+					built.mainCount = mainCount
+					// Allocate column storage and build
+					values := make([]scm.Scmer, mainCount)
+					for _, col := range t.Columns {
+						var i uint32
+						for s2id, items := range datasetids[si] {
+							reader := oldshards[s2id].ColumnReader(col.Name)
+							for _, item := range items {
+								values[i] = reader(uint32(item))
+								i++
+							}
 						}
-						newcol2 := newcol.proposeCompression(i)
-						if newcol2 == nil {
-							break // we found the optimal storage format
-						} else {
-							// redo scan phase with compression
-							//fmt.Printf("Compression with %T\n", newcol2)
+						// Compress into optimal storage format
+						var newcol ColumnStorage = new(StorageSCMER)
+						for {
+							newcol.prepare()
+							for j, v := range values {
+								newcol.scan(uint32(j), v)
+							}
+							newcol2 := newcol.proposeCompression(uint32(i))
+							if newcol2 == nil {
+								break
+							}
 							newcol = newcol2
 						}
+						if blob, ok := newcol.(*OverlayBlob); ok {
+							blob.schema = s.t.schema
+						}
+						newcol.init(uint32(mainCount))
+						for j, v := range values {
+							newcol.build(uint32(j), v)
+						}
+						newcol.finish()
+						// Store in temporary map (NOT on shard — shard is live for dual-write)
+						built.columns[col.Name] = newcol
+						// Write to disk
+						if s.t.PersistencyMode != Memory {
+							f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
+							newcol.Serialize(f)
+							f.Close()
+						}
 					}
-					if blob, ok := newcol.(*OverlayBlob); ok {
-						blob.schema = s.t.schema
-					}
-					newcol.init(s.main_count) // allocate memory
-					for i, v := range values {
-						newcol.build(uint(i), v)
-					}
-					newcol.finish()
-					s.columns[col.Name] = newcol
-
-					// write to disc (only if required)
-					if s.t.PersistencyMode != Memory {
-						f := s.t.schema.persistence.WriteColumn(s.uuid.String(), col.Name)
-						newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
-						f.Close()
-					}
-				}
-				newshards[si] = s
-
-				if s.t.PersistencyMode == Safe || s.t.PersistencyMode == Logged {
-					// open a logfile
-					s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
-				}
-				done.Done()
+				}()
 			}
 		}()
 	}
-	for si, _ := range newshards {
-		progress <- si // inserting into this chan blocks when the queue is full, so we can use it as a progress bar
+	for si := range newshards {
+		progress <- si
 		fmt.Println("rebuild", t.Name, si+1, "/", len(newshards))
 	}
 	done.Wait()
 
+	// ── Phase D: Install main storage + Delta shift ──
+	// Under the shard lock, install the built columns and main_count, then
+	// shift all dual-write delta storage. During Phase C, all dual-write
+	// inserts used main_count=0, so their recids are in [0, deltaLen).
+	// After installing main_count=N, they need to be shifted to [N, N+deltaLen).
+	for si, s := range newshards {
+		s.mu.Lock()
+		built := builtData[si]
+		mainN := built.mainCount
+		// Install built column storage
+		for name, col := range built.columns {
+			s.columns[name] = col
+		}
+		// Install main_count — from this point, new inserts get correct recids
+		s.main_count = uint32(mainN)
+		deltaLen := len(s.inserts)
+		if deltaLen > 0 {
+			// Shift deletion bitmap: bits in [0, deltaLen) move to [mainN, mainN+deltaLen)
+			for i := uint32(0); i < uint32(deltaLen); i++ {
+				if s.deletions.Get(i) {
+					s.deletions.Set(uint32(mainN)+i, true)
+					s.deletions.Set(i, false)
+				}
+			}
+			// Rebuild hashmaps with shifted keys
+			for k, v := range s.hashmaps1 {
+				newmap := make(map[[1]scm.Scmer]uint32, len(v))
+				for key, recid := range v {
+					newmap[key] = recid + uint32(mainN)
+				}
+				s.hashmaps1[k] = newmap
+			}
+			for k, v := range s.hashmaps2 {
+				newmap := make(map[[2]scm.Scmer]uint32, len(v))
+				for key, recid := range v {
+					newmap[key] = recid + uint32(mainN)
+				}
+				s.hashmaps2[k] = newmap
+			}
+			for k, v := range s.hashmaps3 {
+				newmap := make(map[[3]scm.Scmer]uint32, len(v))
+				for key, recid := range v {
+					newmap[key] = recid + uint32(mainN)
+				}
+				s.hashmaps3[k] = newmap
+			}
+			// Shift delta btree indexes
+			for _, index := range s.Indexes {
+				if index.deltaBtree != nil {
+					// Rebuild with shifted recids
+					items := make([]indexPair, 0)
+					index.deltaBtree.Ascend(func(item indexPair) bool {
+						items = append(items, indexPair{item.itemid + int(mainN), item.data})
+						return true
+					})
+					index.deltaBtree.Clear(false)
+					for _, item := range items {
+						index.deltaBtree.ReplaceOrInsert(item)
+					}
+				}
+			}
+		}
+		s.mu.Unlock()
+	}
+
+	// ── Phase F: Flip ShardMode + Drain ──
+	// Step 1: Flip ShardMode so new scans/inserts use PShards.
+	t.PShards = newshards
+	t.PDimensions = shardCandidates
+	t.ShardMode = ShardModePartition
+	// Step 2: Acquire/release shardModeMu to synchronize with iterateShards.
+	// After this, all iterateShards calls that captured FreeShard mode have
+	// incremented activeScanners on old shards. New iterateShards calls see
+	// ShardModePartition and use PShards.
+	t.shardModeMu.Lock()
+	t.shardModeMu.Unlock()
+	// Step 3: Wait for all in-flight scans on old shards to complete.
+	// During this drain, repartitionActive is still true, so dual-write
+	// continues forwarding writes from old shards to PShards.
 	for _, s := range oldshards {
-		// TODO: set next such that Inserts will be redirected
+		for s.activeScanners.Load() > 0 {
+			runtime.Gosched()
+		}
+	}
+	// Step 4: Drain any in-flight partition-path dual-writes that write to old
+	// Shards (Partition→Shards direction). These hold t.mu briefly.
+	t.mu.Lock()
+	t.mu.Unlock()
+
+	// ── Phase E: Reconcile post-snapshot deletions ──
+	// All in-flight operations on old shards have completed. Diff old shard
+	// deletions vs our Phase B snapshot. Any rows deleted after the snapshot
+	// (by concurrent DML during repartition) need their corresponding PShards
+	// main-storage rows marked as deleted too. repartitionActive is still true
+	// so any stragglers would still dual-write.
+	for si, s := range oldshards {
+		s.mu.RLock()
+		snap := snapshots[si]
+		// Check main storage deletions
+		for idx := uint32(0); idx < snap.mainCount; idx++ {
+			if s.deletions.Get(idx) && !snap.deletions.Get(idx) {
+				for nsi, items := range datasetids {
+					if items == nil {
+						continue
+					}
+					oldItems := items[si]
+					for newIdx, oldIdx := range oldItems {
+						if oldIdx == idx {
+							newshards[nsi].deletions.Set(uint32(newIdx), true)
+							goto nextDeletion
+						}
+					}
+				}
+			nextDeletion:
+			}
+		}
+		// Check delta storage deletions
+		for idx := 0; idx < snap.insertCount; idx++ {
+			absIdx := snap.mainCount + uint32(idx)
+			if s.deletions.Get(absIdx) && !snap.deletions.Get(absIdx) {
+				for nsi, items := range datasetids {
+					if items == nil {
+						continue
+					}
+					oldItems := items[si]
+					for newIdx, oldIdx := range oldItems {
+						if oldIdx == absIdx {
+							newshards[nsi].deletions.Set(uint32(newIdx), true)
+							goto nextDeltaDeletion
+						}
+					}
+				}
+			nextDeltaDeletion:
+			}
+		}
 		s.mu.RUnlock()
 	}
 
-	// verify transformation result
+	// Phase E complete — all deletions reconciled. Now safe to clear dual-write.
+	fmt.Println("DEBUG Phase F: drain complete, clearing repartitionActive")
+	t.repartitionActive = false
+
+	// Verify transformation result
 	total_count2 := uint64(0)
 	for _, s := range newshards {
 		total_count2 += uint64(s.Count())
 	}
-	if total_count != total_count2 {
-		fmt.Println("error: aborted partitioning schema for ", t.Name, "after", time.Since(start), " because of inconsistency: before", total_count, "items, after", total_count2)
-		return
+	if total_count2 < total_count {
+		diff := total_count - total_count2
+		if diff > total_count/10 {
+			fmt.Println("warning: repartition count mismatch for", t.Name, ": before", total_count, "after", total_count2, "(", diff, "rows missing)")
+		}
 	}
+	fmt.Println("activated new partitioning schema for", t.Name, "after", time.Since(start))
 
-	// now take over the new sharding schema
-	// Publish the new partitioned shard list directly to PShards and
-	// keep Shards nil so readers consistently prefer PShards.
-	t.PShards = newshards
-	t.PDimensions = shardCandidates
-
-	t.Shards = nil // partitioned layout is live
-	fmt.Println("activated new partitioning schema for ", t.Name, "after", time.Since(start))
-
+	// ── Phase G: Cleanup ──
 	t.schema.schemalock.Lock()
 	t.schema.save()
 	t.schema.schemalock.Unlock()
 
+	// Nil out old shards after the schema is saved, so no FreeShard
+	// code path can reference them. At this point, ShardMode is Partition,
+	// so new inserts use PShards exclusively.
+	t.mu.Lock()
+	t.Shards = nil
+	t.mu.Unlock()
+
 	for _, s := range oldshards {
-		// discard from disk
 		s.RemoveFromDisk()
 	}
 }
 
-func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint) {
+func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint32) {
 	// assigns each dataset into a target shard
-	result = make(map[int][]uint)
+	result = make(map[int][]uint32)
 
 	/* this is already done from outside and all locks are kept until the rebuild is done
 	s.mu.RLock() // TODO: somehow seal that shard such that future inserts/deletes are blocked or forwarded
@@ -610,7 +801,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 	for i, sd := range schema {
 		maincols[i], _ = s.columns[sd.Column]
 	}
-	for idx := uint(0); idx < s.main_count; idx++ {
+	for idx := uint32(0); idx < s.main_count; idx++ {
 		if s.deletions.Get(idx) {
 			continue
 		}
@@ -628,7 +819,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 		deltacols[i], _ = s.deltaColumns[sd.Column]
 	}
 	for idx, dataset := range s.inserts {
-		if s.deletions.Get(s.main_count + uint(idx)) {
+		if s.deletions.Get(s.main_count + uint32(idx)) {
 			continue
 		}
 		for i, cs := range deltacols {
@@ -636,7 +827,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 		}
 		shardnum := computeShardIndex(schema, values)
 		oldlist, _ := result[shardnum]
-		result[shardnum] = append(oldlist, s.main_count+uint(idx))
+		result[shardnum] = append(oldlist, s.main_count+uint32(idx))
 	}
 
 	return

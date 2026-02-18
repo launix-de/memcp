@@ -41,10 +41,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 			// found the column
 			t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 			done := make(chan error, 6)
-			shardlist := t.Shards
-			if shardlist == nil {
-				shardlist = t.PShards
-			}
+			shardlist := t.ActiveShards()
 			for i, s := range shardlist {
 				gls.Go(func(i int, s *storageShard) func() {
 					return func() {
@@ -96,7 +93,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	if parallel {
 		var done sync.WaitGroup
 		done.Add(int(s.main_count))
-		progress := make(chan uint, runtime.NumCPU()/2) // don't go all at once, we don't have enough RAM
+		progress := make(chan uint32, runtime.NumCPU()/2) // don't go all at once, we don't have enough RAM
 		for i := 0; i < runtime.NumCPU()/2; i++ {
 			gls.Go(func() { // threadpool with half of the cores
 				// allocate private buffers per worker to avoid data races
@@ -108,7 +105,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 				}
 				for i := range progress {
 					for j := range readers {
-						colvalues[j] = readers[j].GetValue(i) // read values from main storage into lambda params
+						colvalues[j] = readers[j].GetValue(uint32(i)) // read values from main storage into lambda params
 					}
 					vals[i] = scm.Apply(computor, colvalues...) // execute computor kernel (but the onoptimized version for non-serial use)
 					done.Done()
@@ -116,7 +113,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 			})
 		}
 		// add all items to the queue
-		for i := uint(0); i < s.main_count; i++ {
+		for i := uint32(0); i < s.main_count; i++ {
 			progress <- i
 		}
 		close(progress) // signal workers to exit
@@ -130,7 +127,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		for j, col := range cols {
 			readers[j] = newCachedColumnReader(col)
 		}
-		for i := uint(0); i < s.main_count; i++ {
+		for i := uint32(0); i < s.main_count; i++ {
 			for j := range readers {
 				colvalues[j] = readers[j].GetValue(i) // read values from main storage into lambda params
 			}

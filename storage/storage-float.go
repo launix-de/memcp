@@ -64,7 +64,7 @@ func (s *StorageFloat) Deserialize(f io.Reader) uint {
 
 func (s *StorageFloat) GetCachedReader() ColumnReader { return s }
 
-func (s *StorageFloat) GetValue(i uint) scm.Scmer {
+func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
 	// NULL is encoded as NaN in SQL
 	if math.IsNaN(s.values[i]) {
 		return scm.NewNil()
@@ -72,15 +72,15 @@ func (s *StorageFloat) GetValue(i uint) scm.Scmer {
 	return scm.NewFloat(s.values[i])
 }
 
-func (s *StorageFloat) scan(i uint, value scm.Scmer) {
+func (s *StorageFloat) scan(i uint32, value scm.Scmer) {
 }
 func (s *StorageFloat) prepare() {
 }
-func (s *StorageFloat) init(i uint) {
+func (s *StorageFloat) init(i uint32) {
 	// allocate
 	s.values = make([]float64, i)
 }
-func (s *StorageFloat) build(i uint, value scm.Scmer) {
+func (s *StorageFloat) build(i uint32, value scm.Scmer) {
 	// store
 	if value.IsNil() {
 		s.values[i] = math.NaN()
@@ -91,7 +91,7 @@ func (s *StorageFloat) build(i uint, value scm.Scmer) {
 func (s *StorageFloat) finish() {
 }
 
-func (s *StorageFloat) proposeCompression(i uint) ColumnStorage {
+func (s *StorageFloat) proposeCompression(i uint32) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }

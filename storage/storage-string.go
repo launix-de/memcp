@@ -99,7 +99,7 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 
 func (s *StorageString) GetCachedReader() ColumnReader { return s }
 
-func (s *StorageString) GetValue(i uint) scm.Scmer {
+func (s *StorageString) GetValue(i uint32) scm.Scmer {
 	if s.nodict {
 		start := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
 		if s.starts.hasNull && start == s.starts.null {
@@ -110,8 +110,8 @@ func (s *StorageString) GetValue(i uint) scm.Scmer {
 		endIdx := int(start + len_)
 		return scm.NewString(s.dictionary[startIdx:endIdx])
 	} else {
-		idx := uint(int64(s.values.GetValueUInt(i)) + s.values.offset)
-		if s.values.hasNull && idx == uint(s.values.null) {
+		idx := uint32(int64(s.values.GetValueUInt(i)) + s.values.offset)
+		if s.values.hasNull && idx == uint32(s.values.null) {
 			return scm.NewNil()
 		}
 		start := int64(s.starts.GetValueUInt(idx)) + s.starts.offset
@@ -130,7 +130,7 @@ func (s *StorageString) prepare() {
 	s.reverseMap = make(map[string][3]uint)
 	s.prefixstat = make(map[string]int)
 }
-func (s *StorageString) scan(i uint, value scm.Scmer) {
+func (s *StorageString) scan(i uint32, value scm.Scmer) {
 	// storage is so simple, dont need scan
 	var v string
 	if value.IsNil() {
@@ -180,15 +180,15 @@ func (s *StorageString) scan(i uint, value scm.Scmer) {
 			start[1] = uint(s.sb.Len())
 			start[2] = uint(len(v))
 			s.sb.WriteString(v)
-			s.starts.scan(start[0], scm.NewInt(int64(start[1])))
-			s.lens.scan(start[0], scm.NewInt(int64(start[2])))
+			s.starts.scan(uint32(start[0]), scm.NewInt(int64(start[1])))
+			s.lens.scan(uint32(start[0]), scm.NewInt(int64(start[2])))
 			s.reverseMap[v] = start
 			s.count = s.count + 1
 		}
 		s.values.scan(i, scm.NewInt(int64(start[0])))
 	}
 }
-func (s *StorageString) init(i uint) {
+func (s *StorageString) init(i uint32) {
 	s.prefixstat = nil // free memory
 	if s.nodict {
 		// do not init values, sb andsoon
@@ -201,16 +201,16 @@ func (s *StorageString) init(i uint) {
 		// prefixed strings are not accounted with that, but maybe this could be checked later??
 		s.values.init(i)
 		// take over dictionary
-		s.starts.init(s.count)
-		s.lens.init(s.count)
+		s.starts.init(uint32(s.count))
+		s.lens.init(uint32(s.count))
 		for _, start := range s.reverseMap {
 			// we read the value from dictionary, so we can free up all the single-strings
-			s.starts.build(start[0], scm.NewInt(int64(start[1])))
-			s.lens.build(start[0], scm.NewInt(int64(start[2])))
+			s.starts.build(uint32(start[0]), scm.NewInt(int64(start[1])))
+			s.lens.build(uint32(start[0]), scm.NewInt(int64(start[2])))
 		}
 	}
 }
-func (s *StorageString) build(i uint, value scm.Scmer) {
+func (s *StorageString) build(i uint32, value scm.Scmer) {
 	// store
 	if value.IsNil() {
 		if s.nodict {
@@ -242,7 +242,7 @@ func (s *StorageString) finish() {
 	s.starts.finish()
 	s.lens.finish()
 }
-func (s *StorageString) proposeCompression(i uint) ColumnStorage {
+func (s *StorageString) proposeCompression(i uint32) ColumnStorage {
 	// build prefix map (maybe prefix trees later?)
 	/* TODO: reactivate as soon as StoragePrefix has a proper implementation for Serialize/Deserialize
 	mostprefixscore := 0

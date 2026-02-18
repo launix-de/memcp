@@ -147,7 +147,7 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 			if string(b) == "" {
 				// nop
 			} else if string(b[0:7]) == "delete " {
-				var idx uint
+				var idx uint32
 				json.Unmarshal(b[7:], &idx)
 				replay <- LogEntryDelete{idx}
 			} else if string(b[0:7]) == "insert " {

@@ -12,11 +12,11 @@ func buildEnum(n int, gen func(i int) scm.Scmer) *StorageEnum {
 	s := new(StorageEnum)
 	s.prepare()
 	for i := 0; i < n; i++ {
-		s.scan(uint(i), gen(i))
+		s.scan(uint32(i), gen(i))
 	}
-	s.init(uint(n))
+	s.init(uint32(n))
 	for i := 0; i < n; i++ {
-		s.build(uint(i), gen(i))
+		s.build(uint32(i), gen(i))
 	}
 	s.finish()
 	return s
@@ -38,7 +38,7 @@ func TestEnumGetValueReadOnly(t *testing.T) {
 	// Random access pattern — should work without any cache
 	indices := []int{999, 0, 500, 99, 100, 999, 1, 500}
 	for _, idx := range indices {
-		got := s.GetValue(uint(idx))
+		got := s.GetValue(uint32(idx))
 		want := gen(idx)
 		if !scm.Equal(got, want) {
 			t.Fatalf("GetValue(%d) = %v, want %v", idx, got, want)
@@ -58,7 +58,7 @@ func TestEnumSequentialCorrectness(t *testing.T) {
 	s := buildEnum(n, gen)
 
 	for i := 0; i < n; i++ {
-		got := s.GetValue(uint(i))
+		got := s.GetValue(uint32(i))
 		want := gen(i)
 		if !scm.Equal(got, want) {
 			t.Fatalf("GetValue(%d) = %v, want %v", i, got, want)
@@ -79,7 +79,7 @@ func TestEnumRandomCorrectness(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
 	for trial := 0; trial < n; trial++ {
 		idx := rng.Intn(n)
-		got := s.GetValue(uint(idx))
+		got := s.GetValue(uint32(idx))
 		want := gen(idx)
 		if !scm.Equal(got, want) {
 			t.Fatalf("GetValue(%d) = %v, want %v", idx, got, want)
@@ -99,7 +99,7 @@ func TestEnumCachedCorrectness(t *testing.T) {
 
 	var cache EnumDecodeCache
 	for i := 0; i < n; i++ {
-		got := s.GetValueCached(uint(i), &cache)
+		got := s.GetValueCached(uint32(i), &cache)
 		want := gen(i)
 		if !scm.Equal(got, want) {
 			t.Fatalf("GetValueCached(%d) = %v, want %v", i, got, want)
@@ -123,7 +123,7 @@ func TestEnumGetCachedReader(t *testing.T) {
 		t.Fatal("GetCachedReader() returned self, expected cachedEnumReader wrapper")
 	}
 	for i := 0; i < n; i++ {
-		got := reader.GetValue(uint(i))
+		got := reader.GetValue(uint32(i))
 		want := gen(i)
 		if !scm.Equal(got, want) {
 			t.Fatalf("cachedReader.GetValue(%d) = %v, want %v", i, got, want)
@@ -139,9 +139,9 @@ func TestEnumProposalSkewed(t *testing.T) {
 	s.prepare()
 	for i := 0; i < 1000; i++ {
 		if i%100 == 99 {
-			s.scan(uint(i), scm.NewInt(1))
+			s.scan(uint32(i), scm.NewInt(1))
 		} else {
-			s.scan(uint(i), scm.NewInt(0))
+			s.scan(uint32(i), scm.NewInt(0))
 		}
 	}
 	result := s.proposeCompression(1000)
@@ -155,7 +155,7 @@ func TestEnumProposalBalancedBool(t *testing.T) {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < 1000; i++ {
-		s.scan(uint(i), scm.NewInt(int64(i%2)))
+		s.scan(uint32(i), scm.NewInt(int64(i%2)))
 	}
 	result := s.proposeCompression(1000)
 	if _, ok := result.(*StorageEnum); ok {
@@ -168,7 +168,7 @@ func TestEnumProposalUniformFour(t *testing.T) {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < 1000; i++ {
-		s.scan(uint(i), scm.NewInt(int64(i%4)))
+		s.scan(uint32(i), scm.NewInt(int64(i%4)))
 	}
 	result := s.proposeCompression(1000)
 	if _, ok := result.(*StorageEnum); ok {
@@ -182,7 +182,7 @@ func TestEnumProposalUniformStrings(t *testing.T) {
 	s.prepare()
 	vals := []string{"alpha", "beta", "gamma", "delta"}
 	for i := 0; i < 1000; i++ {
-		s.scan(uint(i), scm.NewString(vals[i%4]))
+		s.scan(uint32(i), scm.NewString(vals[i%4]))
 	}
 	result := s.proposeCompression(1000)
 	if _, ok := result.(*StorageEnum); ok {
@@ -199,7 +199,7 @@ func TestEnumProposalEightSkewed(t *testing.T) {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < 1000; i++ {
-		s.scan(uint(i), genEightSkewed(i))
+		s.scan(uint32(i), genEightSkewed(i))
 	}
 	result := s.proposeCompression(1000)
 	if _, ok := result.(*StorageEnum); !ok {
@@ -279,7 +279,7 @@ func BenchmarkEnumSequential(b *testing.B) {
 			b.ResetTimer()
 			for iter := 0; iter < b.N; iter++ {
 				for i := 0; i < cfg.n; i++ {
-					s.GetValue(uint(i))
+					s.GetValue(uint32(i))
 				}
 			}
 		})
@@ -294,7 +294,7 @@ func BenchmarkEnumSequentialCached(b *testing.B) {
 			for iter := 0; iter < b.N; iter++ {
 				var cache EnumDecodeCache
 				for i := 0; i < cfg.n; i++ {
-					s.GetValueCached(uint(i), &cache)
+					s.GetValueCached(uint32(i), &cache)
 				}
 			}
 		})
@@ -307,15 +307,15 @@ func BenchmarkEnumRandom(b *testing.B) {
 	for _, cfg := range configs {
 		s := buildEnum(cfg.n, cfg.gen)
 		rng := rand.New(rand.NewSource(42))
-		indices := make([]uint, cfg.n)
+		indices := make([]uint32, cfg.n)
 		for i := range indices {
-			indices[i] = uint(rng.Intn(cfg.n))
+			indices[i] = uint32(rng.Intn(cfg.n))
 		}
 		b.Run(cfg.name, func(b *testing.B) {
 			b.ResetTimer()
 			for iter := 0; iter < b.N; iter++ {
 				for _, idx := range indices {
-					s.GetValue(idx)
+					s.GetValue(uint32(idx))
 				}
 			}
 		})
@@ -326,16 +326,16 @@ func BenchmarkEnumRandomCached(b *testing.B) {
 	for _, cfg := range configs {
 		s := buildEnum(cfg.n, cfg.gen)
 		rng := rand.New(rand.NewSource(42))
-		indices := make([]uint, cfg.n)
+		indices := make([]uint32, cfg.n)
 		for i := range indices {
-			indices[i] = uint(rng.Intn(cfg.n))
+			indices[i] = uint32(rng.Intn(cfg.n))
 		}
 		b.Run(cfg.name, func(b *testing.B) {
 			b.ResetTimer()
 			for iter := 0; iter < b.N; iter++ {
 				var cache EnumDecodeCache
 				for _, idx := range indices {
-					s.GetValueCached(idx, &cache)
+					s.GetValueCached(uint32(idx), &cache)
 				}
 			}
 		})
@@ -352,19 +352,19 @@ func BenchmarkEnumPerElem(b *testing.B) {
 	variants := []variant{
 		{"Sequential", func(s *StorageEnum, n int, b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				s.GetValue(uint(i % n))
+				s.GetValue(uint32(i % n))
 			}
 		}},
 		{"SequentialCached", func(s *StorageEnum, n int, b *testing.B) {
 			var cache EnumDecodeCache
 			for i := 0; i < b.N; i++ {
-				s.GetValueCached(uint(i%n), &cache)
+				s.GetValueCached(uint32(i%n), &cache)
 			}
 		}},
 		{"Random", func(s *StorageEnum, n int, b *testing.B) {
 			rng := rand.New(rand.NewSource(99))
 			for i := 0; i < b.N; i++ {
-				s.GetValue(uint(rng.Intn(n)))
+				s.GetValue(uint32(rng.Intn(n)))
 			}
 		}},
 	}

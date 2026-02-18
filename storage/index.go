@@ -109,7 +109,7 @@ func (idx *StorageIndex) String() string {
 }
 
 // iterates over items
-func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint)) {
+func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint32)) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
 	// check if we found conditions
@@ -154,11 +154,11 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 	}
 
 	// otherwise: iterate over all items
-	for i := uint(0); i < t.main_count; i++ {
+	for i := uint32(0); i < t.main_count; i++ {
 		callback(i)
 	}
 	for i := 0; i < maxInsertIndex; i++ {
-		callback(t.main_count + uint(i))
+		callback(t.main_count + uint32(i))
 	}
 }
 
@@ -173,7 +173,7 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 }
 
 // iterate over index
-func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint)) {
+func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint32)) {
 
 	// find columns in storage
 	cols := make([]ColumnStorage, len(s.Cols))
@@ -188,11 +188,11 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		// index is not built yet
 		if s.Savings < savings_threshold {
 			// iterate over all items because we don't want to store the index
-			for i := uint(0); i < s.t.main_count; i++ {
+			for i := uint32(0); i < s.t.main_count; i++ {
 				callback(i)
 			}
 			for i := 0; i < maxInsertIndex; i++ {
-				callback(s.t.main_count + uint(i))
+				callback(s.t.main_count + uint32(i))
 			}
 			return
 		} else {
@@ -206,8 +206,8 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			fmt.Println("building index on", s.t.t.Name, "over", s.Cols)
 
 			// main storage
-			tmp := make([]uint, s.t.main_count)
-			for i := uint(0); i < s.t.main_count; i++ {
+			tmp := make([]uint32, s.t.main_count)
+			for i := uint32(0); i < s.t.main_count; i++ {
 				tmp[i] = i // fill with natural order
 			}
 			// sort indexes
@@ -227,11 +227,11 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 			// store sorted values into compressed format
 			s.mainIndexes.prepare()
 			for i, v := range tmp {
-				s.mainIndexes.scan(uint(i), scm.NewInt(int64(v)))
+				s.mainIndexes.scan(uint32(i), scm.NewInt(int64(v)))
 			}
-			s.mainIndexes.init(uint(len(tmp)))
+			s.mainIndexes.init(uint32(len(tmp)))
 			for i, v := range tmp {
-				s.mainIndexes.build(uint(i), scm.NewInt(int64(v)))
+				s.mainIndexes.build(uint32(i), scm.NewInt(int64(v)))
 			}
 			s.mainIndexes.finish()
 
@@ -273,10 +273,10 @@ start_scan:
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
 	idx := sort.Search(int(s.t.main_count), func(idx int) bool {
-		idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
+		idx2 := uint32(int64(s.mainIndexes.GetValueUInt(uint32(idx))) + s.mainIndexes.offset)
 		for i := 0; i < cmpCols; i++ {
 			a := lower[i]
-			b := cols[i].GetValue(uint(idx2))
+			b := cols[i].GetValue(idx2)
 			// TODO: respect !lowerEqual
 			if scm.Less(a, b) {
 				return true // less
@@ -291,13 +291,13 @@ start_scan:
 iteration:
 	for {
 		// check for array bounds
-		if uint(idx) >= s.t.main_count {
+		if uint32(idx) >= s.t.main_count {
 			break
 		}
-		idx2 := uint(int64(s.mainIndexes.GetValueUInt(uint(idx))) + s.mainIndexes.offset)
+		idx2 := uint32(int64(s.mainIndexes.GetValueUInt(uint32(idx))) + s.mainIndexes.offset)
 		// check for index bounds
 		for i := 0; i < cmpCols; i++ {
-			a := cols[i].GetValue(uint(idx2))
+			a := cols[i].GetValue(idx2)
 			if i == cmpCols-1 {
 				if !upperLast.IsNil() && scm.Less(upperLast, a) { // TODO: respect !upperEqual
 					break iteration // stop traversing when we exceed the < part of last col
@@ -309,7 +309,7 @@ iteration:
 		}
 		// TODO: merge with delta btree in order to preserve index order
 		// output recordid
-		callback(uint(idx2))
+		callback(idx2)
 		idx++
 		// TODO: stop on limit
 	}
@@ -339,7 +339,7 @@ iteration:
 		*/
 		// fallback: output all items
 		for i := 0; i < maxInsertIndex; i++ {
-			callback(s.t.main_count + uint(i))
+			callback(s.t.main_count + uint32(i))
 		}
 	}
 }

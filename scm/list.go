@@ -27,6 +27,33 @@ package scm
 
 import "fmt"
 
+// optimizeMap is the optimizer hook for `map`. It applies default optimization
+// (including FirstParameterMutable swap to map_mut), then fuses
+// (map (produceN N) fn) → (produceN N fn) to eliminate the intermediate list.
+func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	// Run default optimization first (handles map → map_mut swap etc.)
+	result, td := oc.applyDefaultOptimization(v, useResult, "map_mut")
+	// Check if the optimized result is still a call to map/map_mut
+	if result.IsSlice() {
+		rv := result.Slice()
+		if len(rv) == 3 {
+			if sym, ok := scmerSymbol(rv[0]); ok && (sym == "map" || sym == "map_mut") {
+				// Check if arg 1 is a (produceN N) call
+				if rv[1].IsSlice() {
+					inner := rv[1].Slice()
+					if len(inner) == 2 {
+						if isym, ok := scmerSymbol(inner[0]); ok && isym == "produceN" {
+							// Fuse: (map (produceN N) fn) → (produceN N fn)
+							return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), td
+						}
+					}
+				}
+			}
+		}
+	}
+	return result, td
+}
+
 func asSlice(v Scmer, ctx string) []Scmer {
 	// Treat nil as empty list so higher-level code can be concise
 	if v.IsNil() {
@@ -320,7 +347,7 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("map_mut")},
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeMap},
 	})
 	Declare(&Globalenv, &Declaration{
 		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
@@ -390,10 +417,11 @@ func init_list() {
 		true, false, &TypeDescriptor{Return: FreshAlloc},
 	})
 	Declare(&Globalenv, &Declaration{
-		"produceN", "returns a list with numbers from 0..n-1",
-		1, 1,
+		"produceN", "returns a list with numbers from 0..n-1, optionally mapped through a function",
+		1, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"n", "number", "number of elements to produce", nil},
+			DeclarationParameter{"fn", "func", "(optional) map function applied to each index", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			n := int(a[0].Int())
@@ -401,8 +429,16 @@ func init_list() {
 				n = 0
 			}
 			result := make([]Scmer, n)
-			for i := 0; i < n; i++ {
-				result[i] = NewInt(int64(i))
+			if len(a) > 1 && !a[1].IsNil() {
+				// fused produceN+map: generate and transform in one pass
+				fn := OptimizeProcToSerialFunction(a[1])
+				for i := 0; i < n; i++ {
+					result[i] = fn(NewInt(int64(i)))
+				}
+			} else {
+				for i := 0; i < n; i++ {
+					result[i] = NewInt(int64(i))
+				}
 			}
 			return NewSlice(result)
 		},

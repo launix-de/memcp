@@ -154,7 +154,7 @@ func (s *StorageEnum) prepare() {
 	s.k = 0
 }
 
-func (s *StorageEnum) scan(i uint, value scm.Scmer) {
+func (s *StorageEnum) scan(i uint32, value scm.Scmer) {
 	s.scanTotal++
 	// find existing symbol (strict: NULL only matches NULL)
 	for j := uint8(0); j < s.k; j++ {
@@ -171,11 +171,11 @@ func (s *StorageEnum) scan(i uint, value scm.Scmer) {
 	}
 }
 
-func (s *StorageEnum) proposeCompression(i uint) ColumnStorage {
+func (s *StorageEnum) proposeCompression(i uint32) ColumnStorage {
 	return nil // terminal
 }
 
-func (s *StorageEnum) init(i uint) {
+func (s *StorageEnum) init(i uint32) {
 	s.count = uint64(i)
 
 	if s.k < 2 {
@@ -240,7 +240,7 @@ func (s *StorageEnum) init(i uint) {
 	s.buildBuf = make([]scm.Scmer, i)
 }
 
-func (s *StorageEnum) build(i uint, value scm.Scmer) {
+func (s *StorageEnum) build(i uint32, value scm.Scmer) {
 	s.buildBuf[i] = value
 }
 
@@ -331,7 +331,7 @@ type cachedEnumReader struct {
 	cache EnumDecodeCache
 }
 
-func (r *cachedEnumReader) GetValue(i uint) scm.Scmer {
+func (r *cachedEnumReader) GetValue(i uint32) scm.Scmer {
 	return r.s.GetValueCached(i, &r.cache)
 }
 
@@ -342,7 +342,7 @@ func (s *StorageEnum) GetCachedReader() ColumnReader {
 // GetValue is safe for concurrent use — it is fully read-only on the struct.
 // Uses binary search + sequential decode from chunk start. For O(1) sequential
 // access, use GetCachedReader() which returns a per-goroutine cached wrapper.
-func (s *StorageEnum) GetValue(i uint) scm.Scmer {
+func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
 	idx := int(i)
 	fwdIdx := s.findChunk(idx)
 	chunkStart := 0
@@ -361,7 +361,7 @@ func (s *StorageEnum) GetValue(i uint) scm.Scmer {
 
 // GetValueCached provides O(1) sequential access using a per-goroutine cache.
 // The cache must not be shared between goroutines.
-func (s *StorageEnum) GetValueCached(i uint, c *EnumDecodeCache) scm.Scmer {
+func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 	idx := int(i)
 
 	if c.valid {

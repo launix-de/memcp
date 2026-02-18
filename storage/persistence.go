@@ -60,7 +60,7 @@ type PersistenceLogfile interface {
 	Close()
 }
 type LogEntryDelete struct {
-	idx uint
+	idx uint32
 }
 type LogEntryInsert struct {
 	cols   []string

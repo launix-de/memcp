@@ -154,5 +154,83 @@ test_cases:
     expect:
       rows: 0
 
+  # === Multi-shard ORDER BY stress test ===
+  # Inserts 200K rows spanning multiple shards (60K default shard size)
+  # to verify the priority-queue merge produces strictly ordered output.
+
+  - name: "Multi-shard ORDER BY: setup 200K rows"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_stress"
+      - sql: "CREATE TABLE ord_stress (id INT, val INT, grp INT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN 200000) (lambda (i)
+              (list i (* 7 (- (* i 31337) (* (floor (/ (* i 31337) 200000)) 200000))) (floor (/ i 40000))))))
+            (insert "memcp-tests" "ord_stress" (list "id" "val" "grp") rows))
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS cnt FROM ord_stress"
+    expect:
+      rows: 1
+      data:
+        - cnt: 200000
+
+  - name: "Multi-shard ORDER BY ASC spot check offset 0"
+    sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - val: 0
+
+  - name: "Multi-shard ORDER BY ASC spot check offset 99999"
+    sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 1 OFFSET 99999"
+    expect:
+      rows: 1
+      data:
+        - val: 699993
+
+  - name: "Multi-shard ORDER BY ASC spot check last"
+    sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 1 OFFSET 199999"
+    expect:
+      rows: 1
+      data:
+        - val: 1399993
+
+  - name: "Multi-shard ORDER BY DESC spot check first"
+    sql: "SELECT val FROM ord_stress ORDER BY val DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - val: 1399993
+
+  - name: "Multi-shard ORDER BY DESC spot check middle"
+    sql: "SELECT val FROM ord_stress ORDER BY val DESC LIMIT 1 OFFSET 99999"
+    expect:
+      rows: 1
+      data:
+        - val: 700000
+
+  - name: "Multi-shard ORDER BY multi-column"
+    sql: "SELECT grp, val FROM ord_stress ORDER BY grp ASC, val DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - grp: 0
+          val: 1399986
+        - grp: 0
+          val: 1399951
+        - grp: 0
+          val: 1399937
+
+  - name: "Multi-shard ORDER BY with OFFSET across shards"
+    sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 3 OFFSET 49999"
+    expect:
+      rows: 3
+      data:
+        - val: 349993
+        - val: 350000
+        - val: 350007
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_stress"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ord_t"

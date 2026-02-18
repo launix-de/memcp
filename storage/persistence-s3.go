@@ -470,7 +470,7 @@ func openOrCreateS3Logfile(s *S3Storage, shard string) (*S3Logfile, error) {
 // Log encoding (same as Ceph)
 type s3EncDelete struct {
 	T   string `json:"t"`
-	Idx uint   `json:"idx"`
+	Idx uint32 `json:"idx"`
 }
 type s3EncInsert struct {
 	T      string        `json:"t"`
@@ -521,7 +521,7 @@ func decodeS3LogStream(data []byte, out chan interface{}) {
 		case "delete":
 			var d s3EncDelete
 			if json.Unmarshal(payload, &d) == nil {
-				out <- LogEntryDelete{idx: d.Idx}
+				out <- LogEntryDelete{idx: uint32(d.Idx)}
 			}
 		case "insert":
 			var ins s3EncInsert

@@ -83,11 +83,11 @@ func (s *StorageSCMER) Deserialize(f io.Reader) uint {
 
 func (s *StorageSCMER) GetCachedReader() ColumnReader { return s }
 
-func (s *StorageSCMER) GetValue(i uint) scm.Scmer {
+func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 	return s.values[i]
 }
 
-func (s *StorageSCMER) scan(i uint, value scm.Scmer) {
+func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 	// enum detection: track up to enumMaxSymbols distinct values with frequencies
 	if s.enumK != 0xFF {
 		found := false
@@ -175,11 +175,11 @@ func (s *StorageSCMER) prepare() {
 	s.hasString = false
 	s.enumK = 0
 }
-func (s *StorageSCMER) init(i uint) {
+func (s *StorageSCMER) init(i uint32) {
 	// allocate
 	s.values = make([]scm.Scmer, i)
 }
-func (s *StorageSCMER) build(i uint, value scm.Scmer) {
+func (s *StorageSCMER) build(i uint32, value scm.Scmer) {
 	// store
 	s.values[i] = value
 }
@@ -187,8 +187,8 @@ func (s *StorageSCMER) finish() {
 }
 
 // soley to StorageSCMER
-func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
-	if s.null*100 > i*13 {
+func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
+	if s.null*100 > uint(i)*13 {
 		// sparse payoff against bitcompressed is at ~13%
 		if s.longStrings > 2 {
 			b := new(OverlayBlob)
@@ -228,7 +228,7 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 	if s.minIntScale > math.MinInt8 {
 		if s.minIntScale == 0 || s.minIntScale == math.MaxInt8 {
 			// pure integers (MaxInt8 = all values were 0 or no non-NULL numerics)
-			if i > 5 && 2*(i-s.numSeq) < i {
+			if i > 5 && 2*(uint(i)-s.numSeq) < uint(i) {
 				return new(StorageSeq)
 			}
 			return new(StorageInt)
@@ -240,7 +240,7 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 	if !s.hasString {
 		return new(StorageFloat)
 	}
-	if s.null*2 > i {
+	if s.null*2 > uint(i) {
 		// sparse payoff against StorageSCMER is at 2.1
 		return new(StorageSparse)
 	}

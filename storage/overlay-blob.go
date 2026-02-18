@@ -108,7 +108,7 @@ func gunzipValue(gzipped string) scm.Scmer {
 
 func (s *OverlayBlob) GetCachedReader() ColumnReader { return s }
 
-func (s *OverlayBlob) GetValue(i uint) scm.Scmer {
+func (s *OverlayBlob) GetValue(i uint32) scm.Scmer {
 	v := s.Base.GetValue(i)
 	if v.IsString() {
 		vs := v.String()
@@ -146,7 +146,7 @@ func (s *OverlayBlob) prepare() {
 	// set up scan
 	s.Base.prepare()
 }
-func (s *OverlayBlob) scan(i uint, value scm.Scmer) {
+func (s *OverlayBlob) scan(i uint32, value scm.Scmer) {
 	if value.IsString() {
 		vs := value.String()
 		if len(vs) > 255 {
@@ -164,13 +164,13 @@ func (s *OverlayBlob) scan(i uint, value scm.Scmer) {
 	}
 	s.Base.scan(i, value)
 }
-func (s *OverlayBlob) init(i uint) {
+func (s *OverlayBlob) init(i uint32) {
 	s.values = make(map[[32]byte]string)
 	s.size = 0
 	s.refs = make(map[string]bool)
 	s.Base.init(i)
 }
-func (s *OverlayBlob) build(i uint, value scm.Scmer) {
+func (s *OverlayBlob) build(i uint32, value scm.Scmer) {
 	if value.IsString() {
 		vs := value.String()
 		if len(vs) > 255 {
@@ -220,7 +220,7 @@ func (s *OverlayBlob) finish() {
 	}
 	s.Base.finish()
 }
-func (s *OverlayBlob) proposeCompression(i uint) ColumnStorage {
+func (s *OverlayBlob) proposeCompression(i uint32) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }
@@ -242,7 +242,7 @@ func (s *OverlayBlob) ReleaseBlobs(count uint) {
 
 	// Case 2: loaded from disk, refs unknown -- scan Base column
 	seen := make(map[string]bool)
-	for i := uint(0); i < count; i++ {
+	for i := uint32(0); i < uint32(count); i++ {
 		v := s.Base.GetValue(i)
 		if v.IsString() {
 			vs := v.String()

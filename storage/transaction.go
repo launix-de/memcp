@@ -52,19 +52,19 @@ const (
 type UndoEntry struct {
 	Type     UndoType
 	Shard    *storageShard
-	RowIndex uint
+	RowIndex uint32
 }
 
 // shardOverlay provides O(1) visibility checks via bitmap and an iteration
 // list of recids for commit-time application.
 type shardOverlay struct {
 	Bitmap NonLockingReadMap.NonBlockingBitMap // O(1) visibility check in scan hot path
-	Recids []uint                              // for commit-time iteration
+	Recids []uint32                            // for commit-time iteration
 	mu     sync.Mutex                          // protects Recids append from parallel workers
 }
 
 // Add records a recid in both the bitmap and the iteration list.
-func (o *shardOverlay) Add(recid uint) {
+func (o *shardOverlay) Add(recid uint32) {
 	o.Bitmap.Set(recid, true)
 	o.mu.Lock()
 	o.Recids = append(o.Recids, recid)
@@ -72,7 +72,7 @@ func (o *shardOverlay) Add(recid uint) {
 }
 
 // Has checks whether a recid is in this overlay (O(1) via bitmap).
-func (o *shardOverlay) Has(recid uint) bool {
+func (o *shardOverlay) Has(recid uint32) bool {
 	return o.Bitmap.Get(recid)
 }
 
@@ -210,7 +210,7 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 
 // LogInsert records that a row was inserted; on rollback it will be deleted.
 // Cursor-stability only.
-func (tx *TxContext) LogInsert(shard *storageShard, rowIndex uint) {
+func (tx *TxContext) LogInsert(shard *storageShard, rowIndex uint32) {
 	tx.mu.Lock()
 	tx.UndoLog = append(tx.UndoLog, UndoEntry{
 		Type:     UndoInsert,
@@ -222,7 +222,7 @@ func (tx *TxContext) LogInsert(shard *storageShard, rowIndex uint) {
 
 // LogDelete records that a row was deleted; on rollback it will be undeleted.
 // Cursor-stability only.
-func (tx *TxContext) LogDelete(shard *storageShard, rowIndex uint) {
+func (tx *TxContext) LogDelete(shard *storageShard, rowIndex uint32) {
 	tx.mu.Lock()
 	tx.UndoLog = append(tx.UndoLog, UndoEntry{
 		Type:     UndoDelete,
@@ -233,7 +233,7 @@ func (tx *TxContext) LogDelete(shard *storageShard, rowIndex uint) {
 }
 
 // AddToDeleteMask records that this ACID tx wants to delete a row.
-func (tx *TxContext) AddToDeleteMask(shard *storageShard, recid uint) {
+func (tx *TxContext) AddToDeleteMask(shard *storageShard, recid uint32) {
 	tx.mu.Lock()
 	overlay, ok := tx.DeleteMask[shard]
 	if !ok {
@@ -245,7 +245,7 @@ func (tx *TxContext) AddToDeleteMask(shard *storageShard, recid uint) {
 }
 
 // AddToUndeleteMask records that this ACID tx can see a staged row.
-func (tx *TxContext) AddToUndeleteMask(shard *storageShard, recid uint) {
+func (tx *TxContext) AddToUndeleteMask(shard *storageShard, recid uint32) {
 	tx.mu.Lock()
 	overlay, ok := tx.UndeleteMask[shard]
 	if !ok {
@@ -276,7 +276,7 @@ func (tx *TxContext) SyncTouchedShards() {
 // IsVisible determines whether a row is visible to this ACID transaction.
 // Formula: (!shard->delete[i] && !tx->delete[i]) || tx->undelete[i]
 // UndeleteMask always wins — it is the only way an ACID tx sees its own inserts.
-func (tx *TxContext) IsVisible(shard *storageShard, recid uint) bool {
+func (tx *TxContext) IsVisible(shard *storageShard, recid uint32) bool {
 	tx.mu.Lock()
 	dm := tx.DeleteMask[shard]
 	um := tx.UndeleteMask[shard]

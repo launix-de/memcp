@@ -97,7 +97,7 @@ func (s *StorageInt) String() string {
 
 func (s *StorageInt) GetCachedReader() ColumnReader { return s }
 
-func (s *StorageInt) GetValue(i uint) scm.Scmer {
+func (s *StorageInt) GetValue(i uint32) scm.Scmer {
 	v := s.GetValueUInt(i)
 	if s.hasNull && v == s.null {
 		return scm.NewNil()
@@ -105,8 +105,8 @@ func (s *StorageInt) GetValue(i uint) scm.Scmer {
 	return scm.NewInt(int64(v) + s.offset)
 }
 
-func (s *StorageInt) GetValueUInt(i uint) uint64 {
-	bitpos := i * uint(s.bitsize)
+func (s *StorageInt) GetValueUInt(i uint32) uint64 {
+	bitpos := uint(i) * uint(s.bitsize)
 
 	v := s.chunk[bitpos/64] << (bitpos % 64) // align to leftmost position
 	if bitpos%64+uint(s.bitsize) > 64 {
@@ -123,7 +123,7 @@ func (s *StorageInt) prepare() {
 	s.max = -s.offset - 1
 	s.hasNull = false
 }
-func (s *StorageInt) scan(i uint, value scm.Scmer) {
+func (s *StorageInt) scan(i uint32, value scm.Scmer) {
 	// storage is so simple, dont need scan
 	if value.IsNil() {
 		s.hasNull = true
@@ -137,7 +137,7 @@ func (s *StorageInt) scan(i uint, value scm.Scmer) {
 		s.max = v
 	}
 }
-func (s *StorageInt) init(i uint) {
+func (s *StorageInt) init(i uint32) {
 	v := s.max - s.offset
 	if s.hasNull {
 		// store the value
@@ -155,12 +155,12 @@ func (s *StorageInt) init(i uint) {
 		s.bitsize = 1
 	}
 	// allocate
-	s.chunk = make([]uint64, ((i-1)*uint(s.bitsize)+65)/64+1)
+	s.chunk = make([]uint64, ((uint(i)-1)*uint(s.bitsize)+65)/64+1)
 	s.count = uint64(i)
 	// fmt.Println("storing bitsize", s.bitsize,"null",s.null,"offset",s.offset)
 }
-func (s *StorageInt) build(i uint, value scm.Scmer) {
-	if i >= uint(s.count) {
+func (s *StorageInt) build(i uint32, value scm.Scmer) {
+	if i >= uint32(s.count) {
 		panic("tried to build StorageInt outside of range")
 	}
 	// store
@@ -171,7 +171,7 @@ func (s *StorageInt) build(i uint, value scm.Scmer) {
 	} else {
 		vi = vi - s.offset
 	}
-	bitpos := i * uint(s.bitsize)
+	bitpos := uint(i) * uint(s.bitsize)
 	v := uint64(vi) << (64 - uint(s.bitsize))                      // shift value to the leftmost position of 64bit int
 	s.chunk[bitpos/64] = s.chunk[bitpos/64] | (v >> (bitpos % 64)) // first chunk
 	if bitpos%64+uint(s.bitsize) > 64 {
@@ -180,7 +180,7 @@ func (s *StorageInt) build(i uint, value scm.Scmer) {
 }
 func (s *StorageInt) finish() {
 }
-func (s *StorageInt) proposeCompression(i uint) ColumnStorage {
+func (s *StorageInt) proposeCompression(i uint32) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }

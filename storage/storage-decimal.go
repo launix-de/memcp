@@ -54,7 +54,7 @@ func isCloseToInt(v float64) bool {
 }
 
 // trailingZeroPow10 returns how many times v is divisible by 10.
-// 100 → 2, 1550 → 1, 7 → 0, 0 → MaxInt8
+// 100 → 2, 1550 → 1, 7 → 0, 0 → MaxInt8 (infinitely divisible)
 func trailingZeroPow10(v int64) int8 {
 	if v == 0 {
 		return math.MaxInt8
@@ -105,7 +105,7 @@ func (s *StorageDecimal) String() string {
 
 func (s *StorageDecimal) GetCachedReader() ColumnReader { return s }
 
-func (s *StorageDecimal) GetValue(i uint) scm.Scmer {
+func (s *StorageDecimal) GetValue(i uint32) scm.Scmer {
 	raw := s.inner.GetValueUInt(i)
 	if s.inner.hasNull && raw == s.inner.null {
 		return scm.NewNil()
@@ -138,19 +138,19 @@ func (s *StorageDecimal) prepare() {
 	s.inner.prepare()
 }
 
-func (s *StorageDecimal) scan(i uint, value scm.Scmer) {
+func (s *StorageDecimal) scan(i uint32, value scm.Scmer) {
 	s.inner.scan(i, s.scaleValue(value))
 }
 
-func (s *StorageDecimal) proposeCompression(i uint) ColumnStorage {
+func (s *StorageDecimal) proposeCompression(i uint32) ColumnStorage {
 	return nil // terminal format
 }
 
-func (s *StorageDecimal) init(i uint) {
+func (s *StorageDecimal) init(i uint32) {
 	s.inner.init(i)
 }
 
-func (s *StorageDecimal) build(i uint, value scm.Scmer) {
+func (s *StorageDecimal) build(i uint32, value scm.Scmer) {
 	s.inner.build(i, s.scaleValue(value))
 }
 

@@ -16,14 +16,14 @@ func buildViaCompression(n int, gen func(int) scm.Scmer) ColumnStorage {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < n; i++ {
-		s.scan(uint(i), gen(i))
+		s.scan(uint32(i), gen(i))
 	}
-	col := s.proposeCompression(uint(n))
+	col := s.proposeCompression(uint32(n))
 	if col == nil {
 		// no compression proposed, use StorageSCMER directly
-		s.init(uint(n))
+		s.init(uint32(n))
 		for i := 0; i < n; i++ {
-			s.build(uint(i), gen(i))
+			s.build(uint32(i), gen(i))
 		}
 		s.finish()
 		return s
@@ -32,17 +32,17 @@ func buildViaCompression(n int, gen func(int) scm.Scmer) ColumnStorage {
 	for {
 		col.prepare()
 		for i := 0; i < n; i++ {
-			col.scan(uint(i), gen(i))
+			col.scan(uint32(i), gen(i))
 		}
-		col2 := col.proposeCompression(uint(n))
+		col2 := col.proposeCompression(uint32(n))
 		if col2 == nil {
 			break
 		}
 		col = col2
 	}
-	col.init(uint(n))
+	col.init(uint32(n))
 	for i := 0; i < n; i++ {
-		col.build(uint(i), gen(i))
+		col.build(uint32(i), gen(i))
 	}
 	col.finish()
 	return col
@@ -71,7 +71,7 @@ func serializeDeserialize(col ColumnStorage) ColumnStorage {
 func verifyStorage(t *testing.T, col ColumnStorage, n int, gen func(int) scm.Scmer) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		got := col.GetValue(uint(i))
+		got := col.GetValue(uint32(i))
 		want := gen(i)
 		if !scm.Equal(got, want) {
 			t.Fatalf("GetValue(%d) = %v, want %v (storage type %T)", i, got, want, col)
@@ -88,11 +88,11 @@ func TestStorageIntPipeline(t *testing.T) {
 	col := new(StorageInt)
 	col.prepare()
 	for i := 0; i < n; i++ {
-		col.scan(uint(i), gen(i))
+		col.scan(uint32(i), gen(i))
 	}
-	col.init(uint(n))
+	col.init(uint32(n))
 	for i := 0; i < n; i++ {
-		col.build(uint(i), gen(i))
+		col.build(uint32(i), gen(i))
 	}
 	col.finish()
 	verifyStorage(t, col, n, gen)
@@ -110,11 +110,11 @@ func TestStorageIntWithNull(t *testing.T) {
 	col := new(StorageInt)
 	col.prepare()
 	for i := 0; i < n; i++ {
-		col.scan(uint(i), gen(i))
+		col.scan(uint32(i), gen(i))
 	}
-	col.init(uint(n))
+	col.init(uint32(n))
 	for i := 0; i < n; i++ {
-		col.build(uint(i), gen(i))
+		col.build(uint32(i), gen(i))
 	}
 	col.finish()
 	verifyStorage(t, col, n, gen)
@@ -126,11 +126,11 @@ func TestStorageIntNegative(t *testing.T) {
 	col := new(StorageInt)
 	col.prepare()
 	for i := 0; i < n; i++ {
-		col.scan(uint(i), gen(i))
+		col.scan(uint32(i), gen(i))
 	}
-	col.init(uint(n))
+	col.init(uint32(n))
 	for i := 0; i < n; i++ {
-		col.build(uint(i), gen(i))
+		col.build(uint32(i), gen(i))
 	}
 	col.finish()
 	verifyStorage(t, col, n, gen)
@@ -167,11 +167,11 @@ func TestStorageFloatPipeline(t *testing.T) {
 	col := new(StorageFloat)
 	col.prepare()
 	for i := 0; i < n; i++ {
-		col.scan(uint(i), gen(i))
+		col.scan(uint32(i), gen(i))
 	}
-	col.init(uint(n))
+	col.init(uint32(n))
 	for i := 0; i < n; i++ {
-		col.build(uint(i), gen(i))
+		col.build(uint32(i), gen(i))
 	}
 	col.finish()
 	verifyStorage(t, col, n, gen)
@@ -322,7 +322,7 @@ func TestStorageDecimalPipeline(t *testing.T) {
 	}
 	// verify with float tolerance
 	for i := 0; i < n; i++ {
-		got := col.GetValue(uint(i))
+		got := col.GetValue(uint32(i))
 		want := float64(i) * 0.01
 		if got.IsNil() {
 			t.Fatalf("GetValue(%d) = nil, want %v", i, want)
@@ -344,7 +344,7 @@ func TestStorageDecimalWithNull(t *testing.T) {
 	}
 	col := buildViaCompression(n, gen)
 	for i := 0; i < n; i++ {
-		got := col.GetValue(uint(i))
+		got := col.GetValue(uint32(i))
 		if i%10 == 0 {
 			if !got.IsNil() {
 				t.Fatalf("GetValue(%d) = %v, want nil", i, got)
@@ -381,7 +381,7 @@ func TestStorageDecimalSerializeRoundtrip(t *testing.T) {
 		t.Fatal("deserialization returned nil")
 	}
 	for i := 0; i < n; i++ {
-		got := col2.GetValue(uint(i))
+		got := col2.GetValue(uint32(i))
 		want := float64(i) * 0.01
 		diff := math.Abs(got.Float() - want)
 		if diff > 1e-9 {
@@ -528,7 +528,7 @@ func TestProposeCompressionFloatOrDecimal(t *testing.T) {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < 100; i++ {
-		s.scan(uint(i), scm.NewFloat(float64(i)*math.Pi))
+		s.scan(uint32(i), scm.NewFloat(float64(i)*math.Pi))
 	}
 	result := s.proposeCompression(100)
 	switch result.(type) {
@@ -544,7 +544,7 @@ func TestProposeCompressionIntOrSeq(t *testing.T) {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < 100; i++ {
-		s.scan(uint(i), scm.NewInt(int64(i*7+3)))
+		s.scan(uint32(i), scm.NewInt(int64(i*7+3)))
 	}
 	result := s.proposeCompression(100)
 	switch result.(type) {
@@ -559,7 +559,7 @@ func TestProposeCompressionSeq(t *testing.T) {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < 100; i++ {
-		s.scan(uint(i), scm.NewInt(int64(i*5)))
+		s.scan(uint32(i), scm.NewInt(int64(i*5)))
 	}
 	result := s.proposeCompression(100)
 	if _, ok := result.(*StorageSeq); !ok {
@@ -572,9 +572,9 @@ func TestProposeCompressionSparse(t *testing.T) {
 	s.prepare()
 	for i := 0; i < 100; i++ {
 		if i%4 == 0 {
-			s.scan(uint(i), scm.NewInt(int64(i)))
+			s.scan(uint32(i), scm.NewInt(int64(i)))
 		} else {
-			s.scan(uint(i), scm.NewNil())
+			s.scan(uint32(i), scm.NewNil())
 		}
 	}
 	result := s.proposeCompression(100)
@@ -587,7 +587,7 @@ func TestProposeCompressionDecimal(t *testing.T) {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < 100; i++ {
-		s.scan(uint(i), scm.NewFloat(float64(i)*0.01))
+		s.scan(uint32(i), scm.NewFloat(float64(i)*0.01))
 	}
 	result := s.proposeCompression(100)
 	if _, ok := result.(*StorageDecimal); !ok {
@@ -599,7 +599,7 @@ func TestProposeCompressionString(t *testing.T) {
 	s := new(StorageSCMER)
 	s.prepare()
 	for i := 0; i < 100; i++ {
-		s.scan(uint(i), scm.NewString(fmt.Sprintf("item_%d", i)))
+		s.scan(uint32(i), scm.NewString(fmt.Sprintf("item_%d", i)))
 	}
 	result := s.proposeCompression(100)
 	if _, ok := result.(*StorageString); !ok {

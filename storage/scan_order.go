@@ -16,8 +16,8 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "time"
 import "sort"
+import "time"
 import "strings"
 import "runtime/debug"
 import "container/heap"
@@ -50,26 +50,11 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 
 type shardqueue struct {
 	shard    *storageShard
-	items    []uint // TODO: refactor to chan, so we can block generating too much entries
+	items    []uint32 // TODO: refactor to chan, so we can block generating too much entries
 	err      scanError
-	scols    []func(uint) scm.Scmer // sort criteria column reader
+	scols    []func(uint32) scm.Scmer // sort criteria column reader
 	sortdirs []func(...scm.Scmer) scm.Scmer
 	mapper   *ShardMapReducer
-}
-
-// itemSortsBefore returns true if item aItem from shard a sorts strictly before the front element of shard b.
-func itemSortsBefore(a *shardqueue, aItem uint, b *shardqueue) bool {
-	for c := 0; c < len(a.scols); c++ {
-		av := a.scols[c](aItem)
-		bv := b.scols[c](b.items[0])
-		if scm.ToBool(a.sortdirs[c](av, bv)) {
-			return true
-		}
-		if scm.ToBool(a.sortdirs[c](bv, av)) {
-			return false
-		}
-	}
-	return false // equal is not strictly before
 }
 
 // scanOrderResult bundles per-shard outputs for ordered scans.
@@ -216,7 +201,9 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		sq.mapper = sq.shard.OpenMapReducer(callbackCols, callback, aggregate)
 	}
 
-	var buf [1024]uint // stack-allocated batch buffer (8 KB, fits in L1)
+	var buf [1024]uint32 // stack-allocated batch buffer (4 KB, fits in L1)
+	bufN := 0
+	var bufShard *shardqueue
 	for len(q.q) > 0 {
 		qx := q.q[0]
 
@@ -241,52 +228,44 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 			break
 		}
 
-		// Determine batch size: how many items from qx before another shard takes over?
-		maxBatch := len(qx.items)
-		if limit >= 0 && limit < maxBatch {
-			maxBatch = limit
-		}
+		// Pop one item from the global merge
+		item := qx.items[0]
+		qx.items = qx.items[1:]
 
-		batchEnd := maxBatch // default: take all (single shard or no competitor)
-		if len(q.q) > 1 {
-			// Find the "second" shard via heap children (indices 1, 2)
-			peekIdx := 1
-			if len(q.q) > 2 && q.Less(2, 1) {
-				peekIdx = 2
-			}
-			peek := q.q[peekIdx]
-			// Binary search: find first k where qx.items[k] >= peek.items[0]
-			batchEnd = sort.Search(maxBatch, func(k int) bool {
-				return !itemSortsBefore(qx, qx.items[k], peek)
-			})
-			if batchEnd == 0 {
-				batchEnd = 1 // at least 1 (heap guarantees qx is min)
-			}
-		}
-
-		// Stream in chunks of 1024 via stack buffer
-		outCount += int64(batchEnd)
-		remaining := batchEnd
-		for remaining > 0 {
-			n := remaining
-			if n > 1024 {
-				n = 1024
-			}
-			copy(buf[:n], qx.items[:n])
-			akkumulator = qx.mapper.Stream(akkumulator, buf[:n])
+		// If shard changed, flush the buffer to the previous shard's mapper
+		if bufShard != nil && bufShard != qx {
+			akkumulator = bufShard.mapper.Stream(akkumulator, buf[:bufN])
 			hadValue = true
-			qx.items = qx.items[n:]
-			remaining -= n
-		}
-		if limit >= 0 {
-			limit -= batchEnd
+			bufN = 0
 		}
 
+		// Accumulate item into buffer
+		bufShard = qx
+		buf[bufN] = item
+		bufN++
+		outCount++
+		if limit >= 0 {
+			limit--
+		}
+
+		// Flush if buffer full
+		if bufN == len(buf) {
+			akkumulator = bufShard.mapper.Stream(akkumulator, buf[:bufN])
+			hadValue = true
+			bufN = 0
+		}
+
+		// Re-heapify or remove exhausted shard
 		if len(qx.items) > 0 {
 			heap.Fix(&q, 0)
 		} else {
 			heap.Pop(&q)
 		}
+	}
+	// Flush remaining buffer
+	if bufN > 0 && bufShard != nil {
+		akkumulator = bufShard.mapper.Stream(akkumulator, buf[:bufN])
+		hadValue = true
 	}
 	if !hadValue && isOuter {
 		callbackFn := scm.OptimizeProcToSerialFunction(callback)
@@ -343,7 +322,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	}
 
 	// prepare sort criteria so they can be queried easily
-	result.scols = make([]func(uint) scm.Scmer, len(sortcols))
+	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
 	for i, scol := range sortcols {
 		if scol.IsString() {
 			colname := scol.String()
@@ -357,7 +336,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
 				params = arr
 			}
-			largs := make([]func(uint) scm.Scmer, len(params))
+			largs := make([]func(uint32) scm.Scmer, len(params))
 			for j, param := range params {
 				name := ""
 				if param.IsSymbol() {
@@ -370,7 +349,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				largs[j] = t.ColumnReader(name)
 			}
 			procFn := scm.OptimizeProcToSerialFunction(scol)
-			result.scols[i] = func(idx uint) scm.Scmer {
+			result.scols[i] = func(idx uint32) scm.Scmer {
 				vals := make([]scm.Scmer, len(largs))
 				for j, getter := range largs {
 					vals[j] = getter(idx)
@@ -451,9 +430,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		// iterate over items (indexed)
 		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
 		currentTx := CurrentTx()
-		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint) {
+		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint32) {
 			if currentTx != nil && currentTx.Mode == TxACID {
-				if !currentTx.IsVisible(t, idx) {
+				if !currentTx.IsVisible(t, uint32(idx)) {
 					return
 				}
 			} else {

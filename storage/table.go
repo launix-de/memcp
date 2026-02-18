@@ -51,6 +51,37 @@ const (
 	Memory                 = 2
 )
 
+type ShardMode int
+
+const (
+	ShardModeFree      ShardMode = 0 // use Shards (unpartitioned)
+	ShardModePartition ShardMode = 1 // use PShards (partitioned)
+)
+
+func (m *ShardMode) MarshalJSON() ([]byte, error) {
+	if *m == ShardModePartition {
+		return []byte("\"partition\""), nil
+	}
+	return []byte("\"freeshard\""), nil
+}
+
+func (m *ShardMode) UnmarshalJSON(data []byte) error {
+	var str string
+	err := json.Unmarshal(data, &str)
+	if err != nil {
+		return err
+	}
+	if str == "partition" {
+		*m = ShardModePartition
+		return nil
+	}
+	if str == "freeshard" {
+		*m = ShardModeFree
+		return nil
+	}
+	return errors.New("unknown shard mode: " + str)
+}
+
 type uniqueKey struct {
 	Id   string
 	Cols []string
@@ -102,20 +133,26 @@ type table struct {
 	Charset         string
 	Comment         string
 
-	// storage: if both arrays Shards and PShards are present, Shards is the single point of truth
-	Shards      []*storageShard // unordered shards; as long as this value is not nil, use shards instead of pshards
-	PShards     []*storageShard // partitioned shards according to PDimensions
-	PDimensions []shardDimension
-	// TODO: move rows from Shards to PShards according to PDimensions
+	// storage: ShardMode controls which shard set is the read/write target
+	ShardMode         ShardMode
+	repartitionActive bool             // true when dual-write is in progress
+	shardModeMu       sync.RWMutex    // protects ShardMode reads in iterateShards vs Phase F flip
+	Shards            []*storageShard  // unordered shards (used when ShardMode == ShardModeFree)
+	PShards           []*storageShard  // partitioned shards according to PDimensions (used when ShardMode == ShardModePartition)
+	PDimensions       []shardDimension
+}
+
+// ActiveShards returns the shard set that is currently authoritative for reads/writes.
+func (t *table) ActiveShards() []*storageShard {
+	if t.ShardMode == ShardModePartition {
+		return t.PShards
+	}
+	return t.Shards
 }
 
 func (t *table) Count() (result uint) {
-	shards := t.Shards
-	if shards == nil {
-		shards = t.PShards
-	}
-	for _, s := range shards {
-		result += s.Count()
+	for _, s := range t.ActiveShards() {
+		result += uint(s.Count())
 	}
 	return
 }
@@ -124,10 +161,7 @@ func (t *table) Count() (result uint) {
 // first shard's count and multiplying it by the number of shards. This avoids
 // iterating all shards and can be used as an inputCount estimate for planning.
 func (t *table) CountEstimate() (result uint) {
-	shards := t.Shards
-	if shards == nil {
-		shards = t.PShards
-	}
+	shards := t.ActiveShards()
 	if len(shards) == 0 {
 		return 0
 	}
@@ -135,7 +169,7 @@ func (t *table) CountEstimate() (result uint) {
 	unlock := shards[0].GetRead()
 	defer unlock()
 	c := shards[0].Count()
-	return c * uint(len(shards))
+	return uint(c) * uint(len(shards))
 }
 
 /* Implement NonLockingReadMap */
@@ -604,12 +638,17 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		}
 	}
 
-	if t.Shards != nil { // unpartitioned sharding
+	if t.ShardMode == ShardModeFree { // unpartitioned sharding
 		// Helper to get or create a shard with capacity for n rows
 		getShardWithCapacity := func(n uint) *storageShard {
 			t.mu.Lock()
+			if t.Shards == nil {
+				// Repartition completed while we waited for the lock.
+				t.mu.Unlock()
+				return nil
+			}
 			shard := t.Shards[len(t.Shards)-1]
-			if shard.Count()+n > Settings.ShardSize {
+			if uint(shard.Count())+n > Settings.ShardSize {
 				// Current shard would overflow, create new one
 				go func(i int) {
 					defer func() {
@@ -631,6 +670,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 
 		// For bulk inserts larger than ShardSize, split into chunks
 		chunkSize := int(Settings.ShardSize)
+		repartitioned := false
 		for start := 0; start < len(values); start += chunkSize {
 			end := start + chunkSize
 			if end > len(values) {
@@ -639,6 +679,12 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			chunk := values[start:end]
 
 			shard := getShardWithCapacity(uint(len(chunk)))
+			if shard == nil {
+				// Repartition completed: re-insert remaining values via partition path
+				values = values[start:]
+				repartitioned = true
+				break
+			}
 			release := shard.GetExclusive()
 
 			// check unique constraints in a thread safe manner
@@ -678,7 +724,12 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			}
 			release()
 		}
-	} else {
+		if !repartitioned {
+			goto insertDone
+		}
+		// fall through to partition path with remaining values
+	}
+	{
 		// partitions
 		// TODO: check which shards are involved; a sharding dimension column must be present in ALL unique keys, otherwise we cannot prune
 		dims := t.PDimensions
@@ -754,8 +805,74 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		}
 	}
 
-	// TODO: Trigger after insert
+insertDone:
+	// Dual-write: forward inserts to the secondary shard set during repartition.
+	// The secondary insert bypasses unique checks (already handled above),
+	// triggers, and auto-increment (already assigned in primary insert).
+	if t.repartitionActive {
+		t.dualWriteInsert(columns, values)
+	}
+
 	return result
+}
+
+// dualWriteInsert routes rows into the secondary shard set (the one not selected
+// by ShardMode) during an active repartition. Called only when repartitionActive
+// is true. Rows are inserted with alreadyLocked=false and no unique/trigger processing.
+func (t *table) dualWriteInsert(columns []string, values [][]scm.Scmer) {
+	fmt.Println("DEBUG dualWriteInsert: mode=", t.ShardMode, "rows=", len(values))
+	if t.ShardMode == ShardModeFree {
+		// Primary is Shards, secondary is PShards
+		if t.PShards == nil {
+			return
+		}
+		dims := t.PDimensions
+		shardcols := make([]scm.Scmer, len(dims))
+		translatable := make([]int, len(dims))
+		for i, cd := range dims {
+			for j, col := range columns {
+				if cd.Column == col {
+					translatable[i] = j
+				}
+			}
+		}
+		last_i := 0
+		var last_shard *storageShard
+		for i := 0; i < len(values); i++ {
+			for j, colidx := range translatable {
+				if colidx < len(values[i]) {
+					shardcols[j] = values[i][colidx]
+				} else {
+					shardcols[j] = scm.NewNil()
+				}
+			}
+			shard := t.PShards[computeShardIndex(dims, shardcols)]
+			if i > 0 && shard != last_shard {
+				rel := last_shard.GetExclusive()
+				last_shard.Insert(columns, values[last_i:i], false, nil, false)
+				rel()
+				last_i = i
+			}
+			last_shard = shard
+		}
+		if last_i < len(values) && last_shard != nil {
+			rel := last_shard.GetExclusive()
+			last_shard.Insert(columns, values[last_i:], false, nil, false)
+			rel()
+		}
+	} else {
+		// Primary is PShards, secondary is Shards
+		if t.Shards == nil {
+			return
+		}
+		// Route to the last shard in the free shard list
+		t.mu.Lock()
+		shard := t.Shards[len(t.Shards)-1]
+		t.mu.Unlock()
+		rel := shard.GetExclusive()
+		shard.Insert(columns, values, false, nil, false)
+		rel()
+	}
 }
 
 /*
@@ -783,14 +900,20 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 		}
 
-		shardlist := t.Shards
+		shardlist := t.ActiveShards()
+		// During repartition drain (ShardMode already flipped to Partition but
+		// repartitionActive still true), in-flight scans on old shards call
+		// ProcessUniqueCollision. We must check old Shards because the deletion
+		// from the UPDATE is only in the old shard, not yet in PShards.
+		if t.repartitionActive && t.ShardMode == ShardModePartition && t.Shards != nil {
+			shardlist = t.Shards
+		}
 		allowPruning := false // if we can prune the shardlist
 		pruningMap := make([]int, len(uniq.Cols))
 		pruningVals := make([]scm.Scmer, len(uniq.Cols))
-		if shardlist == nil {
+		if t.ShardMode == ShardModePartition && !t.repartitionActive {
 			// partitioning
 			allowPruning = true
-			shardlist = t.PShards
 			for j, dim := range t.PDimensions {
 				hasPruningCol := false
 				for i, col := range uniq.Cols {

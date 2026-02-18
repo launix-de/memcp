@@ -64,19 +64,19 @@ func (b *NonBlockingBitMap) Copy() (result NonBlockingBitMap) {
 	return
 }
 
-func (b *NonBlockingBitMap) Get(i uint) bool {
+func (b *NonBlockingBitMap) Get(i uint32) bool {
 	ptr := b.data.Load()
 	if ptr == nil {
 		return false
 	}
 	data := *ptr
-	if (i >> 6) >= uint(len(data)) {
+	if (i >> 6) >= uint32(len(data)) {
 		return false
 	}
 	return ((data[i>>6] >> (i & 0b111111)) & 1) != 0
 }
 
-func (b *NonBlockingBitMap) Set(i uint, val bool) {
+func (b *NonBlockingBitMap) Set(i uint32, val bool) {
 	// first step: load array and ensure it is big enough
 	var data []uint64
 	for {
@@ -86,7 +86,7 @@ func (b *NonBlockingBitMap) Set(i uint, val bool) {
 		} else {
 			data = *dataptr
 		}
-		if (i >> 6) >= uint(len(data)) {
+		if (i >> 6) >= uint32(len(data)) {
 			// first step: increase data size
 			newdata := append(data, 0) // allocate new element
 			if b.data.CompareAndSwap(dataptr, &newdata) {
@@ -133,36 +133,36 @@ func (b *NonBlockingBitMap) Count() (result uint) {
 }
 
 // Iterate calls fn for each set bit index.
-func (b *NonBlockingBitMap) Iterate(fn func(uint)) {
+func (b *NonBlockingBitMap) Iterate(fn func(uint32)) {
 	dataptr := b.data.Load()
 	if dataptr == nil {
 		return
 	}
 	for i, v := range *dataptr {
 		for v != 0 {
-			bit := uint(bits.TrailingZeros64(v))
-			fn(uint(i)*64 + bit)
+			bit := uint32(bits.TrailingZeros64(v))
+			fn(uint32(i)*64 + bit)
 			v &= v - 1 // clear lowest set bit
 		}
 	}
 }
 
-func (b *NonBlockingBitMap) CountUntil(idx uint) (result uint) {
+func (b *NonBlockingBitMap) CountUntil(idx uint32) (result uint) {
 	dataptr := b.data.Load()
 	if dataptr == nil {
 		return 0
 	}
-	for i := uint(0); i < (idx >> 6); i++ {
-		if i >= uint(len(*dataptr)) {
+	for i := uint32(0); i < (idx >> 6); i++ {
+		if i >= uint32(len(*dataptr)) {
 			return
 		}
 		result += uint(bits.OnesCount64((*dataptr)[i]))
 	}
-	if (idx >> 6) >= uint(len(*dataptr)) {
+	if (idx >> 6) >= uint32(len(*dataptr)) {
 		return
 	}
 	currentCell := (*dataptr)[idx>>6]
-	for i := uint(0); i < (idx & 0b111111); i++ {
+	for i := uint32(0); i < (idx & 0b111111); i++ {
 		if ((currentCell >> i) & 1) != 0 {
 			result++
 		}

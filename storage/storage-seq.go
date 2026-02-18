@@ -28,7 +28,7 @@ type StorageSeq struct {
 	start,
 	stride StorageInt
 	count    uint // number of values
-	seqCount uint // number of sequences
+	seqCount uint32 // number of sequences
 
 	// analysis (lastValue also used as atomic pivot cache for concurrent GetValue)
 	lastValue      atomic.Int64
@@ -63,7 +63,7 @@ func (s *StorageSeq) Deserialize(f io.Reader) uint {
 	s.count = uint(l)
 	var sc uint64
 	binary.Read(f, binary.LittleEndian, &sc)
-	s.seqCount = uint(sc)
+	s.seqCount = uint32(sc)
 	s.recordId.DeserializeEx(f, true)
 	s.start.DeserializeEx(f, true)
 	s.stride.DeserializeEx(f, true)
@@ -72,14 +72,14 @@ func (s *StorageSeq) Deserialize(f io.Reader) uint {
 
 func (s *StorageSeq) GetCachedReader() ColumnReader { return s }
 
-func (s *StorageSeq) GetValue(i uint) scm.Scmer {
+func (s *StorageSeq) GetValue(i uint32) scm.Scmer {
 	// bisect to the correct index where to find (lowest idx to find our sequence)
-	pivot := uint(s.lastValue.Load()) // atomic pivot cache for concurrent access
-	min := uint(0)
+	pivot := uint32(s.lastValue.Load()) // atomic pivot cache for concurrent access
+	min := uint32(0)
 	max := s.seqCount - 1
 	for {
 		recid := int64(s.recordId.GetValueUInt(pivot)) + s.recordId.offset
-		if i < uint(recid) {
+		if i < uint32(recid) {
 			max = pivot - 1
 			pivot--
 		} else {
@@ -92,7 +92,7 @@ func (s *StorageSeq) GetValue(i uint) scm.Scmer {
 
 		// also read the next neighbour (we are in the cache line anyway and we achieve O(1) in case the same sequence is read again!)
 		recid = int64(s.recordId.GetValueUInt(pivot)) + s.recordId.offset
-		if i < uint(recid) {
+		if i < uint32(recid) {
 			max = pivot - 1
 		} else {
 			min = pivot
@@ -123,7 +123,7 @@ func (s *StorageSeq) prepare() {
 	s.start.prepare()
 	s.stride.prepare()
 }
-func (s *StorageSeq) scan(i uint, value scm.Scmer) {
+func (s *StorageSeq) scan(i uint32, value scm.Scmer) {
 	if value.IsNil() {
 		// nil (stride is 0)
 		if i == 0 {
@@ -165,7 +165,7 @@ func (s *StorageSeq) scan(i uint, value scm.Scmer) {
 		}
 	}
 }
-func (s *StorageSeq) init(i uint) {
+func (s *StorageSeq) init(i uint32) {
 	s.recordId.init(s.seqCount)
 	s.start.init(s.seqCount)
 	s.stride.init(s.seqCount)
@@ -173,10 +173,10 @@ func (s *StorageSeq) init(i uint) {
 	s.lastStride = 0
 	s.lastValueNil = false
 	s.lastValueFirst = false
-	s.count = i
+	s.count = uint(i)
 	s.seqCount = 0
 }
-func (s *StorageSeq) build(i uint, value scm.Scmer) {
+func (s *StorageSeq) build(i uint32, value scm.Scmer) {
 	// store
 	if value.IsNil() {
 		// nil (stride is 0)
@@ -231,7 +231,7 @@ func (s *StorageSeq) finish() {
 		fmt.Println(s.recordId.GetValue(i),":",s.start.GetValue(i),":",s.stride.GetValue(i))
 	}*/
 }
-func (s *StorageSeq) proposeCompression(i uint) ColumnStorage {
+func (s *StorageSeq) proposeCompression(i uint32) ColumnStorage {
 	// dont't propose another pass
 	return nil
 }

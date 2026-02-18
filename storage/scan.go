@@ -252,7 +252,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	maxInsertIndex := len(t.inserts)
 
 	// filter phase: collect matching IDs into stack buffer, flush to MapReducer
-	var buf [1024]uint
+	var buf [1024]uint32
 	bufN := 0
 	hadValue := false
 	currentTx := CurrentTx()
@@ -272,9 +272,9 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		locked = true
 	}
 
-	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint) {
+	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint32) {
 		if currentTx != nil && currentTx.Mode == TxACID {
-			if !currentTx.IsVisible(t, idx) {
+			if !currentTx.IsVisible(t, uint32(idx)) {
 				return
 			}
 		} else {

@@ -37,7 +37,7 @@ func (s *StoragePrefix) String() string {
 
 func (s *StoragePrefix) GetCachedReader() ColumnReader { return s }
 
-func (s *StoragePrefix) GetValue(i uint) scm.Scmer {
+func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 	inner := s.values.GetValue(i)
 	if inner.IsNil() {
 		return scm.NewNil()
@@ -58,7 +58,7 @@ func (s *StoragePrefix) prepare() {
 	s.prefixes.prepare()
 	s.values.prepare()
 }
-func (s *StoragePrefix) scan(i uint, value scm.Scmer) {
+func (s *StoragePrefix) scan(i uint32, value scm.Scmer) {
 	if value.IsNil() {
 		s.values.scan(i, scm.NewNil())
 		return
@@ -74,11 +74,11 @@ func (s *StoragePrefix) scan(i uint, value scm.Scmer) {
 		}
 	}
 }
-func (s *StoragePrefix) init(i uint) {
+func (s *StoragePrefix) init(i uint32) {
 	s.prefixes.init(i)
 	s.values.init(i)
 }
-func (s *StoragePrefix) build(i uint, value scm.Scmer) {
+func (s *StoragePrefix) build(i uint32, value scm.Scmer) {
 	// store
 	if value.IsNil() {
 		s.values.build(i, scm.NewNil())
@@ -99,7 +99,7 @@ func (s *StoragePrefix) finish() {
 	s.prefixes.finish()
 	s.values.finish()
 }
-func (s *StoragePrefix) proposeCompression(i uint) ColumnStorage {
+func (s *StoragePrefix) proposeCompression(i uint32) ColumnStorage {
 	// dont't propose another pass
 	// TODO: if s.values proposes a StoragePrefix, build it into our cascade??
 	return nil

@@ -44,7 +44,7 @@ func (s *StorageSparse) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for k, v := range s.values {
-		vbytes, err := json.Marshal(uint64(s.recids.GetValueUInt(uint(k)) + uint64(s.recids.offset)))
+		vbytes, err := json.Marshal(uint64(s.recids.GetValueUInt(uint32(k)) + uint64(s.recids.offset)))
 		if err != nil {
 			panic(err)
 		}
@@ -69,8 +69,8 @@ func (s *StorageSparse) Deserialize(f io.Reader) uint {
 	scanner := bufio.NewScanner(f)
 	s.recids.prepare()
 	s.recids.scan(0, scm.NewInt(0))
-	s.recids.scan(uint(l2-1), scm.NewInt(int64(l-1)))
-	s.recids.init(uint(l2))
+	s.recids.scan(uint32(l2-1), scm.NewInt(int64(l-1)))
+	s.recids.init(uint32(l2))
 	i := 0
 	for {
 		var k uint64
@@ -83,7 +83,7 @@ func (s *StorageSparse) Deserialize(f io.Reader) uint {
 		}
 		var v any
 		json.Unmarshal(scanner.Bytes(), &v)
-		s.recids.build(uint(i), scm.NewInt(int64(k)))
+		s.recids.build(uint32(i), scm.NewInt(int64(k)))
 		s.values[i] = scm.TransformFromJSON(v)
 		i++
 	}
@@ -93,14 +93,14 @@ func (s *StorageSparse) Deserialize(f io.Reader) uint {
 
 func (s *StorageSparse) GetCachedReader() ColumnReader { return s }
 
-func (s *StorageSparse) GetValue(i uint) scm.Scmer {
-	var lower uint = 0
-	var upper uint = uint(s.i)
+func (s *StorageSparse) GetValue(i uint32) scm.Scmer {
+	var lower uint32 = 0
+	var upper uint32 = uint32(s.i)
 	for {
 		if lower == upper {
 			return scm.NewNil() // sparse value
 		}
-		pivot := uint((lower + upper) / 2)
+		pivot := (lower + upper) / 2
 		recid := s.recids.GetValueUInt(pivot) + uint64(s.recids.offset)
 		if recid == uint64(i) {
 			return s.values[pivot] // found the value
@@ -114,25 +114,25 @@ func (s *StorageSparse) GetValue(i uint) scm.Scmer {
 	}
 }
 
-func (s *StorageSparse) scan(i uint, value scm.Scmer) {
+func (s *StorageSparse) scan(i uint32, value scm.Scmer) {
 	if !value.IsNil() {
-		s.recids.scan(uint(s.i), scm.NewInt(int64(i)))
+		s.recids.scan(uint32(s.i), scm.NewInt(int64(i)))
 		s.i++
 	}
 }
 func (s *StorageSparse) prepare() {
 	s.i = 0
 }
-func (s *StorageSparse) init(i uint) {
+func (s *StorageSparse) init(i uint32) {
 	s.values = make([]scm.Scmer, s.i)
 	s.count = uint64(i)
-	s.recids.init(uint(s.i))
+	s.recids.init(uint32(s.i))
 	s.i = 0
 }
-func (s *StorageSparse) build(i uint, value scm.Scmer) {
+func (s *StorageSparse) build(i uint32, value scm.Scmer) {
 	// store
 	if !value.IsNil() {
-		s.recids.build(uint(s.i), scm.NewInt(int64(i)))
+		s.recids.build(uint32(s.i), scm.NewInt(int64(i)))
 		s.values[s.i] = value
 		s.i++
 	}
@@ -142,6 +142,6 @@ func (s *StorageSparse) finish() {
 }
 
 // soley to StorageSparse
-func (s *StorageSparse) proposeCompression(i uint) ColumnStorage {
+func (s *StorageSparse) proposeCompression(i uint32) ColumnStorage {
 	return nil
 }

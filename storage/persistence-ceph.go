@@ -437,7 +437,7 @@ func openOrCreateCephLogfile(s *CephStorage, shard string) (*CephLogfile, error)
 
 type encDelete struct {
 	T   string `json:"t"`
-	Idx uint   `json:"idx"`
+	Idx uint32 `json:"idx"`
 }
 type encInsert struct {
 	T      string        `json:"t"`
@@ -490,7 +490,7 @@ func decodeLogStream(data []byte, out chan interface{}) {
 		case "delete":
 			var d encDelete
 			if json.Unmarshal(payload, &d) == nil {
-				out <- LogEntryDelete{idx: uint(d.Idx)}
+				out <- LogEntryDelete{idx: uint32(d.Idx)}
 			}
 		case "insert":
 			var ins encInsert

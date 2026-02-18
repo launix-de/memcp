@@ -31,13 +31,13 @@ import "github.com/launix-de/memcp/scm"
 // ColumnReader provides sequential-access-optimized reads. Returned by
 // ColumnStorage.GetCachedReader(). Must not be shared between goroutines.
 type ColumnReader interface {
-	GetValue(uint) scm.Scmer
+	GetValue(uint32) scm.Scmer
 }
 
 // THE basic storage pattern
 type ColumnStorage interface {
 	// info
-	GetValue(uint) scm.Scmer       // read function (concurrent-safe, no mutable state)
+	GetValue(uint32) scm.Scmer     // read function (concurrent-safe, no mutable state)
 	GetCachedReader() ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
 	String() string                // self-description
 	scm.Sizable
@@ -45,11 +45,11 @@ type ColumnStorage interface {
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
 	// analyze
 	prepare()
-	scan(uint, scm.Scmer)
-	proposeCompression(i uint) ColumnStorage
+	scan(uint32, scm.Scmer)
+	proposeCompression(i uint32) ColumnStorage
 	// store
-	init(uint)
-	build(uint, scm.Scmer)
+	init(uint32)
+	build(uint32, scm.Scmer)
 	finish()
 
 	// persistency (the callee takes ownership of the file handle, so he can close it immediately or set a finalizer)
@@ -300,11 +300,11 @@ func Init(en scm.Env) {
 						filtered = append(filtered, val)
 					}
 				}
-				scols := make([]func(uint) scm.Scmer, len(sortcolsVals))
+				scols := make([]func(uint32) scm.Scmer, len(sortcolsVals))
 				for i, scol := range sortcolsVals {
 					if scol.IsString() {
 						colname := scol.String()
-						scols[i] = func(idx uint) scm.Scmer {
+						scols[i] = func(idx uint32) scm.Scmer {
 							row := mustScmerSlice(filtered[idx], "sort row")
 							ds := dataset(row)
 							val, _ := ds.GetI(colname)
@@ -317,7 +317,7 @@ func Init(en scm.Env) {
 					if slice, ok := scmerSlice(scol); ok {
 						params = slice
 					}
-					scols[i] = func(idx uint) scm.Scmer {
+					scols[i] = func(idx uint32) scm.Scmer {
 						row := mustScmerSlice(filtered[idx], "sort row")
 						ds := dataset(row)
 						args := make([]scm.Scmer, len(params))
@@ -329,8 +329,8 @@ func Init(en scm.Env) {
 				}
 				sort.Slice(filtered, func(i, j int) bool {
 					for c := 0; c < len(scols); c++ {
-						a := scols[c](uint(i))
-						b := scols[c](uint(j))
+						a := scols[c](uint32(i))
+						b := scols[c](uint32(j))
 						if scm.ToBool(sortdirs[c](a, b)) {
 							return false
 						} else if scm.ToBool(sortdirs[c](b, a)) {

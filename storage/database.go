@@ -223,6 +223,13 @@ func (db *database) ensureLoaded() {
 				}
 			}
 		}
+		// Derive ShardMode from shard presence for backward compatibility
+		// with schemas that don't yet have ShardMode persisted.
+		if t.PShards != nil && t.Shards == nil {
+			t.ShardMode = ShardModePartition
+		} else {
+			t.ShardMode = ShardModeFree
+		}
 	}
 	// FK enforcement triggers are serializable Procs and persist with the table JSON.
 	// No re-installation needed on load.
@@ -280,12 +287,8 @@ func (db *database) rebuild(all bool, repartition bool) {
 			// TODO: check LRU statistics and remove unused computed columns
 
 			// rebuild shards without mutating the live shard list; swap when complete
-			origShardList := t.Shards // if Shards AND PShards are present, Shards is the single point of truth
-			targetIsP := false
-			if origShardList == nil {
-				origShardList = t.PShards
-				targetIsP = true
-			}
+			targetIsP := t.ShardMode == ShardModePartition
+			origShardList := t.ActiveShards()
 			newShardList := make([]*storageShard, len(origShardList))
 			// Track if any shard is still COLD to avoid triggering repartition logic
 			hasColdShard := false
@@ -295,7 +298,7 @@ func (db *database) rebuild(all bool, repartition bool) {
 					return 0
 				}
 				s.mu.RLock()
-				c := s.main_count + uint(len(s.inserts)) - uint(s.deletions.Count())
+				c := uint(s.main_count) + uint(len(s.inserts)) - uint(s.deletions.Count())
 				s.mu.RUnlock()
 				return c
 			}
@@ -378,14 +381,6 @@ func (db *database) rebuild(all bool, repartition bool) {
 				t.Shards = origShardList
 			}
 
-			// check if we should do the repartitioning
-			if repartition && !hasColdShard {
-				shardCandidates, shouldChange := t.proposerepartition(maincount)
-				if shouldChange || (t.PShards != nil && t.Shards != nil) {
-					t.repartition(shardCandidates) // perform the repartitioning
-				}
-			}
-
 			// Collect replaced shards for deferred cleanup (see comment above).
 			if len(replaced) > 0 {
 				replacedMu.Lock()
@@ -393,7 +388,22 @@ func (db *database) rebuild(all bool, repartition bool) {
 				replacedMu.Unlock()
 			}
 
+			// Decide on repartition while holding t.mu, but execute it
+			// OUTSIDE the table lock so concurrent inserts can proceed
+			// and the dual-write mechanism works correctly.
+			var shardCandidates []shardDimension
+			doRepart := false
+			if repartition && !hasColdShard {
+				var shouldChange bool
+				shardCandidates, shouldChange = t.proposerepartition(maincount)
+				doRepart = shouldChange || (t.ShardMode == ShardModeFree && t.Shards != nil)
+			}
+
 			t.mu.Unlock()
+
+			if doRepart {
+				t.repartition(shardCandidates)
+			}
 		}(t)
 	}
 	done.Wait()
@@ -470,6 +480,7 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	t.schema = db
 	t.Name = name
 	t.PersistencyMode = pm
+	t.ShardMode = ShardModeFree
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	t.Auto_increment = 1
