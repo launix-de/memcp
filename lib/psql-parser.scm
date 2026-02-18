@@ -603,7 +603,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query psql_select) (apply build_queryplan (apply untangle_query query)))
-		(parser '((atom "DESCRIBE" true) (define query psql_select)) '('resultrow '('list "code" (serialize (apply build_queryplan (apply untangle_query query))))))
+		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (serialize (apply build_queryplan (apply untangle_query query))))))
 		psql_insert_into
 		psql_insert_select
 		psql_create_table
