@@ -258,9 +258,9 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 				}
 				return false // fully equal
 			})
-			// fill deltaBtree (no locking required; we are already in a readlock)
+			// fill deltaBtree with global record IDs (no locking required; we are already in a readlock)
 			for i, data := range s.t.inserts {
-				s.deltaBtree.ReplaceOrInsert(indexPair{i, data})
+				s.deltaBtree.ReplaceOrInsert(indexPair{int(s.t.main_count) + i, data})
 			}
 
 			s.active = true // mark as ready
@@ -314,30 +314,59 @@ iteration:
 		// TODO: stop on limit
 	}
 
-	// delta storage -> scan btree (but we can also eject all items, it won't break the code)
-	if len(s.t.inserts) > 0 { // avoid building objects if there is no delta
-		/* TODO: use our own compressed delta Bheap-tree
-		delta_lower := make(dataset, 2 * len(s.Cols))
-		delta_upper := make(dataset, 2 * len(s.Cols))
-		for i := 0; i < len(s.Cols); i++ {
-			delta_lower[2 * i] = s.Cols[i]
-			delta_lower[2 * i + 1] = lower[i]
-			delta_upper[2 * i] = s.Cols[i]
-			delta_upper[2 * i + 1] = lower[i]
+	// delta storage -> scan btree for matching range
+	if maxInsertIndex > 0 && s.deltaBtree != nil {
+		// Build reference items with values at the correct deltaColumns positions.
+		// The btree comparator uses s.t.deltaColumns[col] to index into data[].
+		maxCol := 0
+		for _, col := range s.Cols {
+			if pos, ok := s.t.deltaColumns[col]; ok && pos+1 > maxCol {
+				maxCol = pos + 1
+			}
 		}
-		delta_upper[len(delta_upper)-1] = upperLast
-		// scan less than
-		s.deltaBtree.AscendRange(indexPair{-1, delta_lower}, indexPair{-1, delta_upper}, func (p indexPair) bool {
-			callback(s.t.main_count + uint(p.itemid))
-			return true // don't stop iteration
-			// TODO: stop on limit
+		refLower := make([]scm.Scmer, maxCol)
+		refUpper := make([]scm.Scmer, maxCol)
+		for i, col := range s.Cols {
+			if pos, ok := s.t.deltaColumns[col]; ok {
+				refLower[pos] = lower[i]
+				if i == cmpCols-1 && !upperLast.IsNil() {
+					refUpper[pos] = upperLast
+				} else {
+					refUpper[pos] = lower[i]
+				}
+			}
+		}
+		// AscendRange is [greaterOrEqual, lessThan) so we need to go one past upper.
+		// Instead, use AscendGreaterOrEqual and stop manually when we exceed bounds.
+		s.deltaBtree.AscendGreaterOrEqual(indexPair{-1, refLower}, func(p indexPair) bool {
+			if p.itemid < 0 {
+				return true // skip reference items (shouldn't happen, but defensive)
+			}
+			// check upper bound for each column
+			for i, col := range s.Cols {
+				pos, ok := s.t.deltaColumns[col]
+				if !ok {
+					continue
+				}
+				var v scm.Scmer
+				if pos < len(p.data) {
+					v = p.data[pos]
+				}
+				if i == cmpCols-1 {
+					if !upperLast.IsNil() && scm.Less(upperLast, v) {
+						return false // past upper bound on last (range) column
+					}
+				} else if !scm.Equal(v, lower[i]) {
+					return false // past equality bound
+				}
+			}
+			if uint32(p.itemid) >= s.t.main_count && p.itemid-int(s.t.main_count) < maxInsertIndex {
+				callback(uint32(p.itemid))
+			}
+			return true
 		})
-		// find exact fit, too
-		if p, ok := s.deltaBtree.Get(indexPair{-1, delta_upper}); ok {
-			callback(s.t.main_count + uint(p.itemid))
-		}
-		*/
-		// fallback: output all items
+	} else if maxInsertIndex > 0 {
+		// no btree yet — full scan fallback
 		for i := 0; i < maxInsertIndex; i++ {
 			callback(s.t.main_count + uint32(i))
 		}

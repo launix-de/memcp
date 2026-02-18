@@ -1,0 +1,61 @@
+# Performance tests for unique key insert operations
+# Tests INSERT with UNIQUE constraint to measure delta btree index performance
+# A: full delta scan fallback (O(N^2) for batch inserts)
+# B: delta btree range scan (O(N log N) for batch inserts)
+
+metadata:
+  version: "1.0"
+  description: "Performance tests: unique key inserts"
+
+test_cases:
+  # Unique insert into empty table (baseline)
+  - name: "Perf: UNIQUE INSERT fresh"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_unique`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_unique` (id INT PRIMARY KEY, val INT UNIQUE, name TEXT)"
+    scm: |
+      (begin
+        (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
+        (insert "{database}" "perf_unique" '("id" "val" "name") rows))
+    threshold_ms: 30000
+    expect_scm:
+      type: number
+
+  # Unique insert with existing main storage (exercises index lookup)
+  - name: "Perf: UNIQUE INSERT after rebuild"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_unique`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_unique` (id INT PRIMARY KEY, val INT UNIQUE, name TEXT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
+            (insert "{database}" "perf_unique" '("id" "val" "name") rows)
+            (rebuild))
+    scm: |
+      (begin
+        (set rows (map (produceN {rows}) (lambda (i) (list (+ i {rows}) (+ i {rows}) (concat "new_" i)))))
+        (insert "{database}" "perf_unique" '("id" "val" "name") rows))
+    threshold_ms: 30000
+    expect_scm:
+      type: number
+
+  # INSERT IGNORE with duplicates (unique collision path)
+  - name: "Perf: INSERT IGNORE duplicates"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_unique`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_unique` (id INT PRIMARY KEY, val INT UNIQUE, name TEXT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
+            (insert "{database}" "perf_unique" '("id" "val" "name") rows)
+            (rebuild))
+    sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id + {rows}, val, CONCAT('dup_', name) FROM perf_unique"
+    threshold_ms: 30000
+    expect:
+      rows: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS perf_unique"
