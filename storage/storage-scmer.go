@@ -223,8 +223,8 @@ func (s *StorageSCMER) proposeCompression(i uint) ColumnStorage {
 	}
 	// scalable numerics (replaces onlyInt and onlyFloat)
 	if s.minIntScale > math.MinInt8 {
-		if s.minIntScale == 0 {
-			// pure integers
+		if s.minIntScale == 0 || s.minIntScale >= 18 {
+			// pure integers (or uninitialized — no numeric values scanned)
 			if i > 5 && 2*(i-s.numSeq) < i {
 				return new(StorageSeq)
 			}
