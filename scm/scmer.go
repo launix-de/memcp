@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -507,8 +506,7 @@ func (s Scmer) Float() float64 {
 func (s Scmer) String() string {
 	switch s.GetTag() {
 	case tagString, tagSymbol:
-		hdr := [2]uintptr{uintptr(unsafe.Pointer(s.ptr)), uintptr(auxVal(s.aux))}
-		return *(*string)(unsafe.Pointer(&hdr))
+		return unsafe.String(s.ptr, int(auxVal(s.aux)))
 	case tagInt:
 		return strconv.FormatInt(int64(s.aux), 10)
 	case tagFloat:
@@ -588,21 +586,18 @@ func (s Scmer) Slice() []Scmer {
 	if ln == 0 || s.ptr == nil {
 		return nil
 	}
-	head := (*Scmer)(unsafe.Pointer(s.ptr))
-	headers := reflect.SliceHeader{
-		Data: uintptr(unsafe.Pointer(head)),
-		Len:  ln,
-		Cap:  ln,
-	}
-	return *(*[]Scmer)(unsafe.Pointer(&headers))
+	return unsafe.Slice((*Scmer)(unsafe.Pointer(s.ptr)), ln)
 }
 
 func (s Scmer) Vector() []float64 {
 	if s.GetTag() != tagVector {
 		panic("not vector")
 	}
-	hdr := [3]uintptr{uintptr(unsafe.Pointer(s.ptr)), uintptr(auxVal(s.aux)), uintptr(auxVal(s.aux))}
-	return *(*[]float64)(unsafe.Pointer(&hdr))
+	ln := int(auxVal(s.aux))
+	if ln == 0 || s.ptr == nil {
+		return nil
+	}
+	return unsafe.Slice((*float64)(unsafe.Pointer(s.ptr)), ln)
 }
 
 func (s Scmer) FastDict() *FastDict {
