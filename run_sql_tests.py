@@ -91,7 +91,7 @@ PERF_CALIBRATE = os.environ.get("PERF_CALIBRATE", "0") == "1"  # reset baselines
 PERF_NORECALIBRATE = os.environ.get("PERF_NORECALIBRATE", "0") == "1"  # freeze row counts for bisecting
 PERF_EXPLAIN = os.environ.get("PERF_EXPLAIN", "0") == "1"  # show query plans
 PERF_BASELINE_FILE = ".perf_baseline.json"
-PERF_THRESHOLD_FACTOR = 1.3  # 30% tolerance over baseline
+PERF_THRESHOLD_FACTOR = 1.1  # 10% tolerance over baseline
 PERF_TARGET_MIN_MS = 10000  # target minimum query time (10s)
 PERF_TARGET_MAX_MS = 20000  # target maximum query time (20s)
 PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
@@ -405,6 +405,8 @@ class SQLTestRunner:
         # Scheme code execution via /scm endpoint
         scm_code = test_case.get("scm")
         if scm_code:
+            if is_perf_test:
+                scm_code = scm_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
             expect = test_case.get("expect", {})
             expect_error = expect.get("error", False)
             try:
@@ -431,6 +433,8 @@ class SQLTestRunner:
             return True
 
         query = test_case.get("sql") or test_case.get("sparql")
+        if query and is_perf_test:
+            query = query.replace("{rows}", str(perf_rows)).replace("{database}", database)
         is_sparql = "sparql" in test_case
         # auth: allow per-test overrides, fallback to suite metadata, then runner defaults
         tc_user = test_case.get("username") or self.suite_metadata.get("username") or self.username

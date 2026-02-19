@@ -1,0 +1,297 @@
+# Corner case tests for UNIQUE constraint enforcement across main and delta storage
+# Tests unique key checking when data lives in:
+# - delta only (before rebuild)
+# - main only (after rebuild)
+# - main + delta (after rebuild with new inserts)
+# Uses scm:"(rebuild)" to trigger main storage compaction between operations
+
+metadata:
+  version: "1.0"
+  description: "Unique constraint: main vs delta storage corner cases"
+
+test_cases:
+  # ==============================================================
+  # Phase 1: Delta-only unique enforcement
+  # ==============================================================
+
+  - name: "Setup unique table"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `uniq_md`"
+      - scm: "(rebuild)"
+    sql: "CREATE TABLE `uniq_md` (id INT PRIMARY KEY, val INT UNIQUE, name TEXT)"
+
+  - name: "Delta: insert 3 rows"
+    sql: "INSERT INTO uniq_md VALUES (1, 100, 'a'), (2, 200, 'b'), (3, 300, 'c')"
+    expect:
+      affected_rows: 3
+
+  - name: "Delta: duplicate PK should fail"
+    sql: "INSERT INTO uniq_md VALUES (1, 999, 'dup')"
+    expect:
+      error: true
+
+  - name: "Delta: duplicate UNIQUE val should fail"
+    sql: "INSERT INTO uniq_md VALUES (99, 100, 'dup')"
+    expect:
+      error: true
+
+  - name: "Delta: INSERT IGNORE duplicate PK"
+    sql: "INSERT IGNORE INTO uniq_md VALUES (1, 999, 'ignored')"
+    expect:
+      affected_rows: 0
+
+  - name: "Delta: INSERT IGNORE duplicate UNIQUE val"
+    sql: "INSERT IGNORE INTO uniq_md VALUES (99, 100, 'ignored')"
+    expect:
+      affected_rows: 0
+
+  - name: "Delta: verify data intact after ignored inserts"
+    sql: "SELECT id, val, name FROM uniq_md ORDER BY id"
+    expect:
+      data:
+        - id: 1
+          val: 100
+          name: "a"
+        - id: 2
+          val: 200
+          name: "b"
+        - id: 3
+          val: 300
+          name: "c"
+
+  - name: "Delta: UPDATE to duplicate UNIQUE should fail"
+    sql: "UPDATE uniq_md SET val = 200 WHERE id = 1"
+    expect:
+      error: true
+
+  - name: "Delta: UPDATE non-unique column succeeds"
+    sql: "UPDATE uniq_md SET name = 'updated' WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Delta: verify update"
+    sql: "SELECT name FROM uniq_md WHERE id = 1"
+    expect:
+      data:
+        - name: "updated"
+
+  # ==============================================================
+  # Phase 2: Rebuild to move data to main storage
+  # ==============================================================
+
+  - name: "Rebuild to main storage"
+    scm: "(rebuild)"
+
+  - name: "Main: duplicate PK should fail"
+    sql: "INSERT INTO uniq_md VALUES (1, 999, 'dup')"
+    expect:
+      error: true
+
+  - name: "Main: duplicate UNIQUE val should fail"
+    sql: "INSERT INTO uniq_md VALUES (99, 100, 'dup')"
+    expect:
+      error: true
+
+  - name: "Main: INSERT IGNORE duplicate PK"
+    sql: "INSERT IGNORE INTO uniq_md VALUES (1, 999, 'ignored')"
+    expect:
+      affected_rows: 0
+
+  - name: "Main: INSERT IGNORE duplicate UNIQUE val"
+    sql: "INSERT IGNORE INTO uniq_md VALUES (99, 100, 'ignored')"
+    expect:
+      affected_rows: 0
+
+  - name: "Main: UPDATE to duplicate UNIQUE should fail"
+    sql: "UPDATE uniq_md SET val = 200 WHERE id = 1"
+    expect:
+      error: true
+
+  - name: "Main: valid insert into rebuilt table"
+    sql: "INSERT INTO uniq_md VALUES (4, 400, 'd')"
+    expect:
+      affected_rows: 1
+
+  - name: "Main: verify insert"
+    sql: "SELECT id, val FROM uniq_md WHERE id = 4"
+    expect:
+      data:
+        - id: 4
+          val: 400
+
+  # ==============================================================
+  # Phase 3: Main + Delta mixed unique checks
+  # ==============================================================
+
+  - name: "Mixed: new delta row with val unique to delta but dup of main"
+    sql: "INSERT INTO uniq_md VALUES (99, 100, 'conflict_with_main')"
+    expect:
+      error: true
+
+  - name: "Mixed: new delta row with PK unique to delta but dup of main"
+    sql: "INSERT INTO uniq_md VALUES (1, 999, 'pk_conflict_with_main')"
+    expect:
+      error: true
+
+  - name: "Mixed: insert more delta rows"
+    sql: "INSERT INTO uniq_md VALUES (5, 500, 'e'), (6, 600, 'f')"
+    expect:
+      affected_rows: 2
+
+  - name: "Mixed: delta-delta duplicate PK"
+    sql: "INSERT INTO uniq_md VALUES (5, 999, 'delta_pk_dup')"
+    expect:
+      error: true
+
+  - name: "Mixed: delta-delta duplicate UNIQUE val"
+    sql: "INSERT INTO uniq_md VALUES (99, 500, 'delta_val_dup')"
+    expect:
+      error: true
+
+  - name: "Mixed: INSERT IGNORE duplicate across main+delta"
+    sql: "INSERT IGNORE INTO uniq_md VALUES (1, 999, 'ign'), (99, 500, 'ign'), (7, 700, 'g')"
+    expect:
+      affected_rows: 1
+
+  - name: "Mixed: verify only non-dup row inserted"
+    sql: "SELECT id, val, name FROM uniq_md WHERE id = 7"
+    expect:
+      data:
+        - id: 7
+          val: 700
+          name: "g"
+
+  - name: "Mixed: UPDATE delta row to conflict with main"
+    sql: "UPDATE uniq_md SET val = 100 WHERE id = 5"
+    expect:
+      error: true
+
+  - name: "Mixed: UPDATE main row to conflict with delta"
+    sql: "UPDATE uniq_md SET val = 500 WHERE id = 1"
+    expect:
+      error: true
+
+  - name: "Mixed: verify row count"
+    sql: "SELECT COUNT(*) AS cnt FROM uniq_md"
+    expect:
+      data:
+        - cnt: 7
+
+  # ==============================================================
+  # Phase 4: Delete then reinsert same unique value
+  # ==============================================================
+
+  - name: "Delete from delta"
+    sql: "DELETE FROM uniq_md WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "Reinsert deleted delta unique val"
+    sql: "INSERT INTO uniq_md VALUES (8, 500, 'reuse_delta_val')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify reinserted delta val"
+    sql: "SELECT id, name FROM uniq_md WHERE val = 500"
+    expect:
+      data:
+        - id: 8
+          name: "reuse_delta_val"
+
+  - name: "Delete from main"
+    sql: "DELETE FROM uniq_md WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Reinsert deleted main unique val"
+    sql: "INSERT INTO uniq_md VALUES (9, 100, 'reuse_main_val')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify reinserted main val"
+    sql: "SELECT id, name FROM uniq_md WHERE val = 100"
+    expect:
+      data:
+        - id: 9
+          name: "reuse_main_val"
+
+  # ==============================================================
+  # Phase 5: Second rebuild with mixed data, then verify
+  # ==============================================================
+
+  - name: "Second rebuild"
+    scm: "(rebuild)"
+
+  - name: "Post-rebuild: verify all data"
+    sql: "SELECT id, val FROM uniq_md ORDER BY id"
+    expect:
+      data:
+        - id: 2
+          val: 200
+        - id: 3
+          val: 300
+        - id: 4
+          val: 400
+        - id: 6
+          val: 600
+        - id: 7
+          val: 700
+        - id: 8
+          val: 500
+        - id: 9
+          val: 100
+
+  - name: "Post-rebuild: dup of rebuilt main should fail"
+    sql: "INSERT INTO uniq_md VALUES (99, 200, 'post_dup')"
+    expect:
+      error: true
+
+  - name: "Post-rebuild: fresh unique insert succeeds"
+    sql: "INSERT INTO uniq_md VALUES (10, 1000, 'j')"
+    expect:
+      affected_rows: 1
+
+  # ==============================================================
+  # Phase 6: NULL uniqueness (SQL standard: NULLs are always unique)
+  # noncritical: MemCP currently treats NULLs as equal for unique checks
+  # ==============================================================
+
+  - name: "NULL: insert row with NULL unique val"
+    sql: "INSERT INTO uniq_md VALUES (11, NULL, 'null1')"
+    expect:
+      affected_rows: 1
+
+  - name: "NULL: insert second row with NULL unique val"
+    noncritical: true
+    sql: "INSERT INTO uniq_md VALUES (12, NULL, 'null2')"
+    expect:
+      affected_rows: 1
+
+  - name: "NULL: verify both NULL rows exist"
+    noncritical: true
+    sql: "SELECT id FROM uniq_md WHERE val IS NULL ORDER BY id"
+    expect:
+      data:
+        - id: 11
+        - id: 12
+
+  - name: "NULL: rebuild and verify NULLs survive"
+    noncritical: true
+    scm: "(rebuild)"
+
+  - name: "NULL: post-rebuild both NULLs still present"
+    noncritical: true
+    sql: "SELECT id FROM uniq_md WHERE val IS NULL ORDER BY id"
+    expect:
+      data:
+        - id: 11
+        - id: 12
+
+  - name: "NULL: can still insert NULL unique after rebuild"
+    noncritical: true
+    sql: "INSERT INTO uniq_md VALUES (13, NULL, 'null3')"
+    expect:
+      affected_rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS uniq_md"

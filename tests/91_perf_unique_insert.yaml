@@ -2,46 +2,51 @@
 # Tests INSERT with UNIQUE constraint to measure delta btree index performance
 # A: full delta scan fallback (O(N^2) for batch inserts)
 # B: delta btree range scan (O(N log N) for batch inserts)
+# {rows} and {database} are template placeholders filled by the test runner
 
 metadata:
   version: "1.0"
   description: "Performance tests: unique key inserts"
 
 test_cases:
-  # Unique insert into empty table (baseline)
+  # INSERT IGNORE with non-overlapping keys into empty table (fresh delta insert)
   - name: "Perf: UNIQUE INSERT fresh"
     setup:
       - sql: "DROP TABLE IF EXISTS `perf_unique`"
+      - sql: "DROP TABLE IF EXISTS `perf_source`"
       - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_source` (id INT PRIMARY KEY, val INT, name TEXT)"
       - sql: "CREATE TABLE `perf_unique` (id INT PRIMARY KEY, val INT UNIQUE, name TEXT)"
-    scm: |
-      (begin
-        (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
-        (insert "{database}" "perf_unique" '("id" "val" "name") rows))
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
+            (insert "{database}" "perf_source" '("id" "val" "name") rows)
+            (rebuild))
+    sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id, val, name FROM perf_source"
+    warmup: false
     threshold_ms: 30000
-    expect_scm:
-      type: number
 
-  # Unique insert with existing main storage (exercises index lookup)
+  # INSERT IGNORE with non-overlapping keys into rebuilt table (main + delta)
   - name: "Perf: UNIQUE INSERT after rebuild"
     setup:
       - sql: "DROP TABLE IF EXISTS `perf_unique`"
+      - sql: "DROP TABLE IF EXISTS `perf_source`"
       - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_source` (id INT PRIMARY KEY, val INT, name TEXT)"
       - sql: "CREATE TABLE `perf_unique` (id INT PRIMARY KEY, val INT UNIQUE, name TEXT)"
       - scm: |
           (begin
             (set rows (map (produceN {rows}) (lambda (i) (list i i (concat "name_" i)))))
             (insert "{database}" "perf_unique" '("id" "val" "name") rows)
+            (rebuild)
+            (set rows2 (map (produceN {rows}) (lambda (i) (list (+ i {rows}) (+ i {rows}) (concat "new_" i)))))
+            (insert "{database}" "perf_source" '("id" "val" "name") rows2)
             (rebuild))
-    scm: |
-      (begin
-        (set rows (map (produceN {rows}) (lambda (i) (list (+ i {rows}) (+ i {rows}) (concat "new_" i)))))
-        (insert "{database}" "perf_unique" '("id" "val" "name") rows))
+    sql: "INSERT IGNORE INTO perf_unique (id, val, name) SELECT id, val, name FROM perf_source"
+    warmup: false
     threshold_ms: 30000
-    expect_scm:
-      type: number
 
-  # INSERT IGNORE with duplicates (unique collision path)
+  # INSERT IGNORE with all-duplicate keys (unique collision path)
   - name: "Perf: INSERT IGNORE duplicates"
     setup:
       - sql: "DROP TABLE IF EXISTS `perf_unique`"
@@ -59,3 +64,4 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS perf_unique"
+  - sql: "DROP TABLE IF EXISTS perf_source"

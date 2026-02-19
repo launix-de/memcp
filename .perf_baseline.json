@@ -1,6 +1,14 @@
 {
-  "Perf: COUNT": {"time_ms": 10000, "rows": 250000000},
-  "Perf: SUM": {"time_ms": 10000, "rows": 250000000},
-  "Perf: ORDER+LIMIT": {"time_ms": 10000, "rows": 500000000},
-  "Perf: SCAN+FILTER": {"time_ms": 15000, "rows": 200000000}
+  "Perf: UNIQUE INSERT fresh": {
+    "time_ms": 14054.0,
+    "rows": 10000
+  },
+  "Perf: UNIQUE INSERT after rebuild": {
+    "time_ms": 14091.5,
+    "rows": 10000
+  },
+  "Perf: INSERT IGNORE duplicates": {
+    "time_ms": 192.0,
+    "rows": 13000
+  }
 }
