@@ -1,14 +1,14 @@
 {
   "Perf: UNIQUE INSERT fresh": {
-    "time_ms": 14054.0,
+    "time_ms": 13726.7,
     "rows": 10000
   },
   "Perf: UNIQUE INSERT after rebuild": {
-    "time_ms": 14091.5,
+    "time_ms": 14093.6,
     "rows": 10000
   },
   "Perf: INSERT IGNORE duplicates": {
-    "time_ms": 192.0,
-    "rows": 13000
+    "time_ms": 249.8,
+    "rows": 16900
   }
 }
