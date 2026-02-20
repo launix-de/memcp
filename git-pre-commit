@@ -62,6 +62,21 @@ run_memcp_forever() {
   done
 }
 
+wait_for_sql_ready() {
+  local retries="${1:-60}"
+  local delay="${2:-1}"
+  for ((i=1; i<=retries; i++)); do
+    if curl -s "http://localhost:$test_port" >/dev/null 2>&1; then
+      http_code=$(curl -s -o /dev/null -w "%{http_code}" -u root:admin "http://localhost:$test_port/sql/memcp-tests" -d "SELECT 1")
+      if [ "$http_code" = "200" ]; then
+        return 0
+      fi
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
 # Prepare data dir and logfile once outside the loop
 rm -rf /tmp/memcp-pre-commit-tests || true
 echo -n > /tmp/memcp-test.log
@@ -79,13 +94,12 @@ supervisor_pid=$!
 
 # Wait until ready once
 echo "⏳ Waiting for MemCP to be ready..."
-for i in {1..60}; do
-  if curl -s "http://localhost:$test_port" >/dev/null 2>&1; then
-    echo "✅ MemCP is ready!"
-    break
-  fi
-  sleep 1
-done
+if wait_for_sql_ready 60 1; then
+  echo "✅ MemCP is ready!"
+else
+  echo "❌ MemCP did not become SQL-ready"
+  exit 1
+fi
 
 cleanup() {
   # Make cleanup idempotent
@@ -123,19 +137,27 @@ echo "🧪 Running SQL tests using single MemCP instance (parallel where safe)..
 all_passed=true
 failed_files=""
 
-# Split tests: those that contain SHUTDOWN (disruptive) run sequentially; others in parallel
+# Split tests: disruptive tests run sequentially; others in parallel.
+# Rebuild-heavy suites and suites that run internal parallel groups can deadlock
+# when executed concurrently against one shared server instance.
 parallel_tests=""
 sequential_tests=""
 for tf in $test_files; do
-  if grep -q "SHUTDOWN" "$tf"; then
+  if grep -q "SHUTDOWN" "$tf" || \
+     grep -q "(rebuild)" "$tf" || \
+     grep -q "parallel:" "$tf" || \
+     grep -Eqi "CREATE USER|ALTER USER|DROP USER|SET PASSWORD|GRANT |REVOKE |system\\.user|system\\.access" "$tf"; then
     sequential_tests="$sequential_tests $tf"
   else
     parallel_tests="$parallel_tests $tf"
   fi
 done
 
-# Limit concurrency to number of processors, cap at 8
-max_jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+# Keep test suites isolated by default; allow opt-in parallelism via MEMCP_TEST_JOBS.
+max_jobs="${MEMCP_TEST_JOBS:-1}"
+if ! [[ "$max_jobs" =~ ^[0-9]+$ ]] || [ "$max_jobs" -lt 1 ]; then
+  max_jobs=1
+fi
 if [ "$max_jobs" -gt 8 ]; then max_jobs=8; fi
 
 tmpdir=$(mktemp -d)
@@ -146,10 +168,15 @@ run_one() {
   local out="$2"
   local statusf="$3"
   # Wait for readiness before starting
-  for i in {1..30}; do
-    if curl -s "http://localhost:$test_port" >/dev/null 2>&1; then break; fi
-    sleep 1
-  done
+  if ! wait_for_sql_ready 60 1; then
+    echo "FAIL" > "$statusf"
+    {
+      flock -x 9
+      echo "❌ $tf: MemCP did not become SQL-ready before running this suite"
+      echo ""
+    } 9>>"$lockfile"
+    return
+  fi
   python3 run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
   rc=$?
   # Determine status by exit code (0 => OK, nonzero => FAIL)
