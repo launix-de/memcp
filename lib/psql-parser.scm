@@ -37,6 +37,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "CROSS" true)
 	(atom "JOIN" true)
 	(atom "SELECT" true)
+	(atom "UNION" true)
+	(atom "ALL" true)
 	(atom "INSERT" true)
 	(atom "ORDER" true)
 	(atom "LIMIT" true)
@@ -207,6 +209,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p psql_expression) ")") '('parse_date p))
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
+		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" psql_int ")" ")") '('concat p))
+		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) ")") '('concat p))
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CONCAT" true) "(" (define p (+ psql_expression ",")) ")") (cons 'concat p))
 		/* TRIM/LTRIM/RTRIM as explicit parser rules for reliable dispatch */
@@ -280,7 +284,40 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define order nil)
 	(define limit nil)
 	(define offset nil)
-	(define psql_select (parser '(
+	(define psql_select_order (lambda (query) (match query
+		'(schema tables fields condition group having order limit offset) order
+		_ nil
+	)))
+	(define psql_select_limit (lambda (query) (match query
+		'(schema tables fields condition group having order limit offset) limit
+		_ nil
+	)))
+	(define psql_select_offset (lambda (query) (match query
+		'(schema tables fields condition group having order limit offset) offset
+		_ nil
+	)))
+	(define psql_select_clear_stage (lambda (query) (match query
+		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
+		_ query
+	)))
+	(define psql_union_all_parts (lambda (query) (match query
+		'(union_all branches order limit offset) (list branches order limit offset)
+		'((symbol union_all) branches order limit offset) (list branches order limit offset)
+		'((quote union_all) branches order limit offset) (list branches order limit offset)
+		_ nil
+	)))
+	(define psql_union_all_query (lambda (left right) (begin
+		(define right_parts (psql_union_all_parts right))
+		(if (nil? right_parts)
+			(list (quote union_all)
+				(list left (psql_select_clear_stage right))
+				(psql_select_order right)
+				(psql_select_limit right)
+				(psql_select_offset right))
+			(match right_parts '(branches order limit offset)
+				(list (quote union_all) (cons left branches) order limit offset)))
+	)))
+	(define psql_select_core (parser '(
 		(atom "SELECT" true)
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
@@ -338,6 +375,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			)
 		)
 	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))
+	(define psql_select (parser (or
+		(parser '(
+			(define left psql_select_core)
+			(atom "UNION" true)
+			(atom "ALL" true)
+			(define right psql_select)
+		) (psql_union_all_query left right))
+		psql_select_core
+	)))
 
 	(define psql_update (parser '(
 		(atom "UPDATE" true)
@@ -497,7 +543,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			'('begin
 				'('set 'resultrow '('lambda '('item) '('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
-				(apply build_queryplan (apply untangle_query inner))
+				(build_queryplan_term inner)
 			)
 	)))
 
@@ -613,8 +659,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
-		(parser (define query psql_select) (apply build_queryplan (apply untangle_query query)))
-		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (serialize (apply build_queryplan (apply untangle_query query))))))
+		(parser (define query psql_select) (build_queryplan_term query))
+		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (serialize (build_queryplan_term query)))))
 		psql_insert_into
 		psql_insert_select
 		psql_create_table
@@ -636,25 +682,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 		/* GRANT syntax (PostgreSQL-style) -> reflect only admin and database-level access */
 		/* GRANT <any> ON DATABASE db TO user */
-		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
+		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
 		))
 		/* GRANT <any> ON SCHEMA db TO user */
-		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
+		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
 		))
 		/* GRANT ALL PRIVILEGES ON ALL DATABASES is non-standard; ignore */
 		/* Treat GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA db TO user as db-level access */
-		(parser '((atom "GRANT" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
+		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
 		))
 
 		/* REVOKE syntax (PostgreSQL-style) -> mirror GRANT behavior */
 		/* REVOKE <any> ON DATABASE db FROM user */
-		(parser '((atom "REVOKE" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
+		(parser '((atom "REVOKE" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					"system"
@@ -667,7 +713,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					0
 		)))
 		/* REVOKE <any> ON SCHEMA db FROM user */
-		(parser '((atom "REVOKE" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
+		(parser '((atom "REVOKE" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					"system"
@@ -680,7 +726,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					0
 		)))
 		/* REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA db FROM user -> treat as db-level */
-		(parser '((atom "REVOKE" true) (+ (or psql_identifier ",")) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
+		(parser '((atom "REVOKE" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					"system"

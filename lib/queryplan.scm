@@ -205,6 +205,19 @@ if there is a group function, create a temporary preaggregate table
 	))
 ) false)))
 
+/* query term helpers */
+(define query_union_all_parts (lambda (query) (match query
+	'(union_all branches order limit offset) (list branches order limit offset)
+	'((symbol union_all) branches order limit offset) (list branches order limit offset)
+	'((quote union_all) branches order limit offset) (list branches order limit offset)
+	_ nil
+)))
+(define query_is_select_core (lambda (query) (and (list? query) (>= (count query) 9))))
+(define query_branch_field_names (lambda (query) (match query
+	'(schema tables fields condition group having order limit offset) (extract_assoc fields (lambda (k v) k))
+	_ '()
+)))
+
 /* make_keytable: create a canonically named group/key table with sloppy engine
 Returns the keytable name. Creates table + partitioning as side effect.
 condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
@@ -330,321 +343,351 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	)))
 
 	(define build_scalar_subselect (lambda (subquery outer_schemas) (begin
-		(define raw_vals (if (and (list? subquery) (>= (count subquery) 9))
-			(list (nth subquery 4) (nth subquery 5) (nth subquery 6) (nth subquery 7) (nth subquery 8))
-			(list nil nil nil nil nil)
-		))
-		(define raw_group (nth raw_vals 0))
-		(define raw_having (nth raw_vals 1))
-		(define raw_order (nth raw_vals 2))
-		(define raw_limit (nth raw_vals 3))
-		(define raw_offset (nth raw_vals 4))
-		(match (apply untangle_query subquery)
-			'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+		(define union_parts (query_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(error "scalar subselect UNION ALL is not supported yet")
 			(begin
-				(define groups2 (coalesceNil groups2 '()))
-				(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
-					(if (or raw_group raw_having raw_order raw_limit raw_offset)
-						(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset))
-						groups2)
-					groups2))
-				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
-				(define field_exprs (extract_assoc fields2 (lambda (k v) v)))
-				(define value_expr (match field_exprs
-					(cons only '()) only
-					_ (error "scalar subselect must return single column")
+				(define raw_vals (if (and (list? subquery) (>= (count subquery) 9))
+					(list (nth subquery 4) (nth subquery 5) (nth subquery 6) (nth subquery 7) (nth subquery 8))
+					(list nil nil nil nil nil)
 				))
-				(define scalar_neutral (list (quote quote) (quote __scalar_empty)))
-				(define scalar_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
-					(list (quote if)
-						(list (quote equal?) (quote acc) scalar_neutral)
-						(list (quote if)
-							(list (quote equal?) (quote v) scalar_neutral)
-							(quote acc)
-							(quote v)
-						)
-						(list (quote if)
-							(list (quote equal?) (quote v) scalar_neutral)
-							(quote acc)
-							(list (quote error) "scalar subselect returned more than one row")
-						)
-					)
-				))
-				(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
-				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
-				(define replace_resultrow (lambda (expr) (match expr
-					(cons sym args) (if (equal? sym (quote resultrow))
-						(cons (symbol "__scalar_resultrow") (map args replace_resultrow))
-						(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-							(list (quote symbol) "__scalar_resultrow")
-							(cons (replace_resultrow sym) (map args replace_resultrow))
-						)
-					)
-					expr
-				)))
-				(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
-				(list (quote begin)
-					(list (quote set) (symbol "accsess") (list (quote newsession)))
-					(list (symbol "accsess") "acc" scalar_neutral)
-					(list (quote set) (symbol "__scalar_resultrow")
-						(list (quote lambda) (list (symbol "row"))
-							(list (quote begin)
-								(list (symbol "accsess") "acc"
-									(list scalar_reduce
-										(list (symbol "accsess") "acc")
-										(list (quote nth) (symbol "row") 1)))
-								true
+				(define raw_group (nth raw_vals 0))
+				(define raw_having (nth raw_vals 1))
+				(define raw_order (nth raw_vals 2))
+				(define raw_limit (nth raw_vals 3))
+				(define raw_offset (nth raw_vals 4))
+				(match (apply untangle_query subquery)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					(begin
+						(define groups2 (coalesceNil groups2 '()))
+						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
+							(if (or raw_group raw_having raw_order raw_limit raw_offset)
+								(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset))
+								groups2)
+							groups2))
+						(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
+						(define field_exprs (extract_assoc fields2 (lambda (k v) v)))
+						(define value_expr (match field_exprs
+							(cons only '()) only
+							_ (error "scalar subselect must return single column")
+						))
+						(define scalar_neutral (list (quote quote) (quote __scalar_empty)))
+						(define scalar_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
+							(list (quote if)
+								(list (quote equal?) (quote acc) scalar_neutral)
+								(list (quote if)
+									(list (quote equal?) (quote v) scalar_neutral)
+									(quote acc)
+									(quote v)
+								)
+								(list (quote if)
+									(list (quote equal?) (quote v) scalar_neutral)
+									(quote acc)
+									(list (quote error) "scalar subselect returned more than one row")
+								)
 							)
+						))
+						(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
+						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
+						(define replace_resultrow (lambda (expr) (match expr
+							(cons sym args) (if (equal? sym (quote resultrow))
+								(cons (symbol "__scalar_resultrow") (map args replace_resultrow))
+								(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+									(list (quote symbol) "__scalar_resultrow")
+									(cons (replace_resultrow sym) (map args replace_resultrow))
+								)
+							)
+							expr
+						)))
+						(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
+						(list (quote begin)
+							(list (quote set) (symbol "accsess") (list (quote newsession)))
+							(list (symbol "accsess") "acc" scalar_neutral)
+							(list (quote set) (symbol "__scalar_resultrow")
+								(list (quote lambda) (list (symbol "row"))
+									(list (quote begin)
+										(list (symbol "accsess") "acc"
+											(list scalar_reduce
+												(list (symbol "accsess") "acc")
+												(list (quote nth) (symbol "row") 1)))
+										true
+									)
+								)
+							)
+							subplan
+							(list (quote if)
+								(list (quote equal?) (list (symbol "accsess") "acc") scalar_neutral)
+								nil
+								(list (symbol "accsess") "acc"))
 						)
 					)
-					subplan
-					(list (quote if)
-						(list (quote equal?) (list (symbol "accsess") "acc") scalar_neutral)
-						nil
-						(list (symbol "accsess") "acc"))
 				)
 			)
 		)
 	)))
 
 	(define build_in_subselect (lambda (target_expr subquery outer_schemas) (begin
-		(define raw_vals (if (and (list? subquery) (>= (count subquery) 9))
-			(list (nth subquery 4) (nth subquery 5) (nth subquery 6) (nth subquery 7) (nth subquery 8))
-			(list nil nil nil nil nil)
-		))
-		(define raw_group (nth raw_vals 0))
-		(define raw_having (nth raw_vals 1))
-		(define raw_order (nth raw_vals 2))
-		(define raw_limit (nth raw_vals 3))
-		(define raw_offset (nth raw_vals 4))
-		(match (apply untangle_query subquery)
-			'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+		(define union_parts (query_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(match union_parts '(branches order limit offset) (begin
+				(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
+					(error "UNION ALL with ORDER/LIMIT/OFFSET is not supported yet in IN subselects"))
+				(if (or (nil? branches) (equal? branches '()))
+					false
+					(cons (quote or) (map branches (lambda (branch) (build_in_subselect target_expr branch outer_schemas)))))
+			))
 			(begin
-				(define groups2 (coalesceNil groups2 '()))
-				(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
-					(if (or raw_group raw_having raw_order raw_limit raw_offset)
-						(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset))
-						groups2)
-					groups2))
-				(define has_stage (and (not (nil? groups2)) (not (equal? groups2 '()))))
-				(if (and has_stage (not (equal? (cdr groups2) '()))) (error "multiple group stages not supported yet in IN subselects"))
-				(define stage (if has_stage (car groups2) nil))
-				(define stage_group (if stage (coalesceNil (stage_group_cols stage) '()) nil))
-				(define stage_having (if stage (stage_having_expr stage) nil))
-				(define stage_order (if stage (coalesceNil (stage_order_list stage) '()) nil))
-				(define stage_limit (if stage (stage_limit_val stage) nil))
-				(define stage_offset (if stage (stage_offset_val stage) nil))
-				(if (or (and (not (nil? stage_group)) (not (equal? stage_group '()))) (not (nil? stage_having)))
-					(error "group/having is not supported yet in IN subselects")
-				)
-				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
-				(define replace_find_column_outer (make_replace_find_column_subselect '() outer_schemas))
-				(define field_exprs (extract_assoc fields2 (lambda (key value) value)))
-				(define value_expr (match field_exprs
-					(cons only '()) only
-					_ (error "IN subselect must return single column")
+				(define raw_vals (if (and (list? subquery) (>= (count subquery) 9))
+					(list (nth subquery 4) (nth subquery 5) (nth subquery 6) (nth subquery 7) (nth subquery 8))
+					(list nil nil nil nil nil)
 				))
-				(set target_expr (replace_find_column_outer target_expr))
-				(set value_expr (replace_find_column_subselect value_expr))
-				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
-				(define in_expr (if (or (nil? tables2) (equal? tables2 '()))
+				(define raw_group (nth raw_vals 0))
+				(define raw_having (nth raw_vals 1))
+				(define raw_order (nth raw_vals 2))
+				(define raw_limit (nth raw_vals 3))
+				(define raw_offset (nth raw_vals 4))
+				(match (apply untangle_query subquery)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
-						(define limit_zero (and (not (nil? stage_limit)) (equal? stage_limit 0)))
-						(define offset_positive (and (not (nil? stage_offset)) (> stage_offset 0)))
-						(if (or limit_zero offset_positive)
-							false
-							(list (quote and) condition2 (list (quote equal??) target_expr value_expr)))
-					)
-					(begin
-						(if (not (and (list? tables2) (equal? (count tables2) 1)))
-							(error "IN subselect with multiple tables not supported yet")
+						(define groups2 (coalesceNil groups2 '()))
+						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
+							(if (or raw_group raw_having raw_order raw_limit raw_offset)
+								(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset))
+								groups2)
+							groups2))
+						(define has_stage (and (not (nil? groups2)) (not (equal? groups2 '()))))
+						(if (and has_stage (not (equal? (cdr groups2) '()))) (error "multiple group stages not supported yet in IN subselects"))
+						(define stage (if has_stage (car groups2) nil))
+						(define stage_group (if stage (coalesceNil (stage_group_cols stage) '()) nil))
+						(define stage_having (if stage (stage_having_expr stage) nil))
+						(define stage_order (if stage (coalesceNil (stage_order_list stage) '()) nil))
+						(define stage_limit (if stage (stage_limit_val stage) nil))
+						(define stage_offset (if stage (stage_offset_val stage) nil))
+						(if (or (and (not (nil? stage_group)) (not (equal? stage_group '()))) (not (nil? stage_having)))
+							(error "group/having is not supported yet in IN subselects")
 						)
-						(define tdesc (car tables2))
-						(if (not (and (list? tdesc) (equal? (count tdesc) 5)))
-							(error "IN subselect with multiple tables not supported yet")
-						)
-						(define tblvar (nth tdesc 0))
-						(define schema3 (nth tdesc 1))
-						(define tbl (nth tdesc 2))
-						(define isOuter (nth tdesc 3))
-						(define joinexpr (nth tdesc 4))
-						(if (not (nil? joinexpr)) (error "IN subselect joins not supported yet"))
-						(define filtercols (extract_columns_for_tblvar tblvar condition2))
-						(define mapcols (extract_columns_for_tblvar tblvar value_expr))
-						(define use_ordered (or (and (not (nil? stage_order)) (not (equal? stage_order '()))) (not (nil? stage_limit)) (not (nil? stage_offset))))
-						(define ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
-							'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-							'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-							_ '()
-						))))))
-						(define dirs (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
-							'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-							'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-							_ '()
-						))))))
-						(if (and use_ordered (not (equal? stage_order '())) (not (equal? (count ordercols) (count stage_order))))
-							(error "IN subselect ORDER BY must use direct columns")
-						)
-						(define in_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
-							(list (quote or) (quote acc) (quote v))
+						(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
+						(define replace_find_column_outer (make_replace_find_column_subselect '() outer_schemas))
+						(define field_exprs (extract_assoc fields2 (lambda (key value) value)))
+						(define value_expr (match field_exprs
+							(cons only '()) only
+							_ (error "IN subselect must return single column")
 						))
-						(define in_neutral false)
-						(define map_expr (list (quote equal??) (replace_columns_from_expr target_expr) (replace_columns_from_expr value_expr)))
-						(if use_ordered
-							(list (quote scan_order)
-								schema3
-								tbl
-								(cons list filtercols)
-								(list (quote lambda)
-									(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-									(optimize (replace_columns_from_expr condition2))
-								)
-								(cons list ordercols)
-								(cons list dirs)
-								(coalesceNil stage_offset 0)
-								(coalesceNil stage_limit -1)
-								(cons list mapcols)
-								(list (quote lambda)
-									(map mapcols (lambda (col) (symbol (concat tblvar "." col))))
-									map_expr
-								)
-								in_reduce
-								in_neutral
+						(set target_expr (replace_find_column_outer target_expr))
+						(set value_expr (replace_find_column_subselect value_expr))
+						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
+						(define in_expr (if (or (nil? tables2) (equal? tables2 '()))
+							(begin
+								(define limit_zero (and (not (nil? stage_limit)) (equal? stage_limit 0)))
+								(define offset_positive (and (not (nil? stage_offset)) (> stage_offset 0)))
+								(if (or limit_zero offset_positive)
+									false
+									(list (quote and) condition2 (list (quote equal??) target_expr value_expr)))
 							)
-							(list (quote scan)
-								schema3
-								tbl
-								(cons list filtercols)
-								(list (quote lambda)
-									(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-									(optimize (replace_columns_from_expr condition2))
+							(begin
+								(if (not (and (list? tables2) (equal? (count tables2) 1)))
+									(error "IN subselect with multiple tables not supported yet")
 								)
-								(cons list mapcols)
-								(list (quote lambda)
-									(map mapcols (lambda (col) (symbol (concat tblvar "." col))))
-									map_expr
+								(define tdesc (car tables2))
+								(if (not (and (list? tdesc) (equal? (count tdesc) 5)))
+									(error "IN subselect with multiple tables not supported yet")
 								)
-								in_reduce
-								in_neutral
-								in_reduce
+								(define tblvar (nth tdesc 0))
+								(define schema3 (nth tdesc 1))
+								(define tbl (nth tdesc 2))
+								(define isOuter (nth tdesc 3))
+								(define joinexpr (nth tdesc 4))
+								(if (not (nil? joinexpr)) (error "IN subselect joins not supported yet"))
+								(define filtercols (extract_columns_for_tblvar tblvar condition2))
+								(define mapcols (extract_columns_for_tblvar tblvar value_expr))
+								(define use_ordered (or (and (not (nil? stage_order)) (not (equal? stage_order '()))) (not (nil? stage_limit)) (not (nil? stage_offset))))
+								(define ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
+									'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+									'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+									_ '()
+								))))))
+								(define dirs (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
+									'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+									'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+									_ '()
+								))))))
+								(if (and use_ordered (not (equal? stage_order '())) (not (equal? (count ordercols) (count stage_order))))
+									(error "IN subselect ORDER BY must use direct columns")
+								)
+								(define in_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
+									(list (quote or) (quote acc) (quote v))
+								))
+								(define in_neutral false)
+								(define map_expr (list (quote equal??) (replace_columns_from_expr target_expr) (replace_columns_from_expr value_expr)))
+								(if use_ordered
+									(list (quote scan_order)
+										schema3
+										tbl
+										(cons list filtercols)
+										(list (quote lambda)
+											(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
+											(optimize (replace_columns_from_expr condition2))
+										)
+										(cons list ordercols)
+										(cons list dirs)
+										(coalesceNil stage_offset 0)
+										(coalesceNil stage_limit -1)
+										(cons list mapcols)
+										(list (quote lambda)
+											(map mapcols (lambda (col) (symbol (concat tblvar "." col))))
+											map_expr
+										)
+										in_reduce
+										in_neutral
+									)
+									(list (quote scan)
+										schema3
+										tbl
+										(cons list filtercols)
+										(list (quote lambda)
+											(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
+											(optimize (replace_columns_from_expr condition2))
+										)
+										(cons list mapcols)
+										(list (quote lambda)
+											(map mapcols (lambda (col) (symbol (concat tblvar "." col))))
+											map_expr
+										)
+										in_reduce
+										in_neutral
+										in_reduce
+									)
+								)
 							)
-						)
+						))
+						in_expr
 					)
-				))
-				in_expr
+				)
 			)
 		)
 	)))
 
 	(define build_exists_subselect (lambda (subquery outer_schemas) (begin
-		(define raw_vals (if (and (list? subquery) (>= (count subquery) 9))
-			(list (nth subquery 4) (nth subquery 5) (nth subquery 6) (nth subquery 7) (nth subquery 8))
-			(list nil nil nil nil nil)
-		))
-		(define raw_group (nth raw_vals 0))
-		(define raw_having (nth raw_vals 1))
-		(define raw_order (nth raw_vals 2))
-		(define raw_limit (nth raw_vals 3))
-		(define raw_offset (nth raw_vals 4))
-		(match (apply untangle_query subquery)
-			'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+		(define union_parts (query_union_all_parts subquery))
+		(if (not (nil? union_parts))
+			(match union_parts '(branches order limit offset) (begin
+				(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
+					(error "UNION ALL with ORDER/LIMIT/OFFSET is not supported yet in EXISTS subselects"))
+				(if (or (nil? branches) (equal? branches '()))
+					false
+					(cons (quote or) (map branches (lambda (branch) (build_exists_subselect branch outer_schemas)))))
+			))
 			(begin
-				(define groups2 (coalesceNil groups2 '()))
-				(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
-					(if (or raw_group raw_having raw_order raw_limit raw_offset)
-						(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset))
-						groups2)
-					groups2))
-				(define has_stage (and (not (nil? groups2)) (not (equal? groups2 '()))))
-				(if (and has_stage (not (equal? (cdr groups2) '()))) (error "multiple group stages not supported yet in EXISTS subselects"))
-				(define stage (if has_stage (car groups2) nil))
-				(define stage_group (if stage (coalesceNil (stage_group_cols stage) '()) nil))
-				(define stage_having (if stage (stage_having_expr stage) nil))
-				(define stage_order (if stage (coalesceNil (stage_order_list stage) '()) nil))
-				(define stage_limit (if stage (stage_limit_val stage) nil))
-				(define stage_offset (if stage (stage_offset_val stage) nil))
-				(if (or (and (not (nil? stage_group)) (not (equal? stage_group '()))) (not (nil? stage_having)))
-					(error "group/having is not supported yet in EXISTS subselects")
-				)
-				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
-				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
-				(define exists_expr (if (or (nil? tables2) (equal? tables2 '()))
-					(begin
-						(define limit_zero (and (not (nil? stage_limit)) (equal? stage_limit 0)))
-						(define offset_positive (and (not (nil? stage_offset)) (> stage_offset 0)))
-						(if (or limit_zero offset_positive)
-							false
-							condition2)
-					)
-					(begin
-						(if (not (and (list? tables2) (equal? (count tables2) 1)))
-							(error "EXISTS subselect with multiple tables not supported yet")
-						)
-						(define tdesc (car tables2))
-						(if (not (and (list? tdesc) (equal? (count tdesc) 5)))
-							(error "EXISTS subselect with multiple tables not supported yet")
-						)
-						(define tblvar (nth tdesc 0))
-						(define schema3 (nth tdesc 1))
-						(define tbl (nth tdesc 2))
-						(define isOuter (nth tdesc 3))
-						(define joinexpr (nth tdesc 4))
-						(if (not (nil? joinexpr)) (error "EXISTS subselect joins not supported yet"))
-						(define filtercols (extract_columns_for_tblvar tblvar condition2))
-						(define use_ordered (or (and (not (nil? stage_order)) (not (equal? stage_order '()))) (not (nil? stage_limit)) (not (nil? stage_offset))))
-						(define ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
-							'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-							'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-							_ '()
-						))))))
-						(define dirs (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
-							'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-							'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-							_ '()
-						))))))
-						(if (and use_ordered (not (equal? stage_order '())) (not (equal? (count ordercols) (count stage_order))))
-							(error "EXISTS subselect ORDER BY must use direct columns")
-						)
-						(define exists_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
-							(list (quote or) (quote acc) (quote v))
-						))
-						(define exists_neutral false)
-						(if use_ordered
-							(list (quote scan_order)
-								schema3
-								tbl
-								(cons list filtercols)
-								(list (quote lambda)
-									(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-									(optimize (replace_columns_from_expr condition2))
-								)
-								(cons list ordercols)
-								(cons list dirs)
-								(coalesceNil stage_offset 0)
-								(coalesceNil stage_limit -1)
-								(cons list '())
-								(list (quote lambda) '() true)
-								exists_reduce
-								exists_neutral
-							)
-							(list (quote scan)
-								schema3
-								tbl
-								(cons list filtercols)
-								(list (quote lambda)
-									(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-									(optimize (replace_columns_from_expr condition2))
-								)
-								(cons list '())
-								(list (quote lambda) '() true)
-								exists_reduce
-								exists_neutral
-								exists_reduce
-							)
-						)
-					)
+				(define raw_vals (if (and (list? subquery) (>= (count subquery) 9))
+					(list (nth subquery 4) (nth subquery 5) (nth subquery 6) (nth subquery 7) (nth subquery 8))
+					(list nil nil nil nil nil)
 				))
-				exists_expr
+				(define raw_group (nth raw_vals 0))
+				(define raw_having (nth raw_vals 1))
+				(define raw_order (nth raw_vals 2))
+				(define raw_limit (nth raw_vals 3))
+				(define raw_offset (nth raw_vals 4))
+				(match (apply untangle_query subquery)
+					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+					(begin
+						(define groups2 (coalesceNil groups2 '()))
+						(define groups2 (if (or (nil? groups2) (equal? groups2 '()))
+							(if (or raw_group raw_having raw_order raw_limit raw_offset)
+								(list (make_group_stage raw_group raw_having raw_order raw_limit raw_offset))
+								groups2)
+							groups2))
+						(define has_stage (and (not (nil? groups2)) (not (equal? groups2 '()))))
+						(if (and has_stage (not (equal? (cdr groups2) '()))) (error "multiple group stages not supported yet in EXISTS subselects"))
+						(define stage (if has_stage (car groups2) nil))
+						(define stage_group (if stage (coalesceNil (stage_group_cols stage) '()) nil))
+						(define stage_having (if stage (stage_having_expr stage) nil))
+						(define stage_order (if stage (coalesceNil (stage_order_list stage) '()) nil))
+						(define stage_limit (if stage (stage_limit_val stage) nil))
+						(define stage_offset (if stage (stage_offset_val stage) nil))
+						(if (or (and (not (nil? stage_group)) (not (equal? stage_group '()))) (not (nil? stage_having)))
+							(error "group/having is not supported yet in EXISTS subselects")
+						)
+						(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
+						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
+						(define exists_expr (if (or (nil? tables2) (equal? tables2 '()))
+							(begin
+								(define limit_zero (and (not (nil? stage_limit)) (equal? stage_limit 0)))
+								(define offset_positive (and (not (nil? stage_offset)) (> stage_offset 0)))
+								(if (or limit_zero offset_positive)
+									false
+									condition2)
+							)
+							(begin
+								(if (not (and (list? tables2) (equal? (count tables2) 1)))
+									(error "EXISTS subselect with multiple tables not supported yet")
+								)
+								(define tdesc (car tables2))
+								(if (not (and (list? tdesc) (equal? (count tdesc) 5)))
+									(error "EXISTS subselect with multiple tables not supported yet")
+								)
+								(define tblvar (nth tdesc 0))
+								(define schema3 (nth tdesc 1))
+								(define tbl (nth tdesc 2))
+								(define isOuter (nth tdesc 3))
+								(define joinexpr (nth tdesc 4))
+								(if (not (nil? joinexpr)) (error "EXISTS subselect joins not supported yet"))
+								(define filtercols (extract_columns_for_tblvar tblvar condition2))
+								(define use_ordered (or (and (not (nil? stage_order)) (not (equal? stage_order '()))) (not (nil? stage_limit)) (not (nil? stage_offset))))
+								(define ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
+									'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+									'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+									_ '()
+								))))))
+								(define dirs (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
+									'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+									'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+									_ '()
+								))))))
+								(if (and use_ordered (not (equal? stage_order '())) (not (equal? (count ordercols) (count stage_order))))
+									(error "EXISTS subselect ORDER BY must use direct columns")
+								)
+								(define exists_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
+									(list (quote or) (quote acc) (quote v))
+								))
+								(define exists_neutral false)
+								(if use_ordered
+									(list (quote scan_order)
+										schema3
+										tbl
+										(cons list filtercols)
+										(list (quote lambda)
+											(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
+											(optimize (replace_columns_from_expr condition2))
+										)
+										(cons list ordercols)
+										(cons list dirs)
+										(coalesceNil stage_offset 0)
+										(coalesceNil stage_limit -1)
+										(cons list '())
+										(list (quote lambda) '() true)
+										exists_reduce
+										exists_neutral
+									)
+									(list (quote scan)
+										schema3
+										tbl
+										(cons list filtercols)
+										(list (quote lambda)
+											(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
+											(optimize (replace_columns_from_expr condition2))
+										)
+										(cons list '())
+										(list (quote lambda) '() true)
+										exists_reduce
+										exists_neutral
+										exists_reduce
+									)
+								)
+							)
+						))
+						exists_expr
+					)
+				)
 			)
 		)
 	)))
@@ -734,97 +777,101 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
 				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
-				'(id schemax subquery isOuter joinexpr) (match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
-					/* helper function add prefix to tblalias of every expression */
-					(define replace_column_alias (lambda (expr) (match expr
-						'((symbol get_column) nil ti col ci) (begin
-							/* resolve unqualified column against inner schemas2; must match exactly one table */
-							(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
-								(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
-									(cons alias acc)
-									acc)) '()))
-							(match matches
-								(cons only '()) '('get_column (concat id ":" only) ti col ci)
-								'() (begin
-									/* column not in schemas2 - check if it's a SELECT alias in fields2 */
-									(if (nil? (fields2 col))
-										(error (concat "column " col " does not exist in subquery"))
-										/* found in fields2 - resolve to the underlying expression */
-										(replace_column_alias (fields2 col))
+				'(id schemax subquery isOuter joinexpr) (begin
+					(if (not (nil? (query_union_all_parts subquery)))
+						(error "UNION ALL in FROM subqueries is not supported yet"))
+					(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+						/* helper function add prefix to tblalias of every expression */
+						(define replace_column_alias (lambda (expr) (match expr
+							'((symbol get_column) nil ti col ci) (begin
+								/* resolve unqualified column against inner schemas2; must match exactly one table */
+								(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
+									(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
+										(cons alias acc)
+										acc)) '()))
+								(match matches
+									(cons only '()) '('get_column (concat id ":" only) ti col ci)
+									'() (begin
+										/* column not in schemas2 - check if it's a SELECT alias in fields2 */
+										(if (nil? (fields2 col))
+											(error (concat "column " col " does not exist in subquery"))
+											/* found in fields2 - resolve to the underlying expression */
+											(replace_column_alias (fields2 col))
+										)
 									)
+									(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 								)
-								(cons _ _) (error (concat "ambiguous column " col " in subquery"))
+							)
+							'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+							'((symbol outer) outer_arg) (begin
+								/* prefix outer variable reference if it refers to a table in schemas2 */
+								(define s (string outer_arg))
+								(define parts (split s "."))
+								(match parts
+									(list tbl col) (if (not (nil? (schemas2 tbl)))
+										(list (quote outer) (symbol (concat id ":" tbl "." col)))
+										(list (quote outer) outer_arg))
+									_ (list (quote outer) (replace_column_alias outer_arg))
+								)
+							)
+							(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
+							expr
+						)))
+						/* prefix all table aliases and transform their joinexprs */
+						(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
+							(list (concat id ":" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+						/* helper function to transform joinexpr: only transform references to subquery alias id */
+						(define transform_joinexpr (lambda (expr) (match expr
+							'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
+								/* reference to subquery alias -> resolve against inner schemas by passing nil alias */
+								(replace_column_alias (list (quote get_column) nil ti col ci))
+								/* reference to outer table -> keep as-is */
+								expr)
+							(cons sym args) /* function call */ (cons sym (map args transform_joinexpr))
+							expr
+						)))
+						/* transform and attach joinexpr to first table in tablesPrefixed */
+						(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr joinexpr)))
+						/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics */
+						(set condition2_transformed (replace_column_alias condition2))
+						(set joinexpr2 (if isOuter
+							/* merge condition2 into joinexpr for outer joins */
+							(if (nil? joinexpr2)
+								condition2_transformed
+								(if (or (nil? condition2_transformed) (equal? condition2_transformed true))
+									joinexpr2
+									(list (quote and) joinexpr2 condition2_transformed)))
+							joinexpr2))
+						(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
+							(set tablesPrefixed (cons
+								/* inherit isOuter from the subquery's join type, not from inner table */
+								(match (car tablesPrefixed) '(a s t io je) (list a s t isOuter joinexpr2))
+								(cdr tablesPrefixed)))
+						)
+						/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
+						(if (and (not (nil? groups2)) (not (equal? groups2 '())))
+							(begin
+								(define unsupported (reduce groups2 (lambda (acc stage)
+									(or acc
+										(begin
+											(define g (stage_group_cols stage))
+											(and (not (nil? g)) (not (equal? g '())))
+										)
+										(not (nil? (stage_having_expr stage)))
+										(not (nil? (stage_limit_val stage)))
+										(not (nil? (stage_offset_val stage)))
+									)
+								) false))
+								(if unsupported (error "group/order/limit is not supported yet in subqueries"))
+								(set groups2 nil)
 							)
 						)
-						'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
-						'((symbol outer) outer_arg) (begin
-							/* prefix outer variable reference if it refers to a table in schemas2 */
-							(define s (string outer_arg))
-							(define parts (split s "."))
-							(match parts
-								(list tbl col) (if (not (nil? (schemas2 tbl)))
-									(list (quote outer) (symbol (concat id ":" tbl "." col)))
-									(list (quote outer) outer_arg))
-								_ (list (quote outer) (replace_column_alias outer_arg))
-							)
-						)
-						(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
-						expr
-					)))
-					/* prefix all table aliases and transform their joinexprs */
-					(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
-						(list (concat id ":" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
-					/* helper function to transform joinexpr: only transform references to subquery alias id */
-					(define transform_joinexpr (lambda (expr) (match expr
-						'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
-							/* reference to subquery alias -> resolve against inner schemas by passing nil alias */
-							(replace_column_alias (list (quote get_column) nil ti col ci))
-							/* reference to outer table -> keep as-is */
-							expr)
-						(cons sym args) /* function call */ (cons sym (map args transform_joinexpr))
-						expr
-					)))
-					/* transform and attach joinexpr to first table in tablesPrefixed */
-					(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr joinexpr)))
-					/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics */
-					(set condition2_transformed (replace_column_alias condition2))
-					(set joinexpr2 (if isOuter
-						/* merge condition2 into joinexpr for outer joins */
-						(if (nil? joinexpr2)
-							condition2_transformed
-							(if (or (nil? condition2_transformed) (equal? condition2_transformed true))
-								joinexpr2
-								(list (quote and) joinexpr2 condition2_transformed)))
-						joinexpr2))
-					(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
-						(set tablesPrefixed (cons
-							/* inherit isOuter from the subquery's join type, not from inner table */
-							(match (car tablesPrefixed) '(a s t io je) (list a s t isOuter joinexpr2))
-							(cdr tablesPrefixed)))
-					)
-					/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
-					(if (and (not (nil? groups2)) (not (equal? groups2 '())))
-						(begin
-							(define unsupported (reduce groups2 (lambda (acc stage)
-								(or acc
-									(begin
-										(define g (stage_group_cols stage))
-										(and (not (nil? g)) (not (equal? g '())))
-									)
-									(not (nil? (stage_having_expr stage)))
-									(not (nil? (stage_limit_val stage)))
-									(not (nil? (stage_offset_val stage)))
-								)
-							) false))
-							(if unsupported (error "group/order/limit is not supported yet in subqueries"))
-							(set groups2 nil)
-						)
-					)
-					/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
-					/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
-					(set globalFilter (if isOuter true (replace_column_alias condition2)))
-					(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
-				) (error "non matching return value for untangle_query"))
+						/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
+						/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
+						(set globalFilter (if isOuter true (replace_column_alias condition2)))
+						(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
+					) (error "non matching return value for untangle_query"))
+				)
 				(error (concat "unknown tabledesc: " tbldesc))
 			)))))
 			(set tablesList (car zipped))
@@ -989,6 +1036,54 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	)
 )
 ))
+
+(define build_queryplan_term (lambda (query) (begin
+	(define union_parts (query_union_all_parts query))
+	(if (nil? union_parts)
+		(if (query_is_select_core query)
+			(apply build_queryplan (apply untangle_query query))
+			(error "invalid SELECT query term"))
+		(match union_parts '(branches order limit offset) (begin
+			(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
+				(error "UNION ALL with set-level ORDER/LIMIT/OFFSET is not supported yet"))
+			(if (or (nil? branches) (equal? branches '()))
+				(error "UNION ALL requires at least one branch"))
+			(define branch_meta (map branches (lambda (branch) (begin
+				(if (not (query_is_select_core branch))
+					(error "UNION ALL branch must be a SELECT query"))
+				(match branch '(schema2 tables2 fields2 condition2 group2 having2 order2 limit2 offset2) (begin
+					(if (or (not (nil? order2)) (not (nil? limit2)) (not (nil? offset2)))
+						(error "UNION ALL branch ORDER/LIMIT/OFFSET is not supported yet"))
+					(define branch_cols (query_branch_field_names branch))
+					(list branch branch_cols (count branch_cols)))
+					_ (error "UNION ALL branch must be a SELECT query"))
+			))))
+			(define expected_cols (match branch_meta
+				(cons first_meta _) (nth first_meta 2)
+				_ 0))
+			(define output_cols (match branch_meta
+				(cons first_meta _) (nth first_meta 1)
+				_ '()))
+			(if (not (reduce branch_meta (lambda (ok meta) (and ok (equal? (nth meta 2) expected_cols))) true))
+				(error "UNION ALL branches must project the same number of columns"))
+			(define branch_plans (map branch_meta (lambda (meta) (begin
+				(define branch (nth meta 0))
+				(define branch_plan (build_queryplan_term branch))
+				(define normalized_row (cons (quote list) (merge (map (produceN expected_cols) (lambda (idx)
+					(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
+				)))))
+				(list (quote begin)
+					(list (quote set) (symbol "__union_resultrow") (symbol "resultrow"))
+					(list (quote set) (symbol "resultrow")
+						(list (quote lambda) (list (symbol "row"))
+							(list (symbol "__union_resultrow") normalized_row)))
+					branch_plan)
+			))))
+			(cons (quote begin) branch_plans)
+		))
+	)
+)))
+
 /* build queryplan from parsed query
 GROUP BY aggregate pipeline:
 When a GROUP BY query has aggregates (SUM, COUNT, etc.), three phases run:

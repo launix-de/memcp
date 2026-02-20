@@ -38,6 +38,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "CROSS" true)
 	(atom "JOIN" true)
 	(atom "SELECT" true)
+	(atom "UNION" true)
+	(atom "ALL" true)
 	(atom "INSERT" true)
 	(atom "ORDER" true)
 	(atom "LIMIT" true)
@@ -454,6 +456,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) "(" sql_int "," sql_int ")" ")") '('simplify p))
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) "(" sql_int ")" ")") '('simplify p))
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "DECIMAL" true) ")") '('simplify p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" sql_int ")" ")") '('concat p))
+		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "VARCHAR" true) ")") '('concat p))
 		(parser '((atom "CAST" true) "(" (define p sql_expression) (atom "AS" true) (atom "CHAR" true) (atom "CHARACTER" true) (atom "SET" true) (atom "utf8" true) ")") '('concat p))
 		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) "(" sql_int "," sql_int ")" ")") '('simplify p))
 		(parser '((atom "CONVERT" true) "(" (define p sql_expression) "," (atom "DECIMAL" true) "(" sql_int ")" ")") '('simplify p))
@@ -529,7 +533,40 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define order nil)
 	(define limit nil)
 	(define offset nil)
-	(define sql_select (parser '(
+	(define sql_select_order (lambda (query) (match query
+		'(schema tables fields condition group having order limit offset) order
+		_ nil
+	)))
+	(define sql_select_limit (lambda (query) (match query
+		'(schema tables fields condition group having order limit offset) limit
+		_ nil
+	)))
+	(define sql_select_offset (lambda (query) (match query
+		'(schema tables fields condition group having order limit offset) offset
+		_ nil
+	)))
+	(define sql_select_clear_stage (lambda (query) (match query
+		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
+		_ query
+	)))
+	(define sql_union_all_parts (lambda (query) (match query
+		'(union_all branches order limit offset) (list branches order limit offset)
+		'((symbol union_all) branches order limit offset) (list branches order limit offset)
+		'((quote union_all) branches order limit offset) (list branches order limit offset)
+		_ nil
+	)))
+	(define sql_union_all_query (lambda (left right) (begin
+		(define right_parts (sql_union_all_parts right))
+		(if (nil? right_parts)
+			(list (quote union_all)
+				(list left (sql_select_clear_stage right))
+				(sql_select_order right)
+				(sql_select_limit right)
+				(sql_select_offset right))
+			(match right_parts '(branches order limit offset)
+				(list (quote union_all) (cons left branches) order limit offset)))
+	)))
+	(define sql_select_core (parser '(
 		(atom "SELECT" true)
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
@@ -588,6 +625,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			)
 		)
 	) '(schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset)))
+	(define sql_select (parser (or
+		(parser '(
+			(define left sql_select_core)
+			(atom "UNION" true)
+			(atom "ALL" true)
+			(define right sql_select)
+		) (sql_union_all_query left right))
+		sql_select_core
+	)))
 
 	(define sql_update (parser '(
 		(atom "UPDATE" true)
@@ -835,7 +881,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						'((quote lambda) '() 0)
 						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
 					'('lambda '('id) '('session "last_insert_id" 'id)))))
-				(apply build_queryplan (apply untangle_query inner))
+				(build_queryplan_term inner)
 			)
 	)))
 
@@ -959,8 +1005,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
-		(parser (define query sql_select) (apply build_queryplan (apply untangle_query query)))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (serialize (apply build_queryplan (apply untangle_query query))))))
+		(parser (define query sql_select) (build_queryplan_term query))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (serialize (build_queryplan_term query)))))
 		sql_insert_into
 		sql_insert_select
 		sql_create_table
@@ -987,12 +1033,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
 		))
 		/* GRANT <anything> ON db.* TO user -> insert access */
-		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_identifier))
+		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
 		))
 		/* GRANT <anything> ON db.table TO user -> also insert access at db level */
-		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "TO" true) (define username sql_identifier))
+		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "TO" true) (define username sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
 		))
@@ -1004,7 +1050,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
-		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_identifier))
+		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					"system"
@@ -1017,7 +1063,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					0
 		)))
 		/* REVOKE <anything> ON db.table FROM user -> treat as db-level and delete access entry */
-		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "FROM" true) (define username sql_identifier))
+		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "FROM" true) (define username sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					"system"
