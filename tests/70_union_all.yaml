@@ -148,6 +148,113 @@ test_cases:
         - ID: 3
           name: "image3.png"
 
+  # === UNION ALL branch shape / staged branch behavior ===
+
+  - name: "UNION ALL keeps output aliases from first branch"
+    noncritical: true
+    sql: |
+      SELECT ID AS file_id, name AS label FROM fop_files WHERE ID = 1
+      UNION ALL
+      SELECT result AS ignored_id, CAST(result AS VARCHAR) AS ignored_label FROM renderjob WHERE ID = 102
+      ORDER BY file_id
+    expect:
+      rows: 2
+      data:
+        - file_id: 1
+          label: "image1.png"
+        - file_id: 3
+          label: "3"
+
+  - name: "UNION ALL with inner ORDER BY/LIMIT per branch"
+    noncritical: true
+    sql: |
+      SELECT ID FROM (
+        SELECT ID FROM fop_files ORDER BY ID DESC LIMIT 2
+      ) AS branch_a
+      UNION ALL
+      SELECT ID FROM (
+        SELECT result AS ID FROM renderjob ORDER BY result ASC LIMIT 1
+      ) AS branch_b
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+        - ID: 4
+        - ID: 5
+
+  - name: "UNION ALL with grouped branch"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files WHERE ID <= 2
+      UNION ALL
+      SELECT result AS ID, CONCAT('r', CAST(COUNT(*) AS VARCHAR)) AS name
+      FROM renderjob
+      GROUP BY result
+      HAVING result = 3
+      ORDER BY ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 2
+          name: "image2.png"
+        - ID: 3
+          name: "r2"
+
+  - name: "UNION ALL with derived branch filtering"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files WHERE ID = 5
+      UNION ALL
+      SELECT ID, name FROM (
+        SELECT ID, name FROM fop_files WHERE ID <= 2 ORDER BY ID DESC LIMIT 1
+      ) AS picked
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 2
+          name: "image2.png"
+        - ID: 5
+          name: "image5.png"
+
+  - name: "UNION ALL with NULL payload in one branch"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files WHERE ID = 1
+      UNION ALL
+      SELECT result AS ID, NULL AS name FROM renderjob WHERE ID = 102
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: null
+
+  # === Must-fail cases ===
+
+  - name: "UNION ALL column count mismatch"
+    noncritical: true
+    sql: |
+      SELECT ID FROM fop_files
+      UNION ALL
+      SELECT ID, name FROM fop_files
+    expect:
+      error: true
+
+  - name: "UNION DISTINCT not supported yet"
+    noncritical: true
+    sql: |
+      SELECT ID FROM fop_files WHERE ID <= 2
+      UNION
+      SELECT ID FROM fop_files WHERE ID >= 4
+    expect:
+      error: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS renderjob"
   - sql: "DROP TABLE IF EXISTS fop_files"

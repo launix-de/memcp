@@ -150,6 +150,148 @@ test_cases:
         - ID: 5
           name: "image5.png"
 
+  - name: "IN with UNION ALL using three branches"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (
+        SELECT result FROM renderjob WHERE ID = 101
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 102
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 103
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+  - name: "IN with UNION ALL duplicate branches keeps semantics"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (
+        SELECT result FROM renderjob WHERE ID = 101
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 102
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 103
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+  - name: "IN with UNION ALL including empty branch"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (
+        SELECT result FROM renderjob WHERE ID > 1000
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 101
+      )
+      ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          name: "image1.png"
+
+  - name: "NOT IN with UNION ALL when all branches empty"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID NOT IN (
+        SELECT result FROM renderjob WHERE ID > 1000
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID > 2000
+      )
+      ORDER BY ID
+    expect:
+      rows: 5
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 2
+          name: "image2.png"
+        - ID: 3
+          name: "image3.png"
+        - ID: 4
+          name: "image4.png"
+        - ID: 5
+          name: "image5.png"
+
+  - name: "IN with UNION ALL and outer filter"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (
+        SELECT result FROM renderjob WHERE ID = 101
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 102
+      )
+      AND ID > 1
+      ORDER BY ID
+    expect:
+      rows: 1
+      data:
+        - ID: 3
+          name: "image3.png"
+
+  - name: "IN with UNION ALL branch using inner ORDER BY/LIMIT"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (
+        SELECT result FROM (
+          SELECT result FROM renderjob ORDER BY ID DESC LIMIT 1
+        ) AS top_result
+        UNION ALL
+        SELECT result FROM renderjob WHERE ID = 101
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+  - name: "IN with UNION ALL column count mismatch"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (
+        SELECT result FROM renderjob WHERE ID = 101
+        UNION ALL
+        SELECT result, ID FROM renderjob WHERE ID = 102
+      )
+    expect:
+      error: true
+
+  - name: "IN with UNION DISTINCT not supported yet"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      WHERE ID IN (
+        SELECT result FROM renderjob WHERE ID = 101
+        UNION
+        SELECT result FROM renderjob WHERE ID = 102
+      )
+      ORDER BY ID
+    expect:
+      error: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS renderjob"
   - sql: "DROP TABLE IF EXISTS fop_files"
