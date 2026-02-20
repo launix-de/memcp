@@ -716,9 +716,6 @@ def start_memcp_process(port: int) -> subprocess.Popen | None:
     try:
         datadir = os.environ.get("MEMCP_TEST_DATADIR", f"/tmp/memcp-sql-tests-{port}")
         env = os.environ.copy()
-        godebug = env.get("GODEBUG", "")
-        if "invalidptr=" not in godebug:
-            env["GODEBUG"] = f"{godebug},invalidptr=0" if godebug else "invalidptr=0"
         devnull = open(os.devnull, 'w')
         proc = subprocess.Popen([
             "./memcp", "-data", datadir,
