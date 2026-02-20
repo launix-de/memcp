@@ -1181,8 +1181,16 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 								/* TODO: match case insensitive column */
 								/* TODO: non-trivial columns to computed columns */
 								/* preserve ORDER BY key order (first key has highest priority) */
-								(set ordercols (merge (map stage_order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list col) '())))))
-								(set dirs      (merge (map stage_order (lambda (o) (match o '('((symbol get_column) (eval tblvar) _ col _) dir) (list dir) '())))))
+								(set ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
+									'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+									'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+									_ '()
+								))))))
+								(set dirs (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
+									'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+									'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+									_ '()
+								))))))
 
 								/* offset/limit only apply to the outermost scan, not to nested JOINs */
 								(define scan_offset (if is_first stage_offset 0))

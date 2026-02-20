@@ -462,6 +462,16 @@ class SQLTestRunner:
                 # Treat SHUTDOWN as successful regardless of response body, even if the connection closed.
                 if self._restart_handler is not None:
                     self._restart_handler()
+                else:
+                    # No restart handler (--connect-only): wait for external supervisor to restart
+                    import time as _time
+                    for _i in range(60):
+                        _time.sleep(1)
+                        try:
+                            if requests.get(self.base_url, timeout=2).status_code < 500:
+                                break
+                        except Exception:
+                            pass
                 self._record_success(name, is_noncritical)
                 return True
 
@@ -623,6 +633,10 @@ class SQLTestRunner:
         self.suite_metadata = metadata or {}
         self.suite_syntax = self._normalize_syntax(self.suite_metadata.get("syntax"))
         database = 'memcp-tests'
+
+        if metadata.get('disabled'):
+            print(f"⏭️  Suite disabled: {metadata.get('description', spec_file)}")
+            return True
 
         # Load performance baselines for this machine
         if PERF_TEST_ENABLED:

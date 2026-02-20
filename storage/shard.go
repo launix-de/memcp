@@ -54,6 +54,9 @@ type storageShard struct {
 
 	// repartition drain tracking: counts in-flight scans on this shard
 	activeScanners atomic.Int32
+
+	// guards RemoveFromDisk against double execution (finalizer + explicit cleanup)
+	cleanupOnce sync.Once
 }
 
 func (s *storageShard) ComputeSize() uint {
@@ -930,23 +933,25 @@ func (t *storageShard) getDelta(idx int, col string) scm.Scmer {
 }
 
 func (t *storageShard) RemoveFromDisk() {
-	// close logfile
-	if t.logfile != nil {
-		t.logfile.Close()
-	}
-	// Release blob refcounts before removing column files.
-	// Skip for COLD shards (columns not loaded) -- orphaned blobs will be cleaned by (clean).
-	for _, col := range t.t.Columns {
-		if cs, ok := t.columns[col.Name]; ok && cs != nil {
-			if blob, ok := cs.(*OverlayBlob); ok {
-				blob.ReleaseBlobs(uint(t.main_count))
+	t.cleanupOnce.Do(func() {
+		// close logfile
+		if t.logfile != nil {
+			t.logfile.Close()
+		}
+		// Release blob refcounts before removing column files.
+		// Skip for COLD shards (columns not loaded) -- orphaned blobs will be cleaned by (clean).
+		for _, col := range t.t.Columns {
+			if cs, ok := t.columns[col.Name]; ok && cs != nil {
+				if blob, ok := cs.(*OverlayBlob); ok {
+					blob.ReleaseBlobs(uint(t.main_count))
+				}
 			}
 		}
-	}
-	for _, col := range t.t.Columns {
-		t.t.schema.persistence.RemoveColumn(t.uuid.String(), col.Name)
-	}
-	t.t.schema.persistence.RemoveLog(t.uuid.String())
+		for _, col := range t.t.Columns {
+			t.t.schema.persistence.RemoveColumn(t.uuid.String(), col.Name)
+		}
+		t.t.schema.persistence.RemoveLog(t.uuid.String())
+	})
 }
 
 // rebuild main storage from main+delta
@@ -1043,7 +1048,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			for {
 				// scan phase
 				i = 0
-				reader = newCachedColumnReader(c) // fresh cached reader for each scan pass
+				reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
 				newcol.prepare()
 				// scan main
 				for idx := uint32(0); idx < t.main_count; idx++ {
@@ -1075,12 +1080,16 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 			}
 			// build phase
+			// TODO: when source and target are both OverlayBlob, pass raw
+			// compressed blob data through instead of decompressing via
+			// GetValue and recompressing in build(). This avoids a full
+			// gzip round-trip per blob during rebuild.
 			if blob, ok := newcol.(*OverlayBlob); ok {
 				blob.schema = result.t.schema
 			}
 			newcol.init(i)
 			i = 0
-			reader = newCachedColumnReader(c) // fresh cached reader for build pass
+			reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
 			// build main
 			for idx := uint32(0); idx < t.main_count; idx++ {
 				// check for deletion

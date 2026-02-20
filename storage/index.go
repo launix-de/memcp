@@ -256,7 +256,9 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 					}
 					// otherwise: next iteration
 				}
-				return false // fully equal
+				// tiebreak by itemid so duplicate key values are never "equal"
+				// (prevents ReplaceOrInsert from dropping rows with same key)
+				return i.itemid < j.itemid
 			})
 			// fill deltaBtree with global record IDs (no locking required; we are already in a readlock)
 			for i, data := range s.t.inserts {
@@ -325,15 +327,10 @@ iteration:
 			}
 		}
 		refLower := make([]scm.Scmer, maxCol)
-		refUpper := make([]scm.Scmer, maxCol)
-		for i, col := range s.Cols {
+		for i := 0; i < cmpCols; i++ {
+			col := s.Cols[i]
 			if pos, ok := s.t.deltaColumns[col]; ok {
 				refLower[pos] = lower[i]
-				if i == cmpCols-1 && !upperLast.IsNil() {
-					refUpper[pos] = upperLast
-				} else {
-					refUpper[pos] = lower[i]
-				}
 			}
 		}
 		// AscendRange is [greaterOrEqual, lessThan) so we need to go one past upper.
@@ -342,8 +339,9 @@ iteration:
 			if p.itemid < 0 {
 				return true // skip reference items (shouldn't happen, but defensive)
 			}
-			// check upper bound for each column
-			for i, col := range s.Cols {
+			// check upper bound for each compared column
+			for i := 0; i < cmpCols; i++ {
+				col := s.Cols[i]
 				pos, ok := s.t.deltaColumns[col]
 				if !ok {
 					continue

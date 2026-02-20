@@ -275,15 +275,19 @@ func (db *database) rebuild(all bool, repartition bool) {
 	done.Add(len(dbs))
 	for _, t := range dbs {
 		go func(t *table) {
+			tableLocked := false
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Println("error: rebuild failed for table", db.Name+".", t.Name, ":", r, "\n", r)
+					fmt.Println("error: rebuild failed for table", db.Name+".", t.Name, ":", r)
 					// best-effort unlock if still locked
-					func() { defer func() { _ = recover() }(); t.mu.Unlock() }()
+					if tableLocked {
+						func() { defer func() { _ = recover() }(); t.mu.Unlock() }()
+					}
 				}
 				done.Done()
 			}()
 			t.mu.Lock() // table lock
+			tableLocked = true
 			// TODO: check LRU statistics and remove unused computed columns
 
 			// rebuild shards without mutating the live shard list; swap when complete
@@ -400,6 +404,7 @@ func (db *database) rebuild(all bool, repartition bool) {
 			}
 
 			t.mu.Unlock()
+			tableLocked = false
 
 			if doRepart {
 				t.repartition(shardCandidates)

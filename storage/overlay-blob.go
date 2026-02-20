@@ -171,6 +171,10 @@ func (s *OverlayBlob) init(i uint32) {
 	s.Base.init(i)
 }
 func (s *OverlayBlob) build(i uint32, value scm.Scmer) {
+	// TODO: for rebuild/repartition, allow passing raw gzipped blob data
+	// through without decompressing+recompressing. When the source column
+	// is also an OverlayBlob we could copy the hash reference and the
+	// compressed blob file directly, avoiding the gzip round-trip entirely.
 	if value.IsString() {
 		vs := value.String()
 		if len(vs) > 255 {

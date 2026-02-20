@@ -293,7 +293,8 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				cdataset[i] = t.getDelta(int(idx-t.main_count), k)
 			}
 		}
-		if !scm.ToBool(conditionFn(cdataset...)) {
+		condResult := conditionFn(cdataset...)
+		if !scm.ToBool(condResult) {
 			return
 		}
 

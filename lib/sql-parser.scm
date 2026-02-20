@@ -458,6 +458,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "RTRIM" true) "(" (define e sql_expression) ")") '((quote sql_rtrim) e))
 
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesceNil) args))
+		/* MySQL IFNULL(val, default) — alias for COALESCE with 2 args */
+		(parser '((atom "IFNULL" true) "(" (define a sql_expression) "," (define b sql_expression) ")") '((quote coalesceNil) a b))
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
 		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */

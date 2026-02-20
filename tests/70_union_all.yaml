@@ -1,0 +1,153 @@
+# UNION ALL support
+# fuchsbriefe uses 18+ UNION ALL queries combining file sources from multiple tables
+# Implementation: (begin) block with two scans
+
+metadata:
+  version: "1.0"
+  description: "UNION ALL combining results from multiple tables"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS renderjob"
+  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: |
+      CREATE TABLE fop_files (
+        ID INT PRIMARY KEY,
+        name VARCHAR(64)
+      )
+  - sql: |
+      CREATE TABLE renderjob (
+        ID INT PRIMARY KEY,
+        result INT
+      )
+  - sql: |
+      INSERT INTO fop_files (ID, name) VALUES
+      (1, 'image1.png'), (2, 'image2.png'), (3, 'image3.png'),
+      (4, 'image4.png'), (5, 'image5.png')
+  - sql: |
+      INSERT INTO renderjob (ID, result) VALUES
+      (101, 1), (102, 3), (103, 3)
+
+test_cases:
+
+  # === Basic UNION ALL ===
+
+  - name: "UNION ALL two tables"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files WHERE ID <= 2
+      UNION ALL
+      SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob WHERE ID <= 102
+    expect:
+      rows: 4
+
+  - name: "UNION ALL preserves duplicates"
+    noncritical: true
+    sql: |
+      SELECT name FROM fop_files WHERE ID = 1
+      UNION ALL
+      SELECT name FROM fop_files WHERE ID = 1
+    expect:
+      rows: 2
+      data:
+        - name: "image1.png"
+        - name: "image1.png"
+
+  - name: "UNION ALL three queries"
+    noncritical: true
+    sql: |
+      SELECT name FROM fop_files WHERE ID = 1
+      UNION ALL
+      SELECT name FROM fop_files WHERE ID = 2
+      UNION ALL
+      SELECT name FROM fop_files WHERE ID = 3
+    expect:
+      rows: 3
+      data:
+        - name: "image1.png"
+        - name: "image2.png"
+        - name: "image3.png"
+
+  - name: "UNION ALL with WHERE filters"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files WHERE ID <= 2
+      UNION ALL
+      SELECT ID, name FROM fop_files WHERE ID >= 4
+    expect:
+      rows: 4
+
+  # === UNION ALL with ORDER BY / LIMIT ===
+
+  - name: "UNION ALL with ORDER BY"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files WHERE ID <= 2
+      UNION ALL
+      SELECT ID, name FROM fop_files WHERE ID >= 4
+      ORDER BY ID
+    expect:
+      rows: 4
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 2
+          name: "image2.png"
+        - ID: 4
+          name: "image4.png"
+        - ID: 5
+          name: "image5.png"
+
+  - name: "UNION ALL with LIMIT"
+    noncritical: true
+    sql: |
+      SELECT name FROM fop_files
+      UNION ALL
+      SELECT CAST(result AS VARCHAR) AS name FROM renderjob
+      LIMIT 3
+    expect:
+      rows: 3
+
+  - name: "UNION ALL with ORDER BY and LIMIT"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files
+      UNION ALL
+      SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob
+      ORDER BY ID LIMIT 4
+    expect:
+      rows: 4
+
+  # === UNION ALL in subquery / derived table ===
+
+  - name: "UNION ALL as derived table"
+    noncritical: true
+    sql: |
+      SELECT COUNT(*) AS c FROM (
+        SELECT ID FROM fop_files
+        UNION ALL
+        SELECT ID FROM renderjob
+      ) AS combined
+    expect:
+      rows: 1
+      data:
+        - c: 8
+
+  - name: "EXISTS with UNION ALL subselect"
+    noncritical: true
+    sql: |
+      SELECT ID, name FROM fop_files f
+      WHERE EXISTS (
+        SELECT 1 FROM renderjob WHERE result = f.ID
+      )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          name: "image1.png"
+        - ID: 3
+          name: "image3.png"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS renderjob"
+  - sql: "DROP TABLE IF EXISTS fop_files"

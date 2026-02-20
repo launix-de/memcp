@@ -199,7 +199,8 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 	}
 	// enum detection: if <=8 distinct values and not abandoned, propose StorageEnum
 	// but only when the distribution is skewed enough to beat PFOR's ceil(log2(k)) bits/element
-	if s.enumK != 0xFF && s.enumK >= 2 && i > 0 {
+	// Skip when longStrings > 2: OverlayBlob is more appropriate for blob-sized values
+	if s.enumK != 0xFF && s.enumK >= 2 && i > 0 && s.longStrings <= 2 {
 		// compute Shannon entropy in bits
 		n := float64(i)
 		entropy := 0.0

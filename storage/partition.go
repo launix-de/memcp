@@ -473,10 +473,14 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		s.ensureLoaded()
 		s.mu.Lock()
 		for _, sd := range shardCandidates {
-			s.ensureColumnLoaded(sd.Column, true)
+			if _, ok := s.columns[sd.Column]; ok {
+				s.ensureColumnLoaded(sd.Column, true)
+			}
 		}
 		for _, col := range t.Columns {
-			s.ensureColumnLoaded(col.Name, true)
+			if _, ok := s.columns[col.Name]; ok {
+				s.ensureColumnLoaded(col.Name, true)
+			}
 		}
 		s.ensureMainCount(true)
 		s.mu.Unlock()
@@ -495,7 +499,6 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	t.PShards = newshards
 	t.PDimensions = shardCandidates
 	t.repartitionActive = true
-	fmt.Println("DEBUG Phase A: repartitionActive=true, PShards:", len(newshards))
 	// From this point, all concurrent inserts/updates go to BOTH shard sets.
 
 	// ── Phase B: Snapshot deletion baselines ──
@@ -590,6 +593,10 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 						if blob, ok := newcol.(*OverlayBlob); ok {
 							blob.schema = s.t.schema
 						}
+						// TODO: when source column is OverlayBlob, shuffle raw
+						// compressed blob data without decompressing+recompressing.
+						// Copy hash references and blob files directly to avoid
+						// the gzip round-trip during repartition.
 						newcol.init(uint32(mainCount))
 						for j, v := range values {
 							newcol.build(uint32(j), v)
@@ -612,6 +619,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		progress <- si
 		fmt.Println("rebuild", t.Name, si+1, "/", len(newshards))
 	}
+	close(progress) // signal workers to exit after processing all items
 	done.Wait()
 
 	// ── Phase D: Install main storage + Delta shift ──
@@ -753,7 +761,6 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	}
 
 	// Phase E complete — all deletions reconciled. Now safe to clear dual-write.
-	fmt.Println("DEBUG Phase F: drain complete, clearing repartitionActive")
 	t.repartitionActive = false
 
 	// Verify transformation result

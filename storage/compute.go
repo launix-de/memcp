@@ -16,7 +16,6 @@ Copyright (C) 2024  Carl-Philip Hänsch
 */
 package storage
 
-import "fmt"
 import "sync"
 import "runtime"
 import "runtime/debug"
@@ -77,7 +76,6 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 }
 
 func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, parallel bool) bool {
-	fmt.Println("start compute on", s.t.Name, "parallel", parallel)
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		return false // can't compute in shards with delta storage
 	}

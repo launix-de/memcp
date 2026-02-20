@@ -820,7 +820,6 @@ insertDone:
 // by ShardMode) during an active repartition. Called only when repartitionActive
 // is true. Rows are inserted with alreadyLocked=false and no unique/trigger processing.
 func (t *table) dualWriteInsert(columns []string, values [][]scm.Scmer) {
-	fmt.Println("DEBUG dualWriteInsert: mode=", t.ShardMode, "rows=", len(values))
 	if t.ShardMode == ShardModeFree {
 		// Primary is Shards, secondary is PShards
 		if t.PShards == nil {

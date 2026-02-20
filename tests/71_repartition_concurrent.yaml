@@ -1,0 +1,127 @@
+# Concurrent repartition test
+# Verifies that data is not lost when INSERT/DELETE/UPDATE run concurrently with rebuild (repartition).
+# Uses the parallel test directive to launch rebuild and DML operations simultaneously.
+
+metadata:
+  version: "1.0"
+  description: "Concurrent repartition: dual-write correctness"
+  disabled: true  # bulk insert of 61k rows with PK times out; needs unique check optimization
+
+setup:
+  - sql: "DROP TABLE IF EXISTS `rc_data`"
+  - sql: |
+      CREATE TABLE `rc_data` (
+        id INT PRIMARY KEY,
+        val INT,
+        tag TEXT
+      )
+
+test_cases:
+  # ---- Generate 61000 rows so rebuild triggers repartition ----
+  - name: "RC: insert 61000 rows"
+    scm: |
+      (begin
+        (set b (map (produceN 61000) (lambda (i) (list i i (concat "t" i)))))
+        (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+        61000)
+
+  - name: "RC: verify initial count"
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+    expect:
+      rows: 1
+      data:
+        - cnt: 61000
+
+  # ---- Parallel group: rebuild + concurrent DML ----
+  - name: "RC: rebuild (triggers repartition)"
+    parallel: repart
+    scm: "(rebuild)"
+
+  - name: "RC: concurrent INSERT 200 rows"
+    parallel: repart
+    scm: |
+      (begin
+        (set b (map (produceN 200) (lambda (i) (list (+ i 100000) (+ i 100000) (concat "new" i)))))
+        (insert "memcp-tests" "rc_data" (list "id" "val" "tag") b)
+        200)
+
+  - name: "RC: concurrent DELETE 50 rows"
+    parallel: repart
+    sql: "DELETE FROM rc_data WHERE id >= 60950 AND id < 61000"
+    expect:
+      affected_rows: 50
+
+  - name: "RC: concurrent UPDATE 50 rows"
+    parallel: repart
+    sql: "UPDATE rc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"
+    expect:
+      affected_rows: 50
+
+  # ---- Post-parallel verification ----
+  - name: "RC: count after concurrent ops"
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+    expect:
+      rows: 1
+      data:
+        # 61000 original + 200 inserted - 50 deleted = 61150
+        - cnt: 61150
+
+  - name: "RC: verify inserted rows exist"
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 100000"
+    expect:
+      rows: 1
+      data:
+        - cnt: 200
+
+  - name: "RC: verify deleted rows gone"
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 60950 AND id < 61000"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  - name: "RC: verify updated rows"
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE val = -999 AND tag = 'updated'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 50
+
+  - name: "RC: verify first inserted row"
+    sql: "SELECT id, val, tag FROM rc_data WHERE id = 100000"
+    expect:
+      rows: 1
+      data:
+        - id: 100000
+          val: 100000
+          tag: "new0"
+
+  - name: "RC: verify last inserted row"
+    sql: "SELECT id, val, tag FROM rc_data WHERE id = 100199"
+    expect:
+      rows: 1
+      data:
+        - id: 100199
+          val: 100199
+          tag: "new199"
+
+  # ---- Second rebuild to verify stability ----
+  - name: "RC: second rebuild"
+    scm: "(rebuild)"
+
+  - name: "RC: count after second rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data"
+    expect:
+      rows: 1
+      data:
+        - cnt: 61150
+
+  - name: "RC: verify data integrity after second rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM rc_data WHERE id >= 100000"
+    expect:
+      rows: 1
+      data:
+        - cnt: 200
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS `rc_data`"
