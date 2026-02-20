@@ -70,6 +70,8 @@ github.com/jtolds/gls v4.20.0+incompatible h1:xdiiI2gbIgH/gLH7ADydsJ1uDOEzR8yvV7
 github.com/jtolds/gls v4.20.0+incompatible/go.mod h1:QJZ7F/aHp+rZTRtaJ1ow/lLfFfVYBRgL+9YlvaHOwJU=
 github.com/launix-de/go-mysqlstack v0.0.0-20241101205441-bc39b4e0fb04 h1:UptMvGGGmlIqQKcvnAth06l30fVWsFcEC56b8xBHg7Y=
 github.com/launix-de/go-mysqlstack v0.0.0-20241101205441-bc39b4e0fb04/go.mod h1:YNDPcAUMZzFT4UPyIAq5uW4+QrrW64Q3iQAvjZAvASQ=
+github.com/launix-de/go-mysqlstack v0.0.0-20260220192146-2b1e1efd98c4 h1:or2DmzCM1NJHgUPaEUS5ylPptKycYHfdc3ghH76Bycs=
+github.com/launix-de/go-mysqlstack v0.0.0-20260220192146-2b1e1efd98c4/go.mod h1:VdLcZx5196xfE/j4IceJPF462Xf50LvSk5vzuJRdSVs=
 github.com/launix-de/go-packrat/v2 v2.1.19 h1:t5S9dIFdtjwBxrX9rEVaWnN+pv+b3cYr77OYfTBdM60=
 github.com/launix-de/go-packrat/v2 v2.1.19/go.mod h1:Xb1/gZg0UMb2CPgmCfBdwvpMZYhKLjZ5BdqoWa/oQjw=
 github.com/launix-de/go-packrat/v2 v2.1.20 h1:0vpJ3KOPjGVEniYlZKDHCAMY8Ga5e/Fk5WZAzzLDYZ0=
