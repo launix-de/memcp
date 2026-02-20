@@ -405,11 +405,11 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 				// unique constraint checking
 				if t.t.Unique != nil {
 					t.deletions.Set(uint32(idx), true) // mark as deleted temporarily for unique check
-					t.mu.Unlock()                    // release write lock, so the scan can be performed
+					t.mu.Unlock()                      // release write lock, so the scan can be performed
 					t.t.ProcessUniqueCollision(cols, [][]scm.Scmer{d2}, false, func(values [][]scm.Scmer) {
 						t.mu.Lock() // start write lock
 					}, nil, func(errmsg string, data []scm.Scmer) {
-						t.mu.Lock()                       // start write lock
+						t.mu.Lock()                         // start write lock
 						t.deletions.Set(uint32(idx), false) // mark as undeleted
 						panic("Unique key constraint violated in table " + t.t.Name + ": " + errmsg)
 					}, 0)
@@ -568,16 +568,16 @@ func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
 // processMainBlock/processDeltaBlock – tight loops suitable for JIT compilation.
 // For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
 type ShardMapReducer struct {
-	shard     *storageShard
-	mainCols  []ColumnStorage // direct main storage access (nil for $update cols)
-	colNames  []string        // column names for delta getDelta access
-	isUpdate  []bool          // true for $update columns
-	args      []scm.Scmer     // pre-allocated args buffer
-	mapFn     func(...scm.Scmer) scm.Scmer
-	reduceFn  func(...scm.Scmer) scm.Scmer
-	mapScmer  scm.Scmer       // original Scmer for network serialization
-	reduceScmer scm.Scmer     // original Scmer for network serialization
-	mainCount uint32
+	shard       *storageShard
+	mainCols    []ColumnStorage // direct main storage access (nil for $update cols)
+	colNames    []string        // column names for delta getDelta access
+	isUpdate    []bool          // true for $update columns
+	args        []scm.Scmer     // pre-allocated args buffer
+	mapFn       func(...scm.Scmer) scm.Scmer
+	reduceFn    func(...scm.Scmer) scm.Scmer
+	mapScmer    scm.Scmer // original Scmer for network serialization
+	reduceScmer scm.Scmer // original Scmer for network serialization
+	mainCount   uint32
 }
 
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
@@ -885,23 +885,23 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	mainCount := t.main_count
 
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
-	t.iterateIndex(bounds, lower, upperLast, len(t.inserts), func(idx uint32) {
+	t.iterateIndex(bounds, lower, upperLast, len(t.inserts), func(idx uint32) bool {
 		if present {
-			return // already found
+			return false // already found
 		}
 		// Verify all columns match (iterateIndex may return superset for range boundaries)
 		if idx < mainCount {
 			// Main storage: use ColumnStorage
 			for j, v := range values {
 				if !scm.Equal(mcols[j].GetValue(idx), v) {
-					return
+					return true
 				}
 			}
 		} else {
 			// Delta storage: use getDelta
 			for j, v := range values {
 				if !scm.Equal(t.getDelta(int(idx-mainCount), columns[j]), v) {
-					return
+					return true
 				}
 			}
 		}
@@ -910,11 +910,14 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 			if currentTx.IsVisible(t, idx) {
 				result = idx
 				present = true
+				return false
 			}
 		} else if !t.deletions.Get(uint32(idx)) {
 			result = idx
 			present = true
+			return false
 		}
+		return true
 	})
 
 	t.mu.RUnlock()

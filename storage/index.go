@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -109,7 +109,57 @@ func (idx *StorageIndex) String() string {
 }
 
 // iterates over items
-func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint32)) {
+func (s *StorageIndex) getDeltaValue(data []scm.Scmer, col string) scm.Scmer {
+	colpos, ok := s.t.deltaColumns[col]
+	if ok && colpos < len(data) {
+		return data[colpos]
+	}
+	return scm.NewNil()
+}
+
+func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
+	for i := 0; i < cmpCols; i++ {
+		v := getter(i)
+		if i == cmpCols-1 {
+			if !upperLast.IsNil() && scm.Less(upperLast, v) {
+				return false, true
+			}
+			continue
+		}
+		if scm.Equal(v, lower[i]) {
+			continue
+		}
+		if scm.Less(v, lower[i]) {
+			return false, false
+		}
+		return false, true
+	}
+	return true, false
+}
+
+func (s *StorageIndex) compareMainAndDelta(mainRecid uint32, mainCols []ColumnStorage, delta indexPair) int {
+	for i, col := range s.Cols {
+		mainVal := mainCols[i].GetValue(mainRecid)
+		deltaVal := s.getDeltaValue(delta.data, col)
+		if scm.Less(mainVal, deltaVal) {
+			return -1
+		}
+		if scm.Less(deltaVal, mainVal) {
+			return 1
+		}
+	}
+	deltaRecid := uint32(delta.itemid)
+	if mainRecid < deltaRecid {
+		return -1
+	}
+	if mainRecid > deltaRecid {
+		return 1
+	}
+	return 0
+}
+
+// iterates over items
+func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint32) bool) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
 	// check if we found conditions
@@ -155,10 +205,14 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 
 	// otherwise: iterate over all items
 	for i := uint32(0); i < t.main_count; i++ {
-		callback(i)
+		if !callback(i) {
+			return
+		}
 	}
 	for i := 0; i < maxInsertIndex; i++ {
-		callback(t.main_count + uint32(i))
+		if !callback(t.main_count + uint32(i)) {
+			return
+		}
 	}
 }
 
@@ -173,7 +227,7 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 }
 
 // iterate over index
-func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint32)) {
+func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint32) bool) {
 
 	// find columns in storage
 	cols := make([]ColumnStorage, len(s.Cols))
@@ -189,10 +243,14 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		if s.Savings < savings_threshold {
 			// iterate over all items because we don't want to store the index
 			for i := uint32(0); i < s.t.main_count; i++ {
-				callback(i)
+				if !callback(i) {
+					return
+				}
 			}
 			for i := 0; i < maxInsertIndex; i++ {
-				callback(s.t.main_count + uint32(i))
+				if !callback(s.t.main_count + uint32(i)) {
+					return
+				}
 			}
 			return
 		} else {
@@ -274,7 +332,7 @@ start_scan:
 	// bisect where the lower bound is found
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
-	idx := sort.Search(int(s.t.main_count), func(idx int) bool {
+	mainIdx := sort.Search(int(s.t.main_count), func(idx int) bool {
 		idx2 := uint32(int64(s.mainIndexes.GetValueUInt(uint32(idx))) + s.mainIndexes.offset)
 		for i := 0; i < cmpCols; i++ {
 			a := lower[i]
@@ -289,37 +347,28 @@ start_scan:
 		}
 		return true // fully equal
 	})
-	// now iterate over all items as long as we stay in sync
-iteration:
-	for {
-		// check for array bounds
-		if uint32(idx) >= s.t.main_count {
-			break
-		}
-		idx2 := uint32(int64(s.mainIndexes.GetValueUInt(uint32(idx))) + s.mainIndexes.offset)
-		// check for index bounds
-		for i := 0; i < cmpCols; i++ {
-			a := cols[i].GetValue(idx2)
-			if i == cmpCols-1 {
-				if !upperLast.IsNil() && scm.Less(upperLast, a) { // TODO: respect !upperEqual
-					break iteration // stop traversing when we exceed the < part of last col
-				}
-			} else if !scm.Equal(a, lower[i]) {
-				break iteration // stop traversing when we exceed the equal-part
+
+	nextMain := func() (uint32, bool) {
+		for {
+			if uint32(mainIdx) >= s.t.main_count {
+				return 0, false
 			}
-			// otherwise: next col
+			recid := uint32(int64(s.mainIndexes.GetValueUInt(uint32(mainIdx))) + s.mainIndexes.offset)
+			mainIdx++
+			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, func(i int) scm.Scmer {
+				return cols[i].GetValue(recid)
+			})
+			if inRange {
+				return recid, true
+			}
+			if beyond {
+				return 0, false
+			}
 		}
-		// TODO: merge with delta btree in order to preserve index order
-		// output recordid
-		callback(idx2)
-		idx++
-		// TODO: stop on limit
 	}
 
-	// delta storage -> scan btree for matching range
+	deltaItems := make([]indexPair, 0)
 	if maxInsertIndex > 0 && s.deltaBtree != nil {
-		// Build reference items with values at the correct deltaColumns positions.
-		// The btree comparator uses s.t.deltaColumns[col] to index into data[].
 		maxCol := 0
 		for _, col := range s.Cols {
 			if pos, ok := s.t.deltaColumns[col]; ok && pos+1 > maxCol {
@@ -333,40 +382,69 @@ iteration:
 				refLower[pos] = lower[i]
 			}
 		}
-		// AscendRange is [greaterOrEqual, lessThan) so we need to go one past upper.
-		// Instead, use AscendGreaterOrEqual and stop manually when we exceed bounds.
 		s.deltaBtree.AscendGreaterOrEqual(indexPair{-1, refLower}, func(p indexPair) bool {
 			if p.itemid < 0 {
-				return true // skip reference items (shouldn't happen, but defensive)
+				return true
 			}
-			// check upper bound for each compared column
-			for i := 0; i < cmpCols; i++ {
-				col := s.Cols[i]
-				pos, ok := s.t.deltaColumns[col]
-				if !ok {
-					continue
-				}
-				var v scm.Scmer
-				if pos < len(p.data) {
-					v = p.data[pos]
-				}
-				if i == cmpCols-1 {
-					if !upperLast.IsNil() && scm.Less(upperLast, v) {
-						return false // past upper bound on last (range) column
-					}
-				} else if !scm.Equal(v, lower[i]) {
-					return false // past equality bound
-				}
+			recid := uint32(p.itemid)
+			if recid < s.t.main_count || p.itemid-int(s.t.main_count) >= maxInsertIndex {
+				return true
 			}
-			if uint32(p.itemid) >= s.t.main_count && p.itemid-int(s.t.main_count) < maxInsertIndex {
-				callback(uint32(p.itemid))
+			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, func(i int) scm.Scmer {
+				return s.getDeltaValue(p.data, s.Cols[i])
+			})
+			if inRange {
+				deltaItems = append(deltaItems, p)
 			}
-			return true
+			return !beyond
 		})
-	} else if maxInsertIndex > 0 {
-		// no btree yet — full scan fallback
-		for i := 0; i < maxInsertIndex; i++ {
-			callback(s.t.main_count + uint32(i))
+	}
+
+	if len(deltaItems) == 0 {
+		for recid, ok := nextMain(); ok; recid, ok = nextMain() {
+			if !callback(recid) {
+				return
+			}
 		}
+		if maxInsertIndex > 0 && s.deltaBtree == nil {
+			for i := 0; i < maxInsertIndex; i++ {
+				if !callback(s.t.main_count + uint32(i)) {
+					return
+				}
+			}
+		}
+		return
+	}
+
+	di := 0
+	mainRecid, mainOk := nextMain()
+	for mainOk || di < len(deltaItems) {
+		if !mainOk {
+			if !callback(uint32(deltaItems[di].itemid)) {
+				return
+			}
+			di++
+			continue
+		}
+		if di >= len(deltaItems) {
+			if !callback(mainRecid) {
+				return
+			}
+			mainRecid, mainOk = nextMain()
+			continue
+		}
+
+		cmp := s.compareMainAndDelta(mainRecid, cols, deltaItems[di])
+		if cmp <= 0 {
+			if !callback(mainRecid) {
+				return
+			}
+			mainRecid, mainOk = nextMain()
+			continue
+		}
+		if !callback(uint32(deltaItems[di].itemid)) {
+			return
+		}
+		di++
 	}
 }

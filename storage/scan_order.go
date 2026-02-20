@@ -430,14 +430,14 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		// iterate over items (indexed)
 		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
 		currentTx := CurrentTx()
-		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint32) {
+		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint32) bool {
 			if currentTx != nil && currentTx.Mode == TxACID {
 				if !currentTx.IsVisible(t, uint32(idx)) {
-					return
+					return true
 				}
 			} else {
 				if t.deletions.Get(idx) {
-					return // item is on delete list
+					return true // item is on delete list
 				}
 			}
 
@@ -456,10 +456,11 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			}
 			// check condition
 			if !scm.ToBool(conditionFn(cdataset...)) {
-				return // condition did not match
+				return true // condition did not match
 			}
 
 			result.items = append(result.items, idx)
+			return true
 		})
 	}()
 

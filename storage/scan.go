@@ -272,14 +272,14 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		locked = true
 	}
 
-	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint32) {
+	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint32) bool {
 		if currentTx != nil && currentTx.Mode == TxACID {
 			if !currentTx.IsVisible(t, uint32(idx)) {
-				return
+				return true
 			}
 		} else {
 			if t.deletions.Get(idx) {
-				return // item is on delete list
+				return true // item is on delete list
 			}
 		}
 
@@ -295,7 +295,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		}
 		condResult := conditionFn(cdataset...)
 		if !scm.ToBool(condResult) {
-			return
+			return true
 		}
 
 		// collect matching ID into buffer
@@ -304,6 +304,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		if bufN == 1024 {
 			flush()
 		}
+		return true
 	})
 	flush() // flush remaining
 

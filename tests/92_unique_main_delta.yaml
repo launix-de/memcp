@@ -215,6 +215,26 @@ test_cases:
         - id: 9
           name: "reuse_main_val"
 
+  - name: "Mixed: index range select merges main+delta correctly"
+    sql: "SELECT id, val, name FROM uniq_md WHERE val >= 300 AND val <= 700 ORDER BY val"
+    expect:
+      data:
+        - id: 3
+          val: 300
+          name: "c"
+        - id: 4
+          val: 400
+          name: "d"
+        - id: 8
+          val: 500
+          name: "reuse_delta_val"
+        - id: 6
+          val: 600
+          name: "f"
+        - id: 7
+          val: 700
+          name: "g"
+
   # ==============================================================
   # Phase 5: Second rebuild with mixed data, then verify
   # ==============================================================
