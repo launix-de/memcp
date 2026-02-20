@@ -23,17 +23,16 @@ The test runner (`run_sql_tests.py`) starts the server exactly like this:
 ```
 ./memcp -data /tmp/memcp-sql-tests-PORT --api-port=PORT --mysql-port=PORT+1000 --disable-mysql lib/main.scm
 ```
-- The binary MUST be `./memcp` (hardcoded in the test runner at line 727).
+- The binary MUST be `./memcp` (hardcoded in the test runner).
 - `-data DIR` sets the data directory (positional dash flag, not `--datadir`).
 - `--api-port=PORT` sets the HTTP API port (default 4321).
 - `--no-repl` for background daemon use (test runner uses stdin pipe instead).
-- GODEBUG=invalidptr=0 is set in the environment.
 
 ### Manual Server Testing
 To start a server manually for debugging:
 ```
 mkdir -p /tmp/memcp-manual-test
-GODEBUG=invalidptr=0 ./memcp -data /tmp/memcp-manual-test --api-port=4399 --no-repl lib/main.scm </dev/null &>/tmp/memcp_manual.log &
+./memcp -data /tmp/memcp-manual-test --api-port=4399 --no-repl lib/main.scm </dev/null &>/tmp/memcp_manual.log &
 ```
 Then send queries via the HTTP API:
 ```
