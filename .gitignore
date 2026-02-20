@@ -10,3 +10,5 @@ memcp.sif
 trace*.json
 *.diff
 go.sum
+todos/
+.perf_baseline.json
