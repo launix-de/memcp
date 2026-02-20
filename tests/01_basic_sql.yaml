@@ -38,6 +38,13 @@ test_cases:
       data:
         - result: 5
 
+  - name: "Basic modulo"
+    sql: "SELECT 17 % 5 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 2
+
   - name: "Complex arithmetic with parentheses"
     sql: "SELECT (10 + 5) * 2 - 8 / 4 AS result"
     expect:

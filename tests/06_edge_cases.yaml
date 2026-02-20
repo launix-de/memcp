@@ -50,6 +50,12 @@ test_cases:
       error: true
       error_type: "syntax_error"
 
+  - name: "Invalid modulo syntax"
+    sql: "SELECT 5 % AS result"
+    expect:
+      error: true
+      error_type: "syntax_error"
+
   - name: "Double equals instead of single (actually works in MemCP)"
     sql: "SELECT * FROM test_table WHERE id == 1"
     expect: {}

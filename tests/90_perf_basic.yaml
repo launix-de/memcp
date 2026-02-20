@@ -99,7 +99,7 @@ test_cases:
     sql: "SELECT category % 100 AS cat, COUNT(*) AS cnt, SUM(value) AS total FROM perf_main GROUP BY category % 100"
     threshold_ms: 30000
     expect:
-      rows: 100
+      rows: 50
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS perf_main"

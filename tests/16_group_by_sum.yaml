@@ -29,5 +29,33 @@ test_cases:
         - a: 3
           s: 7
 
+  - name: "Group by modulo expression"
+    sql: "SELECT a % 2 AS g, COUNT(*) AS c, SUM(b) AS s FROM tbl GROUP BY a % 2"
+    expect:
+      rows: 2
+
+  - name: "Group by modulo across main and delta"
+    setup:
+      - sql: "DROP TABLE IF EXISTS tbl_mix"
+      - sql: "CREATE TABLE tbl_mix (a INT, b INT)"
+      - sql: |
+          INSERT INTO tbl_mix (a, b) VALUES
+          (1, 10), (2, 20), (3, 30), (4, 40)
+      - scm: "(rebuild)"
+      - sql: |
+          INSERT INTO tbl_mix (a, b) VALUES
+          (5, 50), (6, 60), (7, 70), (8, 80)
+    sql: "SELECT a % 2 AS g, COUNT(*) AS c, SUM(b) AS s FROM tbl_mix GROUP BY a % 2 ORDER BY a % 2"
+    expect:
+      rows: 2
+      data:
+        - g: 0
+          c: 4
+          s: 200
+        - g: 1
+          c: 4
+          s: 160
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS tbl"
+  - sql: "DROP TABLE IF EXISTS tbl_mix"

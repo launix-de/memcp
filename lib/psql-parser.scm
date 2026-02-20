@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024  Carl-Philip Hänsch
+Copyright (C) 2023, 2024, 2026  Carl-Philip Hänsch
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -80,6 +80,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define psql_string (parser (or
 	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
 )))
+
+/* SQL modulo expression: NULL-safe, division-by-zero-safe, truncates quotient toward zero */
+(define psql_mod_expr (lambda (a b)
+	'((quote if)
+		'((quote or) '((quote nil?) a) '((quote nil?) b) '((quote equal??) b 0))
+		nil
+		'((quote -) a '((quote *) b '((quote if) '((quote <) '((quote /) a b) 0) '((quote ceil) '((quote /) a b)) '((quote floor) '((quote /) a b)))))
+	)
+))
 
 (define psql_type (parser (or
 	(parser '((atom "character" true) (atom "varying" true)) "varying")
@@ -163,6 +172,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define psql_expression4 (parser (or
 		(parser '((define a psql_expression5) "*" (define b psql_expression4)) '((quote *) a b))
 		(parser '((define a psql_expression5) "/" (define b psql_expression4)) '((quote /) a b))
+		(parser '((define a psql_expression5) "%" (define b psql_expression4)) (psql_mod_expr a b))
 		psql_expression5
 	)))
 
@@ -205,6 +215,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "RTRIM" true) "(" (define e psql_expression) ")") '((quote sql_rtrim) e))
 
 		(parser '((atom "COALESCE" true) "(" (define args (* psql_expression ",")) ")") (cons (quote coalesceNil) args))
+		(parser '((atom "MOD" true) "(" (define a psql_expression) "," (define b psql_expression) ")") (psql_mod_expr a b))
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
 		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */

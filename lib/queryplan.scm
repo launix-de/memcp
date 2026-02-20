@@ -1110,15 +1110,20 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
 						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false))
+						(define replace_group_key_or_fetch (lambda (expr) (if
+							(reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
+							'('get_column grouptbl false (concat expr) false)
+							(replace_agg_with_fetch expr)
+						)))
 
-						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_agg_with_fetch col) dir))))))
+						(define grouped_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (replace_group_key_or_fetch col) dir))))))
 						(define next_groups (merge
 							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset)) '())
 							rest_groups
 						))
 						(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
-							(map_assoc fields (lambda (k v) (replace_agg_with_fetch v)))
-							(replace_agg_with_fetch stage_having)
+							(map_assoc fields (lambda (k v) (replace_group_key_or_fetch v)))
+							(replace_group_key_or_fetch stage_having)
 							next_groups
 							schemas
 							replace_find_column))
