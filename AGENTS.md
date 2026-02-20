@@ -129,6 +129,7 @@ curl -s -u root:admin "http://localhost:4399/sql/DBNAME" -d "SELECT 1"
 - construct a test case in tests/ that will reproduce the failing bug, verify bug reproduction with make test
 - work on the bugfix
 - verify with make test, reiterate
+- if any regression appears in `make test`, stop immediately and fix the root cause before continuing any other work
 - do not commit until all tests including the new one pass
 
 ## Execution Plan Building Hints (Pipelines & Braking)
