@@ -113,10 +113,12 @@ def get_max_rows_for_ram(bytes_per_row: int = 100) -> int:
     return 10_000_000  # fallback: 10M rows
 
 class SQLTestRunner:
-    def __init__(self, base_url="http://localhost:4321", username="root", password="admin"):
+    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", suite_db_cleanup=True):
         self.base_url = base_url
         self.username = username
         self.password = password
+        self.default_database = default_database
+        self.suite_db_cleanup = suite_db_cleanup
         self.auth_header = self._create_auth_header()
         self.test_count = 0
         self.test_passed = 0
@@ -632,7 +634,7 @@ class SQLTestRunner:
         metadata = spec.get('metadata', {})
         self.suite_metadata = metadata or {}
         self.suite_syntax = self._normalize_syntax(self.suite_metadata.get("syntax"))
-        database = 'memcp-tests'
+        database = self.default_database
 
         if metadata.get('disabled'):
             print(f"⏭️  Suite disabled: {metadata.get('description', spec_file)}")
@@ -648,8 +650,10 @@ class SQLTestRunner:
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
         print(f"💾 Database: {database}")
 
-        # fresh DB for this suite; ensure exists after cleanup
-        self.cleanup_test_database(database)
+        # Optional suite-level DB isolation. In shared-server parallel runs we
+        # disable this to avoid cross-suite DROP/CREATE races.
+        if self.suite_db_cleanup:
+            self.cleanup_test_database(database)
         self.ensure_database(database)
 
         if spec.get('setup') and not self.run_setup(spec['setup'], database):
@@ -678,7 +682,8 @@ class SQLTestRunner:
 
         if spec.get('cleanup'):
             self.run_cleanup(spec['cleanup'], database)
-        self.cleanup_test_database(database)
+        if self.suite_db_cleanup:
+            self.cleanup_test_database(database)
 
         print("="*60)
         total = self.test_count
@@ -748,16 +753,19 @@ def kill_memcp_by_port(port: int) -> None:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only]")
+        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only] [--no-db-cleanup]")
         sys.exit(1)
 
     spec_file = sys.argv[1]
     port = 4321
     connect_only = False
+    suite_db_cleanup = True
 
     for arg in sys.argv[2:]:
         if arg == "--connect-only":
             connect_only = True
+        elif arg == "--no-db-cleanup":
+            suite_db_cleanup = False
         elif arg.isdigit():
             port = int(arg)
 
@@ -781,7 +789,7 @@ def main():
                 print("❌ Failed to start MemCP")
                 sys.exit(1)
 
-    runner = SQLTestRunner(base_url)
+    runner = SQLTestRunner(base_url, suite_db_cleanup=suite_db_cleanup)
     if not connect_only:
         def restart_handler() -> bool:
             nonlocal memcp_process

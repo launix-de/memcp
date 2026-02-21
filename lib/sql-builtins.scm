@@ -22,6 +22,8 @@
 (sql_builtins "CEILING" ceil)
 (sql_builtins "ROUND" round)
 (sql_builtins "ABS" sql_abs)
+(sql_builtins "RAND" sql_rand)
+(sql_builtins "RANDOM" sql_rand)
 (sql_builtins "GREATEST" max)
 (sql_builtins "LEAST" min)
 

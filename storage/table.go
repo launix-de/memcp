@@ -135,10 +135,10 @@ type table struct {
 
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode         ShardMode
-	repartitionActive bool             // true when dual-write is in progress
+	repartitionActive bool            // true when dual-write is in progress
 	shardModeMu       sync.RWMutex    // protects ShardMode reads in iterateShards vs Phase F flip
-	Shards            []*storageShard  // unordered shards (used when ShardMode == ShardModeFree)
-	PShards           []*storageShard  // partitioned shards according to PDimensions (used when ShardMode == ShardModePartition)
+	Shards            []*storageShard // unordered shards (used when ShardMode == ShardModeFree)
+	PShards           []*storageShard // partitioned shards according to PDimensions (used when ShardMode == ShardModePartition)
 	PDimensions       []shardDimension
 }
 
@@ -596,46 +596,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	}
 
 	// sanitize values (per-row recovery for INSERT IGNORE)
-	if isIgnore {
-		filtered := values[:0]
-		for _, row := range values {
-			ok := true
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						ok = false
-					}
-				}()
-				for i, col := range columns {
-					for _, colDesc := range t.Columns {
-						if col == colDesc.Name && colDesc.sanitizer != nil {
-							if i < len(row) {
-								row[i] = colDesc.sanitizer(row[i])
-							}
-						}
-					}
-				}
-			}()
-			if ok {
-				filtered = append(filtered, row)
-			}
-		}
-		values = filtered
-		if len(values) == 0 {
-			return 0
-		}
-	} else {
-		for i, col := range columns {
-			for _, colDesc := range t.Columns {
-				if col == colDesc.Name && colDesc.sanitizer != nil {
-					for _, row := range values {
-						if i < len(row) {
-							row[i] = colDesc.sanitizer(row[i])
-						}
-					}
-				}
-			}
-		}
+	values = t.sanitizeInsertRows(columns, values, isIgnore)
+	if len(values) == 0 {
+		return 0
 	}
 
 	if t.ShardMode == ShardModeFree { // unpartitioned sharding
@@ -816,6 +779,48 @@ insertDone:
 	return result
 }
 
+func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgnore bool) [][]scm.Scmer {
+	if isIgnore {
+		filtered := values[:0]
+		for _, row := range values {
+			ok := true
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						ok = false
+					}
+				}()
+				for i, col := range columns {
+					for _, colDesc := range t.Columns {
+						if col == colDesc.Name && colDesc.sanitizer != nil {
+							if i < len(row) {
+								row[i] = colDesc.sanitizer(row[i])
+							}
+						}
+					}
+				}
+			}()
+			if ok {
+				filtered = append(filtered, row)
+			}
+		}
+		return filtered
+	}
+
+	for i, col := range columns {
+		for _, colDesc := range t.Columns {
+			if col == colDesc.Name && colDesc.sanitizer != nil {
+				for _, row := range values {
+					if i < len(row) {
+						row[i] = colDesc.sanitizer(row[i])
+					}
+				}
+			}
+		}
+	}
+	return values
+}
+
 // dualWriteInsert routes rows into the secondary shard set (the one not selected
 // by ShardMode) during an active repartition. Called only when repartitionActive
 // is true. Rows are inserted with alreadyLocked=false and no unique/trigger processing.
@@ -947,10 +952,17 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 
 		last_j := 0
 		for j, row := range values {
+			shardlist2 := shardlist
+			skipUniqueCheck := false
 			for i, colidx := range keyIdx {
 				key[i] = row[colidx]
+				if !mergeNull && key[i].IsNil() {
+					skipUniqueCheck = true
+				}
 			}
-			shardlist2 := shardlist
+			if skipUniqueCheck {
+				goto nextrow
+			}
 			if allowPruning {
 				for j, xidx := range pruningMap {
 					pruningVals[j] = row[keyIdx[xidx]]

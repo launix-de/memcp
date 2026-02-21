@@ -26,6 +26,8 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import (
+	crand "crypto/rand"
+	"encoding/binary"
 	"math"
 	"strings"
 )
@@ -428,6 +430,21 @@ func init_alu() {
 				return NewInt(int64(v))
 			}
 			return NewFloat(v)
+		},
+		true, false, nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"sql_rand", "SQL RAND(): returns a random float in [0,1)",
+		0, 0,
+		[]DeclarationParameter{}, "number",
+		func(a ...Scmer) Scmer {
+			var buf [8]byte
+			if _, err := crand.Read(buf[:]); err != nil {
+				panic("sql_rand: " + err.Error())
+			}
+			// 53 random bits map exactly into float64 mantissa range.
+			u := binary.LittleEndian.Uint64(buf[:]) >> 11
+			return NewFloat(float64(u) / (1 << 53))
 		},
 		true, false, nil,
 	})

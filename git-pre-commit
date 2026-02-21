@@ -137,6 +137,7 @@ sequential_tests=""
 for tf in $test_files; do
   if grep -q "SHUTDOWN" "$tf" || \
      grep -q "(rebuild)" "$tf" || \
+     grep -qi "repartition" "$tf" || \
      grep -q "parallel:" "$tf" || \
      grep -Eqi "CREATE USER|ALTER USER|DROP USER|SET PASSWORD|GRANT |REVOKE |system\\.user|system\\.access" "$tf"; then
     sequential_tests="$sequential_tests $tf"
@@ -159,6 +160,7 @@ run_one() {
   local tf="$1"
   local out="$2"
   local statusf="$3"
+  local no_db_cleanup="${4:-0}"
   # Wait for readiness before starting
   if ! wait_for_sql_ready 60 1; then
     echo "FAIL" > "$statusf"
@@ -169,7 +171,11 @@ run_one() {
     } 9>>"$lockfile"
     return
   fi
-  python3 run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
+  if [ "$no_db_cleanup" = "1" ]; then
+    python3 run_sql_tests.py "$tf" $test_port --connect-only --no-db-cleanup > "$out" 2>&1
+  else
+    python3 run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
+  fi
   rc=$?
   # Determine status by exit code (0 => OK, nonzero => FAIL)
   if [ $rc -eq 0 ]; then echo OK > "$statusf"; else echo FAIL > "$statusf"; fi
@@ -185,7 +191,7 @@ run_one() {
 for tf in $parallel_tests; do
   out="$tmpdir/$(basename "$tf").out"
   statusf="$tmpdir/$(basename "$tf").status"
-  run_one "$tf" "$out" "$statusf" &
+  run_one "$tf" "$out" "$statusf" 1 &
   active_pids+=("$!")
   # Concurrency gate: wait for the oldest test PID when at limit
   while [ ${#active_pids[@]} -ge $max_jobs ]; do
@@ -202,7 +208,7 @@ done
 for tf in $sequential_tests; do
   out="$tmpdir/$(basename "$tf").out"
   statusf="$tmpdir/$(basename "$tf").status"
-  run_one "$tf" "$out" "$statusf"
+  run_one "$tf" "$out" "$statusf" 0
 done
 
 # Stop supervisor and memcp now that all tests are done

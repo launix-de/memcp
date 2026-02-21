@@ -273,7 +273,6 @@ test_cases:
 
   # ==============================================================
   # Phase 6: NULL uniqueness (SQL standard: NULLs are always unique)
-  # noncritical: MemCP currently treats NULLs as equal for unique checks
   # ==============================================================
 
   - name: "NULL: insert row with NULL unique val"
@@ -282,13 +281,11 @@ test_cases:
       affected_rows: 1
 
   - name: "NULL: insert second row with NULL unique val"
-    noncritical: true
     sql: "INSERT INTO uniq_md VALUES (12, NULL, 'null2')"
     expect:
       affected_rows: 1
 
   - name: "NULL: verify both NULL rows exist"
-    noncritical: true
     sql: "SELECT id FROM uniq_md WHERE val IS NULL ORDER BY id"
     expect:
       data:
@@ -296,11 +293,9 @@ test_cases:
         - id: 12
 
   - name: "NULL: rebuild and verify NULLs survive"
-    noncritical: true
     scm: "(rebuild)"
 
   - name: "NULL: post-rebuild both NULLs still present"
-    noncritical: true
     sql: "SELECT id FROM uniq_md WHERE val IS NULL ORDER BY id"
     expect:
       data:
@@ -308,7 +303,6 @@ test_cases:
         - id: 12
 
   - name: "NULL: can still insert NULL unique after rebuild"
-    noncritical: true
     sql: "INSERT INTO uniq_md VALUES (13, NULL, 'null3')"
     expect:
       affected_rows: 1

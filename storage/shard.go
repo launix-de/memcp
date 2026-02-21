@@ -383,6 +383,15 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 				// Execute BEFORE UPDATE triggers (can modify d2)
 				if withTrigger && triggerOldRow != nil {
 					d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
+					// BEFORE triggers may change typed/NOT NULL columns; sanitize again.
+					for i, col := range cols {
+						for _, colDesc := range t.t.Columns {
+							if col == colDesc.Name && colDesc.sanitizer != nil {
+								d2[i] = colDesc.sanitizer(d2[i])
+								break
+							}
+						}
+					}
 					// Recheck if anything changed after trigger modifications
 					result = false
 					for i, v := range d2 {
@@ -677,6 +686,11 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		if len(values) == 0 {
 			return // all rows skipped by triggers
 		}
+	}
+	// Re-apply sanitizers after BEFORE INSERT trigger mutations.
+	values = t.t.sanitizeInsertRows(columns, values, isIgnore)
+	if len(values) == 0 {
+		return // all rows skipped by sanitizer in INSERT IGNORE mode
 	}
 
 	if !alreadyLocked {
