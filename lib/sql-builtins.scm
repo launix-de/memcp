@@ -46,6 +46,12 @@
 (sql_builtins "SUBSTR" sql_substr)
 (sql_builtins "SUBSTRING" sql_substr)
 (sql_builtins "REGEXP_REPLACE" regexp_replace)
+(sql_builtins "REGEXP_SUBSTR" (lambda (s pattern)
+	(if (or (nil? s) (nil? pattern))
+		nil
+		(eval (list 'match s (list 'regex (concat "(" pattern ")") '_ 'rx_match) 'rx_match nil))
+	)
+))
 
 /* vectors */
 (sql_builtins "VECTOR_DISTANCE" dot)

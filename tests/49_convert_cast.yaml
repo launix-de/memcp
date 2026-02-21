@@ -1,8 +1,8 @@
-# CONVERT, CAST, REGEXP_REPLACE
+# CONVERT, CAST, REGEXP_REPLACE, REGEXP_SUBSTR
 
 metadata:
   version: "1.0"
-  description: "Type conversion functions and REGEXP_REPLACE"
+  description: "Type conversion functions and regexp helpers"
 
 test_cases:
   # --- CAST ---
@@ -136,6 +136,21 @@ test_cases:
       rows: 1
       data:
         - { v: "hello" }
+
+  # --- REGEXP_SUBSTR ---
+  - name: "REGEXP_SUBSTR extract first numeric run"
+    sql: "SELECT REGEXP_SUBSTR('font: 12pt', '[0-9]+') AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: "12" }
+
+  - name: "REGEXP_SUBSTR no match returns NULL"
+    sql: "SELECT REGEXP_SUBSTR('abc', '[0-9]+') AS v"
+    expect:
+      rows: 1
+      data:
+        - { v: null }
 
   # --- Combined erpl pattern: CAST(REGEXP_REPLACE(SUBSTR(...))) ---
   - name: "erpl number extraction pattern"

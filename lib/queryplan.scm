@@ -51,7 +51,7 @@ if there is a group function, create a temporary preaggregate table
 /* returns a list of '(string...) */
 (define extract_columns_for_tblvar (lambda (tblvar expr)
 	(match expr
-		'((symbol get_column) (eval tblvar) _ col _) '(col) /* TODO: case matching */
+		'((symbol get_column) (eval tblvar) _ col _) (if (equal? col "*") '() '(col)) /* TODO: case matching */
 		(cons sym args) /* function call */ (merge_unique (map args (lambda (arg) (extract_columns_for_tblvar tblvar arg))))
 		'()
 	)
