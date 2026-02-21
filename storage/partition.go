@@ -420,13 +420,14 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 // to both the old and new shard sets via repartitionActive dual-write.
 //
 // Phases:
-//   A. Prepare PShards (before releasing any locks)
-//   B. Snapshot deletion baselines (brief RLock per old shard)
-//   C. Build main storage (no locks held — long phase)
-//   D. Delta shift (brief Lock per new shard)
-//   E. Reconcile post-snapshot deletions
-//   F. Flip ShardMode
-//   G. Cleanup
+//
+//	A. Prepare PShards (before releasing any locks)
+//	B. Snapshot deletion baselines (brief RLock per old shard)
+//	C. Build main storage (no locks held — long phase)
+//	D. Delta shift (brief Lock per new shard)
+//	E. Reconcile post-snapshot deletions
+//	F. Flip ShardMode
+//	G. Cleanup
 //
 // This function is called WITHOUT t.mu held (t.mu is released by the caller
 // before invoking repartition). It manages its own shard-level locking.
@@ -505,9 +506,9 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	// Take a brief RLock on each old shard to snapshot its deletion bitmap
 	// and inserts count. This gives us a consistent baseline for reconciliation.
 	type shardSnapshot struct {
-		deletions    interface{ Get(uint32) bool } // deletion bitmap copy
-		insertCount  int                         // number of delta inserts at snapshot time
-		mainCount    uint32                      // main_count at snapshot time
+		deletions   interface{ Get(uint32) bool } // deletion bitmap copy
+		insertCount int                           // number of delta inserts at snapshot time
+		mainCount   uint32                        // main_count at snapshot time
 	}
 	snapshots := make([]shardSnapshot, len(oldshards))
 	datasetids := make([][][]uint32, totalShards) // newshard -> oldshard -> []rowIdx

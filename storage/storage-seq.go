@@ -27,7 +27,7 @@ type StorageSeq struct {
 	recordId,
 	start,
 	stride StorageInt
-	count    uint // number of values
+	count    uint   // number of values
 	seqCount uint32 // number of sequences
 
 	// analysis (lastValue also used as atomic pivot cache for concurrent GetValue)

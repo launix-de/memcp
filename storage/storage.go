@@ -890,6 +890,9 @@ func Init(en scm.Env) {
 			}
 			// perform insert
 			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
 			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
 			return scm.NewInt(int64(inserted))
 		}, false, false, nil,
