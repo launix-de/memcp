@@ -196,8 +196,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	rowcount := func() Scmer {
 		defer func() {
 			if r := recover(); r != nil {
-				PrintError("error in mysql connection: " + fmt.Sprint(r))
-				myerr = ErrorWrapper(fmt.Sprint(r))
+				errMsg := fmt.Sprint(r)
+				PrintError("error in mysql connection: " + errMsg)
+				myerr = ErrorWrapper(errMsg)
 			}
 		}()
 		callbackFn := NewFunc(func(a ...Scmer) Scmer {

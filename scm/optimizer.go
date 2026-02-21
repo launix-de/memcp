@@ -20,9 +20,6 @@ import "regexp"
 
 var SettingsHaveGoodBacktraces bool
 
-// Global guard: once eval/import is seen during optimization, disable risky inlining
-var optimizerSeenEvalImport bool
-
 // to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
 func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	/* API contract:
@@ -248,6 +245,59 @@ func scmerSlice(v Scmer) ([]Scmer, bool) {
 	}
 	return nil, false
 }
+
+// expressionContainsEvalCall conservatively detects runtime eval usage.
+// If a lambda body calls eval, parameter symbol bindings must remain name-based
+// so eval can resolve them from lexical scope.
+func expressionContainsEvalCall(v Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(v); ok {
+		v = stripped
+	}
+	list, ok := scmerSlice(v)
+	if !ok || len(list) == 0 {
+		return false
+	}
+	if head, ok := scmerSymbol(list[0]); ok {
+		if head == Symbol("eval") {
+			return true
+		}
+		if head == Symbol("quote") {
+			return false
+		}
+	}
+	for _, item := range list {
+		if expressionContainsEvalCall(item) {
+			return true
+		}
+	}
+	return false
+}
+
+// expressionContainsEvalOrImportCall conservatively detects runtime eval/import usage.
+func expressionContainsEvalOrImportCall(v Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(v); ok {
+		v = stripped
+	}
+	list, ok := scmerSlice(v)
+	if !ok || len(list) == 0 {
+		return false
+	}
+	if head, ok := scmerSymbol(list[0]); ok {
+		if head == Symbol("eval") || head == Symbol("import") {
+			return true
+		}
+		if head == Symbol("quote") {
+			return false
+		}
+	}
+	for _, item := range list {
+		if expressionContainsEvalOrImportCall(item) {
+			return true
+		}
+	}
+	return false
+}
+
 func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (result Scmer, transferOwnership bool, isConstant bool) {
 	if val.ptr == nil && val.aux == 0 {
 		return NewNil(), true, true
@@ -357,11 +407,17 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				x = stripped
 			}
 			if sub, ok := scmerSlice(x); ok && len(sub) > 0 {
-				subHead, subHeadOk := scmerSymbol(sub[0])
+				subHeadExpr := sub[0]
+				if stripped, ok := scmerStripSourceInfo(subHeadExpr); ok {
+					subHeadExpr = stripped
+				}
+				subHead, subHeadOk := scmerSymbol(subHeadExpr)
 				if subHeadOk && (subHead == Symbol("define") || subHead == Symbol("set")) {
 					visitNode(sub[2], depth, blacklist)
-					if sym, ok := scmerSymbol(sub[1]); ok {
-						variableContent[sym] = sub[2]
+					if depth == 0 {
+						if sym, ok := scmerSymbol(sub[1]); ok {
+							variableContent[sym] = sub[2]
+						}
 					}
 				} else if subHeadOk && subHead == Symbol("lambda") {
 					params := sub[1]
@@ -379,20 +435,24 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						}
 						visitNode(sub[2], depth+1, blacklist2)
 					}
-				} else if !subHeadOk || subHead != Symbol("begin") {
+				} else if subHeadOk && subHead == Symbol("begin") {
+					for i := 1; i < len(sub); i++ {
+						visitNode(sub[i], depth+1, blacklist)
+					}
+				} else if subHeadOk && subHead == Symbol("!begin") {
+					for i := 1; i < len(sub); i++ {
+						visitNode(sub[i], depth, blacklist)
+					}
+				} else if subHeadOk && subHead == Symbol("eval") {
+					usedVariables[Symbol("eval")] = 1
+					for i := 2; i < len(sub); i++ {
+						visitNode(sub[i], depth+1, blacklist)
+					}
+				} else {
 					// Also visit the head — it may be a variable used in call position (e.g., (accsess "key"))
 					visitNode(sub[0], depth+1, blacklist)
 					for i := 1; i < len(sub); i++ {
 						visitNode(sub[i], depth+1, blacklist)
-					}
-				} else if subHead != Symbol("eval") {
-					usedVariables[Symbol("eval")] = 1
-					for i := 2; i < len(sub); i++ {
-						visitNode(sub[i], depth, blacklist)
-					}
-				} else {
-					for i := 1; i < len(sub); i++ {
-						visitNode(sub[i], depth, blacklist)
 					}
 				}
 				return
@@ -422,7 +482,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				expr = stripped
 			}
 			if sub, ok := scmerSlice(expr); ok && len(sub) > 0 {
-				if head, ok := scmerSymbol(sub[0]); ok {
+				headExpr := sub[0]
+				if stripped, ok := scmerStripSourceInfo(headExpr); ok {
+					headExpr = stripped
+				}
+				if head, ok := scmerSymbol(headExpr); ok {
 					if (head == Symbol("define") || head == Symbol("set")) && len(sub) >= 3 {
 						if sym, ok := scmerSymbol(sub[1]); ok {
 							defineTopIdx[sym] = i
@@ -432,6 +496,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						if earliestEvalImport == -1 || i < earliestEvalImport {
 							earliestEvalImport = i
 						}
+					}
+				}
+				if expressionContainsEvalOrImportCall(expr) {
+					if earliestEvalImport == -1 || i < earliestEvalImport {
+						earliestEvalImport = i
 					}
 				}
 			}
@@ -458,14 +527,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					shouldReplace = false
 				}
 			}
-			// Safeguard: after a top-level eval/import appears, forbid inlining of later defines
+			// Safeguard: if a top-level eval/import appears anywhere in this begin,
+			// keep all bindings explicit. eval can resolve dynamically-built symbols
+			// against lexical scope, so partial inlining is unsafe.
 			if earliestEvalImport >= 0 {
-				if defIdx, ok := defineTopIdx[sym]; ok && defIdx >= earliestEvalImport {
-					shouldReplace = false
-				}
-			}
-			// Global safeguard: once eval/import was seen anywhere, stop begin inlining
-			if optimizerSeenEvalImport {
 				shouldReplace = false
 			}
 			if shouldReplace {
@@ -475,7 +540,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				ome2.variableReplacement[sym] = content
 			}
 		}
-		if len(usedVariables) == 0 {
+		if len(usedVariables) == 0 && len(defineTopIdx) == 0 {
 			v[0] = NewSymbol("!begin")
 			for sym, content := range ome2.variableReplacement {
 				if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
@@ -511,6 +576,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if scmerIsSymbol(v[0], "!begin") && len(v) == 2 {
 			return OptimizeEx(v[1], env, &ome2, useResult)
 		}
+		if scmerIsSymbol(v[0], "begin") && len(v) == 2 {
+			return OptimizeEx(v[1], env, &ome2, useResult)
+		}
+		if scmerIsSymbol(v[0], "begin") {
+			isConstant = false
+		}
 		return NewSlice(v), transferOwnership, isConstant
 	}
 
@@ -537,6 +608,22 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		params := v[1]
 		if stripped, ok := scmerStripSourceInfo(params); ok {
 			params = stripped
+		}
+		// Keep lambdas with eval conservative: eval relies on symbol lookup in
+		// current lexical scope and cannot see NthLocalVar-only parameters.
+		if expressionContainsEvalCall(v[2]) {
+			ome2 := ome.Copy()
+			if list, ok := scmerSlice(params); ok {
+				for _, param := range list {
+					if sym, ok := scmerSymbol(param); ok {
+						delete(ome2.variableReplacement, sym)
+					}
+				}
+			} else if sym, ok := scmerSymbol(params); ok {
+				delete(ome2.variableReplacement, sym)
+			}
+			v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
+			return NewSlice(v), transferOwnership, false
 		}
 		// Skip lambdas that already have explicit NumVars
 		if len(v) > 3 {
@@ -680,7 +767,7 @@ func FirstParameterMutable(mutName string) func(v []Scmer, oc *OptimizerContext,
 func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, mutName string) (Scmer, *TypeDescriptor) {
 	env := oc.Env
 	ome := oc.Ome
-	headSym, headOk := scmerSymbol(v[0])
+	_, headOk := scmerSymbol(v[0])
 
 	allConstArgs := true
 	var transferOwnership bool
@@ -749,7 +836,6 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 		if firstArgFresh && len(v) >= 2 {
 			v[0] = NewSymbol(mutName)
-			headSym = Symbol(mutName)
 			transferOwnership = true
 		}
 	}
@@ -790,10 +876,6 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 	}
 
-	// If this expression is an eval/import call, globally disable further begin inlining
-	if headOk && (headSym == Symbol("eval") || headSym == Symbol("import")) {
-		optimizerSeenEvalImport = true
-	}
 	if scmerIsSymbol(v[0], "!begin") && allConstArgs {
 		return v[len(v)-1], &TypeDescriptor{Transfer: true, Const: true}
 	}

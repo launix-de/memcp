@@ -699,12 +699,6 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"code", "list", "list with head and optional parameters", nil},
 		}, "any", func(a ...Scmer) Scmer {
-			// Reset the optimizer eval/import barrier per optimize() call.
-			// The global guard is needed during a single optimization pass, but it must
-			// not leak across independent calls (see unit test: define use-once inlining).
-			saved := optimizerSeenEvalImport
-			optimizerSeenEvalImport = false
-			defer func() { optimizerSeenEvalImport = saved }()
 			return Optimize(a[0], &Globalenv)
 		}, true, false, nil,
 	})

@@ -11,9 +11,14 @@ test_cases:
   - name: "CREATE TABLE with CHARSET COLLATE ENGINE"
     sql: "CREATE TABLE dbc_t (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL, email VARCHAR(200) COLLATE utf8mb4_unicode_ci, notes TEXT, active BOOLEAN DEFAULT true) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE=InnoDB"
 
+  - name: "CREATE TABLE with DOUBLE PRECISION and ENGINE equals spacing"
+    sql: "CREATE TABLE dbc_double_precision (id INT PRIMARY KEY AUTO_INCREMENT, val DOUBLE PRECISION) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE = INNODB"
+
   # --- LOCK/UNLOCK (no-op) ---
   - name: "LOCK TABLES WRITE"
     sql: "LOCK TABLES dbc_t WRITE"
+  - name: "LOCK TABLES multiple WRITE entries"
+    sql: "LOCK TABLES dbc_t WRITE, dbc_double_precision WRITE"
   - name: "UNLOCK TABLES"
     sql: "UNLOCK TABLES"
 
@@ -22,6 +27,8 @@ test_cases:
     sql: "SHOW TABLES"
   - name: "SHOW FULL COLUMNS FROM table"
     sql: "SHOW FULL COLUMNS FROM dbc_t"
+  - name: "SHOW FULL COLUMNS FROM table with WHERE"
+    sql: "SHOW FULL COLUMNS FROM dbc_t WHERE `Key` = 'PRI'"
   - name: "SHOW CREATE TABLE"
     sql: "SHOW CREATE TABLE dbc_t"
   - name: "SHOW INDEXES FROM table"
@@ -40,7 +47,6 @@ test_cases:
     sql: "ALTER TABLE dbc_t MODIFY COLUMN status VARCHAR(50) NOT NULL"
   - name: "ALTER TABLE CHANGE column type"
     sql: "ALTER TABLE dbc_t CHANGE email email VARCHAR(250)"
-
   # --- ALTER TABLE DROP COLUMN ---
   - name: "ALTER TABLE DROP COLUMN"
     sql: "ALTER TABLE dbc_t DROP COLUMN notes"
@@ -76,6 +82,8 @@ test_cases:
     sql: "CREATE TABLE dbc_child (id INT PRIMARY KEY, parent_id INT)"
   - name: "ALTER TABLE ADD FOREIGN KEY"
     sql: "ALTER TABLE dbc_child ADD CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES dbc_t(id) ON UPDATE CASCADE ON DELETE RESTRICT"
+  - name: "ALTER TABLE ADD FOREIGN KEY named after KEY"
+    sql: "ALTER TABLE dbc_child ADD FOREIGN KEY fk_parent2 (parent_id) REFERENCES dbc_t(id) ON UPDATE CASCADE ON DELETE RESTRICT"
   - name: "ALTER TABLE DROP FOREIGN KEY"
     sql: "ALTER TABLE dbc_child DROP FOREIGN KEY fk_parent"
 
@@ -98,7 +106,6 @@ test_cases:
     sql: "CREATE TRIGGER `dbc_t.ib` BEFORE INSERT ON dbc_t FOR EACH ROW BEGIN SET NEW.status = COALESCE(NEW.status, 'new'); END"
   - name: "DROP TRIGGER IF EXISTS after create"
     sql: "DROP TRIGGER IF EXISTS `dbc_t.ib`"
-
   # --- ANALYZE TABLE (no-op) ---
   - name: "ANALYZE TABLE"
     sql: "ANALYZE TABLE dbc_t"
@@ -143,6 +150,7 @@ test_cases:
     sql: "CREATE TABLE dbc_double (id INT PRIMARY KEY, val DOUBLE)"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS dbc_double_precision"
   - sql: "DROP TABLE IF EXISTS dbc_double"
   - sql: "DROP TABLE IF EXISTS dbc_datetime"
   - sql: "DROP TABLE IF EXISTS dbc_longblob"

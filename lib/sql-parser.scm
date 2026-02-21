@@ -41,6 +41,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "UNION" true)
 	(atom "ALL" true)
 	(atom "INSERT" true)
+	(atom "SET" true)
 	(atom "ORDER" true)
 	(atom "LIMIT" true)
 	(atom "DELIMITER" true)
@@ -343,6 +344,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* TODO: GENERATED ALWAYS AS expr */
 	))) (merge sub)))
 
+	(define sql_column_type (parser (or
+		(parser '((atom "DOUBLE" true) (atom "PRECISION" true)) "DOUBLE")
+		(parser '((atom "CHARACTER" true) (atom "VARYING" true)) "VARCHAR")
+		sql_identifier
+	)))
+
+	(define sql_lock_table_mode (parser (or
+		(parser '((atom "READ" true) (? (atom "LOCAL" true))) true)
+		(parser '((atom "LOW_PRIORITY" true) (atom "WRITE" true)) true)
+		(parser (atom "WRITE" true) true)
+		(parser (atom "READ" true) true)
+	)))
+
 	(define sql_expression (parser (or
 		(parser '((atom "@" true) (define var sql_identifier_unquoted) (atom ":=" true) (define value sql_expression)) '((quote session) var value))
 		(parser '((define a sql_expression1) (atom "OR" true) (define b (+ sql_expression1 (atom "OR" true)))) (cons (quote or) (cons a b)))
@@ -639,6 +653,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(atom "UPDATE" true)
 		/* TODO: UPDATE tbl FROM tbl, tbl, tbl */
 		(define tbl sql_identifier) /* TODO: ignorecase */
+		(define tblalias (? sql_identifier))
+		(define othertables (* (parser '("," sql_identifier) sql_identifier)))
 		(atom "SET" true)
 		(define cols (+ (or
 			/* TODO: tbl.identifier */
@@ -674,10 +690,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			)
 		)
 	) (begin
+			(if (> (count othertables) 0) (error "multi-table UPDATE is not implemented yet") true)
 			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
 			(define replace_find_column (lambda (expr) (match expr
 				'((symbol get_column) nil _ col ci) '((quote get_column) tbl false col ci) /* TODO: case insensitive column */
+				'((symbol get_column) tblvar _ col ci) (if (and tblalias (equal?? tblvar tblalias)) '((quote get_column) tbl false col ci) expr)
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 				expr
 			)))
@@ -905,7 +923,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser '((atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
 			(parser '(
 				(define col sql_identifier)
-				(define type sql_identifier)
+				(define type sql_column_type)
 				(define dimensions (or
 					(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
 					(parser '("(" (define a sql_int) ")") '((quote list) a))
@@ -944,14 +962,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser '((atom "ADD" true) (atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2))) */
 			(parser '((atom "ADD" true) (atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) nil) /* ignore index definitions */
 			(parser '((atom "ADD" true) (atom "FULLTEXT" true) (? (atom "INDEX" true)) (? sql_identifier) "(" (+ sql_identifier ",") ")") (lambda (id) true)) /* ignore fulltext index */
-			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define cname (? sql_identifier))) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode))) (lambda (id) true))
+			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define cname (? sql_identifier))) (atom "FOREIGN" true) (atom "KEY" true) (? (define fkname sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode))) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "FOREIGN" true) (atom "KEY" true) (define fk sql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define fk sql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "PRIMARY" true) (atom "KEY" true)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)) (lambda (id) true))
 			(parser '((atom "ADD" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
-				(define type sql_identifier)
+				(define type sql_column_type)
 				(define dimensions (or
 					(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
 					(parser '("(" (define a sql_int) ")") '((quote list) a))
@@ -961,7 +979,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			) (lambda (id) '((quote createcolumn) schema id col type dimensions (cons 'list typeparams))))
 			(parser '((atom "MODIFY" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
-				(define type sql_identifier)
+				(define type sql_column_type)
 				(define dimensions (or
 					(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
 					(parser '("(" (define a sql_int) ")") '((quote list) a))
@@ -972,7 +990,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser '((atom "CHANGE" true)
 				(define oldcol sql_identifier)
 				(define col sql_identifier)
-				(define type sql_identifier)
+				(define type sql_column_type)
 				(define dimensions (or
 					(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
 					(parser '("(" (define a sql_int) ")") '((quote list) a))
@@ -980,7 +998,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				))
 				(define typeparams sql_column_attributes)
 			) (lambda (id) '('!begin '((quote altercolumn) schema id col "type" type) '((quote altercolumn) schema id col "dimensions" dimensions) 1)))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "TYPE" true) (define type sql_identifier) (define dimensions (or
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "TYPE" true) (define type sql_column_type) (define dimensions (or
 				(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
 				(parser '("(" (define a sql_int) ")") '((quote list) a))
 				(parser empty '((quote list)))
@@ -1083,10 +1101,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema id))))
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
 		(parser '((atom "SHOW" true) (atom "TABLES" true) (? (atom "FROM" true) (define schema sql_identifier))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '((quote resultrow) '((quote list) "Table" (quote tbl))))))
-		(parser '((atom "SHOW" true) (atom "TABLE" true) (atom "STATUS" true) (? (atom "FROM" true) (define schema sql_identifier) (? (atom "LIKE" true) (define likepattern sql_expression)))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '('if '('strlike 'tbl '('coalesce 'likepattern "%")) '((quote resultrow) '('list "name" 'tbl "rows" "1")))))) /* TODO: engine version row_format avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time collation checksum create_options comment max_index_length temporary */
+		(parser '((atom "SHOW" true) (atom "TABLE" true) (atom "STATUS" true) (? (atom "FROM" true) (define schema2 sql_identifier)) (? (atom "LIKE" true) (define likepattern sql_expression))) '((quote map) '((quote show) (coalesce schema2 schema)) '((quote lambda) '((quote tbl)) '('if '('strlike 'tbl '('coalesce 'likepattern "%")) '((quote resultrow) '('list "name" 'tbl "rows" "1")))))) /* TODO: engine version row_format avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time collation checksum create_options comment max_index_length temporary */
 		(parser '((atom "DESCRIBE" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier)) '((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
 		(parser '((atom "DESCRIBE" true) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
-		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line))))) /* TODO: Field Type Collation Null Key Default Extra(auto_increment) Privileges Comment */
+		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier) (? (atom "WHERE" true) (define where sql_expression))) '((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line))))) /* TODO: apply WHERE filter */
+		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define id sql_identifier) (? (atom "WHERE" true) (define where sql_expression))) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line))))) /* TODO: apply WHERE filter */
 
 		/* SHOW TRIGGERS [FROM schema] */
 		(parser '((atom "SHOW" true) (atom "TRIGGERS" true) (? (atom "FROM" true) (define tgtschema sql_identifier)))
@@ -1133,7 +1152,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons '!begin vars))
 
-		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or sql_identifier '(sql_identifier (atom "AS" true) sql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
+		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (? sql_lock_table_mode)) tbl) ",")) "ignore")
 		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
 
 		/* CREATE INDEX syntax acceptance (no-op unless UNIQUE; MemCP auto-indexes) */
@@ -1194,7 +1213,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(define compiled (compile_trigger_body schema timing (car (cdr body))))
 				(list 'createtrigger schema tbl name timing (car body) (eval compiled))
 		))
-
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
 			'((quote droptrigger) schema name (if if_exists true false)))

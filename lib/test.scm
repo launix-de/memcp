@@ -671,6 +671,37 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(try (lambda () ((eval (optimize lam_bad)) 2 3)) (lambda (e) (panicked "panic" true)))
 	(assert (panicked "panic") true "insufficient NumVars must panic (guards optimizer bug)")
 
+	/* Optimizer regression: lambdas with eval must keep symbol-bound params (no NthLocalVar-only params). */
+	(define lam_eval_scope (list
+		'lambda
+		(list 'session)
+		(list
+			'begin
+			(list 'eval (list 'quote (list 'session "probe" 1)))
+			(list 'session "probe")
+		)
+	))
+	(assert (list? lam_eval_scope) true "lambda eval scope fixture must be list AST")
+	(define eval_scope_state (newsession))
+	(try
+		(lambda () (eval_scope_state "opt" (optimize lam_eval_scope)))
+		(lambda (e) (panicked "eval-opt-panic" true))
+	)
+	(assert (panicked "eval-opt-panic") nil "optimizer must not panic on lambda containing eval")
+	(define lam_eval_scope_opt (eval_scope_state "opt"))
+	(if (panicked "eval-opt-panic") true (begin
+		(assert (list? lam_eval_scope_opt) true "optimizer output for lambda AST must remain list AST")
+		(if (list? lam_eval_scope_opt)
+			(assert (count lam_eval_scope_opt) 3 "lambdas with eval must not be auto-numbered (no NumVars append)")
+			true
+		)
+
+		(define lam_eval_scope_serialized "")
+		(try (lambda () (set lam_eval_scope_serialized (serialize lam_eval_scope_opt))) (lambda (e) (panicked "eval-serialize-panic" true)))
+		(assert (panicked "eval-serialize-panic") nil "serialize on optimized lambda must not panic")
+		(assert (match lam_eval_scope_serialized (regex "\\(var 0\\)" _) true false) false "lambda with eval must keep session symbol, not (var 0)")
+	))
+
 	/* cascade override */
 	(print "testing more lambda functions ...")
 	(define lam_nested1 (lambda (req res) (+ req res)))

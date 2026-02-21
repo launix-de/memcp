@@ -388,7 +388,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define psql_update (parser '(
 		(atom "UPDATE" true)
 		/* TODO: UPDATE tbl FROM tbl, tbl, tbl */
-		(define tbl psql_identifier) /* TODO: ignorecase */
+		(define tables (+ psql_identifier ","))
 		(atom "SET" true)
 		(define cols (+ (or
 			/* TODO: tbl.identifier */
@@ -399,6 +399,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define condition psql_expression)
 		))
 	) (begin
+			(if (> (count tables) 1) (error "multi-table UPDATE is not implemented yet") true)
+			(define tbl (car tables))
 			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
 			(define replace_find_column (lambda (expr) (match expr

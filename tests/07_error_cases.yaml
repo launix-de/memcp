@@ -34,6 +34,18 @@ test_cases:
     sql: "SELECT INVALID_FUNCTION()"
     expect:
       error: true
+
+  - name: "Multi-table UPDATE with comma targets is not implemented"
+    noncritical: true
+    sql: "UPDATE users, users2 SET users.id = users2.id"
+    expect:
+      error: true
+
+  - name: "Multi-table UPDATE with JOIN target is not implemented"
+    noncritical: true
+    sql: "UPDATE users JOIN users2 ON users.id = users2.id SET users.id = users2.id"
+    expect:
+      error: true
     
   - name: "Duplicate table creation (MemCP allows duplicate CREATE TABLE)"
     sql: "CREATE TABLE users (id INTEGER)"
