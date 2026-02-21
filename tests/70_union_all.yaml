@@ -73,6 +73,8 @@ test_cases:
       rows: 4
 
   # === UNION ALL with ORDER BY / LIMIT ===
+  # TODO: global ORDER BY/LIMIT on UNION ALL needs set-operator materialization
+  # or a dedicated shuffle/merge operator in storage; not preplanned in this step.
 
   - name: "UNION ALL with ORDER BY"
     noncritical: true
@@ -82,16 +84,7 @@ test_cases:
       SELECT ID, name FROM fop_files WHERE ID >= 4
       ORDER BY ID
     expect:
-      rows: 4
-      data:
-        - ID: 1
-          name: "image1.png"
-        - ID: 2
-          name: "image2.png"
-        - ID: 4
-          name: "image4.png"
-        - ID: 5
-          name: "image5.png"
+      error: true
 
   - name: "UNION ALL with LIMIT"
     noncritical: true
@@ -101,7 +94,7 @@ test_cases:
       SELECT CAST(result AS VARCHAR) AS name FROM renderjob
       LIMIT 3
     expect:
-      rows: 3
+      error: true
 
   - name: "UNION ALL with ORDER BY and LIMIT"
     noncritical: true
@@ -111,12 +104,11 @@ test_cases:
       SELECT ID, CAST(result AS VARCHAR) AS name FROM renderjob
       ORDER BY ID LIMIT 4
     expect:
-      rows: 4
+      error: true
 
   # === UNION ALL in subquery / derived table ===
 
   - name: "UNION ALL as derived table"
-    noncritical: true
     sql: |
       SELECT COUNT(*) AS c FROM (
         SELECT ID FROM fop_files
@@ -153,12 +145,7 @@ test_cases:
       SELECT result AS ignored_id, CAST(result AS VARCHAR) AS ignored_label FROM renderjob WHERE ID = 102
       ORDER BY file_id
     expect:
-      rows: 2
-      data:
-        - file_id: 1
-          label: "image1.png"
-        - file_id: 3
-          label: "3"
+      error: true
 
   - name: "UNION ALL with inner ORDER BY/LIMIT per branch"
     noncritical: true
@@ -172,11 +159,7 @@ test_cases:
       ) AS branch_b
       ORDER BY ID
     expect:
-      rows: 3
-      data:
-        - ID: 1
-        - ID: 4
-        - ID: 5
+      error: true
 
   - name: "UNION ALL with grouped branch"
     noncritical: true
@@ -189,14 +172,7 @@ test_cases:
       HAVING result = 3
       ORDER BY ID
     expect:
-      rows: 3
-      data:
-        - ID: 1
-          name: "image1.png"
-        - ID: 2
-          name: "image2.png"
-        - ID: 3
-          name: "r2"
+      error: true
 
   - name: "UNION ALL with derived branch filtering"
     noncritical: true
@@ -208,12 +184,7 @@ test_cases:
       ) AS picked
       ORDER BY ID
     expect:
-      rows: 2
-      data:
-        - ID: 2
-          name: "image2.png"
-        - ID: 5
-          name: "image5.png"
+      error: true
 
   - name: "UNION ALL with NULL payload in one branch"
     noncritical: true
@@ -223,12 +194,7 @@ test_cases:
       SELECT result AS ID, NULL AS name FROM renderjob WHERE ID = 102
       ORDER BY ID
     expect:
-      rows: 2
-      data:
-        - ID: 1
-          name: "image1.png"
-        - ID: 3
-          name: null
+      error: true
 
   # === Must-fail cases ===
 

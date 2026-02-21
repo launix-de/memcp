@@ -778,99 +778,162 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
 				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
 				'(id schemax subquery isOuter joinexpr) (begin
-					(if (not (nil? (query_union_all_parts subquery)))
-						(error "UNION ALL in FROM subqueries is not supported yet"))
-					(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
-						/* helper function add prefix to tblalias of every expression */
-						(define replace_column_alias (lambda (expr) (match expr
-							'((symbol get_column) nil ti col ci) (begin
-								/* resolve unqualified column against inner schemas2; must match exactly one table */
-								(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
-									(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
-										(cons alias acc)
-										acc)) '()))
-								(match matches
-									(cons only '()) '('get_column (concat id ":" only) ti col ci)
-									'() (begin
-										/* column not in schemas2 - check if it's a SELECT alias in fields2 */
-										(if (nil? (fields2 col))
-											(error (concat "column " col " does not exist in subquery"))
-											/* found in fields2 - resolve to the underlying expression */
-											(replace_column_alias (fields2 col))
+					(define union_parts_from (query_union_all_parts subquery))
+					(if (not (nil? union_parts_from))
+						(match union_parts_from '(branches union_order union_limit union_offset) (begin
+							(define output_cols (match branches
+								(cons first_branch _) (query_branch_field_names first_branch)
+								_ '()))
+							(if (or (nil? output_cols) (equal? output_cols '()))
+								(error "UNION ALL subquery must project at least one column"))
+							(define rows_sym (symbol (concat "__from_union_rows:" id)))
+							(define resultrow_sym (symbol (concat "__from_union_resultrow:" id)))
+							(define materialized_rows (list (quote begin)
+								(list (quote set) rows_sym (list (quote newsession)))
+								(list rows_sym "rows" '())
+								(list (quote set) resultrow_sym (symbol "resultrow"))
+								(list (quote set) (symbol "resultrow")
+									(list (quote lambda) (list (symbol "item"))
+										(list rows_sym "rows"
+											(list (quote append)
+												(list rows_sym "rows")
+												(list (quote list) (symbol "item")))))
+								)
+								(build_queryplan_term subquery)
+								(list (quote set) (symbol "resultrow") resultrow_sym)
+								(list rows_sym "rows")
+							))
+							(list
+								(list (list id schemax materialized_rows isOuter joinexpr))
+								'()
+								true
+								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
+							)
+						))
+						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+							/* helper function add prefix to tblalias of every expression */
+							(define replace_column_alias (lambda (expr) (match expr
+								'((symbol get_column) nil ti col ci) (begin
+									/* resolve unqualified column against inner schemas2; must match exactly one table */
+									(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
+										(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
+											(cons alias acc)
+											acc)) '()))
+									(match matches
+										(cons only '()) '('get_column (concat id ":" only) ti col ci)
+										'() (begin
+											/* column not in schemas2 - check if it's a SELECT alias in fields2 */
+											(if (nil? (fields2 col))
+												(error (concat "column " col " does not exist in subquery"))
+												/* found in fields2 - resolve to the underlying expression */
+												(replace_column_alias (fields2 col))
+											)
 										)
+										(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 									)
-									(cons _ _) (error (concat "ambiguous column " col " in subquery"))
+								)
+								'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+								'((symbol outer) outer_arg) (begin
+									/* prefix outer variable reference if it refers to a table in schemas2 */
+									(define s (string outer_arg))
+									(define parts (split s "."))
+									(match parts
+										(list tbl col) (if (not (nil? (schemas2 tbl)))
+											(list (quote outer) (symbol (concat id ":" tbl "." col)))
+											(list (quote outer) outer_arg))
+										_ (list (quote outer) (replace_column_alias outer_arg))
+									)
+								)
+								(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
+								expr
+							)))
+							/* prefix all table aliases and transform their joinexprs */
+							(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
+								(list (concat id ":" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+							/* helper function to transform joinexpr: only transform references to subquery alias id */
+							(define transform_joinexpr (lambda (expr) (match expr
+								'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
+									/* reference to subquery alias -> resolve against inner schemas by passing nil alias */
+									(replace_column_alias (list (quote get_column) nil ti col ci))
+									/* reference to outer table -> keep as-is */
+									expr)
+								(cons sym args) /* function call */ (cons sym (map args transform_joinexpr))
+								expr
+							)))
+							/* transform and attach joinexpr to first table in tablesPrefixed */
+							(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr joinexpr)))
+							/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics */
+							(set condition2_transformed (replace_column_alias condition2))
+							(set joinexpr2 (if isOuter
+								/* merge condition2 into joinexpr for outer joins */
+								(if (nil? joinexpr2)
+									condition2_transformed
+									(if (or (nil? condition2_transformed) (equal? condition2_transformed true))
+										joinexpr2
+										(list (quote and) joinexpr2 condition2_transformed)))
+								joinexpr2))
+							(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
+								(set tablesPrefixed (cons
+									/* inherit isOuter from the subquery's join type, not from inner table */
+									(match (car tablesPrefixed) '(a s t io je) (list a s t isOuter joinexpr2))
+									(cdr tablesPrefixed)))
+							)
+							(define use_materialize false)
+							/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
+							(if (and (not (nil? groups2)) (not (equal? groups2 '())))
+								(begin
+									(define unsupported (reduce groups2 (lambda (acc stage)
+										(or acc
+											(begin
+												(define g (stage_group_cols stage))
+												(and (not (nil? g)) (not (equal? g '())))
+											)
+											(not (nil? (stage_having_expr stage)))
+											(not (nil? (stage_limit_val stage)))
+											(not (nil? (stage_offset_val stage)))
+										)
+									) false))
+									(if unsupported
+										(set use_materialize true)
+										(set groups2 nil))
 								)
 							)
-							'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
-							'((symbol outer) outer_arg) (begin
-								/* prefix outer variable reference if it refers to a table in schemas2 */
-								(define s (string outer_arg))
-								(define parts (split s "."))
-								(match parts
-									(list tbl col) (if (not (nil? (schemas2 tbl)))
-										(list (quote outer) (symbol (concat id ":" tbl "." col)))
-										(list (quote outer) outer_arg))
-									_ (list (quote outer) (replace_column_alias outer_arg))
+							(if use_materialize
+								(begin
+									(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
+									(define rows_sym (symbol (concat "__from_subquery_rows:" id)))
+									(define resultrow_sym (symbol (concat "__from_subquery_resultrow:" id)))
+									(define materialized_rows (list (quote begin)
+										(list (quote set) rows_sym (list (quote newsession)))
+										(list rows_sym "rows" '())
+										(list (quote set) resultrow_sym (symbol "resultrow"))
+										(list (quote set) (symbol "resultrow")
+											(list (quote lambda) (list (symbol "item"))
+												(list rows_sym "rows"
+													(list (quote append)
+														(list rows_sym "rows")
+														(list (quote list) (symbol "item")))))
+										)
+										(build_queryplan_term subquery)
+										(list (quote set) (symbol "resultrow") resultrow_sym)
+										(list rows_sym "rows")
+									))
+									(list
+										(list (list id schemax materialized_rows isOuter joinexpr))
+										'()
+										true
+										(list id (map output_cols_sub (lambda (col) '("Field" col "Type" "any"))))
+									)
+								)
+								(begin
+									/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
+									/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
+									(set globalFilter (if isOuter true (replace_column_alias condition2)))
+									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
 								)
 							)
-							(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
-							expr
-						)))
-						/* prefix all table aliases and transform their joinexprs */
-						(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schema tbl a innerJoinexpr)
-							(list (concat id ":" alias) schema tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
-						/* helper function to transform joinexpr: only transform references to subquery alias id */
-						(define transform_joinexpr (lambda (expr) (match expr
-							'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
-								/* reference to subquery alias -> resolve against inner schemas by passing nil alias */
-								(replace_column_alias (list (quote get_column) nil ti col ci))
-								/* reference to outer table -> keep as-is */
-								expr)
-							(cons sym args) /* function call */ (cons sym (map args transform_joinexpr))
-							expr
-						)))
-						/* transform and attach joinexpr to first table in tablesPrefixed */
-						(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr joinexpr)))
-						/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics */
-						(set condition2_transformed (replace_column_alias condition2))
-						(set joinexpr2 (if isOuter
-							/* merge condition2 into joinexpr for outer joins */
-							(if (nil? joinexpr2)
-								condition2_transformed
-								(if (or (nil? condition2_transformed) (equal? condition2_transformed true))
-									joinexpr2
-									(list (quote and) joinexpr2 condition2_transformed)))
-							joinexpr2))
-						(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
-							(set tablesPrefixed (cons
-								/* inherit isOuter from the subquery's join type, not from inner table */
-								(match (car tablesPrefixed) '(a s t io je) (list a s t isOuter joinexpr2))
-								(cdr tablesPrefixed)))
-						)
-						/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
-						(if (and (not (nil? groups2)) (not (equal? groups2 '())))
-							(begin
-								(define unsupported (reduce groups2 (lambda (acc stage)
-									(or acc
-										(begin
-											(define g (stage_group_cols stage))
-											(and (not (nil? g)) (not (equal? g '())))
-										)
-										(not (nil? (stage_having_expr stage)))
-										(not (nil? (stage_limit_val stage)))
-										(not (nil? (stage_offset_val stage)))
-									)
-								) false))
-								(if unsupported (error "group/order/limit is not supported yet in subqueries"))
-								(set groups2 nil)
-							)
-						)
-						/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
-						/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
-						(set globalFilter (if isOuter true (replace_column_alias condition2)))
-						(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
-					) (error "non matching return value for untangle_query"))
+						) (error "non matching return value for untangle_query"))
+					)
 				)
 				(error (concat "unknown tabledesc: " tbldesc))
 			)))))
@@ -1044,8 +1107,6 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 			(apply build_queryplan (apply untangle_query query))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
-			(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
-				(error "UNION ALL with set-level ORDER/LIMIT/OFFSET is not supported yet"))
 			(if (or (nil? branches) (equal? branches '()))
 				(error "UNION ALL requires at least one branch"))
 			(define branch_meta (map branches (lambda (branch) (begin
@@ -1055,7 +1116,7 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 					(if (or (not (nil? order2)) (not (nil? limit2)) (not (nil? offset2)))
 						(error "UNION ALL branch ORDER/LIMIT/OFFSET is not supported yet"))
 					(define branch_cols (query_branch_field_names branch))
-					(list branch branch_cols (count branch_cols)))
+					(list branch branch_cols (count branch_cols) schema2))
 					_ (error "UNION ALL branch must be a SELECT query"))
 			))))
 			(define expected_cols (match branch_meta
@@ -1064,6 +1125,8 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 			(define output_cols (match branch_meta
 				(cons first_meta _) (nth first_meta 1)
 				_ '()))
+			(if (or (not (nil? order)) (not (nil? limit)) (not (nil? offset)))
+				(error "UNION ALL with global ORDER BY/LIMIT/OFFSET is not supported yet"))
 			(if (not (reduce branch_meta (lambda (ok meta) (and ok (equal? (nth meta 2) expected_cols))) true))
 				(error "UNION ALL branches must project the same number of columns"))
 			(define branch_plans (map branch_meta (lambda (meta) (begin
@@ -1073,11 +1136,12 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 					(list (nth output_cols idx) (list (quote nth) (symbol "row") (+ (* idx 2) 1)))
 				)))))
 				(list (quote begin)
-					(list (quote set) (symbol "__union_resultrow") (symbol "resultrow"))
+					(list (quote set) (symbol "__union_prev_resultrow") (symbol "resultrow"))
 					(list (quote set) (symbol "resultrow")
 						(list (quote lambda) (list (symbol "row"))
-							(list (symbol "__union_resultrow") normalized_row)))
-					branch_plan)
+							(list (symbol "__union_prev_resultrow") normalized_row)))
+					branch_plan
+					(list (quote set) (symbol "resultrow") (symbol "__union_prev_resultrow")))
 			))))
 			(cons (quote begin) branch_plans)
 		))
