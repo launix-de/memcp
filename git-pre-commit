@@ -49,7 +49,10 @@ run_memcp_forever() {
     memcp_pid=$!
     # wait for process to exit; test loop will poll readiness
     wait $memcp_pid
-    echo "⚠️  MemCP exited (code=$?). Restarting..."
+    rc=$?
+    if [ $rc -ne 0 ]; then
+      echo "⚠️  MemCP exited unexpectedly (code=$rc). Restarting..."
+    fi
     sleep 0.5
   done
 }
