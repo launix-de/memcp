@@ -250,5 +250,38 @@ test_cases:
       data:
         - a_count: 3
 
+  # === ISNULL(expr) — returns 1 if NULL, 0 otherwise ===
+
+  - name: "ISNULL with NULL"
+    sql: "SELECT ISNULL(NULL) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 1
+
+  - name: "ISNULL with non-null value"
+    sql: "SELECT ISNULL(42) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 0
+
+  - name: "ISNULL with string"
+    sql: "SELECT ISNULL('hello') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 0
+
+  - name: "ISNULL with column"
+    sql: "SELECT id, ISNULL(amount) AS is_null FROM ccn_data WHERE id IN (1, 3) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          is_null: 0
+        - id: 3
+          is_null: 1
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ccn_data"

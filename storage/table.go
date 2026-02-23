@@ -263,12 +263,25 @@ func (t *table) ShowColumns() scm.Scmer {
 	}
 	result := make([]scm.Scmer, len(t.Columns))
 	for i, v := range t.Columns {
-		result[i] = v.Show()
+		// Determine Key type for this column
+		keyType := ""
+		for _, uk := range t.Unique {
+			for _, col := range uk.Cols {
+				if col == v.Name {
+					if uk.Id == "PRIMARY" {
+						keyType = "PRI"
+					} else if keyType == "" {
+						keyType = "UNI"
+					}
+				}
+			}
+		}
+		result[i] = v.Show(keyType)
 	}
 	return scm.NewSlice(result)
 }
 
-func (c *column) Show() scm.Scmer {
+func (c *column) Show(keyType string) scm.Scmer {
 	dims := make([]scm.Scmer, len(c.Typdimensions))
 	for i, v := range c.Typdimensions {
 		dims[i] = scm.NewInt(int64(v))
@@ -298,6 +311,7 @@ func (c *column) Show() scm.Scmer {
 		scm.NewString("RawType"), scm.NewString(c.Typ),
 		scm.NewString("Dimensions"), scm.NewSlice(dims),
 		scm.NewString("Null"), scm.NewBool(c.AllowNull),
+		scm.NewString("Key"), scm.NewString(keyType),
 		scm.NewString("Default"), c.Default,
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),

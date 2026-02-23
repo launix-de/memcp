@@ -1435,3 +1435,239 @@ test_cases:
     sql: "DROP TABLE IF EXISTS trigger_ign2"
     expect:
       affected_rows: 0
+
+  # =====================================================
+  # Trigger body: INSERT...SELECT (cross-table copy)
+  # =====================================================
+
+  - name: "Clean up for INSERT...SELECT trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for INSERT...SELECT test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "Insert source rows for INSERT...SELECT trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (2000, 42, 'src1'), (2001, 99, 'src2')"
+    expect:
+      affected_rows: 2
+
+  - name: "CREATE AFTER INSERT trigger with INSERT...SELECT"
+    sql: "CREATE TRIGGER ins_sel_ai AFTER INSERT ON trigger_test FOR EACH ROW BEGIN INSERT INTO trigger_log (id, action, new_val) SELECT NEW.id, 'ins_select', NEW.val; END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT fires trigger with INSERT...SELECT body"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (2002, 77, 'trigger_ins_sel')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify INSERT...SELECT trigger wrote to log"
+    sql: "SELECT id, action, new_val FROM trigger_log WHERE id = 2002"
+    expect:
+      rows: 1
+      data:
+        - { id: 2002, action: "ins_select", new_val: 77 }
+
+  - name: "DROP INSERT...SELECT trigger"
+    sql: "DROP TRIGGER IF EXISTS ins_sel_ai"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Trigger body: SET @var (session variable, ignored)
+  # =====================================================
+
+  - name: "Clean up for SET @var trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE trigger with SET @var (should parse and be ignored)"
+    sql: "CREATE TRIGGER setvar_ai AFTER INSERT ON trigger_test FOR EACH ROW BEGIN SET @last_id = NEW.id; INSERT INTO trigger_log (id, action, new_val) VALUES (NEW.id, 'setvar', NEW.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "Clear trigger_log for SET @var test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "INSERT fires trigger with SET @var and INSERT"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (2100, 33, 'setvar_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify SET @var trigger executed the INSERT (SET @var ignored)"
+    sql: "SELECT id, action, new_val FROM trigger_log WHERE id = 2100"
+    expect:
+      rows: 1
+      data:
+        - { id: 2100, action: "setvar", new_val: 33 }
+
+  - name: "DROP SET @var trigger"
+    sql: "DROP TRIGGER IF EXISTS setvar_ai"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Trigger body: INSERT IGNORE INTO (duplicate handling)
+  # =====================================================
+
+  - name: "Create PK table for INSERT IGNORE trigger body test"
+    sql: "CREATE TABLE trigger_ign_body (id INT PRIMARY KEY, val INT)"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert base row for trigger INSERT IGNORE test"
+    sql: "INSERT INTO trigger_ign_body (id, val) VALUES (1, 100)"
+    expect:
+      affected_rows: 1
+
+  - name: "Clean up trigger_test for INSERT IGNORE body test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE AFTER INSERT trigger with INSERT IGNORE body"
+    sql: "CREATE TRIGGER ign_body_ai AFTER INSERT ON trigger_test FOR EACH ROW BEGIN INSERT IGNORE INTO trigger_ign_body (id, val) VALUES (NEW.id, NEW.val); END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT that triggers INSERT IGNORE with no collision"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (2, 200, 'no_dup')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify trigger INSERT IGNORE created row (no collision)"
+    sql: "SELECT id, val FROM trigger_ign_body WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - { id: 2, val: 200 }
+
+  - name: "INSERT that triggers INSERT IGNORE with PK collision"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (1, 999, 'has_dup')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify trigger INSERT IGNORE skipped duplicate (original unchanged)"
+    sql: "SELECT id, val FROM trigger_ign_body WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - { id: 1, val: 100 }
+
+  - name: "DROP INSERT IGNORE body trigger"
+    sql: "DROP TRIGGER IF EXISTS ign_body_ai"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop INSERT IGNORE body test table"
+    sql: "DROP TABLE IF EXISTS trigger_ign_body"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Trigger body: UPDATE statement
+  # =====================================================
+
+  - name: "Clean up for UPDATE in trigger body test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Create counter table for UPDATE trigger body"
+    sql: "CREATE TABLE trigger_counter (name VARCHAR(50), cnt INT)"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert initial counter"
+    sql: "INSERT INTO trigger_counter (name, cnt) VALUES ('inserts', 0)"
+    expect:
+      affected_rows: 1
+
+  - name: "CREATE AFTER INSERT trigger with UPDATE body"
+    sql: "CREATE TRIGGER upd_body_ai AFTER INSERT ON trigger_test FOR EACH ROW BEGIN UPDATE trigger_counter SET cnt = cnt + 1 WHERE name = 'inserts'; END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT fires trigger that UPDATEs counter"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (2200, 1, 'cnt1')"
+    expect:
+      affected_rows: 1
+
+  - name: "Second INSERT fires trigger again"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (2201, 2, 'cnt2')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify UPDATE in trigger body incremented counter"
+    sql: "SELECT cnt FROM trigger_counter WHERE name = 'inserts'"
+    expect:
+      data:
+        - cnt: 2
+
+  - name: "DROP UPDATE body trigger"
+    sql: "DROP TRIGGER IF EXISTS upd_body_ai"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop counter table"
+    sql: "DROP TABLE IF EXISTS trigger_counter"
+    expect:
+      affected_rows: 0
+
+  # =====================================================
+  # Trigger body: DELETE statement
+  # =====================================================
+
+  - name: "Clean up for DELETE in trigger body test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Create archive table for DELETE trigger body"
+    sql: "CREATE TABLE trigger_archive (id INT, val INT, archived VARCHAR(10))"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert rows into archive"
+    sql: "INSERT INTO trigger_archive (id, val, archived) VALUES (3000, 10, 'yes'), (3001, 20, 'yes'), (3002, 30, 'no')"
+    expect:
+      affected_rows: 3
+
+  - name: "CREATE AFTER INSERT trigger with DELETE body"
+    sql: "CREATE TRIGGER del_body_ai AFTER INSERT ON trigger_test FOR EACH ROW BEGIN DELETE FROM trigger_archive WHERE id = NEW.id; END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT fires trigger that DELETEs from archive"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (3000, 1, 'del_test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify DELETE in trigger body removed archive row"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_archive WHERE id = 3000"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "Verify other archive rows untouched"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_archive"
+    expect:
+      data:
+        - cnt: 2
+
+  - name: "DROP DELETE body trigger"
+    sql: "DROP TRIGGER IF EXISTS del_body_ai"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop archive table"
+    sql: "DROP TABLE IF EXISTS trigger_archive"
+    expect:
+      affected_rows: 0

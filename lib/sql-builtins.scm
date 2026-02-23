@@ -53,6 +53,9 @@
 	)
 ))
 
+/* null check */
+(sql_builtins "ISNULL" (lambda (x) (if (nil? x) 1 0)))
+
 /* vectors */
 (sql_builtins "VECTOR_DISTANCE" dot)
 (sql_builtins "STRING_TO_VECTOR" json_decode)

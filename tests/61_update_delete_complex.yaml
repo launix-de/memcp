@@ -187,7 +187,78 @@ test_cases:
         - id: 2
           val: 77
 
+  # === Multi-table DELETE ===
+
+  - name: "Create parent table for multi-delete"
+    sql: "CREATE TABLE ud_parent (id INT PRIMARY KEY, status VARCHAR(20))"
+
+  - name: "Create child table for multi-delete"
+    sql: "CREATE TABLE ud_child (id INT PRIMARY KEY, parent_id INT, val VARCHAR(20))"
+
+  - name: "Insert parent data"
+    sql: "INSERT INTO ud_parent VALUES (1, 'active'), (2, 'inactive'), (3, 'active'), (4, 'inactive')"
+    expect:
+      affected_rows: 4
+
+  - name: "Insert child data"
+    sql: |
+      INSERT INTO ud_child VALUES
+        (10, 1, 'a'), (11, 1, 'b'),
+        (20, 2, 'c'), (21, 2, 'd'),
+        (30, 3, 'e'),
+        (40, 4, 'f'), (41, 4, 'g')
+    expect:
+      affected_rows: 7
+
+  - name: "Multi-table DELETE with join condition"
+    sql: "DELETE ud_child FROM ud_child, ud_parent WHERE ud_child.parent_id = ud_parent.id AND ud_parent.status = 'inactive'"
+    expect:
+      affected_rows: 4
+
+  - name: "Verify multi-table delete removed correct rows"
+    sql: "SELECT COUNT(*) AS c FROM ud_child"
+    expect:
+      rows: 1
+      data:
+        - c: 3
+
+  - name: "Verify remaining children are from active parents"
+    sql: "SELECT val FROM ud_child ORDER BY val"
+    expect:
+      rows: 3
+      data:
+        - val: "a"
+        - val: "b"
+        - val: "e"
+
+  - name: "Parent table unchanged by multi-table delete"
+    sql: "SELECT COUNT(*) AS c FROM ud_parent"
+    expect:
+      rows: 1
+      data:
+        - c: 4
+
+  - name: "Multi-table DELETE with alias"
+    sql: "DELETE c FROM ud_child AS c, ud_parent AS p WHERE c.parent_id = p.id AND p.id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify aliased multi-table delete"
+    sql: "SELECT COUNT(*) AS c FROM ud_child"
+    expect:
+      rows: 1
+      data:
+        - c: 2
+
+  - name: "Multi-table DELETE with no matching rows"
+    sql: "DELETE ud_child FROM ud_child, ud_parent WHERE ud_child.parent_id = ud_parent.id AND ud_parent.status = 'nonexistent'"
+    expect:
+      affected_rows: 0
+
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ud_child"
+  - sql: "DROP TABLE IF EXISTS ud_parent"
   - sql: "DROP TABLE IF EXISTS ud_main"
   - sql: "DROP TABLE IF EXISTS ud_types"
   - sql: "DROP TABLE IF EXISTS ud_single"

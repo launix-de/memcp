@@ -27,8 +27,13 @@ test_cases:
     sql: "SHOW TABLES"
   - name: "SHOW FULL COLUMNS FROM table"
     sql: "SHOW FULL COLUMNS FROM dbc_t"
-  - name: "SHOW FULL COLUMNS FROM table with WHERE"
+  - name: "SHOW FULL COLUMNS FROM table with WHERE Key=PRI"
     sql: "SHOW FULL COLUMNS FROM dbc_t WHERE `Key` = 'PRI'"
+    expect:
+      rows: 1
+      data:
+        - Field: "id"
+          Key: "PRI"
   - name: "SHOW CREATE TABLE"
     sql: "SHOW CREATE TABLE dbc_t"
   - name: "SHOW INDEXES FROM table"
@@ -66,6 +71,10 @@ test_cases:
     sql: "CREATE INDEX idx_name ON dbc_t (name)"
   - name: "CREATE UNIQUE INDEX"
     sql: "CREATE UNIQUE INDEX uk_email ON dbc_t (email)"
+  - name: "SHOW FULL COLUMNS shows UNI for unique key column"
+    sql: "SHOW FULL COLUMNS FROM dbc_t WHERE `Key` = 'UNI'"
+    expect:
+      min_rows: 1
   - name: "CREATE UNIQUE INDEX with prefix"
     sql: "CREATE UNIQUE INDEX uk_slug ON dbc_t (slug(128))"
   - name: "DROP INDEX"
