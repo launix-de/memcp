@@ -1084,6 +1084,59 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define d_mut5 (extract_assoc_mut (list "a" 1 "b" 2) (lambda (k v) v)))
 	(assert (equal? d_mut5 '(1 2)) true "extract_assoc_mut extracts values")
 
+	/* window_mut / window_flush */
+	(print "testing window_mut / window_flush ...")
+	/* LAG(col1, 1): window_size=2, stride=1, skip=0 */
+	(define _win_results (newsession))
+	(_win_results "items" '())
+	(define _win_lag1 (list 0 0 1 nil nil))
+	(set _win_lag1 (window_mut _win_lag1 (lambda (oldest newest) (_win_results "items" (merge (_win_results "items") (list oldest)))) 10))
+	(assert (equal? (_win_results "items") '(nil)) true "window_mut LAG stride=1 row1 emits nil")
+	(set _win_lag1 (window_mut _win_lag1 (lambda (oldest newest) (_win_results "items" (merge (_win_results "items") (list oldest)))) 20))
+	(assert (equal? (_win_results "items") '(nil 10)) true "window_mut LAG stride=1 row2 emits 10")
+	(set _win_lag1 (window_mut _win_lag1 (lambda (oldest newest) (_win_results "items" (merge (_win_results "items") (list oldest)))) 30))
+	(assert (equal? (_win_results "items") '(nil 10 20)) true "window_mut LAG stride=1 row3 emits 20")
+
+	/* LEAD(col1, 1): window_size=2, stride=1, skip=1 */
+	(define _win_results2 (newsession))
+	(_win_results2 "items" '())
+	(define _win_lead1 (list 1 0 1 nil nil))
+	(set _win_lead1 (window_mut _win_lead1 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) 10))
+	(assert (equal? (_win_results2 "items") '()) true "window_mut LEAD skip=1 row1 no emit")
+	(set _win_lead1 (window_mut _win_lead1 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) 20))
+	(assert (equal? (_win_results2 "items") '(20)) true "window_mut LEAD row2 emits newest=20")
+	(set _win_lead1 (window_mut _win_lead1 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) 30))
+	(assert (equal? (_win_results2 "items") '(20 30)) true "window_mut LEAD row3 emits newest=30")
+	/* flush remaining */
+	(window_flush _win_lead1 (lambda (oldest newest) (_win_results2 "items" (merge (_win_results2 "items") (list newest)))) 1)
+	(assert (equal? (_win_results2 "items") '(20 30 nil)) true "window_flush LEAD emits nil for last row")
+
+	/* LEAD(col1, 2): window_size=3, stride=1, skip=2 */
+	(define _win_results3 (newsession))
+	(_win_results3 "items" '())
+	(define _win_lead2 (list 2 0 1 nil nil nil))
+	(set _win_lead2 (window_mut _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) 10))
+	(set _win_lead2 (window_mut _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) 20))
+	(assert (equal? (_win_results3 "items") '()) true "window_mut LEAD(2) skips first 2 rows")
+	(set _win_lead2 (window_mut _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) 30))
+	(assert (equal? (_win_results3 "items") '(30)) true "window_mut LEAD(2) row3 emits newest=30")
+	(set _win_lead2 (window_mut _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) 40))
+	(assert (equal? (_win_results3 "items") '(30 40)) true "window_mut LEAD(2) row4 emits 40")
+	(window_flush _win_lead2 (lambda (a b c) (_win_results3 "items" (merge (_win_results3 "items") (list c)))) 2)
+	(assert (equal? (_win_results3 "items") '(30 40 nil nil)) true "window_flush LEAD(2) flushes 2 nils")
+
+	/* stride=2: tracking two columns, LAG(col1,1) + LAG(col2,1)
+	   window_size=2, stride=2 -> 4 slots, emit gets 4 flat args: old_c1 old_c2 new_c1 new_c2 */
+	(define _win_results4 (newsession))
+	(_win_results4 "items" '())
+	(define _win_stride2 (list 0 0 2 nil nil nil nil))
+	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) 10 100))
+	(assert (equal? (_win_results4 "items") '(nil nil)) true "window_mut stride=2 row1 emits old=(nil nil)")
+	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) 20 200))
+	(assert (equal? (_win_results4 "items") '(nil nil 10 100)) true "window_mut stride=2 row2 emits old=(10 100)")
+	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) 30 300))
+	(assert (equal? (_win_results4 "items") '(nil nil 10 100 20 200)) true "window_mut stride=2 row3 emits old=(20 200)")
+
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
 	(if (< (teststat "success") (teststat "count")) (begin

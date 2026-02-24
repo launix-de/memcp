@@ -1,0 +1,296 @@
+metadata:
+  version: "1.0"
+  description: "Window functions: LEAD, LAG, aggregates with OVER, error cases"
+
+test_cases:
+  # --- Setup ---
+  - name: "Create window test table"
+    sql: "CREATE TABLE win_emp (id INT PRIMARY KEY, parent INT, time_val INT, amount INT)"
+
+  - name: "Insert window test data"
+    sql: |
+      INSERT INTO win_emp VALUES
+      (1, 100, 10, 500),
+      (2, 100, 20, 300),
+      (3, 100, 30, 700),
+      (4, 200, 15, 200),
+      (5, 200, 25, 400)
+
+  # ==========================================================================
+  # Case 1: OVER (ORDER BY) + LAG/LEAD — no partition, no outer sort
+  # ==========================================================================
+
+  - name: "Case 1: LAG without partition"
+    noncritical: true
+    sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, time_val: 10, prev_time: null}
+        - {id: 4, time_val: 15, prev_time: 10}
+        - {id: 2, time_val: 20, prev_time: 15}
+        - {id: 5, time_val: 25, prev_time: 20}
+        - {id: 3, time_val: 30, prev_time: 25}
+
+  - name: "Case 1: LEAD without partition"
+    noncritical: true
+    sql: "SELECT id, time_val, LEAD(time_val) OVER (ORDER BY time_val) AS next_time FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, time_val: 10, next_time: 15}
+        - {id: 4, time_val: 15, next_time: 20}
+        - {id: 2, time_val: 20, next_time: 25}
+        - {id: 5, time_val: 25, next_time: 30}
+        - {id: 3, time_val: 30, next_time: null}
+
+  - name: "Case 1: LAG with expression"
+    noncritical: true
+    sql: "SELECT id, time_val, time_val - LAG(time_val) OVER (ORDER BY time_val) AS diff FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, time_val: 10, diff: null}
+        - {id: 4, time_val: 15, diff: 5}
+        - {id: 2, time_val: 20, diff: 5}
+        - {id: 5, time_val: 25, diff: 5}
+        - {id: 3, time_val: 30, diff: 5}
+
+  - name: "Case 1: LEAD with offset 2"
+    noncritical: true
+    sql: "SELECT id, time_val, LEAD(time_val, 2) OVER (ORDER BY time_val) AS next2 FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, time_val: 10, next2: 20}
+        - {id: 4, time_val: 15, next2: 25}
+        - {id: 2, time_val: 20, next2: 30}
+        - {id: 5, time_val: 25, next2: null}
+        - {id: 3, time_val: 30, next2: null}
+
+  - name: "Case 1: LAG with offset 2"
+    noncritical: true
+    sql: "SELECT id, time_val, LAG(time_val, 2) OVER (ORDER BY time_val) AS prev2 FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, time_val: 10, prev2: null}
+        - {id: 4, time_val: 15, prev2: null}
+        - {id: 2, time_val: 20, prev2: 10}
+        - {id: 5, time_val: 25, prev2: 15}
+        - {id: 3, time_val: 30, prev2: 20}
+
+  # ==========================================================================
+  # Case 2: OVER (PARTITION BY) + aggregate — keytable + LEFT JOIN
+  # ==========================================================================
+
+  - name: "Case 2: SUM OVER (PARTITION BY)"
+    noncritical: true
+    sql: "SELECT id, parent, amount, SUM(amount) OVER (PARTITION BY parent) AS total FROM win_emp ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, parent: 100, amount: 500, total: 1500}
+        - {id: 2, parent: 100, amount: 300, total: 1500}
+        - {id: 3, parent: 100, amount: 700, total: 1500}
+        - {id: 4, parent: 200, amount: 200, total: 600}
+        - {id: 5, parent: 200, amount: 400, total: 600}
+
+  - name: "Case 2: COUNT OVER (PARTITION BY)"
+    noncritical: true
+    sql: "SELECT id, parent, COUNT(*) OVER (PARTITION BY parent) AS cnt FROM win_emp ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, parent: 100, cnt: 3}
+        - {id: 2, parent: 100, cnt: 3}
+        - {id: 3, parent: 100, cnt: 3}
+        - {id: 4, parent: 200, cnt: 2}
+        - {id: 5, parent: 200, cnt: 2}
+
+  - name: "Case 2: MAX OVER (PARTITION BY)"
+    noncritical: true
+    sql: "SELECT id, parent, amount, MAX(amount) OVER (PARTITION BY parent) AS mx FROM win_emp ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, parent: 100, amount: 500, mx: 700}
+        - {id: 2, parent: 100, amount: 300, mx: 700}
+        - {id: 3, parent: 100, amount: 700, mx: 700}
+        - {id: 4, parent: 200, amount: 200, mx: 400}
+        - {id: 5, parent: 200, amount: 400, mx: 400}
+
+  # ==========================================================================
+  # Case 3: OVER ORDER BY + outer ORDER BY → compile-time error
+  # ==========================================================================
+
+  - name: "Case 3: LEAD with conflicting outer ORDER BY"
+    noncritical: true
+    sql: "SELECT id, LEAD(time_val) OVER (ORDER BY time_val) AS next_time FROM win_emp ORDER BY amount"
+    expect:
+      error: true
+
+  - name: "Case 3: LAG with partition + order + outer ORDER BY"
+    noncritical: true
+    sql: "SELECT id, LAG(time_val) OVER (PARTITION BY parent ORDER BY time_val) AS prev FROM win_emp ORDER BY amount"
+    expect:
+      error: true
+
+  # ==========================================================================
+  # Case 4: OVER (PARTITION BY + ORDER BY) + LAG/LEAD — ERPL use case
+  # ==========================================================================
+
+  - name: "Case 4: LEAD within partition (ERPL pattern)"
+    sql: "SELECT id, parent, time_val, LEAD(time_val) OVER (PARTITION BY parent ORDER BY time_val) AS next_time FROM win_emp ORDER BY parent, time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, parent: 100, time_val: 10, next_time: 20}
+        - {id: 2, parent: 100, time_val: 20, next_time: 30}
+        - {id: 3, parent: 100, time_val: 30, next_time: null}
+        - {id: 4, parent: 200, time_val: 15, next_time: 25}
+        - {id: 5, parent: 200, time_val: 25, next_time: null}
+
+  - name: "Case 4: LAG within partition"
+    sql: "SELECT id, parent, time_val, LAG(time_val) OVER (PARTITION BY parent ORDER BY time_val) AS prev_time FROM win_emp ORDER BY parent, time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, parent: 100, time_val: 10, prev_time: null}
+        - {id: 2, parent: 100, time_val: 20, prev_time: 10}
+        - {id: 3, parent: 100, time_val: 30, prev_time: 20}
+        - {id: 4, parent: 200, time_val: 15, prev_time: null}
+        - {id: 5, parent: 200, time_val: 25, prev_time: 15}
+
+  - name: "Case 4: LEAD on different column than ORDER BY"
+    sql: "SELECT id, parent, time_val, LEAD(amount) OVER (PARTITION BY parent ORDER BY time_val) AS next_amount FROM win_emp ORDER BY parent, time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, parent: 100, time_val: 10, next_amount: 300}
+        - {id: 2, parent: 100, time_val: 20, next_amount: 700}
+        - {id: 3, parent: 100, time_val: 30, next_amount: null}
+        - {id: 4, parent: 200, time_val: 15, next_amount: 400}
+        - {id: 5, parent: 200, time_val: 25, next_amount: null}
+
+  - name: "Case 4: ERPL subquery pattern"
+    sql: |
+      SELECT m.id, m.partStart, m.partEnd
+      FROM (
+        SELECT id, parent AS pid, time_val AS partStart,
+               LEAD(time_val) OVER (PARTITION BY parent ORDER BY time_val) AS partEnd
+        FROM win_emp
+      ) m
+      WHERE m.pid = 100
+      ORDER BY m.partStart
+    expect:
+      rows: 3
+      data:
+        - {id: 1, partStart: 10, partEnd: 20}
+        - {id: 2, partStart: 20, partEnd: 30}
+        - {id: 3, partStart: 30, partEnd: null}
+
+  # ==========================================================================
+  # Case 5: OVER () — empty OVER clause with aggregate
+  # ==========================================================================
+
+  - name: "Case 5: SUM OVER ()"
+    noncritical: true
+    sql: "SELECT id, amount, SUM(amount) OVER () AS total FROM win_emp ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, amount: 500, total: 2100}
+        - {id: 2, amount: 300, total: 2100}
+        - {id: 3, amount: 700, total: 2100}
+        - {id: 4, amount: 200, total: 2100}
+        - {id: 5, amount: 400, total: 2100}
+
+  - name: "Case 5: COUNT OVER ()"
+    noncritical: true
+    sql: "SELECT id, COUNT(*) OVER () AS cnt FROM win_emp ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, cnt: 5}
+        - {id: 2, cnt: 5}
+        - {id: 3, cnt: 5}
+        - {id: 4, cnt: 5}
+        - {id: 5, cnt: 5}
+
+  # ==========================================================================
+  # Case 6: OVER (ORDER BY) + aggregate → same as OVER ()
+  # ==========================================================================
+
+  - name: "Case 6: SUM OVER (ORDER BY) without frame = SUM OVER ()"
+    noncritical: true
+    sql: "SELECT id, amount, SUM(amount) OVER (ORDER BY time_val) AS total FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, amount: 500, total: 2100}
+        - {id: 4, amount: 200, total: 2100}
+        - {id: 2, amount: 300, total: 2100}
+        - {id: 5, amount: 400, total: 2100}
+        - {id: 3, amount: 700, total: 2100}
+
+  # ==========================================================================
+  # Case 7: Multiple window functions — same OVER clause
+  # ==========================================================================
+
+  - name: "Case 7: LEAD and LAG same column same OVER"
+    noncritical: true
+    sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev, LEAD(time_val) OVER (ORDER BY time_val) AS next FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, time_val: 10, prev: null, next: 15}
+        - {id: 4, time_val: 15, prev: 10, next: 20}
+        - {id: 2, time_val: 20, prev: 15, next: 25}
+        - {id: 5, time_val: 25, prev: 20, next: 30}
+        - {id: 3, time_val: 30, prev: 25, next: null}
+
+  - name: "Case 7: LEAD and LAG different columns same OVER"
+    noncritical: true
+    sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY id) AS prev_time, LEAD(amount) OVER (ORDER BY id) AS next_amt FROM win_emp ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, time_val: 10, prev_time: null, next_amt: 300}
+        - {id: 2, time_val: 20, prev_time: 10, next_amt: 700}
+        - {id: 3, time_val: 30, prev_time: 20, next_amt: 200}
+        - {id: 4, time_val: 15, prev_time: 30, next_amt: 400}
+        - {id: 5, time_val: 25, prev_time: 15, next_amt: null}
+
+  # ==========================================================================
+  # Case 8: Multiple window functions — different OVER clauses → error
+  # ==========================================================================
+
+  - name: "Case 8: Different OVER ORDER BY clauses"
+    noncritical: true
+    sql: "SELECT id, LEAD(time_val) OVER (ORDER BY time_val) AS a, LAG(amount) OVER (ORDER BY amount) AS b FROM win_emp"
+    expect:
+      error: true
+
+  # ==========================================================================
+  # Case 9: Window function + GROUP BY → error
+  # ==========================================================================
+
+  - name: "Case 9: Window function with GROUP BY"
+    noncritical: true
+    sql: "SELECT parent, SUM(amount), LEAD(SUM(amount)) OVER (ORDER BY parent) FROM win_emp GROUP BY parent"
+    expect:
+      error: true
+
+  # ==========================================================================
+  # Case 10: Window function in WHERE → error
+  # ==========================================================================
+
+  - name: "Case 10: Window function in WHERE clause"
+    noncritical: true
+    sql: "SELECT id FROM win_emp WHERE LAG(time_val) OVER (ORDER BY time_val) > 10"
+    expect:
+      error: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS win_emp"

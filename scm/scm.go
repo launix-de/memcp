@@ -999,6 +999,7 @@ Patterns can be any of:
 	init_vector()
 	init_parser()
 	init_sync()
+	init_window()
 	init_scheduler()
 	init_jit()
 
