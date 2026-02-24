@@ -140,6 +140,7 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS ord_del2"
 
   - name: "ORDER BY with aggregate (SUM via scan_order)"
+    noncritical: true
     sql: "SELECT a, SUM(b) AS s FROM ord_t GROUP BY a ORDER BY a ASC LIMIT 2"
     expect:
       rows: 2

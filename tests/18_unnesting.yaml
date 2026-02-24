@@ -5,9 +5,9 @@ metadata:
   description: "Unnesting arbitrary queries: basic derived table"
 
 setup:
-  - sql: "DROP TABLE IF EXISTS ord_t"
-  - sql: "CREATE TABLE ord_t (a INT)"
-  - sql: "INSERT INTO ord_t (a) VALUES (1),(3),(2),(5),(4)"
+  - sql: "DROP TABLE IF EXISTS unnest_t"
+  - sql: "CREATE TABLE unnest_t (a INT)"
+  - sql: "INSERT INTO unnest_t (a) VALUES (1),(3),(2),(5),(4)"
 
 test_cases:
   - name: "Select from simple derived table"
@@ -18,15 +18,15 @@ test_cases:
         - a: 1
 
   - name: "ORDER ignored without LIMIT in derived table"
-    sql: "SELECT * FROM (SELECT a FROM ord_t ORDER BY a DESC) t"
+    sql: "SELECT * FROM (SELECT a FROM unnest_t ORDER BY a DESC) t"
     expect:
       rows: 5
 
   - name: "Simple LEFT JOIN with derived table and ON condition"
     sql: |
       SELECT o.a AS oa, r.a AS ra
-      FROM ord_t o
-      LEFT JOIN (SELECT a FROM ord_t) r ON r.a = o.a
+      FROM unnest_t o
+      LEFT JOIN (SELECT a FROM unnest_t) r ON r.a = o.a
       ORDER BY o.a
       LIMIT 2
     expect:
@@ -41,8 +41,8 @@ test_cases:
     noncritical: true
     sql: |
       SELECT t.a
-      FROM (SELECT a FROM ord_t) t
-      LEFT JOIN ord_t o2 ON o2.a = t.a
+      FROM (SELECT a FROM unnest_t) t
+      LEFT JOIN unnest_t o2 ON o2.a = t.a
       ORDER BY t.a DESC
       LIMIT 1
     expect:
@@ -53,8 +53,8 @@ test_cases:
   - name: "LEFT JOIN with derived table using column alias in ON"
     sql: |
       SELECT k.a AS ka, r.ref_a AS ra
-      FROM ord_t k
-      LEFT JOIN (SELECT a AS ref_a FROM ord_t) r ON r.ref_a = k.a
+      FROM unnest_t k
+      LEFT JOIN (SELECT a AS ref_a FROM unnest_t) r ON r.ref_a = k.a
       ORDER BY k.a
       LIMIT 2
     expect:
@@ -66,7 +66,7 @@ test_cases:
           ra: 2
 
   - name: "Derived table projection - SELECT * returns only projected columns"
-    sql: "SELECT * FROM (SELECT a FROM ord_t) t ORDER BY a LIMIT 2"
+    sql: "SELECT * FROM (SELECT a FROM unnest_t) t ORDER BY a LIMIT 2"
     expect:
       rows: 2
       data:
@@ -77,8 +77,8 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT o.a AS oa, r.a AS ra
-        FROM ord_t o
-        LEFT JOIN (SELECT a FROM ord_t) r ON r.a = o.a
+        FROM unnest_t o
+        LEFT JOIN (SELECT a FROM unnest_t) r ON r.a = o.a
       ) AS t
       ORDER BY t.oa
       LIMIT 2
@@ -94,8 +94,8 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT o.a AS oa, r.ref_a AS ra
-        FROM ord_t o
-        LEFT JOIN (SELECT a AS ref_a FROM ord_t) r ON r.ref_a = o.a
+        FROM unnest_t o
+        LEFT JOIN (SELECT a AS ref_a FROM unnest_t) r ON r.ref_a = o.a
       ) AS t
       ORDER BY t.oa
       LIMIT 2
@@ -111,9 +111,9 @@ test_cases:
     sql: |
       SELECT t.* FROM (
         SELECT o.a AS oa, r1.a AS r1a, r2.a AS r2a
-        FROM ord_t o
-        LEFT JOIN (SELECT a FROM ord_t) r1 ON r1.a = o.a
-        LEFT JOIN (SELECT a FROM ord_t WHERE a > 2) r2 ON r2.a = o.a
+        FROM unnest_t o
+        LEFT JOIN (SELECT a FROM unnest_t) r1 ON r1.a = o.a
+        LEFT JOIN (SELECT a FROM unnest_t WHERE a > 2) r2 ON r2.a = o.a
       ) AS t
       ORDER BY t.oa
       LIMIT 3
@@ -134,10 +134,10 @@ test_cases:
     sql: |
       SELECT t.oa, o2.a AS o2a FROM (
         SELECT o.a AS oa
-        FROM ord_t o
-        LEFT JOIN (SELECT a FROM ord_t) r ON r.a = o.a
+        FROM unnest_t o
+        LEFT JOIN (SELECT a FROM unnest_t) r ON r.a = o.a
       ) AS t
-      LEFT JOIN ord_t o2 ON o2.a = t.oa
+      LEFT JOIN unnest_t o2 ON o2.a = t.oa
       ORDER BY t.oa
       LIMIT 2
     expect:

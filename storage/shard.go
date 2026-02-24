@@ -104,15 +104,13 @@ func (u *storageShard) UnmarshalJSON(data []byte) error {
 }
 func (u *storageShard) load(t *table) {
 	u.t = t
-	// mark columns for lazy loading
+	// mark columns for lazy loading (caller must hold u.mu.Lock)
 	for _, col := range u.t.Columns {
 		u.columns[col.Name] = nil
 	}
 
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
-		// Replaying the log mutates inserts/deletions; use shard write lock
-		u.mu.Lock()
-		defer u.mu.Unlock()
+		// Replaying the log mutates inserts/deletions; caller holds u.mu.Lock
 		var log chan interface{}
 		log, u.logfile = u.t.schema.persistence.ReplayLog(u.uuid.String())
 		numEntriesRestored := 0
@@ -279,7 +277,13 @@ func (s *storageShard) ensureLoaded() {
 	if s.srState != COLD {
 		return
 	}
-	// materialize shard from disk
+	// double-check under lock to prevent concurrent map writes in load()
+	s.mu.Lock()
+	if s.srState != COLD {
+		s.mu.Unlock()
+		return
+	}
+	// materialize shard from disk (load expects caller to hold mu.Lock)
 	s.load(s.t)
 	// memory engine shards stay WRITE to bypass LRU later
 	if s.t.PersistencyMode == Memory {
@@ -287,6 +291,7 @@ func (s *storageShard) ensureLoaded() {
 	} else {
 		s.srState = SHARED
 	}
+	s.mu.Unlock()
 }
 
 func NewShard(t *table) *storageShard {
