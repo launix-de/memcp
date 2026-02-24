@@ -814,9 +814,12 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
-									/* resolve unqualified column against inner schemas2; must match exactly one table */
+									/* resolve unqualified column against inner schemas2; must match exactly one table.
+									Skip aliases that contain ':' — those are prefixed from flattened derived tables
+									and should not participate in unqualified column resolution. */
 									(define matches (reduce_assoc schemas2 (lambda (acc alias cols)
-										(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
+										(if (and (equal? (replace alias ":" "") alias)
+											(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
 											(cons alias acc)
 											acc)) '()))
 									(match matches

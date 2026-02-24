@@ -148,6 +148,70 @@ test_cases:
         - oa: 2
           o2a: 2
 
+  - name: "Ambiguous column in multiple derived tables with overlapping columns"
+    sql: |
+      DROP TABLE IF EXISTS unn_main
+    expect: {}
+  - name: "setup unn_ref"
+    sql: |
+      DROP TABLE IF EXISTS unn_ref
+    expect: {}
+  - name: "setup unn_extra"
+    sql: |
+      DROP TABLE IF EXISTS unn_extra
+    expect: {}
+  - name: "setup unn_main create"
+    sql: |
+      CREATE TABLE unn_main (id INT PRIMARY KEY, typ INT, name VARCHAR(50))
+    expect: {}
+  - name: "setup unn_ref create"
+    sql: |
+      CREATE TABLE unn_ref (id INT PRIMARY KEY, descr VARCHAR(50))
+    expect: {}
+  - name: "setup unn_extra create"
+    sql: |
+      CREATE TABLE unn_extra (id INT PRIMARY KEY, typ INT, label VARCHAR(50))
+    expect: {}
+  - name: "setup unn_main insert"
+    sql: |
+      INSERT INTO unn_main (id, typ, name) VALUES (1, 10, 'Alice'), (2, 20, 'Bob')
+    expect: {}
+  - name: "setup unn_ref insert"
+    sql: |
+      INSERT INTO unn_ref (id, descr) VALUES (10, 'Type-A'), (20, 'Type-B')
+    expect: {}
+  - name: "setup unn_extra insert"
+    sql: |
+      INSERT INTO unn_extra (id, typ, label) VALUES (1, 99, 'X1'), (2, 88, 'X2')
+    expect: {}
+  - name: "Unnested derived tables with overlapping column names"
+    sql: |
+      SELECT t.* FROM (
+        SELECT unn_main.typ AS typ, unn_main.name AS name
+        FROM unn_main unn_main
+        LEFT JOIN (SELECT id AS `typ:ID`, descr AS `typ:descr` FROM unn_ref) `ref:typ`
+          ON `ref:typ`.`typ:ID` = typ
+        LEFT JOIN (SELECT id AS `extra:ID`, label AS `extra:label` FROM unn_extra) `ref:extra`
+          ON `ref:extra`.`extra:ID` = unn_main.id
+      ) AS t
+      ORDER BY t.typ
+    expect:
+      rows: 2
+      data:
+        - typ: 10
+          name: "Alice"
+        - typ: 20
+          name: "Bob"
+  - name: "cleanup unn_main"
+    sql: "DROP TABLE IF EXISTS unn_main"
+    expect: {}
+  - name: "cleanup unn_ref"
+    sql: "DROP TABLE IF EXISTS unn_ref"
+    expect: {}
+  - name: "cleanup unn_extra"
+    sql: "DROP TABLE IF EXISTS unn_extra"
+    expect: {}
+
   # TODO: add correlated subselect in FROM (LATERAL-style)
   # - name: "Derived table with correlation"
   #   sql: |
