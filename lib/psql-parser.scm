@@ -180,6 +180,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	(define psql_expression5 (parser (or
 		(parser '((atom "NOT" true) (define expr psql_expression6)) '('not expr))
+		/* unary minus: -(expr) */
+		(parser '("-" (define expr psql_expression6)) '((quote -) 0 expr))
 		(parser '((define expr psql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
 		(parser '((define expr psql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
 		psql_expression6

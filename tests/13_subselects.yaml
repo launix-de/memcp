@@ -35,6 +35,77 @@ test_cases:
 #       - name: "Alice"
 #         cnt: 2
 
+  # === Scalar subselects in SELECT list ===
+  - name: "Scalar subselect in SELECT"
+    sql: "SELECT (SELECT 1) AS sub"
+    expect:
+      rows: 1
+      data:
+        - sub: 1
+
+  - name: "Multiple scalar subselects in SELECT"
+    sql: "SELECT 1 AS a, (SELECT 2) AS b, (SELECT 3) AS c"
+    expect:
+      rows: 1
+      data:
+        - a: 1
+          b: 2
+          c: 3
+
+  - name: "Scalar subselect with CASE WHEN"
+    sql: "SELECT (SELECT CASE WHEN TRUE THEN 1 ELSE 0 END) AS t"
+    expect:
+      rows: 1
+      data:
+        - t: 1
+
+  - name: "Scalar subselect with unary minus"
+    sql: "SELECT (SELECT CASE WHEN FALSE THEN 1 ELSE -(1) END) AS t"
+    expect:
+      rows: 1
+      data:
+        - t: -1
+
+  - name: "Scalar subselect with unary minus and space"
+    sql: "SELECT (SELECT CASE WHEN FALSE THEN 1 ELSE - (1) END) AS t"
+    expect:
+      rows: 1
+      data:
+        - t: -1
+
+  - name: "Unary minus in expression"
+    sql: "SELECT -(5) AS t"
+    expect:
+      rows: 1
+      data:
+        - t: -5
+
+  - name: "Unary minus with multiplication"
+    sql: "SELECT 3 * -(2) AS t"
+    expect:
+      rows: 1
+      data:
+        - t: -6
+
+  - name: "UNIX_TIMESTAMP with expression"
+    sql: "SELECT UNIX_TIMESTAMP('2025-01-01') AS t"
+    expect:
+      rows: 1
+
+  - name: "Correlated scalar subselect"
+    sql: |
+      SELECT c.name,
+        (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) AS order_count
+      FROM customers c
+      ORDER BY c.id
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+          order_count: 2
+        - name: "Bob"
+          order_count: 1
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS orders"
   - sql: "DROP TABLE IF EXISTS customers"
