@@ -5,32 +5,32 @@ metadata:
   description: "EXISTS and NOT EXISTS subquery tests"
 
 setup:
-  - sql: "DROP TABLE IF EXISTS orders"
-  - sql: "DROP TABLE IF EXISTS customers"
+  - sql: "DROP TABLE IF EXISTS exists_orders"
+  - sql: "DROP TABLE IF EXISTS exists_customers"
   - sql: |
-      CREATE TABLE customers (
+      CREATE TABLE exists_customers (
         ID INT PRIMARY KEY,
         name VARCHAR(64)
       )
   - sql: |
-      CREATE TABLE orders (
+      CREATE TABLE exists_orders (
         ID INT PRIMARY KEY,
         customer_id INT,
         total DECIMAL(10,2)
       )
   - sql: |
-      INSERT INTO customers (ID, name) VALUES
+      INSERT INTO exists_customers (ID, name) VALUES
       (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')
   - sql: |
-      INSERT INTO orders (ID, customer_id, total) VALUES
+      INSERT INTO exists_orders (ID, customer_id, total) VALUES
       (101, 1, 100.00), (102, 1, 200.00), (103, 2, 150.00)
 
 test_cases:
   - name: "EXISTS with correlated subquery - customers with orders"
     noncritical: true  # Correlated EXISTS in WHERE not yet supported
     sql: |
-      SELECT ID, name FROM customers c
-      WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.ID)
+      SELECT ID, name FROM exists_customers c
+      WHERE EXISTS (SELECT 1 FROM exists_orders o WHERE o.customer_id = c.ID)
       ORDER BY ID
     expect:
       rows: 2
@@ -43,8 +43,8 @@ test_cases:
   - name: "NOT EXISTS - customers without orders"
     noncritical: true  # Correlated EXISTS in WHERE not yet supported
     sql: |
-      SELECT ID, name FROM customers c
-      WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.ID)
+      SELECT ID, name FROM exists_customers c
+      WHERE NOT EXISTS (SELECT 1 FROM exists_orders o WHERE o.customer_id = c.ID)
       ORDER BY ID
     expect:
       rows: 1
@@ -54,8 +54,8 @@ test_cases:
 
   - name: "EXISTS with uncorrelated subquery - true case"
     sql: |
-      SELECT ID, name FROM customers
-      WHERE EXISTS (SELECT 1 FROM orders WHERE total > 50)
+      SELECT ID, name FROM exists_customers
+      WHERE EXISTS (SELECT 1 FROM exists_orders WHERE total > 50)
       ORDER BY ID
     expect:
       rows: 3
@@ -69,12 +69,12 @@ test_cases:
 
   - name: "EXISTS with uncorrelated subquery - false case"
     sql: |
-      SELECT ID, name FROM customers
-      WHERE EXISTS (SELECT 1 FROM orders WHERE total > 1000)
+      SELECT ID, name FROM exists_customers
+      WHERE EXISTS (SELECT 1 FROM exists_orders WHERE total > 1000)
       ORDER BY ID
     expect:
       rows: 0
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS orders"
-  - sql: "DROP TABLE IF EXISTS customers"
+  - sql: "DROP TABLE IF EXISTS exists_orders"
+  - sql: "DROP TABLE IF EXISTS exists_customers"

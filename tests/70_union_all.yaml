@@ -32,7 +32,6 @@ test_cases:
   # === Basic UNION ALL ===
 
   - name: "UNION ALL two tables"
-    noncritical: true
     sql: |
       SELECT ID, name FROM fop_files WHERE ID <= 2
       UNION ALL
@@ -41,7 +40,6 @@ test_cases:
       rows: 4
 
   - name: "UNION ALL preserves duplicates"
-    noncritical: true
     sql: |
       SELECT name FROM fop_files WHERE ID = 1
       UNION ALL
@@ -53,7 +51,6 @@ test_cases:
         - name: "image1.png"
 
   - name: "UNION ALL three queries"
-    noncritical: true
     sql: |
       SELECT name FROM fop_files WHERE ID = 1
       UNION ALL
@@ -68,7 +65,6 @@ test_cases:
         - name: "image3.png"
 
   - name: "UNION ALL with WHERE filters"
-    noncritical: true
     sql: |
       SELECT ID, name FROM fop_files WHERE ID <= 2
       UNION ALL
@@ -113,7 +109,6 @@ test_cases:
   # === UNION ALL in subquery / derived table ===
 
   - name: "UNION ALL as derived table"
-    noncritical: true
     sql: |
       SELECT COUNT(*) AS c FROM (
         SELECT ID FROM fop_files
@@ -126,7 +121,6 @@ test_cases:
         - c: 8
 
   - name: "EXISTS with UNION ALL subselect"
-    noncritical: true
     sql: |
       SELECT ID, name FROM fop_files f
       WHERE EXISTS (

@@ -6,12 +6,12 @@ metadata:
   # Suite is now expected to pass fully
 
 setup:
-  - sql: DROP TABLE IF EXISTS `users`
+  - sql: DROP TABLE IF EXISTS `compat_users`
 
 test_cases:
   - name: "CREATE TABLE with backticked identifiers"
     sql: |
-      CREATE TABLE `users` (
+      CREATE TABLE `compat_users` (
         `id` INT PRIMARY KEY,
         `name` VARCHAR(100),
         `active` BOOLEAN
@@ -21,13 +21,13 @@ test_cases:
 
   - name: "INSERT respects backticks"
     sql: |
-      INSERT INTO `users` (`id`, `name`, `active`) VALUES (1, 'Ada', true)
+      INSERT INTO `compat_users` (`id`, `name`, `active`) VALUES (1, 'Ada', true)
     expect:
       affected_rows: 1
 
   - name: "SELECT with backticks"
     sql: |
-      SELECT `id`, `name`, `active` FROM `users`
+      SELECT `id`, `name`, `active` FROM `compat_users`
     expect:
       rows: 1
       data:

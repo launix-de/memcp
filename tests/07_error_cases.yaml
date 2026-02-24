@@ -11,7 +11,7 @@ test_cases:
       error: true
     
   - name: "Syntax error - invalid SQL statement"
-    sql: "SELCT * FROM users"
+    sql: "SELCT * FROM err_users"
     expect:
       error: true
     
@@ -21,12 +21,12 @@ test_cases:
       error: true
     
   - name: "Non-existing column"
-    sql: "SELECT non_existing_column FROM users"
+    sql: "SELECT non_existing_column FROM err_users"
     expect:
       error: true
     
   - name: "Invalid column reference in WHERE"
-    sql: "SELECT * FROM users WHERE invalid_column = 1"
+    sql: "SELECT * FROM err_users WHERE invalid_column = 1"
     expect:
       error: true
     
@@ -37,18 +37,18 @@ test_cases:
 
   - name: "Multi-table UPDATE with comma targets is not implemented"
     noncritical: true
-    sql: "UPDATE users, users2 SET users.id = users2.id"
+    sql: "UPDATE err_users, err_users2 SET err_users.id = err_users2.id"
     expect:
       error: true
 
   - name: "Multi-table UPDATE with JOIN target is not implemented"
     noncritical: true
-    sql: "UPDATE users JOIN users2 ON users.id = users2.id SET users.id = users2.id"
+    sql: "UPDATE err_users JOIN err_users2 ON err_users.id = err_users2.id SET err_users.id = err_users2.id"
     expect:
       error: true
     
   - name: "Duplicate table creation (MemCP allows duplicate CREATE TABLE)"
-    sql: "CREATE TABLE users (id INTEGER)"
+    sql: "CREATE TABLE err_users (id INTEGER)"
     expect: {}
     
   - name: "Drop non-existing table"
@@ -57,7 +57,7 @@ test_cases:
       error: true
     
   - name: "Missing closing parenthesis"
-    sql: "SELECT * FROM (SELECT * FROM users"
+    sql: "SELECT * FROM (SELECT * FROM err_users"
     expect:
       error: true
 

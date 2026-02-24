@@ -5,32 +5,32 @@ metadata:
   description: "IN and NOT IN with subquery tests"
 
 setup:
-  - sql: "DROP TABLE IF EXISTS renderjob"
-  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: "DROP TABLE IF EXISTS in_renderjob"
+  - sql: "DROP TABLE IF EXISTS in_fop_files"
   - sql: |
-      CREATE TABLE fop_files (
+      CREATE TABLE in_fop_files (
         ID INT PRIMARY KEY,
         name VARCHAR(64)
       )
   - sql: |
-      CREATE TABLE renderjob (
+      CREATE TABLE in_renderjob (
         ID INT PRIMARY KEY,
         result INT
       )
   - sql: |
-      INSERT INTO fop_files (ID, name) VALUES
+      INSERT INTO in_fop_files (ID, name) VALUES
       (1, 'image1.png'), (2, 'image2.png'), (3, 'image3.png'),
       (4, 'image4.png'), (5, 'image5.png')
   - sql: |
-      INSERT INTO renderjob (ID, result) VALUES
+      INSERT INTO in_renderjob (ID, result) VALUES
       (101, 1), (102, 3), (103, 3)
 
 test_cases:
   - name: "IN subquery - files with render results"
     noncritical: true  # IN subquery in WHERE with table scan not yet supported
     sql: |
-      SELECT ID, name FROM fop_files
-      WHERE ID IN (SELECT result FROM renderjob)
+      SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob)
       ORDER BY ID
     expect:
       rows: 2
@@ -43,8 +43,8 @@ test_cases:
   - name: "NOT IN subquery - files without render results"
     noncritical: true  # NOT IN subquery in WHERE with table scan not yet supported
     sql: |
-      SELECT ID, name FROM fop_files
-      WHERE ID NOT IN (SELECT result FROM renderjob)
+      SELECT ID, name FROM in_fop_files
+      WHERE ID NOT IN (SELECT result FROM in_renderjob)
       ORDER BY ID
     expect:
       rows: 3
@@ -59,8 +59,8 @@ test_cases:
   - name: "IN subquery with WHERE in subquery"
     noncritical: true  # IN subquery in WHERE with table scan not yet supported
     sql: |
-      SELECT ID, name FROM fop_files
-      WHERE ID IN (SELECT result FROM renderjob WHERE ID > 101)
+      SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob WHERE ID > 101)
       ORDER BY ID
     expect:
       rows: 1
@@ -71,8 +71,8 @@ test_cases:
   - name: "IN subquery returns no matches"
     noncritical: true  # IN subquery in WHERE with table scan not yet supported
     sql: |
-      SELECT ID, name FROM fop_files
-      WHERE ID IN (SELECT result FROM renderjob WHERE ID > 1000)
+      SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob WHERE ID > 1000)
       ORDER BY ID
     expect:
       rows: 0
@@ -80,8 +80,8 @@ test_cases:
   - name: "NOT IN subquery returns all when subquery empty"
     noncritical: true  # NOT IN subquery in WHERE with table scan not yet supported
     sql: |
-      SELECT ID, name FROM fop_files
-      WHERE ID NOT IN (SELECT result FROM renderjob WHERE ID > 1000)
+      SELECT ID, name FROM in_fop_files
+      WHERE ID NOT IN (SELECT result FROM in_renderjob WHERE ID > 1000)
       ORDER BY ID
     expect:
       rows: 5
@@ -100,8 +100,8 @@ test_cases:
   - name: "IN subquery combined with other conditions"
     noncritical: true  # IN subquery in WHERE with table scan not yet supported
     sql: |
-      SELECT ID, name FROM fop_files
-      WHERE ID IN (SELECT result FROM renderjob) AND name LIKE '%3%'
+      SELECT ID, name FROM in_fop_files
+      WHERE ID IN (SELECT result FROM in_renderjob) AND name LIKE '%3%'
       ORDER BY ID
     expect:
       rows: 1
@@ -114,11 +114,11 @@ test_cases:
 
   - name: "IN with UNION ALL subselect"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID IN (
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 102
+        SELECT result FROM in_renderjob WHERE ID = 102
       )
       ORDER BY ID
     expect:
@@ -131,11 +131,11 @@ test_cases:
 
   - name: "NOT IN with UNION ALL subselect"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID NOT IN (
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 102
+        SELECT result FROM in_renderjob WHERE ID = 102
       )
       ORDER BY ID
     expect:
@@ -150,13 +150,13 @@ test_cases:
 
   - name: "IN with UNION ALL using three branches"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID IN (
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 102
+        SELECT result FROM in_renderjob WHERE ID = 102
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 103
+        SELECT result FROM in_renderjob WHERE ID = 103
       )
       ORDER BY ID
     expect:
@@ -169,13 +169,13 @@ test_cases:
 
   - name: "IN with UNION ALL duplicate branches keeps semantics"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID IN (
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 102
+        SELECT result FROM in_renderjob WHERE ID = 102
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 103
+        SELECT result FROM in_renderjob WHERE ID = 103
       )
       ORDER BY ID
     expect:
@@ -188,11 +188,11 @@ test_cases:
 
   - name: "IN with UNION ALL including empty branch"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID IN (
-        SELECT result FROM renderjob WHERE ID > 1000
+        SELECT result FROM in_renderjob WHERE ID > 1000
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
       )
       ORDER BY ID
     expect:
@@ -203,11 +203,11 @@ test_cases:
 
   - name: "NOT IN with UNION ALL when all branches empty"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID NOT IN (
-        SELECT result FROM renderjob WHERE ID > 1000
+        SELECT result FROM in_renderjob WHERE ID > 1000
         UNION ALL
-        SELECT result FROM renderjob WHERE ID > 2000
+        SELECT result FROM in_renderjob WHERE ID > 2000
       )
       ORDER BY ID
     expect:
@@ -226,11 +226,11 @@ test_cases:
 
   - name: "IN with UNION ALL and outer filter"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID IN (
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 102
+        SELECT result FROM in_renderjob WHERE ID = 102
       )
       AND ID > 1
       ORDER BY ID
@@ -243,13 +243,13 @@ test_cases:
   - name: "IN with UNION ALL branch using inner ORDER BY/LIMIT"
     noncritical: true
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID IN (
         SELECT result FROM (
-          SELECT result FROM renderjob ORDER BY ID DESC LIMIT 1
+          SELECT result FROM in_renderjob ORDER BY ID DESC LIMIT 1
         ) AS top_result
         UNION ALL
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
       )
       ORDER BY ID
     expect:
@@ -262,27 +262,27 @@ test_cases:
 
   - name: "IN with UNION ALL column count mismatch"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID IN (
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
         UNION ALL
-        SELECT result, ID FROM renderjob WHERE ID = 102
+        SELECT result, ID FROM in_renderjob WHERE ID = 102
       )
     expect:
       error: true
 
   - name: "IN with UNION DISTINCT not supported yet"
     sql: |
-      SELECT ID, name FROM fop_files
+      SELECT ID, name FROM in_fop_files
       WHERE ID IN (
-        SELECT result FROM renderjob WHERE ID = 101
+        SELECT result FROM in_renderjob WHERE ID = 101
         UNION
-        SELECT result FROM renderjob WHERE ID = 102
+        SELECT result FROM in_renderjob WHERE ID = 102
       )
       ORDER BY ID
     expect:
       error: true
 
 cleanup:
-  - sql: "DROP TABLE IF EXISTS renderjob"
-  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: "DROP TABLE IF EXISTS in_renderjob"
+  - sql: "DROP TABLE IF EXISTS in_fop_files"
