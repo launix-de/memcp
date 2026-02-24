@@ -15,6 +15,7 @@
 (sql_builtins "STR_TO_DATE" str_to_date)
 (sql_builtins "DATE" date_trunc_day)
 (sql_builtins "CURRENT_DATE" current_date)
+(sql_builtins "DATEDIFF" datediff)
 
 /* math */
 (sql_builtins "FLOOR" floor)

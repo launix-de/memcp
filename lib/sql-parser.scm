@@ -537,6 +537,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		sql_expression6
 	)))
 
+	/* window function OVER() spec: parse PARTITION BY and ORDER BY clauses */
+	(define sql_window_orderby_item (parser '((define e sql_expression) (? (or (atom "ASC" true) (atom "DESC" true)))) true))
+	(define sql_window_spec (parser '(
+		(? (atom "PARTITION" true) (atom "BY" true) (+ sql_expression ","))
+		(? (atom "ORDER" true) (atom "BY" true) (+ sql_window_orderby_item ","))) true))
+
 	(define sql_expression6 (parser (or
 		/* Scalar subselect in expressions: (SELECT ...) */
 		(parser '("(" (define sub sql_select) ")") '('inner_select sub))
@@ -628,6 +634,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "LEFT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote sql_substr) s 1 n))
 		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
 		(parser '((atom "RIGHT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
+		/* window functions: parse OVER(...) clause and return nil (stub until implemented) */
+		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") nil)
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
 		sql_number
 		sql_string

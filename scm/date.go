@@ -306,6 +306,31 @@ func init_date() {
 		true, false, nil,
 	})
 
+	// DATEDIFF(date1, date2) - returns number of days between two dates
+	Declare(&Globalenv, &Declaration{
+		"datediff", "returns number of days between two dates (date1 - date2)",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"date1", "any", "first date", nil},
+			DeclarationParameter{"date2", "any", "second date", nil},
+		}, "int",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
+			t1, ok1 := toTime(a[0])
+			t2, ok2 := toTime(a[1])
+			if !ok1 || !ok2 {
+				return NewNil()
+			}
+			d1 := time.Date(t1.Year(), t1.Month(), t1.Day(), 0, 0, 0, 0, time.UTC)
+			d2 := time.Date(t2.Year(), t2.Month(), t2.Day(), 0, 0, 0, 0, time.UTC)
+			days := int64(d1.Sub(d2).Hours() / 24)
+			return NewInt(days)
+		},
+		true, false, nil,
+	})
+
 	// STR_TO_DATE(str, format) - parse string with MySQL format to date
 	Declare(&Globalenv, &Declaration{
 		"str_to_date", "parses a string with MySQL format specifiers to a date",

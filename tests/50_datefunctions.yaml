@@ -205,5 +205,49 @@ test_cases:
       data:
         - d: "2024-06-15 00:00:00"
 
+  # --- DATEDIFF ---
+  - name: "DATEDIFF positive"
+    sql: "SELECT DATEDIFF('2025-06-15', '2025-06-10') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: 5
+
+  - name: "DATEDIFF negative"
+    sql: "SELECT DATEDIFF('2025-06-10', '2025-06-15') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: -5
+
+  - name: "DATEDIFF same day different times"
+    sql: "SELECT DATEDIFF('2025-06-15 23:59:59', '2025-06-15 00:00:00') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: 0
+
+  - name: "DATEDIFF with NULL"
+    sql: "SELECT DATEDIFF(NULL, '2025-06-15') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: null
+
+  # --- Window function stub (parse only, returns NULL) ---
+  - name: "Window function LEAD stub returns NULL"
+    sql: "SELECT LEAD(1) OVER (ORDER BY 1) AS l"
+    expect:
+      rows: 1
+      data:
+        - l: null
+
+  - name: "Window function with PARTITION BY and ORDER BY DESC"
+    sql: "SELECT LEAD(1) OVER (PARTITION BY 1 ORDER BY 1 DESC) AS l"
+    expect:
+      rows: 1
+      data:
+        - l: null
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS date_test"
