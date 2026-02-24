@@ -46,6 +46,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "TRIM" true)
 	(atom "LTRIM" true)
 	(atom "RTRIM" true)
+	(atom "BETWEEN" true)
+	(atom "INTERVAL" true)
 )))
 (define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"])+" false false)) "\"") (sql_unescape id))) /* with double quote */
 (define psql_identifier (parser (define x (or psql_identifier_unquoted psql_identifier_quoted)) x))
@@ -162,10 +164,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((define a psql_expression3) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b))
 		(parser '((define a psql_expression3) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('contains? (cons list b) a))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('not (contains? (cons list b) a)))
+		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
+		(parser '((define a psql_expression3) (atom "BETWEEN" true) (define low psql_expression3) (atom "AND" true) (define high psql_expression3)) (list (quote and) (list (quote >=) a low) (list (quote <=) a high)))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "BETWEEN" true) (define low psql_expression3) (atom "AND" true) (define high psql_expression3)) (list (quote not) (list (quote and) (list (quote >=) a low) (list (quote <=) a high))))
 		psql_expression3
 	)))
 
 	(define psql_expression3 (parser (or
+		/* date + INTERVAL n UNIT */
+		(parser '((define a psql_expression4) "+" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_identifier_unquoted)) '('date_add a n unit))
+		/* date - INTERVAL n UNIT */
+		(parser '((define a psql_expression4) "-" (atom "INTERVAL" true) (define n psql_expression4) (define unit psql_identifier_unquoted)) '('date_sub a n unit))
 		(parser '((define a psql_expression4) "+" (define b psql_expression3)) '((quote +) a b))
 		(parser '((define a psql_expression4) "-" (define b psql_expression3)) '((quote -) a b))
 		psql_expression4
@@ -197,6 +206,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "CASE" true) (define conditions (* (parser '((atom "WHEN" true) (define a psql_expression) (atom "THEN" true) (define b psql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch psql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
+		/* COUNT(DISTINCT expr): unique counting */
+		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e psql_expression) ")") '('count_distinct e))
 		/* COUNT(expr): count non-NULL values -> map to (if (nil? expr) 0 1), reduce +, neutral 0 */
 		(parser '((atom "COUNT" true) "(" (define e psql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
 		(parser '((atom "SUM" true) "(" (define s psql_expression) ")") '('aggregate s (quote +) 0))
@@ -209,6 +220,29 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p psql_expression) ")") '('parse_date p))
+		/* CURRENT_DATE / CURRENT_DATE() */
+		(parser '((atom "CURRENT_DATE" true) "(" ")") '('current_date))
+		(parser (atom "CURRENT_DATE" true) '('current_date))
+		/* CURRENT_TIMESTAMP / CURRENT_TIMESTAMP() */
+		(parser '((atom "CURRENT_TIMESTAMP" true) "(" ")") '('now))
+		(parser (atom "CURRENT_TIMESTAMP" true) '('now))
+		/* EXTRACT(field FROM expr) */
+		(parser '((atom "EXTRACT" true) "(" (define field psql_identifier_unquoted) (atom "FROM" true) (define e psql_expression) ")") '('extract_date e field))
+		/* DATE_ADD(expr, INTERVAL n UNIT) / DATE_SUB(expr, INTERVAL n UNIT) */
+		(parser '((atom "DATE_ADD" true) "(" (define e psql_expression) "," (atom "INTERVAL" true) (define n psql_expression) (define unit psql_identifier_unquoted) ")") '('date_add e n unit))
+		(parser '((atom "DATE_SUB" true) "(" (define e psql_expression) "," (atom "INTERVAL" true) (define n psql_expression) (define unit psql_identifier_unquoted) ")") '('date_sub e n unit))
+		/* DATE('str') - parse date string; DATE(expr) - truncate to day */
+		(parser '((atom "DATE" true) (define s psql_string)) '('parse_date s))
+		(parser '((atom "DATE" true) "(" (define e psql_expression) ")") '('date_trunc_day e))
+		/* SUBSTRING(expr FROM start FOR len) - SQL standard syntax */
+		(parser '((atom "SUBSTRING" true) "(" (define s psql_expression) (atom "FROM" true) (define start psql_expression) (atom "FOR" true) (define len psql_expression) ")") '((quote sql_substr) s start len))
+		/* IFNULL(val, default) - alias for COALESCE with 2 args */
+		(parser '((atom "IFNULL" true) "(" (define a psql_expression) "," (define b psql_expression) ")") '((quote coalesceNil) a b))
+		/* CONVERT(expr, type) */
+		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "DECIMAL" true) (? "(" psql_int (? "," psql_int) ")") ")") '('simplify p))
+		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "UNSIGNED" true) ")") '('simplify p))
+		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "SIGNED" true) ")") '('simplify p))
+		(parser '((atom "CONVERT" true) "(" (define p psql_expression) "," (atom "INTEGER" true) ")") '('simplify p))
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "UNSIGNED" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "INTEGER" true) ")") '('simplify p)) /* TODO: proper implement CAST; for now make vscode work */
 		(parser '((atom "CAST" true) "(" (define p psql_expression) (atom "AS" true) (atom "VARCHAR" true) "(" psql_int ")" ")") '('concat p))
@@ -250,9 +284,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		psql_column
 	)))
 
-	/* Postgres cast syntax: expr::text (postfix operator; avoid left recursion) */
+	/* Postgres cast syntax: expr::type (postfix operator; avoid left recursion) */
 	(define psql_expression6 (parser (or
 		(parser '((define a psql_expression7) "::" (atom "text" true)) '('concat a))
+		(parser '((define a psql_expression7) "::" (atom "varchar" true)) '('concat a))
+		(parser '((define a psql_expression7) "::" (atom "integer" true)) '('simplify a))
+		(parser '((define a psql_expression7) "::" (atom "int" true)) '('simplify a))
+		(parser '((define a psql_expression7) "::" (atom "bigint" true)) '('simplify a))
+		(parser '((define a psql_expression7) "::" (atom "float" true)) '('simplify a))
+		(parser '((define a psql_expression7) "::" (atom "double" true)) '('simplify a))
+		(parser '((define a psql_expression7) "::" (atom "numeric" true)) '('simplify a))
+		(parser '((define a psql_expression7) "::" (atom "boolean" true)) '('simplify a))
+		(parser '((define a psql_expression7) "::" (atom "date" true)) '('concat a))
+		(parser '((define a psql_expression7) "::" (atom "timestamp" true)) '('concat a))
+		(parser '((define a psql_expression7) "::" psql_identifier) a) /* unknown cast types: pass through */
 		psql_expression7
 	)))
 

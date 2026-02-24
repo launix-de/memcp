@@ -1,0 +1,202 @@
+# PostgreSQL parser feature tests
+
+metadata:
+  version: "1.0"
+  description: "PostgreSQL-specific parser features: BETWEEN, casts, functions"
+  syntax: postgresql
+
+setup:
+  - sql: "DROP TABLE IF EXISTS psql_data"
+  - sql: |
+      CREATE TABLE psql_data (
+        id INT PRIMARY KEY,
+        name VARCHAR(50),
+        val INT
+      )
+  - sql: |
+      INSERT INTO psql_data (id, name, val) VALUES
+      (1, 'Alice', 10), (2, 'Bob', 30), (3, 'Charlie', 50), (4, 'Alice', 20)
+
+test_cases:
+  # === BETWEEN / NOT BETWEEN ===
+  - name: "BETWEEN filter"
+    sql: |
+      SELECT id, val FROM psql_data WHERE val BETWEEN 20 AND 40 ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 2
+          val: 30
+        - id: 4
+          val: 20
+
+  - name: "NOT BETWEEN filter"
+    sql: |
+      SELECT id, val FROM psql_data WHERE val NOT BETWEEN 20 AND 40 ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          val: 10
+        - id: 3
+          val: 50
+
+  # === :: cast operator ===
+  - name: "Cast integer to text"
+    sql: "SELECT 42::text AS t"
+    expect:
+      rows: 1
+      data:
+        - t: "42"
+
+  - name: "Cast string to integer"
+    sql: "SELECT '123'::integer AS i"
+    expect:
+      rows: 1
+      data:
+        - i: 123
+
+  - name: "Cast string to int"
+    sql: "SELECT '456'::int AS i"
+    expect:
+      rows: 1
+      data:
+        - i: 456
+
+  - name: "Cast string to bigint"
+    sql: "SELECT '999999999999'::bigint AS b"
+    expect:
+      rows: 1
+      data:
+        - b: 999999999999
+
+  - name: "Cast string to float"
+    sql: "SELECT '3.14'::float AS f"
+    expect:
+      rows: 1
+      data:
+        - f: 3.14
+
+  - name: "Cast string to numeric"
+    sql: "SELECT '42.5'::numeric AS n"
+    expect:
+      rows: 1
+      data:
+        - n: 42.5
+
+  - name: "Cast string to boolean"
+    sql: "SELECT '1'::boolean AS b"
+    expect:
+      rows: 1
+      data:
+        - b: true
+
+  - name: "Cast string to date"
+    sql: "SELECT '2025-06-15'::date AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2025-06-15"
+
+  - name: "Cast to varchar"
+    sql: "SELECT 42::varchar AS v"
+    expect:
+      rows: 1
+      data:
+        - v: "42"
+
+  # === COUNT(DISTINCT) ===
+  - name: "COUNT DISTINCT"
+    sql: "SELECT COUNT(DISTINCT name) AS cnt FROM psql_data"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  # === CURRENT_DATE / CURRENT_TIMESTAMP ===
+  - name: "CURRENT_DATE returns a value"
+    sql: "SELECT CURRENT_DATE AS d"
+    expect:
+      rows: 1
+
+  - name: "CURRENT_TIMESTAMP returns a value"
+    sql: "SELECT CURRENT_TIMESTAMP AS ts"
+    expect:
+      rows: 1
+
+  # === EXTRACT ===
+  - name: "EXTRACT YEAR"
+    sql: "SELECT EXTRACT(YEAR FROM '2025-06-15') AS y"
+    expect:
+      rows: 1
+      data:
+        - y: 2025
+
+  - name: "EXTRACT MONTH"
+    sql: "SELECT EXTRACT(MONTH FROM '2025-06-15') AS m"
+    expect:
+      rows: 1
+      data:
+        - m: 6
+
+  # === IFNULL ===
+  - name: "IFNULL with NULL"
+    sql: "SELECT IFNULL(NULL, 42) AS v"
+    expect:
+      rows: 1
+      data:
+        - v: 42
+
+  - name: "IFNULL without NULL"
+    sql: "SELECT IFNULL(7, 42) AS v"
+    expect:
+      rows: 1
+      data:
+        - v: 7
+
+  # === SUBSTRING FROM FOR ===
+  - name: "SUBSTRING FROM FOR"
+    sql: "SELECT SUBSTRING('hello world' FROM 1 FOR 5) AS s"
+    expect:
+      rows: 1
+      data:
+        - s: "hello"
+
+  # === DATE function ===
+  - name: "DATE truncation"
+    sql: "SELECT DATE('2025-06-15 12:30:00') AS d"
+    expect:
+      rows: 1
+
+  # === DATE_ADD / DATE_SUB ===
+  - name: "DATE_ADD"
+    sql: "SELECT DATE_ADD('2025-01-01', INTERVAL 1 DAY) AS d"
+    expect:
+      rows: 1
+
+  - name: "DATE_SUB"
+    sql: "SELECT DATE_SUB('2025-01-01', INTERVAL 1 MONTH) AS d"
+    expect:
+      rows: 1
+
+  # === INTERVAL arithmetic ===
+  - name: "Date plus INTERVAL"
+    sql: "SELECT '2025-01-01' + INTERVAL 7 DAY AS d"
+    expect:
+      rows: 1
+
+  - name: "Date minus INTERVAL"
+    sql: "SELECT '2025-06-15' - INTERVAL 3 MONTH AS d"
+    expect:
+      rows: 1
+
+  # === CONVERT ===
+  - name: "CONVERT to SIGNED"
+    sql: "SELECT CONVERT('123', SIGNED) AS v"
+    expect:
+      rows: 1
+      data:
+        - v: 123
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS psql_data"
