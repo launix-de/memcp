@@ -1671,3 +1671,157 @@ test_cases:
     sql: "DROP TABLE IF EXISTS trigger_archive"
     expect:
       affected_rows: 0
+
+  # ========================================================
+  # IF...ELSE...END IF trigger tests
+  # ========================================================
+
+  - name: "Setup tables for IF-ELSE trigger tests"
+    sql: "DROP TABLE IF EXISTS trig_else_log"
+    expect:
+      affected_rows: 0
+
+  - name: "Create log table for IF-ELSE triggers"
+    sql: "CREATE TABLE trig_else_log (id INT, path VARCHAR(50))"
+    expect:
+      affected_rows: 0
+
+  - name: "Create AFTER INSERT trigger with IF-ELSE"
+    sql: >
+      CREATE TRIGGER trig_else_ai AFTER INSERT ON trigger_test FOR EACH ROW
+      BEGIN
+        IF NEW.`val` > 500 THEN
+          INSERT INTO `trig_else_log` (`id`, `path`) VALUES (NEW.`id`, 'high');
+        ELSE
+          INSERT INTO `trig_else_log` (`id`, `path`) VALUES (NEW.`id`, 'low');
+        END IF;
+      END
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT high val - should trigger THEN branch"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (9001, 999, 'high')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify THEN branch executed"
+    sql: "SELECT path FROM trig_else_log WHERE id = 9001"
+    expect:
+      data:
+        - path: "high"
+
+  - name: "INSERT low val - should trigger ELSE branch"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (9002, 100, 'low')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify ELSE branch executed"
+    sql: "SELECT path FROM trig_else_log WHERE id = 9002"
+    expect:
+      data:
+        - path: "low"
+
+  - name: "Drop IF-ELSE trigger"
+    sql: "DROP TRIGGER IF EXISTS trig_else_ai"
+    expect:
+      affected_rows: 0
+
+  - name: "Create nested IF-ELSE trigger"
+    sql: >
+      CREATE TRIGGER trig_nested_else AFTER INSERT ON trigger_test FOR EACH ROW
+      BEGIN
+        IF NEW.`val` > 500 THEN
+          IF NEW.`val` > 900 THEN
+            INSERT INTO `trig_else_log` (`id`, `path`) VALUES (NEW.`id`, 'very-high');
+          ELSE
+            INSERT INTO `trig_else_log` (`id`, `path`) VALUES (NEW.`id`, 'medium-high');
+          END IF;
+        ELSE
+          INSERT INTO `trig_else_log` (`id`, `path`) VALUES (NEW.`id`, 'low');
+        END IF;
+      END
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT very high val"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (9003, 950, 'very-high')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify nested THEN-THEN branch"
+    sql: "SELECT path FROM trig_else_log WHERE id = 9003"
+    expect:
+      data:
+        - path: "very-high"
+
+  - name: "INSERT medium high val"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (9004, 600, 'medium-high')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify nested THEN-ELSE branch"
+    sql: "SELECT path FROM trig_else_log WHERE id = 9004"
+    expect:
+      data:
+        - path: "medium-high"
+
+  - name: "INSERT low val for nested"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (9005, 100, 'low-nested')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify outer ELSE branch"
+    sql: "SELECT path FROM trig_else_log WHERE id = 9005"
+    expect:
+      data:
+        - path: "low"
+
+  - name: "Drop nested IF-ELSE trigger"
+    sql: "DROP TRIGGER IF EXISTS trig_nested_else"
+    expect:
+      affected_rows: 0
+
+  - name: "Create large trigger with many IF blocks (ERPL-like pattern)"
+    sql: >
+      CREATE TRIGGER trig_many_ifs AFTER UPDATE ON trigger_test FOR EACH ROW
+      BEGIN
+        IF OLD.`val` <> NEW.`val` THEN
+          INSERT INTO `trig_else_log` (`id`, `path`)
+          SELECT NEW.`id`, CONCAT('val:', OLD.`val`, '->', NEW.`val`);
+        END IF;
+        IF OLD.`name` <> NEW.`name` THEN
+          INSERT INTO `trig_else_log` (`id`, `path`)
+          SELECT NEW.`id`, CONCAT('name:', OLD.`name`, '->', NEW.`name`);
+        END IF;
+        IF COALESCE(OLD.`val` <> NEW.`val`, (OLD.`val` IS NULL) <> (NEW.`val` IS NULL)) THEN
+          INSERT INTO `trig_else_log` (`id`, `path`)
+          SELECT NEW.`id`, 'coalesce-check';
+        END IF;
+      END
+    expect:
+      affected_rows: 0
+
+  - name: "UPDATE to test many-IF trigger"
+    sql: "UPDATE trigger_test SET val = 777, name = 'changed' WHERE id = 9001"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify many-IF trigger logged val change"
+    sql: "SELECT path FROM trig_else_log WHERE id = 9001 AND path LIKE 'val:%'"
+    expect:
+      rows: 1
+
+  - name: "Verify many-IF trigger logged name change"
+    sql: "SELECT path FROM trig_else_log WHERE id = 9001 AND path LIKE 'name:%'"
+    expect:
+      rows: 1
+
+  - name: "Drop many-IF trigger"
+    sql: "DROP TRIGGER IF EXISTS trig_many_ifs"
+    expect:
+      affected_rows: 0
+
+  - name: "Cleanup IF-ELSE test tables"
+    sql: "DROP TABLE IF EXISTS trig_else_log"
+    expect:
+      affected_rows: 0
