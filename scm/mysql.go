@@ -267,7 +267,13 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			txObj.SyncTouchedShards()
 		}
 	}
-	// TODO: also set result.InsertID (maybe as a callback as 4th parameter to m.querycallback?)
+	// Retrieve last_insert_id from the session (set by INSERT with AUTO_INCREMENT).
+	// TODO: replace with a dedicated callback parameter to m.querycallback so the
+	// Scheme side has full control over returned insert IDs without hardcoded fields.
+	lastInsertId := sessionFunc(NewString("last_insert_id"))
+	if !lastInsertId.IsNil() {
+		result.InsertID = uint64(lastInsertId.Int())
+	}
 	result.RowsAffected = uint64(rowcount.Int())
 	// update status greeting
 	updateFlags(session, sessionFunc)
