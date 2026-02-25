@@ -1,0 +1,390 @@
+# Coverage tests for range scans, scan statistics logging, EXPLAIN (printer.go),
+# ordered scans with OFFSET/LIMIT, and aggregates with filters.
+# Exercises: storage/scan.go, storage/scan_order.go, storage/scan_helper.go,
+#            storage/index.go, scm/printer.go (SerializeEx via EXPLAIN)
+
+metadata:
+  version: "1.0"
+  description: "Range scan, EXPLAIN, and scan statistics coverage"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS rs_data"
+  - sql: "DROP TABLE IF EXISTS rs_multi"
+  - sql: "DROP TABLE IF EXISTS rs_left"
+  - sql: "DROP TABLE IF EXISTS rs_right"
+
+test_cases:
+
+  # ========================================================================
+  # 1. Setup: create table with >50 rows to trigger scan stats logging
+  # ========================================================================
+  - name: "Create range scan table"
+    sql: "CREATE TABLE rs_data (id INT PRIMARY KEY, val INT, category VARCHAR(20), price DOUBLE)"
+    expect:
+      rows: 0
+
+  - name: "Insert 200 rows for range scans"
+    scm: |
+      (begin
+        (set rows (map (produceN 200) (lambda (i)
+          (list i
+            (* i 3)
+            (nth '("alpha" "beta" "gamma" "delta") (- i (* 4 (floor (/ i 4)))))
+            (+ 1.0 (* i 0.5))))))
+        (insert "memcp-tests" "rs_data" '("id" "val" "category" "price") rows)
+        200)
+
+  # ========================================================================
+  # 2. Range scans with various operators (exercises index boundary code)
+  # ========================================================================
+  - name: "Range: WHERE val > 500"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_data WHERE val > 500"
+    expect:
+      rows: 1
+      data:
+        - cnt: 33
+
+  - name: "Range: WHERE val >= 300"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_data WHERE val >= 300"
+    expect:
+      rows: 1
+      data:
+        - cnt: 100
+
+  - name: "Range: WHERE val < 30"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_data WHERE val < 30"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10
+
+  - name: "Range: WHERE val <= 30"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_data WHERE val <= 30"
+    expect:
+      rows: 1
+      data:
+        - cnt: 11
+
+  - name: "Range: WHERE val BETWEEN 100 AND 200"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_data WHERE val BETWEEN 100 AND 200"
+    expect:
+      rows: 1
+      data:
+        - cnt: 33
+
+  - name: "Range: WHERE id > 150 AND id < 160"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_data WHERE id > 150 AND id < 160"
+    expect:
+      rows: 1
+      data:
+        - cnt: 9
+
+  # ========================================================================
+  # 3. Aggregates with range filters (exercises scan.go aggregate paths)
+  # ========================================================================
+  - name: "Range SUM: WHERE val > 500"
+    sql: "SELECT SUM(val) AS s FROM rs_data WHERE val > 500"
+    expect:
+      rows: 1
+
+  - name: "Range AVG: WHERE val BETWEEN 100 AND 300"
+    sql: "SELECT AVG(val) AS a FROM rs_data WHERE val BETWEEN 100 AND 300"
+    expect:
+      rows: 1
+
+  - name: "Range MIN: WHERE category = 'alpha'"
+    sql: "SELECT MIN(val) AS m FROM rs_data WHERE category = 'alpha'"
+    expect:
+      rows: 1
+      data:
+        - m: 0
+
+  - name: "Range MAX: WHERE category = 'delta'"
+    sql: "SELECT MAX(val) AS m FROM rs_data WHERE category = 'delta'"
+    expect:
+      rows: 1
+
+  - name: "Range SUM with price: WHERE price > 50.0"
+    sql: "SELECT SUM(price) AS s FROM rs_data WHERE price > 50.0"
+    expect:
+      rows: 1
+
+  - name: "Range COUNT with multiple conditions"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_data WHERE val > 100 AND category = 'beta'"
+    expect:
+      rows: 1
+
+  # ========================================================================
+  # 4. GROUP BY with range filter (exercises aggregate2 path in scan.go)
+  # ========================================================================
+  - name: "GROUP BY with range filter"
+    sql: "SELECT category, COUNT(*) AS cnt, SUM(val) AS s FROM rs_data WHERE val > 300 GROUP BY category ORDER BY category"
+    expect:
+      rows: 4
+
+  - name: "GROUP BY with BETWEEN"
+    sql: "SELECT category, AVG(price) AS avg_p FROM rs_data WHERE id BETWEEN 50 AND 99 GROUP BY category ORDER BY category"
+    expect:
+      rows: 4
+
+  # ========================================================================
+  # 5. Ordered range scans (exercises scan_order.go merge + OFFSET/LIMIT)
+  # ========================================================================
+  - name: "ORDER BY with range filter"
+    sql: "SELECT id, val FROM rs_data WHERE val > 400 ORDER BY val ASC LIMIT 5"
+    expect:
+      rows: 5
+
+  - name: "ORDER BY DESC with range filter"
+    sql: "SELECT id, val FROM rs_data WHERE val < 50 ORDER BY val DESC LIMIT 5"
+    expect:
+      rows: 5
+
+  - name: "ORDER BY with OFFSET"
+    sql: "SELECT id FROM rs_data WHERE val >= 100 ORDER BY id LIMIT 10 OFFSET 5"
+    expect:
+      rows: 10
+
+  - name: "ORDER BY with large OFFSET"
+    sql: "SELECT id FROM rs_data WHERE val >= 0 ORDER BY id LIMIT 5 OFFSET 100"
+    expect:
+      rows: 5
+
+  - name: "ORDER BY non-PK column with filter"
+    sql: "SELECT id, price FROM rs_data WHERE category = 'gamma' ORDER BY price DESC LIMIT 5"
+    expect:
+      rows: 5
+
+  - name: "ORDER BY with no matching rows"
+    sql: "SELECT id FROM rs_data WHERE val > 99999 ORDER BY id LIMIT 10"
+    expect:
+      rows: 0
+
+  # ========================================================================
+  # 6. EXPLAIN queries (exercises scm/printer.go SerializeEx)
+  # ========================================================================
+  - name: "EXPLAIN simple SELECT"
+    sql: "EXPLAIN SELECT * FROM rs_data WHERE id = 1"
+    expect:
+      rows: 1
+
+  - name: "EXPLAIN range scan"
+    sql: "EXPLAIN SELECT SUM(val) FROM rs_data WHERE val > 100"
+    expect:
+      rows: 1
+
+  - name: "EXPLAIN with ORDER BY"
+    sql: "EXPLAIN SELECT id, val FROM rs_data ORDER BY val DESC LIMIT 10"
+    expect:
+      rows: 1
+
+  - name: "EXPLAIN GROUP BY"
+    sql: "EXPLAIN SELECT category, COUNT(*) FROM rs_data GROUP BY category"
+    expect:
+      rows: 1
+
+  - name: "EXPLAIN JOIN"
+    sql: "EXPLAIN SELECT a.id, b.id FROM rs_data a JOIN rs_data b ON a.val = b.val WHERE a.id < 5"
+    expect:
+      rows: 1
+
+  - name: "EXPLAIN BETWEEN"
+    sql: "EXPLAIN SELECT * FROM rs_data WHERE val BETWEEN 50 AND 150"
+    expect:
+      rows: 1
+
+  - name: "EXPLAIN subquery"
+    sql: "EXPLAIN SELECT * FROM rs_data WHERE val > (SELECT AVG(val) FROM rs_data)"
+    expect:
+      rows: 1
+
+  # ========================================================================
+  # 7. Compress and re-test (exercises range scans on compressed storage)
+  # ========================================================================
+  - name: "SHUTDOWN to compress"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Post-compress: range COUNT"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_data WHERE val > 500"
+    expect:
+      rows: 1
+      data:
+        - cnt: 33
+
+  - name: "Post-compress: range SUM"
+    sql: "SELECT SUM(val) AS s FROM rs_data WHERE val BETWEEN 100 AND 200"
+    expect:
+      rows: 1
+
+  - name: "Post-compress: ordered range"
+    sql: "SELECT id FROM rs_data WHERE val >= 400 ORDER BY val ASC LIMIT 3"
+    expect:
+      rows: 3
+
+  - name: "Post-compress: EXPLAIN still works"
+    sql: "EXPLAIN SELECT * FROM rs_data WHERE val > 100 ORDER BY id LIMIT 5"
+    expect:
+      rows: 1
+
+  # ========================================================================
+  # 8. Multi-column range + index (exercises multi-column boundary code)
+  # ========================================================================
+  - name: "Create multi-column table"
+    sql: "CREATE TABLE rs_multi (a INT, b INT, c INT, PRIMARY KEY(a, b))"
+    expect:
+      rows: 0
+
+  - name: "Insert multi-column data"
+    scm: |
+      (begin
+        (set rows (map (produceN 100) (lambda (i)
+          (list (floor (/ i 10)) (- i (* 10 (floor (/ i 10)))) (* i i)))))
+        (insert "memcp-tests" "rs_multi" '("a" "b" "c") rows)
+        100)
+
+  - name: "Multi-col: range on first key"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_multi WHERE a > 5"
+    expect:
+      rows: 1
+      data:
+        - cnt: 40
+
+  - name: "Multi-col: range on both keys"
+    sql: "SELECT COUNT(*) AS cnt FROM rs_multi WHERE a = 3 AND b > 5"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  - name: "Multi-col: SUM with composite key range"
+    sql: "SELECT SUM(c) AS s FROM rs_multi WHERE a BETWEEN 2 AND 4"
+    expect:
+      rows: 1
+
+  - name: "Multi-col: ORDER BY composite"
+    sql: "SELECT a, b FROM rs_multi WHERE a >= 7 ORDER BY a, b LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - a: 7
+          b: 0
+        - a: 7
+          b: 1
+        - a: 7
+          b: 2
+        - a: 7
+          b: 3
+        - a: 7
+          b: 4
+
+  # ========================================================================
+  # 9. LEFT JOIN with no matches (exercises outer join NULL-row injection)
+  # ========================================================================
+  - name: "Create left table"
+    sql: "CREATE TABLE rs_left (id INT, name VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Create right table (empty)"
+    sql: "CREATE TABLE rs_right (id INT, ref_id INT, score INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert left data"
+    sql: "INSERT INTO rs_left VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')"
+    expect:
+      affected_rows: 3
+
+  - name: "LEFT JOIN with empty right (outer join NULL injection)"
+    sql: "SELECT l.name, r.score FROM rs_left l LEFT JOIN rs_right r ON l.id = r.ref_id ORDER BY l.name"
+    expect:
+      rows: 3
+      data:
+        - name: "Alice"
+          score: null
+        - name: "Bob"
+          score: null
+        - name: "Charlie"
+          score: null
+
+  - name: "LEFT JOIN with ORDER BY and no matches (outer + ordered path)"
+    sql: "SELECT l.name, r.score FROM rs_left l LEFT JOIN rs_right r ON l.id = r.ref_id ORDER BY l.name LIMIT 5"
+    expect:
+      rows: 3
+
+  - name: "Insert some right data"
+    sql: "INSERT INTO rs_right VALUES (1, 1, 100), (2, 1, 200), (3, 3, 50)"
+    expect:
+      affected_rows: 3
+
+  - name: "LEFT JOIN partial match"
+    sql: "SELECT l.name, r.score FROM rs_left l LEFT JOIN rs_right r ON l.id = r.ref_id ORDER BY l.name, r.score"
+    expect:
+      rows: 4
+      data:
+        - name: "Alice"
+          score: 100
+        - name: "Alice"
+          score: 200
+        - name: "Bob"
+          score: null
+        - name: "Charlie"
+          score: 50
+
+  # ========================================================================
+  # 10. serialize() with complex data structures (printer.go deep paths)
+  # ========================================================================
+  - name: "serialize: deeply nested list"
+    scm: "(serialize '(if (> 'x 10) (+ 'x 1) (- 'x 1)))"
+    expect:
+      data: ["(if (> x 10) (+ x 1) (- x 1))"]
+
+  - name: "serialize: empty inner list"
+    scm: "(serialize '(begin '() 42))"
+    expect:
+      data: ["(begin '() 42)"]
+
+  - name: "serialize: quoted list marker"
+    scm: "(serialize (list (list 'list 1 2 3)))"
+
+  - name: "serialize: string with newlines and quotes"
+    scm: "(serialize \"hello\\nworld\\\"quoted\\\"\")"
+
+  - name: "serialize: large nested expression"
+    scm: "(serialize '('lambda '('a 'b) '('+ '('* 'a 'a) '('* 'b 'b))))"
+
+  - name: "serialize roundtrip: complex expression"
+    scm: |
+      (begin
+        (set code '('+ '('* 2 3) '('- 10 4)))
+        (set s (serialize code))
+        (eval (scheme s)))
+    expect:
+      data: [12]
+
+  # ========================================================================
+  # 11. stat() on compressed tables (deep storage stats)
+  # ========================================================================
+  - name: "stat: compressed table detail"
+    scm: |
+      (begin
+        (set s (stat "memcp-tests" "rs_data"))
+        (if (> (strlen s) 50) "ok" "too_short"))
+    expect:
+      data: ["ok"]
+
+  - name: "stat: multi-column table detail"
+    scm: |
+      (begin
+        (set s (stat "memcp-tests" "rs_multi"))
+        (if (> (strlen s) 0) "ok" "empty"))
+    expect:
+      data: ["ok"]
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS rs_data"
+  - sql: "DROP TABLE IF EXISTS rs_multi"
+  - sql: "DROP TABLE IF EXISTS rs_left"
+  - sql: "DROP TABLE IF EXISTS rs_right"
