@@ -790,6 +790,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	t.mu.Unlock()
 
 	for _, s := range oldshards {
+		GlobalCache.Remove(s)
 		s.RemoveFromDisk()
 	}
 }

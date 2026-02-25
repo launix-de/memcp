@@ -1345,6 +1345,10 @@ func PrintMemUsage() string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", units.BytesSize(float64(m.Alloc)), units.BytesSize(float64(m.TotalAlloc)), units.BytesSize(float64(m.Sys)), m.NumGC))
 
+	// CacheManager evictable memory breakdown
+	b.WriteString("\n\nCache\n======\n")
+	b.WriteString(GlobalCache.Stat().FormatStat())
+
 	for _, db := range databases.GetAll() {
 		b.WriteString("\n\n" + db.Name + " [" + sharedStateStr(db.srState) + "]\n======\n")
 		b.WriteString(db.PrintMemUsage())
@@ -1380,7 +1384,9 @@ func (db *database) PrintMemUsage() string {
 			size += s.ComputeSize()
 		}
 		for _, s := range t.PShards {
-			size += s.ComputeSize()
+			if s != nil {
+				size += s.ComputeSize()
+			}
 		}
 		b.WriteString(fmt.Sprintf("%-25s\t%d\t%d\t%d\t%s\n", t.Name, len(t.Columns), len(t.Shards)+len(t.PShards), len(t.PDimensions), units.BytesSize(float64(size))))
 		dsize += size

@@ -416,6 +416,7 @@ func (db *database) rebuild(all bool, repartition bool) {
 	// All table rebuilds (including .blobs) are complete. Safe to clean up
 	// replaced pre-rebuild shards without risk of deadlocking with repartition.
 	for _, s := range allReplaced {
+		GlobalCache.Remove(s)
 		s.RemoveFromDisk()
 	}
 }
@@ -496,6 +497,13 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	} else {
 		db.save()
 	}
+	// register temp keytable with CacheManager (`.`-prefix = temp)
+	if strings.HasPrefix(name, ".") {
+		schemaName := schema
+		GlobalCache.AddItem(t, 0, TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) {
+			keytableCleanup(ptr.(*table), schemaName, freedByType)
+		}, keytableLastUsed, nil)
+	}
 	return t, true
 }
 
@@ -514,16 +522,22 @@ func DropTable(schema, name string, ifexists bool) {
 		}
 		panic("Table " + schema + "." + name + " does not exist")
 	}
+	// deregister temp keytable from CacheManager
+	GlobalCache.Remove(t)
 	db.tables.Remove(name)
 	db.save()
 	db.schemalock.Unlock()
 
-	// delete shard files from disk
+	// deregister shards and delete from disk
 	for _, s := range t.Shards {
+		GlobalCache.Remove(s)
 		s.RemoveFromDisk()
 	}
 	for _, s := range t.PShards {
-		s.RemoveFromDisk()
+		if s != nil {
+			GlobalCache.Remove(s)
+			s.RemoveFromDisk()
+		}
 	}
 }
 
@@ -546,4 +560,53 @@ func RenameTable(schema, oldname, newname string) {
 	t.Name = newname
 	db.tables.Set(t)
 	db.save()
+}
+
+// keytableCleanup is called by the CacheManager when evicting a temp keytable.
+// MUST NOT call public GlobalCache.Remove (deadlock: we're inside the CacheManager goroutine).
+func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) {
+	// remove all shard+index registrations for this table (recursive)
+	for _, s := range tbl.Shards {
+		GlobalCache.removeInternal(s, freedByType)
+		for _, idx := range s.Indexes {
+			GlobalCache.removeInternal(idx, freedByType)
+		}
+	}
+	for _, s := range tbl.PShards {
+		GlobalCache.removeInternal(s, freedByType)
+		for _, idx := range s.Indexes {
+			GlobalCache.removeInternal(idx, freedByType)
+		}
+	}
+	// drop the table directly (bypass DropTable to avoid deadlock on opChan)
+	db := GetDatabase(schemaName)
+	if db != nil {
+		db.schemalock.Lock()
+		db.tables.Remove(tbl.Name)
+		db.save()
+		db.schemalock.Unlock()
+		for _, s := range tbl.Shards {
+			s.RemoveFromDisk()
+		}
+		for _, s := range tbl.PShards {
+			s.RemoveFromDisk()
+		}
+	}
+}
+
+func keytableLastUsed(ptr any) time.Time {
+	tbl := ptr.(*table)
+	// use the newest shard lastAccessed as proxy
+	var latest time.Time
+	for _, s := range tbl.Shards {
+		if s.lastAccessed.After(latest) {
+			latest = s.lastAccessed
+		}
+	}
+	for _, s := range tbl.PShards {
+		if s.lastAccessed.After(latest) {
+			latest = s.lastAccessed
+		}
+	}
+	return latest
 }

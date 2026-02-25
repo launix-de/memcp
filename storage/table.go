@@ -19,6 +19,7 @@ package storage
 import "fmt"
 import "math"
 import "sync"
+import "time"
 import "errors"
 import "strings"
 import "strconv"
@@ -555,6 +556,15 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 		s.columns[name] = new(StorageSparse)
 		s.mu.Unlock()
 	}
+	// register temp column with CacheManager
+	if c.IsTemp {
+		colPtr := &t.Columns[len(t.Columns)-1]
+		tbl := t // capture for closure
+		colName := name
+		GlobalCache.AddItem(colPtr, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) {
+			tbl.DropColumn(colName)
+		}, tempColumnLastUsed, nil)
+	}
 	t.schema.save()
 	return true
 }
@@ -563,6 +573,10 @@ func (t *table) DropColumn(name string) bool {
 	t.schema.schemalock.Lock()
 	for i, c := range t.Columns {
 		if c.Name == name {
+			// deregister temp column from CacheManager before removal
+			if c.IsTemp {
+				GlobalCache.Remove(&t.Columns[i])
+			}
 			// found the column
 			t.Columns = append(t.Columns[:i], t.Columns[i+1:]...) // remove from slice
 			for _, s := range t.Shards {
@@ -1054,4 +1068,9 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			lock.Unlock()
 		}
 	}
+}
+
+func tempColumnLastUsed(ptr any) time.Time {
+	// temp columns don't track last access independently; use zero time (always old)
+	return time.Time{}
 }

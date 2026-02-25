@@ -19,6 +19,7 @@ package storage
 import "fmt"
 import "sync"
 import "sync/atomic"
+import "time"
 import "strings"
 import "reflect"
 import "runtime"
@@ -50,7 +51,8 @@ type storageShard struct {
 	hashmaps3  map[[3]string]map[[3]scm.Scmer]uint32 // hashmaps for single columned unique keys
 
 	// lazy-loading/shared-resource state
-	srState SharedState
+	srState      SharedState
+	lastAccessed time.Time // updated on GetRead/GetExclusive for LRU eviction
 
 	// repartition drain tracking: counts in-flight scans on this shard
 	activeScanners atomic.Int32
@@ -265,11 +267,13 @@ func (s *storageShard) GetRead() func() {
 	if s.srState == COLD {
 		s.srState = SHARED
 	}
+	s.lastAccessed = time.Now()
 	return func() {}
 }
 func (s *storageShard) GetExclusive() func() {
 	s.ensureLoaded()
 	s.srState = WRITE
+	s.lastAccessed = time.Now()
 	return func() {}
 }
 
@@ -292,6 +296,34 @@ func (s *storageShard) ensureLoaded() {
 		s.srState = SHARED
 	}
 	s.mu.Unlock()
+	s.lastAccessed = time.Now()
+	// register with CacheManager (skip temp tables and Memory-engine shards)
+	if s.t.PersistencyMode != Memory && !strings.HasPrefix(s.t.Name, ".") {
+		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+	}
+}
+
+// shardCleanup is called by the CacheManager when evicting a shard.
+func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) {
+	s := ptr.(*storageShard)
+	s.mu.Lock()
+	// remove indexes from CacheManager (recursive free)
+	for _, idx := range s.Indexes {
+		GlobalCache.removeInternal(idx, freedByType)
+		idx.active = false
+		idx.mainIndexes = StorageInt{}
+		idx.deltaBtree = nil
+	}
+	// release column storage
+	for col := range s.columns {
+		s.columns[col] = nil
+	}
+	s.srState = COLD
+	s.mu.Unlock()
+}
+
+func shardLastUsed(ptr any) time.Time {
+	return ptr.(*storageShard).lastAccessed
 }
 
 func NewShard(t *table) *storageShard {
@@ -834,6 +866,10 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			}
 		}
 	}
+	// update tracked size in CacheManager (heuristic: 16 bytes per column per row)
+	if !strings.HasPrefix(t.t.Name, ".") {
+		GlobalCache.UpdateSize(t, int64(len(values))*int64(len(t.deltaColumns))*16)
+	}
 }
 
 // insertDatasetFromLog appends delta rows from a persisted log without applying
@@ -1172,6 +1208,8 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			t.t.schema.persistence.RemoveLog(t.uuid.String())
 		}
 
+		// deregister old shard from CacheManager before it gets GC'd
+		GlobalCache.Remove(t)
 		// Only after a successful rebuild, schedule old shard files for deletion.
 		runtime.SetFinalizer(t, func(t *storageShard) {
 			t.RemoveFromDisk()

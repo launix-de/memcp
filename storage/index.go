@@ -20,6 +20,7 @@ package storage
 import "fmt"
 import "sort"
 import "sync"
+import "time"
 import "strings"
 
 import "github.com/google/btree"
@@ -356,6 +357,8 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 
 			s.active = true // mark as ready
 			s.mu.Unlock()
+			// register with CacheManager
+			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 		}
 	}
 start_scan:
@@ -493,4 +496,23 @@ start_scan:
 	if bufN > 0 {
 		callback(buf[:bufN])
 	}
+}
+
+// indexCleanup is called by the CacheManager when evicting an index.
+func indexCleanup(ptr any, freedByType *[numEvictableTypes]int64) {
+	idx := ptr.(*StorageIndex)
+	idx.mu.Lock()
+	idx.active = false
+	idx.mainIndexes = StorageInt{}
+	idx.deltaBtree = nil
+	idx.mu.Unlock()
+}
+
+func indexLastUsed(ptr any) time.Time {
+	// use the parent shard's lastAccessed as proxy
+	return ptr.(*StorageIndex).t.lastAccessed
+}
+
+func indexGetScore(ptr any) float64 {
+	return ptr.(*StorageIndex).Savings
 }
