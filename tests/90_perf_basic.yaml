@@ -101,6 +101,47 @@ test_cases:
     expect:
       rows: 50
 
+  # Equality join: dimension table drives scan with equality boundary on index
+  # 100 dimension rows x {rows}/100 matches each = {rows} total joined rows
+  - name: "Perf: EQUI JOIN"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `perf_dim`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `perf_dim` (cat_id INT PRIMARY KEY, label TEXT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
+            (insert "{database}" "perf_main" '("id" "category" "value" "name") rows)
+            (set dims (map (produceN 100) (lambda (i) (list i (concat "cat_" i)))))
+            (insert "{database}" "perf_dim" '("cat_id" "label") dims)
+            (rebuild)
+            "ok")
+    sql: "SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id"
+    threshold_ms: 30000
+
+  # Range join: dimension table drives scan with range boundaries on index
+  # 20 range buckets covering all values = {rows} total joined rows
+  - name: "Perf: RANGE JOIN"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `perf_ranges`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `perf_ranges` (range_id INT PRIMARY KEY, low_val INT, high_val INT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
+            (insert "{database}" "perf_main" '("id" "category" "value" "name") rows)
+            (set ranges (map (produceN 20) (lambda (i) (list i (* i (/ (* {rows} 71) 20)) (* (+ i 1) (/ (* {rows} 71) 20))))))
+            (insert "{database}" "perf_ranges" '("range_id" "low_val" "high_val") ranges)
+            (rebuild)
+            "ok")
+    sql: "SELECT r.range_id, m.id FROM perf_ranges r JOIN perf_main m ON m.value >= r.low_val AND m.value < r.high_val"
+    threshold_ms: 30000
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS perf_main"
-  - sql: "DROP TABLE IF EXISTS perf_small"
+  - sql: "DROP TABLE IF EXISTS perf_dim"
+  - sql: "DROP TABLE IF EXISTS perf_ranges"
