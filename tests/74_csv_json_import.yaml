@@ -1,0 +1,352 @@
+# Coverage tests for storage/csv.go, storage/json.go, and (stat)
+
+metadata:
+  version: "1.0"
+  description: "CSV and JSON import coverage tests"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS csv_products"
+  - sql: "DROP TABLE IF EXISTS csv_employees"
+  - sql: "DROP TABLE IF EXISTS csv_nohdr"
+  - sql: "DROP TABLE IF EXISTS events"
+
+test_cases:
+
+  # ========================================================================
+  # 1. CSV import with comma delimiter and header line
+  # ========================================================================
+  - name: "Create products table for CSV import"
+    sql: |
+      CREATE TABLE csv_products (
+        id INT,
+        name VARCHAR(100),
+        price DOUBLE,
+        category VARCHAR(50),
+        in_stock VARCHAR(10)
+      )
+    expect:
+      rows: 0
+
+  - name: "Load CSV with comma delimiter"
+    scm: |
+      (begin
+        (loadCSV "memcp-tests" "csv_products"
+          (streamString "id,name,price,category,in_stock\n1,Widget A,9.99,electronics,true\n2,Widget B,19.50,electronics,true\n3,Gadget X,4.75,toys,false\n4,Gadget Y,14.00,toys,true\n5,Tool Alpha,29.99,tools,true\n6,Tool Beta,7.25,tools,false\n7,Snack Pack,2.50,food,true\n8,Drink Mix,3.75,food,true\n9,Book One,12.00,books,true\n10,Book Two,8.50,books,false\n")
+          "," true)
+        "ok")
+
+  - name: "CSV products: count rows"
+    sql: "SELECT COUNT(*) AS cnt FROM csv_products"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10
+
+  - name: "CSV products: verify first row"
+    sql: "SELECT name, price FROM csv_products WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - name: "Widget A"
+          price: 9.99
+
+  - name: "CSV products: verify last row"
+    sql: "SELECT name, price FROM csv_products WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - name: "Book Two"
+          price: 8.5
+
+  - name: "CSV products: filter by category"
+    sql: "SELECT COUNT(*) AS cnt FROM csv_products WHERE category = 'electronics'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
+
+  - name: "CSV products: aggregate price"
+    sql: "SELECT SUM(price) AS total FROM csv_products WHERE category = 'tools'"
+    expect:
+      rows: 1
+      data:
+        - total: 37.24
+
+  - name: "CSV products: group by category"
+    sql: "SELECT category, COUNT(*) AS cnt FROM csv_products GROUP BY category ORDER BY category"
+    expect:
+      rows: 5
+      data:
+        - category: "books"
+          cnt: 2
+        - category: "electronics"
+          cnt: 2
+        - category: "food"
+          cnt: 2
+        - category: "tools"
+          cnt: 2
+        - category: "toys"
+          cnt: 2
+
+  # ========================================================================
+  # 2. CSV import with semicolon delimiter (default)
+  # ========================================================================
+  - name: "Create employees table for CSV import"
+    sql: |
+      CREATE TABLE csv_employees (
+        id INT,
+        name VARCHAR(100),
+        department VARCHAR(50),
+        salary INT
+      )
+    expect:
+      rows: 0
+
+  - name: "Load CSV with semicolon delimiter (default)"
+    scm: |
+      (begin
+        (loadCSV "memcp-tests" "csv_employees"
+          (streamString "id;name;department;salary\n1;Alice;Engineering;75000\n2;Bob;Sales;55000\n3;Charlie;Engineering;82000\n4;Diana;Marketing;60000\n5;Eve;Engineering;90000\n6;Frank;Sales;52000\n7;Grace;Marketing;65000\n8;Hank;Engineering;78000\n"))
+        "ok")
+
+  - name: "CSV employees: count rows"
+    sql: "SELECT COUNT(*) AS cnt FROM csv_employees"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+
+  - name: "CSV employees: verify Alice"
+    sql: "SELECT name, department, salary FROM csv_employees WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - name: "Alice"
+          department: "Engineering"
+          salary: 75000
+
+  - name: "CSV employees: count Engineering"
+    sql: "SELECT COUNT(*) AS cnt FROM csv_employees WHERE department = 'Engineering'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  - name: "CSV employees: avg salary by department"
+    sql: "SELECT department, AVG(salary) AS avg_sal FROM csv_employees GROUP BY department ORDER BY department"
+    expect:
+      rows: 3
+      data:
+        - department: "Engineering"
+          avg_sal: 81250
+        - department: "Marketing"
+          avg_sal: 62500
+        - department: "Sales"
+          avg_sal: 53500
+
+  - name: "CSV employees: max salary"
+    sql: "SELECT MAX(salary) AS max_sal FROM csv_employees"
+    expect:
+      rows: 1
+      data:
+        - max_sal: 90000
+
+  # ========================================================================
+  # 3. CSV import without header line (firstline=false)
+  # ========================================================================
+  - name: "Create nohdr table for CSV import"
+    sql: |
+      CREATE TABLE csv_nohdr (
+        col_a INT,
+        col_b VARCHAR(50),
+        col_c DOUBLE
+      )
+    expect:
+      rows: 0
+
+  - name: "Load CSV without header line"
+    scm: |
+      (begin
+        (loadCSV "memcp-tests" "csv_nohdr"
+          (streamString "1,hello,3.14\n2,world,2.72\n3,foo,1.41\n")
+          "," false)
+        "ok")
+
+  - name: "CSV nohdr: count rows"
+    sql: "SELECT COUNT(*) AS cnt FROM csv_nohdr"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  - name: "CSV nohdr: verify data"
+    sql: "SELECT col_a, col_b, col_c FROM csv_nohdr WHERE col_a = 1"
+    expect:
+      rows: 1
+      data:
+        - col_a: 1
+          col_b: "hello"
+          col_c: 3.14
+
+  - name: "CSV nohdr: verify row 3"
+    sql: "SELECT col_b, col_c FROM csv_nohdr WHERE col_a = 3"
+    expect:
+      rows: 1
+      data:
+        - col_b: "foo"
+          col_c: 1.41
+
+  # ========================================================================
+  # 4. CSV with empty lines (should be skipped)
+  # ========================================================================
+  - name: "Load CSV with empty lines into csv_nohdr"
+    scm: |
+      (begin
+        (loadCSV "memcp-tests" "csv_nohdr"
+          (streamString "4,bar,9.99\n\n5,baz,0.01\n\n")
+          "," false)
+        "ok")
+
+  - name: "CSV empty lines: count total"
+    sql: "SELECT COUNT(*) AS cnt FROM csv_nohdr"
+    expect:
+      rows: 1
+      data:
+        - cnt: 5
+
+  # ========================================================================
+  # 5. JSON import (creates table and columns dynamically)
+  # ========================================================================
+  - name: "Load JSONL data"
+    scm: |
+      (begin
+        (loadJSON "memcp-tests"
+          (streamString "#table events\n#event log data\n{\"id\": 1, \"type\": \"click\", \"user\": \"alice\", \"value\": 10}\n{\"id\": 2, \"type\": \"view\", \"user\": \"bob\", \"value\": 5}\n{\"id\": 3, \"type\": \"click\", \"user\": \"charlie\", \"value\": 20}\n{\"id\": 4, \"type\": \"purchase\", \"user\": \"alice\", \"value\": 99}\n{\"id\": 5, \"type\": \"view\", \"user\": \"diana\", \"value\": 3}\n{\"id\": 6, \"type\": \"click\", \"user\": \"bob\", \"value\": 15}\n{\"id\": 7, \"type\": \"purchase\", \"user\": \"eve\", \"value\": 45}\n{\"id\": 8, \"type\": \"view\", \"user\": \"alice\", \"value\": 7}\n{\"id\": 9, \"type\": \"click\", \"user\": \"frank\", \"value\": 12}\n{\"id\": 10, \"type\": \"purchase\", \"user\": \"charlie\", \"value\": 150}\n"))
+        "ok")
+
+  - name: "JSON events: count rows"
+    sql: "SELECT COUNT(*) AS cnt FROM events"
+    expect:
+      rows: 1
+      data:
+        - cnt: 10
+
+  - name: "JSON events: verify click by alice"
+    sql: "SELECT value FROM events WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - value: 10
+
+  - name: "JSON events: count by type"
+    sql: "SELECT type, COUNT(*) AS cnt FROM events GROUP BY type ORDER BY type"
+    expect:
+      rows: 3
+      data:
+        - type: "click"
+          cnt: 4
+        - type: "purchase"
+          cnt: 3
+        - type: "view"
+          cnt: 3
+
+  - name: "JSON events: sum value by type"
+    sql: "SELECT type, SUM(value) AS total FROM events GROUP BY type ORDER BY type"
+    expect:
+      rows: 3
+      data:
+        - type: "click"
+          total: 57
+        - type: "purchase"
+          total: 294
+        - type: "view"
+          total: 15
+
+  - name: "JSON events: max purchase"
+    sql: "SELECT user, value FROM events WHERE type = 'purchase' ORDER BY value DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - user: "charlie"
+          value: 150
+
+  - name: "JSON events: distinct users"
+    sql: "SELECT COUNT(DISTINCT user) AS cnt FROM events"
+    expect:
+      rows: 1
+      data:
+        - cnt: 6
+
+  # ========================================================================
+  # 6. JSON import with empty lines and comments (should be skipped)
+  # ========================================================================
+  - name: "Load JSONL with comments and blanks"
+    scm: |
+      (begin
+        (loadJSON "memcp-tests"
+          (streamString "#table events\n# this is a comment\n\n{\"id\": 11, \"type\": \"click\", \"user\": \"grace\", \"value\": 8}\n\n#another comment\n{\"id\": 12, \"type\": \"view\", \"user\": \"grace\", \"value\": 2}\n"))
+        "ok")
+
+  - name: "JSON with comments: total count"
+    sql: "SELECT COUNT(*) AS cnt FROM events"
+    expect:
+      rows: 1
+      data:
+        - cnt: 12
+
+  # ========================================================================
+  # 7. stat() function coverage -- exercises storage/storage.go stat paths
+  # ========================================================================
+  - name: "stat: global memory stats"
+    scm: |
+      (begin
+        (set s (stat))
+        (if (> (strlen s) 0) "ok" "empty"))
+    expect:
+      data: ["ok"]
+
+  - name: "stat: database-level stats"
+    scm: |
+      (begin
+        (set s (stat "memcp-tests"))
+        (if (> (strlen s) 0) "ok" "empty"))
+    expect:
+      data: ["ok"]
+
+  - name: "stat: table-level stats"
+    scm: |
+      (begin
+        (set s (stat "memcp-tests" "csv_products"))
+        (if (> (strlen s) 0) "ok" "empty"))
+    expect:
+      data: ["ok"]
+
+  - name: "stat: table-level stats for JSON table"
+    scm: |
+      (begin
+        (set s (stat "memcp-tests" "events"))
+        (if (> (strlen s) 0) "ok" "empty"))
+    expect:
+      data: ["ok"]
+
+  # ========================================================================
+  # 8. Cross-table query to verify data integrity
+  # ========================================================================
+  - name: "Cross check: CSV products + employees same DB"
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM csv_products) AS products,
+        (SELECT COUNT(*) FROM csv_employees) AS employees,
+        (SELECT COUNT(*) FROM events) AS events
+    expect:
+      rows: 1
+      data:
+        - products: 10
+          employees: 8
+          events: 12
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS csv_products"
+  - sql: "DROP TABLE IF EXISTS csv_employees"
+  - sql: "DROP TABLE IF EXISTS csv_nohdr"
+  - sql: "DROP TABLE IF EXISTS events"

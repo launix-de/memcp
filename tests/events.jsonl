@@ -1,0 +1,12 @@
+#table events
+#event log data for testing
+{"id": 1, "type": "click", "user": "alice", "value": 10}
+{"id": 2, "type": "view", "user": "bob", "value": 5}
+{"id": 3, "type": "click", "user": "charlie", "value": 20}
+{"id": 4, "type": "purchase", "user": "alice", "value": 99}
+{"id": 5, "type": "view", "user": "diana", "value": 3}
+{"id": 6, "type": "click", "user": "bob", "value": 15}
+{"id": 7, "type": "purchase", "user": "eve", "value": 45}
+{"id": 8, "type": "view", "user": "alice", "value": 7}
+{"id": 9, "type": "click", "user": "frank", "value": 12}
+{"id": 10, "type": "purchase", "user": "charlie", "value": 150}

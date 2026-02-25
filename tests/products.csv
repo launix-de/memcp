@@ -1,0 +1,11 @@
+id,name,price,category,in_stock
+1,Widget A,9.99,electronics,true
+2,Widget B,19.50,electronics,true
+3,Gadget X,4.75,toys,false
+4,Gadget Y,14.00,toys,true
+5,Tool Alpha,29.99,tools,true
+6,Tool Beta,7.25,tools,false
+7,Snack Pack,2.50,food,true
+8,Drink Mix,3.75,food,true
+9,Book One,12.00,books,true
+10,Book Two,8.50,books,false

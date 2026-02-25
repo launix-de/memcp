@@ -1,0 +1,375 @@
+# Coverage tests for scm/printer.go, scm/scmer.go (MarshalJSON),
+# scm/strings.go (json_encode, json_decode, base64, hex, html, url, sql_unescape)
+
+metadata:
+  version: "1.0"
+  description: "Serializer and encoding function coverage"
+
+setup: []
+
+test_cases:
+
+  # ========================================================================
+  # 1. json_encode: various types
+  # ========================================================================
+  - name: "json_encode: integer"
+    scm: "(json_encode 42)"
+    expect:
+      data: ["42"]
+
+  - name: "json_encode: float"
+    scm: "(json_encode 3.14)"
+    expect:
+      data: ["3.14"]
+
+  - name: "json_encode: string"
+    scm: "(json_encode \"hello world\")"
+    expect:
+      data: ["\"hello world\""]
+
+  - name: "json_encode: boolean true"
+    scm: "(json_encode true)"
+    expect:
+      data: ["true"]
+
+  - name: "json_encode: boolean false"
+    scm: "(json_encode false)"
+    expect:
+      data: ["false"]
+
+  - name: "json_encode: nil"
+    scm: "(json_encode nil)"
+    expect:
+      data: ["null"]
+
+  - name: "json_encode: list as array"
+    scm: "(json_encode '(1 2 3))"
+    expect:
+      data: ["[1,2,3]"]
+
+  - name: "json_encode: nested list"
+    scm: "(json_encode (list 1 (list 2 3) 4))"
+    expect:
+      data: ["[1,[2,3],4]"]
+
+  - name: "json_encode: empty list"
+    scm: "(json_encode '())"
+    expect:
+      data: ["[]"]
+
+  - name: "json_encode: string with special chars"
+    scm: "(json_encode \"line1\\nline2\\ttab\")"
+    expect:
+      data: ["\"line1\\nline2\\ttab\""]
+
+  # ========================================================================
+  # 2. json_encode_assoc: associative lists as objects
+  # ========================================================================
+  - name: "json_encode_assoc: simple key-value"
+    scm: |
+      (begin
+        (set result (json_decode (json_encode_assoc '("name" "Alice" "age" 30))))
+        (if (and (equal? (get_assoc result "name") "Alice") (equal? (get_assoc result "age") 30)) "ok" "fail"))
+    expect:
+      data: ["ok"]
+
+  - name: "json_encode_assoc: nested assoc"
+    scm: |
+      (begin
+        (set result (json_decode (json_encode_assoc (list "outer" (list "inner_key" "inner_val")))))
+        (if (equal? (get_assoc (get_assoc result "outer") "inner_key") "inner_val") "ok" "fail"))
+    expect:
+      data: ["ok"]
+
+  # ========================================================================
+  # 3. json_decode: various JSON inputs
+  # ========================================================================
+  - name: "json_decode: object"
+    scm: |
+      (begin
+        (set obj (json_decode "{\"name\":\"Bob\",\"age\":25}"))
+        (list (get_assoc obj "name") (get_assoc obj "age")))
+    expect:
+      data: [["Bob", 25]]
+
+  - name: "json_decode: array"
+    scm: "(json_decode \"[1,2,3]\")"
+    expect:
+      data: [[1, 2, 3]]
+
+  - name: "json_decode: nested object"
+    scm: |
+      (begin
+        (set obj (json_decode "{\"a\":{\"b\":42}}"))
+        (get_assoc (get_assoc obj "a") "b"))
+    expect:
+      data: [42]
+
+  - name: "json_decode: null"
+    scm: "(json_decode \"null\")"
+    expect:
+      data: [null]
+
+  - name: "json_decode: boolean true"
+    scm: "(json_decode \"true\")"
+    expect:
+      data: [true]
+
+  - name: "json_decode: boolean false"
+    scm: "(json_decode \"false\")"
+    expect:
+      data: [false]
+
+  - name: "json_decode: string"
+    scm: "(json_decode \"\\\"hello\\\"\")"
+    expect:
+      data: ["hello"]
+
+  - name: "json_decode: float"
+    scm: "(json_decode \"3.14\")"
+    expect:
+      data: [3.14]
+
+  # ========================================================================
+  # 4. json roundtrip: encode then decode
+  # ========================================================================
+  - name: "json roundtrip: list"
+    scm: "(json_decode (json_encode '(10 20 30)))"
+    expect:
+      data: [[10, 20, 30]]
+
+  - name: "json roundtrip: string"
+    scm: "(json_decode (json_encode \"test string\"))"
+    expect:
+      data: ["test string"]
+
+  # ========================================================================
+  # 5. base64 encode/decode
+  # ========================================================================
+  - name: "base64_encode: simple"
+    scm: "(base64_encode \"Hello, World!\")"
+    expect:
+      data: ["SGVsbG8sIFdvcmxkIQ=="]
+
+  - name: "base64_decode: simple"
+    scm: "(base64_decode \"SGVsbG8sIFdvcmxkIQ==\")"
+    expect:
+      data: ["Hello, World!"]
+
+  - name: "base64 roundtrip"
+    scm: "(base64_decode (base64_encode \"roundtrip test 123\"))"
+    expect:
+      data: ["roundtrip test 123"]
+
+  - name: "base64_encode: empty string"
+    scm: "(base64_encode \"\")"
+    expect:
+      data: [""]
+
+  - name: "base64_decode: empty string"
+    scm: "(base64_decode \"\")"
+    expect:
+      data: [""]
+
+  # ========================================================================
+  # 6. bin2hex / hex2bin
+  # ========================================================================
+  - name: "bin2hex: hello"
+    scm: "(bin2hex \"hello\")"
+    expect:
+      data: ["68656c6c6f"]
+
+  - name: "hex2bin: hello"
+    scm: "(hex2bin \"68656c6c6f\")"
+    expect:
+      data: ["hello"]
+
+  - name: "hex roundtrip"
+    scm: "(hex2bin (bin2hex \"test data\"))"
+    expect:
+      data: ["test data"]
+
+  - name: "bin2hex: empty"
+    scm: "(bin2hex \"\")"
+    expect:
+      data: [""]
+
+  - name: "hex2bin: empty"
+    scm: "(hex2bin \"\")"
+    expect:
+      data: [""]
+
+  # ========================================================================
+  # 7. htmlentities
+  # ========================================================================
+  - name: "htmlentities: angle brackets"
+    scm: "(htmlentities \"<b>bold</b>\")"
+    expect:
+      data: ["&lt;b&gt;bold&lt;/b&gt;"]
+
+  - name: "htmlentities: ampersand and quotes"
+    scm: "(htmlentities \"a & b \\\"quoted\\\"\")"
+    expect:
+      data: ["a &amp; b &#34;quoted&#34;"]
+
+  - name: "htmlentities: no escaping needed"
+    scm: "(htmlentities \"plain text\")"
+    expect:
+      data: ["plain text"]
+
+  # ========================================================================
+  # 8. urlencode / urldecode
+  # ========================================================================
+  - name: "urlencode: spaces and special chars"
+    scm: "(urlencode \"hello world&foo=bar\")"
+    expect:
+      data: ["hello+world%26foo%3Dbar"]
+
+  - name: "urldecode: encoded string"
+    scm: "(urldecode \"hello+world%26foo%3Dbar\")"
+    expect:
+      data: ["hello world&foo=bar"]
+
+  - name: "url roundtrip"
+    scm: "(urldecode (urlencode \"path/to resource?q=test&lang=de\"))"
+    expect:
+      data: ["path/to resource?q=test&lang=de"]
+
+  # ========================================================================
+  # 9. sql_unescape
+  # ========================================================================
+  - name: "sql_unescape: backslash sequences"
+    scm: "(sql_unescape \"hello\\\\world\")"
+    expect:
+      data: ["hello\\world"]
+
+  - name: "sql_unescape: newline"
+    scm: "(strlen (sql_unescape \"line1\\nline2\"))"
+    expect:
+      data: [11]
+
+  - name: "sql_unescape: single quote"
+    scm: "(sql_unescape \"it\\\\'s\")"
+    expect:
+      data: ["it's"]
+
+  - name: "sql_unescape: no escaping"
+    scm: "(sql_unescape \"plain\")"
+    expect:
+      data: ["plain"]
+
+  # ========================================================================
+  # 10. serialize: code serialization (scm/printer.go)
+  # ========================================================================
+  - name: "serialize: integer"
+    scm: "(serialize 42)"
+    expect:
+      data: ["42"]
+
+  - name: "serialize: string"
+    scm: "(serialize \"hello\")"
+    expect:
+      data: ["\"hello\""]
+
+  - name: "serialize: boolean"
+    scm: "(serialize true)"
+    expect:
+      data: ["true"]
+
+  - name: "serialize: nil"
+    scm: "(serialize nil)"
+    expect:
+      data: ["nil"]
+
+  - name: "serialize: list"
+    scm: "(serialize '(1 2 3))"
+    expect:
+      data: ["(1 2 3)"]
+
+  - name: "serialize: nested list"
+    scm: "(serialize '(+ (* 2 3) 4))"
+    expect:
+      data: ["(+ (* 2 3) 4)"]
+
+  - name: "serialize: symbol"
+    scm: "(serialize 'foo)"
+    expect:
+      data: ["foo"]
+
+  - name: "serialize: lambda"
+    scm: "(serialize '('lambda '('x) '('+ 'x 1)))"
+    expect:
+      data: ["(lambda (x) (+ x 1))"]
+
+  - name: "serialize: quoted symbol in list"
+    scm: "(serialize '('a 'b 'c))"
+    expect:
+      data: ["('a 'b 'c)"]
+
+  - name: "serialize: float"
+    scm: "(serialize 3.14)"
+    expect:
+      data: ["3.14"]
+
+  - name: "serialize: negative number"
+    scm: "(serialize -42)"
+    expect:
+      data: ["-42"]
+
+  - name: "serialize: empty list"
+    scm: "(serialize '())"
+    expect:
+      data: ["()"]
+
+  - name: "serialize: string with escapes"
+    scm: "(serialize \"line1\\nline2\")"
+
+  - name: "serialize roundtrip: eval serialized code"
+    scm: |
+      (begin
+        (set code '(+ 1 2))
+        (set s (serialize code))
+        (eval (scheme s)))
+    expect:
+      data: [3]
+
+  # ========================================================================
+  # 11. Combined: serialize + json roundtrip on table data
+  # ========================================================================
+  - name: "Create table for roundtrip test"
+    sql: "CREATE TABLE ser_test (id INT, data VARCHAR(200))"
+    expect:
+      rows: 0
+
+  - name: "Insert JSON-encoded data into table"
+    scm: |
+      (begin
+        (insert "memcp-tests" "ser_test" '("id" "data")
+          (list
+            (list 1 (json_encode '("a" "b" "c")))
+            (list 2 (json_encode_assoc '("key" "value" "num" 42)))
+            (list 3 (json_encode nil))))
+        3)
+
+  - name: "Verify JSON stored in table"
+    sql: "SELECT data FROM ser_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - data: "[\"a\",\"b\",\"c\"]"
+
+  - name: "Decode JSON from table via scm"
+    scm: |
+      (begin
+        (set rows (scan "memcp-tests" "ser_test" '("id") (lambda (id) (equal? id 2)) '("data") (lambda (data) data) (lambda (a b) b) nil))
+        (set decoded (json_decode rows))
+        (get_assoc decoded "key"))
+    expect:
+      data: ["value"]
+
+  - name: "Drop roundtrip table"
+    sql: "DROP TABLE IF EXISTS ser_test"
+    expect:
+      rows: 0
+
+cleanup: []

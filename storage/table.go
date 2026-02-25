@@ -906,8 +906,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 	}
 	uniq := t.Unique[idx]
 	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
-	if len(uniq.Cols) <= 3 {
-		// use hashmap
+	{
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))
 		for i, col := range uniq.Cols {
@@ -1053,72 +1052,6 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		}
 		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
 			lock.Unlock()
-		}
-	} else {
-		if idx == 0 {
-			t.uniquelock.Unlock() // TODO: instead of uniquelock, in case of sharding, use a shard local lock
-		}
-		// build scan for unique check
-		cols := make([]scm.Scmer, len(uniq.Cols))
-		colidx := make([]int, len(uniq.Cols))
-		for i, c := range uniq.Cols {
-			cols[i] = scm.NewSymbol(c)
-			for j, col := range columns { // find uniq columns
-				if c == col {
-					colidx[i] = j
-				}
-			}
-		}
-		conditionBody := make([]scm.Scmer, len(uniq.Cols)+1)
-		conditionBody[0] = scm.NewSymbol("and")
-		last_j := 0
-		for j, row := range values {
-			for i, colidx := range colidx {
-				value := row[colidx]
-				if !mergeNull && value.IsNil() {
-					conditionBody[i+1] = scm.NewBool(false) // NULL can be there multiple times
-				} else {
-					conditionBody[i+1] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewAny(scm.NthLocalVar(i)), value})
-				}
-			}
-			condition := scm.Proc{Params: scm.NewSlice(cols), Body: scm.NewSlice(conditionBody), En: &scm.Globalenv, NumVars: len(uniq.Cols)}
-			updatefn := t.scan(
-				uniq.Cols,
-				scm.NewAny(condition),
-				onCollisionCols,
-				scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-					t.uniquelock.Unlock()
-					for i, p := range onCollisionCols {
-						if len(p) >= 4 && p[:4] == "NEW." {
-							for j, c := range columns {
-								if p[4:] == c {
-									args[i] = row[j]
-								}
-							}
-						}
-					}
-					failure(uniq.Id, args) // call collision function
-					t.uniquelock.Lock()
-					return scm.NewBool(true) // feedback that there was a collision
-				}),
-				scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
-				scm.NewNil(),
-				scm.NewNil(),
-				false,
-			)
-			if !updatefn.IsNil() {
-				// found a unique collision: flush the successing items and skip this one
-				if j != last_j {
-					t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1) // flush
-				}
-				last_j = j + 1
-			}
-		}
-		if len(values) != last_j {
-			t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1) // flush the rest
-		}
-		if idx == 0 {
-			t.uniquelock.Unlock()
 		}
 	}
 }
