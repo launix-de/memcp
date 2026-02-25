@@ -538,10 +538,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 
 	/* window function OVER() spec: parse PARTITION BY and ORDER BY clauses */
-	(define sql_window_orderby_item (parser '((define e sql_expression) (? (or (atom "ASC" true) (atom "DESC" true)))) true))
+	(define sql_window_orderby_item (parser '(
+		(define col sql_expression)
+		(define dir (or
+			(parser (atom "DESC" true) >)
+			(parser (atom "ASC" true) <)
+			(parser empty <)
+		))
+	) (list col dir)))
 	(define sql_window_spec (parser '(
-		(? (atom "PARTITION" true) (atom "BY" true) (+ sql_expression ","))
-		(? (atom "ORDER" true) (atom "BY" true) (+ sql_window_orderby_item ","))) true))
+		(? (atom "PARTITION" true) (atom "BY" true) (define partition_by (+ sql_expression ",")))
+		(? (atom "ORDER" true) (atom "BY" true) (define order_by (+ sql_window_orderby_item ",")))
+	) (list (coalesce partition_by '()) (coalesce order_by '()))))
 
 	(define sql_expression6 (parser (or
 		/* Scalar subselect in expressions: (SELECT ...) */
@@ -634,8 +642,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "LEFT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote sql_substr) s 1 n))
 		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
 		(parser '((atom "RIGHT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
-		/* window functions: parse OVER(...) clause and return nil (stub until implemented) */
-		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") nil)
+		/* window functions: parse OVER(...) clause and emit AST node */
+		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func (toUpper fn) args _over))
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
 		sql_number
 		sql_string

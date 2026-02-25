@@ -234,20 +234,16 @@ test_cases:
       data:
         - d: null
 
-  # --- Window function stub (parse only, returns NULL) ---
-  - name: "Window function LEAD stub returns NULL"
+  # --- Window function parse tests (no FROM table = error) ---
+  - name: "Window function without FROM table"
     sql: "SELECT LEAD(1) OVER (ORDER BY 1) AS l"
     expect:
-      rows: 1
-      data:
-        - l: null
+      error: true
 
-  - name: "Window function with PARTITION BY and ORDER BY DESC"
+  - name: "Window function with PARTITION BY without FROM table"
     sql: "SELECT LEAD(1) OVER (PARTITION BY 1 ORDER BY 1 DESC) AS l"
     expect:
-      rows: 1
-      data:
-        - l: null
+      error: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS date_test"

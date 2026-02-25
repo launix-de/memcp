@@ -122,6 +122,33 @@ func init_list() {
 		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
+		"slice", "extract a sublist from start (inclusive) to end (exclusive).\n(slice list start end) returns elements list[start..end).",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "base list", NoEscape},
+			DeclarationParameter{"start", "number", "start index (inclusive)", nil},
+			DeclarationParameter{"end", "number", "end index (exclusive)", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			list := asSlice(a[0], "slice")
+			start := int(a[1].Int())
+			end := int(a[2].Int())
+			if start < 0 {
+				start = 0
+			}
+			if end > len(list) {
+				end = len(list)
+			}
+			if start >= end {
+				return NewSlice([]Scmer{})
+			}
+			result := make([]Scmer, end-start)
+			copy(result, list[start:end])
+			return NewSlice(result)
+		},
+		true, false, nil,
+	})
+	Declare(&Globalenv, &Declaration{
 		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
 		2, 1000,
 		[]DeclarationParameter{
@@ -203,6 +230,21 @@ func init_list() {
 			return NewSlice(list[1:])
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
+	})
+	Declare(&Globalenv, &Declaration{
+		"cadr", "extracts the second element of a list.\nEquivalent to (car (cdr x)).",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "list", NoEscape},
+		}, "any",
+		func(a ...Scmer) Scmer {
+			list := asSlice(a[0], "cadr")
+			if len(list) < 2 {
+				panic("cadr on list with fewer than 2 elements")
+			}
+			return list[1]
+		},
+		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",

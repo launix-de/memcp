@@ -86,6 +86,15 @@ if there is a group function, create a temporary preaggregate table
 	)
 ))
 
+/* returns a list of all window function nodes (fn args over) in this expr */
+(define extract_window_funcs (lambda (expr)
+	(match expr
+		(cons (symbol window_func) rest) (list rest)
+		(cons sym args) /* function call */ (merge (map args extract_window_funcs))
+		/* literal */ '()
+	)
+))
+
 /* split_condition returns a tuple (now, later) according to what can be checked now and what has to be waited for tables '('(tblvar ...) ...) */
 (define split_condition (lambda (expr tables) (match expr
 	'((symbol get_column) tblvar _ col _) /* a column */ (match tables
@@ -881,7 +890,9 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 									(match (car tablesPrefixed) '(a s t io je) (list a s t isOuter joinexpr2))
 									(cdr tablesPrefixed)))
 							)
-							(define use_materialize false)
+							/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
+							(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
+							(define use_materialize subquery_has_window)
 							/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
 							(if (and (not (nil? groups2)) (not (equal? groups2 '())))
 								(begin
@@ -1187,6 +1198,15 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	(define stage_limit (if stage (stage_limit_val stage) nil))
 	(define stage_offset (if stage (stage_offset_val stage) nil))
 
+	/* window function detection */
+	(define window_funcs_all (merge (extract_assoc fields (lambda (k v) (extract_window_funcs v)))))
+	(define has_window (not (equal? window_funcs_all '())))
+	/* Case 10: window functions in WHERE clause */
+	(define window_in_condition (not (equal? (extract_window_funcs (coalesceNil condition true)) '())))
+	(if window_in_condition (error "window functions not allowed in WHERE clause"))
+
+	(if (and has_window stage_group) (error "window functions with GROUP BY not yet supported"))
+
 	(if stage_group (begin
 		/* group: extract aggregate clauses and split the query into two parts: gathering the aggregates and outputting them */
 		(set stage_group (map stage_group replace_find_column))
@@ -1316,82 +1336,198 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	) (optimize (begin
 			/* grouping has been removed; now to the real data: */
 			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '()))) (error "non-group stage must be last"))
-			(if (coalesce stage_order stage_limit stage_offset) (begin
-				/* ordered or limited scan */
-				/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
-				(set stage_order (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
-				/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
-				(define build_scan (lambda (tables condition is_first)
-					(match tables
-						(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
-							(set cols (merge_unique
-								(list
-									(merge_unique
-										(cons
-											(extract_columns_for_tblvar tblvar condition)
-											(extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))
-										)
-									)
-									(merge_unique
-										(cons
-											(extract_outer_columns_for_tblvar tblvar condition)
-											(extract_assoc fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
-										)
-									)
-								)
-							))
-							(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-								(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
-								/* TODO: add columns from rest condition into cols list */
-
-								/* extract order cols for this tblvar */
-								/* TODO: match case insensitive column */
-								/* TODO: non-trivial columns to computed columns */
-								/* preserve ORDER BY key order (first key has highest priority) */
-								(set ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
-									'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-									'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-									_ '()
-								))))))
-								(set dirs (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
-									'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-									'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-									_ '()
-								))))))
-
-								/* offset/limit only apply to the outermost scan, not to nested JOINs */
-								(define scan_offset (if is_first stage_offset 0))
-								(define scan_limit (if is_first (coalesceNil stage_limit -1) -1))
-
-								(scan_wrapper 'scan_order schema tbl
-									/* condition */
-									(cons list filtercols)
-									'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
-									/* sortcols, sortdirs */
-									(cons list ordercols)
-									(cons list dirs)
-									scan_offset
-									scan_limit
-									/* extract columns and store them into variables */
-									(cons list cols)
-									'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition false))
-									/* no reduce+neutral */
-									nil
-									nil
-									isOuter
-								)
-							))
-						)
-						'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
+			(if has_window (begin
+				/* ========= Window function scan path (LAG/LEAD) ========= */
+				/* Case 8: different OVER clauses */
+				(define first_over (nth (car window_funcs_all) 2))
+				(if (not (reduce window_funcs_all (lambda (ok wf) (and ok (equal? (nth wf 2) first_over))) true))
+					(error "multiple window functions with different OVER clauses not yet supported"))
+				/* extract and resolve OVER info */
+				(define over_partition (map (car first_over) replace_find_column))
+				(define over_order (map (cadr first_over) (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))
+				/* Case 3: conflicting ORDER BY */
+				(define effective_sort (merge (map over_partition (lambda (pe) (list pe <))) over_order))
+				(define stage_order_resolved (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
+				(if (and (not (equal? stage_order_resolved '())) (not (equal? effective_sort stage_order_resolved)))
+					(error "window ORDER BY with outer ORDER BY not yet supported"))
+				/* only LAG/LEAD for now */
+				(define wf_resolved (map window_funcs_all (lambda (wf) (match wf '(fn args over)
+					(list fn (map args replace_find_column) over)))))
+				(if (reduce wf_resolved (lambda (acc wf) (match wf '(fn _ _)
+					(or acc (and (not (equal? fn "LAG")) (not (equal? fn "LEAD")))))) false)
+					(error "only LAG and LEAD window functions are currently supported"))
+				/* single table only */
+				(match tables
+					'('(tblvar schema tbl isOuter _)) (begin
+						(set condition (replace_find_column (coalesceNil condition true)))
+						(define has_partition (not (equal? over_partition '())))
+						/* compute stride_cols: all columns needed in output and window args */
+						(define non_window_cols (merge_unique (extract_assoc fields (lambda (k v)
+							(extract_columns_for_tblvar tblvar (replace_find_column v))))))
+						(define wf_arg_cols (merge_unique (map wf_resolved (lambda (wf) (match wf '(fn args _)
+							(merge_unique (map args (lambda (a) (extract_columns_for_tblvar tblvar a)))))))))
+						(define partition_col_names (merge_unique (map over_partition (lambda (pe) (match pe
+							'((symbol get_column) _ _ col _) '(col)
+							'((quote get_column) _ _ col _) '(col)
+							'())))))
+						(define stride_cols (merge_unique (list non_window_cols wf_arg_cols partition_col_names)))
+						(define stride (count stride_cols))
+						/* window parameters */
+						(define max_lag (reduce wf_resolved (lambda (acc wf) (match wf '(fn args _)
+							(if (equal? fn "LAG") (max acc (if (> (count args) 1) (cadr args) 1)) acc))) 0))
+						(define max_lead (reduce wf_resolved (lambda (acc wf) (match wf '(fn args _)
+							(if (equal? fn "LEAD") (max acc (if (> (count args) 1) (cadr args) 1)) acc))) 0))
+						(define window_size (+ max_lag 1 max_lead))
+						(define skip max_lead)
+						(define flush_count skip)
+						(define current_row_pos (- window_size 1 skip))
+						/* emit_fn parameter symbols */
+						(define num_emit_params (* window_size stride))
+						(define emit_params (map (produceN num_emit_params (lambda (i) i)) (lambda (i) (symbol (concat "__w" i)))))
+						/* helper: find column index in stride_cols */
+						(define col_index (lambda (col) (car (reduce stride_cols (lambda (acc c) (match acc '(idx found)
+							(if found acc (if (equal?? c col) (list idx true) (list (+ idx 1) false))))) (list 0 false)))))
+						/* rewrite field expression for emit_fn */
+						(define rewrite_for_emit (lambda (expr row_pos) (match expr
+							(cons (symbol window_func) wf_rest) (begin
+								(define fn (car wf_rest))
+								(define wf_args (cadr wf_rest))
+								(define wf_offset (if (> (count wf_args) 1) (cadr wf_args) 1))
+								(define wf_pos (if (equal? fn "LAG") (- current_row_pos wf_offset) (+ current_row_pos wf_offset)))
+								(rewrite_for_emit (replace_find_column (car wf_args)) wf_pos))
+							'((symbol get_column) (eval tblvar) _ col _) (nth emit_params (+ (* row_pos stride) (col_index col)))
+							'((quote get_column) (eval tblvar) _ col _) (nth emit_params (+ (* row_pos stride) (col_index col)))
+							'((symbol get_column) nil _ col _) (rewrite_for_emit (replace_find_column expr) row_pos)
+							(cons sym args_) (cons sym (map args_ (lambda (a) (rewrite_for_emit a row_pos))))
+							expr)))
+						/* build emit_fn: (lambda (__w0 __w1 ...) (resultrow (list field_rewrites...))) */
+						(define emit_body '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (rewrite_for_emit v current_row_pos))))))
+						(define emit_fn_ast (list (quote lambda) emit_params emit_body))
+						/* build neutral */
+						(define neutral_list (merge (list skip 0 stride) (produceN (* window_size stride) (lambda (_) nil))))
+						(define neutral_ast (cons (quote list) neutral_list))
+						/* sort cols/dirs from effective_sort */
+						(define ordercols (merge (map effective_sort (lambda (order_item) (match order_item '(col dir) (match col
+							'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+							'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+							_ '()))))))
+						(define sort_dirs (merge (map effective_sort (lambda (order_item) (match order_item '(col dir) (match col
+							'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+							'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+							_ '()))))))
+						/* filter setup */
+						(define filtercols (extract_columns_for_tblvar tblvar condition))
+						/* symbols for emit_fn and fresh neutral */
+						(define efn_sym (symbol "__emit_fn"))
+						(define nfn_sym (symbol "__fresh_neutral"))
+						(if has_partition (begin
+							/* === Case 4: PARTITION BY + ORDER BY === */
+							(define window_end (+ 3 (* window_size stride)))
+							/* partition key expression in mapfn */
+							(define partition_col_syms (map over_partition (lambda (pe) (match pe
+								'((symbol get_column) _ _ col _) (symbol (concat tblvar "." col))
+								'((quote get_column) _ _ col _) (symbol (concat tblvar "." col))))))
+							(define pk_value_expr (if (equal? (count partition_col_syms) 1)
+								(car partition_col_syms)
+								(cons (quote list) partition_col_syms)))
+							/* mapfn: returns (list stride_vals... partition_key) */
+							(define mapfn_ast (list (quote lambda)
+								(map stride_cols (lambda (col) (symbol (concat tblvar "." col))))
+								(list (quote append)
+									(cons (quote list) (map stride_cols (lambda (col) (symbol (concat tblvar "." col)))))
+									pk_value_expr)))
+							/* neutral with nil partition key */
+							(define neutral_partition_ast (cons (quote list) (merge neutral_list (list nil))))
+							/* partition-aware reducer */
+							(define reducer_ast (list (quote lambda) '('acc 'mapped) (list (quote begin)
+								'('define 'pk '('nth 'mapped stride))
+								'('define 'vs '('slice 'mapped 0 stride))
+								'('define 'prev_pk '('nth 'acc window_end))
+								'('define 'win '('slice 'acc 0 window_end))
+								(list (quote if) '('or '('nil? 'prev_pk) '('equal? 'pk 'prev_pk))
+									'('append '('window_mut 'win efn_sym 'vs) 'pk)
+									(list (quote begin)
+										(if (> flush_count 0) '('window_flush 'win efn_sym flush_count) true)
+										'('append '('window_mut nfn_sym efn_sym 'vs) 'pk))))))
+							/* build scan with post-flush */
+							(define scan_plan (list (quote begin)
+								(list (quote define) efn_sym emit_fn_ast)
+								(list (quote define) nfn_sym neutral_ast)
+								(if (> flush_count 0) (begin
+									(list (quote begin)
+										(list (quote define) (symbol "__scan_result")
+											(scan_wrapper 'scan_order schema tbl
+												(cons list filtercols)
+												'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
+												(cons list ordercols)
+												(cons list sort_dirs)
+												0 -1
+												(cons list stride_cols)
+												mapfn_ast
+												reducer_ast
+												neutral_partition_ast
+												isOuter))
+										(list (quote window_flush) (list (quote slice) (symbol "__scan_result") 0 window_end) efn_sym flush_count)))
+									(scan_wrapper 'scan_order schema tbl
+										(cons list filtercols)
+										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
+										(cons list ordercols)
+										(cons list sort_dirs)
+										0 -1
+										(cons list stride_cols)
+										mapfn_ast
+										reducer_ast
+										neutral_partition_ast
+										isOuter))))
+							scan_plan
+						) (begin
+								/* === Case 1: ORDER BY only, no partition === */
+								/* mapfn: returns (list stride_vals...) */
+								(define mapfn_ast '((quote lambda)
+									(map stride_cols (lambda (col) (symbol (concat tblvar "." col))))
+									(cons (quote list) (map stride_cols (lambda (col) (symbol (concat tblvar "." col)))))))
+								/* simple reducer */
+								(define reducer_ast '((quote lambda) '('acc 'mapped) '('window_mut 'acc efn_sym 'mapped)))
+								/* build scan with post-flush */
+								(define scan_plan (list (quote begin)
+									(list (quote define) efn_sym emit_fn_ast)
+									(if (> flush_count 0) (begin
+										(list (quote begin)
+											(list (quote define) (symbol "__scan_result")
+												(scan_wrapper 'scan_order schema tbl
+													(cons list filtercols)
+													'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
+													(cons list ordercols)
+													(cons list sort_dirs)
+													0 -1
+													(cons list stride_cols)
+													mapfn_ast
+													reducer_ast
+													neutral_ast
+													isOuter))
+											(list (quote window_flush) (symbol "__scan_result") efn_sym flush_count)))
+										(scan_wrapper 'scan_order schema tbl
+											(cons list filtercols)
+											'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
+											(cons list ordercols)
+											(cons list sort_dirs)
+											0 -1
+											(cons list stride_cols)
+											mapfn_ast
+											reducer_ast
+											neutral_ast
+											isOuter))))
+								scan_plan
+						))
 					)
-				))
-				(build_scan tables (replace_find_column condition) true)
-			) (begin
-					/* unordered unlimited scan */
-
-					/* TODO: sort tables according to join plan */
-					/* TODO: match tbl to inner query vs string */
-					(define build_scan (lambda (tables condition)
+					(error "window functions on joined tables not yet supported")
+				)
+			) (if (coalesce stage_order stage_limit stage_offset) (begin
+					/* ordered or limited scan */
+					/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
+					(set stage_order (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
+					/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
+					(define build_scan (lambda (tables condition is_first)
 						(match tables
 							(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
 								(set cols (merge_unique
@@ -1410,28 +1546,98 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 										)
 									)
 								))
-								/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
+									/* TODO: add columns from rest condition into cols list */
 
-									(scan_wrapper 'scan schema tbl
+									/* extract order cols for this tblvar */
+									/* TODO: match case insensitive column */
+									/* TODO: non-trivial columns to computed columns */
+									/* preserve ORDER BY key order (first key has highest priority) */
+									(set ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
+										'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+										'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+										_ '()
+									))))))
+									(set dirs (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
+										'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+										'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+										_ '()
+									))))))
+
+									/* offset/limit only apply to the outermost scan, not to nested JOINs */
+									(define scan_offset (if is_first stage_offset 0))
+									(define scan_limit (if is_first (coalesceNil stage_limit -1) -1))
+
+									(scan_wrapper 'scan_order schema tbl
 										/* condition */
 										(cons list filtercols)
 										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+										/* sortcols, sortdirs */
+										(cons list ordercols)
+										(cons list dirs)
+										scan_offset
+										scan_limit
 										/* extract columns and store them into variables */
 										(cons list cols)
-										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
-										nil
+										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition false))
+										/* no reduce+neutral */
 										nil
 										nil
 										isOuter
 									)
 								))
 							)
-							'() /* final inner (=scalar) */ '('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+							'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 						)
 					))
-					(build_scan tables (replace_find_column condition))
-			))
+					(build_scan tables (replace_find_column condition) true)
+				) (begin
+						/* unordered unlimited scan */
+
+						/* TODO: sort tables according to join plan */
+						/* TODO: match tbl to inner query vs string */
+						(define build_scan (lambda (tables condition)
+							(match tables
+								(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
+									(set cols (merge_unique
+										(list
+											(merge_unique
+												(cons
+													(extract_columns_for_tblvar tblvar condition)
+													(extract_assoc fields (lambda (k v) (extract_columns_for_tblvar tblvar v)))
+												)
+											)
+											(merge_unique
+												(cons
+													(extract_outer_columns_for_tblvar tblvar condition)
+													(extract_assoc fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
+												)
+											)
+										)
+									))
+									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
+									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
+										(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
+
+										(scan_wrapper 'scan schema tbl
+											/* condition */
+											(cons list filtercols)
+											'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+											/* extract columns and store them into variables */
+											(cons list cols)
+											'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (build_scan tables later_condition))
+											nil
+											nil
+											nil
+											isOuter
+										)
+									))
+								)
+								'() /* final inner (=scalar) */ '('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
+							)
+						))
+						(build_scan tables (replace_find_column condition))
+			)))
 	)))
 )))

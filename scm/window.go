@@ -39,17 +39,17 @@ func init_window() {
 	DeclareTitle("Window Functions")
 
 	Declare(&Globalenv, &Declaration{
-		"window_mut", "Ring buffer shift-insert for window functions. (window_mut window emit_fn vals...) writes vals into the current slot, increments counter. If skip>0, decrements skip. Otherwise calls (emit_fn oldest_v0 oldest_v1 ... newest_v0 newest_v1) with all slot values ordered oldest-to-newest. Returns updated window.",
-		2, 1000,
+		"window_mut", "Ring buffer shift-insert for window functions. (window_mut window emit_fn vals) writes vals (a list of stride values) into the current slot, increments counter. If skip>0, decrements skip. Otherwise calls (emit_fn oldest_v0 oldest_v1 ... newest_v0 newest_v1) with all slot values ordered oldest-to-newest. Returns updated window.",
+		3, 3,
 		[]DeclarationParameter{
 			{"window", "list", "ring buffer accumulator", nil},
 			{"emit_fn", "func", "callback receiving all window values oldest-to-newest", nil},
-			{"vals...", "any", "values to insert (stride count, default nil)", nil},
+			{"vals", "list", "list of stride values to insert", nil},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			win := asSlice(a[0], "window_mut")
 			emitFn := a[1]
-			// vals are a[2], a[3], ... (stride values)
+			vals := asSlice(a[2], "window_mut vals")
 
 			if len(win) < 3 {
 				panic("window_mut: window must have at least 3 elements (skip, counter, stride)")
@@ -68,8 +68,8 @@ func init_window() {
 			// write vals into current slot
 			writePos := (counter % windowSize) * stride
 			for i := 0; i < stride; i++ {
-				if 2+i < len(a) { // a[2+i] = vals[i]
-					slots[writePos+i] = a[2+i]
+				if i < len(vals) {
+					slots[writePos+i] = vals[i]
 				} else {
 					slots[writePos+i] = NewNil()
 				}
