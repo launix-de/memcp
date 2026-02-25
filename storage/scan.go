@@ -251,62 +251,54 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	}()
 	maxInsertIndex := len(t.inserts)
 
-	// filter phase: collect matching IDs into stack buffer, flush to MapReducer
+	// filter phase: iterateIndex fills stack buffer, callback filters in-place and flushes to MapReducer
 	var buf [1024]uint32
-	bufN := 0
 	hadValue := false
 	currentTx := CurrentTx()
 
-	flush := func() {
-		if bufN == 0 {
-			return
-		}
-		// release lock for map+reduce (UpdateFunction needs write lock)
-		t.mu.RUnlock()
-		locked = false
-		outCount += int64(bufN)
-		akkumulator = mapper.Stream(akkumulator, buf[:bufN])
-		hadValue = true
-		bufN = 0
-		t.mu.RLock()
-		locked = true
-	}
+	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+		// filter in-place: overwrite batch with passing IDs
+		outN := 0
+		for _, idx := range batch {
+			if currentTx != nil && currentTx.Mode == TxACID {
+				if !currentTx.IsVisible(t, idx) {
+					continue
+				}
+			} else {
+				if t.deletions.Get(idx) {
+					continue // item is on delete list
+				}
+			}
 
-	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint32) bool {
-		if currentTx != nil && currentTx.Mode == TxACID {
-			if !currentTx.IsVisible(t, uint32(idx)) {
-				return true
+			// condition check
+			if idx < t.main_count {
+				for i, k := range ccols {
+					cdataset[i] = k.GetValue(idx)
+				}
+			} else {
+				for i, k := range conditionCols {
+					cdataset[i] = t.getDelta(int(idx-t.main_count), k)
+				}
 			}
-		} else {
-			if t.deletions.Get(idx) {
-				return true // item is on delete list
+			if !scm.ToBool(conditionFn(cdataset...)) {
+				continue
 			}
-		}
 
-		// condition check
-		if idx < t.main_count {
-			for i, k := range ccols {
-				cdataset[i] = k.GetValue(idx)
-			}
-		} else {
-			for i, k := range conditionCols {
-				cdataset[i] = t.getDelta(int(idx-t.main_count), k)
-			}
+			batch[outN] = idx
+			outN++
 		}
-		condResult := conditionFn(cdataset...)
-		if !scm.ToBool(condResult) {
-			return true
-		}
-
-		// collect matching ID into buffer
-		buf[bufN] = idx
-		bufN++
-		if bufN == 1024 {
-			flush()
+		if outN > 0 {
+			// release lock for map+reduce (UpdateFunction needs write lock)
+			t.mu.RUnlock()
+			locked = false
+			outCount += int64(outN)
+			akkumulator = mapper.Stream(akkumulator, batch[:outN])
+			hadValue = true
+			t.mu.RLock()
+			locked = true
 		}
 		return true
 	})
-	flush() // flush remaining
 
 	// finished reading
 	t.mu.RUnlock()

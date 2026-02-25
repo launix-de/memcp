@@ -158,8 +158,11 @@ func (s *StorageIndex) compareMainAndDelta(mainRecid uint32, mainCols []ColumnSt
 	return 0
 }
 
-// iterates over items
-func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint32) bool) {
+// iterates over items using a caller-provided buffer for batching.
+// The callback receives batches of record IDs and returns false to stop iteration.
+// Buffer size controls early-out granularity: use small buffers (e.g. [8]uint32)
+// for existence checks, large buffers (e.g. [1024]uint32) for full scans.
+func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
 	// check if we found conditions
@@ -177,7 +180,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 					}
 				}
 				// this index fits!
-				index.iterate(lower, upperLast, maxInsertIndex, callback)
+				index.iterate(lower, upperLast, maxInsertIndex, buf, callback)
 				return
 			}
 		skip_index:
@@ -199,20 +202,34 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		index.t = t
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(lower, upperLast, maxInsertIndex, callback)
+		index.iterate(lower, upperLast, maxInsertIndex, buf, callback)
 		return
 	}
 
-	// otherwise: iterate over all items
+	// otherwise: iterate over all items in batches
+	bufN := 0
 	for i := uint32(0); i < t.main_count; i++ {
-		if !callback(i) {
-			return
+		buf[bufN] = i
+		bufN++
+		if bufN == len(buf) {
+			if !callback(buf[:bufN]) {
+				return
+			}
+			bufN = 0
 		}
 	}
 	for i := 0; i < maxInsertIndex; i++ {
-		if !callback(t.main_count + uint32(i)) {
-			return
+		buf[bufN] = t.main_count + uint32(i)
+		bufN++
+		if bufN == len(buf) {
+			if !callback(buf[:bufN]) {
+				return
+			}
+			bufN = 0
 		}
+	}
+	if bufN > 0 {
+		callback(buf[:bufN])
 	}
 }
 
@@ -226,8 +243,8 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 	// (also consider incremental indexes??)
 }
 
-// iterate over index
-func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, callback func(uint32) bool) {
+// iterate over index using a caller-provided buffer for batching
+func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 
 	// find columns in storage
 	cols := make([]ColumnStorage, len(s.Cols))
@@ -242,15 +259,29 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		// index is not built yet
 		if s.Savings < savings_threshold {
 			// iterate over all items because we don't want to store the index
+			bufN := 0
 			for i := uint32(0); i < s.t.main_count; i++ {
-				if !callback(i) {
-					return
+				buf[bufN] = i
+				bufN++
+				if bufN == len(buf) {
+					if !callback(buf[:bufN]) {
+						return
+					}
+					bufN = 0
 				}
 			}
 			for i := 0; i < maxInsertIndex; i++ {
-				if !callback(s.t.main_count + uint32(i)) {
-					return
+				buf[bufN] = s.t.main_count + uint32(i)
+				bufN++
+				if bufN == len(buf) {
+					if !callback(buf[:bufN]) {
+						return
+					}
+					bufN = 0
 				}
+			}
+			if bufN > 0 {
+				callback(buf[:bufN])
 			}
 			return
 		} else {
@@ -400,18 +431,32 @@ start_scan:
 		})
 	}
 
+	bufN := 0
 	if len(deltaItems) == 0 {
 		for recid, ok := nextMain(); ok; recid, ok = nextMain() {
-			if !callback(recid) {
-				return
+			buf[bufN] = recid
+			bufN++
+			if bufN == len(buf) {
+				if !callback(buf[:bufN]) {
+					return
+				}
+				bufN = 0
 			}
 		}
 		if maxInsertIndex > 0 && s.deltaBtree == nil {
 			for i := 0; i < maxInsertIndex; i++ {
-				if !callback(s.t.main_count + uint32(i)) {
-					return
+				buf[bufN] = s.t.main_count + uint32(i)
+				bufN++
+				if bufN == len(buf) {
+					if !callback(buf[:bufN]) {
+						return
+					}
+					bufN = 0
 				}
 			}
+		}
+		if bufN > 0 {
+			callback(buf[:bufN])
 		}
 		return
 	}
@@ -419,32 +464,33 @@ start_scan:
 	di := 0
 	mainRecid, mainOk := nextMain()
 	for mainOk || di < len(deltaItems) {
+		var id uint32
 		if !mainOk {
-			if !callback(uint32(deltaItems[di].itemid)) {
-				return
-			}
+			id = uint32(deltaItems[di].itemid)
 			di++
-			continue
+		} else if di >= len(deltaItems) {
+			id = mainRecid
+			mainRecid, mainOk = nextMain()
+		} else {
+			cmp := s.compareMainAndDelta(mainRecid, cols, deltaItems[di])
+			if cmp <= 0 {
+				id = mainRecid
+				mainRecid, mainOk = nextMain()
+			} else {
+				id = uint32(deltaItems[di].itemid)
+				di++
+			}
 		}
-		if di >= len(deltaItems) {
-			if !callback(mainRecid) {
+		buf[bufN] = id
+		bufN++
+		if bufN == len(buf) {
+			if !callback(buf[:bufN]) {
 				return
 			}
-			mainRecid, mainOk = nextMain()
-			continue
+			bufN = 0
 		}
-
-		cmp := s.compareMainAndDelta(mainRecid, cols, deltaItems[di])
-		if cmp <= 0 {
-			if !callback(mainRecid) {
-				return
-			}
-			mainRecid, mainOk = nextMain()
-			continue
-		}
-		if !callback(uint32(deltaItems[di].itemid)) {
-			return
-		}
-		di++
+	}
+	if bufN > 0 {
+		callback(buf[:bufN])
 	}
 }

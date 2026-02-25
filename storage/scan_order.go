@@ -430,38 +430,57 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		// iterate over items (indexed)
 		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
 		currentTx := CurrentTx()
-		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, func(idx uint32) bool {
-			if currentTx != nil && currentTx.Mode == TxACID {
-				if !currentTx.IsVisible(t, uint32(idx)) {
-					return true
+		var buf [1024]uint32
+		resultCap := 1024
+		result.items = make([]uint32, resultCap)
+		resultN := 0
+		t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
+			// filter in-place: overwrite batch with passing IDs
+			outN := 0
+			for _, idx := range batch {
+				if currentTx != nil && currentTx.Mode == TxACID {
+					if !currentTx.IsVisible(t, idx) {
+						continue
+					}
+				} else {
+					if t.deletions.Get(idx) {
+						continue // item is on delete list
+					}
 				}
-			} else {
-				if t.deletions.Get(idx) {
-					return true // item is on delete list
-				}
-			}
 
-			if idx < t.main_count {
-				// value from main storage
+				if idx < t.main_count {
+					// value from main storage
+					// check condition
+					for i, k := range ccols { // iterate over columns
+						cdataset[i] = k.GetValue(idx)
+					}
+				} else {
+					// value from delta storage
+					// prepare&call condition function
+					for i, k := range conditionCols { // iterate over columns
+						cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
+					}
+				}
 				// check condition
-				for i, k := range ccols { // iterate over columns
-					cdataset[i] = k.GetValue(idx)
+				if !scm.ToBool(conditionFn(cdataset...)) {
+					continue // condition did not match
 				}
-			} else {
-				// value from delta storage
-				// prepare&call condition function
-				for i, k := range conditionCols { // iterate over columns
-					cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
-				}
-			}
-			// check condition
-			if !scm.ToBool(conditionFn(cdataset...)) {
-				return true // condition did not match
-			}
 
-			result.items = append(result.items, idx)
+				batch[outN] = idx
+				outN++
+			}
+			// grow result if needed, then flush filtered batch
+			for resultN+outN > resultCap {
+				resultCap *= 2
+				newItems := make([]uint32, resultCap)
+				copy(newItems, result.items[:resultN])
+				result.items = newItems
+			}
+			copy(result.items[resultN:], batch[:outN])
+			resultN += outN
 			return true
 		})
+		result.items = result.items[:resultN]
 	}()
 
 	// and now sort result!

@@ -904,37 +904,44 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	mainCount := t.main_count
 
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
-	t.iterateIndex(bounds, lower, upperLast, len(t.inserts), func(idx uint32) bool {
-		if present {
-			return false // already found
-		}
-		// Verify all columns match (iterateIndex may return superset for range boundaries)
-		if idx < mainCount {
-			// Main storage: use ColumnStorage
-			for j, v := range values {
-				if !scm.Equal(mcols[j].GetValue(idx), v) {
-					return true
+	// Small buffer for existence check: stop early after first match
+	var buf [8]uint32
+	t.iterateIndex(bounds, lower, upperLast, len(t.inserts), buf[:], func(batch []uint32) bool {
+		for _, idx := range batch {
+			// Verify all columns match (iterateIndex may return superset for range boundaries)
+			matched := true
+			if idx < mainCount {
+				// Main storage: use ColumnStorage
+				for j, v := range values {
+					if !scm.Equal(mcols[j].GetValue(idx), v) {
+						matched = false
+						break
+					}
+				}
+			} else {
+				// Delta storage: use getDelta
+				for j, v := range values {
+					if !scm.Equal(t.getDelta(int(idx-mainCount), columns[j]), v) {
+						matched = false
+						break
+					}
 				}
 			}
-		} else {
-			// Delta storage: use getDelta
-			for j, v := range values {
-				if !scm.Equal(t.getDelta(int(idx-mainCount), columns[j]), v) {
-					return true
-				}
+			if !matched {
+				continue
 			}
-		}
-		// Check visibility
-		if acidMode {
-			if currentTx.IsVisible(t, idx) {
+			// Check visibility
+			if acidMode {
+				if currentTx.IsVisible(t, idx) {
+					result = idx
+					present = true
+					return false
+				}
+			} else if !t.deletions.Get(uint32(idx)) {
 				result = idx
 				present = true
 				return false
 			}
-		} else if !t.deletions.Get(uint32(idx)) {
-			result = idx
-			present = true
-			return false
 		}
 		return true
 	})
