@@ -819,6 +819,25 @@ func init_strings() {
 		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpReplace},
 	})
 
+	Declare(&Globalenv, &Declaration{
+		"regexp_test", "tests if a string matches a regex pattern, returns true/false",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"str", "string", "input string", nil},
+			DeclarationParameter{"pattern", "string", "regex pattern", nil},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
+			re, err := regexp.Compile(String(a[1]))
+			if err != nil {
+				panic("regexp_test: invalid pattern: " + err.Error())
+			}
+			return NewBool(re.MatchString(String(a[0])))
+		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpTest},
+	})
+
 }
 
 // optimizeRegexpReplace precompiles the regex when the pattern argument is a constant string.
@@ -851,4 +870,33 @@ func optimizeRegexpReplace(v []Scmer, oc *OptimizerContext, useResult bool) (Scm
 	})
 	// Rewrite: (regexp_replace str pattern repl) -> (compiled_fn str repl)
 	return NewSlice([]Scmer{compiled, rv[1], rv[3]}), td
+}
+
+// optimizeRegexpTest precompiles the regex when the pattern argument is a constant string.
+func optimizeRegexpTest(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	if td != nil && td.Const {
+		return result, td
+	}
+	rv, ok := scmerSlice(result)
+	if !ok || len(rv) < 3 {
+		return result, td
+	}
+	// Check if the pattern (arg 2, index 2) is a constant string
+	if !rv[2].IsString() {
+		return result, td
+	}
+	pattern := rv[2].String()
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return result, td
+	}
+	compiled := NewFunc(func(a ...Scmer) Scmer {
+		if a[0].IsNil() {
+			return NewNil()
+		}
+		return NewBool(re.MatchString(String(a[0])))
+	})
+	// Rewrite: (regexp_test str pattern) -> (compiled_fn str)
+	return NewSlice([]Scmer{compiled, rv[1]}), td
 }

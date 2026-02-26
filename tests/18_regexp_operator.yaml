@@ -1,0 +1,97 @@
+# REGEXP / RLIKE operator tests
+
+metadata:
+  version: "1.0"
+  description: "REGEXP and RLIKE pattern matching operator"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS `memcp-tests`.regexp_test"
+  - sql: "CREATE TABLE `memcp-tests`.regexp_test (id INT PRIMARY KEY, val VARCHAR(100))"
+  - sql: "INSERT INTO `memcp-tests`.regexp_test (id, val) VALUES (1, 'abc123')"
+  - sql: "INSERT INTO `memcp-tests`.regexp_test (id, val) VALUES (2, '12345')"
+  - sql: "INSERT INTO `memcp-tests`.regexp_test (id, val) VALUES (3, 'hello world')"
+  - sql: "INSERT INTO `memcp-tests`.regexp_test (id, val) VALUES (4, '')"
+
+test_cases:
+  # === Basic REGEXP matching ===
+  - name: "REGEXP matches digits"
+    sql: "SELECT '12345' REGEXP '^[0-9]+$' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  - name: "REGEXP no match"
+    sql: "SELECT 'abc' REGEXP '^[0-9]+$' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: false
+
+  - name: "REGEXP partial match"
+    sql: "SELECT 'abc123' REGEXP '[0-9]+' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  - name: "RLIKE alias"
+    sql: "SELECT 'hello' RLIKE '^h' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  # === NOT REGEXP ===
+  - name: "NOT REGEXP"
+    sql: "SELECT 'abc' NOT REGEXP '^[0-9]+$' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: true
+
+  - name: "NOT RLIKE"
+    sql: "SELECT '123' NOT RLIKE '^[0-9]+$' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: false
+
+  # === REGEXP with table data ===
+  - name: "REGEXP in WHERE clause"
+    sql: "SELECT id FROM `memcp-tests`.regexp_test WHERE val REGEXP '^[0-9]+$' ORDER BY id"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "REGEXP in CASE expression"
+    sql: "SELECT id, CASE WHEN val REGEXP '^[0-9]{4,9}$' THEN 'numeric' ELSE 'other' END AS typ FROM `memcp-tests`.regexp_test ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          typ: "other"
+        - id: 2
+          typ: "numeric"
+        - id: 3
+          typ: "other"
+        - id: 4
+          typ: "other"
+
+  # === NULL handling ===
+  - name: "REGEXP with NULL left side"
+    sql: "SELECT NULL REGEXP '^test$' AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  # === Must-fail tests ===
+  - name: "REGEXP with invalid regex pattern"
+    sql: "SELECT 'abc' REGEXP '[invalid' AS r"
+    expect:
+      error: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS `memcp-tests`.regexp_test"

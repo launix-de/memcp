@@ -162,6 +162,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((define a psql_expression3) (atom "COLLATE" true) (define collation psql_identifier) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b collation))
 		/* Postgres LIKE is case-sensitive by default. */
 		(parser '((define a psql_expression3) (atom "LIKE" true) (define b psql_expression2)) '('strlike_cs a b))
+		/* REGEXP/RLIKE/~ operator: expr ~ 'pattern' -> regexp_test(expr, pattern) */
+		(parser '((define a psql_expression3) "~" (define b psql_expression2)) '('regexp_test a b))
+		(parser '((define a psql_expression3) (atom "REGEXP" true) (define b psql_expression2)) '('regexp_test a b))
+		(parser '((define a psql_expression3) (atom "RLIKE" true) (define b psql_expression2)) '('regexp_test a b))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b psql_expression2)) '('not '('regexp_test a b)))
+		(parser '((define a psql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b psql_expression2)) '('not '('regexp_test a b)))
 		(parser '((define a psql_expression3) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('contains? (cons list b) a))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ psql_expression ",")) ")") '('not (contains? (cons list b) a)))
 		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */

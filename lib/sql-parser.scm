@@ -48,6 +48,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "TRIM" true)
 	(atom "LTRIM" true)
 	(atom "RTRIM" true)
+	(atom "REGEXP" true)
+	(atom "RLIKE" true)
 )))
 (define sql_identifier_quoted (parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`"))) /* with backtick */
 (define sql_identifier (parser (define x (or sql_identifier_unquoted sql_identifier_quoted)) x))
@@ -503,6 +505,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* MySQL default collation is case-insensitive in this project (utf8mb4_general_ci). */
 		(parser '((define a sql_expression3) (atom "LIKE" true) (define b sql_expression2)) '('strlike a b "utf8mb4_general_ci"))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "LIKE" true) (define b sql_expression2)) '('not '('strlike a b "utf8mb4_general_ci")))
+		/* REGEXP/RLIKE operator: expr REGEXP 'pattern' -> regexp_test(expr, pattern) */
+		(parser '((define a sql_expression3) (atom "REGEXP" true) (define b sql_expression2)) '('regexp_test a b))
+		(parser '((define a sql_expression3) (atom "RLIKE" true) (define b sql_expression2)) '('regexp_test a b))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "REGEXP" true) (define b sql_expression2)) '('not '('regexp_test a b)))
+		(parser '((define a sql_expression3) (atom "NOT" true) (atom "RLIKE" true) (define b sql_expression2)) '('not '('regexp_test a b)))
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") '('contains? (cons list b) a))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define b (+ sql_expression ",")) ")") (list (quote not) (cons (quote contains?) (cons (cons (quote list) b) (list a)))))
 		/* BETWEEN operator: expr BETWEEN low AND high -> a >= low AND a <= high */
