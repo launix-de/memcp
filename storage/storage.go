@@ -23,7 +23,6 @@ import "sync"
 import "time"
 import "strconv"
 import "reflect"
-import "runtime"
 import "strings"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
@@ -916,6 +915,14 @@ func Init(en scm.Env) {
 		}, false, false, nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"totalmem", "Returns total physical memory in bytes (from /proc/meminfo)",
+		0, 0,
+		[]scm.DeclarationParameter{}, "number",
+		func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(totalMemoryBytes())
+		}, true, false, nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"show", "show databases/tables/columns/meta\n\n(show) lists databases\n(show schema) lists tables\n(show schema tbl) lists columns\n(show schema tbl \"meta\") returns table metadata dict",
 		0, 3,
 		[]scm.DeclarationParameter{
@@ -1338,9 +1345,7 @@ func Init(en scm.Env) {
 }
 
 func PrintMemUsage() string {
-	runtime.GC()
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
+	m := scm.CachedMemStats()
 	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Alloc = %v MiB\tTotalAlloc = %v MiB\tSys = %v MiB\tNumGC = %v", units.BytesSize(float64(m.Alloc)), units.BytesSize(float64(m.TotalAlloc)), units.BytesSize(float64(m.Sys)), m.NumGC))

@@ -281,6 +281,8 @@ func (s *storageShard) ensureLoaded() {
 	if s.srState != COLD {
 		return
 	}
+	// pre-free memory before loading shard from disk
+	GlobalCache.CheckPressure(int64(len(s.t.Columns)) * int64(Settings.ShardSize) * 16)
 	// double-check under lock to prevent concurrent map writes in load()
 	s.mu.Lock()
 	if s.srState != COLD {

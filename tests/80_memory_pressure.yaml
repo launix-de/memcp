@@ -1,0 +1,52 @@
+metadata:
+  version: "1.0"
+  description: "Memory pressure management"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS mp_pressure"
+  - sql: "CREATE TABLE mp_pressure (id INT, a INT, b INT, c INT, d INT, e INT, f TEXT)"
+
+test_cases:
+  - name: "MP: insert 300k rows and rebuild"
+    scm: |
+      (begin
+        (set imod (lambda (a b) (- a (* (floor (/ a b)) b))))
+        (insert "memcp-tests" "mp_pressure" '("id" "a" "b" "c" "d" "e" "f")
+          (produceN 300000 (lambda (i) (list i
+            (imod (* i 54321) 999983)
+            (imod (* i 12347) 999979)
+            (imod (* i 98765) 999961)
+            (imod (* i 33331) 999953)
+            (imod (* i 77773) 999931)
+            (concat "val_" (imod (* i 13579) 99991))))))
+        (rebuild)
+        "ok")
+    expect: {}
+
+  - name: "MP: stat before pressure"
+    scm: (stat)
+    expect: {}
+
+  - name: "MP: set MaxRamBytes to 1 (trigger eviction)"
+    scm: (settings "MaxRamBytes" 1)
+    expect: {}
+
+  - name: "MP: select after eviction"
+    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 150000"
+    expect:
+      rows: 1
+      data:
+        - id: 150000
+          a: 288516
+          b: 88892
+
+  - name: "MP: stat after pressure"
+    scm: (stat)
+    expect: {}
+
+  - name: "MP: reset MaxRamBytes to 0"
+    scm: (settings "MaxRamBytes" 0)
+    expect: {}
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS mp_pressure"

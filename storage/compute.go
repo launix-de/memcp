@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -87,6 +87,8 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	for i, col := range inputCols {
 		cols[i] = s.getColumnStorageOrPanic(col)
 	}
+	// pre-free memory before allocating the compute result array
+	GlobalCache.CheckPressure(int64(s.main_count) * 16)
 	vals := make([]scm.Scmer, s.main_count) // build the stretchy value array
 	if parallel {
 		var done sync.WaitGroup

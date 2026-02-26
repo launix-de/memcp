@@ -25,6 +25,7 @@ import (
 	"time"
 
 	units "github.com/docker/go-units"
+	"github.com/launix-de/memcp/scm"
 )
 
 // EvictableType identifies the kind of cached object for factor lookup and stat reporting.
@@ -98,13 +99,14 @@ type CacheManager struct {
 }
 
 type cacheOp struct {
-	add        *softItem
-	del        any
-	updatePtr  any
-	updateDelta int64
-	budgetVal  int64
-	statResult chan CacheStat
-	done       chan struct{}
+	add          *softItem
+	del          any
+	updatePtr    any
+	updateDelta  int64
+	budgetVal    int64
+	pressureSize int64
+	statResult   chan CacheStat
+	done         chan struct{}
 }
 
 // CacheStat holds stat results returned via channel.
@@ -189,6 +191,17 @@ func (cm *CacheManager) UpdateBudget(newBudget int64) {
 	<-done
 }
 
+// CheckPressure proactively triggers eviction if currentMemory + additionalSize exceeds the budget.
+// Use this before large allocations to free space ahead of time.
+func (cm *CacheManager) CheckPressure(additionalSize int64) {
+	if cm.opChan == nil {
+		return
+	}
+	done := make(chan struct{})
+	cm.opChan <- cacheOp{pressureSize: additionalSize, done: done}
+	<-done
+}
+
 // Stat returns per-type evictable sizes and counts.
 func (cm *CacheManager) Stat() CacheStat {
 	if cm.opChan == nil {
@@ -210,6 +223,8 @@ func (cm *CacheManager) run() {
 			cm.updateSizeInternal(op.updatePtr, op.updateDelta)
 		} else if op.budgetVal != 0 {
 			cm.memoryBudget = op.budgetVal
+		} else if op.pressureSize > 0 {
+			cm.evict(op.pressureSize)
 		} else if op.statResult != nil {
 			op.statResult <- CacheStat{
 				SizeByType:    cm.sizeByType,
@@ -224,7 +239,7 @@ func (cm *CacheManager) run() {
 		}
 		// check if we need cleanup after add or updateSize
 		if cm.currentMemory > cm.memoryBudget {
-			cm.evict()
+			cm.evict(0)
 		}
 	}
 }
@@ -233,7 +248,9 @@ func (cm *CacheManager) run() {
 func (cm *CacheManager) addInternal(item *softItem) {
 	if old, ok := cm.itemMap[item.pointer]; ok {
 		// re-registration: update in place
-		cm.currentMemory += item.size - old.size
+		delta := item.size - old.size
+		cm.currentMemory += delta
+		scm.AdjustMemStats(delta)
 		cm.sizeByType[old.evictType] -= old.size
 		cm.countByType[old.evictType]--
 		cm.sizeByType[item.evictType] += item.size
@@ -249,6 +266,7 @@ func (cm *CacheManager) addInternal(item *softItem) {
 	}
 	cm.itemMap[item.pointer] = item
 	cm.currentMemory += item.size
+	scm.AdjustMemStats(item.size)
 	cm.sizeByType[item.evictType] += item.size
 	cm.countByType[item.evictType]++
 	heap.Push(&cm.h, item)
@@ -266,6 +284,7 @@ func (cm *CacheManager) removeInternal(pointer any, freedByType *[numEvictableTy
 		return
 	}
 	cm.currentMemory -= item.size
+	scm.AdjustMemStats(-item.size)
 	cm.sizeByType[item.evictType] -= item.size
 	cm.countByType[item.evictType]--
 	if freedByType != nil {
@@ -284,6 +303,7 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 		return
 	}
 	cm.currentMemory += delta
+	scm.AdjustMemStats(delta)
 	cm.sizeByType[item.evictType] += delta
 	item.size += delta
 	item.evictionScore = item.size / evictableFactors[item.evictType]
@@ -295,11 +315,13 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 const telemetryWeight = 1000.0 // weight for telemetry score vs LRU age in seconds
 
 // evict runs two-phase eviction to bring memory below 75% of budget.
-func (cm *CacheManager) evict() {
-	if cm.currentMemory <= cm.memoryBudget {
+// additionalSize accounts for an upcoming allocation that hasn't been tracked yet.
+func (cm *CacheManager) evict(additionalSize int64) {
+	if cm.currentMemory+additionalSize <= cm.memoryBudget {
 		return
 	}
-	freeTarget := cm.currentMemory - cm.memoryBudget*75/100
+	needToFree := cm.currentMemory + additionalSize - cm.memoryBudget
+	freeTarget := needToFree + cm.memoryBudget*25/100
 	candidateTarget := freeTarget * 2
 
 	// Phase 1: pull candidates from max-heap (largest evictionScore first)

@@ -35,10 +35,11 @@ type SettingsT struct {
 	ShardSize              uint
 	AnalyzeMinItems        int
 	AIEstimator            bool
-	MaxRamPercent          int // 0 = default (90%), otherwise 1-100
+	MaxRamPercent          int   // 0 = default (90%), otherwise 1-100
+	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override budget in bytes
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, false, 0}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, false, 0, 0}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -62,6 +63,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("AnalyzeMinItems"), scm.NewInt(int64(Settings.AnalyzeMinItems)),
 			scm.NewString("AIEstimator"), scm.NewBool(Settings.AIEstimator),
 			scm.NewString("MaxRamPercent"), scm.NewInt(int64(Settings.MaxRamPercent)),
+			scm.NewString("MaxRamBytes"), scm.NewInt(Settings.MaxRamBytes),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -83,6 +85,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(Settings.AIEstimator)
 		case "MaxRamPercent":
 			return scm.NewInt(int64(Settings.MaxRamPercent))
+		case "MaxRamBytes":
+			return scm.NewInt(Settings.MaxRamBytes)
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -107,6 +111,9 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.AnalyzeMinItems = scm.ToInt(a[1])
 		case "MaxRamPercent":
 			Settings.MaxRamPercent = scm.ToInt(a[1])
+			GlobalCache.UpdateBudget(computeMemoryBudget())
+		case "MaxRamBytes":
+			Settings.MaxRamBytes = int64(scm.ToInt(a[1]))
 			GlobalCache.UpdateBudget(computeMemoryBudget())
 		case "AIEstimator":
 			prev := Settings.AIEstimator
@@ -163,6 +170,9 @@ func totalMemoryBytes() int64 {
 }
 
 func computeMemoryBudget() int64 {
+	if Settings.MaxRamBytes > 0 {
+		return Settings.MaxRamBytes
+	}
 	totalRAM := totalMemoryBytes()
 	if totalRAM <= 0 {
 		return 0
