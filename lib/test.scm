@@ -56,6 +56,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? '(1 2) '(1 3)) false "equal? lists different elements")
 	(assert (equal? '() false) true "equal? empty list vs false")
 	(assert (equal? + +) true "equal? same native function")
+	/* equal? additional cross-type branches (compare.go:Equal) */
+	(assert (equal? true (count '(1))) true "equal? bool vs tagInt (truthy)")
+	(assert (equal? false (count '(1))) false "equal? bool false vs tagInt 1")
+	(assert (equal? (parse_date "2024-06-15") "2024-06-15") true "equal? date vs string match")
+	(assert (equal? (parse_date "2024-06-15") "2025-01-01") false "equal? date vs string mismatch")
+	(assert (equal? (parse_date "2024-06-15") (strlen "hello")) false "equal? date vs tagInt fallback")
+	(assert (equal? "2024-06-15" (parse_date "2024-06-15")) true "equal? string vs date match")
+	(assert (equal? "invalid" (parse_date "2024-06-15")) false "equal? string vs date parse fail")
+	(assert (equal? "5" (strlen "hello")) true "equal? string vs tagInt match")
+	(assert (equal? "99" (strlen "hello")) false "equal? string vs tagInt mismatch")
+	(define fd_eq1 (reduce (produceN 20) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
+	(define fd_eq2 (reduce (produceN 20) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
+	(assert (equal? fd_eq1 fd_eq2) true "equal? FastDict same content")
 	/* equal?? (EqualSQL) cross-type coverage (compare.go:EqualSQL) */
 	(assert (nil? (equal?? nil nil)) true "equal?? nil nil returns nil")
 	(assert (nil? (equal?? nil 42)) true "equal?? nil int returns nil")
@@ -70,6 +83,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal?? true true) true "equal?? bool same")
 	(assert (equal?? + +) true "equal?? same func")
 	(assert (equal?? + -) false "equal?? different func")
+	/* equal?? additional cross-type branches (compare.go:EqualSQL) */
+	(assert (equal?? (parse_date "2024-01-01") (parse_date "2024-01-01")) true "equal?? date same")
+	(assert (equal?? (parse_date "2024-01-01") (parse_date "2025-01-01")) false "equal?? date different")
+	(assert (equal?? '(1 2) '(1 2)) true "equal?? list same")
+	(assert (equal?? '(1 2) '(1 3)) false "equal?? list different")
+	(assert (equal?? (parse_date "2024-06-15") "2024-06-15") true "equal?? date vs string")
+	(assert (equal?? (parse_date "2024-06-15") (strlen "hello")) false "equal?? date vs tagInt fallback")
+	(assert (equal?? 3.0 (count '(1 2 3))) true "equal?? float vs tagInt match")
+	(assert (equal?? 3.14 (parse_date "2024-06-15")) false "equal?? float vs date fallback")
+	(assert (equal?? "2024-06-15" (parse_date "2024-06-15")) true "equal?? string vs date")
+	(assert (equal?? "3" (count '(1 2 3))) true "equal?? string vs tagInt")
+	(assert (equal?? true (count '(1))) true "equal?? bool cross-type truthy")
+	(assert (equal?? false (count '(1))) false "equal?? bool cross-type falsy")
+	(assert (equal?? '() false) true "equal?? empty list vs false")
+	(assert (equal?? + (count '(1))) false "equal?? func vs non-func")
 	/* Less cross-type coverage (compare.go:Less) */
 	(assert (< nil nil) false "less nil nil")
 	(assert (< nil 5) true "less nil vs value")
@@ -861,6 +889,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (sql_abs 0) 0) true "sql_abs of 0 = 0")
 	(assert (nil? (sql_abs nil)) true "sql_abs of nil = nil")
 	(assert (equal? (sql_abs -3.7) 3.7) true "sql_abs of -3.7 = 3.7")
+
+	/* alu.go: sqrt */
+	(print "testing sqrt ...")
+	(assert (equal? (sqrt 4) 2.0) true "sqrt of 4 = 2.0")
+	(assert (equal? (sqrt 0) 0.0) true "sqrt of 0 = 0.0")
+	(assert (equal? (sqrt 1) 1.0) true "sqrt of 1 = 1.0")
+	(assert (equal? (sqrt 2.25) 1.5) true "sqrt of 2.25 = 1.5")
+	(assert (nil? (sqrt nil)) true "sqrt of nil = nil")
+	(assert (nil? (sqrt -1)) true "sqrt of negative = nil")
+	(assert (equal? (round (* 1000 (sqrt 2))) 1414.0) true "sqrt of 2 ~ 1.414")
 
 	/* alu.go: equal_collate / notequal_collate */
 	(print "testing collation equality ...")

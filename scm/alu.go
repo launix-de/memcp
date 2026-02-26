@@ -434,6 +434,24 @@ func init_alu() {
 		true, false, nil,
 	})
 	Declare(&Globalenv, &Declaration{
+		"sqrt", "returns the square root of a number",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"value", "number", "value", nil},
+		}, "number",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			v := a[0].Float()
+			if v < 0 {
+				return NewNil()
+			}
+			return NewFloat(math.Sqrt(v))
+		},
+		true, false, nil,
+	})
+	Declare(&Globalenv, &Declaration{
 		"sql_rand", "SQL RAND(): returns a random float in [0,1)",
 		0, 0,
 		[]DeclarationParameter{}, "number",

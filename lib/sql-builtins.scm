@@ -23,6 +23,7 @@
 (sql_builtins "CEILING" ceil)
 (sql_builtins "ROUND" round)
 (sql_builtins "ABS" sql_abs)
+(sql_builtins "SQRT" sqrt)
 (sql_builtins "RAND" sql_rand)
 (sql_builtins "RANDOM" sql_rand)
 (sql_builtins "GREATEST" max)

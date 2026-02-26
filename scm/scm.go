@@ -1006,7 +1006,7 @@ Patterns can be any of:
 	RunJitTest()
 }
 
-/* TODO: abs, quotient, remainder, modulo, gcd, lcm, expt, sqrt
+/* TODO: quotient, remainder, modulo, gcd, lcm, expt
 zero?, negative?, positive?, off?, even?
 sin, cos, tan, asin, acos, atan
 exp, log

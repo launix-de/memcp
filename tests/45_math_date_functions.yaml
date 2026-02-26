@@ -111,6 +111,55 @@ test_cases:
       data:
         - v: null
 
+  # === SQRT() ===
+
+  - name: "SQRT of perfect square"
+    sql: "SELECT SQRT(25) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 5.0
+
+  - name: "SQRT of zero"
+    sql: "SELECT SQRT(0) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 0.0
+
+  - name: "SQRT of 2"
+    sql: "SELECT ROUND(SQRT(2) * 10000) / 10000 AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 1.4142
+
+  - name: "SQRT of NULL"
+    sql: "SELECT SQRT(NULL) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "SQRT of negative returns NULL"
+    sql: "SELECT SQRT(-4) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "SQRT on column"
+    sql: "SELECT SQRT(val) AS v FROM fn_math_test WHERE id = 2"
+    expect:
+      rows: 1
+
+  - name: "SQRT in expression"
+    sql: "SELECT SQRT(ABS(-16)) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: 4.0
+
   # === RAND() / RANDOM() ===
 
   - name: "RAND returns value between 0 and 1"
