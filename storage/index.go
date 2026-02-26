@@ -37,65 +37,18 @@ type StorageIndex struct {
 	Cols        []string   // sort equal-cols alphabetically, so similar conditions are canonical
 	Savings     float64    // store the amount of time savings here -> add selectivity (outputted / size) on each
 	mainIndexes StorageInt // we can do binary searches here
-	deltaBtree  *btree.BTreeG[indexPair]
-	t           *storageShard
-	active      bool
-	mu          sync.Mutex
+	// deltaBtree holds delta inserts in index-column order. Contract:
+	// when active==true, deltaBtree is non-nil. It is built during index
+	// construction and kept in sync by shard.insertDataset on every insert.
+	// Deleted rows are intentionally kept in the btree — the scan layer
+	// filters them via t.deletions / transaction visibility overlays,
+	// because a DELETE can be rolled back by a concurrent transaction.
+	deltaBtree *btree.BTreeG[indexPair]
+	t          *storageShard
+	active     bool
+	mu         sync.Mutex
 }
 
-/*
- TODO: n-ary heap btree implementation for better cache exploitation
-
- - len(tree) = len(data)
- - completely pointerless
- - each node has up to 32 items
- - all nodes except the last node are fully occupied
- - the first item is guaranteed to be the smallest item
- - the next smallest item is its first child
- - if the node is a leaf, the next smallest item is its sibling
- - if the item is the last in the node, the next smallest item is the sibling of its parent
- - forward iteration algorithm:
-    if 32 * i < len(heap) {
-	    // visit child
-	    i = 32 * i
-    } else {
-	    // move to next sibling
-	    i = i + 1
-	    while i % 32 == 0 {
-		    // end of node -> go to parent's next
-		    i = i / 32
-		    if i == 0 {
-			    return "finished"
-		    }
-	    }
-    }
- - backward iteration algorithm:
-    if i == 0 {
-            return "finished"
-    }
-    if i % 32 == 0 {
-            // end of node -> go to parent's next
-            i = i / 32
-    } else {
-	    // move to next sibling
-	    i = i - 1
-	    while 32 * i + 31 < len(heap) {
-		    // visit highest child
-		    i = 32 * i + 31
-	    }
-    }
-  - bisect algorithm: given a searchvalue, find the lowest index where all items below that point are less than searchvalue
-     - start with left=0, right=min(32, len(heap))
-     - pivot = (left+right)/2
-     - if Less(item[pivot], searchvalue) { left = pivot } else { right = pivot }
-     - if left = right:
-       - if not left*32 <= len(heap): return left
-       - if left == 0: return 0
-       - left = (left-1) * 32, right = left + 32 // search items left from left that might be smaller
-       - recurse
-  - bisect for a greater-equal variant (find the highest index where all items above are not less than searchvalue)
-
-*/
 
 func (idx *StorageIndex) ComputeSize() uint {
 	var sz uint = 24 * 8 // heuristic
@@ -401,8 +354,40 @@ start_scan:
 		}
 	}
 
-	deltaItems := make([]indexPair, 0)
-	if maxInsertIndex > 0 && s.deltaBtree != nil {
+	// Streaming merge of main (via nextMain) and delta (via deltaBtree).
+	// Both iterators produce items in index-column order; the merge
+	// interleaves them to maintain global sort order without intermediate
+	// materialization of delta items.
+	//
+	// NOTE on deletions: deleted rows are NOT filtered here. The deltaBtree
+	// intentionally retains items whose underlying row has been marked as
+	// deleted (t.deletions). Filtering happens in the scan layer (scan.go,
+	// scan_order.go) which checks t.deletions and the transaction visibility
+	// overlay. This is by design: a DELETE may be rolled back by a concurrent
+	// transaction, so the index must keep all rows and let the scan layer
+	// decide visibility per-transaction.
+	bufN := 0
+	stopped := false
+	emit := func(id uint32) {
+		buf[bufN] = id
+		bufN++
+		if bufN == len(buf) {
+			if !callback(buf[:bufN]) {
+				stopped = true
+			}
+			bufN = 0
+		}
+	}
+
+	mainRecid, mainOk := nextMain()
+
+	if maxInsertIndex > 0 {
+		// Contract: when the index is active, deltaBtree is always populated.
+		// It is built during index construction and maintained by
+		// shard.insertDataset / insertDatasetFromLog on every new insert.
+		if s.deltaBtree == nil {
+			panic("BUG: active index on " + s.t.t.Name + " (" + s.String() + ") has nil deltaBtree")
+		}
 		maxCol := 0
 		for _, col := range s.Cols {
 			if pos, ok := s.t.deltaColumns[col]; ok && pos+1 > maxCol {
@@ -417,6 +402,9 @@ start_scan:
 			}
 		}
 		s.deltaBtree.AscendGreaterOrEqual(indexPair{-1, refLower}, func(p indexPair) bool {
+			if stopped {
+				return false
+			}
 			if p.itemid < 0 {
 				return true
 			}
@@ -427,73 +415,32 @@ start_scan:
 			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, func(i int) scm.Scmer {
 				return s.getDeltaValue(p.data, s.Cols[i])
 			})
-			if inRange {
-				deltaItems = append(deltaItems, p)
+			if !inRange {
+				return !beyond
 			}
-			return !beyond
+			// drain main items that sort before this delta item
+			for mainOk && !stopped {
+				cmp := s.compareMainAndDelta(mainRecid, cols, p)
+				if cmp > 0 {
+					break // delta item comes first
+				}
+				emit(mainRecid)
+				mainRecid, mainOk = nextMain()
+			}
+			// emit this delta item
+			if !stopped {
+				emit(uint32(p.itemid))
+			}
+			return !beyond && !stopped
 		})
 	}
 
-	bufN := 0
-	if len(deltaItems) == 0 {
-		for recid, ok := nextMain(); ok; recid, ok = nextMain() {
-			buf[bufN] = recid
-			bufN++
-			if bufN == len(buf) {
-				if !callback(buf[:bufN]) {
-					return
-				}
-				bufN = 0
-			}
-		}
-		if maxInsertIndex > 0 && s.deltaBtree == nil {
-			for i := 0; i < maxInsertIndex; i++ {
-				buf[bufN] = s.t.main_count + uint32(i)
-				bufN++
-				if bufN == len(buf) {
-					if !callback(buf[:bufN]) {
-						return
-					}
-					bufN = 0
-				}
-			}
-		}
-		if bufN > 0 {
-			callback(buf[:bufN])
-		}
-		return
+	// drain remaining main items
+	for mainOk && !stopped {
+		emit(mainRecid)
+		mainRecid, mainOk = nextMain()
 	}
-
-	di := 0
-	mainRecid, mainOk := nextMain()
-	for mainOk || di < len(deltaItems) {
-		var id uint32
-		if !mainOk {
-			id = uint32(deltaItems[di].itemid)
-			di++
-		} else if di >= len(deltaItems) {
-			id = mainRecid
-			mainRecid, mainOk = nextMain()
-		} else {
-			cmp := s.compareMainAndDelta(mainRecid, cols, deltaItems[di])
-			if cmp <= 0 {
-				id = mainRecid
-				mainRecid, mainOk = nextMain()
-			} else {
-				id = uint32(deltaItems[di].itemid)
-				di++
-			}
-		}
-		buf[bufN] = id
-		bufN++
-		if bufN == len(buf) {
-			if !callback(buf[:bufN]) {
-				return
-			}
-			bufN = 0
-		}
-	}
-	if bufN > 0 {
+	if bufN > 0 && !stopped {
 		callback(buf[:bufN])
 	}
 }

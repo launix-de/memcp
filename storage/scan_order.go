@@ -125,6 +125,8 @@ func (s *globalqueue) Pop() any {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+	// touch temp columns so CacheManager knows they're still in use
+	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time
 	analyzeStart := time.Now()
 	/* TODO(memcp): Range-based braking & vectorization
@@ -485,7 +487,20 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// and now sort result!
 	result.sortdirs = adjustedSortdirs
-	// TODO: find conditions when exactly we don't need to sort anymore (fully covered indexes, no inserts); the same condition could be used to exit early during iterateIndex
+	// TODO: find conditions when exactly we don't need to sort anymore.
+	// The sort can be skipped when ALL of these hold:
+	// 1. The index used by iterateIndex covers the ORDER BY columns in
+	//    the same order (the index's Cols prefix matches sortcols).
+	// 2. The sort directions match (ASC for the index's natural order).
+	// 3. There are no delta inserts (maxInsertIndex == 0), OR the delta
+	//    items were merged in sorted order by the streaming merge in
+	//    StorageIndex.iterate (which they are — but the condition filter
+	//    in the callback above can discard items, so the output is still
+	//    sorted, just with gaps).
+	// 4. With Optimization 1 (Native sort): if the shard's physical row
+	//    order matches ORDER BY and there are no deltas, the sort is free.
+	// When these conditions are met, the same knowledge could also be
+	// used to exit early during iterateIndex (stop after OFFSET+LIMIT).
 	if (maxInsertIndex > 0 || true) && len(sortcols) > 0 {
 		sort.Sort(result)
 		// or: quicksort but those segments above offset+limit can be omitted

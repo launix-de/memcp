@@ -141,7 +141,56 @@ test_cases:
     sql: "SELECT r.range_id, m.id FROM perf_ranges r JOIN perf_main m ON m.value >= r.low_val AND m.value < r.high_val"
     threshold_ms: 30000
 
+  # Matrix multiplication: C = A*B via equi join
+  # {rows} = matrix dimension, each matrix has {rows}*{rows} entries
+  # Total work: O({rows}^3) — auto-scaler will find dim ~100-300
+  # GROUP BY on joins not yet supported; raw join is the dominant cost anyway
+  - name: "Perf: MATRIX MULT"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `mat_a`"
+      - sql: "DROP TABLE IF EXISTS `mat_b`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `mat_a` (r INT, c INT, v INT)"
+      - sql: "CREATE TABLE `mat_b` (r INT, c INT, v INT)"
+      - scm: |
+          (begin
+            (set dim {rows})
+            (set n (* dim dim))
+            (set a (map (produceN n) (lambda (i) (list (floor (/ i dim)) (- i (* dim (floor (/ i dim)))) (+ 1 i)))))
+            (insert "{database}" "mat_a" '("r" "c" "v") a)
+            (set b (map (produceN n) (lambda (i) (list (floor (/ i dim)) (- i (* dim (floor (/ i dim)))) (+ 1 (* 3 i))))))
+            (insert "{database}" "mat_b" '("r" "c" "v") b)
+            (rebuild)
+            "ok")
+    sql: "SELECT a.r, b.c, a.v * b.v AS v FROM mat_a a JOIN mat_b b ON a.c = b.r"
+    threshold_ms: 30000
+
+  # Delta+main index join: 90% main + 10% delta on inner side
+  # Dimension table drives equi-join; inner side uses index with streaming merge
+  - name: "Perf: DELTA JOIN"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `perf_main`"
+      - sql: "DROP TABLE IF EXISTS `perf_dim`"
+      - scm: "(rebuild)"
+      - sql: "CREATE TABLE `perf_main` (id INT PRIMARY KEY, category INT, value INT, name TEXT)"
+      - sql: "CREATE TABLE `perf_dim` (cat_id INT PRIMARY KEY, label TEXT)"
+      - scm: |
+          (begin
+            (set rows (map (produceN {rows}) (lambda (i) (list i (- i (* 100 (floor (/ i 100)))) (* i 71) (concat "str_" i)))))
+            (insert "{database}" "perf_main" '("id" "category" "value" "name") rows)
+            (set dims (map (produceN 100) (lambda (i) (list i (concat "cat_" i)))))
+            (insert "{database}" "perf_dim" '("cat_id" "label") dims)
+            (rebuild)
+            (set delta_n (floor (/ {rows} 10)))
+            (set delta (map (produceN delta_n) (lambda (i) (list (+ i {rows}) (- i (* 100 (floor (/ i 100)))) (* (+ i {rows}) 71) (concat "delta_" i)))))
+            (insert "{database}" "perf_main" '("id" "category" "value" "name") delta)
+            "ok")
+    sql: "SELECT d.label, m.id FROM perf_dim d JOIN perf_main m ON m.category = d.cat_id"
+    threshold_ms: 30000
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS perf_main"
   - sql: "DROP TABLE IF EXISTS perf_dim"
   - sql: "DROP TABLE IF EXISTS perf_ranges"
+  - sql: "DROP TABLE IF EXISTS mat_a"
+  - sql: "DROP TABLE IF EXISTS mat_b"
