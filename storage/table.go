@@ -19,6 +19,7 @@ package storage
 import "fmt"
 import "math"
 import "sync"
+import "sync/atomic"
 import "time"
 import "errors"
 import "strings"
@@ -41,7 +42,7 @@ type column struct {
 	Collation         string
 	Comment           string
 	sanitizer         func(scm.Scmer) scm.Scmer
-	// TODO: LRU statistics for computed columns
+	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
 }
 type PersistencyMode uint8
 
@@ -122,7 +123,7 @@ foreign keys:
 type table struct {
 	schema          *database
 	Name            string
-	Columns         []column
+	Columns         []*column
 	Unique          []uniqueKey          // unique keys
 	Foreign         []foreignKey         // foreign keys
 	Triggers        []TriggerDescription // triggers on this table
@@ -192,10 +193,10 @@ func (t table) ComputeSize() uint {
 // increases PartitioningScore for a set of columns
 func (t *table) AddPartitioningScore(cols []string) {
 	// we don't sync because we want to be fast; we ignore write-after-write hazards
-	for i, c := range t.Columns {
+	for _, c := range t.Columns {
 		for _, col := range cols {
 			if col == c.Name {
-				t.Columns[i].PartitioningScore = c.PartitioningScore + 1
+				c.PartitioningScore++
 			}
 		}
 	}
@@ -543,7 +544,8 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 		}
 	}
 	c.UpdateSanitizer()
-	t.Columns = append(t.Columns, c)
+	cp := &c
+	t.Columns = append(t.Columns, cp)
 	for _, s := range t.Shards {
 		// mutate shard column map under shard lock to avoid races with readers
 		s.mu.Lock()
@@ -558,11 +560,32 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	}
 	// register temp column with CacheManager
 	if c.IsTemp {
-		colPtr := &t.Columns[len(t.Columns)-1]
-		tbl := t // capture for closure
+		tbl := t
 		colName := name
-		GlobalCache.AddItem(colPtr, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
-			tbl.DropColumn(colName)
+		GlobalCache.AddItem(cp, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
+			// We're inside the CacheManager goroutine. MUST NOT call GlobalCache.Remove.
+			// Use TryLock to avoid blocking the CacheManager if schema is locked.
+			if !tbl.schema.schemalock.TryLock() {
+				return false // busy, retry later
+			}
+			for i, col := range tbl.Columns {
+				if col.Name == colName {
+					tbl.Columns = append(tbl.Columns[:i], tbl.Columns[i+1:]...)
+					for _, s := range tbl.Shards {
+						s.mu.Lock()
+						delete(s.columns, colName)
+						s.mu.Unlock()
+					}
+					for _, s := range tbl.PShards {
+						s.mu.Lock()
+						delete(s.columns, colName)
+						s.mu.Unlock()
+					}
+					tbl.schema.save()
+					break
+				}
+			}
+			tbl.schema.schemalock.Unlock()
 			return true
 		}, tempColumnLastUsed, nil)
 	}
@@ -576,7 +599,7 @@ func (t *table) DropColumn(name string) bool {
 		if c.Name == name {
 			// deregister temp column from CacheManager before removal
 			if c.IsTemp {
-				GlobalCache.Remove(&t.Columns[i])
+				GlobalCache.Remove(c) // *column pointer is stable
 			}
 			// found the column
 			t.Columns = append(t.Columns[:i], t.Columns[i+1:]...) // remove from slice
@@ -1074,6 +1097,10 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 }
 
 func tempColumnLastUsed(ptr any) time.Time {
-	// temp columns don't track last access independently; use zero time (always old)
-	return time.Time{}
+	c := ptr.(*column)
+	ts := atomic.LoadInt64(&c.lastAccessed)
+	if ts == 0 {
+		return time.Time{} // never accessed
+	}
+	return time.Unix(0, ts)
 }

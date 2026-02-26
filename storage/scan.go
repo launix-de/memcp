@@ -73,6 +73,8 @@ type scanResult struct {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
+	// touch temp columns so CacheManager knows they're still in use
+	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time (boundary extraction, sharding hints)
 	analyzeStart := time.Now()
 	/* analyze query */

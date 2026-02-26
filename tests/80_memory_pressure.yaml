@@ -95,5 +95,91 @@ test_cases:
     scm: (settings "MaxRamBytes" 0)
     expect: {}
 
+  # --- Tier 3: temp keytable + temp column eviction ---
+  # GROUP BY creates a temp keytable (`.mp_pressure:a`) and computed temp columns on it.
+
+  - name: "MP: GROUP BY creates temp keytable + computed columns"
+    sql: "SELECT a, SUM(b) AS sb FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 5"
+    expect:
+      rows: 5
+
+  - name: "MP: stat after GROUP BY (keytables+temp columns registered)"
+    scm: (stat)
+    expect: {}
+
+  - name: "MP: set MaxRamBytes to 1 (evict temp keytables + columns)"
+    scm: (settings "MaxRamBytes" 1)
+    expect: {}
+
+  - name: "MP: stat after temp eviction"
+    scm: (stat)
+    expect: {}
+
+  - name: "MP: GROUP BY still works after temp keytable eviction"
+    sql: "SELECT a, SUM(b) AS sb FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 3"
+    expect:
+      rows: 3
+
+  - name: "MP: reset MaxRamBytes to 0 (final)"
+    scm: (settings "MaxRamBytes" 0)
+    expect: {}
+
+  # --- Tier 4: persisted eviction + reload + GROUP BY (combined path) ---
+
+  - name: "MP: set MaxPersistBytes to 1 (evict shards)"
+    scm: (settings "MaxPersistBytes" 1)
+    expect: {}
+
+  - name: "MP: GROUP BY after shard eviction (forces reload + temp keytable)"
+    sql: "SELECT a, COUNT(*) AS cnt FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 3"
+    expect:
+      rows: 3
+
+  - name: "MP: reset MaxPersistBytes to 0 (final)"
+    scm: (settings "MaxPersistBytes" 0)
+    expect: {}
+
+  # --- Tier 5: explicit temp column via createcolumn + eviction ---
+
+  - name: "MP: create temp computed column"
+    scm: |
+      (begin
+        (createcolumn "memcp-tests" "mp_pressure" "tmp_sum" "any" '() '("temp" true)
+          '("a" "b") (lambda (a b) (+ a b)))
+        "ok")
+    expect: {}
+
+  - name: "MP: read from temp column"
+    sql: "SELECT id, tmp_sum FROM `memcp-tests`.mp_pressure WHERE id = 100000 LIMIT 1"
+    expect:
+      rows: 1
+
+  - name: "MP: set MaxRamBytes to 1 (evict temp column)"
+    scm: (settings "MaxRamBytes" 1)
+    expect: {}
+
+  - name: "MP: stat after temp column eviction"
+    scm: (stat)
+    expect: {}
+
+  - name: "MP: reset MaxRamBytes to 0 (after temp col eviction)"
+    scm: (settings "MaxRamBytes" 0)
+    expect: {}
+
+  # --- Tier 6: DropTable cleans up temp keytable from cache ---
+
+  - name: "MP: GROUP BY to create temp keytable for drop test"
+    sql: "SELECT a, SUM(c) AS sc FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 1"
+    expect:
+      rows: 1
+
+  - name: "MP: drop table cleans up all cache entries"
+    sql: "DROP TABLE IF EXISTS `memcp-tests`.mp_pressure"
+    expect: {}
+
+  - name: "MP: stat after drop (orphaned entries cleared)"
+    scm: (stat)
+    expect: {}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS mp_pressure"

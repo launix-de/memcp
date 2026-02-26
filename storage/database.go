@@ -455,10 +455,15 @@ func DropDatabase(schema string, ifexists bool) bool {
 		panic("Database " + schema + " does not exist")
 	}
 
-	// clean up shards/indexes from GlobalCache
+	// clean up shards/indexes/temp columns from GlobalCache
 	db.ensureLoaded()
 	for _, t := range db.tables.GetAll() {
 		GlobalCache.Remove(t) // temp keytable
+		for _, c := range t.Columns {
+			if c.IsTemp {
+				GlobalCache.Remove(c)
+			}
+		}
 		for _, s := range t.Shards {
 			GlobalCache.Remove(s)
 		}
@@ -530,12 +535,18 @@ func DropTable(schema, name string, ifexists bool) {
 		}
 		panic("Table " + schema + "." + name + " does not exist")
 	}
-	// deregister temp keytable from CacheManager
+	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
 	GlobalCache.Remove(t)
 	db.tables.Remove(name)
 	db.save()
 	db.schemalock.Unlock()
 
+	// deregister temp columns from CacheManager
+	for _, c := range t.Columns {
+		if c.IsTemp {
+			GlobalCache.Remove(c)
+		}
+	}
 	// deregister shards and delete from disk
 	for _, s := range t.Shards {
 		GlobalCache.Remove(s)
@@ -573,7 +584,17 @@ func RenameTable(schema, oldname, newname string) {
 // keytableCleanup is called by the CacheManager when evicting a temp keytable.
 // MUST NOT call public GlobalCache.Remove (deadlock: we're inside the CacheManager goroutine).
 func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) {
-	// remove all shard+index registrations for this table (recursive)
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("error: keytableCleanup panic for", schemaName+"."+tbl.Name, ":", r)
+		}
+	}()
+	// remove all shard+index+temp column registrations for this table (recursive)
+	for _, c := range tbl.Columns {
+		if c.IsTemp {
+			GlobalCache.removeInternal(c, freedByType)
+		}
+	}
 	for _, s := range tbl.Shards {
 		GlobalCache.removeInternal(s, freedByType)
 		for _, idx := range s.Indexes {
@@ -590,7 +611,7 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	db := GetDatabase(schemaName)
 	if db != nil {
 		db.schemalock.Lock()
-		db.tables.Remove(tbl.Name)
+		db.tables.Remove(tbl.Name) // no-op if already removed by DropTable
 		db.save()
 		db.schemalock.Unlock()
 		for _, s := range tbl.Shards {

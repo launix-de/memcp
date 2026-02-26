@@ -309,8 +309,18 @@ func (s *storageShard) ensureLoaded() {
 // Returns false if the shard lock cannot be acquired (non-blocking).
 func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	s := ptr.(*storageShard)
+	// Safety: MEMORY-engine shards must NEVER be evicted (data would be lost permanently).
+	if s.t != nil && s.t.PersistencyMode == Memory {
+		return false
+	}
 	if !s.mu.TryLock() {
 		return false // shard is in use, skip eviction
+	}
+	// Sloppy/Logged shards with pending deltas must be flushed to disk before eviction.
+	// If there are deltas, we can't evict now — a rebuild is needed first.
+	if len(s.inserts) > 0 || s.deletions.Count() > 0 {
+		s.mu.Unlock()
+		return false // has unflushed deltas, skip eviction (rebuild will flush them)
 	}
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
@@ -873,8 +883,12 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		}
 	}
 	// update tracked size in CacheManager (heuristic: 16 bytes per column per row)
-	if !strings.HasPrefix(t.t.Name, ".") {
-		GlobalCache.UpdateSize(t, int64(len(values))*int64(len(t.deltaColumns))*16)
+	delta := int64(len(values)) * int64(len(t.deltaColumns)) * 16
+	if strings.HasPrefix(t.t.Name, ".") {
+		// temp keytable: update the table-level entry (shards are not individually registered)
+		GlobalCache.UpdateSize(t.t, delta)
+	} else {
+		GlobalCache.UpdateSize(t, delta)
 	}
 }
 

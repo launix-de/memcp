@@ -69,6 +69,14 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 					panic(err)
 				}
 			}
+			// update CacheManager size for temp columns
+			if c.IsTemp {
+				var totalRows int64
+				for _, s := range shardlist {
+					totalRows += int64(s.Count())
+				}
+				GlobalCache.UpdateSize(c, totalRows*16) // ~16 bytes per value estimate
+			}
 			return
 		}
 	}

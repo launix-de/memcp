@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -231,4 +233,27 @@ func safeLogScan(schema, table string, ordered bool, filter, order string, input
 		scm.NewInt(execNs),
 	}
 	t.Insert(cols, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
+}
+
+// touchTempColumns updates lastAccessed on temp columns used by this scan (lock-free).
+func touchTempColumns(t *table, colSets ...[]string) {
+	now := time.Now().UnixNano()
+	for _, c := range t.Columns {
+		if !c.IsTemp {
+			continue
+		}
+		for _, cols := range colSets {
+			found := false
+			for _, col := range cols {
+				if col == c.Name {
+					atomic.StoreInt64(&c.lastAccessed, now)
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+	}
 }
