@@ -234,6 +234,195 @@ test_cases:
       data:
         - d: null
 
+  # --- DATE_FORMAT additional specifiers ---
+  - name: "DATE_FORMAT %T time shorthand"
+    sql: "SELECT DATE_FORMAT('2024-06-15 14:30:45', '%T') AS t"
+    expect:
+      rows: 1
+      data:
+        - t: "14:30:45"
+
+  - name: "DATE_FORMAT unknown specifier passthrough"
+    sql: "SELECT DATE_FORMAT('2024-06-15', '%Y-%q') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-%q"
+
+  # --- DATE_SUB additional units ---
+  - name: "DATE_SUB months"
+    sql: "SELECT DATE_SUB(DATE '2024-06-15', INTERVAL 2 MONTH) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-04-15 00:00:00"
+
+  - name: "DATE_SUB years"
+    sql: "SELECT DATE_SUB(DATE '2024-06-15', INTERVAL 1 YEAR) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2023-06-15 00:00:00"
+
+  - name: "DATE_SUB hours"
+    sql: "SELECT DATE_SUB('2024-06-15 14:30:00', INTERVAL 2 HOUR) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 12:30:00"
+
+  - name: "DATE_SUB minutes"
+    sql: "SELECT DATE_SUB('2024-06-15 14:30:00', INTERVAL 15 MINUTE) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 14:15:00"
+
+  - name: "DATE_SUB seconds"
+    sql: "SELECT DATE_SUB('2024-06-15 14:30:45', INTERVAL 20 SECOND) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 14:30:25"
+
+  - name: "DATE_SUB weeks"
+    sql: "SELECT DATE_SUB(DATE '2024-06-15', INTERVAL 1 WEEK) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-08 00:00:00"
+
+  # --- DATE_ADD additional units ---
+  - name: "DATE_ADD hours"
+    sql: "SELECT DATE_ADD('2024-06-15 10:00:00', INTERVAL 3 HOUR) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 13:00:00"
+
+  - name: "DATE_ADD minutes"
+    sql: "SELECT DATE_ADD('2024-06-15 10:00:00', INTERVAL 45 MINUTE) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 10:45:00"
+
+  - name: "DATE_ADD seconds"
+    sql: "SELECT DATE_ADD('2024-06-15 10:00:00', INTERVAL 30 SECOND) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 10:00:30"
+
+  - name: "DATE_ADD weeks"
+    sql: "SELECT DATE_ADD(DATE '2024-06-15', INTERVAL 2 WEEK) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-29 00:00:00"
+
+  # --- EXTRACT additional fields ---
+  - name: "EXTRACT HOUR"
+    sql: "SELECT EXTRACT(HOUR FROM '2024-06-15 14:30:45') AS h"
+    expect:
+      rows: 1
+      data:
+        - h: 14
+
+  - name: "EXTRACT MINUTE"
+    sql: "SELECT EXTRACT(MINUTE FROM '2024-06-15 14:30:45') AS m"
+    expect:
+      rows: 1
+      data:
+        - m: 30
+
+  - name: "EXTRACT SECOND"
+    sql: "SELECT EXTRACT(SECOND FROM '2024-06-15 14:30:45') AS s"
+    expect:
+      rows: 1
+      data:
+        - s: 45
+
+  # --- STR_TO_DATE ---
+  - name: "STR_TO_DATE basic"
+    sql: "SELECT STR_TO_DATE('15/06/2024', '%d/%m/%Y') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 00:00:00"
+
+  - name: "STR_TO_DATE with time"
+    sql: "SELECT STR_TO_DATE('2024-06-15 14:30:45', '%Y-%m-%d %H:%i:%s') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15 14:30:45"
+
+  - name: "STR_TO_DATE NULL returns NULL"
+    sql: "SELECT STR_TO_DATE(NULL, '%Y-%m-%d') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: null
+
+  - name: "STR_TO_DATE invalid returns NULL"
+    sql: "SELECT STR_TO_DATE('not-a-date', '%Y-%m-%d') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: null
+
+  - name: "STR_TO_DATE two-digit year %y"
+    sql: "SELECT DATE_FORMAT(STR_TO_DATE('24-06-15', '%y-%m-%d'), '%Y-%m-%d') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15"
+
+  - name: "STR_TO_DATE literal percent %%"
+    sql: "SELECT DATE_FORMAT(STR_TO_DATE('2024%06%15', '%Y%%%m%%%d'), '%Y-%m-%d') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: "2024-06-15"
+
+  # --- DATEDIFF with invalid strings ---
+  - name: "DATEDIFF invalid first arg"
+    sql: "SELECT DATEDIFF('not-a-date', '2025-06-15') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: null
+
+  - name: "DATEDIFF invalid second arg"
+    sql: "SELECT DATEDIFF('2025-06-15', 'garbage') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: null
+
+  # --- NULL propagation for date functions ---
+  - name: "DATE_ADD NULL date"
+    sql: "SELECT DATE_ADD(NULL, INTERVAL 1 DAY) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: null
+
+  - name: "DATE_SUB NULL date"
+    sql: "SELECT DATE_SUB(NULL, INTERVAL 1 DAY) AS d"
+    expect:
+      rows: 1
+      data:
+        - d: null
+
+  - name: "EXTRACT NULL date"
+    sql: "SELECT EXTRACT(YEAR FROM NULL) AS y"
+    expect:
+      rows: 1
+      data:
+        - y: null
+
   # --- Window function parse tests (no FROM table = error) ---
   - name: "Window function without FROM table"
     sql: "SELECT LEAD(1) OVER (ORDER BY 1) AS l"
