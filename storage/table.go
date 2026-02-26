@@ -561,8 +561,9 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 		colPtr := &t.Columns[len(t.Columns)-1]
 		tbl := t // capture for closure
 		colName := name
-		GlobalCache.AddItem(colPtr, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) {
+		GlobalCache.AddItem(colPtr, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
 			tbl.DropColumn(colName)
+			return true
 		}, tempColumnLastUsed, nil)
 	}
 	t.schema.save()
@@ -641,16 +642,18 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			shard := t.Shards[len(t.Shards)-1]
 			if uint(shard.Count())+n > Settings.ShardSize {
 				// Current shard would overflow, create new one
-				go func(i int) {
+				go func(i int, s *storageShard) {
 					defer func() {
 						if r := recover(); r != nil {
 							fmt.Println("error: shard rebuild failed for", t.schema.Name+".", t.Name, "shard", i, ":", r)
 						}
 					}()
-					s := t.Shards[i]
-					t.Shards[i] = s.rebuild(false)
+					rebuilt := s.rebuild(false)
+					t.mu.Lock()
+					t.Shards[i] = rebuilt
+					t.mu.Unlock()
 					t.schema.save()
-				}(len(t.Shards) - 1)
+				}(len(t.Shards)-1, shard)
 				shard = NewShard(t)
 				fmt.Println("started new shard for table", t.Name)
 				t.Shards = append(t.Shards, shard)

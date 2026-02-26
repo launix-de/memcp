@@ -306,9 +306,12 @@ func (s *storageShard) ensureLoaded() {
 }
 
 // shardCleanup is called by the CacheManager when evicting a shard.
-func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) {
+// Returns false if the shard lock cannot be acquired (non-blocking).
+func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	s := ptr.(*storageShard)
-	s.mu.Lock()
+	if !s.mu.TryLock() {
+		return false // shard is in use, skip eviction
+	}
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
 		GlobalCache.removeInternal(idx, freedByType)
@@ -322,6 +325,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) {
 	}
 	s.srState = COLD
 	s.mu.Unlock()
+	return true
 }
 
 func shardLastUsed(ptr any) time.Time {

@@ -499,13 +499,17 @@ start_scan:
 }
 
 // indexCleanup is called by the CacheManager when evicting an index.
-func indexCleanup(ptr any, freedByType *[numEvictableTypes]int64) {
+// Returns false if the index lock cannot be acquired (non-blocking).
+func indexCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	idx := ptr.(*StorageIndex)
-	idx.mu.Lock()
+	if !idx.mu.TryLock() {
+		return false // index is in use, skip eviction
+	}
 	idx.active = false
 	idx.mainIndexes = StorageInt{}
 	idx.deltaBtree = nil
 	idx.mu.Unlock()
+	return true
 }
 
 func indexLastUsed(ptr any) time.Time {

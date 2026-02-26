@@ -50,7 +50,7 @@ type softItem struct {
 	size          int64
 	evictType     EvictableType
 	evictionScore int64 // = size / factor (static, max-heap key)
-	cleanup       func(pointer any, freedByType *[numEvictableTypes]int64)
+	cleanup       func(pointer any, freedByType *[numEvictableTypes]int64) bool
 	getLastUsed   func(pointer any) time.Time
 	getScore      func(pointer any) float64 // optional type-specific telemetry
 	heapIndex     int                       // position in heap (-1 if not in heap)
@@ -106,29 +106,29 @@ type CacheManager struct {
 }
 
 type cacheOp struct {
-	add          *softItem
-	del          any
-	updatePtr    any
-	updateDelta  int64
+	add                *softItem
+	del                any
+	updatePtr          any
+	updateDelta        int64
 	budgetUpdate       bool
 	budgetVal          int64
 	persistedBudgetVal int64
-	pressureSize int64
-	statResult   chan CacheStat
-	done         chan struct{}
+	pressureSize       int64
+	statResult         chan CacheStat
+	done               chan struct{}
 }
 
 // CacheStat holds stat results returned via channel.
 type CacheStat struct {
-	SizeByType    [numEvictableTypes]int64
-	CountByType   [numEvictableTypes]int64
+	SizeByType      [numEvictableTypes]int64
+	CountByType     [numEvictableTypes]int64
 	CurrentMemory   int64
 	MemoryBudget    int64
 	PersistedBudget int64
 	PersistedMemory int64
 }
 
-// Init initializes the CacheManager with the given memory budget and starts the background goroutine.
+// Init initializes the CacheManager with the given budgets and starts the background goroutine.
 // Calling Init on an already-initialized CacheManager is a no-op.
 func (cm *CacheManager) Init(memoryBudget, persistedBudget int64) {
 	if cm.opChan != nil {
@@ -148,7 +148,7 @@ func (cm *CacheManager) AddItem(
 	pointer any,
 	size int64,
 	evictType EvictableType,
-	cleanup func(pointer any, freedByType *[numEvictableTypes]int64),
+	cleanup func(pointer any, freedByType *[numEvictableTypes]int64) bool,
 	getLastUsed func(pointer any) time.Time,
 	getScore func(pointer any) float64,
 ) {
@@ -193,7 +193,7 @@ func (cm *CacheManager) UpdateSize(pointer any, delta int64) {
 	<-done
 }
 
-// UpdateBudget changes both memory budgets.
+// UpdateBudget changes both memory budgets (e.g. when MaxRamPercent or MaxPersistPercent changes).
 func (cm *CacheManager) UpdateBudget(totalBudget, persistedBudget int64) {
 	if cm.opChan == nil {
 		return
@@ -412,7 +412,11 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		if _, ok := cm.itemMap[c.pointer]; !ok {
 			continue
 		}
-		c.cleanup(c.pointer, &freedByType)
+		if !c.cleanup(c.pointer, &freedByType) {
+			// cleanup couldn't acquire lock; push back for later retry
+			heap.Push(&cm.h, c)
+			continue
+		}
 		// removeInternal handles bookkeeping + recursive accounting
 		cm.removeInternal(c.pointer, &freedByType)
 		totalFreed += c.size

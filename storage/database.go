@@ -455,6 +455,20 @@ func DropDatabase(schema string, ifexists bool) bool {
 		panic("Database " + schema + " does not exist")
 	}
 
+	// clean up shards/indexes from GlobalCache
+	db.ensureLoaded()
+	for _, t := range db.tables.GetAll() {
+		GlobalCache.Remove(t) // temp keytable
+		for _, s := range t.Shards {
+			GlobalCache.Remove(s)
+		}
+		for _, s := range t.PShards {
+			if s != nil {
+				GlobalCache.Remove(s)
+			}
+		}
+	}
+
 	// remove remains of the folder structure
 	db.persistence.Remove()
 	return true
@@ -493,8 +507,9 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	// register temp keytable with CacheManager (`.`-prefix = temp)
 	if strings.HasPrefix(name, ".") {
 		schemaName := schema
-		GlobalCache.AddItem(t, 0, TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) {
+		GlobalCache.AddItem(t, 0, TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
 			keytableCleanup(ptr.(*table), schemaName, freedByType)
+			return true
 		}, keytableLastUsed, nil)
 	}
 	return t, true
