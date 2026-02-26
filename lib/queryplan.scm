@@ -95,6 +95,15 @@ if there is a group function, create a temporary preaggregate table
 	)
 ))
 
+/* extract_all_get_columns: return all (get_column tblvar _ col _) refs as ("tblvar.col" expr) pairs */
+(define extract_all_get_columns (lambda (expr)
+	(match expr
+		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) '() (list (list (concat tblvar "." col) expr)))
+		(cons sym args) (merge (map args extract_all_get_columns))
+		'()
+	)
+))
+
 /* split_condition returns a tuple (now, later) according to what can be checked now and what has to be waited for tables '('(tblvar ...) ...) */
 (define split_condition (lambda (expr tables) (match expr
 	'((symbol get_column) tblvar _ col _) /* a column */ (match tables
@@ -256,6 +265,16 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	)))
 	replacer
 )))
+
+/* rewrite_for_prejoin: rewrite (get_column tblvar _ col _) -> (get_column pjvar false "tblvar.col" false) for prejoin materialization */
+(define rewrite_for_prejoin (lambda (pjvar expr)
+	(match expr
+		'((symbol get_column) tblvar _ col _) (if (nil? tblvar) expr
+			'('get_column pjvar false (concat tblvar "." col) false))
+		(cons sym args) (cons sym (map args (lambda (a) (rewrite_for_prejoin pjvar a))))
+		expr
+	)
+))
 
 /* recursively preprocess a query and return the flattened query. The returned parameterset will be passed to build_queryplan */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset) (begin
@@ -1331,7 +1350,95 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(list 'begin collect_plan compute_plan grouped_plan)
 				))
 			)
-			(error "Grouping and aggregates on joined tables is not implemented yet (prejoins)") /* TODO: construct grouptbl as join */
+			(begin /* multi-table GROUP BY via prejoin materialization */
+				(if is_dedup (error "DISTINCT on joined tables not yet supported"))
+				/* resolve condition and fields */
+				(set condition (replace_find_column (coalesceNil condition true)))
+				(define resolved_fields (map_assoc fields (lambda (k v) (replace_find_column v))))
+				/* extract all get_column refs from group, fields, having, order */
+				(define mat_cols_raw (merge
+					(merge (map stage_group extract_all_get_columns))
+					(merge (extract_assoc resolved_fields (lambda (k v) (extract_all_get_columns v))))
+					(if (nil? stage_having) '() (extract_all_get_columns stage_having))
+					(merge (map (coalesce stage_order '()) (lambda (o) (match o '(col dir) (extract_all_get_columns col)))))
+				))
+				(define mat_cols (reduce mat_cols_raw (lambda (acc mc)
+					(if (reduce acc (lambda (found mc2) (or found (equal? (car mc2) (car mc)))) false)
+						acc
+						(merge acc (list mc)))) '()))
+				(define mat_col_names (map mat_cols car))
+				/* compute prejoin table name and alias */
+				(define pjvar ".pj")
+				(define prejointbl (concat ".prejoin:" (map tables (lambda (t) (match t '(tv _ _ _ _) tv))) ":" mat_col_names "|" condition))
+				/* capture outer schema for temp table operations */
+				(define pj_schema schema)
+				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
+				(createtable schema prejointbl
+					(map mat_col_names (lambda (col) '("column" col "any" '() '())))
+					'("engine" "sloppy") true)
+				/* build materialization scan: nested-loop join populating prejoin table */
+				(define build_mat_scan (lambda (scan_tables scan_condition is_outermost)
+					(match scan_tables
+						(cons '(tblvar schema tbl isOuter _) rest) (begin
+							/* columns needed from this table for materialization + condition */
+							(set cols (merge_unique (list
+								(extract_columns_for_tblvar tblvar scan_condition)
+								(merge_unique (map mat_cols (lambda (mc) (extract_columns_for_tblvar tblvar (cadr mc)))))
+								(extract_outer_columns_for_tblvar tblvar scan_condition)
+								(merge_unique (map mat_cols (lambda (mc) (extract_outer_columns_for_tblvar tblvar (cadr mc)))))
+							)))
+							(match (split_condition (coalesceNil scan_condition true) rest) '(now_condition later_condition) (begin
+								(set filtercols (merge_unique (list
+									(extract_columns_for_tblvar tblvar now_condition)
+									(extract_outer_columns_for_tblvar tblvar now_condition))))
+								(scan_wrapper 'scan schema tbl
+									(cons list filtercols)
+									'((quote lambda) (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr now_condition)))
+									(cons list cols)
+									'((quote lambda) (map cols (lambda (col) (symbol (concat tblvar "." col)))) (build_mat_scan rest later_condition false))
+									/* reduce: merge sub-results */
+									'('lambda '('acc 'sub) '('merge 'acc 'sub))
+									'(list)
+									/* reduce2: outermost inserts into prejoin, inner levels merge */
+									(if is_outermost
+										'('lambda '('acc 'shard_rows) '('insert pj_schema prejointbl (cons 'list mat_col_names) 'shard_rows '(list) '('lambda '() true) true))
+										'('lambda '('acc 'shard_rows) '('merge 'acc 'shard_rows)))
+									isOuter
+								)
+							))
+						)
+						'() /* base case: produce one row wrapped in a list */
+						'('if (coalesceNil scan_condition true)
+							(list (quote list) (cons (quote list) (map mat_cols (lambda (mc) (replace_columns_from_expr (cadr mc))))))
+							'(list))
+					)
+				))
+				(define materialize_plan (build_mat_scan tables condition true))
+				/* rewrite all column references to point at prejoin table */
+				(define pj_rewrite (lambda (expr) (rewrite_for_prejoin pjvar expr)))
+				(define pj_fields (map_assoc resolved_fields (lambda (k v) (pj_rewrite v))))
+				(define pj_group (map stage_group pj_rewrite))
+				(define pj_having (pj_rewrite stage_having))
+				(define pj_order (if (nil? stage_order) nil (map stage_order (lambda (o) (match o '(col dir) (list (pj_rewrite col) dir))))))
+				/* rebuild group stage for recursive call */
+				(define pj_stage (make_group_stage pj_group pj_having pj_order stage_limit stage_offset))
+				(define pj_all_groups (cons pj_stage rest_groups))
+				/* recursive call with single prejoin table */
+				(define grouped_result (build_queryplan schema '('(pjvar schema prejointbl false nil))
+					pj_fields
+					nil /* condition already applied during materialization */
+					pj_all_groups
+					schemas
+					replace_find_column))
+				/* assemble: drop + create + materialize + grouped result */
+				(list 'begin
+					'('droptable pj_schema prejointbl true)
+					'('createtable pj_schema prejointbl
+						(cons 'list (map mat_col_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
+						'(list "engine" "sloppy") true)
+					'('time materialize_plan "materialize")
+					grouped_result)
+			)
 		)
 	) (optimize (begin
 			/* grouping has been removed; now to the real data: */

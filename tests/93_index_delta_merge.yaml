@@ -249,6 +249,71 @@ test_cases:
           c: 0
           v: 3
 
+  # ==============================================================
+  # Phase 7: GROUP BY on joined tables (prejoins)
+  # ==============================================================
+
+  - name: "Matrix multiply via direct GROUP BY on join"
+    sql: "SELECT a.r, b.c, SUM(a.v * b.v) AS v FROM mat_a a JOIN mat_b b ON a.c = b.r GROUP BY a.r, b.c ORDER BY a.r, b.c"
+    expect:
+      data:
+        - r: 0
+          c: 0
+          v: 30
+        - r: 0
+          c: 1
+          v: 24
+        - r: 0
+          c: 2
+          v: 18
+        - r: 1
+          c: 0
+          v: 84
+        - r: 1
+          c: 1
+          v: 69
+        - r: 1
+          c: 2
+          v: 54
+        - r: 2
+          c: 0
+          v: 138
+        - r: 2
+          c: 1
+          v: 114
+        - r: 2
+          c: 2
+          v: 90
+        - r: 3
+          c: 0
+          v: 18
+        - r: 3
+          c: 1
+          v: 15
+        - r: 3
+          c: 2
+          v: 12
+
+  - name: "COUNT with GROUP BY on join"
+    sql: "SELECT d.label, COUNT(*) AS cnt FROM idx_dim d JOIN idx_merge m ON m.cat = d.cat_id GROUP BY d.label ORDER BY d.label"
+    expect:
+      data:
+        - label: "five"
+          cnt: 22
+        - label: "seven"
+          cnt: 21
+        - label: "three"
+          cnt: 20
+
+  - name: "GROUP BY join with HAVING"
+    sql: "SELECT a.r, SUM(a.v * b.v) AS total FROM mat_a a JOIN mat_b b ON a.c = b.r GROUP BY a.r HAVING SUM(a.v * b.v) > 100 ORDER BY a.r"
+    expect:
+      data:
+        - r: 1
+          total: 207
+        - r: 2
+          total: 342
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS idx_merge"
   - sql: "DROP TABLE IF EXISTS idx_dim"
