@@ -1029,10 +1029,89 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (serialize (_i 42)) "42") true "serialize int")
 	(assert (equal? (serialize (_i 3.14)) "3.14") true "serialize float")
 	(assert (equal? (serialize (_i "hello")) "\"hello\"") true "serialize string")
+	/* serialize: symbol */
+	(assert (equal? (serialize (_i 'foo)) "foo") true "serialize symbol")
+	/* serialize: list */
+	(assert (equal? (serialize '(1 2 3)) "(1 2 3)") true "serialize list")
+	(assert (equal? (serialize '()) "()") true "serialize empty list")
+	(assert (equal? (serialize '('+ '('* 2 3) 4)) "(+ (* 2 3) 4)") true "serialize nested list")
+	/* serialize: lambda code template */
+	(assert (equal? (serialize '('lambda '('x) '('+ 'x 1))) "(lambda (x) (+ x 1))") true "serialize lambda template")
+	/* serialize: list of symbols */
+	(assert (equal? (serialize '('a 'b 'c)) "(a b c)") true "serialize list of symbols")
+	/* serialize: string with escapes (backslash, quotes, newline) */
+	(assert (equal? (serialize (_i "he said \"hi\"")) "\"he said \\\"hi\\\"\"") true "serialize string with embedded quotes")
+	(assert (equal? (serialize (_i "line1\nline2")) "\"line1\\nline2\"") true "serialize string with newline")
+	/* serialize: negative number */
+	(assert (equal? (serialize (_i -42)) "-42") true "serialize negative int")
+	/* serialize: tagProc - real lambda (not a quoted code template) */
+	(assert (> (strlen (serialize (_i (lambda (x y) (+ x y))))) 5) true "serialize real lambda (tagProc)")
+	/* serialize: tagFastDict via set_assoc */
+	(define ser_fd (set_assoc (set_assoc (list) "a" 1) "b" 2))
+	(assert (> (strlen (serialize (_i ser_fd))) 3) true "serialize FastDict (tagFastDict)")
+	/* serialize: tagFunc - native function */
+	(assert (equal? (serialize (_i +)) "+") true "serialize native func +")
+	(assert (equal? (serialize (_i concat)) "concat") true "serialize native func concat")
+	/* serialize: symbol with special chars (unquote branch) */
+	(assert (equal? (serialize (_i (symbol "hello world"))) "(unquote \"hello world\")") true "serialize symbol with space triggers unquote")
+	(assert (equal? (serialize (_i (symbol "a\"b"))) "(unquote \"a\\\"b\")") true "serialize symbol with quote triggers unquote")
+	/* serialize: (outer ...) pattern */
+	(assert (equal? (serialize (list (symbol "outer") (symbol "x"))) "(outer x)") true "serialize outer expression")
+	/* serialize: list starting with 'list symbol (quote shorthand '(...) ) */
+	(assert (strlike (serialize (list (symbol "list") 1 2 3)) "%1 2 3%") true "serialize list-prefixed list")
+	/* serialize: collate function (serializeNativeFunc collate branch) */
+	(define ser_coll (collate "en"))
+	(assert (equal? (serialize (_i ser_coll)) "(collate \"en\" false)") true "serialize collate function")
+	(define ser_coll_rev (collate "en" true))
+	(assert (equal? (serialize (_i ser_coll_rev)) "(collate \"en\" true)") true "serialize reverse collate function")
+	/* serialize: optimized lambda with NumVars (serializeProcShallow NumVars > 0 branch) */
+	(define ser_opt_lam (eval (optimize '('lambda '('a 'b) '('+ 'a 'b)))))
+	(assert (> (strlen (serialize (_i ser_opt_lam))) 5) true "serialize optimized lambda with NumVars")
+	/* serialize roundtrip: eval serialized code */
+	(assert (equal? (eval (scheme (serialize '(+ 1 2)) "ser-test.scm")) 3) true "serialize roundtrip eval")
+
+	/* String() coverage (printer.go:String) */
+	(assert (equal? (string '()) "()") true "string of empty list")
+	(assert (equal? (string '(1 2 3)) "(1 2 3)") true "string of list")
+	(assert (equal? (string 'hello) "hello") true "string of symbol")
+	/* string of real lambda (tagProc) */
+	(assert (> (strlen (string (lambda (a b) (* a b)))) 5) true "string of real lambda (tagProc)")
+	/* string of FastDict */
+	(define str_fd (set_assoc (set_assoc (list) "a" 1) "b" 2))
+	(assert (> (strlen (string str_fd)) 3) true "string of FastDict")
+
+	/* scm.go: ApplyEx coverage */
+	(print "testing ApplyEx coverage ...")
+	/* assoc list: even-length, missing key returns nil */
+	(define assoc_even (list "a" 1 "b" 2))
+	(assert (equal? (assoc_even "nonexistent") nil) true "assoc even-length missing key returns nil")
+	/* assoc list: odd-length, missing key returns last element as default */
+	(define assoc_odd (list "a" 1 "fallback"))
+	(assert (equal? (assoc_odd "missing") "fallback") true "assoc odd-length default value")
+	/* assoc list: key found returns value */
+	(assert (equal? (assoc_even "a") 1) true "assoc even-length key found")
+	(assert (equal? (assoc_even "b") 2) true "assoc even-length second key found")
+	/* FastDict: missing key returns nil */
+	(define fd_apply (reduce (produceN 20) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
+	(assert (equal? (fd_apply "nonexistent_key") nil) true "FastDict missing key returns nil")
+	/* FastDict: key found */
+	(assert (equal? (fd_apply "k0") 0) true "FastDict key found k0")
+	(assert (equal? (fd_apply "k19") 19) true "FastDict key found k19")
 
 	/* scm.go: apply */
 	(assert (equal? (apply + '(1 2 3)) 6) true "apply + to list")
 	(assert (equal? (apply concat '("a" "b" "c")) "abc") true "apply concat to list")
+
+	/* optimizer.go: OptimizeEx coverage */
+	(print "testing OptimizeEx coverage ...")
+	/* SourceInfo wrapping: parse code string, then optimize (triggers tagSourceInfo path) */
+	/* (scheme "..." "file.scm") produces SourceInfo-wrapped AST; optimize must fold constants through it */
+	(assert (equal? (optimize (scheme "(+ 1 2)" "opt-test.scm")) 3) true "optimize folds constant through SourceInfo")
+	(assert (equal? (optimize (scheme "(+ 3 4)" "opt-test2.scm")) 7) true "optimize folds constant through SourceInfo 2")
+	/* optimize: constant folding through nested SourceInfo (concat) */
+	(assert (equal? (optimize (scheme "(concat \"a\" \"b\")" "opt-si-concat.scm")) "ab") true "optimize folds concat through SourceInfo")
+	/* optimize: SourceInfo wrapping a non-constant expression (quoted lambda data) */
+	(assert (strlike (serialize (_i (optimize '('lambda '('x) '('+ 'x 1))))) "%lambda%") true "optimize quoted lambda data preserves lambda")
 
 	/* scm.go: error (via try) */
 	(define err_caught (newsession))

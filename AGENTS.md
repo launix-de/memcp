@@ -116,7 +116,7 @@ curl -s -u root:admin "http://localhost:4399/sql/DBNAME" -d "SELECT 1"
 - The `make test` / `git-pre-commit` script supports `MEMCP_COVERAGE=1 MEMCP_COVERDIR=/tmp/memcp-coverage` environment variables to automatically build with coverage, collect profiles, and report.
 - Generate report: `go tool covdata textfmt -i=/tmp/memcp-coverage -o=/tmp/memcp-coverage/coverage.out && go tool cover -func=/tmp/memcp-coverage/coverage.out`
 - HTML report: `go tool cover -html=/tmp/memcp-coverage/coverage.out`
-- Current coverage: **62.5%** (537 Scheme unit tests in `lib/test.scm`, 72 storage type tests + ~2470 SQL tests in `tests/*.yaml`)
+- Current coverage: **69.7%** (594 Scheme unit tests in `lib/test.scm`, 72 storage type tests + ~2470 SQL tests in `tests/*.yaml`)
 - Two test layers:
   - `lib/test.scm`: Scheme-level unit tests for the runtime (match, compare, date, strings, lists, scheduler, sync, optimizer, JIT). These run at startup before the SQL frontend.
   - `tests/*.yaml`: SQL integration tests via HTTP API. Cover SQL parsing, query planning, storage compression, triggers, persistence, DML/DDL.
