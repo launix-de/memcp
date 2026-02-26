@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -493,6 +493,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	newshards := make([]*storageShard, totalShards)
 	for i := range newshards {
 		newshards[i] = NewShard(t)
+		newshards[i].srState = WRITE // live shard, not cold
 		if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 			newshards[i].logfile = t.schema.persistence.OpenLog(newshards[i].uuid.String())
 		}
@@ -792,6 +793,14 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	for _, s := range oldshards {
 		GlobalCache.Remove(s)
 		s.RemoveFromDisk()
+	}
+
+	// Register new PShards with CacheManager
+	if t.PersistencyMode != Memory && !strings.HasPrefix(t.Name, ".") {
+		for _, s := range newshards {
+			s.lastAccessed = time.Now()
+			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+		}
 	}
 }
 

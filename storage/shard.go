@@ -1031,6 +1031,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	// concurrency! when rebuild is run in background, inserts and deletions into and from old delta storage must be duplicated to the ongoing process
 	t.mu.Lock()
 	locked := true
+	removedFromCache := false
 	defer func() {
 		if locked {
 			t.mu.Unlock()
@@ -1050,7 +1051,12 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result.srState = WRITE // mark as live so ensureLoaded() won't reset columns
 	t.next = result
 	result.mu.Lock() // interlock so no one will rebuild the shard twice
-	defer result.mu.Unlock()
+	resultLocked := true
+	defer func() {
+		if resultLocked {
+			result.mu.Unlock()
+		}
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			// If rebuild panics, ensure we don't leave a half-built shard reachable via t.next.
@@ -1071,6 +1077,12 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 						defer func() { _ = recover() }()
 						result.t.schema.persistence.RemoveColumn(result.uuid.String(), col.Name)
 					}()
+				}
+			}
+			// Re-register old shard with CacheManager if we deregistered it
+			if removedFromCache && t.t != nil {
+				if t.t.PersistencyMode != Memory && !strings.HasPrefix(t.t.Name, ".") {
+					GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 				}
 			}
 			panic(r)
@@ -1104,6 +1116,11 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		}
 		t.mu.Unlock() // release lock, from now on, deletions+inserts should work
 		locked = false
+
+		// Deregister old shard from CacheManager early to prevent eviction
+		// from destroying column data that rebuild reads from.
+		GlobalCache.Remove(t)
+		removedFromCache = true
 
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		isFirst := true
@@ -1214,8 +1231,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			t.t.schema.persistence.RemoveLog(t.uuid.String())
 		}
 
-		// deregister old shard from CacheManager before it gets GC'd
-		GlobalCache.Remove(t)
 		// Only after a successful rebuild, schedule old shard files for deletion.
 		runtime.SetFinalizer(t, func(t *storageShard) {
 			t.RemoveFromDisk()
@@ -1240,8 +1255,23 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
 		}
 		t.logfile = nil
+		// Update index parent pointers to reference the new shard
+		for _, idx := range result.Indexes {
+			idx.t = result
+		}
 		t.mu.Unlock()
 		locked = false
+		// Deregister old shard — result replaces it
+		GlobalCache.Remove(t)
+		removedFromCache = true
+	}
+	// Unlock result before registration (ComputeSize needs RLock)
+	result.mu.Unlock()
+	resultLocked = false
+	// Register the new shard with CacheManager
+	result.lastAccessed = time.Now()
+	if result.t.PersistencyMode != Memory && !strings.HasPrefix(result.t.Name, ".") {
+		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 	return result
 }

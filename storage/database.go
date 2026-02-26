@@ -408,8 +408,8 @@ func (db *database) rebuild(all bool, repartition bool) {
 
 	// All table rebuilds (including .blobs) are complete. Safe to clean up
 	// replaced pre-rebuild shards without risk of deadlocking with repartition.
+	// rebuild() already deregistered old shards from GlobalCache; just clean disk.
 	for _, s := range allReplaced {
-		GlobalCache.Remove(s)
 		s.RemoveFromDisk()
 	}
 }
