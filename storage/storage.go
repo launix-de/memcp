@@ -724,6 +724,17 @@ func Init(en scm.Env) {
 			switch scm.String(a[2]) {
 			case "drop":
 				return scm.NewBool(t.DropColumn(scm.String(a[3])))
+			case "engine":
+				// TODO: implement ALTER TABLE ENGINE
+				// When changing PersistencyMode:
+				// - Safe/Logged/Sloppy → Memory: deregister all shards from GlobalCache,
+				//   close logfiles, remove persisted data (shards live only in RAM now)
+				// - Memory → Safe/Logged/Sloppy: rebuild all shards to flush to disk,
+				//   register shards with GlobalCache, open logfiles
+				// - Sloppy → Safe/Logged: open logfiles for each shard
+				// - Safe/Logged → Sloppy: close logfiles for each shard
+				// Must hold t.mu during transition to prevent concurrent inserts.
+				panic("ALTER TABLE ENGINE not yet implemented")
 			case "owner":
 				return scm.NewBool(false) // ignore
 			default:
