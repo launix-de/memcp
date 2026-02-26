@@ -34,12 +34,13 @@ type SettingsT struct {
 	DefaultEngine          string
 	ShardSize              uint
 	AnalyzeMinItems        int
-	AIEstimator            bool
-	MaxRamPercent          int   // 0 = default (90%), otherwise 1-100
-	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override budget in bytes
+	MaxRamPercent          int   // 0 = default (90%), otherwise 1-100; total memory budget
+	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override total budget in bytes
+	MaxPersistPercent      int   // 0 = default (30%), otherwise 1-100; budget for persisted shards+indexes
+	MaxPersistBytes        int64 // 0 = use MaxPersistPercent; >0 = override persisted budget in bytes
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, false, 0, 0}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -61,9 +62,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("DefaultEngine"), scm.NewString(Settings.DefaultEngine),
 			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
 			scm.NewString("AnalyzeMinItems"), scm.NewInt(int64(Settings.AnalyzeMinItems)),
-			scm.NewString("AIEstimator"), scm.NewBool(Settings.AIEstimator),
 			scm.NewString("MaxRamPercent"), scm.NewInt(int64(Settings.MaxRamPercent)),
 			scm.NewString("MaxRamBytes"), scm.NewInt(Settings.MaxRamBytes),
+			scm.NewString("MaxPersistPercent"), scm.NewInt(int64(Settings.MaxPersistPercent)),
+			scm.NewString("MaxPersistBytes"), scm.NewInt(Settings.MaxPersistBytes),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -81,12 +83,14 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.ShardSize))
 		case "AnalyzeMinItems":
 			return scm.NewInt(int64(Settings.AnalyzeMinItems))
-		case "AIEstimator":
-			return scm.NewBool(Settings.AIEstimator)
 		case "MaxRamPercent":
 			return scm.NewInt(int64(Settings.MaxRamPercent))
 		case "MaxRamBytes":
 			return scm.NewInt(Settings.MaxRamBytes)
+		case "MaxPersistPercent":
+			return scm.NewInt(int64(Settings.MaxPersistPercent))
+		case "MaxPersistBytes":
+			return scm.NewInt(Settings.MaxPersistBytes)
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -111,29 +115,20 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.AnalyzeMinItems = scm.ToInt(a[1])
 		case "MaxRamPercent":
 			Settings.MaxRamPercent = scm.ToInt(a[1])
-			GlobalCache.UpdateBudget(computeMemoryBudget())
+			total, persisted := computeMemoryBudgets()
+			GlobalCache.UpdateBudget(total, persisted)
 		case "MaxRamBytes":
 			Settings.MaxRamBytes = int64(scm.ToInt(a[1]))
-			GlobalCache.UpdateBudget(computeMemoryBudget())
-		case "AIEstimator":
-			prev := Settings.AIEstimator
-			Settings.AIEstimator = scm.ToBool(a[1])
-			if prev != Settings.AIEstimator {
-				// start/stop estimator on change
-				if Settings.AIEstimator {
-					StartGlobalEstimator()
-				} else {
-					StopGlobalEstimator()
-				}
-			} else if Settings.AIEstimator {
-				// Setting already true; if estimator not running, try to (re)start
-				globalEstimatorMu.Lock()
-				est := globalEstimator
-				globalEstimatorMu.Unlock()
-				if est == nil {
-					StartGlobalEstimator()
-				}
-			}
+			total, persisted := computeMemoryBudgets()
+			GlobalCache.UpdateBudget(total, persisted)
+		case "MaxPersistPercent":
+			Settings.MaxPersistPercent = scm.ToInt(a[1])
+			total, persisted := computeMemoryBudgets()
+			GlobalCache.UpdateBudget(total, persisted)
+		case "MaxPersistBytes":
+			Settings.MaxPersistBytes = int64(scm.ToInt(a[1]))
+			total, persisted := computeMemoryBudgets()
+			GlobalCache.UpdateBudget(total, persisted)
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -169,25 +164,38 @@ func totalMemoryBytes() int64 {
 	return 0
 }
 
-func computeMemoryBudget() int64 {
-	if Settings.MaxRamBytes > 0 {
-		return Settings.MaxRamBytes
-	}
+func computeMemoryBudgets() (total, persisted int64) {
 	totalRAM := totalMemoryBytes()
-	if totalRAM <= 0 {
-		return 0
+
+	// total budget
+	if Settings.MaxRamBytes > 0 {
+		total = Settings.MaxRamBytes
+	} else if totalRAM > 0 {
+		pct := Settings.MaxRamPercent
+		if pct == 0 {
+			pct = 90
+		}
+		total = totalRAM * int64(pct) / 100
 	}
-	pct := Settings.MaxRamPercent
-	if pct == 0 {
-		pct = 90
+
+	// persisted budget (shards + indexes)
+	if Settings.MaxPersistBytes > 0 {
+		persisted = Settings.MaxPersistBytes
+	} else if totalRAM > 0 {
+		pct := Settings.MaxPersistPercent
+		if pct == 0 {
+			pct = 30
+		}
+		persisted = totalRAM * int64(pct) / 100
 	}
-	return totalRAM * int64(pct) / 100
+
+	return
 }
 
 // InitCacheManager initializes the global CacheManager. Call from InitSettings().
 func InitCacheManager() {
-	budget := computeMemoryBudget()
-	if budget > 0 {
-		GlobalCache.Init(budget)
+	total, persisted := computeMemoryBudgets()
+	if total > 0 || persisted > 0 {
+		GlobalCache.Init(total, persisted)
 	}
 }

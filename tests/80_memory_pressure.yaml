@@ -23,15 +23,47 @@ test_cases:
         "ok")
     expect: {}
 
-  - name: "MP: stat before pressure"
+  # --- 3 queries on id to trigger index creation (threshold=2.0, +1.0 per query) ---
+
+  - name: "MP: query 1 on id (Savings=1, no index yet)"
+    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 100000"
+    expect:
+      rows: 1
+      data:
+        - id: 100000
+          a: 192344
+
+  - name: "MP: query 2 on id (Savings=2, triggers index build)"
+    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 200000"
+    expect:
+      rows: 1
+      data:
+        - id: 200000
+          a: 384688
+
+  - name: "MP: query 3 on id (uses built index)"
+    sql: "SELECT id, a FROM `memcp-tests`.mp_pressure WHERE id = 50000"
+    expect:
+      rows: 1
+      data:
+        - id: 50000
+          a: 96172
+
+  - name: "MP: stat before pressure (shards+indexes registered)"
     scm: (stat)
     expect: {}
 
-  - name: "MP: set MaxRamBytes to 1 (trigger eviction)"
-    scm: (settings "MaxRamBytes" 1)
+  # --- Tier 1: persisted budget eviction (shards + indexes only) ---
+
+  - name: "MP: set MaxPersistBytes to 1 (trigger persisted eviction)"
+    scm: (settings "MaxPersistBytes" 1)
     expect: {}
 
-  - name: "MP: select after eviction"
+  - name: "MP: stat after persisted pressure (shards+indexes evicted)"
+    scm: (stat)
+    expect: {}
+
+  - name: "MP: select after persisted eviction (forces shard+index reload)"
     sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 150000"
     expect:
       rows: 1
@@ -40,9 +72,24 @@ test_cases:
           a: 288516
           b: 88892
 
-  - name: "MP: stat after pressure"
-    scm: (stat)
+  - name: "MP: reset MaxPersistBytes to 0"
+    scm: (settings "MaxPersistBytes" 0)
     expect: {}
+
+  # --- Tier 2: total budget eviction (all types) ---
+
+  - name: "MP: set MaxRamBytes to 1 (trigger total eviction)"
+    scm: (settings "MaxRamBytes" 1)
+    expect: {}
+
+  - name: "MP: select after total eviction"
+    sql: "SELECT id, a, b FROM `memcp-tests`.mp_pressure WHERE id = 150000"
+    expect:
+      rows: 1
+      data:
+        - id: 150000
+          a: 288516
+          b: 88892
 
   - name: "MP: reset MaxRamBytes to 0"
     scm: (settings "MaxRamBytes" 0)

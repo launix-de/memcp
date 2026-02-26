@@ -84,10 +84,17 @@ func (h *softItemHeap) Pop() any {
 	return item
 }
 
+// isPersistedType returns true for types representing persisted (disk-reloadable) data.
+func isPersistedType(t EvictableType) bool {
+	return t == TypeShard || t == TypeIndex
+}
+
 // CacheManager manages memory-limited soft references with two-phase eviction.
+// Two budgets: persistedBudget (shards+indexes) and memoryBudget (total).
 type CacheManager struct {
-	memoryBudget  int64
-	currentMemory int64
+	memoryBudget    int64 // total budget (default 90% of RAM)
+	persistedBudget int64 // budget for persisted shards+indexes (default 30% of RAM)
+	currentMemory   int64
 
 	sizeByType  [numEvictableTypes]int64
 	countByType [numEvictableTypes]int64
@@ -103,7 +110,9 @@ type cacheOp struct {
 	del          any
 	updatePtr    any
 	updateDelta  int64
-	budgetVal    int64
+	budgetUpdate       bool
+	budgetVal          int64
+	persistedBudgetVal int64
 	pressureSize int64
 	statResult   chan CacheStat
 	done         chan struct{}
@@ -113,17 +122,20 @@ type cacheOp struct {
 type CacheStat struct {
 	SizeByType    [numEvictableTypes]int64
 	CountByType   [numEvictableTypes]int64
-	CurrentMemory int64
-	MemoryBudget  int64
+	CurrentMemory   int64
+	MemoryBudget    int64
+	PersistedBudget int64
+	PersistedMemory int64
 }
 
 // Init initializes the CacheManager with the given memory budget and starts the background goroutine.
 // Calling Init on an already-initialized CacheManager is a no-op.
-func (cm *CacheManager) Init(memoryBudget int64) {
+func (cm *CacheManager) Init(memoryBudget, persistedBudget int64) {
 	if cm.opChan != nil {
 		return // already initialized
 	}
 	cm.memoryBudget = memoryBudget
+	cm.persistedBudget = persistedBudget
 	cm.itemMap = make(map[any]*softItem)
 	cm.opChan = make(chan cacheOp, 1024)
 	heap.Init(&cm.h)
@@ -181,13 +193,13 @@ func (cm *CacheManager) UpdateSize(pointer any, delta int64) {
 	<-done
 }
 
-// UpdateBudget changes the memory budget (e.g. when MaxRamPercent changes).
-func (cm *CacheManager) UpdateBudget(newBudget int64) {
+// UpdateBudget changes both memory budgets.
+func (cm *CacheManager) UpdateBudget(totalBudget, persistedBudget int64) {
 	if cm.opChan == nil {
 		return
 	}
 	done := make(chan struct{})
-	cm.opChan <- cacheOp{budgetVal: newBudget, done: done}
+	cm.opChan <- cacheOp{budgetUpdate: true, budgetVal: totalBudget, persistedBudgetVal: persistedBudget, done: done}
 	<-done
 }
 
@@ -212,6 +224,23 @@ func (cm *CacheManager) Stat() CacheStat {
 	return <-ch
 }
 
+// persistedMemory returns the sum of persisted (disk-reloadable) tracked memory.
+func (cm *CacheManager) persistedMemory() int64 {
+	return cm.sizeByType[TypeShard] + cm.sizeByType[TypeIndex]
+}
+
+// runEvictionChecks checks both persisted and total budgets and evicts as needed.
+func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
+	// Tier 1: persisted budget (shards + indexes only)
+	if cm.persistedBudget > 0 {
+		cm.evict(cm.persistedMemory(), cm.persistedBudget, additionalSize, isPersistedType)
+	}
+	// Tier 2: total budget (all types)
+	if cm.memoryBudget > 0 {
+		cm.evict(cm.currentMemory, cm.memoryBudget, additionalSize, nil)
+	}
+}
+
 // run is the single-threaded goroutine handling all operations.
 func (cm *CacheManager) run() {
 	for op := range cm.opChan {
@@ -221,16 +250,19 @@ func (cm *CacheManager) run() {
 			cm.removeByPointer(op.del)
 		} else if op.updatePtr != nil {
 			cm.updateSizeInternal(op.updatePtr, op.updateDelta)
-		} else if op.budgetVal != 0 {
+		} else if op.budgetUpdate {
 			cm.memoryBudget = op.budgetVal
+			cm.persistedBudget = op.persistedBudgetVal
 		} else if op.pressureSize > 0 {
-			cm.evict(op.pressureSize)
+			cm.runEvictionChecks(op.pressureSize)
 		} else if op.statResult != nil {
 			op.statResult <- CacheStat{
-				SizeByType:    cm.sizeByType,
-				CountByType:   cm.countByType,
-				CurrentMemory: cm.currentMemory,
-				MemoryBudget:  cm.memoryBudget,
+				SizeByType:      cm.sizeByType,
+				CountByType:     cm.countByType,
+				CurrentMemory:   cm.currentMemory,
+				MemoryBudget:    cm.memoryBudget,
+				PersistedBudget: cm.persistedBudget,
+				PersistedMemory: cm.persistedMemory(),
 			}
 			close(op.statResult)
 		}
@@ -238,9 +270,7 @@ func (cm *CacheManager) run() {
 			close(op.done)
 		}
 		// check if we need cleanup after add or updateSize
-		if cm.currentMemory > cm.memoryBudget {
-			cm.evict(0)
-		}
+		cm.runEvictionChecks(0)
 	}
 }
 
@@ -314,23 +344,33 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 
 const telemetryWeight = 1000.0 // weight for telemetry score vs LRU age in seconds
 
-// evict runs two-phase eviction to bring memory below 75% of budget.
+// evict runs two-phase eviction to bring currentUsage below budget.
 // additionalSize accounts for an upcoming allocation that hasn't been tracked yet.
-func (cm *CacheManager) evict(additionalSize int64) {
-	if cm.currentMemory+additionalSize <= cm.memoryBudget {
+// typeFilter restricts which types are eviction candidates (nil = all types).
+func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFilter func(EvictableType) bool) {
+	if currentUsage+additionalSize <= budget {
 		return
 	}
-	needToFree := cm.currentMemory + additionalSize - cm.memoryBudget
-	freeTarget := needToFree + cm.memoryBudget*25/100
+	needToFree := currentUsage + additionalSize - budget
+	freeTarget := needToFree + budget*25/100
 	candidateTarget := freeTarget * 2
 
 	// Phase 1: pull candidates from max-heap (largest evictionScore first)
 	var candidates []*softItem
+	var skipped []*softItem
 	var candidateSum int64
 	for candidateSum < candidateTarget && cm.h.Len() > 0 {
 		item := heap.Pop(&cm.h).(*softItem)
+		if typeFilter != nil && !typeFilter(item.evictType) {
+			skipped = append(skipped, item)
+			continue
+		}
 		candidates = append(candidates, item)
 		candidateSum += item.size
+	}
+	// push back items that didn't match the type filter
+	for _, s := range skipped {
+		heap.Push(&cm.h, s)
 	}
 
 	// Phase 2: remove candidates already freed by recursive side effects
@@ -416,10 +456,11 @@ func (cs CacheStat) FormatStat() string {
 	totalEvictable -= cs.SizeByType[TypeIndex]
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("MemoryBudget = %s\tTracked = %s\tEvictable = %s\n",
+	b.WriteString(fmt.Sprintf("TotalBudget = %s\tPersistedBudget = %s\tTracked = %s\tPersisted = %s\n",
 		units.BytesSize(float64(cs.MemoryBudget)),
+		units.BytesSize(float64(cs.PersistedBudget)),
 		units.BytesSize(float64(cs.CurrentMemory)),
-		units.BytesSize(float64(totalEvictable))))
+		units.BytesSize(float64(cs.PersistedMemory))))
 	b.WriteString("Type                     \tCount\tSize\n")
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Temp columns", cs.CountByType[TypeTempColumn], units.BytesSize(float64(cs.SizeByType[TypeTempColumn]))))
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Shard columns", cs.CountByType[TypeShard], units.BytesSize(float64(shardColsOnly))))

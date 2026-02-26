@@ -96,30 +96,15 @@ func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
 	scm.Declare(&en, &scm.Declaration{
-		"scan_estimate", "estimate output row count for a scan or ordered scan using the AI estimator if available",
-		4, 5,
+		"scan_estimate", "estimate output row count for a table scan",
+		2, 2,
 		[]scm.DeclarationParameter{
 			{"schema", "string", "database where the table is located", nil},
 			{"table", "string", "name of the table", nil},
-			{"filterColumns", "list", "list of columns that are fed into filter", nil},
-			{"filter", "func", "lambda predicate to evaluate (same as scan)", nil},
-			// optional fifth parameter: order columns (list of column names or lambda procs)
 		}, "int",
 		func(a ...scm.Scmer) scm.Scmer {
 			schema := scm.String(a[0])
 			table := scm.String(a[1])
-			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
-			filter := a[3]
-			var sortcols []scm.Scmer
-			if len(a) > 4 {
-				if lst, ok := scmerSlice(a[4]); ok {
-					sortcols = lst
-				}
-			}
-			// default output when estimator is not available: CountEstimate
-			globalEstimatorMu.Lock()
-			est := globalEstimator
-			globalEstimatorMu.Unlock()
 			db := GetDatabase(schema)
 			if db == nil {
 				return scm.NewInt(0)
@@ -128,21 +113,7 @@ func Init(en scm.Env) {
 			if t == nil {
 				return scm.NewInt(0)
 			}
-			inputEstimate := int64(t.CountEstimate())
-			if est == nil {
-				return scm.NewInt(inputEstimate)
-			}
-			// Query estimator for output count with inputEstimate
-			out, err := est.ScanEstimate(schema, table, filtercols, filter, sortcols, inputEstimate, 50*time.Millisecond)
-			if err != nil {
-				fmt.Println("AIEstimator: call failed:", err, "— falling back to CountEstimate and disabling estimator")
-				StopGlobalEstimator()
-				return scm.NewInt(inputEstimate)
-			}
-			if out < 0 {
-				return scm.NewInt(inputEstimate)
-			}
-			return scm.NewInt(out)
+			return scm.NewInt(int64(t.CountEstimate()))
 		},
 		false, false, nil,
 	})

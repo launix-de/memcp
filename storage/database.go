@@ -102,8 +102,6 @@ func UnloadDatabases() {
 		defer settings.Close()
 		settings.Write(data)
 	}
-	// shutdown estimator if running
-	StopGlobalEstimator()
 }
 
 // createPersistenceFromConfig creates a PersistenceEngine by looking up the
@@ -134,11 +132,6 @@ func LoadDatabases() {
 		}
 	}
 	InitSettings()
-	// Start estimator if configured
-	if Settings.AIEstimator {
-		StartGlobalEstimator()
-	}
-
 	// enumerate dbs; do not load schemas/shards yet (lazy-load on demand)
 	entries, _ := os.ReadDir(Basepath)
 	for _, entry := range entries {
