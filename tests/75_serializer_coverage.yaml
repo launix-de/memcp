@@ -372,4 +372,113 @@ test_cases:
     expect:
       rows: 0
 
+  # ========================================================================
+  # 12. serialize: Go type coverage (printer.go SerializeEx branches)
+  # ========================================================================
+
+  # tagProc: serialize a real lambda (not a quoted code template)
+  - name: "serialize: real lambda (tagProc)"
+    scm: |
+      (begin
+        (set f (lambda (x y) (+ x y)))
+        (strlen (serialize f)))
+    expect:
+      data_greater_than: [5]
+
+  # tagFastDict: serialize a FastDict (set_assoc produces one)
+  - name: "serialize: FastDict via set_assoc (tagFastDict)"
+    scm: |
+      (begin
+        (set d (set_assoc (set_assoc (list) "a" 1) "b" 2))
+        (strlen (serialize d)))
+    expect:
+      data_greater_than: [3]
+
+  # tagFunc: serialize a native function (like +, -, concat)
+  - name: "serialize: native func +"
+    scm: "(serialize +)"
+    expect:
+      data: ["+"]
+
+  - name: "serialize: native func concat"
+    scm: "(serialize concat)"
+    expect:
+      data: ["concat"]
+
+  # serialize: boolean false
+  - name: "serialize: false"
+    scm: "(serialize false)"
+    expect:
+      data: ["false"]
+
+  # serialize: symbol with special chars (unquote branch in SerializeEx)
+  - name: "serialize: symbol with spaces triggers unquote"
+    scm: "(serialize (symbol \"hello world\"))"
+
+  # serialize: string with quotes and backslashes
+  - name: "serialize: string with embedded quotes"
+    scm: "(strlen (serialize \"he said \\\"hi\\\"\"))"
+    expect:
+      data_greater_than: [10]
+
+  # serialize: list with 'list prefix (quoted list branch)
+  - name: "serialize: list with list prefix"
+    scm: "(serialize (list 'list 1 2 3))"
+
+  # serialize: outer expression
+  - name: "serialize: outer expression"
+    scm: "(serialize '(outer 'x))"
+
+  # ========================================================================
+  # 13. String() function coverage (printer.go String branches)
+  # ========================================================================
+
+  # String of a lambda (tagProc through String)
+  - name: "string: real lambda"
+    scm: |
+      (begin
+        (set f (lambda (a b) (* a b)))
+        (strlen (string f)))
+    expect:
+      data_greater_than: [5]
+
+  # String of nil
+  - name: "string: nil"
+    scm: "(string nil)"
+    expect:
+      data: ["nil"]
+
+  # String of a native func
+  - name: "string: native func"
+    scm: "(string +)"
+    expect:
+      data: ["[native func]"]
+
+  # String of empty list
+  - name: "string: empty list"
+    scm: "(string '())"
+    expect:
+      data: ["()"]
+
+  # String of a list
+  - name: "string: list with elements"
+    scm: "(string '(1 2 3))"
+    expect:
+      data: ["(1 2 3)"]
+
+  # String of a FastDict
+  - name: "string: FastDict"
+    scm: |
+      (begin
+        (set d (set_assoc (set_assoc (list) "a" 1) "b" 2))
+        (strlen (string d)))
+    expect:
+      data_greater_than: [3]
+
+  # String of a symbol
+  - name: "string: symbol"
+    scm: "(string 'hello)"
+    expect:
+      data: ["hello"]
+
 cleanup: []

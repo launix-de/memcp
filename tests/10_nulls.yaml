@@ -36,5 +36,91 @@ test_cases:
       data:
         - c: 3
 
+  # === Extended NULL coverage ===
+
+  - name: "IS NULL filter"
+    sql: "SELECT id FROM null_test WHERE name IS NULL ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 2
+        - id: 3
+
+  - name: "IS NOT NULL filter"
+    sql: "SELECT id FROM null_test WHERE name IS NOT NULL"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
+  - name: "NULL in arithmetic"
+    sql: "SELECT id + NULL AS v FROM null_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - v: null
+
+  - name: "NULL string concat"
+    sql: "SELECT CONCAT(name, ' suffix') AS v FROM null_test WHERE id = 2"
+    expect:
+      rows: 1
+
+  - name: "SUM ignores NULL"
+    sql: "SELECT SUM(id) AS s FROM null_test"
+    expect:
+      rows: 1
+      data:
+        - s: 6
+
+  - name: "MIN on nullable column"
+    sql: "SELECT MIN(name) AS m FROM null_test"
+    expect:
+      rows: 1
+      data:
+        - m: "alpha"
+
+  - name: "MAX on nullable column"
+    sql: "SELECT MAX(name) AS m FROM null_test"
+    expect:
+      rows: 1
+      data:
+        - m: "alpha"
+
+  - name: "ORDER BY nullable column ASC"
+    sql: "SELECT id FROM null_test ORDER BY name ASC"
+    expect:
+      rows: 3
+
+  - name: "ORDER BY nullable column DESC"
+    sql: "SELECT id FROM null_test ORDER BY name DESC"
+    expect:
+      rows: 3
+
+  - name: "GROUP BY with NULLs"
+    sql: "SELECT name, COUNT(*) AS cnt FROM null_test GROUP BY name ORDER BY name"
+    expect:
+      rows: 2
+
+  - name: "IFNULL function"
+    sql: "SELECT IFNULL(name, 'unknown') AS v FROM null_test WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - v: "unknown"
+
+  - name: "IFNULL with NULL first arg"
+    sql: "SELECT IFNULL(NULL, 'fallback') AS v"
+    expect:
+      rows: 1
+      data:
+        - v: "fallback"
+
+  - name: "IFNULL with non-NULL first arg"
+    sql: "SELECT IFNULL('present', 'fallback') AS v"
+    expect:
+      rows: 1
+      data:
+        - v: "present"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS null_test"

@@ -182,6 +182,58 @@ test_cases:
           c: 8
           d: "new"
 
+  # === ALTER COLUMN properties (table.go Alter branches) ===
+
+  - name: "Create table for ALTER COLUMN properties"
+    sql: "CREATE TABLE alt_props (id INT, name VARCHAR(50), val INT)"
+    expect:
+      rows: 0
+
+  - name: "Insert data for ALTER COLUMN properties"
+    sql: "INSERT INTO alt_props VALUES (1, 'alice', 10), (2, 'bob', 20)"
+    expect:
+      affected_rows: 2
+
+  - name: "ALTER COLUMN type change"
+    sql: "ALTER TABLE alt_props MODIFY COLUMN val DOUBLE"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify type change works with float data"
+    sql: "INSERT INTO alt_props VALUES (3, 'carol', 30.5)"
+    expect:
+      affected_rows: 1
+
+  - name: "Query after type change"
+    sql: "SELECT val FROM alt_props WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - val: 30.5
+
+  - name: "ALTER COLUMN default value"
+    sql: "ALTER TABLE alt_props ALTER COLUMN val SET DEFAULT 99"
+    expect:
+      rows: 0
+
+  - name: "ALTER COLUMN add comment"
+    sql: "ALTER TABLE alt_props MODIFY COLUMN name VARCHAR(50) COMMENT 'full name'"
+    expect:
+      affected_rows: 1
+
+  - name: "SHUTDOWN to persist ALTER changes"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Post-SHUTDOWN: verify altered data survived"
+    sql: "SELECT val FROM alt_props WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - val: 30.5
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS alt_base"
   - sql: "DROP TABLE IF EXISTS alt_modify"
+  - sql: "DROP TABLE IF EXISTS alt_props"
