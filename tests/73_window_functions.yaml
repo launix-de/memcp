@@ -21,7 +21,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 1: LAG without partition"
-    noncritical: true
     sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -33,7 +32,6 @@ test_cases:
         - {id: 3, time_val: 30, prev_time: 25}
 
   - name: "Case 1: LEAD without partition"
-    noncritical: true
     sql: "SELECT id, time_val, LEAD(time_val) OVER (ORDER BY time_val) AS next_time FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -45,7 +43,6 @@ test_cases:
         - {id: 3, time_val: 30, next_time: null}
 
   - name: "Case 1: LAG with expression"
-    noncritical: true
     sql: "SELECT id, time_val, time_val - LAG(time_val) OVER (ORDER BY time_val) AS diff FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -57,7 +54,6 @@ test_cases:
         - {id: 3, time_val: 30, diff: 5}
 
   - name: "Case 1: LEAD with offset 2"
-    noncritical: true
     sql: "SELECT id, time_val, LEAD(time_val, 2) OVER (ORDER BY time_val) AS next2 FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -69,7 +65,6 @@ test_cases:
         - {id: 3, time_val: 30, next2: null}
 
   - name: "Case 1: LAG with offset 2"
-    noncritical: true
     sql: "SELECT id, time_val, LAG(time_val, 2) OVER (ORDER BY time_val) AS prev2 FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -125,13 +120,11 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 3: LEAD with conflicting outer ORDER BY"
-    noncritical: true
     sql: "SELECT id, LEAD(time_val) OVER (ORDER BY time_val) AS next_time FROM win_emp ORDER BY amount"
     expect:
       error: true
 
   - name: "Case 3: LAG with partition + order + outer ORDER BY"
-    noncritical: true
     sql: "SELECT id, LAG(time_val) OVER (PARTITION BY parent ORDER BY time_val) AS prev FROM win_emp ORDER BY amount"
     expect:
       error: true
@@ -240,7 +233,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 7: LEAD and LAG same column same OVER"
-    noncritical: true
     sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev, LEAD(time_val) OVER (ORDER BY time_val) AS next FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -252,7 +244,6 @@ test_cases:
         - {id: 3, time_val: 30, prev: 25, next: null}
 
   - name: "Case 7: LEAD and LAG different columns same OVER"
-    noncritical: true
     sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY id) AS prev_time, LEAD(amount) OVER (ORDER BY id) AS next_amt FROM win_emp ORDER BY id"
     expect:
       rows: 5
@@ -268,7 +259,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 8: Different OVER ORDER BY clauses"
-    noncritical: true
     sql: "SELECT id, LEAD(time_val) OVER (ORDER BY time_val) AS a, LAG(amount) OVER (ORDER BY amount) AS b FROM win_emp"
     expect:
       error: true
@@ -278,7 +268,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 9: Window function with GROUP BY"
-    noncritical: true
     sql: "SELECT parent, SUM(amount), LEAD(SUM(amount)) OVER (ORDER BY parent) FROM win_emp GROUP BY parent"
     expect:
       error: true
@@ -288,7 +277,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 10: Window function in WHERE clause"
-    noncritical: true
     sql: "SELECT id FROM win_emp WHERE LAG(time_val) OVER (ORDER BY time_val) > 10"
     expect:
       error: true
