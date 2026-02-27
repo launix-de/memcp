@@ -1254,6 +1254,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) (list 30 300)))
 	(assert (equal? (_win_results4 "items") '(nil nil 10 100 20 200)) true "window_mut stride=2 row3 emits old=(20 200)")
 
+	/* dashboard metrics (metrics.go) */
+	(print "testing dashboard metrics ...")
+	(assert (> (total_memory) 0) true "total_memory returns positive")
+	(assert (> (available_memory) 0) true "available_memory returns positive")
+	(assert (<= (available_memory) (total_memory)) true "available_memory <= total_memory")
+	(assert (> (process_memory) 0) true "process_memory returns positive")
+	(assert (>= (cpu_usage) 0) true "cpu_usage >= 0")
+	(assert (<= (cpu_usage) 100.1) true "cpu_usage <= 100")
+	(assert (>= (active_connections) 0) true "active_connections >= 0")
+	(assert (>= (max_connections) 1) true "max_connections >= 1")
+	(assert (>= (requests_per_second) 0) true "requests_per_second >= 0")
+
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
 	(if (< (teststat "success") (teststat "count")) (begin
