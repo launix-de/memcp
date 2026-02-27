@@ -105,6 +105,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	((res "print") body)
 )))
 
+/* helper: build JSON for a single user entry (takes username string) */
+(define dashboard_build_user_json (lambda (uname) (begin
+	(set is_adm (scan "system" "user" '("username") (lambda (u) (equal? u uname)) '("admin") (lambda (a) a) (lambda (a b) b) false))
+	/* get database access for non-admins */
+	(set dbs_csv (if is_adm ""
+		(scan "system" "access" '("username") (lambda (u) (equal?? u uname))
+			'("database") (lambda (db) (json_encode db))
+			(lambda (acc db) (if (equal? acc "") db (concat acc "," db))) "")))
+	(concat "{\"username\":" (json_encode uname)
+		",\"admin\":" (if is_adm "true" "false")
+		",\"databases\":[" dbs_csv "]}")
+)))
+
 /* hook into http_handler */
 (define http_handler (begin
 	(set old_handler http_handler)
@@ -112,7 +125,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(if (not (nil? service_registry)) (begin
 		(service_registry "Dashboard" (list (arg "api-port" (env "PORT" "4321")) "/dashboard" "GET, WebSocket"))
 	))
-	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		(match (req "path")
 			/* API: list running services */
@@ -276,12 +288,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_json res (dashboard_json_array items))
 				)))
 			)
+			/* API: list all users with their database access (admin only) */
+			"/dashboard/api/users" (begin
+				(if (dashboard_check_admin req) (begin
+					/* build JSON per user directly in scan reduce (avoids multi-param lambda optimizer bug) */
+					(set json_str (scan "system" "user" '() (lambda () true) '("username")
+						(lambda (u) (dashboard_build_user_json u))
+						(lambda (acc item) (if (equal? acc "") item (concat acc "," item)))
+						""))
+					(dashboard_send_json res (concat "[" json_str "]"))
+				) (dashboard_send_401 res))
+			)
 			/* API: check current user's admin status */
 			"/dashboard/api/whoami" (begin
 				(define is_admin (dashboard_check_user req))
 				(if (nil? is_admin)
 					(dashboard_send_401 res)
-					(dashboard_send_json res (concat "{\"admin\":" (if is_admin "true" "false") ",\"username\":" (json_encode (req "username")) "}"))
+					(begin
+						(define default_pw (if is_admin
+							(scan "system" "user" '("username") (lambda (username) (equal? username "root")) '("password") (lambda (pw) (equal? pw (password "admin"))) (lambda (a b) b) false)
+							false))
+						(dashboard_send_json res (concat
+							"{\"admin\":" (if is_admin "true" "false")
+							",\"username\":" (json_encode (req "username"))
+							(if is_admin (concat ",\"default_password\":" (if default_pw "true" "false")) "")
+							"}"))
+					)
 				)
 			)
 			"/dashboard" (begin

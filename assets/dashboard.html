@@ -79,7 +79,8 @@ header a:hover{opacity:1;text-decoration:underline}
 .setting-card .info{flex:1;min-width:0}
 .setting-card .info .name{color:#fff;font-size:.85rem;font-weight:600}
 .setting-card .info .desc{color:#888;font-size:.7rem;margin-top:2px}
-.setting-card input[type="number"],.setting-card input[type="text"],.setting-card select{background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:140px;text-align:right}
+.setting-card input[type="number"],.setting-card input[type="text"],.setting-card select{background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:140px;text-align:right;-moz-appearance:textfield}
+.setting-card input[type="number"]::-webkit-outer-spin-button,.setting-card input[type="number"]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .setting-card input[type="number"]:focus,.setting-card input[type="text"]:focus,.setting-card select:focus{outline:none;border-color:#76b512}
 .toggle{position:relative;width:44px;height:24px;flex-shrink:0}
 .toggle input{position:absolute;opacity:0;width:100%;height:100%;cursor:pointer;z-index:1;margin:0}
@@ -126,6 +127,7 @@ header a:hover{opacity:1;text-decoration:underline}
 <a href="#" data-admin-only>Gauges</a>
 <a href="#databases">Databases</a>
 <a href="#console">Console</a>
+<a href="#users" data-admin-only>Users</a>
 <a href="#settings" data-admin-only>Settings</a>
 <a href="https://memcp.org" target="_blank">memcp.org</a>
 <a href="https://github.com/launix-de/memcp" target="_blank">GitHub</a>
@@ -186,6 +188,13 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="view" id="view-databases">
 <div class="browse-wrap">
 <h2>Databases</h2>
+<div style="margin-bottom:16px" data-admin-only>
+<button class="btn-warn" id="btn-create-db-toggle">Create Database</button>
+<div id="create-db-form" style="display:none;margin-top:12px;background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px;max-width:400px">
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Database Name</label><input type="text" id="new-dbname" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<button class="btn-warn" id="btn-create-db">Create</button>
+</div>
+</div>
 <table class="browse-table" id="tbl-databases">
 <thead><tr><th>Name</th><th class="r">Tables</th><th class="r">Size</th><th>Actions</th></tr></thead>
 <tbody></tbody>
@@ -290,6 +299,7 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="view" id="view-settings">
 <div class="browse-wrap">
 <h2>Settings</h2>
+<div id="root-pw-warning" style="display:none;background:#c0392b;padding:16px 20px;border-radius:6px;margin-bottom:20px;font-size:1.1rem;font-weight:700;color:#fff">&#9888; Root password is still the default! <a href="#users" style="color:#ffd700;text-decoration:underline">Manage users</a></div>
 <div class="detail-section" id="services-section">
 <h3>Running Services</h3>
 <table class="browse-table" id="tbl-services">
@@ -299,6 +309,24 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 <div class="settings-status" id="settings-status"></div>
 <div class="settings-grid" id="settings-grid"></div>
+</div>
+</div>
+
+<div class="view" id="view-users">
+<div class="browse-wrap">
+<h2>Users</h2>
+<div style="margin-bottom:16px">
+<button class="btn-warn" id="btn-create-user-toggle">Create User</button>
+<div id="create-user-form" style="display:none;margin-top:12px;background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px;max-width:400px">
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Username</label><input type="text" id="new-username" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Password</label><input type="password" id="new-password" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<button class="btn-warn" id="btn-create-user">Create</button>
+</div>
+</div>
+<table class="browse-table" id="tbl-users">
+<thead><tr><th>Username</th><th>Permissions</th><th>Actions</th></tr></thead>
+<tbody></tbody>
+</table>
 </div>
 </div>
 
@@ -332,6 +360,7 @@ function esc(s){var d=document.createElement("span");d.textContent=String(s);ret
 
 /* Admin detection */
 var isAdmin=false;
+var defaultPassword=false;
 function applyAdminState(){
 var adminEls=document.querySelectorAll("[data-admin-only]");
 for(var i=0;i<adminEls.length;i++)adminEls[i].style.display=isAdmin?"":"none";
@@ -346,6 +375,7 @@ document.querySelector("header .logo").addEventListener("click",goHome);
 document.querySelector("header h1").addEventListener("click",goHome);
 fetch(base+"/dashboard/api/whoami",{credentials:"same-origin"}).then(function(r){return r.json()}).then(function(d){
 isAdmin=!!d.admin;
+defaultPassword=!!d.default_password;
 applyAdminState();
 if(isAdmin)connect();
 else{
@@ -494,8 +524,17 @@ if(!isAdmin){location.hash="databases";return}
 showView("view-settings");
 backLink.href="#";
 backLink.style.display="inline";
+document.getElementById("root-pw-warning").style.display=defaultPassword?"":"none";
 apiFetch(base+"/dashboard/api/settings",renderSettings);
 apiFetch(base+"/dashboard/api/services",renderServices);
+return;
+}
+if(hash==="users"){
+if(!isAdmin){location.hash="databases";return}
+showView("view-users");
+backLink.href="#settings";
+backLink.style.display="inline";
+apiFetch(base+"/dashboard/api/users",renderUsers);
 return;
 }
 /* shard detail: db/NAME/TABLE/shard/N */
@@ -748,9 +787,8 @@ h+="</div>";
 }
 }
 grid.innerHTML=h;
-/* attach change handlers */
-grid.querySelectorAll("input,select").forEach(function(el){
-el.addEventListener("change",function(){
+/* helper to save a setting */
+function saveSetting(el){
 var key=el.getAttribute("data-key");
 var value;
 if(el.type==="checkbox")value=el.checked;
@@ -762,6 +800,17 @@ apiPost(base+"/dashboard/api/settings",{key:key,value:value},function(){
 statusEl.textContent=key+" saved";
 setTimeout(function(){statusEl.textContent=""},2000);
 });
+}
+/* checkboxes and selects: immediate on change */
+grid.querySelectorAll("input[type='checkbox'],select").forEach(function(el){
+el.addEventListener("change",function(){saveSetting(el)});
+});
+/* number inputs: debounced on input */
+grid.querySelectorAll("input[type='number']").forEach(function(el){
+var timer=null;
+el.addEventListener("input",function(){
+if(timer)clearTimeout(timer);
+timer=setTimeout(function(){saveSetting(el)},500);
 });
 });
 }
@@ -908,6 +957,131 @@ consoleTa.value=h[idx].query;
 consoleError.innerHTML="";
 consoleResult.innerHTML="";
 }
+});
+});
+}
+
+/* SQL escaping helpers */
+function sqlStr(s){return "'"+String(s).replace(/'/g,"''")+"'"}
+function sqlId(s){return "`"+String(s).replace(/`/g,"``")+"`"}
+
+/* Create database form */
+var createDbFormVisible=false;
+document.getElementById("btn-create-db-toggle").addEventListener("click",function(){
+createDbFormVisible=!createDbFormVisible;
+document.getElementById("create-db-form").style.display=createDbFormVisible?"":"none";
+});
+document.getElementById("btn-create-db").addEventListener("click",function(){
+var name=document.getElementById("new-dbname").value.trim();
+if(!name){window.alert("Database name is required.");return}
+execSQL("system","CREATE DATABASE "+sqlId(name),function(){
+document.getElementById("new-dbname").value="";
+createDbFormVisible=false;
+document.getElementById("create-db-form").style.display="none";
+route();
+});
+});
+
+/* Users page */
+var createUserFormVisible=false;
+document.getElementById("btn-create-user-toggle").addEventListener("click",function(){
+createUserFormVisible=!createUserFormVisible;
+document.getElementById("create-user-form").style.display=createUserFormVisible?"":"none";
+});
+document.getElementById("btn-create-user").addEventListener("click",function(){
+var u=document.getElementById("new-username").value.trim();
+var p=document.getElementById("new-password").value;
+if(!u||!p){window.alert("Username and password are required.");return}
+execSQL("system","CREATE USER "+sqlId(u)+" IDENTIFIED BY "+sqlStr(p),function(){
+document.getElementById("new-username").value="";
+document.getElementById("new-password").value="";
+createUserFormVisible=false;
+document.getElementById("create-user-form").style.display="none";
+apiFetch(base+"/dashboard/api/users",renderUsers);
+});
+});
+
+function renderUsers(data){
+if(!Array.isArray(data))data=[];
+/* also fetch databases for the grant dropdown */
+apiFetch(base+"/dashboard/api/databases",function(dbs){
+var allDbs=dbs.map(function(d){return d.name});
+var tb=document.querySelector("#tbl-users tbody");
+var h="";
+for(var i=0;i<data.length;i++){
+var u=data[i];
+var permHtml="";
+if(u.admin){
+permHtml="<span class='badge badge-pri'>admin <a href='#' class='revoke-admin' data-user='"+esc(u.username)+"' style='color:#fff;text-decoration:none;margin-left:4px'>&times;</a></span>";
+}else{
+var uDbs=u.databases||[];
+for(var j=0;j<uDbs.length;j++){
+permHtml+="<span class='badge badge-uni' style='margin:2px'>"+esc(uDbs[j])+" <a href='#' class='revoke-db' data-user='"+esc(u.username)+"' data-db='"+esc(uDbs[j])+"' style='color:#fff;text-decoration:none;margin-left:4px'>&times;</a></span>";
+}
+/* add-db dropdown */
+var avail=allDbs.filter(function(db){return uDbs.indexOf(db)<0&&db!=="system"&&db!=="system_statistic"});
+if(avail.length>0){
+permHtml+=" <select class='inline-select grant-db' data-user='"+esc(u.username)+"'><option value=''>+ grant...</option>";
+for(var k=0;k<avail.length;k++)permHtml+="<option value='"+esc(avail[k])+"'>"+esc(avail[k])+"</option>";
+permHtml+="</select>";
+}
+permHtml+=" <button class='btn-warn make-admin' data-user='"+esc(u.username)+"' style='font-size:.85em;padding:2px 8px'>+ admin</button>";
+}
+var actHtml="";
+actHtml+="<button class='btn-warn change-pw' data-user='"+esc(u.username)+"'>Change PW</button> ";
+actHtml+="<button class='btn-danger remove-user' data-user='"+esc(u.username)+"'>Remove</button>";
+h+="<tr><td>"+esc(u.username)+"</td><td>"+permHtml+"</td><td class='action-cell'>"+actHtml+"</td></tr>";
+}
+tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No users</td></tr>";
+/* attach event handlers */
+tb.querySelectorAll(".revoke-db").forEach(function(a){
+a.addEventListener("click",function(e){
+e.preventDefault();
+var user=a.getAttribute("data-user"),db=a.getAttribute("data-db");
+if(window.confirm("Revoke access to '"+db+"' from user '"+user+"'?"))
+execSQL("system","REVOKE ALL ON "+sqlId(db)+".* FROM "+sqlId(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+});
+});
+tb.querySelectorAll(".grant-db").forEach(function(sel){
+sel.addEventListener("change",function(){
+var user=sel.getAttribute("data-user"),db=sel.value;
+if(!db)return;
+execSQL("system","GRANT ALL ON "+sqlId(db)+".* TO "+sqlId(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+});
+});
+tb.querySelectorAll(".make-admin").forEach(function(btn){
+btn.addEventListener("click",function(){
+var user=btn.getAttribute("data-user");
+if(window.confirm("Grant admin privileges to '"+user+"'?"))
+execSQL("system","GRANT ALL ON *.* TO "+sqlId(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+});
+});
+tb.querySelectorAll(".revoke-admin").forEach(function(a){
+a.addEventListener("click",function(e){
+e.preventDefault();
+var user=a.getAttribute("data-user");
+if(window.confirm("Revoke admin privileges from '"+user+"'?"))
+execSQL("system","REVOKE ALL ON *.* FROM "+sqlId(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+});
+});
+tb.querySelectorAll(".change-pw").forEach(function(btn){
+btn.addEventListener("click",function(){
+var user=btn.getAttribute("data-user");
+var pw=window.prompt("New password for '"+user+"':");
+if(pw!==null&&pw!=="")
+execSQL("system","ALTER USER "+sqlId(user)+" IDENTIFIED BY "+sqlStr(pw),function(){
+/* update defaultPassword flag if root pw was changed */
+if(user==="root"){defaultPassword=false;document.getElementById("root-pw-warning").style.display="none"}
+apiFetch(base+"/dashboard/api/users",renderUsers);
+});
+});
+});
+tb.querySelectorAll(".remove-user").forEach(function(btn){
+btn.addEventListener("click",function(){
+var user=btn.getAttribute("data-user");
+if(window.confirm("Remove user '"+user+"'? This cannot be undone!"))
+execSQL("system","DELETE FROM user WHERE username="+sqlStr(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+});
 });
 });
 }
