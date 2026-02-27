@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024 - 2026  Carl-Philip Hänsch
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -70,6 +70,10 @@ this is how rdf works:
 				((res "print") "Unauthorized")
 		))
 	)))
+	/* register RDF/SPARQL frontend in service registry */
+	(if (not (nil? service_registry)) (begin
+		(service_registry "RDF/SPARQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/rdf/[database]" "POST, SPARQL"))
+	))
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		/* hooked our additional paths to it */

@@ -550,14 +550,17 @@ func main() {
 	}
 
 	// start cron
+	exitable.Add(1)
 	go cronroutine()
 
 	// REPL shell or wait for signal
 	if noRepl {
+		signal.Stop(cancelChan) // stop duplicate handler; this goroutine handles the signal
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 		<-sig
 	} else {
+		signal.Stop(cancelChan) // let readline handle SIGINT/SIGTERM in REPL mode
 		scm.Repl(&IOEnv)
 	}
 
@@ -567,9 +570,9 @@ func main() {
 
 var exitsignal chan bool = make(chan bool, 1) // set true to start shutdown routine and wait for all jobs
 var exitable sync.WaitGroup
+var exitOnce sync.Once
 
 func cronroutine() {
-	exitable.Add(1)
 	defer exitable.Done()
 
 	sched := &scm.DefaultScheduler
@@ -593,24 +596,28 @@ func cronroutine() {
 }
 
 func exitroutine() {
-	exitsignal <- true
-	exitable.Wait()
-	fmt.Println("Exit procedure...")
-	if scm.ReplInstance != nil {
-		// in case it dosen't exit properly
-		scm.ReplInstance.Close()
-	}
-	fmt.Println("finalizing storage...")
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// ensure shutdown continues even if saving panics
-				fmt.Println("error: UnloadDatabases failed:", r)
-			}
+	exitOnce.Do(func() {
+		drainSecs := storage.Settings.ShutdownDrainSeconds
+		scm.ShutdownServers(drainSecs)
+		exitsignal <- true
+		exitable.Wait()
+		fmt.Println("Exit procedure...")
+		if scm.ReplInstance != nil {
+			// in case it dosen't exit properly
+			scm.ReplInstance.Close()
+		}
+		fmt.Println("finalizing storage...")
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// ensure shutdown continues even if saving panics
+					fmt.Println("error: UnloadDatabases failed:", r)
+				}
+			}()
+			storage.UnloadDatabases()
 		}()
-		storage.UnloadDatabases()
-	}()
-	fmt.Println("finalizing memory...")
-	runtime.GC() // this will call the finalizers on shards
-	fmt.Println("Exit procedure finished")
+		fmt.Println("finalizing memory...")
+		runtime.GC() // this will call the finalizers on shards
+		fmt.Println("Exit procedure finished")
+	})
 }

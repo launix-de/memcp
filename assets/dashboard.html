@@ -256,7 +256,7 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="detail-section">
 <h3>Column Storage</h3>
 <table class="browse-table" id="tbl-shard-cols">
-<thead><tr><th>Column</th><th>Compression</th><th class="r">Size</th><th class="r">Deltas</th><th class="r">Delta Size</th></tr></thead>
+<thead><tr><th>Column</th><th>Compression</th><th class="r">Size</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
@@ -290,6 +290,13 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="view" id="view-settings">
 <div class="browse-wrap">
 <h2>Settings</h2>
+<div class="detail-section" id="services-section">
+<h3>Running Services</h3>
+<table class="browse-table" id="tbl-services">
+<thead><tr><th>Service</th><th>Port</th><th>Route</th><th>Protocols</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
 <div class="settings-status" id="settings-status"></div>
 <div class="settings-grid" id="settings-grid"></div>
 </div>
@@ -438,6 +445,9 @@ var settingsGroups=[
 {key:"MetricsTracing",desc:"Periodically record metrics to system_statistic.perf_metrics",type:"bool"},
 {key:"MetricsTracingInterval",desc:"Metrics sampling interval in seconds (0=60s)",type:"number"}
 ]},
+{group:"Shutdown",items:[
+{key:"ShutdownDrainSeconds",desc:"Seconds to wait for in-flight requests during shutdown (0=10s)",type:"number"}
+]},
 {group:"Debugging",items:[
 {key:"Backtrace",desc:"Enable detailed error backtraces",type:"bool"},
 {key:"Trace",desc:"Enable Scheme runtime tracing to file",type:"bool"},
@@ -485,6 +495,7 @@ showView("view-settings");
 backLink.href="#";
 backLink.style.display="inline";
 apiFetch(base+"/dashboard/api/settings",renderSettings);
+apiFetch(base+"/dashboard/api/services",renderServices);
 return;
 }
 /* shard detail: db/NAME/TABLE/shard/N */
@@ -560,7 +571,7 @@ var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
 var dbn=esc(encodeURIComponent(dbname)),tn=esc(encodeURIComponent(d.name));
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/"+tn+"'\">"+esc(d.name)+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows||0)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/"+tn+"'\">"+esc(d.name)+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
 }
 tb.innerHTML=h||"<tr><td colspan='7' style='color:#888;text-align:center'>No tables</td></tr>";
 tb.querySelectorAll("[data-trunctbl]").forEach(function(btn){
@@ -587,6 +598,8 @@ var mc="<div class='meta-card'><div class='label'>Engine</div><div class='val'>"
 mc+="<div class='meta-card'><div class='label'>Collation</div><div class='val'>"+esc(meta.collation||"--")+"</div></div>";
 var uniq=meta.uniques||[];
 mc+="<div class='meta-card'><div class='label'>Unique Keys</div><div class='val'>"+uniq.length+"</div></div>";
+var parts=meta.partitions||[];
+if(parts.length>0){var ps=parts.map(function(p){return p.n+"x"+p.column}).join(", ");mc+="<div class='meta-card'><div class='label'>Partition Schema</div><div class='val'>"+esc(ps)+"</div></div>";}
 mc+="<div class='meta-card'><button class='btn-warn' id='btn-query-tbl'>Query</button> <button class='btn-warn' id='btn-truncate-tbl'>Truncate Table</button></div>";
 document.getElementById("detail-meta").innerHTML=mc;
 var engEl=document.getElementById("engine-select");
@@ -679,24 +692,35 @@ loadData();
 }
 
 function renderShardDetail(data,dbname,tblname,shardIdx){
+var cols=data.columns||[];
+var mainCount=data.main_count||0;
 /* summary meta cards */
-var totalSize=0,totalDeltaSize=0,deltaCount=0;
-for(var i=0;i<data.length;i++){totalSize+=(data[i].size_bytes||0);totalDeltaSize+=(data[i].delta_size_bytes||0)}
-if(data.length>0)deltaCount=data[0].delta_count||0;
-var mc="<div class='meta-card'><div class='label'>Columns</div><div class='val'>"+data.length+"</div></div>";
+var totalSize=0;
+for(var i=0;i<cols.length;i++){totalSize+=(cols[i].size_bytes||0)}
+var mc="<div class='meta-card'><div class='label'>Columns</div><div class='val'>"+cols.length+"</div></div>";
+mc+="<div class='meta-card'><div class='label'>Main Count</div><div class='val'>"+mainCount+"</div></div>";
 mc+="<div class='meta-card'><div class='label'>Main Size</div><div class='val'>"+fmt(totalSize)+"</div></div>";
-mc+="<div class='meta-card'><div class='label'>Deltas</div><div class='val'>"+deltaCount+"</div></div>";
-mc+="<div class='meta-card'><div class='label'>Delta Size</div><div class='val'>"+fmt(totalDeltaSize)+"</div></div>";
 document.getElementById("shard-meta").innerHTML=mc;
 /* column storage table */
-data.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
+cols.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
 var tb=document.querySelector("#tbl-shard-cols tbody");
 var h="";
-for(var i=0;i<data.length;i++){
-var c=data[i];
-h+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.compression)+"</td><td class='r'>"+fmt(c.size_bytes||0)+"</td><td class='r'>"+(c.delta_count||0)+"</td><td class='r'>"+fmt(c.delta_size_bytes||0)+"</td></tr>";
+for(var i=0;i<cols.length;i++){
+var c=cols[i];
+h+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.compression)+"</td><td class='r'>"+fmt(c.size_bytes||0)+"</td></tr>";
 }
-tb.innerHTML=h||"<tr><td colspan='5' style='color:#888;text-align:center'>No columns</td></tr>";
+tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No columns</td></tr>";
+}
+
+function renderServices(data){
+var tb=document.querySelector("#tbl-services tbody");
+var h="";
+if(!Array.isArray(data))data=[];
+for(var i=0;i<data.length;i++){
+var s=data[i];
+h+="<tr><td>"+esc(s.name||"")+"</td><td>"+esc(s.port||"")+"</td><td>"+esc(s.route||"")+"</td><td>"+esc(s.protocols||"")+"</td></tr>";
+}
+tb.innerHTML=h||"<tr><td colspan='4' style='color:#888;text-align:center'>No services registered</td></tr>";
 }
 
 function renderSettings(data){

@@ -102,6 +102,7 @@ func UnloadDatabases() {
 		defer settings.Close()
 		settings.Write(data)
 	}
+	GlobalCache.Stop()
 }
 
 // createPersistenceFromConfig creates a PersistenceEngine by looking up the
@@ -324,7 +325,9 @@ func (db *database) rebuild(all bool, repartition bool) {
 							}
 							sdone.Done()
 						}()
-						newShardList[i] = s.rebuild(all)
+						if s != nil {
+							newShardList[i] = s.rebuild(all)
+						}
 					}(i, s)
 				}
 			} else {
@@ -340,7 +343,9 @@ func (db *database) rebuild(all bool, repartition bool) {
 									}
 									sdone.Done()
 								}()
-								newShardList[j.i] = j.s.rebuild(all)
+								if j.s != nil {
+									newShardList[j.i] = j.s.rebuild(all)
+								}
 							}(j)
 						}
 					}()

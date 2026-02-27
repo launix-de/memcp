@@ -55,6 +55,7 @@ type Scheduler struct {
 	nextID   uint64
 	initOnce sync.Once
 	wg       sync.WaitGroup
+	taskWg   sync.WaitGroup // tracks in-flight task goroutines
 }
 
 var DefaultScheduler Scheduler
@@ -127,6 +128,7 @@ func (s *Scheduler) Stop() {
 	if s.stopped {
 		s.mu.Unlock()
 		s.wg.Wait()
+		s.taskWg.Wait()
 		return
 	}
 	s.stopped = true
@@ -134,6 +136,7 @@ func (s *Scheduler) Stop() {
 	s.mu.Unlock()
 	s.signal()
 	s.wg.Wait()
+	s.taskWg.Wait()
 }
 
 func (s *Scheduler) signalLocked() {
@@ -155,6 +158,7 @@ func (s *Scheduler) signal() {
 }
 
 func (s *Scheduler) runTask(fn Task) {
+	defer s.taskWg.Done()
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("scheduler: task panic: %v\n", r)
@@ -204,6 +208,7 @@ func (s *Scheduler) run() {
 			heap.Pop(&s.tasks)
 			delete(s.active, next.id)
 			delete(s.cancel, next.id)
+			s.taskWg.Add(1)
 			s.mu.Unlock()
 			go s.runTask(next.fn)
 			continue

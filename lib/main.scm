@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023 - 2026  Carl-Philip Hänsch
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -36,6 +36,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	*/
 )))
 
+/* global service registry: each module registers itself as (service_registry name (list port route protocols)) */
+(set service_registry (coalesce service_registry (newsession)))
+
 (import "sql.scm")
 (import "dashboard.scm")
 (import "rdf.scm")
@@ -44,5 +47,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (if (not (arg "disable-api" false)) (begin
 	(set port (arg "api-port" (env "PORT" "4321")))
 	(serve port (lambda (req res) (http_handler req res)))
+	(service_registry "HTTP Server" (list port "/" "HTTP"))
 	(print "listening on http://localhost:" port)
 ))

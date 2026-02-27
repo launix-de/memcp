@@ -347,12 +347,60 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 														(list (symbol "list") "$update")
 														(list (symbol "lambda") (list (symbol "$update")) (list (symbol "if") (list (symbol "$update")) 1 0))
 														(symbol "+") 0)))
-												(if (equal? tag '!nop)
-													/* No-op statement (e.g. SET @var) - return empty list */
-													'()
-													/* Unknown statement type */
-													nil
-					))))))))
+												(if (equal? tag '!update_multi)
+													/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE condition; */
+													/* stmt is (!update_multi tbls assignments where) */
+													(begin
+														(define tbls (car (cdr stmt)))
+														(define assignments_raw (merge (car (cdr (cdr stmt)))))
+														(define where_raw (car (cdr (cdr (cdr stmt)))))
+														(define transform_dml (lambda (expr) (match expr
+															'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+															'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+															(cons head tail) (cons (transform_dml head) (map tail transform_dml))
+															expr
+														)))
+														(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
+														/* Build table defs: ((alias tbl) ...) -> ((alias schema tbl false nil) ...) */
+														(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
+														/* First table is the target for UPDATE */
+														(define target_def (car all_defs))
+														(define target_alias (match target_def '(id _ _ _ _) id))
+														(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
+														(define others (cdr all_defs))
+														/* Build SET assignments - only columns for target table */
+														(define target_cols_filter (extract_columns_for_tblvar target_alias t_where))
+														(define target_cols_set (extract_assoc assignments_raw (lambda (col expr)
+															(extract_columns_for_tblvar target_alias (transform_dml expr)))))
+														(define scancols (merge_unique target_cols_set))
+														(define filtercols (merge_unique (list target_cols_filter scancols)))
+														(define condition_body (replace_columns_from_expr t_where))
+														(define filter_body (wrap_multi_scans others target_alias t_where condition_body))
+														(define filterfn (list (symbol "lambda")
+															(map filtercols (lambda (col) (symbol (concat target_alias "." col))))
+															filter_body))
+														/* Build map function for SET assignments */
+														(define mapcols (cons (symbol "list") (cons "$update" scancols)))
+														(define mapfn (list (symbol "lambda")
+															(cons (symbol "$update") (map scancols (lambda (col) (symbol (concat target_alias "." col)))))
+															(list (symbol "if")
+																(list (symbol "$update")
+																	(cons (symbol "list")
+																		(map_assoc assignments_raw (lambda (col expr)
+																			(replace_columns_from_expr (wrap_multi_scans others target_alias (transform_dml expr) (replace_columns_from_expr (transform_dml expr))))))))
+																1 0)))
+														(list (list (symbol "scan") schema target_tbl
+															(cons (symbol "list") filtercols)
+															filterfn
+															mapcols
+															mapfn
+															(symbol "+") 0)))
+													(if (equal? tag '!nop)
+														/* No-op statement (e.g. SET @var) - return empty list */
+														'()
+														/* Unknown statement type */
+														nil
+					)))))))))
 				)
 		)))
 
@@ -423,16 +471,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define inner sql_select)
 			(atom ";" false)
 		) (list '!insert_select tbl cols inner ignore))
-		/* UPDATE table SET col=val WHERE condition; (also accepts table.col = val) */
+		/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE ...; (multi-table in trigger) */
 		(parser '(
-			(atom "UPDATE" true) (define tbl sql_identifier)
+			(atom "UPDATE" true)
+			(define tbls (+ (parser (or
+				(parser '((define tbl sql_identifier) (atom "AS" true) (define alias sql_identifier)) '(alias tbl))
+				(parser '((define tbl sql_identifier) (define alias sql_identifier)) '(alias tbl))
+				(parser (define tbl sql_identifier) '(tbl tbl))
+			)) ","))
 			(atom "SET" true) (define assignments (+ (or
 				(parser '(sql_identifier "." (define col sql_identifier) "=" (define expr sql_expression)) '(col expr))
 				(parser '((define col sql_identifier) "=" (define expr sql_expression)) '(col expr))
 			) ","))
 			(? (atom "WHERE" true) (define where sql_expression))
 			(atom ";" false)
-		) (list '!update tbl assignments where))
+		) (if (> (count tbls) 1)
+				(list '!update_multi tbls assignments where)
+				(list '!update (match (car tbls) '(alias _) alias) assignments where)))
 		/* DELETE FROM table WHERE condition; */
 		(parser '(
 			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)

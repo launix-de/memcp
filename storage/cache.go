@@ -22,6 +22,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	units "github.com/docker/go-units"
@@ -102,7 +103,8 @@ type CacheManager struct {
 	h       softItemHeap
 	itemMap map[any]*softItem
 
-	opChan chan cacheOp
+	opChan  chan cacheOp
+	stopped atomic.Bool
 }
 
 type cacheOp struct {
@@ -142,6 +144,18 @@ func (cm *CacheManager) Init(memoryBudget, persistedBudget int64) {
 	go cm.run()
 }
 
+// Stop signals the CacheManager goroutine to drain remaining ops and exit.
+// After Stop returns, the run() goroutine has finished.
+func (cm *CacheManager) Stop() {
+	if cm.opChan == nil {
+		return
+	}
+	if cm.stopped.Swap(true) {
+		return // already stopped
+	}
+	close(cm.opChan)
+}
+
 // AddItem registers an evictable item. Triggers cleanup if over budget.
 // No-op if the CacheManager is not initialized.
 func (cm *CacheManager) AddItem(
@@ -153,6 +167,9 @@ func (cm *CacheManager) AddItem(
 	getScore func(pointer any) float64,
 ) {
 	if cm.opChan == nil {
+		return
+	}
+	if cm.stopped.Load() {
 		return
 	}
 	factor := evictableFactors[evictType]
@@ -178,6 +195,9 @@ func (cm *CacheManager) Remove(pointer any) {
 	if cm.opChan == nil {
 		return
 	}
+	if cm.stopped.Load() {
+		return
+	}
 	done := make(chan struct{})
 	cm.opChan <- cacheOp{del: pointer, done: done}
 	<-done
@@ -188,6 +208,9 @@ func (cm *CacheManager) UpdateSize(pointer any, delta int64) {
 	if cm.opChan == nil {
 		return
 	}
+	if cm.stopped.Load() {
+		return
+	}
 	done := make(chan struct{})
 	cm.opChan <- cacheOp{updatePtr: pointer, updateDelta: delta, done: done}
 	<-done
@@ -196,6 +219,9 @@ func (cm *CacheManager) UpdateSize(pointer any, delta int64) {
 // UpdateBudget changes both memory budgets (e.g. when MaxRamPercent or MaxPersistPercent changes).
 func (cm *CacheManager) UpdateBudget(totalBudget, persistedBudget int64) {
 	if cm.opChan == nil {
+		return
+	}
+	if cm.stopped.Load() {
 		return
 	}
 	done := make(chan struct{})
@@ -209,6 +235,9 @@ func (cm *CacheManager) CheckPressure(additionalSize int64) {
 	if cm.opChan == nil {
 		return
 	}
+	if cm.stopped.Load() {
+		return
+	}
 	done := make(chan struct{})
 	cm.opChan <- cacheOp{pressureSize: additionalSize, done: done}
 	<-done
@@ -217,6 +246,9 @@ func (cm *CacheManager) CheckPressure(additionalSize int64) {
 // Stat returns per-type evictable sizes and counts.
 func (cm *CacheManager) Stat() CacheStat {
 	if cm.opChan == nil {
+		return CacheStat{}
+	}
+	if cm.stopped.Load() {
 		return CacheStat{}
 	}
 	ch := make(chan CacheStat, 1)

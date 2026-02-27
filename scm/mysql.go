@@ -27,6 +27,13 @@ import "github.com/launix-de/go-mysqlstack/driver"
 import querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
 import "github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
 
+type mysqlCloser interface {
+	Close()
+}
+
+var mysqlListenersMu sync.Mutex
+var mysqlListeners []mysqlCloser
+
 // build this function into your SCM environment to offer http server capabilities
 func MySQLServe(a ...Scmer) Scmer {
 	// params: port, authcallback, schemacallback, querycallback
@@ -43,6 +50,9 @@ func MySQLServe(a ...Scmer) Scmer {
 	if err != nil {
 		panic(err)
 	}
+	mysqlListenersMu.Lock()
+	mysqlListeners = append(mysqlListeners, mysql)
+	mysqlListenersMu.Unlock()
 	go func() {
 		defer mysql.Close()
 		mysql.Accept()

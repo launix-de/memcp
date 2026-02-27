@@ -971,6 +971,16 @@ func Init(en scm.Env) {
 						scm.NewString("Cols"), scm.NewSlice(cols),
 					})
 				}
+				// partition schema: list of (column, numPartitions) pairs
+				partitions := make([]scm.Scmer, 0)
+				if t.ShardMode == ShardModePartition {
+					for _, sd := range t.PDimensions {
+						partitions = append(partitions, scm.NewSlice([]scm.Scmer{
+							scm.NewString("Column"), scm.NewString(sd.Column),
+							scm.NewString("NumPartitions"), scm.NewInt(int64(sd.NumPartitions)),
+						}))
+					}
+				}
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewString("Name"), scm.NewString(t.Name),
 					scm.NewString("Engine"), scm.NewString(engine),
@@ -978,6 +988,7 @@ func Init(en scm.Env) {
 					scm.NewString("Charset"), scm.NewString(t.Charset),
 					scm.NewString("Comment"), scm.NewString(t.Comment),
 					scm.NewString("Unique"), scm.NewSlice(uniques),
+					scm.NewString("Partitions"), scm.NewSlice(partitions),
 				})
 			}
 			panic("invalid call of show")

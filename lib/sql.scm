@@ -98,6 +98,7 @@ if the user is not allowed to access this property, the function will throw an e
 (globalvars "character_set_server" "utf8mb4")
 (globalvars "collation_server" "utf8mb4_general_ci")
 
+
 /* persistent HTTP sessions for transaction support */
 (set http_sessions (newsession))
 
@@ -277,6 +278,11 @@ if the user is not allowed to access this property, the function will throw an e
 	))
 ))
 
+/* register SQL frontends in service registry */
+(service_registry "SQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/sql/[database]" "POST, NDJSON"))
+(service_registry "PSQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/psql/[database]" "POST, NDJSON"))
+(service_registry "SCM Frontend" (list (arg "api-port" (env "PORT" "4321")) "/scm" "POST, JSON"))
+
 /* dedicated mysql protocol listening at specified port */
 (try (lambda () (begin
 	(if (not (arg "disable-mysql" false)) (begin
@@ -299,6 +305,7 @@ if the user is not allowed to access this property, the function will throw an e
 					) sql))
 			))
 		)
+		(if (not (nil? service_registry)) (service_registry "MySQL Protocol" (list port "" "MySQL Wire Protocol")))
 		(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password '" (arg "root-password" "admin") "'), set with --mysql-port")
 	)) ; close the if for disable-mysql
 )) print)

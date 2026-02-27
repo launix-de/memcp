@@ -22,6 +22,7 @@ import "net"
 import "time"
 import "mime"
 import "sync"
+import "context"
 import "strings"
 import "strconv"
 import "net/url"
@@ -29,6 +30,9 @@ import "net/http"
 import "sync/atomic"
 import "encoding/json"
 import "github.com/gorilla/websocket"
+
+var httpServersMu sync.Mutex
+var httpServers []*http.Server
 
 // build this function into your SCM environment to offer http server capabilities
 func HTTPServe(a ...Scmer) Scmer {
@@ -51,6 +55,9 @@ func HTTPServe(a ...Scmer) Scmer {
 			}
 		},
 	}
+	httpServersMu.Lock()
+	httpServers = append(httpServers, server)
+	httpServersMu.Unlock()
 	go server.ListenAndServe()
 	// TODO: ListenAndServeTLS
 	return NewBool(true)
@@ -264,7 +271,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				defer sendmutex.Unlock()
 				err := ws.WriteMessage(int(a[0].Int()), []byte(a[1].String()))
 				if err != nil {
-					panic(err)
+					panic("websocket closed")
 				}
 				return NewString("ok")
 			})
@@ -274,11 +281,17 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		// catch panics and print out 500 Internal Server Error
 		defer func() {
 			if r := recover(); r != nil {
-				PrintError("error in http handler: " + fmt.Sprint(r))
-				res.Header().Set("Content-Type", "text/plain")
-				res.WriteHeader(500)
-				io.WriteString(res, "500 Internal Server Error: ")
-				io.WriteString(res, fmt.Sprint(r))
+				if fmt.Sprint(r) != "websocket closed" {
+					PrintError("error in http handler: " + fmt.Sprint(r))
+				}
+				// try to write error response; silently ignore if connection was hijacked (e.g. websocket)
+				func() {
+					defer func() { recover() }()
+					res.Header().Set("Content-Type", "text/plain")
+					res.WriteHeader(500)
+					io.WriteString(res, "500 Internal Server Error: ")
+					io.WriteString(res, fmt.Sprint(r))
+				}()
 			}
 		}()
 		Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
@@ -318,6 +331,37 @@ func scmerToGo(v Scmer) any {
 		return v.Any()
 	default:
 		return v.String()
+	}
+}
+
+// ShutdownServers gracefully shuts down all HTTP and MySQL servers.
+// drainSeconds controls how long to wait for in-flight HTTP requests (0 = 10s default).
+func ShutdownServers(drainSeconds int) {
+	if drainSeconds <= 0 {
+		drainSeconds = 10
+	}
+
+	// Close MySQL listeners immediately (causes Accept to return)
+	mysqlListenersMu.Lock()
+	listeners := mysqlListeners
+	mysqlListeners = nil
+	mysqlListenersMu.Unlock()
+	for _, l := range listeners {
+		func() {
+			defer func() { recover() }()
+			l.Close()
+		}()
+	}
+
+	// Gracefully shut down HTTP servers with deadline
+	httpServersMu.Lock()
+	servers := httpServers
+	httpServers = nil
+	httpServersMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(drainSeconds)*time.Second)
+	defer cancel()
+	for _, srv := range servers {
+		srv.Shutdown(ctx)
 	}
 }
 

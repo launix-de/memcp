@@ -108,9 +108,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* hook into http_handler */
 (define http_handler (begin
 	(set old_handler http_handler)
+	/* register Dashboard in service registry */
+	(if (not (nil? service_registry)) (begin
+		(service_registry "Dashboard" (list (arg "api-port" (env "PORT" "4321")) "/dashboard" "GET, WebSocket"))
+	))
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		(match (req "path")
+			/* API: list running services */
+			"/dashboard/api/services" (begin
+				(if (nil? (dashboard_check_user req)) (dashboard_send_401 res) (begin
+					(if (not (nil? service_registry)) (begin
+						(define svc_keys (service_registry))
+						(define items (map svc_keys (lambda (name) (begin
+							(define val (service_registry name))
+							(json_encode_assoc (list "name" name "port" (car val) "route" (car (cdr val)) "protocols" (car (cdr (cdr val)))))
+						))))
+						(dashboard_send_json res (dashboard_json_array items))
+					) (dashboard_send_json res "[]"))
+				))
+			)
 			/* API: list databases (admin: all, non-admin: filtered by system.access) */
 			"/dashboard/api/databases" (begin
 				(define is_admin (dashboard_check_user req))
@@ -135,8 +152,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(settings (body "key") (body "value"))
 						(dashboard_send_json res "{\"ok\":true}")
 					) (begin
-						/* read all settings as assoc object */
-						(dashboard_send_json res (json_encode_assoc (settings)))
+							/* read all settings as assoc object */
+							(dashboard_send_json res (json_encode_assoc (settings)))
 					))
 				) (dashboard_send_401 res))
 			)
@@ -166,17 +183,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			/* API: shard column detail with compression types */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
-					(define cols (show_shard_columns dbname tblname (simplify shardidx)))
+					(define sidx (simplify shardidx))
+					(define cols (show_shard_columns dbname tblname sidx))
+					(define shards (show_shards dbname tblname))
+					(define shard_info (if (nil? shards) nil (nth shards sidx)))
+					(define main_count (if (nil? shard_info) 0 (shard_info "main_count")))
 					(define items (map cols (lambda (c)
 						(json_encode_assoc (list
 							"name" (c "name")
 							"compression" (c "compression")
 							"size_bytes" (c "size_bytes")
-							"delta_count" (c "delta_count")
-							"delta_size_bytes" (c "delta_size_bytes")
 						))
 					)))
-					(dashboard_send_json res (dashboard_json_array items))
+					(dashboard_send_json res (concat
+						"{\"main_count\":" (json_encode main_count)
+						",\"columns\":" (dashboard_json_array items) "}"))
 				)))
 			)
 			/* API: table detail with columns, shards, meta */
@@ -210,13 +231,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							(concat "{\"id\":" (json_encode (u "Id")) ",\"cols\":" (json_encode (u "Cols")) "}")
 						)))
 					))
+					/* partition schema */
+					(define raw_partitions (meta "Partitions"))
+					(define partition_items (if (nil? raw_partitions) "[]"
+						(dashboard_json_array (map raw_partitions (lambda (p)
+							(concat "{\"column\":" (json_encode (p "Column")) ",\"n\":" (json_encode (p "NumPartitions")) "}")
+						)))
+					))
 					/* build JSON manually to nest arrays inside object */
 					(dashboard_send_json res (concat
 						"{\"columns\":" (dashboard_json_array col_items)
 						",\"shards\":" (dashboard_json_array shard_items)
 						",\"meta\":{\"engine\":" (json_encode (meta "Engine"))
 						",\"collation\":" (json_encode (meta "Collation"))
-						",\"uniques\":" unique_items "}}"
+						",\"uniques\":" unique_items
+						",\"partitions\":" partition_items "}}"
 					))
 				)))
 			)
@@ -230,8 +259,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(define col_count (if (nil? cols) 0 (count cols)))
 						(define shard_count (if (nil? shards) 0 (count shards)))
 						(define total_size (dashboard_table_size dbname tbl))
-						(define row_count (if (nil? shards) 0
-							(reduce shards (lambda (acc s) (+ acc (+ (s "main_count") (s "delta")) (- 0 (s "deletions")))) 0)))
+						(define all_cold (if (nil? shards) true
+							(reduce shards (lambda (acc s) (and acc (equal? (s "state") "nil"))) true)))
+						(define row_count (if all_cold nil
+							(if (nil? shards) 0
+								(reduce shards (lambda (acc s) (+ acc (+ (s "main_count") (s "delta")) (- 0 (s "deletions")))) 0))))
 						(json_encode_assoc (list
 							"name" tbl
 							"engine" (meta "Engine")
