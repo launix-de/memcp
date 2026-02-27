@@ -116,15 +116,15 @@ test_cases:
     scm: (stat)
     expect: {}
 
+  - name: "MP: reset MaxRamBytes to 0 (before recovery test)"
+    scm: (settings "MaxRamBytes" 0)
+    expect: {}
+
   - name: "MP: GROUP BY still works after temp keytable eviction"
     sql: "SELECT a, SUM(b) AS sb FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 3"
     timeout: 300
     expect:
       rows: 3
-
-  - name: "MP: reset MaxRamBytes to 0 (final)"
-    scm: (settings "MaxRamBytes" 0)
-    expect: {}
 
   # --- Tier 4: persisted eviction + reload + GROUP BY (combined path) ---
 
@@ -132,15 +132,15 @@ test_cases:
     scm: (settings "MaxPersistBytes" 1)
     expect: {}
 
+  - name: "MP: reset MaxPersistBytes to 0 (before recovery test)"
+    scm: (settings "MaxPersistBytes" 0)
+    expect: {}
+
   - name: "MP: GROUP BY after shard eviction (forces reload + temp keytable)"
     sql: "SELECT a, COUNT(*) AS cnt FROM `memcp-tests`.mp_pressure GROUP BY a ORDER BY a LIMIT 3"
     timeout: 300
     expect:
       rows: 3
-
-  - name: "MP: reset MaxPersistBytes to 0 (final)"
-    scm: (settings "MaxPersistBytes" 0)
-    expect: {}
 
   # --- Tier 5: explicit temp column via createcolumn + eviction ---
 
