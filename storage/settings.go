@@ -38,9 +38,11 @@ type SettingsT struct {
 	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override total budget in bytes
 	MaxPersistPercent      int   // 0 = default (30%), otherwise 1-100; budget for persisted shards+indexes
 	MaxPersistBytes        int64 // 0 = use MaxPersistPercent; >0 = override persisted budget in bytes
+	MetricsTracing         bool  // when true, periodically insert metrics into system.perf_metrics
+	MetricsTracingInterval int   // interval in seconds (0 = default 60s)
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0, false, 0}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -66,6 +68,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("MaxRamBytes"), scm.NewInt(Settings.MaxRamBytes),
 			scm.NewString("MaxPersistPercent"), scm.NewInt(int64(Settings.MaxPersistPercent)),
 			scm.NewString("MaxPersistBytes"), scm.NewInt(Settings.MaxPersistBytes),
+			scm.NewString("MetricsTracing"), scm.NewBool(Settings.MetricsTracing),
+			scm.NewString("MetricsTracingInterval"), scm.NewInt(int64(Settings.MetricsTracingInterval)),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -91,6 +95,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.MaxPersistPercent))
 		case "MaxPersistBytes":
 			return scm.NewInt(Settings.MaxPersistBytes)
+		case "MetricsTracing":
+			return scm.NewBool(Settings.MetricsTracing)
+		case "MetricsTracingInterval":
+			return scm.NewInt(int64(Settings.MetricsTracingInterval))
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -129,6 +137,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.MaxPersistBytes = int64(scm.ToInt(a[1]))
 			total, persisted := computeMemoryBudgets()
 			GlobalCache.UpdateBudget(total, persisted)
+		case "MetricsTracing":
+			Settings.MetricsTracing = scm.ToBool(a[1])
+		case "MetricsTracingInterval":
+			Settings.MetricsTracingInterval = scm.ToInt(a[1])
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}

@@ -1002,6 +1002,7 @@ Patterns can be any of:
 	init_window()
 	init_scheduler()
 	init_jit()
+	InitMetricsDeclarations()
 
 	RunJitTest()
 }

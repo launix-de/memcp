@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MemCP Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:Lato,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh}
+header{background:#76b512;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header img{height:40px;width:auto;flex-shrink:0}
+header h1{font-size:1.3rem;color:#fff;font-weight:600;flex-shrink:0}
+header .links{margin-left:auto;display:flex;gap:16px}
+header a{color:#fff;text-decoration:none;font-size:.9rem;opacity:.9}
+header a:hover{opacity:1;text-decoration:underline}
+.gauge-row{display:flex;flex-wrap:wrap;justify-content:center;gap:24px;padding:20px 24px}
+.gauge-row:first-child{padding-top:40px}
+.gauge-card{text-align:center;width:220px}
+.gauge-card h2{font-size:.85rem;color:#aaa;margin-top:4px;text-transform:uppercase;letter-spacing:.5px;font-weight:400}
+.gauge-card .value{font-size:1rem;color:#fff;margin-top:2px;font-weight:600}
+.gauge-card .subval{font-size:.75rem;color:#888;margin-top:1px}
+.gauge{
+	background:url(/gauge.png);
+	background-size:contain;
+	background-repeat:no-repeat;
+	width:220px;
+	height:275px;
+	margin:0 auto;
+}
+.gauge::before{
+	display:block;
+	content:' ';
+	width:100%;
+	height:100%;
+	background:url(/gauge-needle.png);
+	background-size:contain;
+	background-repeat:no-repeat;
+	transform-origin:center center;
+	transform:rotate(var(--from));
+	animation-name:shake;
+	animation-duration:100ms;
+	animation-direction:alternate;
+	animation-timing-function:ease;
+	animation-iteration-count:infinite;
+}
+@keyframes shake{
+	from{transform:rotate(var(--from))}
+	to{transform:rotate(var(--to))}
+}
+.status-bar{text-align:center;padding:12px;color:#666;font-size:.8rem}
+.status-bar.connected{color:#76b512}
+.status-bar.disconnected{color:#e74c3c}
+</style>
+</head>
+<body>
+<header>
+<img src="/dashboard/logo.svg" alt="MemCP">
+<h1>MemCP Dashboard</h1>
+<div class="links">
+<a href="https://memcp.org" target="_blank">memcp.org</a>
+<a href="https://github.com/launix-de/memcp" target="_blank">GitHub</a>
+</div>
+</header>
+<div class="gauge-row">
+<div class="gauge-card">
+	<div class="gauge" id="g-cpu" style="--from:0deg;--to:3deg"></div>
+	<h2>CPU Usage</h2>
+	<div class="value" id="v-cpu">--</div>
+	<div class="subval" id="s-cpu"></div>
+</div>
+<div class="gauge-card">
+	<div class="gauge" id="g-conn" style="--from:0deg;--to:3deg"></div>
+	<h2>Connections</h2>
+	<div class="value" id="v-conn">--</div>
+	<div class="subval" id="s-conn"></div>
+</div>
+<div class="gauge-card">
+	<div class="gauge" id="g-rps" style="--from:0deg;--to:3deg"></div>
+	<h2>Requests/sec</h2>
+	<div class="value" id="v-rps">--</div>
+	<div class="subval" id="s-rps"></div>
+</div>
+</div>
+<div class="gauge-row">
+<div class="gauge-card">
+	<div class="gauge" id="g-ram" style="--from:0deg;--to:3deg"></div>
+	<h2>System RAM</h2>
+	<div class="value" id="v-ram">--</div>
+	<div class="subval" id="s-ram"></div>
+</div>
+<div class="gauge-card">
+	<div class="gauge" id="g-proc" style="--from:0deg;--to:3deg"></div>
+	<h2>Process RAM</h2>
+	<div class="value" id="v-proc">--</div>
+	<div class="subval" id="s-proc"></div>
+</div>
+<div class="gauge-card">
+	<div class="gauge" id="g-shard" style="--from:0deg;--to:3deg"></div>
+	<h2>Shard RAM</h2>
+	<div class="value" id="v-shard">--</div>
+	<div class="subval" id="s-shard"></div>
+</div>
+<div class="gauge-card">
+	<div class="gauge" id="g-evict" style="--from:0deg;--to:3deg"></div>
+	<h2>Eviction Budget</h2>
+	<div class="value" id="v-evict">--</div>
+	<div class="subval" id="s-evict"></div>
+</div>
+</div>
+<div class="status-bar disconnected" id="status">Connecting...</div>
+<div style="text-align:center;padding:8px"><label style="color:#888;font-size:.8rem;cursor:pointer"><input type="checkbox" id="jitter" checked> gauge jitter</label></div>
+<script>
+(function(){
+"use strict";
+/* needle rotation: 0deg = left (0%), 270deg = right (100%) */
+function setGauge(id,t,valText,subText){
+if(t<0)t=0;if(t>1)t=1;
+var deg=t*270;
+var jitterOn=document.getElementById("jitter").checked;
+var jitter=jitterOn?Math.min(t*270+3,270):deg;
+var el=document.getElementById(id);
+el.style.setProperty("--from",deg+"deg");
+el.style.setProperty("--to",jitter+"deg");
+var vid=id.replace("g-","v-");
+var sid=id.replace("g-","s-");
+document.getElementById(vid).textContent=valText;
+document.getElementById(sid).textContent=subText;
+}
+function fmt(bytes){
+if(bytes>=1073741824)return(bytes/1073741824).toFixed(1)+" GB";
+if(bytes>=1048576)return(bytes/1048576).toFixed(0)+" MB";
+if(bytes>=1024)return(bytes/1024).toFixed(0)+" KB";
+return bytes+" B";
+}
+var statusEl=document.getElementById("status");
+var ws,retry=0;
+function connect(){
+var proto=location.protocol==="https:"?"wss:":"ws:";
+ws=new WebSocket(proto+"//"+location.host+"/ws/dashboard");
+ws.onopen=function(){
+statusEl.textContent="Connected";
+statusEl.className="status-bar connected";
+retry=0;
+};
+ws.onmessage=function(e){
+try{var d=JSON.parse(e.data)}catch(x){return}
+var cpu=d.cpu||0;
+setGauge("g-cpu",cpu/100,cpu.toFixed(1)+"%","of 100%");
+var memT=d.mem_total||1,memA=d.mem_available||0;
+var memU=memT-memA;
+setGauge("g-ram",memU/memT,fmt(memU)+" / "+fmt(memT),((memU/memT)*100).toFixed(1)+"%");
+var sh=d.shard||{};
+var shMem=sh.persisted_memory||0,shBud=sh.persisted_budget||1;
+if(shBud===0)shBud=1;
+setGauge("g-shard",shMem/shBud,fmt(shMem)+" / "+fmt(shBud),((shMem/shBud)*100).toFixed(1)+"%");
+var procMem=d.process_memory||0;
+setGauge("g-proc",procMem/memT,fmt(procMem)+" / "+fmt(memT),((procMem/memT)*100).toFixed(1)+"%");
+var evMem=sh.current_memory||0,evBud=sh.memory_budget||1;
+if(evBud===0)evBud=1;
+setGauge("g-evict",evMem/evBud,fmt(evMem)+" / "+fmt(evBud),((evMem/evBud)*100).toFixed(1)+"%");
+var conn=d.connections||0,maxC=d.max_connections||1;
+if(maxC<1)maxC=1;
+setGauge("g-conn",conn/maxC,conn+" / "+maxC,"active / max 10min");
+var rps=d.rps||0;
+var rpsMax=Math.max(100,Math.pow(10,Math.ceil(Math.log10(Math.max(rps,1)))));
+setGauge("g-rps",rps/rpsMax,rps.toFixed(1)+" req/s","scale: 0-"+rpsMax);
+};
+ws.onclose=function(){
+statusEl.textContent="Disconnected - reconnecting...";
+statusEl.className="status-bar disconnected";
+retry++;
+setTimeout(connect,Math.min(1000*Math.pow(2,retry),30000));
+};
+ws.onerror=function(){ws.close()};
+}
+connect();
+})();
+</script>
+</body>
+</html>

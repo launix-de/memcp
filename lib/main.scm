@@ -26,7 +26,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define http_handler (lambda (req res) (begin
 	(print "request " req)
 	(if (equal? (req "path") "/") (begin
-		((res "header") "Location" "/info.html")
+		((res "header") "Location" "/dashboard")
 		((res "status") 301)
 	) (static_files req res))
 	/*
@@ -37,6 +37,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 (import "sql.scm")
+(import "dashboard.scm")
 (import "rdf.scm")
 
 /* read ports from command line arguments or environment */

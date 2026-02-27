@@ -1321,6 +1321,7 @@ func Init(en scm.Env) {
 		}, false, false, nil,
 	})
 
+	initDashboard(en)
 	initMySQLImport(en)
 	initTransaction(en)
 	initFKBuiltins(en)

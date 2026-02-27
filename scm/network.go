@@ -18,6 +18,7 @@ package scm
 
 import "io"
 import "fmt"
+import "net"
 import "time"
 import "mime"
 import "sync"
@@ -25,6 +26,7 @@ import "strings"
 import "strconv"
 import "net/url"
 import "net/http"
+import "sync/atomic"
 import "encoding/json"
 import "github.com/gorilla/websocket"
 
@@ -39,6 +41,15 @@ func HTTPServe(a ...Scmer) Scmer {
 		ReadTimeout:    300 * time.Second,
 		WriteTimeout:   300 * time.Second,
 		MaxHeaderBytes: 1 << 20,
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			switch state {
+			case http.StateNew:
+				atomic.AddInt64(&ActiveHTTPConnections, 1)
+				atomic.AddInt64(&TotalHTTPRequests, 1)
+			case http.StateClosed, http.StateHijacked:
+				atomic.AddInt64(&ActiveHTTPConnections, -1)
+			}
+		},
 	}
 	go server.ListenAndServe()
 	// TODO: ListenAndServeTLS
