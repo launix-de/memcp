@@ -34,7 +34,7 @@ type SettingsT struct {
 	DefaultEngine          string
 	ShardSize              uint
 	AnalyzeMinItems        int
-	MaxRamPercent          int   // 0 = default (90%), otherwise 1-100; total memory budget
+	MaxRamPercent          int   // 0 = default (50%), otherwise 1-100; total memory budget
 	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override total budget in bytes
 	MaxPersistPercent      int   // 0 = default (30%), otherwise 1-100; budget for persisted shards+indexes
 	MaxPersistBytes        int64 // 0 = use MaxPersistPercent; >0 = override persisted budget in bytes
@@ -185,7 +185,7 @@ func computeMemoryBudgets() (total, persisted int64) {
 	} else if totalRAM > 0 {
 		pct := Settings.MaxRamPercent
 		if pct == 0 {
-			pct = 90
+			pct = 50
 		}
 		total = totalRAM * int64(pct) / 100
 	}

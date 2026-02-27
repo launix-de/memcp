@@ -168,13 +168,13 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 <div class="gauge-card">
 	<div class="gauge" id="g-shard" style="--from:0deg;--to:3deg"></div>
-	<h2>Shard RAM</h2>
+	<h2>Evictable Shard RAM</h2>
 	<div class="value" id="v-shard">--</div>
 	<div class="subval" id="s-shard"></div>
 </div>
 <div class="gauge-card">
 	<div class="gauge" id="g-evict" style="--from:0deg;--to:3deg"></div>
-	<h2>Eviction Budget</h2>
+	<h2>Total Eviction Budget</h2>
 	<div class="value" id="v-evict">--</div>
 	<div class="subval" id="s-evict"></div>
 </div>
@@ -417,7 +417,7 @@ apiPost(base+"/dashboard/api/sql",{database:db,sql:sql},cb);
 /* settings grouped by topic */
 var settingsGroups=[
 {group:"Memory",items:[
-{key:"MaxRamPercent",desc:"Total memory budget (% of system RAM, 0=90%)",type:"number"},
+{key:"MaxRamPercent",desc:"Total memory budget (% of system RAM, 0=50%)",type:"number"},
 {key:"MaxRamBytes",desc:"Override total budget in bytes (0=use percent)",type:"number"},
 {key:"MaxPersistPercent",desc:"Persisted shard budget (% of RAM, 0=30%)",type:"number"},
 {key:"MaxPersistBytes",desc:"Override persisted budget in bytes (0=use percent)",type:"number"}

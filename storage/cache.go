@@ -92,7 +92,7 @@ func isPersistedType(t EvictableType) bool {
 // CacheManager manages memory-limited soft references with two-phase eviction.
 // Two budgets: persistedBudget (shards+indexes) and memoryBudget (total).
 type CacheManager struct {
-	memoryBudget    int64 // total budget (default 90% of RAM)
+	memoryBudget    int64 // total budget (default 50% of RAM)
 	persistedBudget int64 // budget for persisted shards+indexes (default 30% of RAM)
 	currentMemory   int64
 
