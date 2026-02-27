@@ -32,11 +32,11 @@ import (
 type EvictableType uint8
 
 const (
-	TypeTempColumn   EvictableType = iota // factor 1
-	TypeShard                             // factor 5
-	TypeIndex                             // factor 25
-	TypeTempKeytable                      // factor 100
-	numEvictableTypes                     // sentinel for array sizing
+	TypeTempColumn    EvictableType = iota // factor 1
+	TypeShard                              // factor 5
+	TypeIndex                              // factor 25
+	TypeTempKeytable                       // factor 100
+	numEvictableTypes                      // sentinel for array sizing
 )
 
 // evictableFactors maps EvictableType → rebuild cost factor.

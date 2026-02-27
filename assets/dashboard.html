@@ -20,7 +20,7 @@ header a:hover{opacity:1;text-decoration:underline}
 .gauge-card .value{font-size:1rem;color:#fff;margin-top:2px;font-weight:600}
 .gauge-card .subval{font-size:.75rem;color:#888;margin-top:1px}
 .gauge{
-	background:url(/gauge.png);
+	background:var(--gauge-bg);
 	background-size:contain;
 	background-repeat:no-repeat;
 	width:220px;
@@ -32,7 +32,7 @@ header a:hover{opacity:1;text-decoration:underline}
 	content:' ';
 	width:100%;
 	height:100%;
-	background:url(/gauge-needle.png);
+	background:var(--gauge-needle-bg);
 	background-size:contain;
 	background-repeat:no-repeat;
 	transform-origin:center center;
@@ -59,6 +59,8 @@ header a:hover{opacity:1;text-decoration:underline}
 .browse-table td{padding:10px 14px;border-bottom:1px solid #2a2a4a;font-size:.85rem}
 .browse-table tr.clickable{cursor:pointer}
 .browse-table tr.clickable:hover td{background:#1a1a3e}
+.browse-table td.clickable{cursor:pointer}
+.browse-table td.clickable:hover{background:#1a1a3e}
 .browse-table td.r{text-align:right}
 .browse-table th.r{text-align:right}
 .badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:.75rem;font-weight:600}
@@ -80,17 +82,27 @@ header a:hover{opacity:1;text-decoration:underline}
 .setting-card input[type="number"],.setting-card input[type="text"],.setting-card select{background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:140px;text-align:right}
 .setting-card input[type="number"]:focus,.setting-card input[type="text"]:focus,.setting-card select:focus{outline:none;border-color:#76b512}
 .toggle{position:relative;width:44px;height:24px;flex-shrink:0}
-.toggle input{opacity:0;width:0;height:0}
+.toggle input{position:absolute;opacity:0;width:100%;height:100%;cursor:pointer;z-index:1;margin:0}
 .toggle .slider{position:absolute;cursor:pointer;inset:0;background:#555;border-radius:24px;transition:.2s}
 .toggle .slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
 .toggle input:checked+.slider{background:#76b512}
 .toggle input:checked+.slider:before{transform:translateX(20px)}
 .settings-status{text-align:center;padding:8px;font-size:.8rem;color:#76b512;min-height:24px}
+.settings-group-header{grid-column:1/-1;font-size:.8rem;color:#888;text-transform:uppercase;letter-spacing:.5px;padding:12px 0 4px;border-bottom:1px solid #2a2a4a;margin-top:8px}
+.settings-group-header:first-child{margin-top:0}
+.btn-danger{background:#c0392b;color:#fff;border:none;padding:4px 10px;border-radius:3px;font-size:.75rem;cursor:pointer}
+.btn-danger:hover{background:#e74c3c}
+.btn-warn{background:#e67e22;color:#fff;border:none;padding:4px 10px;border-radius:3px;font-size:.75rem;cursor:pointer}
+.btn-warn:hover{background:#f39c12}
+.inline-select{background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:3px 6px;border-radius:3px;font-size:.8rem}
+.inline-select:focus{outline:none;border-color:#76b512}
+.action-cell{white-space:nowrap}
+.action-cell button,.action-cell select{margin-left:4px}
 </style>
 </head>
 <body>
 <header>
-<img src="/dashboard/logo.svg" alt="MemCP">
+<img class="logo" alt="MemCP">
 <h1>MemCP Dashboard</h1>
 <div class="links">
 <a href="#" id="link-back">&larr; Back</a>
@@ -157,7 +169,7 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="browse-wrap">
 <h2>Databases</h2>
 <table class="browse-table" id="tbl-databases">
-<thead><tr><th>Name</th><th class="r">Tables</th><th class="r">Size</th></tr></thead>
+<thead><tr><th>Name</th><th class="r">Tables</th><th class="r">Size</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
@@ -167,7 +179,7 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="browse-wrap">
 <h2 id="tables-title">Tables</h2>
 <table class="browse-table" id="tbl-tables">
-<thead><tr><th>Name</th><th>Engine</th><th class="r">Columns</th><th class="r">Shards</th><th class="r">Rows</th><th class="r">Size</th></tr></thead>
+<thead><tr><th>Name</th><th>Engine</th><th class="r">Columns</th><th class="r">Shards</th><th class="r">Rows</th><th class="r">Size</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
@@ -180,7 +192,7 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="detail-section">
 <h3>Columns</h3>
 <table class="browse-table" id="tbl-columns">
-<thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Key</th></tr></thead>
+<thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Key</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
@@ -190,6 +202,31 @@ header a:hover{opacity:1;text-decoration:underline}
 <thead><tr><th class="r">#</th><th>State</th><th class="r">Main</th><th class="r">Delta</th><th class="r">Deletions</th><th class="r">Size</th></tr></thead>
 <tbody></tbody>
 </table>
+</div>
+<div class="detail-section" id="data-section">
+<h3>Data</h3>
+<div style="margin-bottom:10px;display:flex;align-items:center;gap:12px">
+<label style="color:#888;font-size:.8rem">Rows per page:
+<select class="inline-select" id="data-limit">
+<option value="5">5</option>
+<option value="10">10</option>
+<option value="25" selected>25</option>
+<option value="50">50</option>
+<option value="100">100</option>
+</select>
+</label>
+<span style="color:#888;font-size:.8rem" id="data-range"></span>
+<span style="margin-left:auto;display:flex;gap:6px">
+<button class="btn-warn" id="data-prev" disabled>&larr; Prev</button>
+<button class="btn-warn" id="data-next">Next &rarr;</button>
+</span>
+</div>
+<div style="overflow-x:auto">
+<table class="browse-table" id="tbl-data">
+<thead><tr></tr></thead>
+<tbody></tbody>
+</table>
+</div>
 </div>
 </div>
 </div>
@@ -219,6 +256,12 @@ header a:hover{opacity:1;text-decoration:underline}
 <script>
 (function(){
 "use strict";
+/* compute base path for proxy support: /foo/dashboard -> base="/foo" */
+var base=(function(){var p=location.pathname;var i=p.indexOf("/dashboard");return i>0?p.substring(0,i):""})();
+/* fix asset URLs for proxy base */
+document.querySelector("header .logo").src=base+"/dashboard/logo.svg";
+document.documentElement.style.setProperty("--gauge-bg","url("+base+"/gauge.png)");
+document.documentElement.style.setProperty("--gauge-needle-bg","url("+base+"/gauge-needle.png)");
 function setGauge(id,t,valText,subText){
 if(t<0)t=0;if(t>1)t=1;
 var deg=t*270;
@@ -243,7 +286,7 @@ var statusEl=document.getElementById("status");
 var ws,retry=0;
 function connect(){
 var proto=location.protocol==="https:"?"wss:":"ws:";
-ws=new WebSocket(proto+"//"+location.host+"/ws/dashboard");
+ws=new WebSocket(proto+"//"+location.host+base+"/ws/dashboard");
 ws.onopen=function(){
 statusEl.textContent="Connected";
 statusEl.className="status-bar connected";
@@ -300,26 +343,40 @@ return r.json();
 
 function apiPost(url,body,cb){
 fetch(url,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){
-if(!r.ok)throw new Error(r.status);
+if(!r.ok)return r.text().then(function(t){throw new Error(t)});
 return r.json();
-}).then(cb).catch(function(e){console.error("API error:",e)});
+}).then(cb).catch(function(e){window.alert("Error: "+e.message)});
 }
 
-/* settings definitions for rendering form controls */
-var settingsDef=[
+function execSQL(db,sql,cb){
+apiPost(base+"/dashboard/api/sql",{database:db,sql:sql},cb);
+}
+
+/* settings grouped by topic */
+var settingsGroups=[
+{group:"Memory",items:[
 {key:"MaxRamPercent",desc:"Total memory budget (% of system RAM, 0=90%)",type:"number"},
 {key:"MaxRamBytes",desc:"Override total budget in bytes (0=use percent)",type:"number"},
 {key:"MaxPersistPercent",desc:"Persisted shard budget (% of RAM, 0=30%)",type:"number"},
-{key:"MaxPersistBytes",desc:"Override persisted budget in bytes (0=use percent)",type:"number"},
+{key:"MaxPersistBytes",desc:"Override persisted budget in bytes (0=use percent)",type:"number"}
+]},
+{group:"Storage",items:[
 {key:"ShardSize",desc:"Max rows per shard before splitting",type:"number"},
 {key:"PartitionMaxDimensions",desc:"Max partition dimensions for table sharding",type:"number"},
-{key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"},
-{key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logging","sloppy","memory"]},
-{key:"MetricsTracing",desc:"Periodically record metrics to system.perf_metrics",type:"bool"},
-{key:"MetricsTracingInterval",desc:"Metrics sampling interval in seconds (0=60s)",type:"number"},
+{key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logging","sloppy","memory"]}
+]},
+{group:"Query Optimizer",items:[
+{key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"}
+]},
+{group:"Metrics",items:[
+{key:"MetricsTracing",desc:"Periodically record metrics to system_statistic.perf_metrics",type:"bool"},
+{key:"MetricsTracingInterval",desc:"Metrics sampling interval in seconds (0=60s)",type:"number"}
+]},
+{group:"Debugging",items:[
 {key:"Backtrace",desc:"Enable detailed error backtraces",type:"bool"},
 {key:"Trace",desc:"Enable Scheme runtime tracing to file",type:"bool"},
 {key:"TracePrint",desc:"Print trace timing to stdout",type:"bool"}
+]}
 ];
 
 function route(){
@@ -333,15 +390,15 @@ return;
 if(hash==="databases"){
 showView("view-databases");
 backLink.href="#";
-backLink.style.display="";
-apiFetch("/dashboard/api/databases",renderDatabases);
+backLink.style.display="inline";
+apiFetch(base+"/dashboard/api/databases",renderDatabases);
 return;
 }
 if(hash==="settings"){
 showView("view-settings");
 backLink.href="#";
-backLink.style.display="";
-apiFetch("/dashboard/api/settings",renderSettings);
+backLink.style.display="inline";
+apiFetch(base+"/dashboard/api/settings",renderSettings);
 return;
 }
 /* shard detail: db/NAME/TABLE/shard/N */
@@ -350,9 +407,9 @@ if(m){
 var db_=decodeURIComponent(m[1]),tbl_=decodeURIComponent(m[2]),si=m[3];
 showView("view-shard");
 backLink.href="#db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_);
-backLink.style.display="";
+backLink.style.display="inline";
 document.getElementById("shard-title").textContent=db_+"."+tbl_+" - Shard #"+si;
-apiFetch("/dashboard/api/db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_)+"/shard/"+si,function(data){renderShardDetail(data,db_,tbl_,si)});
+apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_)+"/shard/"+si,function(data){renderShardDetail(data,db_,tbl_,si)});
 return;
 }
 /* table detail: db/NAME/TABLE */
@@ -361,9 +418,9 @@ if(m){
 var db2=decodeURIComponent(m[1]),tbl2=decodeURIComponent(m[2]);
 showView("view-detail");
 backLink.href="#db/"+encodeURIComponent(db2);
-backLink.style.display="";
+backLink.style.display="inline";
 document.getElementById("detail-title").textContent=db2+"."+tbl2;
-apiFetch("/dashboard/api/db/"+encodeURIComponent(db2)+"/"+encodeURIComponent(tbl2),function(data){renderDetail(data,db2,tbl2)});
+apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db2)+"/"+encodeURIComponent(tbl2),function(data){renderDetail(data,db2,tbl2)});
 return;
 }
 /* tables in db: db/NAME */
@@ -371,9 +428,9 @@ m=hash.match(/^db\/([^/]+)$/);
 if(m){
 showView("view-tables");
 backLink.href="#databases";
-backLink.style.display="";
+backLink.style.display="inline";
 document.getElementById("tables-title").textContent="Tables in "+decodeURIComponent(m[1]);
-apiFetch("/dashboard/api/db/"+encodeURIComponent(m[1]),function(data){renderTables(data,decodeURIComponent(m[1]))});
+apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(m[1]),function(data){renderTables(data,decodeURIComponent(m[1]))});
 return;
 }
 showView("view-gauges");
@@ -386,9 +443,24 @@ var tb=document.querySelector("#tbl-databases tbody");
 var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
-h+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(d.name))+"'\"><td>"+esc(d.name)+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td></tr>";
+var dn=esc(encodeURIComponent(d.name));
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button></td></tr>";
 }
-tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No databases</td></tr>";
+tb.innerHTML=h||"<tr><td colspan='4' style='color:#888;text-align:center'>No databases</td></tr>";
+tb.querySelectorAll("[data-truncdb]").forEach(function(btn){
+btn.onclick=function(e){e.stopPropagation();var db=btn.getAttribute("data-truncdb");if(window.confirm("Truncate all tables in database '"+db+"'? All data will be deleted.")){
+apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db),function(tables){
+var pending=tables.length;
+if(!pending){route();return}
+for(var j=0;j<tables.length;j++){(function(t){
+execSQL(db,"TRUNCATE TABLE `"+t.name+"`",function(){pending--;if(!pending)route()});
+})(tables[j])}
+});
+}};
+});
+tb.querySelectorAll("[data-dropdb]").forEach(function(btn){
+btn.onclick=function(e){e.stopPropagation();var db=btn.getAttribute("data-dropdb");if(window.confirm("Drop database '"+db+"'? This cannot be undone!"))execSQL(db,"DROP DATABASE `"+db+"`",function(){location.hash="databases";route()})};
+});
 }
 
 function renderTables(data,dbname){
@@ -397,19 +469,46 @@ var tb=document.querySelector("#tbl-tables tbody");
 var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
-h+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(dbname))+"/"+esc(encodeURIComponent(d.name))+"'\"><td>"+esc(d.name)+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows||0)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td></tr>";
+var dbn=esc(encodeURIComponent(dbname)),tn=esc(encodeURIComponent(d.name));
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/"+tn+"'\">"+esc(d.name)+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows||0)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
 }
-tb.innerHTML=h||"<tr><td colspan='6' style='color:#888;text-align:center'>No tables</td></tr>";
+tb.innerHTML=h||"<tr><td colspan='7' style='color:#888;text-align:center'>No tables</td></tr>";
+tb.querySelectorAll("[data-trunctbl]").forEach(function(btn){
+btn.onclick=function(e){e.stopPropagation();var tbl=btn.getAttribute("data-trunctbl");if(window.confirm("Truncate table '"+tbl+"'? All data will be deleted."))execSQL(dbname,"TRUNCATE TABLE `"+tbl+"`",function(){route()})};
+});
+tb.querySelectorAll("[data-droptbl]").forEach(function(btn){
+btn.onclick=function(e){e.stopPropagation();var tbl=btn.getAttribute("data-droptbl");if(window.confirm("Drop table '"+tbl+"'? This cannot be undone!"))execSQL(dbname,"DROP TABLE `"+tbl+"`",function(){route()})};
+});
 }
 
 function renderDetail(data,dbname,tblname){
 /* meta cards */
 var meta=data.meta||{};
-var mc="<div class='meta-card'><div class='label'>Engine</div><div class='val'>"+esc(meta.engine||"--")+"</div></div>";
+var engines=["safe","logging","sloppy","memory"];
+var engSel="<select class='inline-select' id='engine-select'>";
+for(var i=0;i<engines.length;i++){
+engSel+="<option value='"+engines[i]+"'"+(meta.engine===engines[i]?" selected":"")+">"+engines[i]+"</option>";
+}
+engSel+="</select>";
+var mc="<div class='meta-card'><div class='label'>Engine</div><div class='val'>"+engSel+"</div></div>";
 mc+="<div class='meta-card'><div class='label'>Collation</div><div class='val'>"+esc(meta.collation||"--")+"</div></div>";
 var uniq=meta.uniques||[];
 mc+="<div class='meta-card'><div class='label'>Unique Keys</div><div class='val'>"+uniq.length+"</div></div>";
+mc+="<div class='meta-card'><button class='btn-warn' id='btn-truncate-tbl'>Truncate Table</button></div>";
 document.getElementById("detail-meta").innerHTML=mc;
+var engEl=document.getElementById("engine-select");
+var origEngine=engEl.value;
+engEl.addEventListener("change",function(){
+var eng=this.value;
+var sel=this;
+fetch(base+"/dashboard/api/sql",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:dbname,sql:"ALTER TABLE `"+tblname+"` ENGINE="+eng})}).then(function(r){
+if(!r.ok)return r.text().then(function(t){throw new Error(t)});
+return r.json();
+}).then(function(){origEngine=eng}).catch(function(e){window.alert("Error: "+e.message);sel.value=origEngine});
+});
+document.getElementById("btn-truncate-tbl").addEventListener("click",function(){
+if(window.confirm("Truncate table '"+tblname+"'? All data will be deleted."))execSQL(dbname,"TRUNCATE TABLE `"+tblname+"`",function(){route()});
+});
 /* columns */
 var cols=data.columns||[];
 var ch="";
@@ -418,9 +517,12 @@ var c=cols[i];
 var keyBadge="";
 if(c.key==="PRI")keyBadge="<span class='badge badge-pri'>PRI</span>";
 else if(c.key==="UNI")keyBadge="<span class='badge badge-uni'>UNI</span>";
-ch+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.type)+"</td><td>"+(c.nullable?"<span class='badge badge-null'>NULL</span>":"NOT NULL")+"</td><td>"+keyBadge+"</td></tr>";
+ch+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.type)+"</td><td>"+(c.nullable?"<span class='badge badge-null'>NULL</span>":"NOT NULL")+"</td><td>"+keyBadge+"</td><td class='action-cell'><button class='btn-danger' data-dropcol='"+esc(c.name)+"'>Drop</button></td></tr>";
 }
-document.querySelector("#tbl-columns tbody").innerHTML=ch||"<tr><td colspan='4' style='color:#888;text-align:center'>No columns</td></tr>";
+document.querySelector("#tbl-columns tbody").innerHTML=ch||"<tr><td colspan='5' style='color:#888;text-align:center'>No columns</td></tr>";
+document.querySelectorAll("#tbl-columns [data-dropcol]").forEach(function(btn){
+btn.onclick=function(){var col=btn.getAttribute("data-dropcol");if(window.confirm("Drop column '"+col+"' from "+tblname+"? This cannot be undone!"))execSQL(dbname,"ALTER TABLE `"+tblname+"` DROP COLUMN `"+col+"`",function(){route()})};
+});
 /* shards - clickable to shard detail */
 var shards=data.shards||[];
 var sh="";
@@ -429,6 +531,55 @@ var s=shards[i];
 sh+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(dbname))+"/"+esc(encodeURIComponent(tblname))+"/shard/"+s.shard+"'\"><td class='r'>"+s.shard+"</td><td>"+esc(s.state)+"</td><td class='r'>"+s.main_count+"</td><td class='r'>"+s.delta+"</td><td class='r'>"+s.deletions+"</td><td class='r'>"+fmt(s.size_bytes||0)+"</td></tr>";
 }
 document.querySelector("#tbl-shards tbody").innerHTML=sh||"<tr><td colspan='6' style='color:#888;text-align:center'>No shards</td></tr>";
+/* data preview */
+var dataOffset=0;
+var dataLimit=parseInt(document.getElementById("data-limit").value)||25;
+function loadData(){
+var sql="SELECT * FROM `"+tblname+"` LIMIT "+dataLimit+" OFFSET "+dataOffset;
+fetch(base+"/dashboard/api/query",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:dbname,sql:sql})}).then(function(r){
+if(!r.ok)return r.text().then(function(t){throw new Error(t)});
+return r.text();
+}).then(function(text){
+var lines=text.trim().split("\n").filter(function(l){return l.length>0});
+var rows=lines.map(function(l){return JSON.parse(l)});
+renderData(rows);
+}).catch(function(e){
+document.querySelector("#tbl-data tbody").innerHTML="<tr><td style='color:#e74c3c'>"+esc(e.message)+"</td></tr>";
+});
+}
+function renderData(rows){
+var thead=document.querySelector("#tbl-data thead tr");
+var tbody=document.querySelector("#tbl-data tbody");
+if(!rows.length){
+thead.innerHTML="";
+tbody.innerHTML="<tr><td style='color:#888;text-align:center'>No data</td></tr>";
+document.getElementById("data-range").textContent="0 rows";
+document.getElementById("data-prev").disabled=true;
+document.getElementById("data-next").disabled=true;
+return;
+}
+var keys=Object.keys(rows[0]);
+var th="";
+for(var i=0;i<keys.length;i++)th+="<th>"+esc(keys[i])+"</th>";
+thead.innerHTML=th;
+var h="";
+for(var r=0;r<rows.length;r++){
+h+="<tr>";
+for(var k=0;k<keys.length;k++){
+var v=rows[r][keys[k]];
+h+="<td>"+esc(v===null?"NULL":v)+"</td>";
+}
+h+="</tr>";
+}
+tbody.innerHTML=h;
+document.getElementById("data-range").textContent="Rows "+(dataOffset+1)+"-"+(dataOffset+rows.length);
+document.getElementById("data-prev").disabled=(dataOffset===0);
+document.getElementById("data-next").disabled=(rows.length<dataLimit);
+}
+document.getElementById("data-limit").onchange=function(){dataLimit=parseInt(this.value)||25;dataOffset=0;loadData()};
+document.getElementById("data-prev").onclick=function(){dataOffset=Math.max(0,dataOffset-dataLimit);loadData()};
+document.getElementById("data-next").onclick=function(){dataOffset+=dataLimit;loadData()};
+loadData();
 }
 
 function renderShardDetail(data,dbname,tblname,shardIdx){
@@ -452,8 +603,11 @@ tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No col
 function renderSettings(data){
 var grid=document.getElementById("settings-grid");
 var h="";
-for(var i=0;i<settingsDef.length;i++){
-var s=settingsDef[i];
+for(var g=0;g<settingsGroups.length;g++){
+var grp=settingsGroups[g];
+h+="<div class='settings-group-header'>"+esc(grp.group)+"</div>";
+for(var i=0;i<grp.items.length;i++){
+var s=grp.items[i];
 var val=data[s.key];
 h+="<div class='setting-card'><div class='info'><div class='name'>"+esc(s.key)+"</div><div class='desc'>"+esc(s.desc)+"</div></div>";
 if(s.type==="bool"){
@@ -469,6 +623,7 @@ h+="<input type='number' data-key='"+esc(s.key)+"' value='"+(val||0)+"'>";
 }
 h+="</div>";
 }
+}
 grid.innerHTML=h;
 /* attach change handlers */
 grid.querySelectorAll("input,select").forEach(function(el){
@@ -480,7 +635,7 @@ else if(el.type==="number")value=Number(el.value);
 else value=el.value;
 var statusEl=document.getElementById("settings-status");
 statusEl.textContent="Saving "+key+"...";
-apiPost("/dashboard/api/settings",{key:key,value:value},function(){
+apiPost(base+"/dashboard/api/settings",{key:key,value:value},function(){
 statusEl.textContent=key+" saved";
 setTimeout(function(){statusEl.textContent=""},2000);
 });

@@ -97,6 +97,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					))
 				) (dashboard_send_401 res))
 			)
+			/* API: execute admin SQL (ALTER, DROP, etc.) */
+			"/dashboard/api/sql" (begin
+				(if (dashboard_check_admin req) (begin
+					(define body (json_decode ((req "body"))))
+					(define db (body "database"))
+					(define sql (body "sql"))
+					(eval (parse_sql db sql (lambda (schema table write) true)))
+					(dashboard_send_json res "{\"ok\":true}")
+				) (dashboard_send_401 res))
+			)
+			/* API: read-only query, streams NDJSON (same auth realm as dashboard) */
+			"/dashboard/api/query" (begin
+				(if (dashboard_check_admin req) (begin
+					(define body (json_decode ((req "body"))))
+					(define db (body "database"))
+					(define sql (body "sql"))
+					((res "header") "Content-Type" "application/x-ndjson")
+					(define resultrow (res "jsonl"))
+					(eval (parse_sql db sql (lambda (schema table write) (not write))))
+				) (dashboard_send_401 res))
+			)
 			/* API: shard column detail with compression types */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
 				(if (dashboard_check_admin req) (begin
@@ -135,8 +156,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							"size_bytes" (s "size_bytes")
 						))
 					)))
-					(define uniques (filter (meta "Unique") (lambda (u) (not (nil? u)))))
-					(define unique_items (if (nil? uniques) "[]"
+					(define raw_uniques (meta "Unique"))
+					(define uniques (if (nil? raw_uniques) nil (filter raw_uniques (lambda (u) (not (nil? u))))))
+					(define unique_items (if (or (nil? uniques) (equal? (count uniques) 0)) "[]"
 						(dashboard_json_array (map uniques (lambda (u)
 							(concat "{\"id\":" (json_encode (u "Id")) ",\"cols\":" (json_encode (u "Cols")) "}")
 						)))
@@ -202,17 +224,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	))
 ))
 
-/* Metrics tracing: periodically insert rows into system.perf_metrics */
-(if (not (has? (show "system") "perf_metrics")) (begin
-	(print "creating table system.perf_metrics")
-	(eval (parse_sql "system" "CREATE TABLE perf_metrics(time text, cpu float, mem_available bigint, mem_total bigint, shard_memory bigint, shard_budget bigint, connections int, max_connections int, rps float) ENGINE=SLOPPY" (lambda (schema table write) true)))
+/* Metrics tracing: periodically insert rows into system_statistic.perf_metrics */
+(if (not (has? (show "system_statistic") "perf_metrics")) (begin
+	(print "creating table system_statistic.perf_metrics")
+	(eval (parse_sql "system_statistic" "CREATE TABLE perf_metrics(time text, cpu float, mem_available bigint, mem_total bigint, shard_memory bigint, shard_budget bigint, connections int, max_connections int, rps float) ENGINE=SLOPPY" (lambda (schema table write) true)))
 ))
 
 /* self-scheduling tracing loop via setTimeout */
 (define metrics_trace_tick (lambda () (begin
 	(if (settings "MetricsTracing") (begin
 		(set cs (cache_stat))
-		(insert "system" "perf_metrics"
+		(insert "system_statistic" "perf_metrics"
 			'("time" "cpu" "mem_available" "mem_total" "shard_memory" "shard_budget" "connections" "max_connections" "rps")
 			(list (list
 				(now)
