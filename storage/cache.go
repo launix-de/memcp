@@ -37,14 +37,15 @@ const (
 	TypeShard                              // factor 5
 	TypeIndex                              // factor 25
 	TypeTempKeytable                       // factor 100
+	TypeCacheEntry                         // factor 1
 	numEvictableTypes                      // sentinel for array sizing
 )
 
 // evictableFactors maps EvictableType → rebuild cost factor.
 // Higher factor = more protected = lower evictionScore.
-var evictableFactors = [numEvictableTypes]int64{1, 5, 25, 100}
+var evictableFactors = [numEvictableTypes]int64{1, 5, 25, 100, 1}
 
-var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable"}
+var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry"}
 
 type softItem struct {
 	pointer       any
@@ -468,12 +469,13 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		if shardColsOnly < 0 {
 			shardColsOnly = 0
 		}
-		log.Printf("memory pressure: freed %s total (%s temp columns, %s shard columns, %s indexes, %s keytables)",
+		log.Printf("memory pressure: freed %s total (%s temp columns, %s shard columns, %s indexes, %s keytables, %s cache entries)",
 			units.BytesSize(float64(totalFreed)),
 			units.BytesSize(float64(freedByType[TypeTempColumn])),
 			units.BytesSize(float64(shardColsOnly)),
 			units.BytesSize(float64(freedByType[TypeIndex])),
 			units.BytesSize(float64(freedByType[TypeTempKeytable])),
+			units.BytesSize(float64(freedByType[TypeCacheEntry])),
 		)
 	}
 }
@@ -502,5 +504,6 @@ func (cs CacheStat) FormatStat() string {
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Shard columns", cs.CountByType[TypeShard], units.BytesSize(float64(shardColsOnly))))
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Indexes", cs.CountByType[TypeIndex], units.BytesSize(float64(cs.SizeByType[TypeIndex]))))
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Temp keytables", cs.CountByType[TypeTempKeytable], units.BytesSize(float64(cs.SizeByType[TypeTempKeytable]))))
+	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Cache entries", cs.CountByType[TypeCacheEntry], units.BytesSize(float64(cs.SizeByType[TypeCacheEntry]))))
 	return b.String()
 }

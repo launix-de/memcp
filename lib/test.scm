@@ -1266,6 +1266,28 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (>= (max_connections) 1) true "max_connections >= 1")
 	(assert (>= (requests_per_second) 0) true "requests_per_second >= 0")
 
+	/* Cachemap */
+	(print "testing cachemap ...")
+	(define cm (newcachemap))
+	/* set and get */
+	(cm "k1" 42)
+	(assert (cm "k1") 42 "cachemap set/get returns value")
+	/* overwrite existing key */
+	(cm "k1" 99)
+	(assert (cm "k1") 99 "cachemap overwrite returns new value")
+	/* nonexistent key returns nil */
+	(assert (cm "missing") nil "cachemap get nonexistent returns nil")
+	/* multiple entries */
+	(cm "a" "hello")
+	(cm "b" "world")
+	(assert (cm "a") "hello" "cachemap get a")
+	(assert (cm "b") "world" "cachemap get b")
+	/* list keys returns all set keys */
+	(define cm_keys (cm))
+	(assert (contains? cm_keys "k1") true "cachemap lists key k1")
+	(assert (contains? cm_keys "a") true "cachemap lists key a")
+	(assert (contains? cm_keys "b") true "cachemap lists key b")
+
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
 	(if (< (teststat "success") (teststat "count")) (begin
