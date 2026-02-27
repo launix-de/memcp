@@ -8,8 +8,8 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:Lato,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh}
 header{background:#76b512;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-header img{height:40px;width:auto;flex-shrink:0}
-header h1{font-size:1.3rem;color:#fff;font-weight:600;flex-shrink:0}
+header img{height:40px;width:auto;flex-shrink:0;cursor:pointer}
+header h1{font-size:1.3rem;color:#fff;font-weight:600;flex-shrink:0;cursor:pointer}
 header .links{margin-left:auto;display:flex;gap:16px}
 header a{color:#fff;text-decoration:none;font-size:.9rem;opacity:.9}
 header a:hover{opacity:1;text-decoration:underline}
@@ -333,6 +333,10 @@ var schemeOpt=document.querySelector("#console-syntax option[value='scheme']");
 if(schemeOpt)schemeOpt.disabled=!isAdmin;
 if(!isAdmin&&document.getElementById("console-syntax").value==="scheme")document.getElementById("console-syntax").value="sql";
 }
+/* Logo and title click → navigate to main page (gauges for admin, databases otherwise) */
+function goHome(){location.hash=isAdmin?"":"databases"}
+document.querySelector("header .logo").addEventListener("click",goHome);
+document.querySelector("header h1").addEventListener("click",goHome);
 fetch(base+"/dashboard/api/whoami",{credentials:"same-origin"}).then(function(r){return r.json()}).then(function(d){
 isAdmin=!!d.admin;
 applyAdminState();
