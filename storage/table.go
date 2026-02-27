@@ -502,10 +502,10 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	}
 
 	t.schema.schemalock.Lock()
-	defer t.schema.schemalock.Unlock()
 
 	for _, c := range t.Columns {
 		if c.Name == name {
+			t.schema.schemalock.Unlock()
 			return false // column already exists
 		}
 	}
@@ -558,8 +558,12 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 		s.columns[name] = new(StorageSparse)
 		s.mu.Unlock()
 	}
-	// register temp column with CacheManager
-	if c.IsTemp {
+	isTemp := c.IsTemp
+	t.schema.save()
+	t.schema.schemalock.Unlock()
+	// register temp column with CacheManager AFTER releasing schemalock
+	// to avoid deadlock: AddItem → run() → evict → cleanup → TryLock(schemalock)
+	if isTemp {
 		tbl := t
 		colName := name
 		GlobalCache.AddItem(cp, 0, TypeTempColumn, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
@@ -589,18 +593,15 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 			return true
 		}, tempColumnLastUsed, nil)
 	}
-	t.schema.save()
 	return true
 }
 
 func (t *table) DropColumn(name string) bool {
 	t.schema.schemalock.Lock()
+	var removedCol *column
 	for i, c := range t.Columns {
 		if c.Name == name {
-			// deregister temp column from CacheManager before removal
-			if c.IsTemp {
-				GlobalCache.Remove(c) // *column pointer is stable
-			}
+			removedCol = c
 			// found the column
 			t.Columns = append(t.Columns[:i], t.Columns[i+1:]...) // remove from slice
 			for _, s := range t.Shards {
@@ -616,6 +617,10 @@ func (t *table) DropColumn(name string) bool {
 
 			t.schema.save()
 			t.schema.schemalock.Unlock()
+			// deregister temp column AFTER releasing schemalock
+			if removedCol.IsTemp {
+				GlobalCache.Remove(removedCol)
+			}
 			return true
 		}
 	}

@@ -197,6 +197,22 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 	return loadLocked()
 }
 
+// getColumnStorageRLocked returns the column storage without re-acquiring mu.
+// The caller MUST already hold u.mu.RLock(). This avoids the reentrant-RLock
+// deadlock that occurs when a concurrent writer is waiting for mu.Lock()
+// (Go's write-preferring RWMutex queues new readers behind pending writers).
+// Panics if the column is missing or not yet loaded from disk.
+func (u *storageShard) getColumnStorageRLocked(colName string) ColumnStorage {
+	cs, present := u.columns[colName]
+	if !present {
+		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+	}
+	if cs == nil {
+		panic("Column not loaded while shard RLocked: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+	}
+	return cs
+}
+
 // getColumnStorageOrPanic returns a stable pointer to a column's storage.
 // It never reads u.columns without holding the shard lock and loads on demand.
 func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {

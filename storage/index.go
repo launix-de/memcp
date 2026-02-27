@@ -49,7 +49,6 @@ type StorageIndex struct {
 	mu         sync.Mutex
 }
 
-
 func (idx *StorageIndex) ComputeSize() uint {
 	var sz uint = 24 * 8 // heuristic
 	sz += idx.mainIndexes.ComputeSize()
@@ -197,13 +196,45 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 	// (also consider incremental indexes??)
 }
 
+// fullScan iterates all record IDs (main + delta) in natural order.
+// Used when the index is not built yet or was evicted.
+func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
+	bufN := 0
+	for i := uint32(0); i < s.t.main_count; i++ {
+		buf[bufN] = i
+		bufN++
+		if bufN == len(buf) {
+			if !callback(buf[:bufN]) {
+				return
+			}
+			bufN = 0
+		}
+	}
+	for i := 0; i < maxInsertIndex; i++ {
+		buf[bufN] = s.t.main_count + uint32(i)
+		bufN++
+		if bufN == len(buf) {
+			if !callback(buf[:bufN]) {
+				return
+			}
+			bufN = 0
+		}
+	}
+	if bufN > 0 {
+		callback(buf[:bufN])
+	}
+}
+
 // iterate over index using a caller-provided buffer for batching
 func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 
-	// find columns in storage
+	// find columns in storage — use RLocked variant because the caller
+	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
+	// Re-acquiring RLock via getColumnStorageOrPanic would deadlock when a
+	// concurrent writer is waiting for s.t.mu.Lock() (write-preferring RWMutex).
 	cols := make([]ColumnStorage, len(s.Cols))
 	for i, c := range s.Cols {
-		cols[i] = s.t.getColumnStorageOrPanic(c)
+		cols[i] = s.t.getColumnStorageRLocked(c)
 	}
 	// no collation-specific helpers in the current implementation
 
@@ -213,30 +244,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 		// index is not built yet
 		if s.Savings < savings_threshold {
 			// iterate over all items because we don't want to store the index
-			bufN := 0
-			for i := uint32(0); i < s.t.main_count; i++ {
-				buf[bufN] = i
-				bufN++
-				if bufN == len(buf) {
-					if !callback(buf[:bufN]) {
-						return
-					}
-					bufN = 0
-				}
-			}
-			for i := 0; i < maxInsertIndex; i++ {
-				buf[bufN] = s.t.main_count + uint32(i)
-				bufN++
-				if bufN == len(buf) {
-					if !callback(buf[:bufN]) {
-						return
-					}
-					bufN = 0
-				}
-			}
-			if bufN > 0 {
-				callback(buf[:bufN])
-			}
+			s.fullScan(maxInsertIndex, buf, callback)
 			return
 		} else {
 			// rebuild index
@@ -316,11 +324,25 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsert
 	}
 start_scan:
 
+	// Snapshot index state under the lock to prevent a TOCTOU race with
+	// indexCleanup, which may set active=false / mainIndexes={} / deltaBtree=nil
+	// concurrently. The snapshot keeps the backing data alive via GC references.
+	s.mu.Lock()
+	if !s.active {
+		// Index was evicted between our initial check and here.
+		s.mu.Unlock()
+		s.fullScan(maxInsertIndex, buf, callback)
+		return
+	}
+	snapMainIndexes := s.mainIndexes
+	snapDeltaBtree := s.deltaBtree
+	s.mu.Unlock()
+
 	// bisect where the lower bound is found
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
 	mainIdx := sort.Search(int(s.t.main_count), func(idx int) bool {
-		idx2 := uint32(int64(s.mainIndexes.GetValueUInt(uint32(idx))) + s.mainIndexes.offset)
+		idx2 := uint32(int64(snapMainIndexes.GetValueUInt(uint32(idx))) + snapMainIndexes.offset)
 		for i := 0; i < cmpCols; i++ {
 			a := lower[i]
 			b := cols[i].GetValue(idx2)
@@ -340,7 +362,7 @@ start_scan:
 			if uint32(mainIdx) >= s.t.main_count {
 				return 0, false
 			}
-			recid := uint32(int64(s.mainIndexes.GetValueUInt(uint32(mainIdx))) + s.mainIndexes.offset)
+			recid := uint32(int64(snapMainIndexes.GetValueUInt(uint32(mainIdx))) + snapMainIndexes.offset)
 			mainIdx++
 			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, func(i int) scm.Scmer {
 				return cols[i].GetValue(recid)
@@ -381,13 +403,7 @@ start_scan:
 
 	mainRecid, mainOk := nextMain()
 
-	if maxInsertIndex > 0 {
-		// Contract: when the index is active, deltaBtree is always populated.
-		// It is built during index construction and maintained by
-		// shard.insertDataset / insertDatasetFromLog on every new insert.
-		if s.deltaBtree == nil {
-			panic("BUG: active index on " + s.t.t.Name + " (" + s.String() + ") has nil deltaBtree")
-		}
+	if maxInsertIndex > 0 && snapDeltaBtree != nil {
 		maxCol := 0
 		for _, col := range s.Cols {
 			if pos, ok := s.t.deltaColumns[col]; ok && pos+1 > maxCol {
@@ -401,7 +417,7 @@ start_scan:
 				refLower[pos] = lower[i]
 			}
 		}
-		s.deltaBtree.AscendGreaterOrEqual(indexPair{-1, refLower}, func(p indexPair) bool {
+		snapDeltaBtree.AscendGreaterOrEqual(indexPair{-1, refLower}, func(p indexPair) bool {
 			if stopped {
 				return false
 			}

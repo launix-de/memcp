@@ -486,9 +486,9 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	}
 	db.ensureLoaded()
 	db.schemalock.Lock()
-	defer db.schemalock.Unlock()
 	t := db.tables.Get(name)
 	if t != nil {
+		db.schemalock.Unlock()
 		if ifnotexists {
 			return t, false // return the table found
 		}
@@ -504,17 +504,19 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	t.Auto_increment = 1
 	t2 := db.tables.Set(t)
 	if t2 != nil {
+		db.schemalock.Unlock()
 		// concurrent create
 		panic("Table " + name + " already exists")
 	} else {
 		db.save()
 	}
-	// register temp keytable with CacheManager (`.`-prefix = temp)
+	db.schemalock.Unlock()
+	// register temp keytable with CacheManager AFTER releasing schemalock
+	// to avoid deadlock: AddItem → run() → evict → keytableCleanup → TryLock(schemalock)
 	if strings.HasPrefix(name, ".") {
 		schemaName := schema
 		GlobalCache.AddItem(t, 0, TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
-			keytableCleanup(ptr.(*table), schemaName, freedByType)
-			return true
+			return keytableCleanup(ptr.(*table), schemaName, freedByType)
 		}, keytableLastUsed, nil)
 	}
 	return t, true
@@ -535,12 +537,13 @@ func DropTable(schema, name string, ifexists bool) {
 		}
 		panic("Table " + schema + "." + name + " does not exist")
 	}
-	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
-	GlobalCache.Remove(t)
 	db.tables.Remove(name)
 	db.save()
 	db.schemalock.Unlock()
 
+	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
+	// Must be AFTER schemalock.Unlock to avoid deadlock: Remove → run() → evict → keytableCleanup → TryLock
+	GlobalCache.Remove(t)
 	// deregister temp columns from CacheManager
 	for _, c := range t.Columns {
 		if c.IsTemp {
@@ -583,12 +586,24 @@ func RenameTable(schema, oldname, newname string) {
 
 // keytableCleanup is called by the CacheManager when evicting a temp keytable.
 // MUST NOT call public GlobalCache.Remove (deadlock: we're inside the CacheManager goroutine).
-func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) {
+// MUST NOT use Lock on schemalock (deadlock: CreateTable holds schemalock → AddItem → evict → here).
+// Returns false if the schemalock is busy (item pushed back for later retry).
+func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) bool {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println("error: keytableCleanup panic for", schemaName+"."+tbl.Name, ":", r)
 		}
 	}()
+	// drop the table directly (bypass DropTable to avoid deadlock on opChan)
+	db := GetDatabase(schemaName)
+	if db != nil {
+		if !db.schemalock.TryLock() {
+			return false // schemalock is held (e.g. by CreateTable); retry later
+		}
+		db.tables.Remove(tbl.Name) // no-op if already removed by DropTable
+		db.save()
+		db.schemalock.Unlock()
+	}
 	// remove all shard+index+temp column registrations for this table (recursive)
 	for _, c := range tbl.Columns {
 		if c.IsTemp {
@@ -607,20 +622,13 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 			GlobalCache.removeInternal(idx, freedByType)
 		}
 	}
-	// drop the table directly (bypass DropTable to avoid deadlock on opChan)
-	db := GetDatabase(schemaName)
-	if db != nil {
-		db.schemalock.Lock()
-		db.tables.Remove(tbl.Name) // no-op if already removed by DropTable
-		db.save()
-		db.schemalock.Unlock()
-		for _, s := range tbl.Shards {
-			s.RemoveFromDisk()
-		}
-		for _, s := range tbl.PShards {
-			s.RemoveFromDisk()
-		}
+	for _, s := range tbl.Shards {
+		s.RemoveFromDisk()
 	}
+	for _, s := range tbl.PShards {
+		s.RemoveFromDisk()
+	}
+	return true
 }
 
 func keytableLastUsed(ptr any) time.Time {
