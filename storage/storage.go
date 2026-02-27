@@ -1076,6 +1076,57 @@ func Init(en scm.Env) {
 		}, false, false, nil,
 	})
 
+	// show_shard_columns(schema, table, shardIndex): returns per-column storage details for a shard
+	scm.Declare(&en, &scm.Declaration{
+		"show_shard_columns", "show per-column storage details for a specific shard",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "database name", nil},
+			scm.DeclarationParameter{"table", "string", "table name", nil},
+			scm.DeclarationParameter{"shard", "int", "shard index", nil},
+		}, "any",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+			shards := t.ActiveShards()
+			idx := scm.ToInt(a[2])
+			if idx < 0 || idx >= len(shards) {
+				panic("shard index out of range")
+			}
+			s := shards[idx]
+			if s == nil {
+				return scm.NewSlice([]scm.Scmer{})
+			}
+			s.mu.RLock()
+			rows := make([]scm.Scmer, 0, len(t.Columns))
+			for _, col := range t.Columns {
+				cs := s.columns[col.Name]
+				var typStr string
+				var colSize uint
+				if cs != nil {
+					typStr = cs.String()
+					colSize = cs.ComputeSize()
+				} else {
+					typStr = "unloaded"
+					colSize = 0
+				}
+				rows = append(rows, scm.NewSlice([]scm.Scmer{
+					scm.NewString("name"), scm.NewString(col.Name),
+					scm.NewString("compression"), scm.NewString(typStr),
+					scm.NewString("size_bytes"), scm.NewInt(int64(colSize)),
+				}))
+			}
+			s.mu.RUnlock()
+			return scm.NewSlice(rows)
+		}, false, false, nil,
+	})
+
 	// show_triggers(schema, table): returns a list of triggers for a table (non-system triggers only)
 	scm.Declare(&en, &scm.Declaration{
 		"show_triggers", "show triggers for a given table",

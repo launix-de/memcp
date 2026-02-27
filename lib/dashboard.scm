@@ -47,12 +47,134 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(dashboard_push send)
 )))
 
+/* helper: sum size_bytes across all shards of a table */
+(define dashboard_table_size (lambda (db tbl)
+	(reduce (show_shards db tbl) (lambda (acc shard) (+ acc (shard "size_bytes"))) 0)
+))
+
+/* helper: join list of JSON strings into a JSON array */
+(define dashboard_json_array (lambda (items)
+	(if (nil? items) "[]" (concat "[" (reduce items (lambda (a b) (concat a "," b))) "]"))
+))
+
+/* helper: send JSON response with proper Content-Type */
+(define dashboard_send_json (lambda (res body) (begin
+	((res "header") "Content-Type" "application/json")
+	((res "print") body)
+)))
+
 /* hook into http_handler */
 (define http_handler (begin
 	(set old_handler http_handler)
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		(match (req "path")
+			/* API: list all databases with table count and total size */
+			"/dashboard/api/databases" (begin
+				(if (dashboard_check_admin req) (begin
+					(define dbs (show))
+					(define items (map dbs (lambda (db) (begin
+						(define tables (show db))
+						(define table_count (if (nil? tables) 0 (count tables)))
+						(define total_size (if (nil? tables) 0
+							(reduce (map tables (lambda (tbl) (dashboard_table_size db tbl))) (lambda (a b) (+ a b)) 0)))
+						(json_encode_assoc (list "name" db "tables" table_count "size_bytes" total_size))
+					))))
+					(dashboard_send_json res (dashboard_json_array items))
+				) (dashboard_send_401 res))
+			)
+			/* API: read all settings */
+			"/dashboard/api/settings" (begin
+				(if (dashboard_check_admin req) (begin
+					(if (equal? (req "method") "POST") (begin
+						/* write a single setting: body is JSON {"key":"...", "value":...} */
+						(define body (json_decode ((req "body"))))
+						(settings (body "key") (body "value"))
+						(dashboard_send_json res "{\"ok\":true}")
+					) (begin
+						/* read all settings as assoc object */
+						(dashboard_send_json res (json_encode_assoc (settings)))
+					))
+				) (dashboard_send_401 res))
+			)
+			/* API: shard column detail with compression types */
+			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
+				(if (dashboard_check_admin req) (begin
+					(define cols (show_shard_columns dbname tblname (simplify shardidx)))
+					(define items (map cols (lambda (c)
+						(json_encode_assoc (list
+							"name" (c "name")
+							"compression" (c "compression")
+							"size_bytes" (c "size_bytes")
+						))
+					)))
+					(dashboard_send_json res (dashboard_json_array items))
+				) (dashboard_send_401 res))
+			)
+			/* API: table detail with columns, shards, meta */
+			(regex "^/dashboard/api/db/([^/]+)/([^/]+)$" _ dbname tblname) (begin
+				(if (dashboard_check_admin req) (begin
+					(define cols (show dbname tblname))
+					(define shards (show_shards dbname tblname))
+					(define meta (show dbname tblname "meta"))
+					(define col_items (map cols (lambda (col)
+						(json_encode_assoc (list
+							"name" (col "Field")
+							"type" (col "Type")
+							"nullable" (col "Null")
+							"key" (col "Key")
+						))
+					)))
+					(define shard_items (map shards (lambda (s)
+						(json_encode_assoc (list
+							"shard" (s "shard")
+							"state" (s "state")
+							"main_count" (s "main_count")
+							"delta" (s "delta")
+							"deletions" (s "deletions")
+							"size_bytes" (s "size_bytes")
+						))
+					)))
+					(define uniques (filter (meta "Unique") (lambda (u) (not (nil? u)))))
+					(define unique_items (if (nil? uniques) "[]"
+						(dashboard_json_array (map uniques (lambda (u)
+							(concat "{\"id\":" (json_encode (u "Id")) ",\"cols\":" (json_encode (u "Cols")) "}")
+						)))
+					))
+					/* build JSON manually to nest arrays inside object */
+					(dashboard_send_json res (concat
+						"{\"columns\":" (dashboard_json_array col_items)
+						",\"shards\":" (dashboard_json_array shard_items)
+						",\"meta\":{\"engine\":" (json_encode (meta "Engine"))
+						",\"collation\":" (json_encode (meta "Collation"))
+						",\"uniques\":" unique_items "}}"
+					))
+				) (dashboard_send_401 res))
+			)
+			(regex "^/dashboard/api/db/([^/]+)$" _ dbname) (begin
+				(if (dashboard_check_admin req) (begin
+					(define tables (show dbname))
+					(define items (if (nil? tables) nil (map tables (lambda (tbl) (begin
+						(define meta (show dbname tbl "meta"))
+						(define cols (show dbname tbl))
+						(define shards (show_shards dbname tbl))
+						(define col_count (if (nil? cols) 0 (count cols)))
+						(define shard_count (if (nil? shards) 0 (count shards)))
+						(define total_size (dashboard_table_size dbname tbl))
+						(define row_count (if (nil? shards) 0
+							(reduce shards (lambda (acc s) (+ acc (+ (s "main_count") (s "delta")) (- 0 (s "deletions")))) 0)))
+						(json_encode_assoc (list
+							"name" tbl
+							"engine" (meta "Engine")
+							"columns" col_count
+							"shards" shard_count
+							"rows" row_count
+							"size_bytes" total_size
+						))
+					)))))
+					(dashboard_send_json res (dashboard_json_array items))
+				) (dashboard_send_401 res))
+			)
 			"/dashboard" (begin
 				(if (dashboard_check_admin req)
 					(begin

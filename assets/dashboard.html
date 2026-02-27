@@ -50,6 +50,42 @@ header a:hover{opacity:1;text-decoration:underline}
 .status-bar{text-align:center;padding:12px;color:#666;font-size:.8rem}
 .status-bar.connected{color:#76b512}
 .status-bar.disconnected{color:#e74c3c}
+.view{display:none}
+.view.active{display:block}
+.browse-wrap{padding:24px;max-width:1100px;margin:0 auto}
+.browse-wrap h2{font-size:1.1rem;color:#aaa;margin-bottom:16px;font-weight:400;text-transform:uppercase;letter-spacing:.5px}
+.browse-table{width:100%;border-collapse:collapse;background:#16213e;border-radius:6px;overflow:hidden}
+.browse-table th{text-align:left;padding:10px 14px;color:#888;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #2a2a4a;font-weight:400}
+.browse-table td{padding:10px 14px;border-bottom:1px solid #2a2a4a;font-size:.85rem}
+.browse-table tr.clickable{cursor:pointer}
+.browse-table tr.clickable:hover td{background:#1a1a3e}
+.browse-table td.r{text-align:right}
+.browse-table th.r{text-align:right}
+.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:.75rem;font-weight:600}
+.badge-pri{background:#76b512;color:#fff}
+.badge-uni{background:#2980b9;color:#fff}
+.badge-null{background:#555;color:#ccc}
+.meta-cards{display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+.meta-card{background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:14px 20px;min-width:160px}
+.meta-card .label{color:#888;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px}
+.meta-card .val{color:#fff;font-size:1rem;font-weight:600;margin-top:4px}
+.detail-section{margin-bottom:24px}
+.detail-section h3{font-size:.9rem;color:#aaa;margin-bottom:10px;font-weight:400;text-transform:uppercase;letter-spacing:.5px}
+#link-back{display:none}
+.settings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+.setting-card{background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.setting-card .info{flex:1;min-width:0}
+.setting-card .info .name{color:#fff;font-size:.85rem;font-weight:600}
+.setting-card .info .desc{color:#888;font-size:.7rem;margin-top:2px}
+.setting-card input[type="number"],.setting-card input[type="text"],.setting-card select{background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:140px;text-align:right}
+.setting-card input[type="number"]:focus,.setting-card input[type="text"]:focus,.setting-card select:focus{outline:none;border-color:#76b512}
+.toggle{position:relative;width:44px;height:24px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0}
+.toggle .slider{position:absolute;cursor:pointer;inset:0;background:#555;border-radius:24px;transition:.2s}
+.toggle .slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
+.toggle input:checked+.slider{background:#76b512}
+.toggle input:checked+.slider:before{transform:translateX(20px)}
+.settings-status{text-align:center;padding:8px;font-size:.8rem;color:#76b512;min-height:24px}
 </style>
 </head>
 <body>
@@ -57,10 +93,16 @@ header a:hover{opacity:1;text-decoration:underline}
 <img src="/dashboard/logo.svg" alt="MemCP">
 <h1>MemCP Dashboard</h1>
 <div class="links">
+<a href="#" id="link-back">&larr; Back</a>
+<a href="#">Gauges</a>
+<a href="#databases">Databases</a>
+<a href="#settings">Settings</a>
 <a href="https://memcp.org" target="_blank">memcp.org</a>
 <a href="https://github.com/launix-de/memcp" target="_blank">GitHub</a>
 </div>
 </header>
+
+<div class="view active" id="view-gauges">
 <div class="gauge-row">
 <div class="gauge-card">
 	<div class="gauge" id="g-cpu" style="--from:0deg;--to:3deg"></div>
@@ -109,10 +151,74 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 <div class="status-bar disconnected" id="status">Connecting...</div>
 <div style="text-align:center;padding:8px"><label style="color:#888;font-size:.8rem;cursor:pointer"><input type="checkbox" id="jitter" checked> gauge jitter</label></div>
+</div>
+
+<div class="view" id="view-databases">
+<div class="browse-wrap">
+<h2>Databases</h2>
+<table class="browse-table" id="tbl-databases">
+<thead><tr><th>Name</th><th class="r">Tables</th><th class="r">Size</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+
+<div class="view" id="view-tables">
+<div class="browse-wrap">
+<h2 id="tables-title">Tables</h2>
+<table class="browse-table" id="tbl-tables">
+<thead><tr><th>Name</th><th>Engine</th><th class="r">Columns</th><th class="r">Shards</th><th class="r">Rows</th><th class="r">Size</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+
+<div class="view" id="view-detail">
+<div class="browse-wrap">
+<h2 id="detail-title">Table Detail</h2>
+<div class="meta-cards" id="detail-meta"></div>
+<div class="detail-section">
+<h3>Columns</h3>
+<table class="browse-table" id="tbl-columns">
+<thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Key</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+<div class="detail-section">
+<h3>Shards</h3>
+<table class="browse-table" id="tbl-shards">
+<thead><tr><th class="r">#</th><th>State</th><th class="r">Main</th><th class="r">Delta</th><th class="r">Deletions</th><th class="r">Size</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+</div>
+
+<div class="view" id="view-shard">
+<div class="browse-wrap">
+<h2 id="shard-title">Shard Detail</h2>
+<div class="meta-cards" id="shard-meta"></div>
+<div class="detail-section">
+<h3>Column Storage</h3>
+<table class="browse-table" id="tbl-shard-cols">
+<thead><tr><th>Column</th><th>Compression</th><th class="r">Size</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+</div>
+
+<div class="view" id="view-settings">
+<div class="browse-wrap">
+<h2>Settings</h2>
+<div class="settings-status" id="settings-status"></div>
+<div class="settings-grid" id="settings-grid"></div>
+</div>
+</div>
+
 <script>
 (function(){
 "use strict";
-/* needle rotation: 0deg = left (0%), 270deg = right (100%) */
 function setGauge(id,t,valText,subText){
 if(t<0)t=0;if(t>1)t=1;
 var deg=t*270;
@@ -121,10 +227,8 @@ var jitter=jitterOn?Math.min(t*270+3,270):deg;
 var el=document.getElementById(id);
 el.style.setProperty("--from",deg+"deg");
 el.style.setProperty("--to",jitter+"deg");
-var vid=id.replace("g-","v-");
-var sid=id.replace("g-","s-");
-document.getElementById(vid).textContent=valText;
-document.getElementById(sid).textContent=subText;
+document.getElementById(id.replace("g-","v-")).textContent=valText;
+document.getElementById(id.replace("g-","s-")).textContent=subText;
 }
 function fmt(bytes){
 if(bytes>=1073741824)return(bytes/1073741824).toFixed(1)+" GB";
@@ -132,6 +236,9 @@ if(bytes>=1048576)return(bytes/1048576).toFixed(0)+" MB";
 if(bytes>=1024)return(bytes/1024).toFixed(0)+" KB";
 return bytes+" B";
 }
+function esc(s){var d=document.createElement("span");d.textContent=String(s);return d.innerHTML}
+
+/* WebSocket for gauges */
 var statusEl=document.getElementById("status");
 var ws,retry=0;
 function connect(){
@@ -146,8 +253,7 @@ ws.onmessage=function(e){
 try{var d=JSON.parse(e.data)}catch(x){return}
 var cpu=d.cpu||0;
 setGauge("g-cpu",cpu/100,cpu.toFixed(1)+"%","of 100%");
-var memT=d.mem_total||1,memA=d.mem_available||0;
-var memU=memT-memA;
+var memT=d.mem_total||1,memA=d.mem_available||0,memU=memT-memA;
 setGauge("g-ram",memU/memT,fmt(memU)+" / "+fmt(memT),((memU/memT)*100).toFixed(1)+"%");
 var sh=d.shard||{};
 var shMem=sh.persisted_memory||0,shBud=sh.persisted_budget||1;
@@ -174,6 +280,216 @@ setTimeout(connect,Math.min(1000*Math.pow(2,retry),30000));
 ws.onerror=function(){ws.close()};
 }
 connect();
+
+/* SPA hash routing */
+var views=document.querySelectorAll(".view");
+var backLink=document.getElementById("link-back");
+
+function showView(id){
+for(var i=0;i<views.length;i++)views[i].classList.remove("active");
+var el=document.getElementById(id);
+if(el)el.classList.add("active");
+}
+
+function apiFetch(url,cb){
+fetch(url,{credentials:"same-origin"}).then(function(r){
+if(!r.ok)throw new Error(r.status);
+return r.json();
+}).then(cb).catch(function(e){console.error("API error:",e)});
+}
+
+function apiPost(url,body,cb){
+fetch(url,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){
+if(!r.ok)throw new Error(r.status);
+return r.json();
+}).then(cb).catch(function(e){console.error("API error:",e)});
+}
+
+/* settings definitions for rendering form controls */
+var settingsDef=[
+{key:"MaxRamPercent",desc:"Total memory budget (% of system RAM, 0=90%)",type:"number"},
+{key:"MaxRamBytes",desc:"Override total budget in bytes (0=use percent)",type:"number"},
+{key:"MaxPersistPercent",desc:"Persisted shard budget (% of RAM, 0=30%)",type:"number"},
+{key:"MaxPersistBytes",desc:"Override persisted budget in bytes (0=use percent)",type:"number"},
+{key:"ShardSize",desc:"Max rows per shard before splitting",type:"number"},
+{key:"PartitionMaxDimensions",desc:"Max partition dimensions for table sharding",type:"number"},
+{key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"},
+{key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logging","sloppy","memory"]},
+{key:"MetricsTracing",desc:"Periodically record metrics to system.perf_metrics",type:"bool"},
+{key:"MetricsTracingInterval",desc:"Metrics sampling interval in seconds (0=60s)",type:"number"},
+{key:"Backtrace",desc:"Enable detailed error backtraces",type:"bool"},
+{key:"Trace",desc:"Enable Scheme runtime tracing to file",type:"bool"},
+{key:"TracePrint",desc:"Print trace timing to stdout",type:"bool"}
+];
+
+function route(){
+var hash=location.hash.replace(/^#/,"");
+var m;
+if(!hash){
+showView("view-gauges");
+backLink.style.display="none";
+return;
+}
+if(hash==="databases"){
+showView("view-databases");
+backLink.href="#";
+backLink.style.display="";
+apiFetch("/dashboard/api/databases",renderDatabases);
+return;
+}
+if(hash==="settings"){
+showView("view-settings");
+backLink.href="#";
+backLink.style.display="";
+apiFetch("/dashboard/api/settings",renderSettings);
+return;
+}
+/* shard detail: db/NAME/TABLE/shard/N */
+m=hash.match(/^db\/([^/]+)\/([^/]+)\/shard\/(\d+)$/);
+if(m){
+var db_=decodeURIComponent(m[1]),tbl_=decodeURIComponent(m[2]),si=m[3];
+showView("view-shard");
+backLink.href="#db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_);
+backLink.style.display="";
+document.getElementById("shard-title").textContent=db_+"."+tbl_+" - Shard #"+si;
+apiFetch("/dashboard/api/db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_)+"/shard/"+si,function(data){renderShardDetail(data,db_,tbl_,si)});
+return;
+}
+/* table detail: db/NAME/TABLE */
+m=hash.match(/^db\/([^/]+)\/([^/]+)$/);
+if(m){
+var db2=decodeURIComponent(m[1]),tbl2=decodeURIComponent(m[2]);
+showView("view-detail");
+backLink.href="#db/"+encodeURIComponent(db2);
+backLink.style.display="";
+document.getElementById("detail-title").textContent=db2+"."+tbl2;
+apiFetch("/dashboard/api/db/"+encodeURIComponent(db2)+"/"+encodeURIComponent(tbl2),function(data){renderDetail(data,db2,tbl2)});
+return;
+}
+/* tables in db: db/NAME */
+m=hash.match(/^db\/([^/]+)$/);
+if(m){
+showView("view-tables");
+backLink.href="#databases";
+backLink.style.display="";
+document.getElementById("tables-title").textContent="Tables in "+decodeURIComponent(m[1]);
+apiFetch("/dashboard/api/db/"+encodeURIComponent(m[1]),function(data){renderTables(data,decodeURIComponent(m[1]))});
+return;
+}
+showView("view-gauges");
+backLink.style.display="none";
+}
+
+function renderDatabases(data){
+data.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
+var tb=document.querySelector("#tbl-databases tbody");
+var h="";
+for(var i=0;i<data.length;i++){
+var d=data[i];
+h+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(d.name))+"'\"><td>"+esc(d.name)+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td></tr>";
+}
+tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No databases</td></tr>";
+}
+
+function renderTables(data,dbname){
+data.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
+var tb=document.querySelector("#tbl-tables tbody");
+var h="";
+for(var i=0;i<data.length;i++){
+var d=data[i];
+h+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(dbname))+"/"+esc(encodeURIComponent(d.name))+"'\"><td>"+esc(d.name)+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows||0)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td></tr>";
+}
+tb.innerHTML=h||"<tr><td colspan='6' style='color:#888;text-align:center'>No tables</td></tr>";
+}
+
+function renderDetail(data,dbname,tblname){
+/* meta cards */
+var meta=data.meta||{};
+var mc="<div class='meta-card'><div class='label'>Engine</div><div class='val'>"+esc(meta.engine||"--")+"</div></div>";
+mc+="<div class='meta-card'><div class='label'>Collation</div><div class='val'>"+esc(meta.collation||"--")+"</div></div>";
+var uniq=meta.uniques||[];
+mc+="<div class='meta-card'><div class='label'>Unique Keys</div><div class='val'>"+uniq.length+"</div></div>";
+document.getElementById("detail-meta").innerHTML=mc;
+/* columns */
+var cols=data.columns||[];
+var ch="";
+for(var i=0;i<cols.length;i++){
+var c=cols[i];
+var keyBadge="";
+if(c.key==="PRI")keyBadge="<span class='badge badge-pri'>PRI</span>";
+else if(c.key==="UNI")keyBadge="<span class='badge badge-uni'>UNI</span>";
+ch+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.type)+"</td><td>"+(c.nullable?"<span class='badge badge-null'>NULL</span>":"NOT NULL")+"</td><td>"+keyBadge+"</td></tr>";
+}
+document.querySelector("#tbl-columns tbody").innerHTML=ch||"<tr><td colspan='4' style='color:#888;text-align:center'>No columns</td></tr>";
+/* shards - clickable to shard detail */
+var shards=data.shards||[];
+var sh="";
+for(var i=0;i<shards.length;i++){
+var s=shards[i];
+sh+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(dbname))+"/"+esc(encodeURIComponent(tblname))+"/shard/"+s.shard+"'\"><td class='r'>"+s.shard+"</td><td>"+esc(s.state)+"</td><td class='r'>"+s.main_count+"</td><td class='r'>"+s.delta+"</td><td class='r'>"+s.deletions+"</td><td class='r'>"+fmt(s.size_bytes||0)+"</td></tr>";
+}
+document.querySelector("#tbl-shards tbody").innerHTML=sh||"<tr><td colspan='6' style='color:#888;text-align:center'>No shards</td></tr>";
+}
+
+function renderShardDetail(data,dbname,tblname,shardIdx){
+/* summary meta cards */
+var totalSize=0;
+for(var i=0;i<data.length;i++)totalSize+=(data[i].size_bytes||0);
+var mc="<div class='meta-card'><div class='label'>Columns</div><div class='val'>"+data.length+"</div></div>";
+mc+="<div class='meta-card'><div class='label'>Total Size</div><div class='val'>"+fmt(totalSize)+"</div></div>";
+document.getElementById("shard-meta").innerHTML=mc;
+/* column storage table */
+data.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
+var tb=document.querySelector("#tbl-shard-cols tbody");
+var h="";
+for(var i=0;i<data.length;i++){
+var c=data[i];
+h+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.compression)+"</td><td class='r'>"+fmt(c.size_bytes||0)+"</td></tr>";
+}
+tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No columns</td></tr>";
+}
+
+function renderSettings(data){
+var grid=document.getElementById("settings-grid");
+var h="";
+for(var i=0;i<settingsDef.length;i++){
+var s=settingsDef[i];
+var val=data[s.key];
+h+="<div class='setting-card'><div class='info'><div class='name'>"+esc(s.key)+"</div><div class='desc'>"+esc(s.desc)+"</div></div>";
+if(s.type==="bool"){
+h+="<label class='toggle'><input type='checkbox' data-key='"+esc(s.key)+"'"+(val?" checked":"")+"><span class='slider'></span></label>";
+}else if(s.type==="select"){
+h+="<select data-key='"+esc(s.key)+"'>";
+for(var j=0;j<s.options.length;j++){
+h+="<option value='"+esc(s.options[j])+"'"+(val===s.options[j]?" selected":"")+">"+esc(s.options[j])+"</option>";
+}
+h+="</select>";
+}else{
+h+="<input type='number' data-key='"+esc(s.key)+"' value='"+(val||0)+"'>";
+}
+h+="</div>";
+}
+grid.innerHTML=h;
+/* attach change handlers */
+grid.querySelectorAll("input,select").forEach(function(el){
+el.addEventListener("change",function(){
+var key=el.getAttribute("data-key");
+var value;
+if(el.type==="checkbox")value=el.checked;
+else if(el.type==="number")value=Number(el.value);
+else value=el.value;
+var statusEl=document.getElementById("settings-status");
+statusEl.textContent="Saving "+key+"...";
+apiPost("/dashboard/api/settings",{key:key,value:value},function(){
+statusEl.textContent=key+" saved";
+setTimeout(function(){statusEl.textContent=""},2000);
+});
+});
+});
+}
+
+window.onhashchange=route;
+route();
 })();
 </script>
 </body>
