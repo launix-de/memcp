@@ -34,16 +34,16 @@ type EvictableType uint8
 
 const (
 	TypeTempColumn    EvictableType = iota // factor 1
-	TypeShard                              // factor 5
-	TypeIndex                              // factor 25
-	TypeTempKeytable                       // factor 100
+	TypeShard                              // factor 20
+	TypeIndex                              // factor 1
+	TypeTempKeytable                       // factor 10
 	TypeCacheEntry                         // factor 1
 	numEvictableTypes                      // sentinel for array sizing
 )
 
 // evictableFactors maps EvictableType → rebuild cost factor.
 // Higher factor = more protected = lower evictionScore.
-var evictableFactors = [numEvictableTypes]int64{1, 5, 25, 100, 1}
+var evictableFactors = [numEvictableTypes]int64{1, 20, 1, 10, 1}
 
 var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry"}
 
