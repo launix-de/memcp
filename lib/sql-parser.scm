@@ -634,7 +634,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 
 	(define sql_expression5 (parser (or
-		(parser '((atom "NOT" true) (define expr sql_expression6)) '('not expr))
+		/* NOT has lower precedence than IS NULL: NOT expr IS NULL == NOT (expr IS NULL) */
+		(parser '((atom "NOT" true) (define expr sql_expression5)) '('not expr))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr sql_expression6)) '((quote -) 0 expr))
 		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))

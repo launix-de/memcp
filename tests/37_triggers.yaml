@@ -1825,3 +1825,67 @@ test_cases:
     sql: "DROP TABLE IF EXISTS trig_else_log"
     expect:
       affected_rows: 0
+
+  # =====================================================
+  # NOT expr IS NULL precedence in triggers (MySQL form)
+  # =====================================================
+
+  - name: "Clean up for NOT IS NULL trigger test"
+    sql: "DELETE FROM trigger_test"
+    expect:
+      affected_rows_any: true
+
+  - name: "Clear trigger_log for NOT IS NULL test"
+    sql: "DELETE FROM trigger_log"
+    expect:
+      affected_rows_any: true
+
+  - name: "CREATE trigger with NOT NEW.col IS NULL condition"
+    sql: >
+      CREATE TRIGGER not_isnull_au AFTER UPDATE ON trigger_test FOR EACH ROW
+      BEGIN
+        IF OLD.val <> NEW.val AND NOT NEW.name IS NULL THEN
+          INSERT INTO trigger_log (id, action, old_val, new_val)
+          VALUES (NEW.id, 'not_isnull', OLD.val, NEW.val);
+        END IF;
+      END
+    expect:
+      affected_rows: 0
+
+  - name: "Insert row with non-NULL name for NOT IS NULL trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (9100, 10, 'present')"
+    expect:
+      affected_rows: 1
+
+  - name: "Insert row with NULL name for NOT IS NULL trigger"
+    sql: "INSERT INTO trigger_test (id, val, name) VALUES (9101, 10, NULL)"
+    expect:
+      affected_rows: 1
+
+  - name: "UPDATE non-NULL name row - trigger should fire"
+    sql: "UPDATE trigger_test SET val = 20 WHERE id = 9100"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify NOT IS NULL trigger fired for non-NULL name"
+    sql: "SELECT id, action, old_val, new_val FROM trigger_log WHERE id = 9100"
+    expect:
+      rows: 1
+      data:
+        - { id: 9100, action: "not_isnull", old_val: 10, new_val: 20 }
+
+  - name: "UPDATE NULL name row - trigger should NOT fire"
+    sql: "UPDATE trigger_test SET val = 20 WHERE id = 9101"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify NOT IS NULL trigger did NOT fire for NULL name"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_log WHERE id = 9101"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "Drop NOT IS NULL trigger"
+    sql: "DROP TRIGGER IF EXISTS not_isnull_au"
+    expect:
+      affected_rows: 0

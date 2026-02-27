@@ -122,5 +122,34 @@ test_cases:
       data:
         - v: "present"
 
+  # === NOT expr IS NULL precedence (MySQL form) ===
+
+  - name: "NOT col IS NULL equals IS NOT NULL"
+    sql: "SELECT id FROM null_test WHERE NOT name IS NULL"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
+  - name: "NOT col IS NULL with AND"
+    sql: "SELECT id FROM null_test WHERE NOT name IS NULL AND id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
+  - name: "NOT col IS NULL returns no rows for NULLs"
+    sql: "SELECT id FROM null_test WHERE NOT id IS NULL AND name IS NULL ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 2
+        - id: 3
+
+  - name: "Double NOT IS NULL"
+    sql: "SELECT id FROM null_test WHERE NOT (NOT name IS NULL)"
+    expect:
+      rows: 2
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS null_test"
