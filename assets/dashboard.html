@@ -98,6 +98,23 @@ header a:hover{opacity:1;text-decoration:underline}
 .inline-select:focus{outline:none;border-color:#76b512}
 .action-cell{white-space:nowrap}
 .action-cell button,.action-cell select{margin-left:4px}
+.console-wrap{display:flex;gap:20px;padding:24px;max-width:1400px;margin:0 auto}
+.console-left{flex:2;min-width:0}
+.console-right{flex:1;min-width:250px;max-height:calc(100vh - 120px);overflow-y:auto}
+.console-controls{display:flex;gap:8px;margin-bottom:10px;align-items:center}
+#console-textarea{font-family:monospace;background:#16213e;border:1px solid #2a2a4a;color:#e0e0e0;resize:vertical;width:100%;height:200px;padding:10px;font-size:.85rem;border-radius:4px}
+#console-textarea:focus{outline:none;border-color:#76b512}
+.console-send{background:#76b512;color:#fff;border:none;padding:8px 20px;border-radius:4px;font-size:.85rem;cursor:pointer;margin-top:8px}
+.console-send:hover{background:#8cd919}
+.console-error{color:#e74c3c;font-size:.85rem;padding:8px}
+.console-result{margin-top:12px}
+.console-result pre{font-family:monospace;background:#16213e;padding:12px;overflow-x:auto;border-radius:4px;font-size:.85rem;color:#e0e0e0;border:1px solid #2a2a4a}
+.history-list{margin-top:8px}
+.history-item{border-bottom:1px solid #2a2a4a;padding:6px 8px;cursor:pointer}
+.history-item:hover{background:#1a1a3e}
+.history-time{color:#888;font-size:.7rem}
+.history-syntax{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.65rem;font-weight:600;background:#2980b9;color:#fff;margin-left:6px}
+.history-query{color:#ccc;font-size:.8rem;font-family:monospace;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
 <body>
@@ -106,9 +123,10 @@ header a:hover{opacity:1;text-decoration:underline}
 <h1>MemCP Dashboard</h1>
 <div class="links">
 <a href="#" id="link-back">&larr; Back</a>
-<a href="#">Gauges</a>
+<a href="#" data-admin-only>Gauges</a>
 <a href="#databases">Databases</a>
-<a href="#settings">Settings</a>
+<a href="#console">Console</a>
+<a href="#settings" data-admin-only>Settings</a>
 <a href="https://memcp.org" target="_blank">memcp.org</a>
 <a href="https://github.com/launix-de/memcp" target="_blank">GitHub</a>
 </div>
@@ -238,9 +256,33 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="detail-section">
 <h3>Column Storage</h3>
 <table class="browse-table" id="tbl-shard-cols">
-<thead><tr><th>Column</th><th>Compression</th><th class="r">Size</th></tr></thead>
+<thead><tr><th>Column</th><th>Compression</th><th class="r">Size</th><th class="r">Deltas</th><th class="r">Delta Size</th></tr></thead>
 <tbody></tbody>
 </table>
+</div>
+</div>
+</div>
+
+<div class="view" id="view-console">
+<div class="console-wrap">
+<div class="console-left">
+<div class="console-controls">
+<select class="inline-select" id="console-syntax">
+<option value="sql">SQL</option>
+<option value="psql">PostgreSQL</option>
+<option value="sparql">SPARQL</option>
+<option value="scheme">Scheme</option>
+</select>
+<select class="inline-select" id="console-db"></select>
+</div>
+<textarea id="console-textarea" spellcheck="false">SELECT * FROM user LIMIT 25</textarea>
+<button class="console-send" id="console-send">Send (Ctrl+Enter)</button>
+<div id="console-error"></div>
+<div class="console-result" id="console-result"></div>
+</div>
+<div class="console-right">
+<h3 style="font-size:.85rem;color:#aaa;text-transform:uppercase;letter-spacing:.5px;font-weight:400;margin-bottom:4px">Query History</h3>
+<div class="history-list" id="console-history"></div>
 </div>
 </div>
 </div>
@@ -281,7 +323,28 @@ return bytes+" B";
 }
 function esc(s){var d=document.createElement("span");d.textContent=String(s);return d.innerHTML}
 
-/* WebSocket for gauges */
+/* Admin detection */
+var isAdmin=false;
+function applyAdminState(){
+var adminEls=document.querySelectorAll("[data-admin-only]");
+for(var i=0;i<adminEls.length;i++)adminEls[i].style.display=isAdmin?"":"none";
+/* hide Scheme option for non-admins */
+var schemeOpt=document.querySelector("#console-syntax option[value='scheme']");
+if(schemeOpt)schemeOpt.disabled=!isAdmin;
+if(!isAdmin&&document.getElementById("console-syntax").value==="scheme")document.getElementById("console-syntax").value="sql";
+}
+fetch(base+"/dashboard/api/whoami",{credentials:"same-origin"}).then(function(r){return r.json()}).then(function(d){
+isAdmin=!!d.admin;
+applyAdminState();
+if(isAdmin)connect();
+else{
+/* non-admin: redirect away from admin-only views */
+var hash=location.hash.replace(/^#/,"");
+if(!hash||hash==="settings")location.hash="databases";
+}
+}).catch(function(){});
+
+/* WebSocket for gauges (admin only) */
 var statusEl=document.getElementById("status");
 var ws,retry=0;
 function connect(){
@@ -322,7 +385,6 @@ setTimeout(connect,Math.min(1000*Math.pow(2,retry),30000));
 };
 ws.onerror=function(){ws.close()};
 }
-connect();
 
 /* SPA hash routing */
 var views=document.querySelectorAll(".view");
@@ -383,6 +445,7 @@ function route(){
 var hash=location.hash.replace(/^#/,"");
 var m;
 if(!hash){
+if(!isAdmin){location.hash="databases";return}
 showView("view-gauges");
 backLink.style.display="none";
 return;
@@ -390,11 +453,30 @@ return;
 if(hash==="databases"){
 showView("view-databases");
 backLink.href="#";
-backLink.style.display="inline";
+backLink.style.display=isAdmin?"inline":"none";
 apiFetch(base+"/dashboard/api/databases",renderDatabases);
 return;
 }
+if(hash==="console"){
+showView("view-console");
+backLink.href=isAdmin?"#":"#databases";
+backLink.style.display="inline";
+loadConsoleDatabases(function(){
+if(pendingConsoleState){
+consoleSyntax.value="sql";
+consoleDb.style.display="";
+consoleDb.value=pendingConsoleState.db;
+consoleTa.value=pendingConsoleState.query;
+consoleError.innerHTML="";
+consoleResult.innerHTML="";
+pendingConsoleState=null;
+}
+});
+renderHistory();
+return;
+}
 if(hash==="settings"){
+if(!isAdmin){location.hash="databases";return}
 showView("view-settings");
 backLink.href="#";
 backLink.style.display="inline";
@@ -433,6 +515,7 @@ document.getElementById("tables-title").textContent="Tables in "+decodeURICompon
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(m[1]),function(data){renderTables(data,decodeURIComponent(m[1]))});
 return;
 }
+if(!isAdmin){location.hash="databases";return}
 showView("view-gauges");
 backLink.style.display="none";
 }
@@ -444,7 +527,7 @@ var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
 var dn=esc(encodeURIComponent(d.name));
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button></td></tr>";
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querydb='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button></td></tr>";
 }
 tb.innerHTML=h||"<tr><td colspan='4' style='color:#888;text-align:center'>No databases</td></tr>";
 tb.querySelectorAll("[data-truncdb]").forEach(function(btn){
@@ -461,6 +544,9 @@ execSQL(db,"TRUNCATE TABLE `"+t.name+"`",function(){pending--;if(!pending)route(
 tb.querySelectorAll("[data-dropdb]").forEach(function(btn){
 btn.onclick=function(e){e.stopPropagation();var db=btn.getAttribute("data-dropdb");if(window.confirm("Drop database '"+db+"'? This cannot be undone!"))execSQL(db,"DROP DATABASE `"+db+"`",function(){location.hash="databases";route()})};
 });
+tb.querySelectorAll("[data-querydb]").forEach(function(btn){
+btn.onclick=function(e){e.stopPropagation();openConsole(btn.getAttribute("data-querydb"),"SELECT * FROM user LIMIT 25")};
+});
 }
 
 function renderTables(data,dbname){
@@ -470,7 +556,7 @@ var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
 var dbn=esc(encodeURIComponent(dbname)),tn=esc(encodeURIComponent(d.name));
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/"+tn+"'\">"+esc(d.name)+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows||0)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/"+tn+"'\">"+esc(d.name)+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows||0)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
 }
 tb.innerHTML=h||"<tr><td colspan='7' style='color:#888;text-align:center'>No tables</td></tr>";
 tb.querySelectorAll("[data-trunctbl]").forEach(function(btn){
@@ -478,6 +564,9 @@ btn.onclick=function(e){e.stopPropagation();var tbl=btn.getAttribute("data-trunc
 });
 tb.querySelectorAll("[data-droptbl]").forEach(function(btn){
 btn.onclick=function(e){e.stopPropagation();var tbl=btn.getAttribute("data-droptbl");if(window.confirm("Drop table '"+tbl+"'? This cannot be undone!"))execSQL(dbname,"DROP TABLE `"+tbl+"`",function(){route()})};
+});
+tb.querySelectorAll("[data-querytbl]").forEach(function(btn){
+btn.onclick=function(e){e.stopPropagation();openConsole(dbname,"SELECT * FROM `"+btn.getAttribute("data-querytbl")+"` LIMIT 100")};
 });
 }
 
@@ -494,7 +583,7 @@ var mc="<div class='meta-card'><div class='label'>Engine</div><div class='val'>"
 mc+="<div class='meta-card'><div class='label'>Collation</div><div class='val'>"+esc(meta.collation||"--")+"</div></div>";
 var uniq=meta.uniques||[];
 mc+="<div class='meta-card'><div class='label'>Unique Keys</div><div class='val'>"+uniq.length+"</div></div>";
-mc+="<div class='meta-card'><button class='btn-warn' id='btn-truncate-tbl'>Truncate Table</button></div>";
+mc+="<div class='meta-card'><button class='btn-warn' id='btn-query-tbl'>Query</button> <button class='btn-warn' id='btn-truncate-tbl'>Truncate Table</button></div>";
 document.getElementById("detail-meta").innerHTML=mc;
 var engEl=document.getElementById("engine-select");
 var origEngine=engEl.value;
@@ -505,6 +594,9 @@ fetch(base+"/dashboard/api/sql",{method:"POST",credentials:"same-origin",headers
 if(!r.ok)return r.text().then(function(t){throw new Error(t)});
 return r.json();
 }).then(function(){origEngine=eng}).catch(function(e){window.alert("Error: "+e.message);sel.value=origEngine});
+});
+document.getElementById("btn-query-tbl").addEventListener("click",function(){
+openConsole(dbname,"SELECT * FROM `"+tblname+"` LIMIT 100");
 });
 document.getElementById("btn-truncate-tbl").addEventListener("click",function(){
 if(window.confirm("Truncate table '"+tblname+"'? All data will be deleted."))execSQL(dbname,"TRUNCATE TABLE `"+tblname+"`",function(){route()});
@@ -584,10 +676,13 @@ loadData();
 
 function renderShardDetail(data,dbname,tblname,shardIdx){
 /* summary meta cards */
-var totalSize=0;
-for(var i=0;i<data.length;i++)totalSize+=(data[i].size_bytes||0);
+var totalSize=0,totalDeltaSize=0,deltaCount=0;
+for(var i=0;i<data.length;i++){totalSize+=(data[i].size_bytes||0);totalDeltaSize+=(data[i].delta_size_bytes||0)}
+if(data.length>0)deltaCount=data[0].delta_count||0;
 var mc="<div class='meta-card'><div class='label'>Columns</div><div class='val'>"+data.length+"</div></div>";
-mc+="<div class='meta-card'><div class='label'>Total Size</div><div class='val'>"+fmt(totalSize)+"</div></div>";
+mc+="<div class='meta-card'><div class='label'>Main Size</div><div class='val'>"+fmt(totalSize)+"</div></div>";
+mc+="<div class='meta-card'><div class='label'>Deltas</div><div class='val'>"+deltaCount+"</div></div>";
+mc+="<div class='meta-card'><div class='label'>Delta Size</div><div class='val'>"+fmt(totalDeltaSize)+"</div></div>";
 document.getElementById("shard-meta").innerHTML=mc;
 /* column storage table */
 data.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
@@ -595,9 +690,9 @@ var tb=document.querySelector("#tbl-shard-cols tbody");
 var h="";
 for(var i=0;i<data.length;i++){
 var c=data[i];
-h+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.compression)+"</td><td class='r'>"+fmt(c.size_bytes||0)+"</td></tr>";
+h+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.compression)+"</td><td class='r'>"+fmt(c.size_bytes||0)+"</td><td class='r'>"+(c.delta_count||0)+"</td><td class='r'>"+fmt(c.delta_size_bytes||0)+"</td></tr>";
 }
-tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No columns</td></tr>";
+tb.innerHTML=h||"<tr><td colspan='5' style='color:#888;text-align:center'>No columns</td></tr>";
 }
 
 function renderSettings(data){
@@ -639,6 +734,152 @@ apiPost(base+"/dashboard/api/settings",{key:key,value:value},function(){
 statusEl.textContent=key+" saved";
 setTimeout(function(){statusEl.textContent=""},2000);
 });
+});
+});
+}
+
+/* Query Console */
+var consoleSyntax=document.getElementById("console-syntax");
+var consoleDb=document.getElementById("console-db");
+var consoleTa=document.getElementById("console-textarea");
+var consoleResult=document.getElementById("console-result");
+var consoleError=document.getElementById("console-error");
+var consoleSendBtn=document.getElementById("console-send");
+var consoleHistoryEl=document.getElementById("console-history");
+
+var defaultQueries={
+sql:"SELECT * FROM user LIMIT 25",
+psql:"SELECT * FROM user LIMIT 25",
+sparql:"SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 25",
+scheme:"(show)"
+};
+
+var pendingConsoleState=null;
+var consoleDbLoaded=false;
+function loadConsoleDatabases(cb){
+if(consoleDbLoaded){if(cb)cb();return}
+apiFetch(base+"/dashboard/api/databases",function(data){
+consoleDbLoaded=true;
+var h="";
+for(var i=0;i<data.length;i++)h+="<option value='"+esc(data[i].name)+"'>"+esc(data[i].name)+"</option>";
+consoleDb.innerHTML=h;
+if(cb)cb();
+});
+}
+
+function openConsole(db,query){
+pendingConsoleState={db:db,query:query};
+location.hash="console";
+}
+
+consoleSyntax.addEventListener("change",function(){
+var syn=consoleSyntax.value;
+consoleTa.value=defaultQueries[syn]||"";
+consoleDb.style.display=(syn==="scheme")?"none":"";
+consoleError.innerHTML="";
+consoleResult.innerHTML="";
+});
+
+function consoleExec(){
+var syn=consoleSyntax.value;
+var db=consoleDb.value;
+var query=consoleTa.value.trim();
+if(!query)return;
+consoleError.innerHTML="";
+consoleResult.innerHTML="";
+consoleSendBtn.disabled=true;
+consoleSendBtn.textContent="Running...";
+
+var url,opts;
+if(syn==="sql"){url=base+"/sql/"+encodeURIComponent(db)}
+else if(syn==="psql"){url=base+"/psql/"+encodeURIComponent(db)}
+else if(syn==="sparql"){url=base+"/rdf/"+encodeURIComponent(db)}
+else{url=base+"/scm"}
+
+fetch(url,{method:"POST",credentials:"include",body:query}).then(function(r){
+if(!r.ok)return r.text().then(function(t){throw new Error(t)});
+return r.text();
+}).then(function(text){
+consoleSendBtn.disabled=false;
+consoleSendBtn.textContent="Send (Ctrl+Enter)";
+consoleTa.focus();
+addHistory(syn,db,query);
+if(syn==="scheme"){
+consoleResult.innerHTML="<pre>"+esc(text)+"</pre>";
+}else{
+var lines=text.trim().split("\n").filter(function(l){return l.length>0});
+if(!lines.length){consoleResult.innerHTML="<pre>No results</pre>";return}
+var rows=[];
+for(var i=0;i<lines.length;i++){try{rows.push(JSON.parse(lines[i]))}catch(e){}}
+if(!rows.length){consoleResult.innerHTML="<pre>"+esc(text)+"</pre>";return}
+var keys=Object.keys(rows[0]);
+var h="<div style='overflow-x:auto'><table class='browse-table'><thead><tr>";
+for(var k=0;k<keys.length;k++)h+="<th>"+esc(keys[k])+"</th>";
+h+="</tr></thead><tbody>";
+for(var r=0;r<rows.length;r++){
+h+="<tr>";
+for(var k=0;k<keys.length;k++){
+var v=rows[r][keys[k]];
+h+="<td>"+esc(v===null?"NULL":v)+"</td>";
+}
+h+="</tr>";
+}
+h+="</tbody></table></div>";
+consoleResult.innerHTML=h;
+}
+}).catch(function(e){
+consoleSendBtn.disabled=false;
+consoleSendBtn.textContent="Send (Ctrl+Enter)";
+consoleTa.focus();
+consoleError.innerHTML="<div class='console-error'>"+esc(e.message)+"</div>";
+});
+}
+
+consoleSendBtn.addEventListener("click",consoleExec);
+consoleTa.addEventListener("keydown",function(e){
+if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();consoleExec()}
+});
+
+/* History */
+var HISTORY_KEY="memcp_query_history";
+var HISTORY_MAX=1000;
+function getHistory(){try{return JSON.parse(localStorage.getItem(HISTORY_KEY))||[]}catch(e){return[]}}
+function saveHistory(h){localStorage.setItem(HISTORY_KEY,JSON.stringify(h))}
+function addHistory(syn,db,query){
+var h=getHistory();
+h.unshift({time:new Date().toISOString(),syntax:syn,database:db,query:query});
+if(h.length>HISTORY_MAX)h=h.slice(0,HISTORY_MAX);
+saveHistory(h);
+renderHistory();
+}
+function renderHistory(){
+var h=getHistory();
+var html="";
+for(var i=0;i<h.length;i++){
+var item=h[i];
+var t=new Date(item.time);
+var ts=(t.getHours()<10?"0":"")+t.getHours()+":"+(t.getMinutes()<10?"0":"")+t.getMinutes();
+var short=item.query.length>25?item.query.substring(0,25)+"...":item.query;
+html+="<div class='history-item' data-idx='"+i+"'><span class='history-time'>"+esc(ts)+"</span><span class='history-syntax'>"+esc(item.syntax)+"</span><div class='history-query'>"+esc(short)+"</div></div>";
+}
+consoleHistoryEl.innerHTML=html||"<div style='color:#888;font-size:.8rem;padding:8px'>No history yet</div>";
+consoleHistoryEl.querySelectorAll(".history-item").forEach(function(el){
+el.addEventListener("click",function(){
+var idx=parseInt(el.getAttribute("data-idx"));
+var h=getHistory();
+if(h[idx]){
+consoleSyntax.value=h[idx].syntax;
+consoleDb.style.display=(h[idx].syntax==="scheme")?"none":"";
+if(h[idx].database){
+/* ensure the database option exists or select closest */
+for(var j=0;j<consoleDb.options.length;j++){
+if(consoleDb.options[j].value===h[idx].database){consoleDb.value=h[idx].database;break}
+}
+}
+consoleTa.value=h[idx].query;
+consoleError.innerHTML="";
+consoleResult.innerHTML="";
+}
 });
 });
 }

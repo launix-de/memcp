@@ -23,12 +23,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
 )))
 
+/* check any authenticated user (returns admin flag or false) */
+(define dashboard_check_user (lambda (req) (begin
+	(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+	(if (and pw (equal? (car pw) (password (req "password")))) (car (cdr pw)) nil)
+)))
+
 /* send 401 with WWW-Authenticate header */
 (define dashboard_send_401 (lambda (res) (begin
 	((res "header") "Content-Type" "text/plain")
 	((res "header") "WWW-Authenticate" "Basic realm=\"MemCP Dashboard\"")
 	((res "status") 401)
-	((res "print") "Unauthorized (admin required)")
+	((res "print") "Unauthorized")
+)))
+
+/* list databases visible to a user: admin sees all, non-admin sees system.access entries */
+(define dashboard_user_databases (lambda (username is_admin) (begin
+	(if is_admin (show)
+		(begin
+			(define access_set (scan "system" "access"
+				'("username" "database") (lambda (u db) (equal?? u username))
+				'("database") (lambda (db) db)
+				(lambda (acc db) (set_assoc acc db true))
+				(list)))
+			(filter (show) (lambda (db) (has? access_set db)))
+		)
+	)
 )))
 
 /* WebSocket push loop: send metrics JSON every 100ms */
@@ -46,6 +66,28 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(sleep 0.1)
 	(dashboard_push send)
 )))
+
+/* check if user has access to a specific database */
+(define dashboard_has_db_access (lambda (username is_admin dbname)
+	(if is_admin true
+		(> (scan "system" "access"
+			'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db dbname)))
+			'() (lambda () 1)
+			+ 0) 0)
+	)
+))
+
+/* helper: authenticate + check db access; returns is_admin or sends error */
+(define dashboard_check_db (lambda (req res dbname body)
+	(begin
+		(define is_admin (dashboard_check_user req))
+		(if (nil? is_admin) (dashboard_send_401 res)
+			(if (dashboard_has_db_access (req "username") is_admin dbname) (body is_admin)
+				(begin ((res "status") 403) ((res "header") "Content-Type" "text/plain") ((res "print") "Access denied"))
+			)
+		)
+	)
+))
 
 /* helper: sum size_bytes across all shards of a table */
 (define dashboard_table_size (lambda (db tbl)
@@ -69,10 +111,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	old_handler old_handler /* workaround for optimizer bug */
 	(lambda (req res) (begin
 		(match (req "path")
-			/* API: list all databases with table count and total size */
+			/* API: list databases (admin: all, non-admin: filtered by system.access) */
 			"/dashboard/api/databases" (begin
-				(if (dashboard_check_admin req) (begin
-					(define dbs (show))
+				(define is_admin (dashboard_check_user req))
+				(if (nil? is_admin) (dashboard_send_401 res) (begin
+					(define dbs (dashboard_user_databases (req "username") is_admin))
 					(define items (map dbs (lambda (db) (begin
 						(define tables (show db))
 						(define table_count (if (nil? tables) 0 (count tables)))
@@ -81,7 +124,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(json_encode_assoc (list "name" db "tables" table_count "size_bytes" total_size))
 					))))
 					(dashboard_send_json res (dashboard_json_array items))
-				) (dashboard_send_401 res))
+				))
 			)
 			/* API: read all settings */
 			"/dashboard/api/settings" (begin
@@ -109,32 +152,36 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			)
 			/* API: read-only query, streams NDJSON (same auth realm as dashboard) */
 			"/dashboard/api/query" (begin
-				(if (dashboard_check_admin req) (begin
+				(define is_admin (dashboard_check_user req))
+				(if (nil? is_admin) (dashboard_send_401 res) (begin
 					(define body (json_decode ((req "body"))))
 					(define db (body "database"))
 					(define sql (body "sql"))
+					(define policy (if is_admin (lambda (schema table write) (not write)) (sql_policy (req "username"))))
 					((res "header") "Content-Type" "application/x-ndjson")
 					(define resultrow (res "jsonl"))
-					(eval (parse_sql db sql (lambda (schema table write) (not write))))
-				) (dashboard_send_401 res))
+					(eval (parse_sql db sql policy))
+				))
 			)
 			/* API: shard column detail with compression types */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
-				(if (dashboard_check_admin req) (begin
+				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define cols (show_shard_columns dbname tblname (simplify shardidx)))
 					(define items (map cols (lambda (c)
 						(json_encode_assoc (list
 							"name" (c "name")
 							"compression" (c "compression")
 							"size_bytes" (c "size_bytes")
+							"delta_count" (c "delta_count")
+							"delta_size_bytes" (c "delta_size_bytes")
 						))
 					)))
 					(dashboard_send_json res (dashboard_json_array items))
-				) (dashboard_send_401 res))
+				)))
 			)
 			/* API: table detail with columns, shards, meta */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)$" _ dbname tblname) (begin
-				(if (dashboard_check_admin req) (begin
+				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define cols (show dbname tblname))
 					(define shards (show_shards dbname tblname))
 					(define meta (show dbname tblname "meta"))
@@ -171,10 +218,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						",\"collation\":" (json_encode (meta "Collation"))
 						",\"uniques\":" unique_items "}}"
 					))
-				) (dashboard_send_401 res))
+				)))
 			)
 			(regex "^/dashboard/api/db/([^/]+)$" _ dbname) (begin
-				(if (dashboard_check_admin req) (begin
+				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define tables (show dbname))
 					(define items (if (nil? tables) nil (map tables (lambda (tbl) (begin
 						(define meta (show dbname tbl "meta"))
@@ -195,15 +242,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						))
 					)))))
 					(dashboard_send_json res (dashboard_json_array items))
-				) (dashboard_send_401 res))
+				)))
+			)
+			/* API: check current user's admin status */
+			"/dashboard/api/whoami" (begin
+				(define is_admin (dashboard_check_user req))
+				(if (nil? is_admin)
+					(dashboard_send_401 res)
+					(dashboard_send_json res (concat "{\"admin\":" (if is_admin "true" "false") ",\"username\":" (json_encode (req "username")) "}"))
+				)
 			)
 			"/dashboard" (begin
-				(if (dashboard_check_admin req)
+				(if (nil? (dashboard_check_user req))
+					(dashboard_send_401 res)
 					(begin
 						((res "header") "Content-Type" "text/html; charset=utf-8")
 						((res "print") (readfile "assets/dashboard.html"))
 					)
-					(dashboard_send_401 res)
 				)
 			)
 			"/dashboard/logo.svg" (begin

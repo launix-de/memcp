@@ -1104,6 +1104,7 @@ func Init(en scm.Env) {
 				return scm.NewSlice([]scm.Scmer{})
 			}
 			s.mu.RLock()
+			deltaCount := len(s.inserts)
 			rows := make([]scm.Scmer, 0, len(t.Columns))
 			for _, col := range t.Columns {
 				cs := s.columns[col.Name]
@@ -1116,10 +1117,21 @@ func Init(en scm.Env) {
 					typStr = "unloaded"
 					colSize = 0
 				}
+				// compute delta size for this column
+				var deltaSize uint
+				if dIdx, ok := s.deltaColumns[col.Name]; ok {
+					for _, row := range s.inserts {
+						if dIdx < len(row) {
+							deltaSize += row[dIdx].ComputeSize()
+						}
+					}
+				}
 				rows = append(rows, scm.NewSlice([]scm.Scmer{
 					scm.NewString("name"), scm.NewString(col.Name),
 					scm.NewString("compression"), scm.NewString(typStr),
 					scm.NewString("size_bytes"), scm.NewInt(int64(colSize)),
+					scm.NewString("delta_count"), scm.NewInt(int64(deltaCount)),
+					scm.NewString("delta_size_bytes"), scm.NewInt(int64(deltaSize)),
 				}))
 			}
 			s.mu.RUnlock()
