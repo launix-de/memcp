@@ -423,10 +423,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define inner sql_select)
 			(atom ";" false)
 		) (list '!insert_select tbl cols inner ignore))
-		/* UPDATE table SET col=val WHERE condition; */
+		/* UPDATE table SET col=val WHERE condition; (also accepts table.col = val) */
 		(parser '(
 			(atom "UPDATE" true) (define tbl sql_identifier)
-			(atom "SET" true) (define assignments (+ (parser '((define col sql_identifier) "=" (define expr sql_expression)) '(col expr)) ","))
+			(atom "SET" true) (define assignments (+ (or
+				(parser '(sql_identifier "." (define col sql_identifier) "=" (define expr sql_expression)) '(col expr))
+				(parser '((define col sql_identifier) "=" (define expr sql_expression)) '(col expr))
+			) ","))
 			(? (atom "WHERE" true) (define where sql_expression))
 			(atom ";" false)
 		) (list '!update tbl assignments where))
@@ -857,6 +860,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(define tbldefs (+ tabledefs ","))
 		(atom "SET" true)
 		(define cols (+ (or
+			(parser '(sql_identifier "." (define title sql_identifier) "=" (define e sql_expression)) '(title e))
 			(parser '((define title sql_identifier) "=" (define e sql_expression)) '(title e))
 		) ","))
 		(? '(
