@@ -215,43 +215,53 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 										(cons (symbol "list") cols)
 										(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
 										(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil)))
-								(if (equal? tag '!update)
-									/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
+								(if (equal? tag '!insert_select)
+									/* INSERT INTO tbl (cols) <full SELECT> - stmt is (!insert_select tbl cols inner_select ignore) */
+									/* Reuses sql_select + build_queryplan_term (same as top-level INSERT...SELECT) */
 									(begin
 										(define tbl (car (cdr stmt)))
-										(define assignments (merge (car (cdr (cdr stmt))))) /* flatten from + combinator */
-										(define where_raw (car (cdr (cdr (cdr stmt)))))
-										/* Transform: NEW/OLD -> get_assoc, nil-qualified -> tbl-qualified */
-										(define fix_expr (lambda (expr) (match expr
+										(define cols (car (cdr (cdr stmt))))
+										(define inner (car (cdr (cdr (cdr stmt)))))
+										(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
+										/* Transform: replace NEW/OLD column refs with get_assoc for trigger context */
+										(define transform_new_old (lambda (expr) (match expr
 											'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 											'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-											'('get_column nil _ col ci) (list (symbol "get_column") tbl false col ci)
-											(cons h t) (cons (fix_expr h) (map t fix_expr))
+											(cons h t) (cons (transform_new_old h) (map t transform_new_old))
 											expr)))
-										(define condition (if (nil? where_raw) true (fix_expr where_raw)))
-										(define filtercols (extract_columns_for_tblvar tbl condition))
-										(define scancols (merge_unique (extract_assoc assignments (lambda (col expr)
-											(extract_columns_for_tblvar tbl (fix_expr expr))))))
-										(define mapcols (cons (symbol "list") (cons "$update" scancols)))
-										(define mapfn (list (symbol "lambda")
-											(cons (symbol "$update") (map scancols (lambda (col) (symbol (concat tbl "." col)))))
-											(list (symbol "if")
-												(list (symbol "$update") (cons (symbol "list") (map_assoc assignments (lambda (col expr) (replace_columns_from_expr (fix_expr expr))))))
-												1 0)))
-										(define filterfn (list (symbol "lambda")
-											(map filtercols (lambda (col) (symbol (concat tbl "." col))))
-											(replace_columns_from_expr condition)))
-										(list (list (symbol "scan") schema tbl
-											(cons (symbol "list") filtercols)
-											filterfn
-											mapcols
-											mapfn
-											(symbol "+") 0)))
-									(if (equal? tag '!delete)
-										/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
+										/* Transform the SELECT 9-tuple to handle NEW/OLD refs */
+										/* fields is a flat assoc (k1 v1 k2 v2 ...), order is list of (expr dir) pairs */
+										(define inner_t (match inner '(s tables fields condition group having order limit offset)
+											(list s tables
+												(map_assoc fields (lambda (k v) (transform_new_old v)))
+												(transform_new_old condition)
+												(if (nil? group) nil (map group transform_new_old))
+												(if (nil? having) nil (transform_new_old having))
+												(if (nil? order) nil (map order (lambda (o) (match o '(e d) (list (transform_new_old e) d) o))))
+												limit offset)
+											inner))
+										/* Extract SELECT field names from the 9-tuple (fields is a flat assoc list) */
+										(define select_fields (match inner_t '(_ _ fields _ _ _ _ _ _) fields '()))
+										(define select_names (extract_assoc select_fields (lambda (k v) k)))
+										/* Generate code: set resultrow + build_queryplan_term */
+										(list (list (symbol "begin")
+											(list (symbol "set") (symbol "resultrow")
+												(list (symbol "lambda") (list (symbol "item"))
+													(list (symbol "insert") schema tbl
+														(cons (symbol "list") cols)
+														(list (symbol "list")
+															(cons (symbol "list")
+																(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
+														(list (symbol "list"))
+														(if ignore (list (symbol "lambda") '() 0) nil)
+														false nil)))
+											(build_queryplan_term inner_t))))
+									(if (equal? tag '!update)
+										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 										(begin
 											(define tbl (car (cdr stmt)))
-											(define where_raw (car (cdr (cdr stmt))))
+											(define assignments (merge (car (cdr (cdr stmt))))) /* flatten from + combinator */
+											(define where_raw (car (cdr (cdr (cdr stmt)))))
 											/* Transform: NEW/OLD -> get_assoc, nil-qualified -> tbl-qualified */
 											(define fix_expr (lambda (expr) (match expr
 												'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
@@ -261,57 +271,88 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 												expr)))
 											(define condition (if (nil? where_raw) true (fix_expr where_raw)))
 											(define filtercols (extract_columns_for_tblvar tbl condition))
+											(define scancols (merge_unique (extract_assoc assignments (lambda (col expr)
+												(extract_columns_for_tblvar tbl (fix_expr expr))))))
+											(define mapcols (cons (symbol "list") (cons "$update" scancols)))
+											(define mapfn (list (symbol "lambda")
+												(cons (symbol "$update") (map scancols (lambda (col) (symbol (concat tbl "." col)))))
+												(list (symbol "if")
+													(list (symbol "$update") (cons (symbol "list") (map_assoc assignments (lambda (col expr) (replace_columns_from_expr (fix_expr expr))))))
+													1 0)))
 											(define filterfn (list (symbol "lambda")
 												(map filtercols (lambda (col) (symbol (concat tbl "." col))))
 												(replace_columns_from_expr condition)))
 											(list (list (symbol "scan") schema tbl
 												(cons (symbol "list") filtercols)
 												filterfn
-												(list (symbol "list") "$update")
-												(list (symbol "lambda") (list (symbol "$update")) (list (symbol "if") (list (symbol "$update")) 1 0))
+												mapcols
+												mapfn
 												(symbol "+") 0)))
-										(if (equal? tag '!delete_using)
-											/* DELETE FROM target USING target, other [AS alias] WHERE condition */
-											/* stmt is (!delete_using target tbls where) */
+										(if (equal? tag '!delete)
+											/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
 											(begin
-												(define target (car (cdr stmt)))
-												(define tbls (car (cdr (cdr stmt))))
-												(define where_raw (car (cdr (cdr (cdr stmt)))))
-												(define transform_dml (lambda (expr) (match expr
+												(define tbl (car (cdr stmt)))
+												(define where_raw (car (cdr (cdr stmt))))
+												/* Transform: NEW/OLD -> get_assoc, nil-qualified -> tbl-qualified */
+												(define fix_expr (lambda (expr) (match expr
 													'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 													'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-													(cons head tail) (cons (transform_dml head) (map tail transform_dml))
-													expr
-												)))
-												(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-												/* Build table defs: ((alias tbl) ...) -> ((alias schema tbl false nil) ...) */
-												(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
-												(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-													'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
-													acc)) nil))
-												(define target_alias (match target_def '(id _ _ _ _) id))
-												(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-												(define others (reduce all_defs (lambda (acc tdef) (match tdef
-													'(id _ _ _ _) (if (equal? id target_alias) acc (cons tdef acc))
-													acc)) '()))
-												(define target_cols (extract_columns_for_tblvar target_alias t_where))
-												(define condition_body (replace_columns_from_expr t_where))
-												(define filter_body (wrap_multi_scans others target_alias t_where condition_body))
+													'('get_column nil _ col ci) (list (symbol "get_column") tbl false col ci)
+													(cons h t) (cons (fix_expr h) (map t fix_expr))
+													expr)))
+												(define condition (if (nil? where_raw) true (fix_expr where_raw)))
+												(define filtercols (extract_columns_for_tblvar tbl condition))
 												(define filterfn (list (symbol "lambda")
-													(map target_cols (lambda (col) (symbol (concat target_alias "." col))))
-													filter_body))
-												(list (list (symbol "scan") schema target_tbl
-													(cons (symbol "list") target_cols)
+													(map filtercols (lambda (col) (symbol (concat tbl "." col))))
+													(replace_columns_from_expr condition)))
+												(list (list (symbol "scan") schema tbl
+													(cons (symbol "list") filtercols)
 													filterfn
 													(list (symbol "list") "$update")
 													(list (symbol "lambda") (list (symbol "$update")) (list (symbol "if") (list (symbol "$update")) 1 0))
 													(symbol "+") 0)))
-											(if (equal? tag '!nop)
-												/* No-op statement (e.g. SET @var) - return empty list */
-												'()
-												/* Unknown statement type */
-												nil
-					)))))))
+											(if (equal? tag '!delete_using)
+												/* DELETE FROM target USING target, other [AS alias] WHERE condition */
+												/* stmt is (!delete_using target tbls where) */
+												(begin
+													(define target (car (cdr stmt)))
+													(define tbls (car (cdr (cdr stmt))))
+													(define where_raw (car (cdr (cdr (cdr stmt)))))
+													(define transform_dml (lambda (expr) (match expr
+														'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+														'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+														(cons head tail) (cons (transform_dml head) (map tail transform_dml))
+														expr
+													)))
+													(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
+													/* Build table defs: ((alias tbl) ...) -> ((alias schema tbl false nil) ...) */
+													(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
+													(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
+														'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+														acc)) nil))
+													(define target_alias (match target_def '(id _ _ _ _) id))
+													(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
+													(define others (reduce all_defs (lambda (acc tdef) (match tdef
+														'(id _ _ _ _) (if (equal? id target_alias) acc (cons tdef acc))
+														acc)) '()))
+													(define target_cols (extract_columns_for_tblvar target_alias t_where))
+													(define condition_body (replace_columns_from_expr t_where))
+													(define filter_body (wrap_multi_scans others target_alias t_where condition_body))
+													(define filterfn (list (symbol "lambda")
+														(map target_cols (lambda (col) (symbol (concat target_alias "." col))))
+														filter_body))
+													(list (list (symbol "scan") schema target_tbl
+														(cons (symbol "list") target_cols)
+														filterfn
+														(list (symbol "list") "$update")
+														(list (symbol "lambda") (list (symbol "$update")) (list (symbol "if") (list (symbol "$update")) 1 0))
+														(symbol "+") 0)))
+												(if (equal? tag '!nop)
+													/* No-op statement (e.g. SET @var) - return empty list */
+													'()
+													/* Unknown statement type */
+													nil
+					))))))))
 				)
 		)))
 
@@ -375,14 +416,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(define values (+ (parser '("(" (define v (+ sql_expression ",")) ")") v) ","))
 			(atom ";" false)
 		) (list '!insert tbl cols values ignore))
-		/* INSERT [IGNORE] INTO table (...) SELECT expr, expr, ...; */
+		/* INSERT [IGNORE] INTO table (...) SELECT ... ; (full SELECT, handles FROM/WHERE/JOIN/etc.) */
 		(parser '(
 			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
 			"(" (define cols (+ sql_identifier ",")) ")"
-			(atom "SELECT" true)
-			(define exprs (+ sql_expression ","))
+			(define inner sql_select)
 			(atom ";" false)
-		) (list '!insert tbl cols (list exprs) ignore))
+		) (list '!insert_select tbl cols inner ignore))
 		/* UPDATE table SET col=val WHERE condition; */
 		(parser '(
 			(atom "UPDATE" true) (define tbl sql_identifier)

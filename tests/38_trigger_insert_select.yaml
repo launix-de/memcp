@@ -1,0 +1,142 @@
+# Trigger INSERT...SELECT tests
+# Tests INSERT INTO ... SELECT ... FROM ... WHERE ... inside trigger bodies
+
+metadata:
+  version: "1.0"
+  description: "Trigger body INSERT...SELECT with full SELECT support"
+
+setup:
+  - sql: "CREATE TABLE IF NOT EXISTS trig_is_source (id INT, category VARCHAR(50), val INT)"
+  - sql: "CREATE TABLE IF NOT EXISTS trig_is_target (id INT, category VARCHAR(50), val INT)"
+  - sql: "CREATE TABLE IF NOT EXISTS trig_is_log (src_id INT, src_val INT)"
+  - sql: "CREATE TABLE IF NOT EXISTS trig_is_control (id INT, action VARCHAR(20))"
+  - sql: "INSERT INTO trig_is_source (id, category, val) VALUES (1, 'A', 10)"
+  - sql: "INSERT INTO trig_is_source (id, category, val) VALUES (2, 'B', 20)"
+  - sql: "INSERT INTO trig_is_source (id, category, val) VALUES (3, 'A', 30)"
+  - sql: "INSERT INTO trig_is_source (id, category, val) VALUES (4, 'B', 40)"
+
+test_cases:
+  # === Basic INSERT...SELECT FROM...WHERE in trigger body ===
+  - name: "Create AFTER INSERT trigger with INSERT...SELECT FROM WHERE"
+    sql: >
+      CREATE TRIGGER trig_is_copy AFTER INSERT ON trig_is_control
+      FOR EACH ROW BEGIN
+        INSERT INTO trig_is_log (src_id, src_val)
+        SELECT id, val FROM trig_is_source WHERE category = 'A';
+      END
+    expect:
+      affected_rows: 0
+
+  - name: "Fire trigger - inserts matching rows from source into log"
+    sql: "INSERT INTO trig_is_control (id, action) VALUES (1, 'copy')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify INSERT...SELECT copied correct rows"
+    sql: "SELECT src_id, src_val FROM trig_is_log ORDER BY src_id"
+    expect:
+      rows: 2
+      data:
+        - src_id: 1
+          src_val: 10
+        - src_id: 3
+          src_val: 30
+
+  - name: "Drop copy trigger"
+    sql: "DROP TRIGGER IF EXISTS trig_is_copy"
+    expect:
+      affected_rows: 0
+
+  - name: "Clear log"
+    sql: "DELETE FROM trig_is_log WHERE 1=1"
+
+  # === INSERT...SELECT using NEW values in WHERE ===
+  - name: "Create trigger using NEW in SELECT WHERE"
+    sql: >
+      CREATE TRIGGER trig_is_new_ref AFTER INSERT ON trig_is_control
+      FOR EACH ROW BEGIN
+        INSERT INTO trig_is_log (src_id, src_val)
+        SELECT id, val FROM trig_is_source WHERE category = NEW.action;
+      END
+    expect:
+      affected_rows: 0
+
+  - name: "Fire trigger with action=A - copies category A rows"
+    sql: "INSERT INTO trig_is_control (id, action) VALUES (2, 'A')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify NEW-referenced SELECT copied only category A"
+    sql: "SELECT src_id, src_val FROM trig_is_log ORDER BY src_id"
+    expect:
+      rows: 2
+      data:
+        - src_id: 1
+          src_val: 10
+        - src_id: 3
+          src_val: 30
+
+  - name: "Clear log again"
+    sql: "DELETE FROM trig_is_log WHERE 1=1"
+
+  - name: "Fire trigger with action=B - copies category B rows"
+    sql: "INSERT INTO trig_is_control (id, action) VALUES (3, 'B')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify NEW-referenced SELECT copied only category B"
+    sql: "SELECT src_id, src_val FROM trig_is_log ORDER BY src_id"
+    expect:
+      rows: 2
+      data:
+        - src_id: 2
+          src_val: 20
+        - src_id: 4
+          src_val: 40
+
+  - name: "Drop NEW ref trigger"
+    sql: "DROP TRIGGER IF EXISTS trig_is_new_ref"
+    expect:
+      affected_rows: 0
+
+  - name: "Clear log for next test"
+    sql: "DELETE FROM trig_is_log WHERE 1=1"
+
+  # === INSERT...SELECT with expressions in SELECT list ===
+  - name: "Create trigger with computed SELECT expressions"
+    sql: >
+      CREATE TRIGGER trig_is_expr AFTER INSERT ON trig_is_control
+      FOR EACH ROW BEGIN
+        INSERT INTO trig_is_log (src_id, src_val)
+        SELECT id, val * 2 FROM trig_is_source WHERE val > 15;
+      END
+    expect:
+      affected_rows: 0
+
+  - name: "Fire expression trigger"
+    sql: "INSERT INTO trig_is_control (id, action) VALUES (4, 'expr')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify computed expressions in INSERT...SELECT"
+    sql: "SELECT src_id, src_val FROM trig_is_log ORDER BY src_id"
+    expect:
+      rows: 3
+      data:
+        - src_id: 2
+          src_val: 40
+        - src_id: 3
+          src_val: 60
+        - src_id: 4
+          src_val: 80
+
+  - name: "Drop expression trigger"
+    sql: "DROP TRIGGER IF EXISTS trig_is_expr"
+    expect:
+      affected_rows: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS trig_is_control"
+  - sql: "DROP TABLE IF EXISTS trig_is_log"
+  - sql: "DROP TABLE IF EXISTS trig_is_target"
+  - sql: "DROP TABLE IF EXISTS trig_is_source"
