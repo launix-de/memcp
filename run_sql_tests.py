@@ -267,7 +267,7 @@ class SQLTestRunner:
         except Exception:
             pass
 
-    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None) -> Optional[requests.Response]:
+    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10) -> Optional[requests.Response]:
         # proactively ensure database exists (works for connect-only too)
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
@@ -280,7 +280,7 @@ class SQLTestRunner:
         # Try request; if connection fails, wait for memcp to be ready and retry a few times
         for attempt in range(5):
             try:
-                return requests.post(url, data=query, headers=headers, timeout=10)
+                return requests.post(url, data=query, headers=headers, timeout=timeout)
             except Exception:
                 # parse port from base_url
                 try:
@@ -300,12 +300,12 @@ class SQLTestRunner:
             return "postgresql"
         return syntax_lower
 
-    def execute_sparql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None) -> Optional[requests.Response]:
+    def execute_sparql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, timeout: int = 10) -> Optional[requests.Response]:
         try:
             encoded_db = quote(database, safe='')
             url = f"{self.base_url}/rdf/{encoded_db}"
             headers = auth_header if auth_header is not None else self.auth_header
-            return requests.post(url, data=query, headers=headers, timeout=10)
+            return requests.post(url, data=query, headers=headers, timeout=timeout)
         except Exception as e:
             print(f"Error executing SPARQL: {e}")
             return None
@@ -446,6 +446,7 @@ class SQLTestRunner:
         test_syntax = test_case.get("syntax")
         active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
         session_id = test_case.get("session_id")
+        sql_timeout = int(test_case.get("timeout", 10))
 
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
@@ -490,7 +491,7 @@ class SQLTestRunner:
             # Warmup runs for performance tests (2 unmeasured runs before the measured one)
             if is_perf_test and test_case.get("warmup", True):
                 for _ in range(2):
-                    self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax)
+                    self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
 
             # Get memcp PID and start CPU measurement for perf tests
             memcp_pid = find_memcp_pid() if is_perf_test else None
@@ -498,7 +499,7 @@ class SQLTestRunner:
 
             # Execute query (with timing for perf tests)
             start_time = time.monotonic()
-            response = self.execute_sparql(database, query, auth_header) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id)
+            response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id, timeout=sql_timeout)
             elapsed_ms = (time.monotonic() - start_time) * 1000
             elapsed_sec = elapsed_ms / 1000
 
