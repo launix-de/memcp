@@ -27,13 +27,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* cached_parse: wraps a parser with cachemap-based caching.
 cache_key = username:schema:query — per-user isolation (policy checked at parse time).
 On parse error the result is not cached (e.g. table does not exist yet). */
-(define cached_parse (lambda (cache parser schema query policy username)
+(define cached_parse (lambda (cache parse_fn schema query policy username)
 	(begin
 		(define cache_key (concat username ":" schema ":" query))
 		(define cached (cache cache_key))
 		(if cached cached
 			(begin
-				(define formula (try (lambda () (parser schema query policy)) (lambda (e) e)))
+				(define formula (try (lambda () (parse_fn schema query policy)) (lambda (e) e)))
 				(if (string? formula)
 					(error formula)
 					(begin
