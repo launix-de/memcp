@@ -967,15 +967,15 @@ func Init(en scm.Env) {
 				if t == nil {
 					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
-				// engine
-				engine := "SAFE"
+				// engine (lowercase to match dashboard dropdown values)
+				engine := "safe"
 				switch t.PersistencyMode {
 				case Logged:
-					engine = "LOGGING"
+					engine = "logging"
 				case Sloppy:
-					engine = "SLOPPY"
+					engine = "sloppy"
 				case Memory:
-					engine = "MEMORY"
+					engine = "memory"
 				}
 				// unique keys as list of (id, cols...)
 				uniques := make([]scm.Scmer, len(t.Unique))
