@@ -243,6 +243,10 @@ func (s *CephStorage) DeleteBlob(hash string) {
 	_ = s.ioctx.Delete(s.obj("blob/" + hash))
 }
 
+func (s *CephStorage) BackendName() string {
+	return "ceph"
+}
+
 func (s *CephStorage) Remove() {
 	// With plain librados we can't efficiently list "all objects under prefix"
 	// unless we also maintain an index object / omap with object names.

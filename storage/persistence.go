@@ -52,6 +52,7 @@ type PersistenceEngine interface {
 	ReplayLog(shard string) (chan interface{}, PersistenceLogfile) // replay existing log
 	RemoveLog(shard string)
 	Remove() // delete from storage
+	BackendName() string // returns the backend type name (e.g. "filesystem", "s3", "ceph")
 }
 
 type PersistenceLogfile interface {

@@ -58,6 +58,34 @@
 /* null check */
 (sql_builtins "ISNULL" (lambda (x) (if (nil? x) 1 0)))
 
+/* phonetic */
+(sql_builtins "SOUNDEX" (lambda (s) (if (nil? s) nil (begin
+	(define input (toUpper (concat s)))
+	(define codes (newsession))
+	(codes "B" "1") (codes "F" "1") (codes "P" "1") (codes "V" "1")
+	(codes "C" "2") (codes "G" "2") (codes "J" "2") (codes "K" "2") (codes "Q" "2") (codes "S" "2") (codes "X" "2") (codes "Z" "2")
+	(codes "D" "3") (codes "T" "3")
+	(codes "L" "4")
+	(codes "M" "5") (codes "N" "5")
+	(codes "R" "6")
+	(define first (sql_substr input 1 1))
+	(define len (strlen input))
+	(define state (for (list 2 first (coalesce (codes first) "0"))
+		(lambda (i result prev) (and (<= i len) (< (strlen result) 4)))
+		(lambda (i result prev) (begin
+			(define ch (sql_substr input i 1))
+			(define code (codes ch))
+			(if (and (not (nil? code)) (not (equal? code prev)))
+				(list (+ i 1) (concat result code) code)
+				(list (+ i 1) result (coalesce code "0")))
+		))
+	))
+	(define result (nth state 1))
+	(if (< (strlen result) 4)
+		(concat result (sql_substr "0000" 1 (- 4 (strlen result))))
+		result)
+))))
+
 /* vectors */
 (sql_builtins "VECTOR_DISTANCE" dot)
 (sql_builtins "STRING_TO_VECTOR" json_decode)

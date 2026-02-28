@@ -277,6 +277,10 @@ func (s *S3Storage) DeleteBlob(hash string) {
 	})
 }
 
+func (s *S3Storage) BackendName() string {
+	return "s3"
+}
+
 func (s *S3Storage) Remove() {
 	// List and delete all objects with prefix
 	s.ensureOpen()

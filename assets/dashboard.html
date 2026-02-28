@@ -190,13 +190,31 @@ header a:hover{opacity:1;text-decoration:underline}
 <h2>Databases</h2>
 <div style="margin-bottom:16px" data-admin-only>
 <button class="btn-warn" id="btn-create-db-toggle">Create Database</button>
-<div id="create-db-form" style="display:none;margin-top:12px;background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px;max-width:400px">
+<div id="create-db-form" style="display:none;margin-top:12px;background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px;max-width:500px">
 <div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Database Name</label><input type="text" id="new-dbname" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Backend</label><select id="new-db-backend" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"><option value="filesystem">filesystem</option><option value="s3">s3</option><option value="ceph">ceph</option></select></div>
+<div id="db-s3-fields" style="display:none">
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Endpoint</label><input type="text" id="new-db-s3-endpoint" placeholder="http://localhost:9000" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Bucket</label><input type="text" id="new-db-s3-bucket" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Region</label><input type="text" id="new-db-s3-region" value="us-east-1" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Access Key ID</label><input type="text" id="new-db-s3-access-key" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Secret Access Key</label><input type="password" id="new-db-s3-secret-key" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Prefix (optional)</label><input type="text" id="new-db-s3-prefix" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;cursor:pointer"><input type="checkbox" id="new-db-s3-pathstyle"> Force path style</label></div>
+</div>
+<div id="db-ceph-fields" style="display:none">
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Username</label><input type="text" id="new-db-ceph-username" placeholder="client.admin" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Cluster</label><input type="text" id="new-db-ceph-cluster" value="ceph" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Config File (optional)</label><input type="text" id="new-db-ceph-conffile" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Pool</label><input type="text" id="new-db-ceph-pool" placeholder="memcp" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+<div style="margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Prefix (optional)</label><input type="text" id="new-db-ceph-prefix" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"></div>
+</div>
+<div id="db-copyfrom-wrap" style="display:none;margin-bottom:10px"><label style="color:#888;font-size:.8rem;display:block;margin-bottom:4px">Copy config from existing database</label><select id="new-db-copyfrom" style="background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:6px 10px;border-radius:4px;font-size:.85rem;width:100%"><option value="">(none - configure manually)</option></select></div>
 <button class="btn-warn" id="btn-create-db">Create</button>
 </div>
 </div>
 <table class="browse-table" id="tbl-databases">
-<thead><tr><th>Name</th><th class="r">Tables</th><th class="r">Size</th><th>Actions</th></tr></thead>
+<thead><tr><th>Name</th><th>Backend</th><th class="r">Tables</th><th class="r">Size</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
@@ -575,15 +593,16 @@ backLink.style.display="none";
 }
 
 function renderDatabases(data){
+lastDbList=data;
 data.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
 var tb=document.querySelector("#tbl-databases tbody");
 var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
 var dn=esc(encodeURIComponent(d.name));
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querydb='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button></td></tr>";
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td>"+esc(d.backend||"filesystem")+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querydb='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button></td></tr>";
 }
-tb.innerHTML=h||"<tr><td colspan='4' style='color:#888;text-align:center'>No databases</td></tr>";
+tb.innerHTML=h||"<tr><td colspan='5' style='color:#888;text-align:center'>No databases</td></tr>";
 tb.querySelectorAll("[data-truncdb]").forEach(function(btn){
 btn.onclick=function(e){e.stopPropagation();var db=btn.getAttribute("data-truncdb");if(window.confirm("Truncate all tables in database '"+db+"'? All data will be deleted.")){
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db),function(tables){
@@ -967,14 +986,60 @@ function sqlId(s){return "`"+String(s).replace(/`/g,"``")+"`"}
 
 /* Create database form */
 var createDbFormVisible=false;
+var lastDbList=[];
 document.getElementById("btn-create-db-toggle").addEventListener("click",function(){
 createDbFormVisible=!createDbFormVisible;
 document.getElementById("create-db-form").style.display=createDbFormVisible?"":"none";
 });
+document.getElementById("new-db-backend").addEventListener("change",function(){
+var v=this.value;
+document.getElementById("db-s3-fields").style.display=v==="s3"?"":"none";
+document.getElementById("db-ceph-fields").style.display=v==="ceph"?"":"none";
+document.getElementById("db-copyfrom-wrap").style.display=v!=="filesystem"?"":"none";
+/* populate copy-from select */
+var sel=document.getElementById("new-db-copyfrom");
+sel.innerHTML="<option value=''>(none - configure manually)</option>";
+for(var i=0;i<lastDbList.length;i++){
+if((lastDbList[i].backend||"filesystem")===v){
+sel.innerHTML+="<option value='"+esc(lastDbList[i].name)+"'>"+esc(lastDbList[i].name)+"</option>";
+}}
+});
+document.getElementById("new-db-copyfrom").addEventListener("change",function(){
+var backend=document.getElementById("new-db-backend").value;
+var hide=this.value!=="";
+if(backend==="s3"){var fs=document.getElementById("db-s3-fields").querySelectorAll("input");for(var i=0;i<fs.length;i++)fs[i].disabled=hide}
+if(backend==="ceph"){var fs=document.getElementById("db-ceph-fields").querySelectorAll("input");for(var i=0;i<fs.length;i++)fs[i].disabled=hide}
+});
 document.getElementById("btn-create-db").addEventListener("click",function(){
 var name=document.getElementById("new-dbname").value.trim();
 if(!name){window.alert("Database name is required.");return}
-execSQL("system","CREATE DATABASE "+sqlId(name),function(){
+var backend=document.getElementById("new-db-backend").value;
+var copyFrom=document.getElementById("new-db-copyfrom").value;
+var sql;
+if(backend!=="filesystem"&&copyFrom){
+sql="CREATE DATABASE "+sqlId(name)+" FROM "+sqlId(copyFrom);
+}else if(backend==="s3"){
+var parts=["backend='s3'"];
+var ep=document.getElementById("new-db-s3-endpoint").value.trim();if(ep)parts.push("endpoint="+sqlStr(ep));
+var bk=document.getElementById("new-db-s3-bucket").value.trim();if(bk)parts.push("bucket="+sqlStr(bk));
+var rg=document.getElementById("new-db-s3-region").value.trim();if(rg)parts.push("region="+sqlStr(rg));
+var ak=document.getElementById("new-db-s3-access-key").value.trim();if(ak)parts.push("access_key_id="+sqlStr(ak));
+var sk=document.getElementById("new-db-s3-secret-key").value.trim();if(sk)parts.push("secret_access_key="+sqlStr(sk));
+var px=document.getElementById("new-db-s3-prefix").value.trim();if(px)parts.push("prefix="+sqlStr(px));
+if(document.getElementById("new-db-s3-pathstyle").checked)parts.push("force_path_style='true'");
+sql="CREATE DATABASE "+sqlId(name)+" SET "+parts.join(", ");
+}else if(backend==="ceph"){
+var parts=["backend='ceph'"];
+var un=document.getElementById("new-db-ceph-username").value.trim();if(un)parts.push("username="+sqlStr(un));
+var cl=document.getElementById("new-db-ceph-cluster").value.trim();if(cl)parts.push("cluster="+sqlStr(cl));
+var cf=document.getElementById("new-db-ceph-conffile").value.trim();if(cf)parts.push("conf_file="+sqlStr(cf));
+var pl=document.getElementById("new-db-ceph-pool").value.trim();if(pl)parts.push("pool="+sqlStr(pl));
+var px=document.getElementById("new-db-ceph-prefix").value.trim();if(px)parts.push("prefix="+sqlStr(px));
+sql="CREATE DATABASE "+sqlId(name)+" SET "+parts.join(", ");
+}else{
+sql="CREATE DATABASE "+sqlId(name);
+}
+execSQL("system",sql,function(){
 document.getElementById("new-dbname").value="";
 createDbFormVisible=false;
 document.getElementById("create-db-form").style.display="none";

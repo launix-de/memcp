@@ -747,6 +747,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(lam_handler "handler" (begin (set old_handler (lam_handler "handler")) (set mid_handler (lambda (req res) (+ 1 (old_handler req res)))) mid_handler))
 	(assert ((lam_handler "handler") 4 7) 13 "nested lambda scope overriding with inner variables")
 
+	/* Handler chain via global define (dashboard/sql/rdf pattern) */
+	(define test_handler (lambda (x) (concat "base:" x)))
+	(define test_handler (begin (set old_th test_handler) (lambda (x) (concat "w1:" (old_th x)))))
+	(assert (test_handler "a") "w1:base:a" "global handler chain without workaround")
+	(define test_handler (begin (set old_th test_handler) (lambda (x) (concat "w2:" (old_th x)))))
+	(assert (test_handler "b") "w2:w1:base:b" "double global handler chain")
+	/* Handler chain with if statement (exact dashboard pattern) */
+	(define test_handler (lambda (x) (concat "base:" x)))
+	(define test_handler (begin (set old_th test_handler) (if true nil) (lambda (x) (concat "wrap:" (old_th x)))))
+	(assert (test_handler "c") "wrap:base:c" "handler chain with if-statement")
+	/* Handler chain with eval in lambda body */
+	(define test_handler (lambda (x) (concat "base:" x)))
+	(define test_handler (begin (set old_th test_handler) (if true nil) (lambda (x) (begin (if false (eval '(+ 1 2)) nil) (concat "ev:" (old_th x))))))
+	(assert (test_handler "d") "ev:base:d" "handler chain with eval in body")
 
 	/* Mixed-type comparison: be forgiving (SQL) — no panic */
 	(try (lambda () (< "x" 1)) (lambda (e) (panicked "cmp-panic" true)))

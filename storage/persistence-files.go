@@ -232,3 +232,7 @@ func (w FileLogfile) Close() {
 func (s *FileStorage) Remove() {
 	os.RemoveAll(s.path)
 }
+
+func (s *FileStorage) BackendName() string {
+	return "filesystem"
+}

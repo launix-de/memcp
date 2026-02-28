@@ -451,6 +451,147 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 	return true
 }
 
+func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[string]string) bool {
+	backend := options["backend"]
+	if backend == "" || backend == "filesystem" {
+		return CreateDatabase(schema, ignoreexists)
+	}
+
+	db := databases.Get(schema)
+	if db != nil {
+		if ignoreexists {
+			return false
+		}
+		panic("Database " + schema + " already exists")
+	}
+
+	// Validate backend exists in registry
+	if _, ok := BackendRegistry[backend]; !ok {
+		panic("Unknown storage backend: " + backend)
+	}
+
+	// Default prefix to schema name
+	if _, ok := options["prefix"]; !ok {
+		options["prefix"] = schema
+	}
+
+	// Convert force_path_style string to bool for JSON
+	forcePathStyle := false
+	if fps, ok := options["force_path_style"]; ok {
+		forcePathStyle = fps == "true" || fps == "1" || fps == "TRUE"
+		delete(options, "force_path_style")
+	}
+
+	// Build JSON config
+	configMap := make(map[string]interface{})
+	for k, v := range options {
+		configMap[k] = v
+	}
+	if forcePathStyle {
+		configMap["force_path_style"] = true
+	}
+
+	raw, err := json.MarshalIndent(configMap, "", "  ")
+	if err != nil {
+		panic("failed to marshal backend config: " + err.Error())
+	}
+
+	// Write config file
+	configPath := Basepath + "/" + schema + ".json"
+	if err := os.WriteFile(configPath, raw, 0640); err != nil {
+		panic("failed to write backend config: " + err.Error())
+	}
+
+	// Create persistence engine from config
+	persistence := createPersistenceFromConfig(schema, json.RawMessage(raw))
+	if persistence == nil {
+		os.Remove(configPath)
+		panic("failed to create persistence engine for backend: " + backend)
+	}
+
+	db = new(database)
+	db.Name = schema
+	db.persistence = persistence
+	db.tables = NonLockingReadMap.New[table, string]()
+	db.srState = WRITE
+
+	last := databases.Set(db)
+	if last != nil {
+		databases.Set(last)
+		os.Remove(configPath)
+		panic("Database " + schema + " already exists")
+	}
+
+	db.save()
+	return true
+}
+
+func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool {
+	db := databases.Get(schema)
+	if db != nil {
+		if ignoreexists {
+			return false
+		}
+		panic("Database " + schema + " already exists")
+	}
+
+	// Read source config
+	configPath := Basepath + "/" + sourceDB + ".json"
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		panic("Source database " + sourceDB + " has no backend config (filesystem databases cannot be copied)")
+	}
+
+	// Parse and update prefix
+	var configMap map[string]interface{}
+	if err := json.Unmarshal(configData, &configMap); err != nil {
+		panic("failed to parse source config: " + err.Error())
+	}
+	configMap["prefix"] = schema
+
+	raw, err := json.MarshalIndent(configMap, "", "  ")
+	if err != nil {
+		panic("failed to marshal backend config: " + err.Error())
+	}
+
+	// Write new config file
+	newConfigPath := Basepath + "/" + schema + ".json"
+	if err := os.WriteFile(newConfigPath, raw, 0640); err != nil {
+		panic("failed to write backend config: " + err.Error())
+	}
+
+	// Create persistence engine
+	persistence := createPersistenceFromConfig(schema, json.RawMessage(raw))
+	if persistence == nil {
+		os.Remove(newConfigPath)
+		panic("failed to create persistence engine from source config")
+	}
+
+	db = new(database)
+	db.Name = schema
+	db.persistence = persistence
+	db.tables = NonLockingReadMap.New[table, string]()
+	db.srState = WRITE
+
+	last := databases.Set(db)
+	if last != nil {
+		databases.Set(last)
+		os.Remove(newConfigPath)
+		panic("Database " + schema + " already exists")
+	}
+
+	db.save()
+	return true
+}
+
+func DatabaseBackendName(schema string) string {
+	db := databases.Get(schema)
+	if db == nil {
+		panic("Database " + schema + " does not exist")
+	}
+	return db.persistence.BackendName()
+}
+
 func DropDatabase(schema string, ifexists bool) bool {
 	db := databases.Remove(schema)
 	if db == nil {
@@ -481,6 +622,8 @@ func DropDatabase(schema string, ifexists bool) bool {
 
 	// remove remains of the folder structure
 	db.persistence.Remove()
+	// also remove backend config file if it exists
+	os.Remove(Basepath + "/" + schema + ".json")
 	return true
 }
 

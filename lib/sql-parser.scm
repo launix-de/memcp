@@ -664,6 +664,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 		/* EXISTS (SELECT ...) */
 		(parser '((atom "EXISTS" true) "(" (define sub sql_select) ")") '('inner_select_exists sub))
+		/* Simple CASE: CASE expr WHEN val THEN result ... ELSE default END */
+		/* DISABLED FOR DEBUGGING
+		(parser '((atom "CASE" true) (define expr sql_expression) (define conditions (* (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc conditions (lambda (a b) '('('equal?? expr a) b)))) '(elsebranch)))
+		*/
+		/* Searched CASE: CASE WHEN cond THEN result ... ELSE default END */
 		(parser '((atom "CASE" true) (define conditions (* (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e sql_expression) ")") '('count_distinct e))
@@ -1400,7 +1405,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		sql_multi_delete
 		sql_delete
 
-		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))))
+		/* CREATE DATABASE name FROM source_db */
+		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (atom "FROM" true) (define from_db sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil from_db)))
+		/* CREATE DATABASE name [SET key=val, ...] */
+		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (define opts (? (atom "SET" true) (+ (parser '((define k sql_identifier) "=" (define v sql_literal)) '(k v)) ",")))) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) (if opts (cons (quote list) (merge opts)) nil) nil)))
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username sql_identifier)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)

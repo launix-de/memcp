@@ -150,7 +150,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(define table_count (if (nil? tables) 0 (count tables)))
 						(define total_size (if (nil? tables) 0
 							(reduce (map tables (lambda (tbl) (dashboard_table_size db tbl))) (lambda (a b) (+ a b)) 0)))
-						(json_encode_assoc (list "name" db "tables" table_count "size_bytes" total_size))
+						(json_encode_assoc (list "name" db "tables" table_count "size_bytes" total_size "backend" (database_backend db)))
 					))))
 					(dashboard_send_json res (dashboard_json_array items))
 				))
