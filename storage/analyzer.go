@@ -44,11 +44,11 @@ func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 			if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
 				in[i].lower = b2.lower
 			}
-			in[i].lowerInclusive = b.lowerInclusive || b2.lowerInclusive
+			in[i].lowerInclusive = b.lowerInclusive && b2.lowerInclusive
 			if b.upper.IsNil() || (!b2.upper.IsNil() && scm.Less(b2.upper, b.upper)) {
 				in[i].upper = b2.upper
 			}
-			in[i].upperInclusive = b.upperInclusive || b2.upperInclusive
+			in[i].upperInclusive = b.upperInclusive && b2.upperInclusive
 			return in
 		}
 	}
@@ -165,6 +165,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					}
 				}
 			}
+			// reversed: (equal? const col)
+			if v[2].IsSymbol() {
+				sym := scm.Symbol(v[2].String())
+				if col, ok := symbolmapping[sym]; ok {
+					if v2, ok := extractConstant(v[1]); ok {
+						return boundaries{columnboundaries{col, v2, true, v2, true}}
+					}
+				}
+			}
 			return nil
 		} else if v[0].SymbolEquals("<") || v[0].SymbolEquals("<=") {
 			if v[1].IsSymbol() {
@@ -172,6 +181,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				if col, ok := symbolmapping[sym]; ok {
 					if v2, ok := extractConstant(v[2]); ok {
 						return boundaries{columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals("<=")}}
+					}
+				}
+			}
+			// reversed: (< const col) means col > const, (<=  const col) means col >= const
+			if v[2].IsSymbol() {
+				sym := scm.Symbol(v[2].String())
+				if col, ok := symbolmapping[sym]; ok {
+					if v2, ok := extractConstant(v[1]); ok {
+						return boundaries{columnboundaries{col, v2, v[0].SymbolEquals("<="), scm.NewNil(), false}}
 					}
 				}
 			}
@@ -183,6 +201,24 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					if v2, ok := extractConstant(v[2]); ok {
 						return boundaries{columnboundaries{col, v2, v[0].SymbolEquals(">="), scm.NewNil(), false}}
 					}
+				}
+			}
+			// reversed: (> const col) means col < const, (>= const col) means col <= const
+			if v[2].IsSymbol() {
+				sym := scm.Symbol(v[2].String())
+				if col, ok := symbolmapping[sym]; ok {
+					if v2, ok := extractConstant(v[1]); ok {
+						return boundaries{columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals(">=")}}
+					}
+				}
+			}
+			return nil
+		} else if v[0].SymbolEquals("nil?") && len(v) >= 2 {
+			// IS NULL: (nil? col)
+			if v[1].IsSymbol() {
+				sym := scm.Symbol(v[1].String())
+				if col, ok := symbolmapping[sym]; ok {
+					return boundaries{columnboundaries{col, scm.NewNil(), true, scm.NewNil(), true}}
 				}
 			}
 			return nil

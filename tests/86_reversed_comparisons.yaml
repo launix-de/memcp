@@ -1,0 +1,108 @@
+# Tests for reversed comparison boundary extraction (constant on left side)
+# e.g. WHERE 5 < col, WHERE 10 >= col, WHERE 'foo' = col
+# Also tests IS NULL boundary extraction for index usage.
+
+metadata:
+  version: "1.0"
+  description: "Reversed comparisons and IS NULL boundary extraction"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS rev_cmp"
+  - sql: "CREATE TABLE rev_cmp (id INT, val INT, name VARCHAR(50))"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS rev_cmp"
+
+test_cases:
+  - name: "Insert test data"
+    setup:
+      - scm: "(rebuild)"
+      - scm: |
+          (begin
+            (insert "memcp-tests" "rev_cmp" '("id" "val" "name")
+              (map (produceN 200) (lambda (i)
+                (if (equal? i 150) (list i (* i 3) nil)
+                  (list i (* i 3) (concat "item" i))))))
+            (rebuild))
+    sql: "SELECT COUNT(*) AS cnt FROM rev_cmp"
+    expect:
+      data:
+        - cnt: 200
+
+  # ==============================================================
+  # Reversed equality: constant = col
+  # ==============================================================
+
+  - name: "Reversed equality: 50 = id"
+    sql: "SELECT id, val FROM rev_cmp WHERE 50 = id"
+    expect:
+      rows: 1
+      data:
+        - id: 50
+          val: 150
+
+  - name: "Reversed equality: 'item99' = name"
+    sql: "SELECT id FROM rev_cmp WHERE 'item99' = name"
+    expect:
+      rows: 1
+      data:
+        - id: 99
+
+  # ==============================================================
+  # Reversed less-than: constant < col  →  col > constant
+  # ==============================================================
+
+  - name: "Reversed less-than: 195 < id (exclusive)"
+    sql: "SELECT COUNT(*) AS cnt FROM rev_cmp WHERE 195 < id"
+    expect:
+      data:
+        - cnt: 4
+
+  - name: "Reversed less-than-equal: 195 <= id"
+    sql: "SELECT COUNT(*) AS cnt FROM rev_cmp WHERE 195 <= id"
+    expect:
+      data:
+        - cnt: 5
+
+  # ==============================================================
+  # Reversed greater-than: constant > col  →  col < constant
+  # ==============================================================
+
+  - name: "Reversed greater-than: 5 > id (exclusive)"
+    sql: "SELECT COUNT(*) AS cnt FROM rev_cmp WHERE 5 > id"
+    expect:
+      data:
+        - cnt: 5
+
+  - name: "Reversed greater-than-equal: 5 >= id"
+    sql: "SELECT COUNT(*) AS cnt FROM rev_cmp WHERE 5 >= id"
+    expect:
+      data:
+        - cnt: 6
+
+  # ==============================================================
+  # Reversed in compound conditions
+  # ==============================================================
+
+  - name: "Reversed in AND: 10 <= id AND 15 > id"
+    sql: "SELECT COUNT(*) AS cnt FROM rev_cmp WHERE 10 <= id AND 15 > id"
+    expect:
+      data:
+        - cnt: 5
+
+  - name: "Reversed mixed: 10 = id AND 30 = val"
+    sql: "SELECT COUNT(*) AS cnt FROM rev_cmp WHERE 10 = id AND 30 = val"
+    expect:
+      data:
+        - cnt: 1
+
+  # ==============================================================
+  # IS NULL with index boundary extraction
+  # ==============================================================
+
+  - name: "IS NULL on name (row 150 has NULL name)"
+    sql: "SELECT id FROM rev_cmp WHERE name IS NULL"
+    expect:
+      rows: 1
+      data:
+        - id: 150
