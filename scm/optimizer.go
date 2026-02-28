@@ -898,7 +898,7 @@ func wrapConstListForCode(val Scmer) Scmer {
 	if val.IsSlice() {
 		list := val.Slice()
 		packed := make([]Scmer, 1, len(list)+1)
-		packed[0] = NewFunc(List)
+		packed[0] = NewSymbol("list")
 		for _, elem := range list {
 			packed = append(packed, wrapConstListForCode(elem))
 		}

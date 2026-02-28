@@ -701,7 +701,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* _mut on append with fresh list arg */
 	(assert ((eval (optimize '('lambda '('a 'b) '(append '(list 'a) 'b)))) 10 20) '(10 20) "_mut append on fresh list")
 	/* scan callback ownership: reduce accumulator enables _mut inside reduce body */
-	(assert (serialize (optimize '('scan "db" "tbl" '("x") '('lambda '('x) true) '("x") '('lambda '('x) 'x) '('lambda '('acc 'row) '(set_assoc 'acc 'row true)) '(list) nil false))) "(scan \"db\" \"tbl\" (\"x\") (lambda (x) true 1) (\"x\") (lambda (x) (var 0) 1) (lambda (acc row) (set_assoc_mut (var 0) (var 1) true) 2) (list) nil false)" "scan hook: reduce acc enables set_assoc_mut")
+	(assert (serialize (optimize '('scan "db" "tbl" '("x") '('lambda '('x) true) '("x") '('lambda '('x) 'x) '('lambda '('acc 'row) '(set_assoc 'acc 'row true)) '(list) nil false))) "(scan \"db\" \"tbl\" (\"x\") (lambda (x) true 1) (\"x\") (lambda (x) (var 0) 1) (lambda (acc row) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: reduce acc enables set_assoc_mut")
 
 	/* REGEXP_REPLACE precompilation: constant pattern gets precompiled */
 	(assert ((eval (optimize '('lambda '('s) '(regexp_replace 's "[^0-9]" "")))) "abc123def") "123" "regexp_replace precompilation works")
