@@ -1,0 +1,111 @@
+# Tests for IN-list and LIKE prefix boundary extraction for index usage.
+# IN (1,2,3) → range [min,max]; LIKE 'foo%' → range [prefix, prefix+1)
+
+metadata:
+  version: "1.0"
+  description: "IN-list and LIKE prefix boundary extraction"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS inlike"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS inlike"
+
+test_cases:
+  - name: "Create table and insert data"
+    setup:
+      - sql: "CREATE TABLE inlike (id INT, name VARCHAR(100), val INT)"
+      - scm: |
+          (begin
+            (insert "memcp-tests" "inlike" '("id" "name" "val")
+              (map (produceN 200) (lambda (i)
+                (list i (concat "item" i) (* i 5)))))
+            (rebuild))
+    sql: "SELECT COUNT(*) AS cnt FROM inlike"
+    expect:
+      data:
+        - cnt: 200
+
+  # ==============================================================
+  # IN-list boundary extraction
+  # ==============================================================
+
+  - name: "IN-list: basic IN query"
+    sql: "SELECT id FROM inlike WHERE id IN (10, 20, 30) ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 10
+        - id: 20
+        - id: 30
+
+  - name: "IN-list: single value"
+    sql: "SELECT id FROM inlike WHERE id IN (42)"
+    expect:
+      rows: 1
+      data:
+        - id: 42
+
+  - name: "IN-list: with other conditions (AND)"
+    sql: "SELECT id FROM inlike WHERE id IN (10, 20, 30) AND val = 100"
+    expect:
+      rows: 1
+      data:
+        - id: 20
+
+  - name: "IN-list: string values"
+    sql: "SELECT id FROM inlike WHERE name IN ('item50', 'item100', 'item150') ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 50
+        - id: 100
+        - id: 150
+
+  - name: "IN-list: no match"
+    sql: "SELECT COUNT(*) AS cnt FROM inlike WHERE id IN (999, 998, 997)"
+    expect:
+      data:
+        - cnt: 0
+
+  # ==============================================================
+  # LIKE prefix boundary extraction
+  # ==============================================================
+
+  - name: "LIKE prefix: basic prefix match"
+    sql: "SELECT COUNT(*) AS cnt FROM inlike WHERE name LIKE 'item1%'"
+    expect:
+      data:
+        - cnt: 111
+
+  - name: "LIKE prefix: narrow prefix"
+    sql: "SELECT COUNT(*) AS cnt FROM inlike WHERE name LIKE 'item5%'"
+    expect:
+      data:
+        - cnt: 11
+
+  - name: "LIKE prefix: exact match"
+    sql: "SELECT id FROM inlike WHERE name LIKE 'item42%'"
+    expect:
+      rows: 1
+      data:
+        - id: 42
+
+  - name: "LIKE prefix: no match"
+    sql: "SELECT COUNT(*) AS cnt FROM inlike WHERE name LIKE 'zzz%'"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "LIKE prefix: with AND condition"
+    sql: "SELECT id FROM inlike WHERE name LIKE 'item1%' AND val = 50"
+    expect:
+      rows: 1
+      data:
+        - id: 10
+
+  - name: "LIKE with underscore wildcard"
+    sql: "SELECT COUNT(*) AS cnt FROM inlike WHERE name LIKE 'item_'"
+    expect:
+      data:
+        - cnt: 10
