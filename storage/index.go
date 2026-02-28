@@ -20,6 +20,7 @@ package storage
 import "fmt"
 import "sort"
 import "sync"
+import "sync/atomic"
 import "time"
 import "strings"
 
@@ -47,6 +48,7 @@ type StorageIndex struct {
 	deltaBtree *btree.BTreeG[indexPair]
 	t          *storageShard
 	active     bool
+	lastHit    atomic.Uint32 // last binary search position for sorted access pattern optimization
 	mu         sync.Mutex
 }
 
@@ -468,8 +470,20 @@ start_scan:
 	// bisect where the lower bound is found
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
-	mainIdx := sort.Search(int(s.t.main_count), func(idx int) bool {
-		idx2 := getRecid(idx)
+	// Use last-hit hint to narrow binary search range (helps sorted outer loops)
+	searchLo := 0
+	searchN := int(s.t.main_count)
+	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && cmpCols > 0 {
+		hintVal := cols[0].GetValue(getRecid(hint))
+		if scm.Less(hintVal, lower[0]) {
+			searchLo = hint
+			searchN -= hint
+		} else if scm.Less(lower[0], hintVal) {
+			searchN = hint + 1
+		}
+	}
+	mainIdx := searchLo + sort.Search(searchN, func(idx int) bool {
+		idx2 := getRecid(searchLo + idx)
 		for i := 0; i < cmpCols; i++ {
 			a := lower[i]
 			b := cols[i].GetValue(idx2)
@@ -482,6 +496,7 @@ start_scan:
 		}
 		return true // fully equal
 	})
+	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
 	if !lowerInclusive && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
 		for uint32(mainIdx) < s.t.main_count {
