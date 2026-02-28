@@ -1,12 +1,18 @@
 metadata:
   version: "1.0"
-  description: "ENGINE=MEMORY table retains schema but not data across restart"
+  description: "ENGINE=MEMORY table and ALTER TABLE ENGINE= transitions"
 
 setup:
   - sql: "DROP TABLE IF EXISTS mem_t"
+  - sql: "DROP TABLE IF EXISTS alter_safe_to_mem"
+  - sql: "DROP TABLE IF EXISTS alter_mem_to_safe"
+  - sql: "DROP TABLE IF EXISTS alter_sloppy_to_safe"
+  - sql: "DROP TABLE IF EXISTS alter_noop"
   - sql: "CREATE TABLE mem_t (id INT, v TEXT) ENGINE=MEMORY"
 
 test_cases:
+  # --- Original MEMORY engine tests ---
+
   - name: "Insert data into MEMORY table"
     sql: "INSERT INTO mem_t (id, v) VALUES (1, 'x'), (2, 'y')"
     expect:
@@ -37,5 +43,132 @@ test_cases:
     expect:
       rows: 0
 
+  # --- ALTER TABLE ENGINE= SAFE to MEMORY ---
+
+  - name: "Create SAFE table for engine change"
+    sql: "CREATE TABLE alter_safe_to_mem (id INT, v TEXT) ENGINE=SAFE"
+    expect:
+      rows: 0
+
+  - name: "Insert data into SAFE table"
+    sql: "INSERT INTO alter_safe_to_mem (id, v) VALUES (1, 'a'), (2, 'b')"
+    expect:
+      affected_rows: 2
+
+  - name: "ALTER TABLE ENGINE=MEMORY"
+    sql: "ALTER TABLE alter_safe_to_mem ENGINE=MEMORY"
+    expect:
+      rows: 0
+
+  - name: "Data still readable after SAFE to MEMORY"
+    sql: "SELECT id, v FROM alter_safe_to_mem ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          v: "a"
+        - id: 2
+          v: "b"
+
+  - name: "SHUTDOWN after SAFE to MEMORY"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Data gone after restart (now MEMORY)"
+    sql: "SELECT id, v FROM alter_safe_to_mem ORDER BY id"
+    expect:
+      rows: 0
+
+  # --- ALTER TABLE ENGINE= MEMORY to SAFE ---
+
+  - name: "Create MEMORY table for engine change"
+    sql: "CREATE TABLE alter_mem_to_safe (id INT, v TEXT) ENGINE=MEMORY"
+    expect:
+      rows: 0
+
+  - name: "Insert data into MEMORY table for conversion"
+    sql: "INSERT INTO alter_mem_to_safe (id, v) VALUES (10, 'x'), (20, 'y')"
+    expect:
+      affected_rows: 2
+
+  - name: "ALTER TABLE ENGINE=SAFE from MEMORY"
+    sql: "ALTER TABLE alter_mem_to_safe ENGINE=SAFE"
+    expect:
+      rows: 0
+
+  - name: "Data still readable after MEMORY to SAFE"
+    sql: "SELECT id, v FROM alter_mem_to_safe ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 10
+          v: "x"
+        - id: 20
+          v: "y"
+
+  - name: "SHUTDOWN after MEMORY to SAFE"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Data survives restart (now SAFE)"
+    sql: "SELECT id, v FROM alter_mem_to_safe ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 10
+          v: "x"
+        - id: 20
+          v: "y"
+
+  # --- ALTER TABLE ENGINE= SLOPPY to SAFE ---
+
+  - name: "Create SLOPPY table for engine change"
+    sql: "CREATE TABLE alter_sloppy_to_safe (id INT, v TEXT) ENGINE=SLOPPY"
+    expect:
+      rows: 0
+
+  - name: "Insert data into SLOPPY table"
+    sql: "INSERT INTO alter_sloppy_to_safe (id, v) VALUES (3, 'c')"
+    expect:
+      affected_rows: 1
+
+  - name: "ALTER TABLE ENGINE=SAFE from SLOPPY"
+    sql: "ALTER TABLE alter_sloppy_to_safe ENGINE=SAFE"
+    expect:
+      rows: 0
+
+  - name: "Data readable after SLOPPY to SAFE"
+    sql: "SELECT id, v FROM alter_sloppy_to_safe ORDER BY id"
+    expect:
+      rows: 1
+      data:
+        - id: 3
+          v: "c"
+
+  # --- No-op: same engine ---
+
+  - name: "Create table for no-op test"
+    sql: "CREATE TABLE alter_noop (id INT) ENGINE=SAFE"
+    expect:
+      rows: 0
+
+  - name: "ALTER TABLE ENGINE=SAFE on already-SAFE table"
+    sql: "ALTER TABLE alter_noop ENGINE=SAFE"
+    expect:
+      rows: 0
+
+  # --- Error: non-existent table ---
+
+  - name: "ALTER TABLE ENGINE on non-existent table"
+    sql: "ALTER TABLE no_such_table ENGINE=MEMORY"
+    expect:
+      error: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS mem_t"
+  - sql: "DROP TABLE IF EXISTS alter_safe_to_mem"
+  - sql: "DROP TABLE IF EXISTS alter_mem_to_safe"
+  - sql: "DROP TABLE IF EXISTS alter_sloppy_to_safe"
+  - sql: "DROP TABLE IF EXISTS alter_noop"

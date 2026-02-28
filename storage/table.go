@@ -53,6 +53,22 @@ const (
 	Memory                 = 2
 )
 
+// parsePersistencyMode converts an engine name string to a PersistencyMode.
+func parsePersistencyMode(engine string) PersistencyMode {
+	switch engine {
+	case "memory":
+		return Memory
+	case "sloppy":
+		return Sloppy
+	case "logged":
+		return Logged
+	case "safe":
+		return Safe
+	default:
+		panic("unknown engine: " + engine)
+	}
+}
+
 type ShardMode int
 
 const (

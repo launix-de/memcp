@@ -1055,6 +1055,74 @@ func (t *storageShard) RemoveFromDisk() {
 	})
 }
 
+// removePersistence removes on-disk files (columns + logfile) for this shard
+// without invalidating the shard itself. Unlike RemoveFromDisk (which uses
+// sync.Once and is intended for shard disposal), this method allows the shard
+// to continue living in RAM after its persistence has been stripped.
+// Caller must hold s.mu.Lock().
+func (s *storageShard) removePersistence() {
+	if s.logfile != nil {
+		s.logfile.Close()
+		s.logfile = nil
+	}
+	for _, col := range s.t.Columns {
+		s.t.schema.persistence.RemoveColumn(s.uuid.String(), col.Name)
+	}
+	s.t.schema.persistence.RemoveLog(s.uuid.String())
+}
+
+// transitionShardEngine handles the per-shard work when ALTER TABLE ENGINE=
+// changes the persistency mode. Caller must hold s.mu.Lock() and the table's
+// PersistencyMode must already be set to newMode.
+func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
+	oldPersisted := oldMode != Memory
+	newPersisted := newMode != Memory
+
+	switch {
+	case oldPersisted && !newPersisted:
+		// Persisted → Memory: remove disk files, deregister from cache
+		GlobalCache.Remove(s)
+		s.removePersistence()
+		s.srState = WRITE
+
+	case !oldPersisted && newPersisted:
+		// Memory → Persisted: materialize columns to disk, register with cache
+		s.ensureLoaded()
+		// write each column to disk
+		for colName, cs := range s.columns {
+			if cs == nil {
+				continue
+			}
+			f := s.t.schema.persistence.WriteColumn(s.uuid.String(), colName)
+			cs.Serialize(f)
+			f.Close()
+		}
+		// open logfile for Safe/Logged
+		if newMode == Safe || newMode == Logged {
+			s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
+		}
+		s.srState = SHARED
+		if !strings.HasPrefix(s.t.Name, ".") {
+			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+		}
+
+	case oldMode == Sloppy && (newMode == Safe || newMode == Logged):
+		// Sloppy → Safe/Logged: open logfile
+		s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
+
+	case (oldMode == Safe || oldMode == Logged) && newMode == Sloppy:
+		// Safe/Logged → Sloppy: close and remove logfile
+		if s.logfile != nil {
+			s.logfile.Close()
+			s.logfile = nil
+		}
+		s.t.schema.persistence.RemoveLog(s.uuid.String())
+
+	default:
+		// Safe ↔ Logged: no-op on shard level (both use logfiles identically)
+	}
+}
+
 // rebuild main storage from main+delta
 func (t *storageShard) rebuild(all bool) *storageShard {
 
@@ -1257,7 +1325,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			// TODO: this should be in sync with setting the new pointer
 			logfile := t.logfile
 			t.logfile = nil
-			logfile.Close()
+			if logfile != nil {
+				logfile.Close()
+			}
 			t.t.schema.persistence.RemoveLog(t.uuid.String())
 		}
 
