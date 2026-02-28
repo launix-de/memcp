@@ -139,11 +139,29 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		skip_index:
 		}
 
-		// otherwise: create new index
+		// otherwise: create new index (but first check for prefix coverage)
 		t.indexMutex.Lock()
 		if len(old_indexes) != len(t.Indexes) {
 			t.indexMutex.Unlock()
 			goto retry_indexscan // someone has added a index in the meantime: recheck
+		}
+		// check if an existing longer index already covers these columns as a prefix
+		for _, index := range t.Indexes {
+			if len(index.Cols) >= len(lower) {
+				covered := true
+				for i := 0; i < len(lower); i++ {
+					if cols[i].col != index.Cols[i] {
+						covered = false
+						break
+					}
+				}
+				if covered {
+					// longer index covers this query; use it instead of creating a shorter one
+					t.indexMutex.Unlock()
+					index.iterate(lower, upperLast, maxInsertIndex, buf, callback)
+					return
+				}
+			}
 		}
 		index := new(StorageIndex)
 		index.Cols = make([]string, len(lower))
@@ -187,13 +205,61 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 }
 
 func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
-	// TODO rebuild index in database rebuild
-	// check if indexes share same prefix -> leave out the shorter one
-	// savings = 0.9 * savings (decrease)
-	// according to memory pressure -> threshold for discard savings
-	// -> mark inactive if we can don't want to store this index
-	// if two indexes are prefixed, give up the shorter one and add to savings
-	// (also consider incremental indexes??)
+	if len(t1.Indexes) == 0 {
+		return
+	}
+
+	// 1. Clone index metadata from old shard, decay Savings, mark inactive
+	candidates := make([]*StorageIndex, 0, len(t1.Indexes))
+	for _, idx := range t1.Indexes {
+		clone := new(StorageIndex)
+		clone.Cols = make([]string, len(idx.Cols))
+		copy(clone.Cols, idx.Cols)
+		clone.Savings = idx.Savings * 0.9
+		clone.t = t2
+		clone.active = false
+		candidates = append(candidates, clone)
+	}
+
+	// 2. Prefix dedup: sort by len(Cols) descending so longer indexes absorb shorter ones
+	sort.Slice(candidates, func(i, j int) bool {
+		return len(candidates[i].Cols) > len(candidates[j].Cols)
+	})
+	removed := make([]bool, len(candidates))
+	for i, longer := range candidates {
+		if removed[i] {
+			continue
+		}
+		for j := i + 1; j < len(candidates); j++ {
+			if removed[j] {
+				continue
+			}
+			shorter := candidates[j]
+			if len(shorter.Cols) > len(longer.Cols) {
+				continue
+			}
+			isPrefix := true
+			for k := 0; k < len(shorter.Cols); k++ {
+				if shorter.Cols[k] != longer.Cols[k] {
+					isPrefix = false
+					break
+				}
+			}
+			if isPrefix {
+				longer.Savings += shorter.Savings
+				removed[j] = true
+			}
+		}
+	}
+
+	// 3. Assign surviving candidates to new shard
+	result := make([]*StorageIndex, 0, len(candidates))
+	for i, idx := range candidates {
+		if !removed[i] {
+			result = append(result, idx)
+		}
+	}
+	t2.Indexes = result
 }
 
 // fullScan iterates all record IDs (main + delta) in natural order.

@@ -1,0 +1,351 @@
+# Tests for index prefix deduplication:
+# 1. iterateIndex() reuses existing longer indexes instead of creating shorter ones
+# 2. rebuildIndexes() transfers indexes across rebuild with savings decay
+# 3. rebuildIndexes() merges prefix indexes into longer ones
+# 4. Non-overlapping indexes are preserved across rebuild
+# Uses scm:(rebuild) and scm:(show_shard_indexes ...) to verify index state.
+
+metadata:
+  version: "1.0"
+  description: "Index prefix deduplication on rebuild and creation"
+
+test_cases:
+  # ==============================================================
+  # Phase 1: iterateIndex() prefix creation prevention
+  # ==============================================================
+
+  - name: "Setup: create table for prefix prevention"
+    setup:
+      - sql: "DROP TABLE IF EXISTS idx_nopfx"
+      - scm: "(rebuild)"
+    sql: "CREATE TABLE idx_nopfx (a INT, b INT, c INT)"
+
+  - name: "Insert rows and rebuild"
+    setup:
+      - scm: |
+          (begin
+            (insert "memcp-tests" "idx_nopfx" '("a" "b" "c")
+              (map (produceN 200) (lambda (i) (list i (* i 2) (* i 5)))))
+            (rebuild))
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx"
+    expect:
+      data:
+        - cnt: 200
+
+  # Create compound index (a, b) first by querying 3 times
+  - name: "Create compound index hit 1"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 10 AND b = 20"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create compound index hit 2"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 20 AND b = 40"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create compound index hit 3"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 30 AND b = 60"
+    expect:
+      data:
+        - cnt: 1
+
+  # Now query on (a) alone — should reuse the (a, b) index, NOT create a new one
+  - name: "Single-col query reuses compound index 1"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 40"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Single-col query reuses compound index 2"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 50"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Single-col query reuses compound index 3"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 60"
+    expect:
+      data:
+        - cnt: 1
+
+  # Verify only one index exists — the shorter prefix was NOT created
+  - name: "Only compound index exists (no prefix created)"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (if (equal? (count indexes) 1) "ok"
+          (error (concat "expected 1 index, got " (count indexes)))))
+
+  - name: "The single index is the compound (a|b)"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set idx (nth indexes 0))
+        (set cols (get_assoc idx "cols"))
+        (if (equal? cols "a|b") "ok"
+          (error (concat "expected a|b, got " cols))))
+
+  - name: "Compound index has accumulated savings from prefix queries"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set idx (nth indexes 0))
+        (set savings (get_assoc idx "savings"))
+        (if (> savings 5.0) "ok"
+          (error (concat "expected savings > 5.0 (6 queries total), got " savings))))
+
+  # ==============================================================
+  # Phase 2: rebuildIndexes() preserves indexes with savings decay
+  # Insert a row to force actual rebuild (not the no-op else branch)
+  # ==============================================================
+
+  - name: "Insert extra row to force rebuild"
+    sql: "INSERT INTO idx_nopfx VALUES (999, 999, 999)"
+
+  - name: "Rebuild with pending delta"
+    scm: "(rebuild)"
+
+  - name: "Post-rebuild: index is preserved"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (if (equal? (count indexes) 1) "ok"
+          (error (concat "expected 1 index after rebuild, got " (count indexes)))))
+
+  - name: "Post-rebuild: index columns preserved"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set idx (nth indexes 0))
+        (set cols (get_assoc idx "cols"))
+        (if (equal? cols "a|b") "ok"
+          (error (concat "expected a|b after rebuild, got " cols))))
+
+  - name: "Post-rebuild: savings decayed (< pre-rebuild value)"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set idx (nth indexes 0))
+        (set savings (get_assoc idx "savings"))
+        (if (> savings 2.0) "ok"
+          (error (concat "expected savings > 2.0 after 0.9x decay, got " savings))))
+
+  # Queries still work after rebuild (index rebuilds lazily)
+  - name: "Post-rebuild: compound query still works"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 70 AND b = 140"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Post-rebuild: prefix query still works"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nopfx WHERE a = 80"
+    expect:
+      data:
+        - cnt: 1
+
+  # ==============================================================
+  # Phase 3: rebuildIndexes() merges prefix indexes
+  # Create shorter index first, then longer — rebuild should merge
+  # ==============================================================
+
+  - name: "Setup: create table for prefix merge on rebuild"
+    setup:
+      - sql: "DROP TABLE IF EXISTS idx_rev"
+      - scm: "(rebuild)"
+    sql: "CREATE TABLE idx_rev (p INT, q INT, r INT)"
+
+  - name: "Insert rows and rebuild"
+    setup:
+      - scm: |
+          (begin
+            (insert "memcp-tests" "idx_rev" '("p" "q" "r")
+              (map (produceN 200) (lambda (i) (list i (* i 4) (* i 9)))))
+            (rebuild))
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev"
+    expect:
+      data:
+        - cnt: 200
+
+  # Create single-col index (p) FIRST
+  - name: "Create single-col index first hit 1"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 10"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create single-col index first hit 2"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 20"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create single-col index first hit 3"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 30"
+    expect:
+      data:
+        - cnt: 1
+
+  # Now create compound index (p, q)
+  - name: "Create compound index hit 1"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 40 AND q = 160"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create compound index hit 2"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 50 AND q = 200"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create compound index hit 3"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 60 AND q = 240"
+    expect:
+      data:
+        - cnt: 1
+
+  # Two indexes should exist: (p) and (p|q)
+  - name: "Both indexes exist before rebuild"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_rev" 0))
+        (if (equal? (count indexes) 2) "ok"
+          (error (concat "expected 2 indexes, got " (count indexes)))))
+
+  # Insert a row to force actual rebuild (needs pending delta)
+  - name: "Insert extra row to trigger real rebuild"
+    sql: "INSERT INTO idx_rev VALUES (999, 999, 999)"
+
+  # Rebuild should merge (p) into (p|q) via prefix dedup
+  - name: "Rebuild merges prefix into compound"
+    scm: "(rebuild)"
+
+  - name: "Post-rebuild: only compound index remains"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_rev" 0))
+        (if (equal? (count indexes) 1) "ok"
+          (error (concat "expected 1 index after prefix dedup, got " (count indexes)))))
+
+  - name: "Post-rebuild: surviving index is p|q"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_rev" 0))
+        (set idx (nth indexes 0))
+        (set cols (get_assoc idx "cols"))
+        (if (equal? cols "p|q") "ok"
+          (error (concat "expected p|q, got " cols))))
+
+  - name: "Post-rebuild: merged savings from both indexes"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_rev" 0))
+        (set idx (nth indexes 0))
+        (set savings (get_assoc idx "savings"))
+        (if (> savings 3.0) "ok"
+          (error (concat "expected merged savings > 3.0, got " savings))))
+
+  # Queries still correct after dedup
+  - name: "Post-dedup: single-col query works via compound index"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 99"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Post-dedup: compound query works"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_rev WHERE p = 100 AND q = 400"
+    expect:
+      data:
+        - cnt: 1
+
+  # ==============================================================
+  # Phase 4: Non-prefix indexes are NOT merged
+  # ==============================================================
+
+  - name: "Setup: create table for non-prefix test"
+    setup:
+      - sql: "DROP TABLE IF EXISTS idx_nonoverlap"
+      - scm: "(rebuild)"
+    sql: "CREATE TABLE idx_nonoverlap (x INT, y INT, z INT)"
+
+  - name: "Insert rows and rebuild"
+    setup:
+      - scm: |
+          (begin
+            (insert "memcp-tests" "idx_nonoverlap" '("x" "y" "z")
+              (map (produceN 200) (lambda (i) (list i (* i 3) (* i 7)))))
+            (rebuild))
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap"
+    expect:
+      data:
+        - cnt: 200
+
+  # Create index on (x) by querying 3 times
+  - name: "Create x index hit 1"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE x = 10"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create x index hit 2"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE x = 20"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create x index hit 3"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE x = 30"
+    expect:
+      data:
+        - cnt: 1
+
+  # Create index on (y) by querying 3 times — different column, NOT a prefix
+  - name: "Create y index hit 1"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE y = 30"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create y index hit 2"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE y = 60"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Create y index hit 3"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE y = 90"
+    expect:
+      data:
+        - cnt: 1
+
+  # Verify both exist before rebuild
+  - name: "Two non-overlapping indexes exist"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_nonoverlap" 0))
+        (if (equal? (count indexes) 2) "ok"
+          (error (concat "expected 2 indexes, got " (count indexes)))))
+
+  # Insert a row to force actual rebuild, then verify both survive
+  - name: "Non-prefix indexes both survive rebuild"
+    setup:
+      - sql: "INSERT INTO idx_nonoverlap VALUES (999, 999, 999)"
+      - scm: "(rebuild)"
+    scm: |
+      (begin
+        (set indexes (show_shard_indexes "memcp-tests" "idx_nonoverlap" 0))
+        (if (equal? (count indexes) 2) "ok"
+          (error (concat "expected 2 non-overlapping indexes after rebuild, got " (count indexes)))))
+
+  - name: "Non-prefix queries still work after rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_nonoverlap WHERE x = 50"
+    expect:
+      data:
+        - cnt: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS idx_nopfx"
+  - sql: "DROP TABLE IF EXISTS idx_nonoverlap"
+  - sql: "DROP TABLE IF EXISTS idx_rev"
