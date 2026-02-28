@@ -81,7 +81,7 @@ func (m *MySQLWrapper) ServerVersion() string {
 func (m *MySQLWrapper) SetServerVersion() {
 }
 func (m *MySQLWrapper) NewSession(session *driver.Session) {
-	m.log.Info("New Session from " + session.Addr())
+	m.log.Info("%s", "New Session from "+session.Addr())
 	// initialize something??
 	mysqlsessions.Store(session.ID(), NewSession().Func())
 }
@@ -92,7 +92,7 @@ func (m *MySQLWrapper) SessionDec(session *driver.Session) {
 	// I think we can skip session counting
 }
 func (m *MySQLWrapper) SessionClosed(session *driver.Session) {
-	m.log.Info("Closed Session " + session.User() + " from " + session.Addr())
+	m.log.Info("%s", "Closed Session "+session.User()+" from "+session.Addr())
 	mysqlsessions.Delete(session.ID())
 }
 func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
@@ -101,7 +101,7 @@ func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 }
 
 func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
-	m.log.Info("Auth Check with " + session.User())
+	m.log.Info("%s", "Auth Check with "+session.User())
 	// callback should load password from database
 	password := Apply(m.authcallback, NewString(session.User()))
 	if password.IsNil() {
@@ -114,7 +114,7 @@ func (m *MySQLWrapper) AuthCheck(session *driver.Session) error {
 	return nil
 }
 func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error {
-	m.log.Info("db " + database)
+	m.log.Info("%s", "db "+database)
 	allowed := Apply(m.schemacallback, NewString(session.User()), NewString(database))
 	if !allowed.Bool() {
 		return errors.New("access denied for database " + database)

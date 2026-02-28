@@ -184,7 +184,7 @@ func WriteDocumentation(folder string) error {
 	}
 	defer indexFile.Close()
 
-	fmt.Fprintln(indexFile, "# Documentation\n")
+	fmt.Fprintln(indexFile, "# Documentation")
 	for _, ch := range chapters {
 		if len(ch.Fns) == 0 {
 			// Skip empty chapters
@@ -215,9 +215,9 @@ func WriteDocumentation(folder string) error {
 			}
 			fmt.Fprintf(f, "**Allowed number of parameters:** %d–%d\n\n", def.MinParameter, def.MaxParameter)
 
-			fmt.Fprintln(f, "### Parameters\n")
+			fmt.Fprintln(f, "### Parameters")
 			if len(def.Params) == 0 {
-				fmt.Fprintln(f, "_This function has no parameters._\n")
+				fmt.Fprintln(f, "_This function has no parameters._")
 			} else if d, ok := declarations[def.Name]; ok && !d.Forbidden {
 				for _, p := range def.Params {
 					fmt.Fprintf(f, "- **%s** (`%s`): %s\n", p.Name, p.Type, p.Desc)
