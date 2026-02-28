@@ -1033,8 +1033,16 @@ func ComputeSize(v Scmer) uint {
 		return base
 	case tagBool, tagInt, tagFloat, tagDate:
 		return base
-	case tagFunc:
+	case tagFunc, tagFuncEnv:
 		return base + goAllocOverhead
+	case tagNthLocalVar:
+		return base
+	case tagProc:
+		p := v.Proc()
+		if p == nil {
+			return base
+		}
+		return base + goAllocOverhead + 48 + ComputeSize(p.Params) + ComputeSize(p.Body)
 	case tagString, tagSymbol:
 		ln := uint(auxVal(v.aux))
 		if ln == 0 {
