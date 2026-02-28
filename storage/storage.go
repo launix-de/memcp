@@ -68,6 +68,7 @@ var storages = map[uint8]reflect.Type{
 	//30: reflect.TypeOf(OverlaySCMER{}),
 	31: reflect.TypeOf(OverlayBlob{}),
 	40: reflect.TypeOf(StorageEnum{}),
+	50: reflect.TypeOf(StorageComputeProxy{}),
 }
 
 func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {

@@ -166,6 +166,9 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		if blob, ok := columnstorage.(*OverlayBlob); ok {
 			blob.SetSchema(u.t.schema)
 		}
+		if proxy, ok := columnstorage.(*StorageComputeProxy); ok {
+			proxy.shard = u
+		}
 		if uint32(cnt) > u.main_count {
 			u.main_count = uint32(cnt)
 		}

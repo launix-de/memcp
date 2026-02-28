@@ -16,8 +16,6 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "sync"
-import "runtime"
 import "runtime/debug"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
@@ -39,6 +37,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 		if c.Name == name {
 			// found the column
 			t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
+			t.Columns[i].ComputorInputCols = inputCols
 			done := make(chan error, 6)
 			shardlist := t.ActiveShards()
 			for i, s := range shardlist {
@@ -91,63 +90,34 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	s.srState = WRITE
 	// Ensure main_count and input storages are initialized before compute
 	s.ensureMainCount(false)
-	cols := make([]ColumnStorage, len(inputCols))
-	for i, col := range inputCols {
-		cols[i] = s.getColumnStorageOrPanic(col)
-	}
-	// pre-free memory before allocating the compute result array
-	GlobalCache.CheckPressure(int64(s.main_count) * 16)
-	vals := make([]scm.Scmer, s.main_count) // build the stretchy value array
-	if parallel {
-		var done sync.WaitGroup
-		done.Add(int(s.main_count))
-		progress := make(chan uint32, runtime.NumCPU()/2) // don't go all at once, we don't have enough RAM
-		for i := 0; i < runtime.NumCPU()/2; i++ {
-			gls.Go(func() { // threadpool with half of the cores
-				// allocate private buffers per worker to avoid data races
-				colvalues := make([]scm.Scmer, len(cols))
-				// per-worker cached readers for O(1) sequential StorageEnum decode
-				readers := make([]ColumnReader, len(cols))
-				for j, col := range cols {
-					readers[j] = newCachedColumnReader(col)
-				}
-				for i := range progress {
-					for j := range readers {
-						colvalues[j] = readers[j].GetValue(uint32(i)) // read values from main storage into lambda params
-					}
-					vals[i] = scm.Apply(computor, colvalues...) // execute computor kernel (but the onoptimized version for non-serial use)
-					done.Done()
-				}
-			})
-		}
-		// add all items to the queue
-		for i := uint32(0); i < s.main_count; i++ {
-			progress <- i
-		}
-		close(progress) // signal workers to exit
-		done.Wait()
-	} else {
-		// allocate a common param buffer to save allocations
-		colvalues := make([]scm.Scmer, len(cols))
-		fn := scm.OptimizeProcToSerialFunction(computor) // optimize for serial application
-		// per-column cached readers for O(1) sequential StorageEnum decode
-		readers := make([]ColumnReader, len(cols))
-		for j, col := range cols {
-			readers[j] = newCachedColumnReader(col)
-		}
-		for i := uint32(0); i < s.main_count; i++ {
-			for j := range readers {
-				colvalues[j] = readers[j].GetValue(i) // read values from main storage into lambda params
-			}
-			vals[i] = fn(colvalues...) // execute computor kernel
-		}
+
+	// Check if proxy already exists (idempotent re-computation)
+	s.mu.RLock()
+	existing := s.columns[name]
+	s.mu.RUnlock()
+	if proxy, ok := existing.(*StorageComputeProxy); ok {
+		proxy.computor = computor // update lambda
+		proxy.InvalidateAll()
+		proxy.Compress() // recompute all
+		return true
 	}
 
-	s.mu.Lock() // don't defer because we unlock inbetween
-	store := new(StorageSCMER)
-	store.values = vals
-	s.columns[name] = store
+	// Create new proxy
+	proxy := &StorageComputeProxy{
+		delta:     make(map[uint32]scm.Scmer),
+		computor:  computor,
+		inputCols: inputCols,
+		shard:     s,
+		colName:   name,
+		count:     s.main_count,
+	}
+
+	s.mu.Lock()
+	s.columns[name] = proxy
 	s.mu.Unlock()
-	// TODO: decide whether to rebuild optimized store
+
+	// pre-free memory before allocating the compute result array
+	GlobalCache.CheckPressure(int64(s.main_count) * 16)
+	proxy.Compress() // eagerly compute + compress all values (same behavior as before)
 	return true
 }

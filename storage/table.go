@@ -33,6 +33,7 @@ type column struct {
 	Typ               string
 	Typdimensions     []int     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
 	Computor          scm.Scmer `json:"-"` // TODO: marshaljson -> serialize
+	ComputorInputCols []string  `json:",omitempty"` // input cols for computor (persisted in schema)
 	PartitioningScore int       // count this up to increase the chance of partitioning for this column
 	AutoIncrement     bool
 	Default           scm.Scmer
