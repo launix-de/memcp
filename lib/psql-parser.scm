@@ -209,7 +209,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 		/* EXISTS (SELECT ...) */
 		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") '('inner_select_exists sub))
-		(parser '((atom "CASE" true) (define conditions (* (parser '((atom "WHEN" true) (define a psql_expression) (atom "THEN" true) (define b psql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch psql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
+		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a psql_expression) (atom "THEN" true) (define b psql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch psql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
 		/* COUNT(DISTINCT expr): unique counting */
