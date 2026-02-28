@@ -1,0 +1,76 @@
+# CASE WHEN with parenthesized expressions
+# Regression test: CASE WHEN (expr) was failing with "unknown function WHEN"
+# because the simple CASE rule consumed WHEN(expr) as a function call
+
+metadata:
+  version: "1.0"
+  description: "CASE WHEN with parenthesized conditions must work"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS case_paren_test"
+  - sql: "CREATE TABLE case_paren_test (id INT, val VARCHAR(10))"
+  - sql: "INSERT INTO case_paren_test (id, val) VALUES (1, NULL), (2, 'hello'), (3, NULL)"
+
+test_cases:
+  - name: "CASE WHEN (literal) works"
+    sql: "SELECT CASE WHEN (1=1) THEN 'yes' ELSE 'no' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "yes"
+
+  - name: "CASE WHEN (expr) IS NULL"
+    sql: "SELECT CASE WHEN (1) IS NULL THEN 'null' ELSE 'not null' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "not null"
+
+  - name: "CASE WHEN (column) IS NULL with table"
+    sql: "SELECT id, CASE WHEN (`val`) IS NULL THEN 'missing' ELSE val END AS display FROM case_paren_test ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, display: "missing" }
+        - { id: 2, display: "hello" }
+        - { id: 3, display: "missing" }
+
+  - name: "CASE WHEN (TRUE) THEN"
+    sql: "SELECT CASE WHEN (TRUE) THEN 1 ELSE 0 END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 1
+
+  - name: "Nested CASE WHEN with parens"
+    sql: "SELECT CASE WHEN (1 > 2) THEN 'a' WHEN (2 > 1) THEN 'b' ELSE 'c' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "b"
+
+  - name: "CASE WHEN with table.column in parens IS NULL"
+    sql: "SELECT id, CASE WHEN (`case_paren_test`.`val`) IS NULL THEN 'y' ELSE 'n' END AS isnull FROM case_paren_test ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, isnull: "y" }
+        - { id: 2, isnull: "n" }
+        - { id: 3, isnull: "y" }
+
+  - name: "Simple CASE still works after reorder"
+    sql: "SELECT CASE 5 WHEN 1 THEN 'one' WHEN 5 THEN 'five' ELSE 'other' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "five"
+
+  - name: "Searched CASE without parens still works"
+    sql: "SELECT CASE WHEN 1 < 2 THEN 'yes' ELSE 'no' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "yes"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS case_paren_test"
