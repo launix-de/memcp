@@ -310,8 +310,17 @@ func Init(en scm.Env) {
 					}
 					return false
 				})
+				offset := int(scm.ToInt(a[6]))
+				limit := int(scm.ToInt(a[7]))
 				hadValue := false
-				for _, val := range filtered {
+				count := 0
+				for idx, val := range filtered {
+					if idx < offset {
+						continue
+					}
+					if limit >= 0 && count >= limit {
+						break
+					}
 					row := mustScmerSlice(val, "scan_order row")
 					ds := dataset(row)
 					for i, col := range mapcols {
@@ -319,6 +328,7 @@ func Init(en scm.Env) {
 					}
 					result = reducefn(result, mapfn(mapparams...))
 					hadValue = true
+					count++
 				}
 				if !hadValue && isOuter {
 					for i := range mapparams {

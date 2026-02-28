@@ -1,0 +1,124 @@
+# INFORMATION_SCHEMA virtual table coverage
+# Covers: SCHEMATA, TABLES, COLUMNS queries used by ORMs, migration tools, and dbcheck
+
+metadata:
+  version: "1.0"
+  description: "INFORMATION_SCHEMA virtual table queries"
+
+setup:
+  - sql: "CREATE TABLE IF NOT EXISTS is_test_tbl (id INT, name VARCHAR(50), score DOUBLE)"
+
+test_cases:
+
+  # --- SCHEMATA ---
+
+  - name: "SCHEMATA: list schemas"
+    sql: "SELECT schema_name FROM INFORMATION_SCHEMA.SCHEMATA LIMIT 5"
+    expect:
+      min_rows: 1
+
+  - name: "SCHEMATA: constant select from schemata"
+    sql: "SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA LIMIT 1"
+    expect:
+      rows: 1
+
+  # --- TABLES ---
+
+  - name: "TABLES: constant select"
+    sql: "SELECT 1 FROM INFORMATION_SCHEMA.TABLES LIMIT 1"
+    expect:
+      rows: 1
+
+  - name: "TABLES: table existence check"
+    sql: "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'is_test_tbl' LIMIT 1"
+    expect:
+      rows: 1
+
+  - name: "TABLES: select table_name with filter"
+    sql: "SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'is_test_tbl' LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - table_name: "is_test_tbl"
+
+  - name: "TABLES: non-existent table returns empty"
+    sql: "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'nonexistent_xyz_99' LIMIT 1"
+    expect:
+      rows: 0
+
+  - name: "TABLES: filter by schema and table"
+    sql: "SELECT table_name, table_type FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'memcp-tests' AND TABLE_NAME = 'is_test_tbl' LIMIT 1"
+    expect:
+      rows: 1
+
+  - name: "TABLES: select star"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'is_test_tbl' LIMIT 1"
+    expect:
+      rows: 1
+
+  # --- COLUMNS ---
+
+  - name: "COLUMNS: list columns of a table"
+    sql: "SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'is_test_tbl' ORDER BY column_name"
+    expect:
+      min_rows: 3
+
+  - name: "COLUMNS: check data_type of a column"
+    sql: "SELECT data_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'is_test_tbl' AND COLUMN_NAME = 'name' LIMIT 1"
+    expect:
+      rows: 1
+
+  - name: "COLUMNS: column_type query (used by dbcheck migrations)"
+    sql: "SELECT column_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'is_test_tbl' AND COLUMN_NAME = 'id' LIMIT 1"
+    expect:
+      rows: 1
+
+  # --- STATISTICS ---
+
+  - name: "STATISTICS: query returns without error"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_NAME = 'is_test_tbl' LIMIT 5"
+    expect:
+      min_rows: 0
+
+  # --- KEY_COLUMN_USAGE ---
+
+  - name: "KEY_COLUMN_USAGE: query returns without error"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_NAME = 'is_test_tbl' LIMIT 5"
+    expect:
+      min_rows: 0
+
+  # --- REFERENTIAL_CONSTRAINTS ---
+
+  - name: "REFERENTIAL_CONSTRAINTS: query returns without error"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'is_test_tbl' LIMIT 5"
+    expect:
+      min_rows: 0
+
+  # --- FILES (mysqldump compat) ---
+
+  - name: "FILES: empty result for compatibility"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.FILES LIMIT 5"
+    expect:
+      min_rows: 0
+
+  # --- PARTITIONS (mysqldump compat) ---
+
+  - name: "PARTITIONS: empty result for compatibility"
+    sql: "SELECT * FROM INFORMATION_SCHEMA.PARTITIONS LIMIT 5"
+    expect:
+      min_rows: 0
+
+  # --- Case insensitivity ---
+
+  - name: "Case insensitive schema name"
+    sql: "SELECT 1 FROM information_schema.tables LIMIT 1"
+    expect:
+      rows: 1
+
+  - name: "Mixed case schema name"
+    sql: "SELECT 1 FROM Information_Schema.Tables LIMIT 1"
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS is_test_tbl"

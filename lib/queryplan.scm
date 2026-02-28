@@ -992,8 +992,6 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 			(set renamelist (merge renameList))
 			(set tables (merge tablesList))
 			(set schemas (merge schemasList))
-			/*(print "tables=" tables)*/
-			/*(print "schemas=" schemas)*/
 
 			/* TODO: add rename_prefix to all table names and get_column expressions */
 			/* TODO: apply renamelist to all expressions in fields condition group having order */
