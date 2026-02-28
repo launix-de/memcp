@@ -105,6 +105,29 @@ func (s *StorageInt) GetValue(i uint32) scm.Scmer {
 	return scm.NewInt(int64(v) + s.offset)
 }
 
+// SetValue overwrites a single element in the bit-packed array.
+// The new value must fit within the existing [offset, offset+2^bitsize) range.
+// Caller must hold the shard write lock.
+func (s *StorageInt) SetValue(i uint32, value scm.Scmer) {
+	var vi int64
+	if value.IsNil() {
+		vi = int64(s.null)
+	} else {
+		vi = value.Int() - s.offset
+	}
+	bitpos := uint(i) * uint(s.bitsize)
+	mask := uint64((1<<uint(s.bitsize))-1) << (64 - uint(s.bitsize)) // bitsize ones at MSB
+	v := uint64(vi) << (64 - uint(s.bitsize))
+	// clear old bits then set new bits in first chunk
+	shifted := mask >> (bitpos % 64)
+	s.chunk[bitpos/64] = (s.chunk[bitpos/64] & ^shifted) | (v >> (bitpos % 64))
+	if bitpos%64+uint(s.bitsize) > 64 {
+		// spans two chunks
+		shifted2 := mask << (64 - bitpos%64)
+		s.chunk[bitpos/64+1] = (s.chunk[bitpos/64+1] & ^shifted2) | (v << (64 - bitpos%64))
+	}
+}
+
 func (s *StorageInt) GetValueUInt(i uint32) uint64 {
 	bitpos := uint(i) * uint(s.bitsize)
 
