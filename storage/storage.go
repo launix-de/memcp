@@ -517,7 +517,18 @@ func Init(en scm.Env) {
 
 			if len(a) > 7 && !a[7].IsNil() {
 				paramNames := scmerSliceToStrings(mustScmerSlice(a[6], "computor param names"))
-				t.ComputeColumn(colname, paramNames, a[7])
+				// extract filter from options
+				var filterCols []string
+				var filter scm.Scmer
+				for i := 0; i < len(typeparams); i += 2 {
+					key := scm.String(typeparams[i])
+					if key == "filtercols" {
+						filterCols = scmerSliceToStrings(mustScmerSlice(typeparams[i+1], "filter column names"))
+					} else if key == "filter" {
+						filter = typeparams[i+1]
+					}
+				}
+				t.ComputeColumn(colname, paramNames, a[7], filterCols, filter)
 			}
 
 			return scm.NewBool(ok)

@@ -105,7 +105,7 @@ if there is a group function, create a temporary preaggregate table
 ))
 
 /* extract_scanned_tables: walk an expression AST and return all (schema table) pairs from scan/scan_order calls.
-   Used to detect which tables a computor lambda reads from, so we can register invalidation triggers. */
+Used to detect which tables a computor lambda reads from, so we can register invalidation triggers. */
 (define extract_scanned_tables (lambda (expr)
 	(match expr
 		(cons (symbol scan) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
@@ -1356,10 +1356,25 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							schemas
 							replace_find_column))
 
+						/* check if WHERE condition only references group-key columns;
+						if so, we can push the filter into createcolumn options for sparse computation */
+						(define condition_uses_only_keys
+							(and (not (equal? condition true))
+								(reduce filtercols
+									(lambda (acc col) (and acc
+										(reduce tblvar_cols (lambda (found g) (or found (equal? g col))) false)))
+									true)))
+						(define filter_options (if condition_uses_only_keys
+							(list "filtercols" (cons 'list (map stage_group (lambda (col) (concat col))))
+								"filter" '((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
+									(optimize (replace_columns_from_expr condition))))
+							'()))
+						(define createcol_options (cons 'list (merge '("temp" true) filter_options)))
+
 						(define compute_plan
 							'('time (cons 'parallel (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 								(set cols (extract_columns_for_tblvar tblvar expr))
-								'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) '(list "temp" true) (cons list (map stage_group (lambda (col) (concat col)))) '((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
+								'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) createcol_options (cons list (map stage_group (lambda (col) (concat col)))) '((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
 									(scan_wrapper 'scan schema tbl
 										(cons list (merge tblvar_cols filtercols))
 										/* check group equality AND WHERE-condition */

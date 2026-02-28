@@ -32,7 +32,7 @@ func newCachedColumnReader(col ColumnStorage) ColumnReader {
 	return col.GetCachedReader()
 }
 
-func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer) {
+func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// found the column
@@ -49,7 +49,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 								done <- scanError{r, string(debug.Stack())}
 							}
 						}()
-						for !s.ComputeColumn(name, inputCols, computor, len(shardlist) == 1) {
+						for !s.ComputeColumn(name, inputCols, computor, filterCols, filter, len(shardlist) == 1) {
 							// couldn't compute column because delta is still active
 							t.mu.Lock()
 							s = s.rebuild(false)
@@ -82,7 +82,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 	panic("column " + t.Name + "." + name + " does not exist")
 }
 
-func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, parallel bool) bool {
+func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, parallel bool) bool {
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		return false // can't compute in shards with delta storage
 	}
@@ -98,7 +98,11 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.computor = computor // update lambda
 		proxy.InvalidateAll()
-		proxy.Compress() // recompute all
+		if !filter.IsNil() {
+			proxy.CompressFiltered(filterCols, filter)
+		} else {
+			proxy.Compress()
+		}
 		return true
 	}
 
@@ -118,6 +122,10 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 
 	// pre-free memory before allocating the compute result array
 	GlobalCache.CheckPressure(int64(s.main_count) * 16)
-	proxy.Compress() // eagerly compute + compress all values (same behavior as before)
+	if !filter.IsNil() {
+		proxy.CompressFiltered(filterCols, filter)
+	} else {
+		proxy.Compress() // eagerly compute + compress all values (same behavior as before)
+	}
 	return true
 }

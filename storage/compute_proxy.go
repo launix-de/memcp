@@ -149,6 +149,41 @@ func (p *StorageComputeProxy) Compress() {
 	p.compressed = true
 }
 
+// CompressFiltered eagerly computes only rows matching the filter predicate.
+// Unmatched rows stay lazy and are computed on demand via GetValue.
+func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.Scmer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	fn := scm.OptimizeProcToSerialFunction(p.computor)
+	filterFn := scm.OptimizeProcToSerialFunction(filter)
+
+	filterReaders := make([]ColumnReader, len(filterCols))
+	for i, col := range filterCols {
+		filterReaders[i] = newCachedColumnReader(p.shard.getColumnStorageOrPanic(col))
+	}
+	readers := make([]ColumnReader, len(p.inputCols))
+	for i, col := range p.inputCols {
+		readers[i] = newCachedColumnReader(p.shard.getColumnStorageOrPanic(col))
+	}
+
+	filterValues := make([]scm.Scmer, len(filterCols))
+	colvalues := make([]scm.Scmer, len(p.inputCols))
+	for i := uint32(0); i < p.count; i++ {
+		for j := range filterReaders {
+			filterValues[j] = filterReaders[j].GetValue(i)
+		}
+		if scm.ToBool(filterFn(filterValues...)) {
+			for j := range readers {
+				colvalues[j] = readers[j].GetValue(i)
+			}
+			p.delta[i] = fn(colvalues...)
+			p.validMask.Set(i, true)
+		}
+	}
+	// Don't set compressed=true → unmatched rows stay lazy for on-demand GetValue
+}
+
 // Invalidate marks a single row as needing recomputation.
 func (p *StorageComputeProxy) Invalidate(idx uint32) {
 	p.mu.Lock()
