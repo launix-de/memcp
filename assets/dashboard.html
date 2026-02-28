@@ -248,6 +248,13 @@ header a:hover{opacity:1;text-decoration:underline}
 <tbody></tbody>
 </table>
 </div>
+<div class="detail-section" id="trigger-section">
+<h3>Triggers</h3>
+<table class="browse-table" id="tbl-triggers">
+<thead><tr><th>Name</th><th>Timing</th><th>Event</th><th>Body</th><th>Actions</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
 <div class="detail-section" id="data-section">
 <h3>Data</h3>
 <div style="margin-bottom:10px;display:flex;align-items:center;gap:12px">
@@ -706,6 +713,17 @@ var s=shards[i];
 sh+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(dbname))+"/"+esc(encodeURIComponent(tblname))+"/shard/"+s.shard+"'\"><td class='r'>"+s.shard+"</td><td>"+esc(s.state)+"</td><td class='r'>"+s.main_count+"</td><td class='r'>"+s.delta+"</td><td class='r'>"+s.deletions+"</td><td class='r'>"+fmt(s.size_bytes||0)+"</td></tr>";
 }
 document.querySelector("#tbl-shards tbody").innerHTML=sh||"<tr><td colspan='6' style='color:#888;text-align:center'>No shards</td></tr>";
+/* triggers */
+var triggers=data.triggers||[];
+var trh="";
+for(var i=0;i<triggers.length;i++){
+var tr=triggers[i];
+trh+="<tr><td>"+esc(tr.name)+"</td><td>"+esc(tr.timing)+"</td><td>"+esc(tr.event)+"</td><td><code style='font-size:.8rem;white-space:pre-wrap;word-break:break-all'>"+esc(tr.body)+"</code></td><td class='action-cell'><button class='btn-danger' data-droptrigger='"+esc(tr.name)+"'>Drop</button></td></tr>";
+}
+document.querySelector("#tbl-triggers tbody").innerHTML=trh||"<tr><td colspan='5' style='color:#888;text-align:center'>No triggers</td></tr>";
+document.querySelectorAll("#tbl-triggers [data-droptrigger]").forEach(function(btn){
+btn.onclick=function(){var name=btn.getAttribute("data-droptrigger");if(window.confirm("Drop trigger '"+name+"'? This cannot be undone!"))execSQL(dbname,"DROP TRIGGER `"+name+"`",function(){route()})};
+});
 /* data preview */
 var dataOffset=0;
 var dataLimit=parseInt(document.getElementById("data-limit").value)||25;

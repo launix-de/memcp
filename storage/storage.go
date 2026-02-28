@@ -376,7 +376,6 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			// parse options
-			var pm PersistencyMode = Safe
 			options := mustScmerSlice(a[3], "options")
 			var autoIncrement uint64
 			engine := Settings.DefaultEngine
@@ -401,18 +400,7 @@ func Init(en scm.Env) {
 					panic("unknown option: " + key)
 				}
 			}
-			switch engine {
-			case "memory":
-				pm = Memory
-			case "sloppy":
-				pm = Sloppy
-			case "logged":
-				pm = Logged
-			case "safe":
-				pm = Safe
-			default:
-				panic("unknown engine: " + engine)
-			}
+			pm := parsePersistencyMode(engine)
 
 			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
 			t, created := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
@@ -725,16 +713,46 @@ func Init(en scm.Env) {
 			case "drop":
 				return scm.NewBool(t.DropColumn(scm.String(a[3])))
 			case "engine":
-				// TODO: implement ALTER TABLE ENGINE
-				// When changing PersistencyMode:
-				// - Safe/Logged/Sloppy → Memory: deregister all shards from GlobalCache,
-				//   close logfiles, remove persisted data (shards live only in RAM now)
-				// - Memory → Safe/Logged/Sloppy: rebuild all shards to flush to disk,
-				//   register shards with GlobalCache, open logfiles
-				// - Sloppy → Safe/Logged: open logfiles for each shard
-				// - Safe/Logged → Sloppy: close logfiles for each shard
-				// Must hold t.mu during transition to prevent concurrent inserts.
-				panic("ALTER TABLE ENGINE not yet implemented")
+				newMode := parsePersistencyMode(scm.String(a[3]))
+				oldMode := t.PersistencyMode
+				if oldMode == newMode {
+					return scm.NewBool(true) // no-op
+				}
+
+				t.mu.Lock()
+
+				if oldMode == Memory && newMode != Memory {
+					// Memory → Persisted: ensure all columns are loaded
+					// while PersistencyMode is still Memory (so they get
+					// initialized as StorageSparse instead of reading
+					// non-existent disk files). Then switch mode and
+					// rebuild to flush everything to disk.
+					shards := t.ActiveShards()
+					for _, s := range shards {
+						s.mu.Lock()
+						for _, col := range t.Columns {
+							s.ensureColumnLoaded(col.Name, true)
+						}
+						s.mu.Unlock()
+					}
+					t.PersistencyMode = newMode
+					t.mu.Unlock()
+					for i, s := range shards {
+						shards[i] = s.rebuild(true)
+					}
+				} else {
+					t.PersistencyMode = newMode
+					// All other transitions can be done in-place.
+					for _, s := range t.ActiveShards() {
+						s.mu.Lock()
+						transitionShardEngine(s, oldMode, newMode)
+						s.mu.Unlock()
+					}
+					t.mu.Unlock()
+				}
+
+				db.save()
+				return scm.NewBool(true)
 			case "owner":
 				return scm.NewBool(false) // ignore
 			default:
@@ -1236,6 +1254,10 @@ func Init(en scm.Env) {
 					case AfterDelete:
 						timing, event = "AFTER", "DELETE"
 					}
+					funcStr := ""
+					if !tr.Func.IsNil() {
+						funcStr = scm.String(tr.Func)
+					}
 					rows = append(rows, scm.NewSlice([]scm.Scmer{
 						scm.NewString("Trigger"), scm.NewString(tr.Name),
 						scm.NewString("Event"), scm.NewString(event),
@@ -1248,6 +1270,7 @@ func Init(en scm.Env) {
 						scm.NewString("character_set_client"), scm.NewString("utf8mb4"),
 						scm.NewString("collation_connection"), scm.NewString("utf8mb4_general_ci"),
 						scm.NewString("Database Collation"), scm.NewString("utf8mb4_general_ci"),
+						scm.NewString("FuncStr"), scm.NewString(funcStr),
 					}))
 				}
 			}

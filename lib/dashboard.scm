@@ -271,10 +271,24 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							(concat "{\"column\":" (json_encode (p "Column")) ",\"n\":" (json_encode (p "NumPartitions")) "}")
 						)))
 					))
+					/* triggers */
+					(define raw_triggers (show_triggers dbname tblname))
+					(define trigger_items (if (or (nil? raw_triggers) (equal? (count raw_triggers) 0)) "[]"
+						(dashboard_json_array (map raw_triggers (lambda (tr) (begin
+							(define body (if (equal? (tr "Statement") "") (tr "FuncStr") (tr "Statement")))
+							(json_encode_assoc (list
+								"name" (tr "Trigger")
+								"timing" (tr "Timing")
+								"event" (tr "Event")
+								"body" body
+							))
+						))))
+					))
 					/* build JSON manually to nest arrays inside object */
 					(dashboard_send_json res (concat
 						"{\"columns\":" (dashboard_json_array col_items)
 						",\"shards\":" (dashboard_json_array shard_items)
+						",\"triggers\":" trigger_items
 						",\"meta\":{\"engine\":" (json_encode (meta "Engine"))
 						",\"collation\":" (json_encode (meta "Collation"))
 						",\"uniques\":" unique_items
