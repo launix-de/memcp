@@ -250,18 +250,32 @@ if there is a group function, create a temporary preaggregate table
 )))
 
 /* make_keytable: create a canonically named group/key table with sloppy engine
-Returns the keytable name. Creates table + partitioning as side effect.
+Returns (keytable_name init_code) where init_code is plan-time code that ensures
+the table exists at execution time (survives cache eviction of sloppy tables).
 condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
 	(define keytable_name (if (nil? condition_suffix)
 		(concat "." tbl ":" keys)
 		(concat "." tbl ":" keys "|" condition_suffix)))
-	(createtable schema keytable_name (cons
+	/* compute column definitions and partition spec at compile time */
+	(define kt_cols (cons
 		'("unique" "group" (map keys (lambda (col) (concat col))))
-		(map keys (lambda (col) '("column" (concat col) "any" '() '())))
-	) '("engine" "sloppy") true)
-	(partitiontable schema keytable_name (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) '((concat col) (shardcolumn schema tbl scol)) '())))))
-	keytable_name
+		(map keys (lambda (col) '("column" (concat col) "any" '() '())))))
+	(define kt_partition (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) '((concat col) (shardcolumn schema tbl scol)) '())))))
+	/* create at compile time (needed for recursive build_queryplan) */
+	(createtable schema keytable_name kt_cols '("engine" "sloppy") true)
+	(partitiontable schema keytable_name kt_partition)
+	/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
+	(define kt_cols_code (cons 'list
+		(cons
+			(cons 'list (cons "unique" (cons "group" (list (cons 'list (map keys (lambda (col) (concat col))))))))
+			(map keys (lambda (col) (list 'list "column" (concat col) "any" '(list) '(list)))))))
+	(define kt_partition_code (cons 'list (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) (list (list 'list (concat col) (shardcolumn schema tbl scol))) '()))))))
+	(define init_code (list 'begin
+		'('createtable schema keytable_name kt_cols_code '(list "engine" "sloppy") true)
+		'('partitiontable schema keytable_name kt_partition_code)))
+	/* return (name init_code) */
+	(list keytable_name init_code)
 )))
 
 /* make_col_replacer: create a function that rewrites column/aggregate references to point at a group table
@@ -1259,7 +1273,9 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 			'('(tblvar schema tbl isOuter _)) (begin
 				/* prepare preaggregate */
 
-				(set grouptbl (make_keytable schema tbl stage_group tblvar (if is_dedup condition nil)))
+				(define kt_result (make_keytable schema tbl stage_group tblvar (if is_dedup condition nil)))
+				(set grouptbl (car kt_result))
+				(define keytable_init (car (cdr kt_result)))
 
 				/* preparation */
 				(define tblvar_cols (merge_unique (map stage_group (lambda (col) (extract_columns_for_tblvar tblvar col)))))
@@ -1316,7 +1332,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						transformed_rest_groups
 						schemas
 						replace_find_column))
-					(list 'begin collect_plan grouped_plan)
+					(list 'begin keytable_init collect_plan grouped_plan)
 				) (begin
 						/* NORMAL group stage: extract aggregates, compute, and continue.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
@@ -1358,7 +1374,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 								))
 							))))) "compute"))
 
-						(list 'begin collect_plan compute_plan grouped_plan)
+						(list 'begin keytable_init collect_plan compute_plan grouped_plan)
 				))
 			)
 			(begin /* multi-table GROUP BY via prejoin materialization */
