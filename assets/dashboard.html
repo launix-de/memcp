@@ -283,7 +283,14 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="detail-section">
 <h3>Column Storage</h3>
 <table class="browse-table" id="tbl-shard-cols">
-<thead><tr><th>Column</th><th>Compression</th><th class="r">Size</th></tr></thead>
+<thead><tr><th>Column</th><th>Compression</th><th class="r">Size</th><th class="r">Delta Count</th><th class="r">Delta Size</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+<div class="detail-section">
+<h3>Indexes</h3>
+<table class="browse-table" id="tbl-shard-indexes">
+<thead><tr><th>Columns</th><th>Active</th><th class="r">Savings</th><th class="r">Size</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
@@ -766,9 +773,18 @@ var tb=document.querySelector("#tbl-shard-cols tbody");
 var h="";
 for(var i=0;i<cols.length;i++){
 var c=cols[i];
-h+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.compression)+"</td><td class='r'>"+fmt(c.size_bytes||0)+"</td></tr>";
+h+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.compression)+"</td><td class='r'>"+fmt(c.size_bytes||0)+"</td><td class='r'>"+(c.delta_count||0)+"</td><td class='r'>"+fmt(c.delta_size_bytes||0)+"</td></tr>";
 }
-tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No columns</td></tr>";
+tb.innerHTML=h||"<tr><td colspan='5' style='color:#888;text-align:center'>No columns</td></tr>";
+/* indexes table */
+var indexes=data.indexes||[];
+var ib=document.querySelector("#tbl-shard-indexes tbody");
+var ih="";
+for(var j=0;j<indexes.length;j++){
+var ix=indexes[j];
+ih+="<tr><td>"+esc(ix.cols)+"</td><td>"+(ix.active?"Yes":"No")+"</td><td class='r'>"+(ix.savings||0).toFixed(1)+"</td><td class='r'>"+fmt(ix.size_bytes||0)+"</td></tr>";
+}
+ib.innerHTML=ih||"<tr><td colspan='4' style='color:#888;text-align:center'>No indexes</td></tr>";
 }
 
 function renderServices(data){

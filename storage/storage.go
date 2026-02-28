@@ -1150,6 +1150,49 @@ func Init(en scm.Env) {
 		}, false, false, nil,
 	})
 
+	// show_shard_indexes(schema, table, shardIndex): returns per-index details for a shard
+	scm.Declare(&en, &scm.Declaration{
+		"show_shard_indexes", "show indexes for a specific shard",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "database name", nil},
+			scm.DeclarationParameter{"table", "string", "table name", nil},
+			scm.DeclarationParameter{"shard", "int", "shard index", nil},
+		}, "any",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+			shards := t.ActiveShards()
+			idx := scm.ToInt(a[2])
+			if idx < 0 || idx >= len(shards) {
+				panic("shard index out of range")
+			}
+			s := shards[idx]
+			if s == nil {
+				return scm.NewSlice([]scm.Scmer{})
+			}
+			s.mu.RLock()
+			indexes := s.Indexes
+			rows := make([]scm.Scmer, 0, len(indexes))
+			for _, ix := range indexes {
+				rows = append(rows, scm.NewSlice([]scm.Scmer{
+					scm.NewString("cols"), scm.NewString(ix.String()),
+					scm.NewString("active"), scm.NewBool(ix.active),
+					scm.NewString("savings"), scm.NewFloat(ix.Savings),
+					scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
+				}))
+			}
+			s.mu.RUnlock()
+			return scm.NewSlice(rows)
+		}, false, false, nil,
+	})
+
 	// show_triggers(schema, table): returns a list of triggers for a table (non-system triggers only)
 	scm.Declare(&en, &scm.Declaration{
 		"show_triggers", "show triggers for a given table",

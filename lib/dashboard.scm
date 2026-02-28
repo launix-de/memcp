@@ -205,11 +205,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							"name" (c "name")
 							"compression" (c "compression")
 							"size_bytes" (c "size_bytes")
+							"delta_count" (c "delta_count")
+							"delta_size_bytes" (c "delta_size_bytes")
 						))
 					)))
+					(define indexes (show_shard_indexes dbname tblname sidx))
+					(define index_items (if (nil? indexes) "[]"
+						(dashboard_json_array (map indexes (lambda (ix)
+							(json_encode_assoc (list
+								"cols" (ix "cols")
+								"active" (ix "active")
+								"savings" (ix "savings")
+								"size_bytes" (ix "size_bytes")
+							))
+						)))
+					))
 					(dashboard_send_json res (concat
 						"{\"main_count\":" (json_encode main_count)
-						",\"columns\":" (dashboard_json_array items) "}"))
+						",\"columns\":" (dashboard_json_array items)
+						",\"indexes\":" index_items "}"))
 				)))
 			)
 			/* API: table detail with columns, shards, meta */
