@@ -18,7 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "rdf-parser.scm")
 
 /* query plan cache for SPARQL */
-(set queryplan_cache_sparql (newcachemap))
+(set sparql_queryplan_cache (newcachemap))
 
 /*
 this is how rdf works:
@@ -43,13 +43,7 @@ this is how rdf works:
 			((res "header") "Content-Type" "text/plain")
 			((res "status") 200)
 			/*(print "RDF query: " query)*/
-			(define sparql_cache_key (concat (req "username") ":" schema ":" query))
-			(define formula (begin
-				(define cached (queryplan_cache_sparql sparql_cache_key))
-				(if cached cached
-					(begin
-						(define f (try (lambda () (parse_sparql schema query)) (lambda (e) e)))
-						(if (string? f) (error f) (begin (queryplan_cache_sparql sparql_cache_key f) f))))))
+			(define formula (cached_parse sparql_queryplan_cache (lambda (schema query policy) (parse_sparql schema query)) schema query (lambda (schema table write) true) (req "username")))
 			(define resultrow (res "jsonl"))
 
 			(eval formula)

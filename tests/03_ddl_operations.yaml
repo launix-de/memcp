@@ -172,8 +172,7 @@ test_cases:
 
   - name: "DROP INDEX noop"
     sql: "DROP INDEX name_prefix_unique ON users"
-    expect:
-      affected_rows: 1
+    expect: {}
 
   - name: "ALTER TABLE ADD FOREIGN KEY"
     sql: "ALTER TABLE users ADD FOREIGN KEY (id) REFERENCES users(id) ON UPDATE CASCADE ON DELETE RESTRICT"

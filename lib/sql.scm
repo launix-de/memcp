@@ -21,24 +21,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "queryplan.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
-(set queryplan_cache_sql (newcachemap))
-(set queryplan_cache_psql (newcachemap))
+(set sql_queryplan_cache (newcachemap))
+(set psql_queryplan_cache (newcachemap))
 
 /* cached_parse: wraps a parser with cachemap-based caching.
 cache_key = username:schema:query — per-user isolation (policy checked at parse time).
 On parse error the result is not cached (e.g. table does not exist yet). */
-(define cached_parse (lambda (cache parse_fn schema query policy username)
+(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username)
 	(begin
 		(define cache_key (concat username ":" schema ":" query))
-		(define cached (cache cache_key))
+		(define cached (queryplan_cache cache_key))
 		(if cached cached
 			(begin
-				(define formula (try (lambda () (parse_fn schema query policy)) (lambda (e) e)))
-				(if (string? formula)
-					(error formula)
-					(begin
-						(cache cache_key formula)
-						formula)))))))
+				(define formula (parse_fn schema query policy))
+				(queryplan_cache cache_key formula)
+				formula)))))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),
@@ -131,7 +128,7 @@ if the user is not allowed to access this property, the function will throw an e
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
-					(define formula (cached_parse queryplan_cache_sql parse_sql schema query (sql_policy (req "username")) (req "username")))
+					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username")))
 					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 					(define resultrow (res "jsonl"))
 					/* Use persistent session if X-Session-Id header is present */
@@ -210,7 +207,7 @@ if the user is not allowed to access this property, the function will throw an e
 						(regex "FROM\\s+pg_constraint" _) true
 						false))
 					(define query_result (if handled nil (begin
-						(define formula (cached_parse queryplan_cache_psql parse_psql schema query (sql_policy (req "username")) (req "username")))
+						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username")))
 						(eval (source "SQL Query" 1 1 formula))
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
@@ -322,8 +319,8 @@ if the user is not allowed to access this property, the function will throw an e
 						(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
 						(define mysql_username (coalesce (session "username") "root"))
 						(define formula (if (equal? (session "syntax") "postgresql")
-							(cached_parse queryplan_cache_psql parse_psql schema sql (sql_policy mysql_username) mysql_username)
-							(cached_parse queryplan_cache_sql parse_sql schema sql (sql_policy mysql_username) mysql_username)))
+							(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username)
+							(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username)))
 						(eval (source "SQL Query" 1 1 formula))
 					) sql))
 			))

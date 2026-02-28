@@ -375,6 +375,7 @@ if(bytes>=1024)return(bytes/1024).toFixed(0)+" KB";
 return bytes+" B";
 }
 function esc(s){var d=document.createElement("span");d.textContent=String(s);return d.innerHTML}
+function truncName(s,n){n=n||30;return s.length>n?s.substring(0,n)+"\u2026":s}
 
 /* Admin detection */
 var isAdmin=false;
@@ -629,7 +630,7 @@ var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
 var dbn=esc(encodeURIComponent(dbname)),tn=esc(encodeURIComponent(d.name));
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/"+tn+"'\">"+esc(d.name)+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/"+tn+"'\" title='"+esc(d.name)+"'>"+esc(truncName(d.name))+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
 }
 tb.innerHTML=h||"<tr><td colspan='7' style='color:#888;text-align:center'>No tables</td></tr>";
 tb.querySelectorAll("[data-trunctbl]").forEach(function(btn){
