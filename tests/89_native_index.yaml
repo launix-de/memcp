@@ -1,0 +1,159 @@
+# Tests for physical sort by hottest index (Native index).
+# After rebuild, the hottest index's data is physically sorted,
+# so no in-memory index structure is needed (zero memory cost).
+
+metadata:
+  version: "1.0"
+  description: "Physical sort by hottest index (Native index)"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS native_idx"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS native_idx"
+
+test_cases:
+  - name: "Create table and insert data"
+    setup:
+      - sql: "CREATE TABLE native_idx (id INT, val INT, name VARCHAR(50))"
+      - scm: |
+          (begin
+            (insert "memcp-tests" "native_idx" '("id" "val" "name")
+              (map (produceN 200) (lambda (i)
+                (list i (* i 7) (concat "row" i)))))
+            (rebuild))
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx"
+    expect:
+      data:
+        - cnt: 200
+
+  # Build index by querying 6 times (Savings > 4.0 threshold for Native)
+  - name: "Build index hit 1"
+    sql: "SELECT id FROM native_idx WHERE id = 10"
+    expect:
+      data:
+        - id: 10
+
+  - name: "Build index hit 2"
+    sql: "SELECT id FROM native_idx WHERE id = 20"
+    expect:
+      data:
+        - id: 20
+
+  - name: "Build index hit 3"
+    sql: "SELECT id FROM native_idx WHERE id = 30"
+    expect:
+      data:
+        - id: 30
+
+  - name: "Build index hit 4"
+    sql: "SELECT id FROM native_idx WHERE id = 40"
+    expect:
+      data:
+        - id: 40
+
+  - name: "Build index hit 5"
+    sql: "SELECT id FROM native_idx WHERE id = 50"
+    expect:
+      data:
+        - id: 50
+
+  - name: "Build index hit 6"
+    sql: "SELECT id FROM native_idx WHERE id = 60"
+    expect:
+      data:
+        - id: 60
+
+  # Insert row to force actual rebuild, then verify index was transferred and marked Native
+  - name: "Rebuild triggers Native sort"
+    setup:
+      - sql: "INSERT INTO native_idx VALUES (999, 999, 'extra')"
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx"
+    expect:
+      data:
+        - cnt: 201
+
+  # ==============================================================
+  # Correctness: queries still work after Native-sorted rebuild
+  # ==============================================================
+
+  - name: "Equality query works with Native"
+    sql: "SELECT id, val FROM native_idx WHERE id = 100"
+    expect:
+      rows: 1
+      data:
+        - id: 100
+          val: 700
+
+  - name: "Range query works with Native: id > 195"
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx WHERE id > 195"
+    expect:
+      data:
+        - cnt: 5
+
+  - name: "Range query works with Native: id >= 195"
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx WHERE id >= 195"
+    expect:
+      data:
+        - cnt: 6
+
+  - name: "Range query works with Native: id < 5"
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx WHERE id < 5"
+    expect:
+      data:
+        - cnt: 5
+
+  - name: "Range query exclusive: id > 10 AND id < 20"
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx WHERE id > 10 AND id < 20"
+    expect:
+      data:
+        - cnt: 9
+
+  - name: "No match query"
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx WHERE id = 5000"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "ORDER BY with Native index"
+    sql: "SELECT id FROM native_idx WHERE id >= 197 ORDER BY id"
+    expect:
+      data:
+        - id: 197
+        - id: 198
+        - id: 199
+        - id: 999
+
+  - name: "High-value equality from rebuilt extra row"
+    sql: "SELECT name FROM native_idx WHERE id = 999"
+    expect:
+      rows: 1
+      data:
+        - name: extra
+
+  # ==============================================================
+  # Delta inserts work correctly after Native rebuild
+  # ==============================================================
+
+  - name: "Insert into Native-indexed table"
+    sql: "INSERT INTO native_idx VALUES (150, 9999, 'delta')"
+
+  - name: "Query finds new delta row by val"
+    sql: "SELECT name FROM native_idx WHERE val = 9999"
+    expect:
+      rows: 1
+      data:
+        - name: delta
+
+  - name: "Range query includes delta and main"
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx WHERE id >= 148 AND id <= 152"
+    expect:
+      data:
+        - cnt: 6
+
+  - name: "Exact match on delta row overlapping main id"
+    sql: "SELECT COUNT(*) AS cnt FROM native_idx WHERE id = 150"
+    expect:
+      data:
+        - cnt: 2

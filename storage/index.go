@@ -36,7 +36,8 @@ type indexPair struct {
 type StorageIndex struct {
 	Cols        []string   // sort equal-cols alphabetically, so similar conditions are canonical
 	Savings     float64    // store the amount of time savings here -> add selectivity (outputted / size) on each
-	mainIndexes StorageInt // we can do binary searches here
+	Native      bool       // true when data is physically sorted by this index (zero-cost)
+	mainIndexes StorageInt // we can do binary searches here (unused when Native)
 	// deltaBtree holds delta inserts in index-column order. Contract:
 	// when active==true, deltaBtree is non-nil. It is built during index
 	// construction and kept in sync by shard.insertDataset on every insert.
@@ -51,7 +52,9 @@ type StorageIndex struct {
 
 func (idx *StorageIndex) ComputeSize() uint {
 	var sz uint = 24 * 8 // heuristic
-	sz += idx.mainIndexes.ComputeSize()
+	if !idx.Native {
+		sz += idx.mainIndexes.ComputeSize()
+	}
 	// TODO: deltaBtree
 	return sz
 }
@@ -217,6 +220,18 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 	}
 }
 
+// indexHasComputedCol returns true if any of the index's columns is a computed column.
+func indexHasComputedCol(s *storageShard, idx *StorageIndex) bool {
+	for _, col := range idx.Cols {
+		for _, c := range s.t.Columns {
+			if c.Name == col && len(c.ComputorInputCols) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 	if len(t1.Indexes) == 0 {
 		return
@@ -265,12 +280,26 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 		}
 	}
 
-	// 3. Assign surviving candidates to new shard
+	// 3. Assign surviving candidates to new shard, mark hottest as Native
 	result := make([]*StorageIndex, 0, len(candidates))
 	for i, idx := range candidates {
 		if !removed[i] {
 			result = append(result, idx)
 		}
+	}
+	// pick the highest-Savings index to physically sort by
+	// Native indexes are forbidden on computed columns because their values
+	// can change via Invalidate/SetValue which would break the physical sort order.
+	bestSavings := 4.0 // minimum threshold for physical sort
+	bestIdx := -1
+	for i, idx := range result {
+		if idx.Savings > bestSavings && !indexHasComputedCol(t2, idx) {
+			bestSavings = idx.Savings
+			bestIdx = i
+		}
+	}
+	if bestIdx >= 0 {
+		result[bestIdx].Native = true
 	}
 	t2.Indexes = result
 }
@@ -335,35 +364,38 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, lowerIncl
 			}
 			fmt.Println("building index on", s.t.t.Name, "over", s.Cols)
 
-			// main storage
-			tmp := make([]uint32, s.t.main_count)
-			for i := uint32(0); i < s.t.main_count; i++ {
-				tmp[i] = i // fill with natural order
-			}
-			// sort indexes
-			sort.Slice(tmp, func(i, j int) bool {
-				for _, c := range cols {
-					a := c.GetValue(tmp[i])
-					b := c.GetValue(tmp[j])
-					if scm.Less(a, b) {
-						return true // less
-					} else if !scm.Equal(a, b) {
-						return false // greater
-					}
-					// otherwise: next iteration
+			if !s.Native {
+				// main storage: build sort-order index
+				tmp := make([]uint32, s.t.main_count)
+				for i := uint32(0); i < s.t.main_count; i++ {
+					tmp[i] = i // fill with natural order
 				}
-				return false // fully equal
-			})
-			// store sorted values into compressed format
-			s.mainIndexes.prepare()
-			for i, v := range tmp {
-				s.mainIndexes.scan(uint32(i), scm.NewInt(int64(v)))
+				// sort indexes
+				sort.Slice(tmp, func(i, j int) bool {
+					for _, c := range cols {
+						a := c.GetValue(tmp[i])
+						b := c.GetValue(tmp[j])
+						if scm.Less(a, b) {
+							return true // less
+						} else if !scm.Equal(a, b) {
+							return false // greater
+						}
+						// otherwise: next iteration
+					}
+					return false // fully equal
+				})
+				// store sorted values into compressed format
+				s.mainIndexes.prepare()
+				for i, v := range tmp {
+					s.mainIndexes.scan(uint32(i), scm.NewInt(int64(v)))
+				}
+				s.mainIndexes.init(uint32(len(tmp)))
+				for i, v := range tmp {
+					s.mainIndexes.build(uint32(i), scm.NewInt(int64(v)))
+				}
+				s.mainIndexes.finish()
 			}
-			s.mainIndexes.init(uint32(len(tmp)))
-			for i, v := range tmp {
-				s.mainIndexes.build(uint32(i), scm.NewInt(int64(v)))
-			}
-			s.mainIndexes.finish()
+			// else: Native index — data is physically sorted, no mainIndexes needed
 
 			// delta storage
 			s.deltaBtree = btree.NewG[indexPair](8, func(i, j indexPair) bool {
@@ -415,13 +447,22 @@ start_scan:
 	}
 	snapMainIndexes := s.mainIndexes
 	snapDeltaBtree := s.deltaBtree
+	isNative := s.Native
 	s.mu.Unlock()
+
+	// record-ID lookup: identity when data is physically sorted (Native), index dereference otherwise
+	getRecid := func(idx int) uint32 {
+		return uint32(int64(snapMainIndexes.GetValueUInt(uint32(idx))) + snapMainIndexes.offset)
+	}
+	if isNative {
+		getRecid = func(idx int) uint32 { return uint32(idx) }
+	}
 
 	// bisect where the lower bound is found
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
 	mainIdx := sort.Search(int(s.t.main_count), func(idx int) bool {
-		idx2 := uint32(int64(snapMainIndexes.GetValueUInt(uint32(idx))) + snapMainIndexes.offset)
+		idx2 := getRecid(idx)
 		for i := 0; i < cmpCols; i++ {
 			a := lower[i]
 			b := cols[i].GetValue(idx2)
@@ -437,7 +478,7 @@ start_scan:
 	// skip past equal values when lower bound is exclusive (col > 5)
 	if !lowerInclusive && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
 		for uint32(mainIdx) < s.t.main_count {
-			recid := uint32(int64(snapMainIndexes.GetValueUInt(uint32(mainIdx))) + snapMainIndexes.offset)
+			recid := getRecid(mainIdx)
 			if !scm.Equal(cols[cmpCols-1].GetValue(recid), lower[cmpCols-1]) {
 				break
 			}
@@ -450,7 +491,7 @@ start_scan:
 			if uint32(mainIdx) >= s.t.main_count {
 				return 0, false
 			}
-			recid := uint32(int64(snapMainIndexes.GetValueUInt(uint32(mainIdx))) + snapMainIndexes.offset)
+			recid := getRecid(mainIdx)
 			mainIdx++
 			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
 				return cols[i].GetValue(recid)

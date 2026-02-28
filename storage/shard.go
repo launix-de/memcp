@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "sort"
 import "sync"
 import "sync/atomic"
 import "time"
@@ -1223,6 +1224,65 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		GlobalCache.Remove(t)
 		removedFromCache = true
 
+		// transfer indexes early so we know which index is Native (physically sorted)
+		rebuildIndexes(t, result)
+
+		// compute sort permutation for the Native index (if any)
+		var sortPerm []uint32
+		for _, idx := range result.Indexes {
+			if !idx.Native {
+				continue
+			}
+			// check that all index columns exist in old shard
+			allFound := true
+			for _, col := range idx.Cols {
+				if _, ok := t.columns[col]; !ok {
+					allFound = false
+					break
+				}
+			}
+			if !allFound {
+				idx.Native = false
+				break
+			}
+			sortPerm = make([]uint32, 0, int(t.main_count)+maxInsertIndex)
+			for i := uint32(0); i < t.main_count; i++ {
+				if !deletions.Get(i) {
+					sortPerm = append(sortPerm, i)
+				}
+			}
+			for i := 0; i < maxInsertIndex; i++ {
+				if !deletions.Get(t.main_count + uint32(i)) {
+					sortPerm = append(sortPerm, t.main_count+uint32(i))
+				}
+			}
+			idxCols := idx.Cols
+			sort.Slice(sortPerm, func(a, b int) bool {
+				for _, colName := range idxCols {
+					var va, vb scm.Scmer
+					idA, idB := sortPerm[a], sortPerm[b]
+					if idA < t.main_count {
+						va = t.columns[colName].GetValue(idA)
+					} else {
+						va = t.getDelta(int(idA-t.main_count), colName)
+					}
+					if idB < t.main_count {
+						vb = t.columns[colName].GetValue(idB)
+					} else {
+						vb = t.getDelta(int(idB-t.main_count), colName)
+					}
+					if scm.Less(va, vb) {
+						return true
+					}
+					if scm.Less(vb, va) {
+						return false
+					}
+				}
+				return false
+			})
+			break
+		}
+
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		isFirst := true
 		for col, c := range t.columns {
@@ -1239,25 +1299,32 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				i = 0
 				reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
 				newcol.prepare()
-				// scan main
-				for idx := uint32(0); idx < t.main_count; idx++ {
-					// check for deletion
-					if deletions.Get(uint32(idx)) {
-						continue
+				if sortPerm != nil {
+					for _, globalID := range sortPerm {
+						if globalID < t.main_count {
+							newcol.scan(i, reader.GetValue(globalID))
+						} else {
+							newcol.scan(i, t.getDelta(int(globalID-t.main_count), col))
+						}
+						i++
 					}
-					// scan
-					newcol.scan(i, reader.GetValue(idx))
-					i++
-				}
-				// scan delta
-				for idx := 0; idx < maxInsertIndex; idx++ {
-					// check for deletion
-					if deletions.Get(uint32(t.main_count + uint32(idx))) {
-						continue
+				} else {
+					// scan main
+					for idx := uint32(0); idx < t.main_count; idx++ {
+						if deletions.Get(uint32(idx)) {
+							continue
+						}
+						newcol.scan(i, reader.GetValue(idx))
+						i++
 					}
-					// scan
-					newcol.scan(i, t.getDelta(idx, col))
-					i++
+					// scan delta
+					for idx := 0; idx < maxInsertIndex; idx++ {
+						if deletions.Get(uint32(t.main_count + uint32(idx))) {
+							continue
+						}
+						newcol.scan(i, t.getDelta(idx, col))
+						i++
+					}
 				}
 				newcol2 := newcol.proposeCompression(i)
 				if newcol2 == nil {
@@ -1279,25 +1346,32 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			newcol.init(i)
 			i = 0
 			reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
-			// build main
-			for idx := uint32(0); idx < t.main_count; idx++ {
-				// check for deletion
-				if deletions.Get(uint32(idx)) {
-					continue
+			if sortPerm != nil {
+				for _, globalID := range sortPerm {
+					if globalID < t.main_count {
+						newcol.build(i, reader.GetValue(globalID))
+					} else {
+						newcol.build(i, t.getDelta(int(globalID-t.main_count), col))
+					}
+					i++
 				}
-				// build
-				newcol.build(i, reader.GetValue(idx))
-				i++
-			}
-			// build delta
-			for idx := 0; idx < maxInsertIndex; idx++ {
-				// check for deletion
-				if deletions.Get(uint32(t.main_count + uint32(idx))) {
-					continue
+			} else {
+				// build main
+				for idx := uint32(0); idx < t.main_count; idx++ {
+					if deletions.Get(uint32(idx)) {
+						continue
+					}
+					newcol.build(i, reader.GetValue(idx))
+					i++
 				}
-				// build
-				newcol.build(i, t.getDelta(idx, col))
-				i++
+				// build delta
+				for idx := 0; idx < maxInsertIndex; idx++ {
+					if deletions.Get(uint32(t.main_count + uint32(idx))) {
+						continue
+					}
+					newcol.build(i, t.getDelta(idx, col))
+					i++
+				}
 			}
 			newcol.finish()
 			result.columns[col] = newcol
@@ -1318,7 +1392,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		b.WriteString(") -> ")
 		b.WriteString(fmt.Sprint(result.main_count))
 		fmt.Println(b.String())
-		rebuildIndexes(t, result)
 		// Do not persist schema from inside shard rebuild; callers
 		// publish the new shard pointer and then save atomically at the
 		// table/database level to avoid transient, inconsistent schemas.
