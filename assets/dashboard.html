@@ -1081,7 +1081,7 @@ permHtml="<span class='badge badge-pri'>admin <a href='#' class='revoke-admin' d
 }else{
 var uDbs=u.databases||[];
 for(var j=0;j<uDbs.length;j++){
-permHtml+="<span class='badge badge-uni' style='margin:2px'>"+esc(uDbs[j])+" <a href='#' class='revoke-db' data-user='"+esc(u.username)+"' data-db='"+esc(uDbs[j])+"' style='color:#fff;text-decoration:none;margin-left:4px'>&times;</a></span>";
+permHtml+="<span class='badge badge-uni' style='margin:2px'><a href='#db/"+encodeURIComponent(uDbs[j])+"' style='color:#fff;text-decoration:none'>"+esc(uDbs[j])+"</a> <a href='#' class='revoke-db' data-user='"+esc(u.username)+"' data-db='"+esc(uDbs[j])+"' style='color:#fff;text-decoration:none;margin-left:4px'>&times;</a></span>";
 }
 /* add-db dropdown */
 var avail=allDbs.filter(function(db){return uDbs.indexOf(db)<0&&db!=="system"&&db!=="system_statistic"});
