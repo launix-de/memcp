@@ -470,16 +470,20 @@ start_scan:
 	// bisect where the lower bound is found
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
-	// Use last-hit hint to narrow binary search range (helps sorted outer loops)
+	// Use last-hit hint to narrow binary search range (helps sorted outer loops).
+	// The hint is advisory: if stale or from a concurrent goroutine, we safely
+	// fall through to an unnarrowed search. No correctness dependency on the hint.
 	searchLo := 0
 	searchN := int(s.t.main_count)
-	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && cmpCols > 0 {
+	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && cmpCols > 0 && !lower[0].IsNil() {
 		hintVal := cols[0].GetValue(getRecid(hint))
-		if scm.Less(hintVal, lower[0]) {
-			searchLo = hint
-			searchN -= hint
-		} else if scm.Less(lower[0], hintVal) {
-			searchN = hint + 1
+		if !hintVal.IsNil() {
+			if scm.Less(hintVal, lower[0]) {
+				searchLo = hint
+				searchN -= hint
+			} else if scm.Less(lower[0], hintVal) {
+				searchN = hint + 1
+			}
 		}
 	}
 	mainIdx := searchLo + sort.Search(searchN, func(idx int) bool {
