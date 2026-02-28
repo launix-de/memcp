@@ -1,0 +1,326 @@
+# Group table cache invalidation preparation tests
+# Validates that GROUP BY results update correctly after DML on the base table.
+# Also inspects keytable contents (noncritical) to prepare for subquery-cache.
+
+metadata:
+  version: "1.0"
+  description: "GROUP BY cache invalidation: query, mutate base table, re-query"
+
+test_cases:
+  # --- Setup ---
+  - name: "Create base table for group cache tests"
+    sql: "CREATE TABLE sc_base (id INT PRIMARY KEY, dept VARCHAR(20), salary INT, active BOOL)"
+
+  - name: "Insert initial data"
+    sql: |
+      INSERT INTO sc_base (id, dept, salary, active) VALUES
+        (1, 'Engineering', 100, true),
+        (2, 'Engineering', 200, true),
+        (3, 'Sales', 150, true),
+        (4, 'Sales', 50, false),
+        (5, 'HR', 120, true)
+
+  # --- Baseline GROUP BY queries ---
+  - name: "Baseline: COUNT per dept"
+    sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 3
+      data:
+        - dept: "Engineering"
+          c: 2
+        - dept: "HR"
+          c: 1
+        - dept: "Sales"
+          c: 2
+
+  - name: "Baseline: SUM(salary) per dept"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 3
+      data:
+        - dept: "Engineering"
+          s: 300
+        - dept: "HR"
+          s: 120
+        - dept: "Sales"
+          s: 200
+
+  - name: "Baseline: SUM with HAVING"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept HAVING SUM(salary) > 150 ORDER BY dept"
+    expect:
+      rows: 2
+      data:
+        - dept: "Engineering"
+          s: 300
+        - dept: "Sales"
+          s: 200
+
+  - name: "Baseline: filtered aggregate (active only)"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base WHERE active = true GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 3
+      data:
+        - dept: "Engineering"
+          s: 300
+        - dept: "HR"
+          s: 120
+        - dept: "Sales"
+          s: 150
+
+  # --- Inspect keytable after GROUP BY (noncritical) ---
+  - name: "Keytable exists after GROUP BY and contains group keys"
+    noncritical: true
+    sql: "SELECT * FROM `.sc_base:((get_column sc_base false dept false))` ORDER BY `(get_column sc_base false dept false)`"
+    expect:
+      rows: 3
+
+  # === INSERT new rows into base table ===
+  - name: "Insert new Engineering employee"
+    sql: "INSERT INTO sc_base (id, dept, salary, active) VALUES (6, 'Engineering', 300, true)"
+
+  - name: "Insert new department"
+    sql: "INSERT INTO sc_base (id, dept, salary, active) VALUES (7, 'Marketing', 80, true)"
+
+  # --- Re-query after INSERT ---
+  - name: "After INSERT: COUNT per dept"
+    sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 4
+      data:
+        - dept: "Engineering"
+          c: 3
+        - dept: "HR"
+          c: 1
+        - dept: "Marketing"
+          c: 1
+        - dept: "Sales"
+          c: 2
+
+  - name: "After INSERT: SUM(salary) per dept"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 4
+      data:
+        - dept: "Engineering"
+          s: 600
+        - dept: "HR"
+          s: 120
+        - dept: "Marketing"
+          s: 80
+        - dept: "Sales"
+          s: 200
+
+  - name: "After INSERT: SUM with HAVING"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept HAVING SUM(salary) > 150 ORDER BY dept"
+    expect:
+      rows: 2
+      data:
+        - dept: "Engineering"
+          s: 600
+        - dept: "Sales"
+          s: 200
+
+  - name: "Keytable updated after INSERT (new dept visible)"
+    noncritical: true
+    sql: "SELECT * FROM `.sc_base:((get_column sc_base false dept false))` ORDER BY `(get_column sc_base false dept false)`"
+    expect:
+      rows: 4
+
+  # === UPDATE rows in base table ===
+  - name: "Move employee from Sales to HR"
+    sql: "UPDATE sc_base SET dept = 'HR' WHERE id = 3"
+
+  - name: "After UPDATE: COUNT per dept"
+    sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 4
+      data:
+        - dept: "Engineering"
+          c: 3
+        - dept: "HR"
+          c: 2
+        - dept: "Marketing"
+          c: 1
+        - dept: "Sales"
+          c: 1
+
+  - name: "After UPDATE: SUM(salary) per dept"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 4
+      data:
+        - dept: "Engineering"
+          s: 600
+        - dept: "HR"
+          s: 270
+        - dept: "Marketing"
+          s: 80
+        - dept: "Sales"
+          s: 50
+
+  # === DELETE rows from base table ===
+  - name: "Delete inactive employee"
+    sql: "DELETE FROM sc_base WHERE id = 4"
+
+  - name: "After DELETE: COUNT per dept"
+    sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 4
+      data:
+        - dept: "Engineering"
+          c: 3
+        - dept: "HR"
+          c: 2
+        - dept: "Marketing"
+          c: 1
+        - dept: "Sales"
+          c: 0
+
+  - name: "After DELETE: SUM(salary) with no empty groups"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept HAVING COUNT(*) > 0 ORDER BY dept"
+    expect:
+      rows: 3
+      data:
+        - dept: "Engineering"
+          s: 600
+        - dept: "HR"
+          s: 270
+        - dept: "Marketing"
+          s: 80
+
+  - name: "Keytable still contains Sales key after DELETE (stale key, filtered by HAVING)"
+    noncritical: true
+    sql: "SELECT * FROM `.sc_base:((get_column sc_base false dept false))` ORDER BY `(get_column sc_base false dept false)`"
+    expect:
+      rows: 4
+
+  - name: "Delete all Sales employees to fully empty that group"
+    sql: "DELETE FROM sc_base WHERE dept = 'Sales'"
+
+  - name: "After full group deletion: HAVING filters empty group"
+    sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept HAVING COUNT(*) > 0 ORDER BY dept"
+    expect:
+      rows: 3
+      data:
+        - dept: "Engineering"
+          c: 3
+        - dept: "HR"
+          c: 2
+        - dept: "Marketing"
+          c: 1
+
+  # === Multi-column GROUP BY ===
+  - name: "Multi-column GROUP BY baseline"
+    sql: "SELECT dept, active, COUNT(*) AS c FROM sc_base GROUP BY dept, active ORDER BY dept, active"
+    expect:
+      rows: 3
+      data:
+        - dept: "Engineering"
+          active: 1
+          c: 3
+        - dept: "HR"
+          active: 1
+          c: 2
+        - dept: "Marketing"
+          active: 1
+          c: 1
+
+  - name: "Insert inactive employee for multi-column group change"
+    sql: "INSERT INTO sc_base (id, dept, salary, active) VALUES (8, 'Engineering', 50, false)"
+
+  - name: "Multi-column GROUP BY after INSERT (new active=false group)"
+    sql: "SELECT dept, active, COUNT(*) AS c FROM sc_base GROUP BY dept, active ORDER BY dept, active"
+    expect:
+      rows: 4
+      data:
+        - dept: "Engineering"
+          active: 0
+          c: 1
+        - dept: "Engineering"
+          active: 1
+          c: 3
+        - dept: "HR"
+          active: 1
+          c: 2
+        - dept: "Marketing"
+          active: 1
+          c: 1
+
+  # === Multi-table GROUP BY (prejoin path) ===
+  - name: "Create lookup table for prejoin test"
+    sql: "CREATE TABLE sc_dept (id INT PRIMARY KEY, name VARCHAR(20), region VARCHAR(20))"
+
+  - name: "Create employee table for prejoin test"
+    sql: "CREATE TABLE sc_emp (id INT PRIMARY KEY, dept_id INT, salary INT)"
+
+  - name: "Insert departments"
+    sql: "INSERT INTO sc_dept (id, name, region) VALUES (1, 'Engineering', 'West'), (2, 'Sales', 'East')"
+
+  - name: "Insert employees"
+    sql: "INSERT INTO sc_emp (id, dept_id, salary) VALUES (1, 1, 100), (2, 1, 200), (3, 2, 150)"
+
+  - name: "Prejoin GROUP BY baseline"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Engineering"
+          s: 300
+        - name: "Sales"
+          s: 150
+
+  - name: "Insert new employee into existing dept"
+    sql: "INSERT INTO sc_emp (id, dept_id, salary) VALUES (4, 2, 250)"
+
+  - name: "Prejoin GROUP BY after INSERT"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Engineering"
+          s: 300
+        - name: "Sales"
+          s: 400
+
+  - name: "Insert new department and employee"
+    sql: "INSERT INTO sc_dept (id, name, region) VALUES (3, 'HR', 'Central')"
+
+  - name: "Insert employee for new department"
+    sql: "INSERT INTO sc_emp (id, dept_id, salary) VALUES (5, 3, 120)"
+
+  - name: "Prejoin GROUP BY with new department"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 3
+      data:
+        - name: "Engineering"
+          s: 300
+        - name: "HR"
+          s: 120
+        - name: "Sales"
+          s: 400
+
+  - name: "Delete employee and re-query prejoin GROUP BY"
+    sql: "DELETE FROM sc_emp WHERE id = 4"
+
+  - name: "Prejoin GROUP BY after DELETE"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 3
+      data:
+        - name: "Engineering"
+          s: 300
+        - name: "HR"
+          s: 120
+        - name: "Sales"
+          s: 150
+
+  # --- Cleanup ---
+  - name: "Cleanup sc_base"
+    sql: "DROP TABLE IF EXISTS sc_base"
+
+  - name: "Cleanup sc_dept"
+    sql: "DROP TABLE IF EXISTS sc_dept"
+
+  - name: "Cleanup sc_emp"
+    sql: "DROP TABLE IF EXISTS sc_emp"

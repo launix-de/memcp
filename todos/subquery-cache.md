@@ -31,92 +31,42 @@ All use cases share the same infrastructure: **StorageComputeProxy with valid-ma
 
 ## Preparation
 
-refactor build_queryplan the following way:
+### Status: DONE — `make_keytable` extracted
 
-/* TODO: check if there is a foreign key on tbl.groupcol and then reuse that table */
-                                (set grouptbl (concat "." tbl ":" stage_group))
-                                (createtable schema grouptbl (cons
-                                        /* unique key over all identiying columns */ '("unique" "group" (map stage_group (lambda (col) (concat col))))
-                                        /* all identifying columns */ (map stage_group (lambda (col) '("column" (concat col) "any"/* TODO get type from schema */ '() '())))
-                                ) '("engine" "sloppy") true)
-				and following lines...
-
-replace this block with a function call.
-  refactor out a common helper function make_keytable which either builds/finds a canonically named temptable or with only 1 key: finds the table where foreign key = primary key;
-  make_keytable will return code, a tablename as well as the column name for each key
-  use make_keytable for creating the code for the group stages
-  after you got make_keytable, you can add temporary columns to that keytable as you wish
-
-### make_keytable Signature and Return Value
+The inline group table creation has been refactored into `make_keytable` (queryplan.scm:242-252):
 
 ```scheme
-/* make_keytable: create or find a keytable for the given keys
-   Parameters:
-     schema     - database name
-     tbl        - source table name (for naming and FK lookup)
-     keys       - list of key expressions, e.g. '((get_column t false dept false))
-     tblvar     - source table variable name (for partitioning alignment)
-   Returns: (list setup_code keytable_name col_mapping)
-     setup_code      - Scheme code to execute (createtable + partitiontable), or nil if reusing FK table
-     keytable_name   - string: canonical keytable name or FK-referenced table name
-     col_mapping     - flat assoc list: (key_expr_1 "colname_1" key_expr_2 "colname_2" ...)
-                       maps each key expression to the actual column name in the keytable
-*/
-(define make_keytable (lambda (schema tbl keys tblvar) (begin
-    /* Step 1: FK check (single key only) */
-    /* (if (and (equal? (count keys) 1) (has_fk schema tbl (car keys)))
-        (begin
-            (define fk_info (get_fk_target schema tbl (car keys)))
-            (list nil (fk_info "table") (list (car keys) (fk_info "pk_col")))
-        ) */
-    /* Step 2: canonical temp table */
-    (define keytable_name (concat "." tbl ":" keys))
-    (define col_mapping (merge (map keys (lambda (k) (list k (concat k))))))
-    (define setup_code '('begin
-        (createtable schema keytable_name (cons
-            '("unique" "group" (map keys (lambda (col) (concat col))))
-            (map keys (lambda (col) '("column" (concat col) "any" '() '()))))
-            '("engine" "sloppy") true)
-        (partitiontable schema keytable_name
-            (merge (map keys (lambda (col)
-                (match col
-                    '('get_column (eval tblvar) false scol false)
-                        '((concat col) (shardcolumn schema tbl scol))
-                    '())))))
-    ))
-    (list setup_code keytable_name col_mapping)
+/* Current implementation (queryplan.scm:242): */
+(define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
+	(define keytable_name (if (nil? condition_suffix)
+		(concat "." tbl ":" keys)
+		(concat "." tbl ":" keys "|" condition_suffix)))
+	(createtable schema keytable_name (cons
+		'("unique" "group" (map keys (lambda (col) (concat col))))
+		(map keys (lambda (col) '("column" (concat col) "any" '() '())))
+	) '("engine" "sloppy") true)
+	(partitiontable schema keytable_name (merge (map keys (lambda (col)
+		(match col '('get_column (eval tblvar) false scol false)
+			'((concat col) (shardcolumn schema tbl scol)) '())))))
+	keytable_name
 )))
 ```
 
-### Usage in build_queryplan
+**Differences from the original proposal:**
+- Takes 5 params (added `condition_suffix` for dedup stages) vs proposed 4
+- Returns just the keytable_name string — not `(list setup_code keytable_name col_mapping)`
+- Executes createtable/partitiontable at build time as side effect (simpler, works)
+- No FK→PK reuse yet (future optimization)
+- No col_mapping return (column names are derived via `(concat key_expr)` convention)
 
-```scheme
-/* Before (current inline code): */
-(set grouptbl (concat "." tbl ":" stage_group))
-(createtable schema grouptbl ...)
-(partitiontable schema grouptbl ...)
+**Called at:** queryplan.scm:1251: `(set grouptbl (make_keytable schema tbl stage_group tblvar (if is_dedup condition nil)))`
 
-/* After (refactored): */
-(define kt (make_keytable schema tbl stage_group tblvar))
-(define kt_setup (car kt))
-(define grouptbl (car (cdr kt)))
-(define kt_cols (car (cdr (cdr kt))))
-/* emit kt_setup code; then use grouptbl and kt_cols for collect/compute plans */
-```
+### Still TODO: FK→PK reuse
 
-### Column Name Resolution via col_mapping
-
-The `col_mapping` is essential for building `replace_agg_with_fetch` and `replace_col_for_dedup`:
-
-```scheme
-/* Current: hardcoded (concat '('get_column tblvar ti col ci)) */
-'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (concat '('get_column tblvar ti col ci)) ci)
-
-/* With col_mapping: look up the actual column name */
-'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (lookup_colname kt_cols '('get_column tblvar ti col ci)) ci)
-```
-
-When the keytable IS an FK-referenced table (no temp table), `lookup_colname` returns the actual PK column name (e.g. `"id"`) instead of the serialized expression (e.g. `"(get_column dept false id false)"`).
+When `make_keytable` has a single key that matches a foreign key, it could reuse the referenced table instead of creating a temp table. This would require:
+- Querying FK metadata from the schema at plan time
+- Returning the referenced table name + its PK column name
+- Adjusting the `make_col_replacer` to use the actual PK column name
 
 ### Remarks for keytable usage
 
@@ -734,15 +684,177 @@ Table: .employees:(dept)|true
 
 **Phase 1**: Komplettes invalidate (dropcolumn) bei jeder Änderung an Source-Table.
 
-**Später**: Für additive Aggregates können Trigger inkrementell updaten statt invalidieren:
+**Phase 2**: Für additive Aggregates können Trigger inkrementell updaten statt invalidieren:
+
+#### Which aggregates are incrementally updatable?
+
+| Aggregate | Incremental? | Trigger Logic |
+|-----------|-------------|---------------|
+| **SUM(expr)** | Yes | `+= NEW.expr - OLD.expr` |
+| **COUNT(*)** | Yes | `+= 1` (INSERT), `-= 1` (DELETE), no-op (UPDATE unless filter changes) |
+| **COUNT(expr)** | Yes | adjust by ±1 based on NULL-ness of OLD.expr / NEW.expr |
+| **MIN(expr)** | Partial | INSERT: `= min(cached, NEW.expr)`. DELETE: must rescan if deleted value == cached min |
+| **MAX(expr)** | Partial | Same as MIN but mirrored |
+| **AVG(expr)** | Yes | Store as (sum, count) pair internally, derive avg = sum/count |
+| **GROUP_CONCAT** | No | Must rescan (order-dependent, separator-dependent) |
+
+#### Trigger logic per DML type
+
+**INSERT** (new row matches GROUP BY key `k`):
+```
+SUM:   proxy.delta[k] += NEW.expr
+COUNT: proxy.delta[k] += 1
+```
+
+**DELETE** (old row had GROUP BY key `k`):
+```
+SUM:   proxy.delta[k] -= OLD.expr
+COUNT: proxy.delta[k] -= 1
+```
+
+**UPDATE** (row changes from key `k_old` to `k_new`):
+```
+if k_old == k_new:
+    SUM:   proxy.delta[k] += NEW.expr - OLD.expr
+    COUNT: no-op (unless WHERE filter affected)
+else:
+    # treat as DELETE from k_old + INSERT into k_new
+    proxy.delta[k_old] -= OLD.expr  (or -= 1 for COUNT)
+    proxy.delta[k_new] += NEW.expr  (or += 1 for COUNT)
+```
+
+#### Corner cases
+
+1. **WHERE filter on the aggregate query**: If the original query had `WHERE active = true`, the trigger must re-evaluate the filter for both OLD and NEW rows. Only adjust the aggregate if the row passes the filter.
+
+2. **GROUP BY key changes**: UPDATE can move a row between groups. Must adjust both the old and new group's aggregate. If the new group doesn't exist in the keytable yet, insert it (or fall back to full rescan).
+
+3. **New group keys from INSERT**: If INSERT creates a row with a GROUP BY key not yet in the keytable, the keytable needs a new row. This is cheap (sloppy engine INSERT) but must also initialize the aggregate column for that key.
+
+4. **Group becomes empty after DELETE**: The keytable row stays (with aggregate=0 or NULL). HAVING filters handle this at query time. The keytable is never pruned by triggers.
+
+5. **NULL handling**: `SUM(NULL)` is NULL, `COUNT(NULL)` doesn't count. Incremental triggers must check for NULL in both OLD and NEW values.
+
+6. **Overflow**: Integer SUM can overflow. Same risk as full rescan — not a new issue.
+
+#### Implementation sketch
+
+```go
+// For SUM/COUNT, the trigger computes a delta and applies it directly:
+func (p *StorageComputeProxy) IncrementalUpdate(idx uint, delta scm.Scmer) {
+    p.lock.Lock()
+    if p.validMask.Get(idx) {
+        oldVal := p.GetValueLocked(idx)
+        newVal := scm.Add(oldVal, delta)
+        p.delta.SetValue(idx, newVal)
+    }
+    // if not valid, no need to update — will be computed fresh on next read
+    p.lock.Unlock()
+}
+```
+
+#### When to fall back to full invalidation
+
+- Aggregate is not incrementally updatable (MIN/MAX after delete of extreme, GROUP_CONCAT)
+- WHERE filter is too complex to evaluate in the trigger
+- GROUP BY key is an expression (not a simple column) — harder to map OLD/NEW to group
+- Multiple tables in computor (e.g., filtered aggregate with subquery in WHERE)
+
+
+---
+
+## Prejoin Tables in GROUP BY → Subquery Cache
+
+### Current Prejoin Flow (queryplan.scm:1353-1441)
+
+Multi-table GROUP BY creates a `.prejoin:` temp table via nested-loop materialization, then recurses into `build_queryplan` with the prejoin as a single table:
 
 ```
-trigger on INSERT/DELETE/UPDATE:
-  UPDATE aggtbl SET aggcol = aggcol + NEW.(expr) - OLD.(expr)
+SELECT dept.name, SUM(emp.salary) FROM emp JOIN dept ON dept.id = emp.dept_id GROUP BY dept.name
+
+1. create .prejoin:emp,dept:(...)|condition   -- flat materialized join
+2. insert all matching rows via nested scan
+3. recursive build_queryplan with .prejoin as single table
+   → make_keytable creates .(.prejoin:...):((get_column .pj false "dept.name" false))
+   → aggregate columns computed on that group table
 ```
 
-UPDATE auf computed column überschreibt sparse storage direkt (kein delete+insert).
+### Problem: Prejoin Tables Are Ephemeral
 
+The current code explicitly drops and recreates prejoin tables each time (queryplan.scm:1434-1438):
+
+```scheme
+(list 'begin
+    '('droptable pj_schema prejointbl true)      ;; ← kills any cached aggregates
+    '('createtable pj_schema prejointbl ...)
+    '('time materialize_plan "materialize")
+    grouped_result)
+```
+
+This means the group table derived from the prejoin is ALSO ephemeral — any `StorageComputeProxy` columns on it are lost between queries. Subquery cache provides no benefit here.
+
+### Solution: Make Prejoin Tables Cacheable
+
+The prejoin table naming IS already canonical (`.prejoin:{tables}:{cols}|{condition}`), and it uses sloppy engine. To enable caching:
+
+1. **Remove the explicit `droptable`** — rely on `createtable ... true` (IF NOT EXISTS) idempotency
+2. **Before materialization, check if the prejoin table already has data** — if it does AND source tables haven't changed, skip materialization entirely
+3. **Register invalidation triggers** on all source tables in the prejoin — on any INSERT/UPDATE/DELETE to source tables, drop the prejoin table (Phase 1: full invalidation) or selectively invalidate rows (Phase 2)
+
+```scheme
+/* Proposed change: */
+(list 'begin
+    ;; no droptable! createtable is IF NOT EXISTS
+    '('createtable pj_schema prejointbl ...)
+    ;; materialize only if table is empty or invalid
+    '('if ('equal? 0 ('count_rows pj_schema prejointbl))
+        '('time materialize_plan "materialize")
+        nil)
+    grouped_result)
+```
+
+### Invalidation for Prejoin Tables
+
+Register triggers on each source table in the join:
+
+```scheme
+;; For each (tblvar schema tbl isOuter _) in tables:
+;; Register AfterInsert/AfterUpdate/AfterDelete trigger that drops the prejoin table
+(register_system_trigger schema tbl
+    (concat ".cache:prejoin:" prejointbl "|" schema "." tbl)
+    '(AfterInsert AfterUpdate AfterDelete)
+    '(lambda (OLD NEW) (droptable pj_schema prejointbl true)))
+```
+
+When the prejoin table is dropped, the derived group table and its aggregate tempcols are either:
+- Also dropped (if group table naming depends on prejoin name — which it does)
+- Or orphaned and evicted by CacheManager
+
+### Race Condition Improvement
+
+Currently, concurrent GROUP BY queries on the same table race on the shared keytable: two queries may try to insert/compute on the same `.tbl:(keys)` temp table simultaneously, leading to duplicate work or stale aggregate columns. With proper trigger-based invalidation, the keytable becomes a stable cached artifact — queries only read from it, and only DML triggers mutate it. This naturally serializes writes (trigger fires once per DML) and allows concurrent reads without races.
+
+### Benefit Chain
+
+```
+source table change
+  → trigger drops .prejoin:... table
+    → derived group table .(.prejoin:...):(...) also gone
+      → next query: rematerializes prejoin + recomputes aggregates
+
+No source change between queries:
+  → prejoin table reused (skip materialization!)
+    → group table reused
+      → aggregate StorageComputeProxy columns still valid
+        → 10-100x speedup for repeated multi-table aggregates
+```
+
+### Implementation Notes
+
+- `count_rows` builtin needed (or check shard count) — lightweight check if table has data
+- Prejoin tables registered with CacheManager as `TypeTempKeytable` (factor 10) — same as group tables
+- The recursive `build_queryplan` call already treats the prejoin as a normal table, so group table creation, aggregate computation, and eventually StorageComputeProxy all work transitively
+- ORDER BY + LIMIT on joined tables (queryplan.scm:1634 TODO) also benefits from cached prejoins
 
 ---
 
@@ -905,36 +1017,97 @@ For compound keys:
 
 ---
 
+## Implementation Readiness Audit
+
+### What Already Exists
+
+| Component | Status | Location |
+|-----------|--------|----------|
+| `make_keytable` function | DONE | queryplan.scm:242-252 |
+| `make_col_replacer` (rewrite refs to group table) | DONE | queryplan.scm:257-267 |
+| `rewrite_for_prejoin` | DONE | queryplan.scm:270-276 |
+| Prejoin materialization (multi-table GROUP BY) | DONE | queryplan.scm:1353-1441 |
+| `StorageSparse` (for delta storage) | DONE | storage/storage-sparse.go |
+| `NonBlockingBitMap` (for valid-mask) | DONE | NonLockingReadMap package (used for deletions) |
+| `ComputeColumn` (eager, full-compute) | DONE | storage/compute.go:37-153 |
+| `createcolumn` with computor params 7-8 | DONE | storage/storage.go:472-514 (6-8 params) |
+| Trigger system with IsSystem flag | DONE | storage/trigger.go |
+| CacheManager with temp table/column lifecycle | DONE | storage/cache.go |
+| Shard rebuild infrastructure | DONE | storage/shard.go |
+| Canonical naming for keytables/tempcols | DONE | naming convention in make_keytable + compute_plan |
+
+### What Must Be Built
+
+| Component | Complexity | Blocking? | Notes |
+|-----------|------------|-----------|-------|
+| **`StorageComputeProxy` type** | HIGH | Phase 1 blocker | New type implementing `ColumnStorage`. Wraps main+delta+validMask+computor. Core of everything. |
+| **Lazy `GetValue`** | HIGH | Part of proxy | Check validMask → read from delta/main → or compute + store in delta |
+| **`Compress()` method** | MEDIUM | Part of proxy | Compute all values, run proposeCompression loop, replace main, clear delta |
+| **`Invalidate/InvalidateAll`** | LOW | Part of proxy | Just clear bits in NonBlockingBitMap |
+| **Serialization** | MEDIUM | Phase 1 | Serialize main + delta + validMask bytes. Reconstruct computor from column metadata. |
+| **Extend `createcolumn` for filter** | LOW | Phase 1 | Parse `filter_cols`/`filter` from options assoc-list. Route to new `ComputeColumn` signature. |
+| **Adapt `storageShard.ComputeColumn`** | MEDIUM | Phase 1 | Create proxy instead of StorageSCMER. Handle filter-based sparse init vs full Compress. |
+| **`dropcolumn` Scheme builtin** | LOW | Phase 2 | Drop a computed column from all shards. Cleanup system triggers by naming convention. |
+| **`ExtractScannedTables`** | LOW | Phase 2 | Walk computor AST for `(scan schema table ...)` patterns. |
+| **Trigger registration** | MEDIUM | Phase 2 | Register AfterInsert/Update/Delete on source tables → dropcolumn target. |
+| **Prejoin table caching** | MEDIUM | Phase 2/3 | Remove droptable, add data-presence check, register invalidation triggers on source tables. |
+| **`count_rows` or equivalent** | LOW | Phase 2/3 | Needed for prejoin "already populated?" check. Could use shard count sum. |
+| **FK→PK reuse in `make_keytable`** | LOW | Future | Schema metadata query for single-key FK detection. |
+| **`$invalidate:COLNAME` virtual col** | MEDIUM | Phase 4 | Special column name prefix in scan column reader. |
+| **JIT integration** | LOW | Phase 5 | `StorageComputeProxy.JIT()` with validMask bitmap check → fast/slow path. |
+
+### Key Risk: `ComputeColumn` Refactor
+
+The current `ComputeColumn` (compute.go:37-153) is **eagerly** computed — it builds a full `StorageSCMER` values array and stores it directly. The new version must:
+1. Create a `StorageComputeProxy` instead of `StorageSCMER`
+2. Handle the case where proxy already exists (idempotent createcolumn)
+3. Support filter-based sparse computation
+4. Deal with shards that have delta (inserts/deletions) — current code returns false and forces rebuild
+
+The current code also requires delta-free shards (`s.deletions.Count() > 0 || len(s.inserts) > 0` → return false). The proxy approach can work with deltas because it reads values lazily, but the validMask must cover `main_count + len(inserts)`.
+
+---
+
 ## Implementation Phases
 
 ### Phase 1: StorageComputeProxy (Week 1-2)
-1. Extend createcolumn mit filterCols+filter options (in assoc-list)
-2. Implement `StorageComputeProxy` mit `GetValue`, Compress, Invalidate
-3. Implement serialization
-4. Test lazy evaluation
-5. **Keine Trigger** - Bei Bedarf manuell dropcolumn aufrufen, createcolumn baut dann neu
+1. Implement `StorageComputeProxy` struct in `storage/compute_proxy.go`
+   - Implement `ColumnStorage` interface (GetValue, proposeCompression, scan, build, init, finish, Serialize, Deserialize)
+   - Lazy GetValue with validMask check → delta → main → compute path
+   - Compress() with proposeCompression loop
+   - Invalidate/InvalidateAll
+   - Thread safety: RWMutex on delta, NonBlockingBitMap for validMask
+2. Extend `createcolumn` to parse `filter_cols`/`filter` from options assoc-list (storage/storage.go:472)
+3. Refactor `table.ComputeColumn` + `storageShard.ComputeColumn` to create proxy instead of eager StorageSCMER
+4. Implement serialization (main + delta + validMask bytes, computor from column metadata)
+5. Test: manual `createcolumn` with computor, verify lazy evaluation, verify Compress triggers at 3%
+6. **No triggers yet** — manual dropcolumn for invalidation
 
-### Phase 2: Lookup Cache + Trigger (Week 3-4)
-1. `analyze_join_for_cache` in queryplan.scm - JOINs erkennen
-2. Generate `createcolumn` für cacheable joins (kanonische Namen)
-3. `ExtractScannedTables` - computor AST parsen
-4. Trigger registrieren: Änderung an Source-Table → dropcolumn; createcolumn muss jetzt nicht mehr neu bauen
-5. Test invalidation
+### Phase 2: Lookup Cache + Triggers (Week 3-4)
+1. Implement `dropcolumn` Scheme builtin — drop computed column from all shards, cleanup system triggers
+2. `ExtractScannedTables` — walk computor AST for `(scan schema table ...)` patterns
+3. `RegisterComputedColumnTriggers` — register AfterInsert/Update/Delete on source tables → dropcolumn
+4. `analyze_join_for_cache` in queryplan.scm — detect cacheable JOINs, emit `createcolumn` with canonical names
+5. Test invalidation: change source table → cache invalidated → next query recomputes
 
-### Phase 3: Aggregation Cache (Week 5-6)
-1. Apply same pattern to group tables
-2. Implement `update_aggregate` builtin for SUM/COUNT
-3. Register update triggers on source table
+### Phase 3: Aggregation Cache + Prejoin Caching (Week 5-6)
+1. Apply StorageComputeProxy to group table aggregate tempcols
+2. **Make prejoin tables cacheable**: remove droptable, add data-presence check, register source-table triggers
+3. Implement `count_rows` builtin (or inline shard count check) for prejoin freshness test
+4. Register invalidation triggers on prejoin source tables
+5. Test: repeated multi-table GROUP BY queries hit cache; DML on source invalidates
 
 ### Phase 4: Selective Invalidation (Week 7-8)
-1. Analyze scan filters für selective invalidation patterns
+1. Analyze scan filters for selective invalidation patterns
 2. Implement `$invalidate:COLNAME` virtual column in scan.go
-3. Trigger-Code anpassen: statt dropcolumn gezielt Zeilen invalidieren
+3. Adapt trigger code: instead of dropcolumn, selectively invalidate affected rows
 
-### Phase 5: Testing & Polish (Week 9-10)
-1. Correctness tests (invalidation, concurrent access)
-2. Performance benchmarks
-3. Memory pressure handling
+### Phase 5: Incremental Aggregates + JIT + Polish (Week 9-10)
+1. `update_aggregate` builtin for SUM/COUNT — incremental trigger updates instead of full recompute
+2. `StorageComputeProxy.JIT()` with validMask bitmap check → fast/slow path
+3. Correctness tests (invalidation, concurrent access, cascading)
+4. Performance benchmarks
+5. Memory pressure handling (CacheManager eviction of proxy columns)
 
 ---
 
@@ -988,6 +1161,24 @@ For compound keys:
     - "UPDATE status SET is_open = false WHERE id = 1"
     - query: "SELECT COUNT(*) FROM ticket t JOIN status s ON s.id = t.status_id WHERE s.is_open"
       result: [[0]]  # Both lookup cache AND aggregate invalidated
+
+- name: "Prejoin aggregate cache"
+  setup:
+    - "CREATE TABLE dept (id INT PRIMARY KEY, name VARCHAR(50))"
+    - "CREATE TABLE emp (id INT, dept_id INT, salary INT)"
+    - "INSERT INTO dept VALUES (1,'Engineering'),(2,'Sales')"
+    - "INSERT INTO emp VALUES (1,1,100),(2,1,200),(3,2,150)"
+  queries:
+    # Multi-table GROUP BY → prejoin materialization → group table → aggregate
+    - query: "SELECT d.name, SUM(e.salary) FROM emp e JOIN dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+      result: [["Engineering",300],["Sales",150]]
+    # Second run should reuse cached prejoin + aggregate
+    - query: "SELECT d.name, SUM(e.salary) FROM emp e JOIN dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+      result: [["Engineering",300],["Sales",150]]
+    # DML on source table invalidates cache
+    - "INSERT INTO emp VALUES (4,2,250)"
+    - query: "SELECT d.name, SUM(e.salary) FROM emp e JOIN dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+      result: [["Engineering",300],["Sales",400]]  # Cache invalidated, recomputed
 ```
 
 ---
@@ -1002,10 +1193,12 @@ For compound keys:
 4. **Cascading invalidation** - Dependent caches automatisch re-invalidiert via Trigger
 5. **Idempotent createcolumn** - Mehrfacher Aufruf garantiert dass filter-Zeilen berechnet sind
 6. **Kanonische Namen** - Wiederverwendung durch deterministische Column-Namen
+7. **Cacheable prejoins** - Multi-table GROUP BY prejoin tables persist and benefit from the same caching transitively via recursive build_queryplan
 
 **Expected performance:**
 - Lookup joins: 10-100x faster (eliminate nested scan overhead)
 - Aggregations: 10-100x faster (avoid full table rescan)
+- Multi-table aggregations: skip materialization entirely on cache hit
 - Write overhead: minimal (bit clear or delta update)
 - Memory overhead: ~8 MB per 1M cached rows
 

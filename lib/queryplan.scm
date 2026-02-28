@@ -104,6 +104,19 @@ if there is a group function, create a temporary preaggregate table
 	)
 ))
 
+/* extract_scanned_tables: walk an expression AST and return all (schema table) pairs from scan/scan_order calls.
+   Used to detect which tables a computor lambda reads from, so we can register invalidation triggers. */
+(define extract_scanned_tables (lambda (expr)
+	(match expr
+		(cons (symbol scan) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scan_order) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scalar_scan) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons (symbol scalar_scan_order) (cons schema (cons tbl rest))) (cons (list schema tbl) (merge (map rest extract_scanned_tables)))
+		(cons sym args) (merge (map args extract_scanned_tables))
+		'()
+	)
+))
+
 /* split_condition returns a tuple (now, later) according to what can be checked now and what has to be waited for tables '('(tblvar ...) ...) */
 (define split_condition (lambda (expr tables) (match expr
 	'((symbol get_column) tblvar _ col _) /* a column */ (match tables

@@ -827,6 +827,26 @@ func Init(en scm.Env) {
 		}, false, false, nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"dropcolumn", "drops a column from a table",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
+			scm.DeclarationParameter{"table", "string", "name of the table", nil},
+			scm.DeclarationParameter{"column", "string", "name of the column to drop", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				panic("database " + scm.String(a[0]) + " does not exist")
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+			}
+			return scm.NewBool(t.DropColumn(scm.String(a[2])))
+		}, false, false, nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"renametable", "renames a table",
 		3, 3,
 		[]scm.DeclarationParameter{
