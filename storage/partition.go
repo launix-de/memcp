@@ -78,6 +78,16 @@ func (t *table) iterateShards(boundaries []columnboundaries, callback_old func(*
 		}
 		t.shardModeMu.RUnlock()
 
+		// fast path: single shard → execute synchronously, no goroutine overhead
+		if len(shards) == 1 && shards[0] != nil {
+			s := shards[0]
+			release := s.GetRead()
+			callback(s)
+			release()
+			s.activeScanners.Add(-1)
+			return
+		}
+
 		// throttle by CPU cores to avoid massive goroutine fan-out
 		workers := runtime.NumCPU()
 		if workers < 1 {
