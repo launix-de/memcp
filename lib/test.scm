@@ -628,6 +628,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (- 10 (- 3 1)) 8 "subtraction not flattened: 10-(3-1)=8")
 	(assert (/ 100 (/ 10 2)) 20 "division not flattened: 100/(10/2)=20")
 
+	/* Foldable constant-folding: list wrapping/unwrapping roundtrip */
+	/* Simple list folding: (list 1 2 3) with all-const args folds at compile time */
+	(assert ((eval (optimize '('lambda '('x) '(car '(list 1 2 3))))) 0) 1 "folded list car returns first element")
+	(assert ((eval (optimize '('lambda '('x) '(nth '(list 10 20 30) 2)))) 0) 30 "folded list nth returns correct element")
+	/* Nested list folding: inner lists must survive double-fold roundtrip */
+	(assert ((eval (optimize '('lambda '('x) '(car '(car '(list '(list 1 2) '(list 3 4))))))) 0) 1 "nested folded list: car of car")
+	(assert ((eval (optimize '('lambda '('x) '(count '(car '(list '(list 1 2) '(list 3 4))))))) 0) 2 "nested folded list: count of inner")
+	(assert ((eval (optimize '('lambda '('x) '(count '(list '(list 1 2) '(list 3 4)))))) 0) 2 "nested folded list: count of outer")
+	/* json_decode constant folding: parses JSON array to list at compile time */
+	(assert ((eval (optimize '('lambda '('x) '(car '(json_decode "[10,20,30]"))))) 0) 10 "json_decode folded: car of parsed array")
+	(assert ((eval (optimize '('lambda '('x) '(count '(json_decode "[1,2,3,4]"))))) 0) 4 "json_decode folded: count of parsed array")
+	(assert ((eval (optimize '('lambda '('x) '(nth '(json_decode "[5,6,7]") 1)))) 0) 6 "json_decode folded: nth of parsed array")
+	/* Nested json_decode result used by another foldable: the double-fold scenario */
+	(assert ((eval (optimize '('lambda '('x) '(count '(list "vector" '(json_decode "[1,2,3]")))))) 0) 2 "double-fold: list wrapping json_decode result")
+	/* json_decode with nested arrays: recursive wrapping must preserve structure */
+	(assert ((eval (optimize '('lambda '('x) '(count '(json_decode "[[1,2],[3,4]]"))))) 0) 2 "json_decode folded: nested arrays outer count")
+	(assert ((eval (optimize '('lambda '('x) '(count '(car '(json_decode "[[1,2],[3,4]]")))))) 0) 2 "json_decode folded: nested arrays inner count")
+	/* Mixed const and variable args: list with some constants should NOT fold */
+	(assert ((eval (optimize '('lambda '('x) '(car '(list 'x 2 3))))) 42) 42 "list with variable arg: no premature fold")
+	(assert ((eval (optimize '('lambda '('x) '(count '(list 'x 2 3))))) 42) 3 "list with variable arg: count still works")
+
 	/* Flatten nested !begin blocks */
 	(assert (begin (define xb1 1) (!begin (!begin (set xb1 2) (set xb1 (+ xb1 3))) (set xb1 (* xb1 10))) xb1) 50 "nested !begin flattens correctly")
 
