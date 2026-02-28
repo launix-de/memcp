@@ -881,20 +881,44 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	}
 	if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
 		for i := range v {
-			if list, ok := scmerSlice(v[i]); ok && len(list) > 0 && (isList(list[0]) || scmerIsSymbol(list[0], "list")) {
-				v[i] = NewSlice(list[1:])
-			}
+			v[i] = unwrapConstListFromCode(v[i])
 		}
 		result := d.Fn(v[1:]...)
-		if list, ok := scmerSlice(result); ok {
-			packed := make([]Scmer, 1, len(list)+1)
-			packed[0] = NewFunc(List)
-			packed = append(packed, list...)
-			result = NewSlice(packed)
-		}
+		result = wrapConstListForCode(result)
 		return result, &TypeDescriptor{Transfer: true, Const: true}
 	}
 	return NewSlice(v), &TypeDescriptor{Transfer: transferOwnership}
+}
+
+// wrapConstListForCode wraps a constant-folded Scmer value so it can safely
+// be embedded in generated code. Raw list/slice values would be misinterpreted
+// as function calls by Eval, so they are wrapped as (list ...) calls recursively.
+// Only wraps plain slices — FastDicts are left as-is since they are self-evaluating.
+func wrapConstListForCode(val Scmer) Scmer {
+	if val.IsSlice() {
+		list := val.Slice()
+		packed := make([]Scmer, 1, len(list)+1)
+		packed[0] = NewFunc(List)
+		for _, elem := range list {
+			packed = append(packed, wrapConstListForCode(elem))
+		}
+		return NewSlice(packed)
+	}
+	return val
+}
+
+// unwrapConstListFromCode is the inverse of wrapConstListForCode: it recursively
+// strips (list ...) wrappers so that the raw data values can be passed to a
+// foldable function at constant-fold time.
+func unwrapConstListFromCode(val Scmer) Scmer {
+	if list, ok := scmerSlice(val); ok && len(list) > 0 && (isList(list[0]) || scmerIsSymbol(list[0], "list")) {
+		items := make([]Scmer, len(list)-1)
+		for i, elem := range list[1:] {
+			items[i] = unwrapConstListFromCode(elem)
+		}
+		return NewSlice(items)
+	}
+	return val
 }
 
 // optimizeAnd is the Optimize hook for the (and ...) special form.
