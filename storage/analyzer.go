@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "sort"
+import "strings"
 import "github.com/launix-de/memcp/scm"
 
 func mustSymbolValue(v scm.Scmer) scm.Symbol {
@@ -219,6 +220,58 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				sym := scm.Symbol(v[1].String())
 				if col, ok := symbolmapping[sym]; ok {
 					return boundaries{columnboundaries{col, scm.NewNil(), true, scm.NewNil(), true}}
+				}
+			}
+			return nil
+		} else if v[0].SymbolEquals("contains?") && len(v) >= 3 {
+			// IN-list: (contains? (list 1 2 3) col) → range [min, max]
+			if v[2].IsSymbol() {
+				sym := scm.Symbol(v[2].String())
+				if col, ok := symbolmapping[sym]; ok {
+					if v[1].IsSlice() {
+						items := v[1].Slice()
+						if len(items) > 1 && items[0].IsSymbol() && items[0].String() == "list" {
+							var lo, hi scm.Scmer
+							found := false
+							for _, item := range items[1:] {
+								if c, ok := extractConstant(item); ok {
+									if !found {
+										lo = c
+										hi = c
+										found = true
+									} else {
+										if scm.Less(c, lo) {
+											lo = c
+										}
+										if scm.Less(hi, c) {
+											hi = c
+										}
+									}
+								}
+							}
+							if found {
+								return boundaries{columnboundaries{col, lo, true, hi, true}}
+							}
+						}
+					}
+				}
+			}
+			return nil
+		} else if v[0].SymbolEquals("strlike") && len(v) >= 3 {
+			// LIKE prefix: (strlike col "foo%" collation) → range [prefix, prefix+1)
+			if v[1].IsSymbol() {
+				sym := scm.Symbol(v[1].String())
+				if col, ok := symbolmapping[sym]; ok {
+					if pat, ok := extractConstant(v[2]); ok && pat.IsString() {
+						pattern := pat.String()
+						idx := strings.IndexAny(pattern, "%_")
+						if idx > 0 {
+							prefix := pattern[:idx]
+							upperBytes := []byte(prefix)
+							upperBytes[len(upperBytes)-1]++
+							return boundaries{columnboundaries{col, scm.NewString(prefix), true, scm.NewString(string(upperBytes)), false}}
+						}
+					}
 				}
 			}
 			return nil
