@@ -333,6 +333,78 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func(
 	}
 }
 
+// buildIndex constructs the index data structures (mainIndexes and deltaBtree).
+// cols must contain column storages for each index column in order.
+// The caller must hold s.mu.Lock() or have exclusive access.
+func (s *StorageIndex) buildIndex(cols []ColumnStorage) {
+	fmt.Println("building index on", s.t.t.Name, "over", s.Cols)
+
+	if !s.Native {
+		// main storage: build sort-order index
+		tmp := make([]uint32, s.t.main_count)
+		for i := uint32(0); i < s.t.main_count; i++ {
+			tmp[i] = i // fill with natural order
+		}
+		// sort indexes
+		sort.Slice(tmp, func(i, j int) bool {
+			for _, c := range cols {
+				a := c.GetValue(tmp[i])
+				b := c.GetValue(tmp[j])
+				if scm.Less(a, b) {
+					return true // less
+				} else if !scm.Equal(a, b) {
+					return false // greater
+				}
+				// otherwise: next iteration
+			}
+			return false // fully equal
+		})
+		// store sorted values into compressed format
+		s.mainIndexes.prepare()
+		for i, v := range tmp {
+			s.mainIndexes.scan(uint32(i), scm.NewInt(int64(v)))
+		}
+		s.mainIndexes.init(uint32(len(tmp)))
+		for i, v := range tmp {
+			s.mainIndexes.build(uint32(i), scm.NewInt(int64(v)))
+		}
+		s.mainIndexes.finish()
+	}
+	// else: Native index — data is physically sorted, no mainIndexes needed
+
+	// delta storage
+	s.deltaBtree = btree.NewG[indexPair](8, func(i, j indexPair) bool {
+		for _, col := range s.Cols {
+			colpos, ok := s.t.deltaColumns[col]
+			if !ok {
+				continue // non-existing column -> don't compare
+			}
+			var a, b scm.Scmer
+			if colpos < len(i.data) {
+				a = i.data[colpos]
+			}
+			if colpos < len(j.data) {
+				b = j.data[colpos]
+			}
+			if scm.Less(a, b) {
+				return true // less
+			} else if !scm.Equal(a, b) {
+				return false // greater
+			}
+			// otherwise: next iteration
+		}
+		// tiebreak by itemid so duplicate key values are never "equal"
+		// (prevents ReplaceOrInsert from dropping rows with same key)
+		return i.itemid < j.itemid
+	})
+	// fill deltaBtree with global record IDs
+	for i, data := range s.t.inserts {
+		s.deltaBtree.ReplaceOrInsert(indexPair{int(s.t.main_count) + i, data})
+	}
+
+	s.active = true // mark as ready
+}
+
 // iterate over index using a caller-provided buffer for batching
 func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 
@@ -362,72 +434,7 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, lowerIncl
 				s.mu.Unlock()
 				goto start_scan
 			}
-			fmt.Println("building index on", s.t.t.Name, "over", s.Cols)
-
-			if !s.Native {
-				// main storage: build sort-order index
-				tmp := make([]uint32, s.t.main_count)
-				for i := uint32(0); i < s.t.main_count; i++ {
-					tmp[i] = i // fill with natural order
-				}
-				// sort indexes
-				sort.Slice(tmp, func(i, j int) bool {
-					for _, c := range cols {
-						a := c.GetValue(tmp[i])
-						b := c.GetValue(tmp[j])
-						if scm.Less(a, b) {
-							return true // less
-						} else if !scm.Equal(a, b) {
-							return false // greater
-						}
-						// otherwise: next iteration
-					}
-					return false // fully equal
-				})
-				// store sorted values into compressed format
-				s.mainIndexes.prepare()
-				for i, v := range tmp {
-					s.mainIndexes.scan(uint32(i), scm.NewInt(int64(v)))
-				}
-				s.mainIndexes.init(uint32(len(tmp)))
-				for i, v := range tmp {
-					s.mainIndexes.build(uint32(i), scm.NewInt(int64(v)))
-				}
-				s.mainIndexes.finish()
-			}
-			// else: Native index — data is physically sorted, no mainIndexes needed
-
-			// delta storage
-			s.deltaBtree = btree.NewG[indexPair](8, func(i, j indexPair) bool {
-				for _, col := range s.Cols {
-					colpos, ok := s.t.deltaColumns[col]
-					if !ok {
-						continue // non-existing column -> don't compare
-					}
-					var a, b scm.Scmer
-					if colpos < len(i.data) {
-						a = i.data[colpos]
-					}
-					if colpos < len(j.data) {
-						b = j.data[colpos]
-					}
-					if scm.Less(a, b) {
-						return true // less
-					} else if !scm.Equal(a, b) {
-						return false // greater
-					}
-					// otherwise: next iteration
-				}
-				// tiebreak by itemid so duplicate key values are never "equal"
-				// (prevents ReplaceOrInsert from dropping rows with same key)
-				return i.itemid < j.itemid
-			})
-			// fill deltaBtree with global record IDs (no locking required; we are already in a readlock)
-			for i, data := range s.t.inserts {
-				s.deltaBtree.ReplaceOrInsert(indexPair{int(s.t.main_count) + i, data})
-			}
-
-			s.active = true // mark as ready
+			s.buildIndex(cols)
 			s.mu.Unlock()
 			// register with CacheManager
 			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)

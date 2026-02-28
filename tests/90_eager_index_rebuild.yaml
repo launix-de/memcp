@@ -1,0 +1,124 @@
+# Tests for Opt 5: Hybrid Index Rebuild Tiers.
+# After rebuild, indexes with Savings >= 2.0 are eagerly built
+# so the first query does not pay a cold-start full-scan penalty.
+
+metadata:
+  version: "1.0"
+  description: "Eager index rebuild after shard rebuild"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS eager_idx"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS eager_idx"
+
+test_cases:
+  - name: "Create table and insert data"
+    setup:
+      - sql: "CREATE TABLE eager_idx (id INT, val INT, name VARCHAR(50))"
+      - scm: |
+          (begin
+            (insert "memcp-tests" "eager_idx" '("id" "val" "name")
+              (map (produceN 100) (lambda (i)
+                (list i (* i 3) (concat "row" i)))))
+            (rebuild))
+    sql: "SELECT COUNT(*) AS cnt FROM eager_idx"
+    expect:
+      data:
+        - cnt: 100
+
+  # Run 3 queries on id to accumulate Savings >= 3.0 (above the 2.0 threshold)
+  - name: "Build index hit 1"
+    sql: "SELECT id FROM eager_idx WHERE id = 10"
+    expect:
+      data:
+        - id: 10
+
+  - name: "Build index hit 2"
+    sql: "SELECT id FROM eager_idx WHERE id = 20"
+    expect:
+      data:
+        - id: 20
+
+  - name: "Build index hit 3"
+    sql: "SELECT id FROM eager_idx WHERE id = 30"
+    expect:
+      data:
+        - id: 30
+
+  # Insert + rebuild: index metadata is transferred with Savings >= 2.7 (3.0 * 0.9 decay)
+  # and should be eagerly rebuilt
+  - name: "Insert and rebuild to trigger eager index rebuild"
+    setup:
+      - sql: "INSERT INTO eager_idx VALUES (500, 1500, 'extra')"
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS cnt FROM eager_idx"
+    expect:
+      data:
+        - cnt: 101
+
+  # ==============================================================
+  # Verify index works correctly immediately after eager rebuild
+  # ==============================================================
+
+  - name: "Equality query after eager rebuild"
+    sql: "SELECT id, val FROM eager_idx WHERE id = 50"
+    expect:
+      rows: 1
+      data:
+        - id: 50
+          val: 150
+
+  - name: "Range query after eager rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM eager_idx WHERE id > 95"
+    expect:
+      data:
+        - cnt: 5
+
+  - name: "Range query inclusive after eager rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM eager_idx WHERE id >= 95"
+    expect:
+      data:
+        - cnt: 6
+
+  - name: "Query the extra inserted row"
+    sql: "SELECT name FROM eager_idx WHERE id = 500"
+    expect:
+      rows: 1
+      data:
+        - name: extra
+
+  - name: "No match query after eager rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM eager_idx WHERE id = 9999"
+    expect:
+      data:
+        - cnt: 0
+
+  # ==============================================================
+  # Delta inserts after eager-built index still work
+  # ==============================================================
+
+  - name: "Insert into eager-rebuilt table"
+    sql: "INSERT INTO eager_idx VALUES (42, 8888, 'delta')"
+
+  - name: "Query delta row by val"
+    sql: "SELECT name FROM eager_idx WHERE val = 8888"
+    expect:
+      rows: 1
+      data:
+        - name: delta
+
+  - name: "Equality on overlapping delta id"
+    sql: "SELECT COUNT(*) AS cnt FROM eager_idx WHERE id = 42"
+    expect:
+      data:
+        - cnt: 2
+
+  - name: "ORDER BY with eagerly rebuilt index"
+    sql: "SELECT id FROM eager_idx WHERE id >= 97 ORDER BY id"
+    expect:
+      data:
+        - id: 97
+        - id: 98
+        - id: 99
+        - id: 500

@@ -1392,6 +1392,28 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		b.WriteString(") -> ")
 		b.WriteString(fmt.Sprint(result.main_count))
 		fmt.Println(b.String())
+
+		// Eagerly rebuild indexes with sufficient Savings so the first
+		// query after rebuild does not pay a cold-start full-scan penalty.
+		for _, idx := range result.Indexes {
+			if idx.Savings >= 2.0 && !idx.active {
+				idxCols := make([]ColumnStorage, len(idx.Cols))
+				allFound := true
+				for i, colName := range idx.Cols {
+					cs, ok := result.columns[colName]
+					if !ok || cs == nil {
+						allFound = false
+						break
+					}
+					idxCols[i] = cs
+				}
+				if allFound {
+					idx.buildIndex(idxCols)
+					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
+				}
+			}
+		}
+
 		// Do not persist schema from inside shard rebuild; callers
 		// publish the new shard pointer and then save atomically at the
 		// table/database level to avoid transient, inconsistent schemas.
