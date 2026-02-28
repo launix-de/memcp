@@ -136,6 +136,7 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	*/
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	// TODO: append sortcols to boundaries
 

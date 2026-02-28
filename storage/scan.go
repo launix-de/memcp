@@ -79,6 +79,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	analyzeStart := time.Now()
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
+	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	// give sharding hints
 	for _, b := range boundaries {

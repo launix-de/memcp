@@ -152,6 +152,11 @@ type table struct {
 	Charset         string
 	Comment         string
 
+	// index column frequency: used to sort equality columns by frequency
+	// so that the most-queried columns come first, maximizing prefix overlap.
+	colFreq   map[string]int64
+	colFreqMu sync.Mutex
+
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode         ShardMode
 	repartitionActive bool            // true when dual-write is in progress
@@ -159,6 +164,26 @@ type table struct {
 	Shards            []*storageShard // unordered shards (used when ShardMode == ShardModeFree)
 	PShards           []*storageShard // partitioned shards according to PDimensions (used when ShardMode == ShardModePartition)
 	PDimensions       []shardDimension
+}
+
+// bumpColFreq increments the query frequency counter for a column.
+func (t *table) bumpColFreq(col string) {
+	t.colFreqMu.Lock()
+	if t.colFreq == nil {
+		t.colFreq = make(map[string]int64)
+	}
+	t.colFreq[col]++
+	t.colFreqMu.Unlock()
+}
+
+// getColFreq returns the query frequency counter for a column.
+func (t *table) getColFreq(col string) int64 {
+	t.colFreqMu.Lock()
+	defer t.colFreqMu.Unlock()
+	if t.colFreq == nil {
+		return 0
+	}
+	return t.colFreq[col]
 }
 
 // ActiveShards returns the shard set that is currently authoritative for reads/writes.
@@ -556,6 +581,10 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 			c.Collation = scm.String(extrainfo[i+1])
 		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
+		case "filtercols":
+			// handled by createcolumn builtin, not a column property
+		case "filter":
+			// handled by createcolumn builtin, not a column property
 		default:
 			panic("unknown column attribute: " + key)
 		}

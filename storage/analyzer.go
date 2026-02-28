@@ -330,6 +330,29 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	return cols
 }
 
+// reorderByFrequency re-sorts equality columns by query frequency (most-used first)
+// so that the most-queried columns appear first in the index key, maximizing prefix
+// overlap across queries. Also bumps the frequency counters for each boundary column.
+func reorderByFrequency(bounds boundaries, t *table) {
+	for _, b := range bounds {
+		t.bumpColFreq(b.col)
+	}
+	sort.SliceStable(bounds, func(i, j int) bool {
+		iEq := scm.Equal(bounds[i].lower, bounds[i].upper)
+		jEq := scm.Equal(bounds[j].lower, bounds[j].upper)
+		if iEq != jEq {
+			return iEq // equality first
+		}
+		if iEq && jEq {
+			fi, fj := t.getColFreq(bounds[i].col), t.getColFreq(bounds[j].col)
+			if fi != fj {
+				return fi > fj // higher frequency first
+			}
+		}
+		return bounds[i].col < bounds[j].col // tiebreak alphabetically
+	})
+}
+
 func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
 		//fmt.Println("conditions:", cols)
