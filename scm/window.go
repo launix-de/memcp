@@ -104,6 +104,7 @@ func init_window() {
 			return NewSlice(result)
 		},
 		false, false, nil,
+		nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -152,5 +153,6 @@ func init_window() {
 			return NewNil()
 		},
 		false, false, nil,
+		nil,
 	})
 }

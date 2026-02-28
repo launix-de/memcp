@@ -58,6 +58,10 @@ func String(v Scmer) string {
 		var b bytes.Buffer
 		serializeProcShallow(&b, *v.Proc(), &Globalenv)
 		return b.String()
+	case tagJIT:
+		var b bytes.Buffer
+		serializeProcShallow(&b, v.JIT().Proc, &Globalenv)
+		return b.String()
 	case tagFastDict:
 		fd := v.FastDict()
 		if fd == nil {
@@ -257,6 +261,9 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			return
 		}
 		b.WriteString(fmt.Sprint(v.Any()))
+	case tagJIT:
+		jep := v.JIT()
+		serializeProcShallow(b, jep.Proc, glob)
 	default:
 		b.WriteString(v.String())
 	}

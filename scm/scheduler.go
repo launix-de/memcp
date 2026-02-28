@@ -241,6 +241,7 @@ func init_scheduler() {
 			{"args...", "any", "optional arguments forwarded to the callback", nil},
 		}, "int",
 		setTimeout, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"clearTimeout", "Cancels a timeout created with setTimeout.",
@@ -249,6 +250,7 @@ func init_scheduler() {
 			{"id", "number", "identifier returned by setTimeout", nil},
 		}, "bool",
 		clearTimeout, false, false, nil,
+		nil,
 	})
 }
 

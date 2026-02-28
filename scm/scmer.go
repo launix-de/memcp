@@ -558,6 +558,8 @@ func (s Scmer) String() string {
 		return "[parser]"
 	case tagSourceInfo:
 		return s.SourceInfo().String()
+	case tagJIT:
+		return "[jit lambda]"
 	default:
 		if s.GetTag() == tagAny {
 			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr)))
@@ -813,6 +815,17 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			return arr
 		case tagSourceInfo:
 			return toJSONable(v.SourceInfo().value)
+		case tagJIT:
+			jep := v.JIT()
+			p := jep.Proc
+			arr := make([]any, 0, 4)
+			arr = append(arr, map[string]any{"symbol": "lambda"})
+			arr = append(arr, toJSONable(p.Params))
+			arr = append(arr, toJSONable(p.Body))
+			if p.NumVars > 0 {
+				arr = append(arr, p.NumVars)
+			}
+			return arr
 		default:
 			// Unknown custom tag -> fall back to string form
 			return v.String()

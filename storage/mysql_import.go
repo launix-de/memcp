@@ -159,6 +159,7 @@ func initMySQLImport(en scm.Env) {
 			return scm.NewBool(true)
 		},
 		false, false, nil,
+		nil,
 	})
 }
 

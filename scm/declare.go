@@ -32,6 +32,7 @@ type Declaration struct {
 	Foldable     bool            // safe to constant-fold when all args are literals
 	Forbidden    bool            // optimizer-only: hidden from help, blocked from .scm code
 	Type         *TypeDescriptor // function type with optional Optimize hook; nil = derive from Params/Returns
+	JITEmit      func(ctx *JITContext, args []Scmer, descs []JITValueDesc) JITValueDesc // optional JIT emitter; nil = not JIT-able
 }
 
 // TypeDescriptor describes the type of any Scmer value at arbitrary depth.

@@ -117,6 +117,7 @@ func Init(en scm.Env) {
 			return scm.NewInt(int64(t.CountEstimate()))
 		},
 		false, false, nil,
+		nil,
 	})
 
 	scm.Declare(&en, &scm.Declaration{
@@ -209,6 +210,7 @@ func Init(en scm.Env) {
 			}
 			return t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
 		}, false, false, &scm.TypeDescriptor{Optimize: optimizeScan},
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
@@ -350,6 +352,7 @@ func Init(en scm.Env) {
 
 			return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
 		}, false, false, &scm.TypeDescriptor{Optimize: optimizeScanOrder},
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createdatabase", "creates a new database",
@@ -362,6 +365,7 @@ func Init(en scm.Env) {
 			ignoreexists := len(a) > 1 && scm.ToBool(a[1])
 			return scm.NewBool(CreateDatabase(scm.String(a[0]), ignoreexists))
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"dropdatabase", "drops a database",
@@ -374,6 +378,7 @@ func Init(en scm.Env) {
 			ifexists := len(a) > 1 && scm.ToBool(a[1])
 			return scm.NewBool(DropDatabase(scm.String(a[0]), ifexists))
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createtable", "creates a new database",
@@ -479,6 +484,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createcolumn", "creates a new column in table",
@@ -533,6 +539,7 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(ok)
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createkey", "creates a new key on a table",
@@ -574,6 +581,7 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(true)
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"createforeignkey", "creates a new foreign key on a table",
@@ -625,6 +633,7 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(true)
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"shardcolumn", "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
@@ -666,6 +675,7 @@ func Init(en scm.Env) {
 			return scm.NewSlice(t.NewShardDimension(scm.String(a[2]), numPartitions).Pivots)
 
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"partitiontable", "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
@@ -710,6 +720,7 @@ func Init(en scm.Env) {
 				return scm.NewBool(false)
 			}
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"altertable", "alters a table",
@@ -781,6 +792,7 @@ func Init(en scm.Env) {
 				panic("unimplemented alter table operation: " + scm.String(a[2]))
 			}
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"altercolumn", "alters a column",
@@ -830,6 +842,7 @@ func Init(en scm.Env) {
 			}
 			panic("column " + scm.String(a[0]) + "." + scm.String(a[1]) + "." + scm.String(a[2]) + " does not exist")
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"droptable", "removes a table",
@@ -847,6 +860,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"dropcolumn", "drops a column from a table",
@@ -867,6 +881,33 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(t.DropColumn(scm.String(a[2])))
 		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"invalidatecolumn", "marks all values of a computed column as stale",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
+			scm.DeclarationParameter{"table", "string", "name of the table", nil},
+			scm.DeclarationParameter{"column", "string", "name of the computed column", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil { return scm.NewBool(false) }
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil { return scm.NewBool(false) }
+			colName := scm.String(a[2])
+			for _, s := range t.ActiveShards() {
+				s.mu.RLock()
+				col := s.columns[colName]
+				s.mu.RUnlock()
+				if proxy, ok := col.(*StorageComputeProxy); ok {
+					proxy.InvalidateAll()
+				}
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"renametable", "renames a table",
@@ -880,6 +921,7 @@ func Init(en scm.Env) {
 			RenameTable(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
 			return scm.NewBool(true)
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"insert", "inserts a new dataset into table and returns the number of successful items",
@@ -937,6 +979,7 @@ func Init(en scm.Env) {
 			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
 			return scm.NewInt(int64(inserted))
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"stat", "return memory statistics",
@@ -955,6 +998,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewNil()
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"totalmem", "Returns total physical memory in bytes (from /proc/meminfo)",
@@ -963,6 +1007,7 @@ func Init(en scm.Env) {
 		func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(totalMemoryBytes())
 		}, true, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"show", "show databases/tables/columns/meta\n\n(show) lists databases\n(show schema) lists tables\n(show schema tbl) lists columns\n(show schema tbl \"meta\") returns table metadata dict",
@@ -1053,6 +1098,7 @@ func Init(en scm.Env) {
 			}
 			panic("invalid call of show")
 		}, false, false, nil,
+		nil,
 	})
 
 	// show_statistics(): returns INFORMATION_SCHEMA.STATISTICS rows for all unique constraints
@@ -1091,6 +1137,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewSlice(result)
 		}, false, false, nil,
+		nil,
 	})
 
 	// show_shards(schema, table): returns a list of rows describing shards for a table
@@ -1145,6 +1192,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewSlice(rows)
 		}, false, false, nil,
+		nil,
 	})
 
 	// show_shard_columns(schema, table, shardIndex): returns per-column storage details for a shard
@@ -1208,6 +1256,7 @@ func Init(en scm.Env) {
 			s.mu.RUnlock()
 			return scm.NewSlice(rows)
 		}, false, false, nil,
+		nil,
 	})
 
 	// show_shard_indexes(schema, table, shardIndex): returns per-index details for a shard
@@ -1252,6 +1301,7 @@ func Init(en scm.Env) {
 			s.mu.RUnlock()
 			return scm.NewSlice(rows)
 		}, false, false, nil,
+		nil,
 	})
 
 	// show_triggers(schema, table): returns a list of triggers for a table (non-system triggers only)
@@ -1319,6 +1369,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewSlice(rows)
 		}, false, false, nil,
+		nil,
 	})
 
 	scm.Declare(&en, &scm.Declaration{
@@ -1340,6 +1391,7 @@ func Init(en scm.Env) {
 
 			return scm.NewString(Rebuild(all, repartition))
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"clean", "removes orphaned blobs that are no longer referenced by any column storage (GC for crash orphans)",
@@ -1348,6 +1400,7 @@ func Init(en scm.Env) {
 		func(a ...scm.Scmer) scm.Scmer {
 			panic("not yet implemented")
 		}, false, false, nil,
+		nil,
 	})
 
 	scm.Declare(&en, &scm.Declaration{
@@ -1380,6 +1433,7 @@ func Init(en scm.Env) {
 
 			return scm.NewString(fmt.Sprint(time.Since(start)))
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"loadJSON", "loads a .jsonl file from stream into a database and returns the amount of time it took.\nJSONL is a linebreak separated file of JSON objects. Each JSON object is one dataset in the database. Before you add rows, you must declare the table in a line '#table <tablename>'. All other lines starting with # are comments. Columns are created dynamically as soon as they occur in a json object.",
@@ -1400,6 +1454,7 @@ func Init(en scm.Env) {
 
 			return scm.NewString(fmt.Sprint(time.Since(start)))
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"settings", "reads or writes a global settings value. This modifies your data/settings.json.",
@@ -1409,6 +1464,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"value", "any", "new value of that setting", nil},
 		}, "any",
 		ChangeSettings, false, false, nil,
+		nil,
 	})
 
 	// Trigger management
@@ -1470,6 +1526,7 @@ func Init(en scm.Env) {
 			t.schema.save()
 			return scm.NewBool(true)
 		}, false, false, nil,
+		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		"droptrigger", "removes a trigger from a table",
@@ -1502,6 +1559,7 @@ func Init(en scm.Env) {
 			}
 			panic("trigger " + name + " does not exist")
 		}, false, false, nil,
+		nil,
 	})
 
 	initDashboard(en)
@@ -1745,6 +1803,7 @@ func initFKBuiltins(en scm.Env) {
 			return scm.NewNil()
 		},
 		false, true, nil,
+		nil,
 	})
 
 	scm.Declare(&en, &scm.Declaration{
@@ -1787,6 +1846,7 @@ func initFKBuiltins(en scm.Env) {
 			return scm.NewNil()
 		},
 		false, true, nil,
+		nil,
 	})
 
 	scm.Declare(&en, &scm.Declaration{
@@ -1843,6 +1903,7 @@ func initFKBuiltins(en scm.Env) {
 			return scm.NewNil()
 		},
 		false, true, nil,
+		nil,
 	})
 
 	scm.DeclareTitle("Cache")
@@ -1852,6 +1913,7 @@ func initFKBuiltins(en scm.Env) {
 		0, 0,
 		[]scm.DeclarationParameter{}, "func",
 		NewCacheMap, false, false, nil,
+		nil,
 	})
 }
 

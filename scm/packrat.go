@@ -437,5 +437,6 @@ for further details on packrat parsers, take a look at https://github.com/launix
 		}, "func",
 		nil,
 		false, false, nil,
+		nil,
 	})
 }

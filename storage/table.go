@@ -660,6 +660,8 @@ func (t *table) DropColumn(name string) bool {
 				delete(s.columns, name)
 				s.mu.Unlock()
 			}
+			// remove cache invalidation triggers from source tables
+			t.removeComputeTriggers(name)
 
 			t.schema.save()
 			t.schema.schemalock.Unlock()

@@ -234,7 +234,7 @@ func init_jit() {
 			{"fn", "procedure", "the function to compile", nil},
 		}, "procedure",
 		jitCompile,
-		false, false, nil, // not pure because it allocates executable memory
+		false, false, nil, nil, // not pure because it allocates executable memory
 	})
 }
 
@@ -262,6 +262,9 @@ func jitCompile(a ...Scmer) Scmer {
 		// Use OptimizeProcToSerialFunction as fallback/baseline
 		fn := OptimizeProcToSerialFunction(v)
 		return NewFunc(fn)
+
+	case tagJIT:
+		return v
 
 	default:
 		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))

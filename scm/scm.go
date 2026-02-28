@@ -101,7 +101,7 @@ restart:
 	switch expression.GetTag() {
 	case tagSourceInfo:
 		return evalWithSourceInfo(*expression.SourceInfo(), en)
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc, tagJIT:
 		// literals
 		return expression
 	case tagSymbol:
@@ -405,6 +405,20 @@ restart:
 				}
 			}
 			return NewNil()
+		case tagJIT:
+			jep := procedure.JIT()
+			if n := len(operands); n <= 4 {
+				var buf [4]Scmer
+				for i := 0; i < n; i++ {
+					buf[i] = Eval(operands[i], en)
+				}
+				return jep.Native(buf[:n]...)
+			}
+			args := make([]Scmer, len(operands))
+			for i, x := range operands {
+				args[i] = Eval(x, en)
+			}
+			return jep.Native(args...)
 		default:
 			panic("Unknown function: " + list[0].String())
 		}
@@ -583,6 +597,8 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 			}
 		}
 		return NewNil()
+	case tagJIT:
+		return procedure.JIT().Native(args...)
 	default:
 		panic("Unknown function: " + procedure.String())
 	}
@@ -676,6 +692,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"symbol", "symbol", "symbol to quote", nil},
 		}, "symbol", nil, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"eval", "executes the given scheme program in the current environment",
@@ -683,6 +700,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"code", "list", "list with head and optional parameters", nil},
 		}, "any", nil, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"size", "compute the memory size of a value",
@@ -692,6 +710,7 @@ func init() {
 		}, "int", func(a ...Scmer) Scmer {
 			return NewInt(int64(ComputeSize(a[0])))
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",
@@ -701,6 +720,7 @@ func init() {
 		}, "any", func(a ...Scmer) Scmer {
 			return Optimize(a[0], &Globalenv)
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"time", "measures the time it takes to compute the first argument",
@@ -709,6 +729,7 @@ func init() {
 			DeclarationParameter{"code", "any", "code to execute", nil},
 			DeclarationParameter{"label", "string", "label to print in the log or trace", nil},
 		}, "any", nil, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"if", "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
@@ -718,6 +739,7 @@ func init() {
 			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true", nil},
 			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false", nil},
 		}, "returntype", nil, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"and", "returns true if all conditions evaluate to true",
@@ -725,6 +747,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"condition", "bool", "condition to evaluate", nil},
 		}, "bool", nil, true, false, &TypeDescriptor{Optimize: optimizeAnd},
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"or", "returns true if at least one condition evaluates to true",
@@ -732,6 +755,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"condition", "any", "condition to evaluate", nil},
 		}, "bool", nil, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"coalesce", "returns the first value that has a non-zero value",
@@ -739,6 +763,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "returntype", "value to examine", nil},
 		}, "returntype", nil, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"coalesceNil", "returns the first value that has a non-nil value",
@@ -746,6 +771,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "returntype", "value to examine", nil},
 		}, "returntype", nil, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"define", "defines or sets a variable in the current environment",
@@ -754,6 +780,7 @@ func init() {
 			DeclarationParameter{"variable", "symbol", "variable to set", nil},
 			DeclarationParameter{"value", "returntype", "value to set the variable to", nil},
 		}, "bool", nil, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"set", "defines or sets a variable in the current environment",
@@ -762,6 +789,7 @@ func init() {
 			DeclarationParameter{"variable", "symbol", "variable to set", nil},
 			DeclarationParameter{"value", "returntype", "value to set the variable to", nil},
 		}, "bool", nil, false, false, nil,
+		nil,
 	})
 
 	// basic
@@ -782,6 +810,7 @@ func init() {
 				panic(b.String())
 			}
 		}, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
@@ -800,6 +829,7 @@ func init() {
 			result = Apply(a[0])
 			return
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply", "runs the function with its arguments",
@@ -811,6 +841,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return Apply(a[0], asSlice(a[1], "apply")...)
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
@@ -822,6 +853,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
@@ -832,6 +864,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return NewSymbol(String(a[0]))
 		}, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list", "returns a list containing the parameters as alements",
@@ -840,6 +873,7 @@ func init() {
 			DeclarationParameter{"value...", "any", "value for the list", nil},
 		}, "list",
 		nil, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"for", "Sequential loop over a list state; applies a condition and step function and returns the final state list.\nUse only when iterations have strong data dependencies and must run sequentially.\n\nExamples:\n- Count to 10: (for '(0) (lambda (x) (< x 10)) (lambda (x) (list (+ x 1))))  => '(10)\n- Sum 0..9:   (for '(0 0) (lambda (x sum) (< x 10)) (lambda (x sum) (list (+ x 1) (+ sum x)))) => '(10 45)",
@@ -863,6 +897,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("for_mut")},
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"for_mut", "in-place for loop (optimizer-only, skips defensive state copy)",
@@ -886,6 +921,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, true, &TypeDescriptor{Return: FreshAlloc},
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
@@ -896,6 +932,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return NewString(String(a[0]))
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"match", `takes a value evaluates the branch that first matches the given pattern
@@ -917,6 +954,7 @@ Patterns can be any of:
 			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches", nil}, /* TODO: turn to returntype as soon as pattern+result are properly repeaded in Validate */
 		}, "any", // TODO: returntype as soon as repead validate is implemented */
 		nil, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"lambda", "returns a function (func) constructed from the given code",
@@ -927,6 +965,7 @@ Patterns can be any of:
 			DeclarationParameter{"numvars", "number", "number of unnamed variables that can be accessed via (var 0) (var 1) etc.", nil},
 		}, "func", // TODO: func(...)->returntype as soon as function types are implemented
 		nil, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"begin", "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
@@ -936,6 +975,7 @@ Patterns can be any of:
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any", // TODO: returntype as soon as repeat is implemented
 		nil, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"parallel", "executes all parameters in parallel and returns nil if they are finished",
@@ -945,6 +985,7 @@ Patterns can be any of:
 			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
 		}, "any", // TODO: returntype as soon as repeat is implemented
 		nil, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"source", "annotates the node with filename and line information for better backtraces",
@@ -964,6 +1005,7 @@ Patterns can be any of:
 				a[3],
 			})
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"scheme", "parses a scheme expression into a list",
@@ -979,6 +1021,7 @@ Patterns can be any of:
 			}
 			return Read(filename, String(a[0]))
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"serialize", "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
@@ -989,6 +1032,7 @@ Patterns can be any of:
 		func(a ...Scmer) Scmer {
 			return NewString(SerializeToString(a[0], &Globalenv))
 		}, false, false, nil,
+		nil,
 	})
 
 	init_alu()
@@ -1093,6 +1137,14 @@ func ComputeSize(v Scmer) uint {
 	case tagAny:
 		payload := v.Any()
 		return base + goAllocOverhead + computeGoPayload(payload)
+	case tagJIT:
+		jep := v.JIT()
+		sz := base + goAllocOverhead
+		for range jep.Pages {
+			sz += goAllocOverhead + 4096 // JITPage overhead
+		}
+		sz += ComputeSize(NewProcStruct(jep.Proc))
+		return sz
 	default:
 		if v.GetTag() >= 100 {
 			return base

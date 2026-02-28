@@ -230,6 +230,7 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewFloat(loadSnapshot().cpuUsage)
 		}, false, false, nil,
+		nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -240,6 +241,7 @@ func InitMetricsDeclarations() {
 			_, avail := readMemInfo()
 			return NewInt(avail)
 		}, false, false, nil,
+		nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -250,6 +252,7 @@ func InitMetricsDeclarations() {
 			total, _ := readMemInfo()
 			return NewInt(total)
 		}, false, false, nil,
+		nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -259,6 +262,7 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewInt(readProcessRSS())
 		}, false, false, nil,
+		nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -268,6 +272,7 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewInt(atomic.LoadInt64(&ActiveHTTPConnections))
 		}, false, false, nil,
+		nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -277,6 +282,7 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewInt(loadSnapshot().maxConn10min)
 		}, false, false, nil,
+		nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -286,6 +292,7 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewFloat(loadSnapshot().rps)
 		}, false, false, nil,
+		nil,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -302,5 +309,6 @@ func InitMetricsDeclarations() {
 			}
 			return NewString(string(data))
 		}, false, false, nil,
+		nil,
 	})
 }

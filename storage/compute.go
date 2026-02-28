@@ -16,6 +16,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "strings"
 import "runtime/debug"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
@@ -38,6 +39,8 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 			// found the column
 			t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 			t.Columns[i].ComputorInputCols = inputCols
+			// register cache invalidation triggers on source tables
+			t.registerComputeTriggers(name, computor)
 			done := make(chan error, 6)
 			shardlist := t.ActiveShards()
 			for i, s := range shardlist {
@@ -128,4 +131,102 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		proxy.Compress() // eagerly compute + compress all values (same behavior as before)
 	}
 	return true
+}
+
+type tableRef struct{ schema, table string }
+
+// extractScannedTables walks a Scheme expression tree and returns all
+// (schema, table) pairs referenced by scan/scan_order/scalar_scan/scalar_scan_order.
+func extractScannedTables(expr scm.Scmer) []tableRef {
+	if expr.IsProc() {
+		return extractScannedTables(expr.Proc().Body)
+	}
+	if !expr.IsSlice() {
+		return nil
+	}
+	items := expr.Slice()
+	if len(items) >= 3 && items[0].IsSymbol() {
+		sym := items[0].String()
+		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
+			result := []tableRef{{scm.String(items[1]), scm.String(items[2])}}
+			for _, item := range items[3:] {
+				result = append(result, extractScannedTables(item)...)
+			}
+			return result
+		}
+	}
+	var result []tableRef
+	for _, item := range items {
+		result = append(result, extractScannedTables(item)...)
+	}
+	return result
+}
+
+// registerComputeTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers
+// on source tables so that changes automatically invalidate the computed column.
+func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
+	refs := extractScannedTables(computor)
+	targetSchema := t.schema.Name
+	for _, ref := range refs {
+		srcDB := GetDatabase(ref.schema)
+		if srcDB == nil {
+			continue
+		}
+		srcTable := srcDB.GetTable(ref.table)
+		if srcTable == nil {
+			continue
+		}
+		// skip self-referencing triggers
+		if srcTable == t {
+			continue
+		}
+		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+			triggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + timing.String()
+			// idempotency: skip if trigger already exists
+			exists := false
+			for _, tr := range srcTable.Triggers {
+				if tr.Name == triggerName {
+					exists = true
+					break
+				}
+			}
+			if exists {
+				continue
+			}
+			srcTable.AddTrigger(TriggerDescription{
+				Name:     triggerName,
+				Timing:   timing,
+				IsSystem: true,
+				Priority: 100,
+				Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("invalidatecolumn"),
+					scm.NewString(targetSchema),
+					scm.NewString(t.Name),
+					scm.NewString(name),
+				})),
+			})
+		}
+	}
+}
+
+// removeComputeTriggers removes all cache invalidation triggers for a given
+// computed column from all tables in the same database.
+func (t *table) removeComputeTriggers(name string) {
+	prefix := ".cache:" + t.Name + ":" + name + "|"
+	for _, srcTable := range t.schema.tables.GetAll() {
+		changed := false
+		newTriggers := make([]TriggerDescription, 0, len(srcTable.Triggers))
+		for _, tr := range srcTable.Triggers {
+			if strings.HasPrefix(tr.Name, prefix) {
+				changed = true
+				continue
+			}
+			newTriggers = append(newTriggers, tr)
+		}
+		if changed {
+			srcTable.mu.Lock()
+			srcTable.Triggers = newTriggers
+			srcTable.mu.Unlock()
+		}
+	}
 }

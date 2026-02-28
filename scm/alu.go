@@ -46,6 +46,7 @@ func init_alu() {
 			return NewBool(a[0].GetTag() == tagInt)
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"number?", "tells if the value is a number",
@@ -58,6 +59,7 @@ func init_alu() {
 			return NewBool(tag == tagFloat || tag == tagInt || tag == tagDate)
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"+", "adds two or more numbers",
@@ -93,6 +95,7 @@ func init_alu() {
 			return NewFloat(sumFloat)
 		},
 		true, false, &TypeDescriptor{Optimize: optimizeAssociative},
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"-", "subtracts two or more numbers from the first one",
@@ -132,6 +135,7 @@ func init_alu() {
 			return NewFloat(diffFloat)
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"*", "multiplies two or more numbers",
@@ -175,6 +179,7 @@ func init_alu() {
 			return NewFloat(prodFloat)
 		},
 		true, false, &TypeDescriptor{Optimize: optimizeAssociative},
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"/", "divides two or more numbers from the first one",
@@ -196,6 +201,7 @@ func init_alu() {
 			return NewFloat(v)
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<=", "compares two numbers or strings",
@@ -207,6 +213,7 @@ func init_alu() {
 			return NewBool(!Less(a[1], a[0]))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<", "compares two numbers or strings",
@@ -218,6 +225,7 @@ func init_alu() {
 			return NewBool(Less(a[0], a[1]))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		">", "compares two numbers or strings",
@@ -229,6 +237,7 @@ func init_alu() {
 			return NewBool(Less(a[1], a[0]))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		">=", "compares two numbers or strings",
@@ -240,6 +249,7 @@ func init_alu() {
 			return NewBool(!Less(a[0], a[1]))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal?", "compares two values of the same type, (equal? nil nil) is true",
@@ -251,6 +261,7 @@ func init_alu() {
 			return NewBool(Equal(a[0], a[1]))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal??", "performs a SQL compliant sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive, (equal? nil nil) is nil",
@@ -262,6 +273,7 @@ func init_alu() {
 			return EqualSQL(a[0], a[1])
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal_collate", "performs SQL equality with a specified collation (e.g. *_ci case-insensitive, *_bin case-sensitive); returns nil if either arg is nil",
@@ -289,6 +301,7 @@ func init_alu() {
 			return EqualSQL(a[0], a[1])
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"notequal_collate", "performs SQL inequality with a specified collation; returns nil if either arg is nil",
@@ -306,6 +319,7 @@ func init_alu() {
 			return NewBool(!r.Bool())
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"!", "negates the boolean value",
@@ -317,6 +331,7 @@ func init_alu() {
 			return NewBool(!a[0].Bool())
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"not", "negates the boolean value",
@@ -328,6 +343,7 @@ func init_alu() {
 			return NewBool(!a[0].Bool())
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nil?", "returns true if value is nil",
@@ -339,6 +355,7 @@ func init_alu() {
 			return NewBool(a[0].IsNil())
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"min", "returns the smallest value",
@@ -358,6 +375,7 @@ func init_alu() {
 			return result
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"max", "returns the highest value",
@@ -377,6 +395,7 @@ func init_alu() {
 			return result
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"floor", "rounds the number down",
@@ -388,6 +407,7 @@ func init_alu() {
 			return NewFloat(math.Floor(a[0].Float()))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"ceil", "rounds the number up",
@@ -399,6 +419,7 @@ func init_alu() {
 			return NewFloat(math.Ceil(a[0].Float()))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"round", "rounds the number",
@@ -410,6 +431,7 @@ func init_alu() {
 			return NewFloat(math.Round(a[0].Float()))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_abs", "SQL ABS(): returns absolute value, NULL-safe",
@@ -432,6 +454,7 @@ func init_alu() {
 			return NewFloat(v)
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sqrt", "returns the square root of a number",
@@ -450,6 +473,7 @@ func init_alu() {
 			return NewFloat(math.Sqrt(v))
 		},
 		true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_rand", "SQL RAND(): returns a random float in [0,1)",
@@ -465,5 +489,6 @@ func init_alu() {
 			return NewFloat(float64(u) / (1 << 53))
 		},
 		true, false, nil,
+		nil,
 	})
 }

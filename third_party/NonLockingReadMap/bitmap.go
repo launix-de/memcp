@@ -76,6 +76,11 @@ func (b *NonBlockingBitMap) Get(i uint32) bool {
 	return ((data[i>>6] >> (i & 0b111111)) & 1) != 0
 }
 
+// DataPtr returns a pointer to the underlying data slice for direct read access.
+func (b *NonBlockingBitMap) DataPtr() *[]uint64 {
+	return b.data.Load()
+}
+
 func (b *NonBlockingBitMap) Set(i uint32, val bool) {
 	// first step: load array and ensure it is big enough
 	var data []uint64

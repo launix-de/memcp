@@ -220,6 +220,7 @@ func init_sync() {
 		0, 0,
 		[]DeclarationParameter{}, "func",
 		NewSession, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"with_session", "Executes a function with the given session installed in the execution context, so storage operations can access the session's transaction state.",
@@ -231,6 +232,7 @@ func init_sync() {
 		func(a ...Scmer) Scmer {
 			return WithSession(a[0], a[1])
 		}, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"context", "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
@@ -239,6 +241,7 @@ func init_sync() {
 			DeclarationParameter{"args...", "any", "depends on the usage", nil},
 		}, "any",
 		Context, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sleep", "sleeps the amount of seconds",
@@ -255,6 +258,7 @@ func init_sync() {
 				return NewBool(true)
 			}
 		}, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
@@ -272,6 +276,7 @@ func init_sync() {
 				return once()
 			})
 		}, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
@@ -294,6 +299,7 @@ func init_sync() {
 				return Apply(a[0])
 			})
 		}, false, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"numcpu", "Returns the number of logical CPUs available for parallel execution",
@@ -302,6 +308,7 @@ func init_sync() {
 		func(a ...Scmer) Scmer {
 			return NewInt(int64(runtime.NumCPU()))
 		}, true, false, nil,
+		nil,
 	})
 	Declare(&Globalenv, &Declaration{
 		"memstats", "Returns memory statistics as a dict with keys: alloc, total_alloc, sys, heap_alloc, heap_sys (all in bytes)",
@@ -317,5 +324,6 @@ func init_sync() {
 			fd.Set(NewString("heap_sys"), NewInt(int64(m.HeapSys)), nil)
 			return NewFastDict(fd)
 		}, true, false, nil,
+		nil,
 	})
 }
