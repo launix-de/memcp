@@ -86,7 +86,7 @@ if the user is not allowed to access this property, the function will throw an e
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
 (try (lambda () (begin
 	(if (has? (show "system") "user") (begin
-		(if (has? (show "system" "user") "admin")
+		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "admin")
 			true
 			(begin
 				(createcolumn "system" "user" "admin" "boolean" '() '())
