@@ -62,7 +62,7 @@ func RunJitTest() {
 	// disassemble /r 'github.com/launix-de/memcp/scm.RunJitTest'
 	fmt.Println("run JIT test")
 	fn2 := OptimizeForValues(myAdd, []int{2}, []Scmer{NewInt(4)})
-	fmt.Println("fn=", fn2)
+	fmt.Println("fn=", fmt.Sprintf("%p", fn2))
 	fmt.Println("result", fn2(NewInt(3), NewInt(7))) // should return 4
 }
 
