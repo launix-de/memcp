@@ -1,0 +1,164 @@
+metadata:
+  version: "1.0"
+  description: "OR-based multi-range index scanning with dedup"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS or_test"
+  - sql: >
+      CREATE TABLE or_test (
+        a INT,
+        b INT,
+        c VARCHAR(50)
+      )
+  - sql: >
+      INSERT INTO or_test (a, b, c) VALUES
+        (10, 100, 'alpha'),
+        (10, 200, 'beta'),
+        (20, 100, 'gamma'),
+        (20, 200, 'delta'),
+        (30, 300, 'epsilon'),
+        (15, 150, 'zeta'),
+        (25, 250, 'eta')
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS or_test"
+
+test_cases:
+  # --- Simple same-column OR ---
+
+  - name: "Same-column OR: a=10 OR a=20"
+    sql: "SELECT a, b FROM or_test WHERE a=10 OR a=20 ORDER BY a, b"
+    expect:
+      rows: 4
+      data:
+        - a: 10
+          b: 100
+        - a: 10
+          b: 200
+        - a: 20
+          b: 100
+        - a: 20
+          b: 200
+
+  # --- Cross-column OR ---
+
+  - name: "Cross-column OR: a=10 OR b=200"
+    sql: "SELECT a, b FROM or_test WHERE a=10 OR b=200 ORDER BY a, b"
+    expect:
+      rows: 3
+      data:
+        - a: 10
+          b: 100
+        - a: 10
+          b: 200
+        - a: 20
+          b: 200
+
+  # --- OR + AND composite ---
+
+  - name: "OR + AND composite: (a=10 AND b=100) OR (a=20 AND b=200)"
+    sql: "SELECT a, b FROM or_test WHERE (a=10 AND b=100) OR (a=20 AND b=200) ORDER BY a"
+    expect:
+      rows: 2
+      data:
+        - a: 10
+          b: 100
+        - a: 20
+          b: 200
+
+  # --- Dedup verification: row matches both OR branches ---
+
+  - name: "Dedup: a=10 OR b=100 (row a=10,b=100 matches both)"
+    sql: "SELECT a, b FROM or_test WHERE a=10 OR b=100 ORDER BY a, b"
+    expect:
+      rows: 3
+      data:
+        - a: 10
+          b: 100
+        - a: 10
+          b: 200
+        - a: 20
+          b: 100
+
+  # --- OR with range ---
+
+  - name: "OR with range: a < 15 OR a > 25"
+    sql: "SELECT a FROM or_test WHERE a < 15 OR a > 25 ORDER BY a"
+    expect:
+      rows: 3
+      data:
+        - a: 10
+        - a: 10
+        - a: 30
+
+  # --- Aggregation with OR ---
+
+  - name: "COUNT with OR"
+    sql: "SELECT COUNT(*) AS cnt FROM or_test WHERE a=10 OR a=20"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  - name: "SUM with OR"
+    sql: "SELECT SUM(b) AS total FROM or_test WHERE a=10 OR a=30"
+    expect:
+      rows: 1
+      data:
+        - total: 600
+
+  # --- ORDER BY + LIMIT with OR ---
+
+  - name: "ORDER BY + LIMIT with OR"
+    sql: "SELECT a, b FROM or_test WHERE a=10 OR a=20 ORDER BY b DESC LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - a: 10
+          b: 200
+        - a: 20
+          b: 200
+
+  # --- AND containing OR ---
+
+  - name: "AND containing OR: (a=10 OR a=20) AND b=200"
+    sql: "SELECT a, b FROM or_test WHERE (a=10 OR a=20) AND b=200 ORDER BY a"
+    expect:
+      rows: 2
+      data:
+        - a: 10
+          b: 200
+        - a: 20
+          b: 200
+
+  # --- Triple OR ---
+
+  - name: "Triple OR: a=10 OR a=20 OR a=30"
+    sql: "SELECT a FROM or_test WHERE a=10 OR a=20 OR a=30 ORDER BY a"
+    expect:
+      rows: 5
+      data:
+        - a: 10
+        - a: 10
+        - a: 20
+        - a: 20
+        - a: 30
+
+  # --- String column OR ---
+
+  - name: "String column OR: c='alpha' OR c='delta'"
+    sql: "SELECT a, c FROM or_test WHERE c='alpha' OR c='delta' ORDER BY a"
+    expect:
+      rows: 2
+      data:
+        - a: 10
+          c: "alpha"
+        - a: 20
+          c: "delta"
+
+  # --- Must-fail: syntax error ---
+
+  - name: "Syntax error: missing operand in OR"
+    sql: "SELECT * FROM or_test WHERE a=10 OR"
+    expect:
+      error: true

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -36,6 +36,71 @@ type columnboundaries struct {
 
 type boundaries []columnboundaries
 
+// addConstraint merges a column boundary into an existing set, narrowing the
+// range for an already-present column (AND semantics) or appending a new entry.
+func addConstraint(in boundaries, b2 columnboundaries) boundaries {
+	for i, b := range in {
+		if b.col == b2.col {
+			if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
+				in[i].lower = b2.lower
+			}
+			in[i].lowerInclusive = b.lowerInclusive || b2.lowerInclusive
+			if b.upper.IsNil() || (!b2.upper.IsNil() && scm.Less(b2.upper, b.upper)) {
+				in[i].upper = b2.upper
+			}
+			in[i].upperInclusive = b.upperInclusive || b2.upperInclusive
+			return in
+		}
+	}
+	return append(in, b2)
+}
+
+// widenBounds widens a into the union with b (OR semantics).
+// Keeps only columns present in both; for shared columns, takes the wider range.
+// Modifies a in-place, zero allocations.
+func widenBounds(a, b boundaries) boundaries {
+	n := 0
+	for i := range a {
+		found := false
+		for _, cb := range b {
+			if a[i].col != cb.col {
+				continue
+			}
+			found = true
+			// widen lower: take the smaller
+			if a[i].lower.IsNil() {
+				// already unbounded
+			} else if cb.lower.IsNil() {
+				a[i].lower = scm.NewNil()
+				a[i].lowerInclusive = false
+			} else if scm.Less(cb.lower, a[i].lower) {
+				a[i].lower = cb.lower
+				a[i].lowerInclusive = cb.lowerInclusive
+			} else if scm.Equal(cb.lower, a[i].lower) {
+				a[i].lowerInclusive = a[i].lowerInclusive || cb.lowerInclusive
+			}
+			// widen upper: take the larger
+			if a[i].upper.IsNil() {
+				// already unbounded
+			} else if cb.upper.IsNil() {
+				a[i].upper = scm.NewNil()
+				a[i].upperInclusive = false
+			} else if scm.Less(a[i].upper, cb.upper) {
+				a[i].upper = cb.upper
+				a[i].upperInclusive = cb.upperInclusive
+			} else if scm.Equal(a[i].upper, cb.upper) {
+				a[i].upperInclusive = a[i].upperInclusive || cb.upperInclusive
+			}
+			break
+		}
+		if found {
+			a[n] = a[i]
+			n++
+		}
+	}
+	return a[:n]
+}
+
 // analyzes a lambda expression for value boundaries, so the best index can be found
 func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	var p scm.Proc
@@ -53,27 +118,6 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		for i, sym := range p.Params.Slice() {
 			symbolmapping[mustSymbolValue(sym)] = conditionCols[i]
 		}
-	}
-	cols := make([]columnboundaries, 0, 4)
-	addConstraint := func(in []columnboundaries, b2 columnboundaries) []columnboundaries {
-		for i, b := range in {
-			if b.col == b2.col {
-				// column match -> merge value range
-				if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
-					// both values are ANDed, so take the higher value as lower bound
-					in[i].lower = b2.lower
-				}
-				in[i].lowerInclusive = b.lowerInclusive || b2.lowerInclusive // TODO: check correctness
-				if b.upper.IsNil() || (!b2.upper.IsNil() && scm.Less(b2.upper, b.upper)) {
-					// the lower of both upper values will be the new upper bound
-					in[i].upper = b2.upper
-				}
-				in[i].upperInclusive = b.upperInclusive || b2.upperInclusive // TODO: check correctness
-				return in
-			}
-		}
-		// else: append
-		return append(in, b2)
 	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
@@ -100,55 +144,85 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		}
 		return scm.NewNil(), false
 	}
-	var traverseCondition func(scm.Scmer)
-	traverseCondition = func(node scm.Scmer) {
+	// traverseCondition returns boundaries for a single AST node.
+	// nil means "unknown node, no bounds extractable".
+	// AND: merge children (intersect). OR: widen children (union).
+	var traverseCondition func(scm.Scmer) boundaries
+	traverseCondition = func(node scm.Scmer) boundaries {
 		if !node.IsSlice() {
-			return
+			return nil
 		}
 		v := node.Slice()
 		if len(v) == 0 || !v[0].IsSymbol() {
-			return
+			return nil
 		}
 		if v[0].SymbolEquals("equal?") || v[0].SymbolEquals("equal??") {
-			// equi
 			if v[1].IsSymbol() {
 				sym := scm.Symbol(v[1].String())
-				if col, ok := symbolmapping[sym]; ok { // left is a column
-					if v2, ok := extractConstant(v[2]); ok { // right is a constant
-						// ?equal var const
-						cols = addConstraint(cols, columnboundaries{col, v2, true, v2, true})
+				if col, ok := symbolmapping[sym]; ok {
+					if v2, ok := extractConstant(v[2]); ok {
+						return boundaries{columnboundaries{col, v2, true, v2, true}}
 					}
 				}
 			}
+			return nil
 		} else if v[0].SymbolEquals("<") || v[0].SymbolEquals("<=") {
-			// compare
 			if v[1].IsSymbol() {
 				sym := scm.Symbol(v[1].String())
-				if col, ok := symbolmapping[sym]; ok { // left is a column
-					if v2, ok := extractConstant(v[2]); ok { // right is a constant
-						cols = addConstraint(cols, columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals("<=")})
+				if col, ok := symbolmapping[sym]; ok {
+					if v2, ok := extractConstant(v[2]); ok {
+						return boundaries{columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals("<=")}}
 					}
 				}
 			}
+			return nil
 		} else if v[0].SymbolEquals(">") || v[0].SymbolEquals(">=") {
-			// compare
 			if v[1].IsSymbol() {
 				sym := scm.Symbol(v[1].String())
-				if col, ok := symbolmapping[sym]; ok { // left is a column
-					if v2, ok := extractConstant(v[2]); ok { // right is a constant
-						cols = addConstraint(cols, columnboundaries{col, v2, v[0].SymbolEquals(">="), scm.NewNil(), false})
+				if col, ok := symbolmapping[sym]; ok {
+					if v2, ok := extractConstant(v[2]); ok {
+						return boundaries{columnboundaries{col, v2, v[0].SymbolEquals(">="), scm.NewNil(), false}}
 					}
 				}
 			}
+			return nil
 		} else if v[0].SymbolEquals("and") {
-			// AND -> recursive traverse
+			var result boundaries
 			for i := 1; i < len(v); i++ {
-				traverseCondition(v[i])
+				child := traverseCondition(v[i])
+				if child == nil {
+					continue
+				}
+				if result == nil {
+					result = child
+				} else {
+					for _, cb := range child {
+						result = addConstraint(result, cb)
+					}
+				}
 			}
+			return result
+		} else if v[0].SymbolEquals("or") {
+			var result boundaries
+			for i := 1; i < len(v); i++ {
+				child := traverseCondition(v[i])
+				if child == nil {
+					return nil // can't narrow this branch → full scan
+				}
+				if result == nil {
+					result = child
+				} else {
+					result = widenBounds(result, child)
+					if len(result) == 0 {
+						return nil
+					}
+				}
+			}
+			return result
 		}
-		// TODO: OR and more complex analysis
+		return nil
 	}
-	traverseCondition(p.Body) // recursive analysis over condition
+	cols := traverseCondition(p.Body)
 
 	// sort columns -> at first, the lower==upper alphabetically; then one lower!=upper according to best selectivity; discard the rest
 	sort.Slice(cols, func(i, j int) bool {
