@@ -1,0 +1,371 @@
+# Comprehensive CASE expression coverage
+# Covers: simple CASE edge cases, searched CASE with complex expressions,
+# CASE in various SQL positions, data type handling, nesting, aggregates
+
+metadata:
+  version: "1.0"
+  description: "Comprehensive CASE expression coverage for simple and searched variants"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS case_cov"
+  - sql: |
+      CREATE TABLE case_cov (
+        id INT, name VARCHAR(30), category VARCHAR(10),
+        score INT, price DOUBLE, active INT, note VARCHAR(50)
+      )
+  - sql: |
+      INSERT INTO case_cov VALUES
+        (1, 'Alice', 'A', 90, 10.5, 1, 'good'),
+        (2, 'Bob', 'B', 60, 20.0, 0, 'average'),
+        (3, 'Carol', 'A', 80, NULL, 1, NULL),
+        (4, 'Dave', 'C', NULL, 5.99, 0, 'poor'),
+        (5, 'Eve', 'B', 45, 100.0, 1, 'below average'),
+        (6, 'Frank', NULL, 70, 0.0, NULL, 'ok'),
+        (7, 'Grace', 'A', 95, 50.0, 1, 'excellent'),
+        (8, 'Heidi', 'C', 30, 15.0, 0, NULL)
+
+test_cases:
+
+  # --- Simple CASE: expression-based switch value ---
+
+  - name: "Simple CASE with arithmetic expression as switch"
+    sql: "SELECT CASE (2 + 3) WHEN 4 THEN 'four' WHEN 5 THEN 'five' WHEN 6 THEN 'six' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "five"
+
+  - name: "Simple CASE with string column"
+    sql: "SELECT id, CASE category WHEN 'A' THEN 'alpha' WHEN 'B' THEN 'beta' WHEN 'C' THEN 'gamma' ELSE 'unknown' END AS cat_label FROM case_cov WHERE id <= 4 ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - { id: 1, cat_label: "alpha" }
+        - { id: 2, cat_label: "beta" }
+        - { id: 3, cat_label: "alpha" }
+        - { id: 4, cat_label: "gamma" }
+
+  - name: "Simple CASE with NULL column does not match (NULL != NULL)"
+    sql: "SELECT CASE category WHEN 'A' THEN 'found' WHEN NULL THEN 'null_match' ELSE 'miss' END AS result FROM case_cov WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - result: "miss"
+
+  - name: "Simple CASE without ELSE on column returns NULL for no match"
+    sql: "SELECT CASE score WHEN 90 THEN 'ninety' WHEN 80 THEN 'eighty' END AS result FROM case_cov WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - result: null
+
+  - name: "Simple CASE with single WHEN"
+    sql: "SELECT CASE 1 WHEN 1 THEN 'only' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "only"
+
+  - name: "Simple CASE returns numeric types"
+    sql: "SELECT CASE 'B' WHEN 'A' THEN 100 WHEN 'B' THEN 200 WHEN 'C' THEN 300 END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 200
+
+  # --- Searched CASE: compound conditions (AND, OR, NOT) ---
+
+  - name: "Searched CASE with AND condition"
+    sql: "SELECT id, CASE WHEN score >= 80 AND active = 1 THEN 'top_active' ELSE 'other' END AS label FROM case_cov WHERE id IN (1, 2, 3) ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, label: "top_active" }
+        - { id: 2, label: "other" }
+        - { id: 3, label: "top_active" }
+
+  - name: "Searched CASE with OR condition"
+    sql: "SELECT id, CASE WHEN category = 'A' OR category = 'B' THEN 'AB' ELSE 'other' END AS grp FROM case_cov WHERE id <= 4 ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - { id: 1, grp: "AB" }
+        - { id: 2, grp: "AB" }
+        - { id: 3, grp: "AB" }
+        - { id: 4, grp: "other" }
+
+  - name: "Searched CASE with NOT condition"
+    sql: "SELECT CASE WHEN NOT (1 = 2) THEN 'correct' ELSE 'wrong' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "correct"
+
+  # --- Searched CASE: LIKE, IN in WHEN ---
+
+  - name: "CASE with LIKE in WHEN"
+    sql: "SELECT id, CASE WHEN note LIKE '%good%' THEN 'positive' WHEN note LIKE '%poor%' THEN 'negative' ELSE 'neutral' END AS sentiment FROM case_cov WHERE id IN (1, 4, 6) ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, sentiment: "positive" }
+        - { id: 4, sentiment: "negative" }
+        - { id: 6, sentiment: "neutral" }
+
+  - name: "CASE with IN list in WHEN"
+    sql: "SELECT id, CASE WHEN category IN ('A', 'C') THEN 'AC' ELSE 'other' END AS grp FROM case_cov WHERE id <= 4 ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - { id: 1, grp: "AC" }
+        - { id: 2, grp: "other" }
+        - { id: 3, grp: "AC" }
+        - { id: 4, grp: "AC" }
+
+  # --- Function calls in WHEN and THEN ---
+
+  - name: "CASE with function in WHEN"
+    sql: "SELECT id, CASE WHEN LENGTH(name) > 4 THEN 'long' ELSE 'short' END AS name_len FROM case_cov WHERE id IN (1, 2, 5) ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, name_len: "long" }
+        - { id: 2, name_len: "short" }
+        - { id: 5, name_len: "short" }
+
+  - name: "CASE with function in THEN"
+    sql: "SELECT id, CASE WHEN active = 1 THEN UPPER(name) ELSE LOWER(name) END AS styled FROM case_cov WHERE id IN (1, 2) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - { id: 1, styled: "ALICE" }
+        - { id: 2, styled: "bob" }
+
+  - name: "CASE with CONCAT in THEN"
+    sql: "SELECT CASE WHEN category IS NOT NULL THEN CONCAT('cat_', category) ELSE 'no_category' END AS label FROM case_cov WHERE id IN (1, 6) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - label: "cat_A"
+        - label: "no_category"
+
+  # --- CASE in different SQL positions ---
+
+  - name: "CASE in WHERE clause"
+    sql: "SELECT id FROM case_cov WHERE CASE WHEN score IS NULL THEN 0 ELSE score END > 70 ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 3
+        - id: 7
+
+  # --- CASE with different data types ---
+
+  - name: "CASE returning float"
+    sql: "SELECT CASE WHEN 1 = 1 THEN 3.14 ELSE 0.0 END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 3.14
+
+  - name: "CASE returning NULL explicitly in THEN"
+    sql: "SELECT CASE WHEN 1 = 1 THEN NULL ELSE 'fallback' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: null
+
+  - name: "CASE with IS NULL in WHEN and NULL column"
+    sql: "SELECT id, CASE WHEN note IS NULL THEN 'empty' ELSE note END AS display FROM case_cov WHERE id IN (3, 4, 8) ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 3, display: "empty" }
+        - { id: 4, display: "poor" }
+        - { id: 8, display: "empty" }
+
+  - name: "CASE comparing double values"
+    sql: "SELECT id, CASE WHEN price > 50.0 THEN 'expensive' WHEN price > 10.0 THEN 'moderate' WHEN price >= 0.0 THEN 'cheap' ELSE 'unknown' END AS tier FROM case_cov WHERE id IN (1, 5, 6, 3) ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - { id: 1, tier: "moderate" }
+        - { id: 3, tier: "unknown" }
+        - { id: 5, tier: "expensive" }
+        - { id: 6, tier: "cheap" }
+
+  # --- Nested CASE: 3+ levels and cross-variant nesting ---
+
+  - name: "Deeply nested CASE (3 levels)"
+    sql: |
+      SELECT CASE
+        WHEN score >= 90 THEN
+          CASE WHEN active = 1 THEN
+            CASE WHEN category = 'A' THEN 'star' ELSE 'top' END
+          ELSE 'dormant_top' END
+        ELSE 'regular'
+      END AS tier
+      FROM case_cov WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - tier: "star"
+
+  - name: "Simple CASE nested inside searched CASE"
+    sql: |
+      SELECT CASE
+        WHEN score > 80 THEN
+          CASE category WHEN 'A' THEN 'A_high' WHEN 'B' THEN 'B_high' ELSE 'other_high' END
+        ELSE 'low'
+      END AS label
+      FROM case_cov WHERE id IN (1, 2, 7) ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - label: "A_high"
+        - label: "low"
+        - label: "A_high"
+
+  - name: "Searched CASE nested inside simple CASE"
+    sql: |
+      SELECT CASE category
+        WHEN 'A' THEN CASE WHEN score > 85 THEN 'A_excellent' ELSE 'A_good' END
+        WHEN 'B' THEN 'B_group'
+        ELSE 'other'
+      END AS label
+      FROM case_cov WHERE id IN (1, 3, 5) ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - label: "A_excellent"
+        - label: "A_good"
+        - label: "B_group"
+
+  # --- CASE with aggregates ---
+
+  - name: "SUM of CASE for conditional aggregation"
+    sql: "SELECT SUM(CASE WHEN category = 'A' THEN score ELSE 0 END) AS a_total FROM case_cov"
+    expect:
+      rows: 1
+      data:
+        - a_total: 265
+
+  - name: "COUNT CASE for conditional count"
+    sql: "SELECT COUNT(CASE WHEN active = 1 THEN 1 END) AS active_count FROM case_cov"
+    expect:
+      rows: 1
+      data:
+        - active_count: 4
+
+  - name: "MAX of CASE expression"
+    sql: "SELECT MAX(CASE WHEN active = 1 THEN price ELSE 0 END) AS max_active_price FROM case_cov"
+    expect:
+      rows: 1
+      data:
+        - max_active_price: 100
+
+  - name: "Multiple CASE expressions in GROUP BY aggregation"
+    sql: |
+      SELECT category,
+             SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) AS active_cnt,
+             SUM(CASE WHEN active = 0 THEN 1 ELSE 0 END) AS inactive_cnt
+      FROM case_cov
+      WHERE category IS NOT NULL
+      GROUP BY category
+      ORDER BY category
+    expect:
+      rows: 3
+      data:
+        - { category: "A", active_cnt: 3, inactive_cnt: 0 }
+        - { category: "B", active_cnt: 1, inactive_cnt: 1 }
+        - { category: "C", inactive_cnt: 2, active_cnt: 0 }
+
+  # --- Edge cases ---
+
+  - name: "Searched CASE all conditions false, no ELSE returns NULL"
+    sql: "SELECT CASE WHEN 1 = 0 THEN 'a' WHEN 2 = 0 THEN 'b' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: null
+
+  - name: "Simple CASE with all NULL THEN values"
+    sql: "SELECT CASE 1 WHEN 1 THEN NULL WHEN 2 THEN NULL ELSE 'fallback' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: null
+
+  - name: "Multiple CASE expressions in same SELECT"
+    sql: |
+      SELECT
+        CASE WHEN score > 80 THEN 'high' ELSE 'low' END AS grade,
+        CASE category WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 3 END AS cat_num
+      FROM case_cov WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - { grade: "high", cat_num: 1 }
+
+  - name: "CASE with empty string match"
+    sql: "SELECT CASE '' WHEN '' THEN 'matched_empty' ELSE 'no_match' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "matched_empty"
+
+  - name: "CASE with negative numbers"
+    sql: "SELECT CASE WHEN -5 < 0 THEN 'negative' ELSE 'non_negative' END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "negative"
+
+  - name: "CASE in arithmetic expression"
+    sql: "SELECT 10 + CASE WHEN 1 = 1 THEN 5 ELSE 0 END AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 15
+
+  - name: "CASE as argument to function"
+    sql: "SELECT UPPER(CASE WHEN 1 = 1 THEN 'yes' ELSE 'no' END) AS result"
+    expect:
+      rows: 1
+      data:
+        - result: "YES"
+
+  - name: "Many WHEN branches (6 branches)"
+    sql: |
+      SELECT CASE score
+        WHEN 90 THEN 'A'
+        WHEN 80 THEN 'B'
+        WHEN 70 THEN 'C'
+        WHEN 60 THEN 'D'
+        WHEN 45 THEN 'E'
+        WHEN 30 THEN 'F'
+        ELSE 'X'
+      END AS grade
+      FROM case_cov WHERE id IN (1, 2, 5, 6, 7, 8) ORDER BY id
+    expect:
+      rows: 6
+      data:
+        - grade: "A"
+        - grade: "D"
+        - grade: "E"
+        - grade: "C"
+        - grade: "X"
+        - grade: "F"
+
+  - name: "CASE with boolean-like 0/1 result"
+    sql: "SELECT id, CASE WHEN active = 1 THEN 1 ELSE 0 END AS is_active FROM case_cov WHERE id <= 3 ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - { id: 1, is_active: 1 }
+        - { id: 2, is_active: 0 }
+        - { id: 3, is_active: 1 }
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS case_cov"
