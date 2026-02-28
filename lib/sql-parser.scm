@@ -413,15 +413,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(define valid_stmts (filter compiled_stmts (lambda (s) (not (nil? s)))))
 				/* For BEFORE triggers: init changed_rows from NEW, return it at end */
 				/* For AFTER triggers: just execute statements */
+				/* Inject (define session (context "session")) so @variables resolve in trigger scope */
+				(define session_bind (list (symbol "define") (symbol "session") (list (symbol "context") "session")))
 				(if is_after
 					(if (> (count valid_stmts) 0)
-						(list (symbol "lambda") params (cons (symbol "begin") valid_stmts))
+						(list (symbol "lambda") params (cons (symbol "begin") (cons session_bind valid_stmts)))
 						(list (symbol "lambda") params nil))
 					/* BEFORE trigger: wrap with changed_rows handling */
 					/* Use outer begin for define, inner !begin (no new scope) for statements */
 					/* Wrap in begin: define changed_rows, execute stmts, return changed_rows */
 					(list (symbol "lambda") params
 						(list (symbol "begin")
+							session_bind
 							(list (symbol "define") changed_rows_sym (symbol "NEW"))
 							(cons '!begin valid_stmts)
 							changed_rows_sym)))
