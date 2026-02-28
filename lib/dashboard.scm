@@ -150,7 +150,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(define table_count (if (nil? tables) 0 (count tables)))
 						(define total_size (if (nil? tables) 0
 							(reduce (map tables (lambda (tbl) (dashboard_table_size db tbl))) (lambda (a b) (+ a b)) 0)))
-						(json_encode_assoc (list "name" db "tables" table_count "size_bytes" total_size "backend" (database_backend db)))
+						(json_encode_assoc (list "name" db "tables" table_count "size_bytes" total_size))
 					))))
 					(dashboard_send_json res (dashboard_json_array items))
 				))
@@ -245,8 +245,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					))
 					/* partition schema */
 					(define raw_partitions (meta "Partitions"))
-					(define partition_items (if (nil? raw_partitions) "[]"
-						(dashboard_json_array (map raw_partitions (lambda (p)
+					(define partitions (if (nil? raw_partitions) nil (filter raw_partitions (lambda (p) (not (nil? p))))))
+					(define partition_items (if (or (nil? partitions) (equal? (count partitions) 0)) "[]"
+						(dashboard_json_array (map partitions (lambda (p)
 							(concat "{\"column\":" (json_encode (p "Column")) ",\"n\":" (json_encode (p "NumPartitions")) "}")
 						)))
 					))
