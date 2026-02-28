@@ -83,6 +83,18 @@ func init_list() {
 	// list functions
 	DeclareTitle("Lists")
 
+	// list is already in Globalenv.Vars (scm.go init); register it
+	// in declarations so serialization can resolve the function pointer.
+	Declare(&Globalenv, &Declaration{
+		"list", "constructs a list from its arguments",
+		0, 1000,
+		[]DeclarationParameter{
+			DeclarationParameter{"items", "any", "items to put into the list", nil},
+		}, "list",
+		List,
+		true, false, nil,
+	})
+
 	Declare(&Globalenv, &Declaration{
 		"count", "counts the number of elements in the list",
 		1, 1,
