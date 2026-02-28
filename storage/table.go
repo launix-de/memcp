@@ -1087,7 +1087,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 		nextrow:
 			if allowPruning {
-				if len(t.Unique) == 1 {
+				if len(t.Unique) == 1 && !skipUniqueCheck {
 					lock.Unlock()
 				}
 			}
