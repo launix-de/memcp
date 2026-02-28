@@ -665,9 +665,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* EXISTS (SELECT ...) */
 		(parser '((atom "EXISTS" true) "(" (define sub sql_select) ")") '('inner_select_exists sub))
 		/* Simple CASE: CASE expr WHEN val THEN result ... ELSE default END */
-		/* DISABLED FOR DEBUGGING
-		(parser '((atom "CASE" true) (define expr sql_expression) (define conditions (* (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc conditions (lambda (a b) '('('equal?? expr a) b)))) '(elsebranch)))
-		*/
+		(parser '((atom "CASE" true) (define expr sql_expression) (define conditions (* (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) '('('equal?? expr a) b)))) '(elsebranch)))
 		/* Searched CASE: CASE WHEN cond THEN result ... ELSE default END */
 		(parser '((atom "CASE" true) (define conditions (* (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
