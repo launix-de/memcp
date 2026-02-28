@@ -1042,7 +1042,11 @@ func ComputeSize(v Scmer) uint {
 		if p == nil {
 			return base
 		}
-		return base + goAllocOverhead + 48 + ComputeSize(p.Params) + ComputeSize(p.Body)
+		// Proc struct: Params(16) + Body(16) + En(8) + NumVars(8) = 48 bytes
+		// Params and Body are inline Scmer fields — their slots are covered by
+		// the recursive ComputeSize base (same pattern as slice backing array).
+		// Only count the non-Scmer fields: *Env(8) + NumVars(8) = 16 bytes.
+		return base + goAllocOverhead + 16 + ComputeSize(p.Params) + ComputeSize(p.Body)
 	case tagString, tagSymbol:
 		ln := uint(auxVal(v.aux))
 		if ln == 0 {
@@ -1073,7 +1077,10 @@ func ComputeSize(v Scmer) uint {
 		return base + goAllocOverhead + fastDictPayloadSize(v.FastDict())
 	case tagSourceInfo:
 		si := v.SourceInfo()
-		sz := base + goAllocOverhead
+		// SourceInfo struct: source(16) + line(8) + col(8) + value(16) = 48 bytes
+		// value is an inline Scmer — covered by recursive ComputeSize base.
+		// Non-Scmer fields: source header(16) + line(8) + col(8) = 32 bytes.
+		sz := base + goAllocOverhead + 32
 		if si.source != "" {
 			sz += align8(uint(len(si.source)))
 		}
