@@ -22,6 +22,7 @@ import "sync"
 import "errors"
 import "strings"
 import "runtime"
+import "sync/atomic"
 import "github.com/launix-de/go-mysqlstack/xlog"
 import "github.com/launix-de/go-mysqlstack/driver"
 import querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
@@ -181,6 +182,7 @@ func isSelectQuery(query string) bool {
 	return strings.HasPrefix(strings.ToLower(trimmed), "select")
 }
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
+	atomic.AddInt64(&TotalHTTPRequests, 1)
 	if query == "select @@version_comment limit 1" {
 		callback(&sqltypes.Result{
 			Fields: []*querypb.Field{
