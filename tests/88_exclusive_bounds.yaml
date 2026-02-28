@@ -1,0 +1,172 @@
+# Tests for exclusive lower/upper bound handling in index scans.
+# Verifies that col > 5 skips rows where col = 5, and col < 10 excludes col = 10.
+
+metadata:
+  version: "1.0"
+  description: "Exclusive bound index scan optimization"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS exbound"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS exbound"
+
+test_cases:
+  - name: "Create table and insert data"
+    setup:
+      - sql: "CREATE TABLE exbound (id INT, val INT)"
+      - scm: |
+          (begin
+            (insert "memcp-tests" "exbound" '("id" "val")
+              (map (produceN 100) (lambda (i) (list i (* i 10)))))
+            (rebuild))
+    sql: "SELECT COUNT(*) AS cnt FROM exbound"
+    expect:
+      data:
+        - cnt: 100
+
+  # Build index by querying 3 times (Savings threshold = 2.0)
+  - name: "Build index hit 1"
+    sql: "SELECT id FROM exbound WHERE id = 50"
+    expect:
+      data:
+        - id: 50
+
+  - name: "Build index hit 2"
+    sql: "SELECT id FROM exbound WHERE id = 60"
+    expect:
+      data:
+        - id: 60
+
+  - name: "Build index hit 3"
+    sql: "SELECT id FROM exbound WHERE id = 70"
+    expect:
+      data:
+        - id: 70
+
+  # ==============================================================
+  # Exclusive lower bound: col > N
+  # ==============================================================
+
+  - name: "Exclusive lower: id > 95"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id > 95"
+    expect:
+      data:
+        - cnt: 4
+
+  - name: "Exclusive lower: id > 0 (boundary at start)"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id > 0"
+    expect:
+      data:
+        - cnt: 99
+
+  - name: "Exclusive lower: id > 99 (boundary at end)"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id > 99"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "Exclusive lower: id > 98"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id > 98"
+    expect:
+      data:
+        - cnt: 1
+
+  # ==============================================================
+  # Inclusive lower: col >= N (for comparison)
+  # ==============================================================
+
+  - name: "Inclusive lower: id >= 95"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id >= 95"
+    expect:
+      data:
+        - cnt: 5
+
+  - name: "Inclusive lower: id >= 99"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id >= 99"
+    expect:
+      data:
+        - cnt: 1
+
+  # ==============================================================
+  # Exclusive upper bound: col < N
+  # ==============================================================
+
+  - name: "Exclusive upper: id < 5"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id < 5"
+    expect:
+      data:
+        - cnt: 5
+
+  - name: "Exclusive upper: id < 1"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id < 1"
+    expect:
+      data:
+        - cnt: 1
+
+  - name: "Exclusive upper: id < 0"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id < 0"
+    expect:
+      data:
+        - cnt: 0
+
+  # ==============================================================
+  # Inclusive upper: col <= N (for comparison)
+  # ==============================================================
+
+  - name: "Inclusive upper: id <= 5"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id <= 5"
+    expect:
+      data:
+        - cnt: 6
+
+  - name: "Inclusive upper: id <= 0"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id <= 0"
+    expect:
+      data:
+        - cnt: 1
+
+  # ==============================================================
+  # Combined exclusive bounds: col > N AND col < M
+  # ==============================================================
+
+  - name: "Both exclusive: id > 10 AND id < 15"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id > 10 AND id < 15"
+    expect:
+      data:
+        - cnt: 4
+
+  - name: "Both exclusive: id > 10 AND id < 11 (empty range)"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id > 10 AND id < 11"
+    expect:
+      data:
+        - cnt: 0
+
+  - name: "Mixed: id >= 10 AND id < 15"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id >= 10 AND id < 15"
+    expect:
+      data:
+        - cnt: 5
+
+  - name: "Mixed: id > 10 AND id <= 15"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE id > 10 AND id <= 15"
+    expect:
+      data:
+        - cnt: 5
+
+  # ==============================================================
+  # Exclusive bounds with equality on another column (compound)
+  # ==============================================================
+
+  - name: "Compound: val = 500 AND id > 48"
+    sql: "SELECT id FROM exbound WHERE val = 500 AND id > 48"
+    expect:
+      rows: 1
+      data:
+        - id: 50
+
+  - name: "Compound: val = 500 AND id > 50 (excludes exact match)"
+    sql: "SELECT COUNT(*) AS cnt FROM exbound WHERE val = 500 AND id > 50"
+    expect:
+      data:
+        - cnt: 0

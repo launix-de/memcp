@@ -70,12 +70,18 @@ func (s *StorageIndex) getDeltaValue(data []scm.Scmer, col string) scm.Scmer {
 	return scm.NewNil()
 }
 
-func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
+func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
 	for i := 0; i < cmpCols; i++ {
 		v := getter(i)
 		if i == cmpCols-1 {
-			if !upperLast.IsNil() && scm.Less(upperLast, v) {
-				return false, true
+			if !upperLast.IsNil() {
+				if upperInclusive {
+					if scm.Less(upperLast, v) {
+						return false, true
+					}
+				} else if !scm.Less(v, upperLast) {
+					return false, true
+				}
 			}
 			continue
 		}
@@ -118,6 +124,13 @@ func (s *StorageIndex) compareMainAndDelta(mainRecid uint32, mainCols []ColumnSt
 func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 
+	// extract inclusiveness for the range column (last boundary)
+	lowerIncl, upperIncl := true, true
+	if len(cols) > 0 {
+		lowerIncl = cols[len(cols)-1].lowerInclusive
+		upperIncl = cols[len(cols)-1].upperInclusive
+	}
+
 	// check if we found conditions
 	if len(lower) > 0 {
 		// find an index that has at least the columns in that order we're searching for
@@ -133,7 +146,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 					}
 				}
 				// this index fits!
-				index.iterate(lower, upperLast, maxInsertIndex, buf, callback)
+				index.iterate(lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 				return
 			}
 		skip_index:
@@ -158,7 +171,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 				if covered {
 					// longer index covers this query; use it instead of creating a shorter one
 					t.indexMutex.Unlock()
-					index.iterate(lower, upperLast, maxInsertIndex, buf, callback)
+					index.iterate(lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 					return
 				}
 			}
@@ -173,7 +186,7 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		index.t = t
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(lower, upperLast, maxInsertIndex, buf, callback)
+		index.iterate(lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, callback)
 		return
 	}
 
@@ -292,7 +305,7 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func(
 }
 
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 
 	// find columns in storage — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
@@ -412,7 +425,6 @@ start_scan:
 		for i := 0; i < cmpCols; i++ {
 			a := lower[i]
 			b := cols[i].GetValue(idx2)
-			// TODO: respect !lowerEqual
 			if scm.Less(a, b) {
 				return true // less
 			} else if scm.Less(b, a) {
@@ -422,6 +434,16 @@ start_scan:
 		}
 		return true // fully equal
 	})
+	// skip past equal values when lower bound is exclusive (col > 5)
+	if !lowerInclusive && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
+		for uint32(mainIdx) < s.t.main_count {
+			recid := uint32(int64(snapMainIndexes.GetValueUInt(uint32(mainIdx))) + snapMainIndexes.offset)
+			if !scm.Equal(cols[cmpCols-1].GetValue(recid), lower[cmpCols-1]) {
+				break
+			}
+			mainIdx++
+		}
+	}
 
 	nextMain := func() (uint32, bool) {
 		for {
@@ -430,7 +452,7 @@ start_scan:
 			}
 			recid := uint32(int64(snapMainIndexes.GetValueUInt(uint32(mainIdx))) + snapMainIndexes.offset)
 			mainIdx++
-			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, func(i int) scm.Scmer {
+			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
 				return cols[i].GetValue(recid)
 			})
 			if inRange {
@@ -494,7 +516,7 @@ start_scan:
 			if recid < s.t.main_count || p.itemid-int(s.t.main_count) >= maxInsertIndex {
 				return true
 			}
-			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, func(i int) scm.Scmer {
+			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
 				return s.getDeltaValue(p.data, s.Cols[i])
 			})
 			if !inRange {

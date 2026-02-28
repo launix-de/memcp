@@ -42,14 +42,20 @@ type boundaries []columnboundaries
 func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 	for i, b := range in {
 		if b.col == b2.col {
+			// lower: pick the tighter (higher) bound
 			if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
 				in[i].lower = b2.lower
+				in[i].lowerInclusive = b2.lowerInclusive
+			} else if !b.lower.IsNil() && !b2.lower.IsNil() && scm.Equal(b.lower, b2.lower) {
+				in[i].lowerInclusive = b.lowerInclusive && b2.lowerInclusive
 			}
-			in[i].lowerInclusive = b.lowerInclusive && b2.lowerInclusive
+			// upper: pick the tighter (lower) bound
 			if b.upper.IsNil() || (!b2.upper.IsNil() && scm.Less(b2.upper, b.upper)) {
 				in[i].upper = b2.upper
+				in[i].upperInclusive = b2.upperInclusive
+			} else if !b.upper.IsNil() && !b2.upper.IsNil() && scm.Equal(b.upper, b2.upper) {
+				in[i].upperInclusive = b.upperInclusive && b2.upperInclusive
 			}
-			in[i].upperInclusive = b.upperInclusive && b2.upperInclusive
 			return in
 		}
 	}
