@@ -300,32 +300,44 @@ if the user is not allowed to access this property, the function will throw an e
 (service_registry "PSQL Frontend" (list (arg "api-port" (env "PORT" "4321")) "/psql/[database]" "POST, NDJSON"))
 (service_registry "SCM Frontend" (list (arg "api-port" (env "PORT" "4321")) "/scm" "POST, JSON"))
 
+/* shared callbacks for mysql protocol (TCP and Unix socket) */
+(set mysql_auth (lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
+(set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
+(set mysql_handler (lambda (schema sql resultrow_sql session) (begin
+	(define resultrow resultrow_sql)
+	(if (equal? (session "syntax") "scheme") (begin
+		/* scheme syntax mode */
+		(set print (lambda args (resultrow '("result" (concat args)))))
+		(resultrow '("result" (eval (scheme sql))))
+	) (time (begin
+			/* SQL syntax mode */
+			/* tolerate an optional trailing ';' - must be at end of string */
+			(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
+			(define mysql_username (coalesce (session "username") "root"))
+			(define formula (if (equal? (session "syntax") "postgresql")
+				(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username)
+				(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username)))
+			(eval (source "SQL Query" 1 1 formula))
+		) sql))
+)))
+
 /* dedicated mysql protocol listening at specified port */
 (try (lambda () (begin
 	(if (not (arg "disable-mysql" false)) (begin
 		(set port (arg "mysql-port" (env "MYSQL_PORT" "3307")))
-		(mysql port
-			(lambda (username_) (scan "system" "user" '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)) /* auth: load pw hash from system.user */
-			(lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))) /* allow virtual INFORMATION_SCHEMA, otherwise check db existence */
-			(lambda (schema sql resultrow_sql session) (begin /* sql */
-				(define resultrow resultrow_sql)
-				(if (equal? (session "syntax") "scheme") /* TODO: check access to system.* */ (begin
-					/* scheme syntax mode */
-					(set print (lambda args (resultrow '("result" (concat args)))))
-					(resultrow '("result" (eval (scheme sql))))
-				) (time (begin
-						/* SQL syntax mode */
-						/* tolerate an optional trailing ';' - must be at end of string */
-						(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
-						(define mysql_username (coalesce (session "username") "root"))
-						(define formula (if (equal? (session "syntax") "postgresql")
-							(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username)
-							(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username)))
-						(eval (source "SQL Query" 1 1 formula))
-					) sql))
-			))
-		)
+		(mysql port mysql_auth mysql_schema mysql_handler)
 		(if (not (nil? service_registry)) (service_registry "MySQL Protocol" (list port "" "MySQL Wire Protocol")))
 		(print "MySQL server listening on port " port " (connect with `mysql -P " port " -u root -p` using password '" (arg "root-password" "admin") "'), set with --mysql-port")
 	)) ; close the if for disable-mysql
+)) print)
+
+/* dedicated mysql unix socket */
+(try (lambda () (begin
+	(set socketpath (arg "mysql-socket" (env "MYSQL_SOCKET" "/tmp/memcp.sock")))
+	(if (not (equal? socketpath ""))
+		(begin
+			(mysql_socket socketpath mysql_auth mysql_schema mysql_handler)
+			(if (not (nil? service_registry)) (service_registry "MySQL Socket" (list socketpath "" "MySQL Unix Socket")))
+			(print "MySQL socket listening on " socketpath)
+	))
 )) print)

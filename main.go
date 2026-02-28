@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -307,6 +307,17 @@ func setupIO(wd string) {
 		scm.MySQLServe, false, false, nil,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
+		"mysql_socket", "Listen on a Unix domain socket for MySQL protocol",
+		4, 4,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"socketpath", "string", "path to the Unix domain socket", nil},
+			scm.DeclarationParameter{"getPassword", "func", "lambda(username string) string|nil has to return the password for a user or nil to deny login", nil},
+			scm.DeclarationParameter{"schemacallback", "func", "lambda(username schema) bool handler check whether user is allowed to schema (string) - you should check access rights here", nil},
+			scm.DeclarationParameter{"handler", "func", "lambda(schema sql resultrow session) handler to process sql query (string) in schema (string). resultrow is a lambda(list)", nil},
+		}, "bool",
+		scm.MySQLServeSocket, false, false, nil,
+	})
+	scm.Declare(&IOEnv, &scm.Declaration{
 		"password", "Hashes a password with sha1 (for mysql user authentication)",
 		1, 1,
 		[]scm.DeclarationParameter{
@@ -445,6 +456,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --api-port=PORT        HTTP API port (default 4321)\n")
 		fmt.Fprintf(os.Stderr, "  --mysql-port=PORT      MySQL protocol port (default 3307)\n")
 		fmt.Fprintf(os.Stderr, "  --disable-api          Disable HTTP API server\n")
+		fmt.Fprintf(os.Stderr, "  --mysql-socket=PATH    Unix socket path (default /tmp/memcp.sock, empty to disable)\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}

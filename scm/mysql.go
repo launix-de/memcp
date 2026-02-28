@@ -17,7 +17,9 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 package scm
 
+import "os"
 import "fmt"
+import "net"
 import "sync"
 import "errors"
 import "strings"
@@ -51,6 +53,39 @@ func MySQLServe(a ...Scmer) Scmer {
 	if err != nil {
 		panic(err)
 	}
+	mysqlListenersMu.Lock()
+	mysqlListeners = append(mysqlListeners, mysql)
+	mysqlListenersMu.Unlock()
+	go func() {
+		defer mysql.Close()
+		mysql.Accept()
+	}()
+	return NewBool(true)
+}
+
+// MySQLServeSocket listens on a Unix domain socket for MySQL protocol.
+func MySQLServeSocket(a ...Scmer) Scmer {
+	socketPath := a[0].String()
+
+	// Remove stale socket file
+	os.Remove(socketPath)
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		panic(err)
+	}
+
+	// Make socket accessible to all local users
+	os.Chmod(socketPath, 0777)
+
+	log := xlog.NewStdLog(xlog.Level(xlog.INFO))
+	var handler MySQLWrapper
+	handler.log = log
+	handler.authcallback = a[1]
+	handler.schemacallback = a[2]
+	handler.querycallback = a[3]
+
+	mysql := driver.NewListenerFromNetListener(log, listener, &handler)
 	mysqlListenersMu.Lock()
 	mysqlListeners = append(mysqlListeners, mysql)
 	mysqlListenersMu.Unlock()
