@@ -197,6 +197,20 @@ func (w *JITWriter) EmitMakeInt(dst JITValueDesc, src JITValueDesc) {
 	}
 }
 
+// EmitMakeFloat constructs a Scmer float into dst.Reg (ptr) and dst.Reg2 (aux).
+// src.Reg holds the float64 bits as uint64.
+func (w *JITWriter) EmitMakeFloat(dst JITValueDesc, src JITValueDesc) {
+	w.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
+	switch src.Loc {
+	case LocReg:
+		if dst.Reg2 != src.Reg {
+			w.emitMovRegReg(dst.Reg2, src.Reg)
+		}
+	case LocImm:
+		w.EmitMovRegImm64(dst.Reg2, uint64(src.Imm.Int())) // float bits stored as int64 in aux
+	}
+}
+
 // EmitMakeNil constructs a Scmer nil into dst.Reg (ptr) and dst.Reg2 (aux).
 func (w *JITWriter) EmitMakeNil(dst JITValueDesc) {
 	w.emitXorReg(dst.Reg)
@@ -542,6 +556,16 @@ func (w *JITWriter) EmitSetcc(dst Reg, cc byte) {
 }
 
 // --- Shift emitters ---
+
+// EmitShlRegImm8 emits SHL r64, imm8 (logical shift left by immediate)
+func (w *JITWriter) EmitShlRegImm8(dst Reg, imm uint8) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xE0) | byte(dst&7) // /4 = SHL
+	w.emitBytes(rex, 0xC1, modrm, imm)
+}
 
 // EmitShrRegImm8 emits SHR r64, imm8 (logical shift right by immediate)
 func (w *JITWriter) EmitShrRegImm8(dst Reg, imm uint8) {

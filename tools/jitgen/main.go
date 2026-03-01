@@ -244,10 +244,11 @@ func dumpSSA(fn *ssa.Function) {
 // genVal tracks how an SSA value is represented in the generated Go code.
 // goVar is a Go variable name: either a JITValueDesc (isDesc=true) or a Reg.
 type genVal struct {
-	goVar  string
-	isDesc bool   // true = JITValueDesc (Scmer pair), false = Reg (scalar)
-	argIdx int    // >= 0: deferred arg reference from IndexAddr, not yet loaded
-	marker string // "_newbool"/"_newint"/"_newfloat" for deferred constructors
+	goVar     string
+	isDesc    bool   // true = JITValueDesc (Scmer pair), false = Reg (scalar)
+	argIdx    int    // >= 0: deferred arg reference from IndexAddr (constant index), not yet loaded
+	argIdxVar string // non-empty: deferred arg reference with variable index (goVar of index desc)
+	marker    string // "_newbool"/"_newint"/"_newfloat" for deferred constructors
 }
 
 type codeGen struct {
@@ -519,8 +520,14 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 	switch v := instr.(type) {
 	case *ssa.IndexAddr:
 		if v.X.Name() == g.paramName {
-			idx := constInt(v.Index)
-			g.vals[name] = genVal{argIdx: int(idx)}
+			if c, ok := v.Index.(*ssa.Const); ok {
+				idx, _ := constant.Int64Val(c.Value)
+				g.vals[name] = genVal{argIdx: int(idx)}
+			} else {
+				// Variable index (e.g. phi loop counter)
+				idxVal := g.resolveValue(v.Index)
+				g.vals[name] = genVal{argIdx: -1, argIdxVar: idxVal.goVar}
+			}
 		} else {
 			panic(fmt.Sprintf("IndexAddr on non-parameter: %s", v))
 		}
@@ -528,10 +535,44 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 	case *ssa.UnOp:
 		if v.Op == token.MUL {
 			src := g.vals[v.X.Name()]
-			if src.argIdx >= 0 {
+			if src.argIdxVar != "" {
+				// Variable-index IndexAddr+Deref → emit runtime load from sliceBase
+				dv := g.allocDesc()
+				scratch := g.allocReg()
+				g.emit("%s := ctx.AllocReg()", scratch)
+				g.emit("ctx.W.emitMovRegReg(%s, %s.Reg)", scratch, src.argIdxVar)
+				g.emit("ctx.W.EmitShlRegImm8(%s, 4)", scratch) // *16
+				g.emit("ctx.W.EmitAddInt64(%s, ctx.SliceBase)", scratch)
+				ptrReg := g.allocReg()
+				auxReg := g.allocReg()
+				g.emit("%s := ctx.AllocReg()", ptrReg)
+				g.emit("%s := ctx.AllocReg()", auxReg)
+				g.emit("ctx.W.emitMovRegMem(%s, %s, 0)", ptrReg, scratch)
+				g.emit("ctx.W.emitMovRegMem(%s, %s, 8)", auxReg, scratch)
+				g.emit("ctx.FreeReg(%s)", scratch)
+				g.emit("%s := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: %s, Reg2: %s}", dv, ptrReg, auxReg)
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else if src.argIdx >= 0 {
 				// Fused IndexAddr+Deref → args[i] already describes this argument
 				dv := g.allocDesc()
 				g.emit("%s := args[%d]", dv, src.argIdx)
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else if src.argIdxVar != "" {
+				// Variable-index IndexAddr+Deref → emit runtime load from sliceBase
+				dv := g.allocDesc()
+				scratch := g.allocReg()
+				g.emit("%s := ctx.AllocReg()", scratch)
+				g.emit("ctx.W.emitMovRegReg(%s, %s.Reg)", scratch, src.argIdxVar)
+				g.emit("ctx.W.EmitShlRegImm8(%s, 4)", scratch) // *16
+				g.emit("ctx.W.EmitAddInt64(%s, ctx.SliceBase)", scratch)
+				ptrReg := g.allocReg()
+				auxReg := g.allocReg()
+				g.emit("%s := ctx.AllocReg()", ptrReg)
+				g.emit("%s := ctx.AllocReg()", auxReg)
+				g.emit("ctx.W.emitMovRegMem(%s, %s, 0)", ptrReg, scratch)
+				g.emit("ctx.W.emitMovRegMem(%s, %s, 8)", auxReg, scratch)
+				g.emit("ctx.FreeReg(%s)", scratch)
+				g.emit("%s := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: %s, Reg2: %s}", dv, ptrReg, auxReg)
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
 			} else {
 				panic(fmt.Sprintf("deref of non-arg pointer: %s", v))
@@ -664,12 +705,29 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s.Loc == LocImm && %s.Loc == LocImm {", xVal.goVar, yVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOp, yVal.goVar)
-				g.emit("} else {")
+				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
+				// y is imm, x is reg → CmpRegImm32
 				rv := g.allocReg()
 				g.emit("\t%s := ctx.AllocReg()", rv)
-				g.emit("\tctx.W.EmitCmpInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
+				g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
 				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv, cc)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
+				// x is imm, y is reg → materialize x, CMP
+				rv2 := g.allocReg()
+				g.emit("\t%s := ctx.AllocReg()", rv2)
+				g.emit("\tscratch := ctx.AllocReg()")
+				g.emit("\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", xVal.goVar)
+				g.emit("\tctx.W.EmitCmpInt64(scratch, %s.Reg)", yVal.goVar)
+				g.emit("\tctx.FreeReg(scratch)")
+				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv2, cc)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv2)
+				g.emit("} else {")
+				rv3 := g.allocReg()
+				g.emit("\t%s := ctx.AllocReg()", rv3)
+				g.emit("\tctx.W.EmitCmpInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
+				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv3, cc)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv3)
 				g.emit("}")
 			}
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
@@ -786,6 +844,25 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			g.enqueueBB(targetBB)
 		}
 
+	case *ssa.Convert:
+		src := g.resolveValue(v.X)
+		dv := g.allocDesc()
+		srcType := v.X.Type().String()
+		dstType := v.Type().String()
+		if srcType == "int64" && dstType == "float64" {
+			// int64 → float64: emit CVTSI2SD
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", src.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(float64(%s.Imm.Int()))}", dv, src.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.W.EmitCvtInt64ToFloat64(%s.Reg, %s.Reg)", src.goVar, src.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, src.goVar)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		} else {
+			panic(fmt.Sprintf("unsupported Convert %s → %s", srcType, dstType))
+		}
+
 	default:
 		panic(instrDesc(instr))
 	}
@@ -876,6 +953,33 @@ func (g *codeGen) lookup(v ssa.Value) genVal {
 		return gv
 	}
 	panic(fmt.Sprintf("unresolved SSA value: %s", v))
+}
+
+// resolveValue resolves any SSA value to a genVal: constants become LocImm
+// descriptors, everything else is looked up from g.vals (must be pre-computed).
+func (g *codeGen) resolveValue(v ssa.Value) genVal {
+	if c, ok := v.(*ssa.Const); ok {
+		dv := g.allocDesc()
+		if c.Value == nil {
+			g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
+		} else {
+			switch c.Value.Kind() {
+			case constant.Int:
+				ival, _ := constant.Int64Val(c.Value)
+				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}", dv, ival)
+			case constant.Float:
+				fval, _ := constant.Float64Val(c.Value)
+				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}", dv, fval)
+			case constant.Bool:
+				bval := constant.BoolVal(c.Value)
+				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%v)}", dv, bval)
+			default:
+				panic(fmt.Sprintf("unsupported constant kind: %s", c.Value.Kind()))
+			}
+		}
+		return genVal{goVar: dv, isDesc: true}
+	}
+	return g.lookup(v)
 }
 
 // constInt extracts the int64 from a constant SSA value.

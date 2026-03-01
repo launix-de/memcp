@@ -1093,6 +1093,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (_jit_int_of_nil nil) false "jit: int?(nil? nil) = false (bool)")
 	(assert (_jit_int_of_nil 5) false "jit: int?(nil? 5) = false (bool)")
 
+	/* JIT arithmetic: + - with phi loop */
+	(define _jit_add2 (jit (lambda (a b) (+ a b))))
+	(assert (_jit_add2 3 4) 7 "jit: 3+4 = 7")
+	(assert (_jit_add2 -1 1) 0 "jit: -1+1 = 0")
+	(assert (_jit_add2 100 200) 300 "jit: 100+200 = 300")
+	(define _jit_add3 (jit (lambda (a b c) (+ a b c))))
+	(assert (_jit_add3 1 2 3) 6 "jit: 1+2+3 = 6")
+	(define _jit_sub2 (jit (lambda (a b) (- a b))))
+	(assert (_jit_sub2 10 3) 7 "jit: 10-3 = 7")
+	(assert (_jit_sub2 0 5) -5 "jit: 0-5 = -5")
+	/* mixed types: int+float promotes to float, nil propagates */
+	(define _jit_add_if (jit (lambda (a b) (+ a b))))
+	(assert (_jit_add_if 1 2.5) 3.5 "jit: 1+2.5 = 3.5 (int+float)")
+	(assert (_jit_add_if 2.5 3.5) 6.0 "jit: 2.5+3.5 = 6.0 (float+float)")
+	(define _jit_add3m (jit (lambda (a b c) (+ a b c))))
+	(assert (_jit_add3m 1 2 3.0) 6.0 "jit: 1+2+3.0 = 6.0 (int+int+float)")
+	(assert (_jit_add3m 1.0 2 3) 6.0 "jit: 1.0+2+3 = 6.0 (float+int+int)")
+	(assert (nil? (_jit_add3m 1 nil 3)) true "jit: 1+nil+3 = nil")
+	(define _jit_add4m (jit (lambda (a b c d) (+ a b c d))))
+	(assert (_jit_add4m 1 2 3 4) 10 "jit: 1+2+3+4 = 10 (all int)")
+	(assert (_jit_add4m 1 2 3.0 4) 10.0 "jit: 1+2+3.0+4 = 10.0 (mixed)")
+	(assert (nil? (_jit_add4m 1 2 nil 4)) true "jit: 1+2+nil+4 = nil")
+	/* nested: x*2+2 pattern */
+	(define _jit_x2p2 (jit (lambda (x) (+ (* x 2) 2))))
+	(assert (_jit_x2p2 5) 12 "jit: 5*2+2 = 12")
+	(assert (_jit_x2p2 0) 2 "jit: 0*2+2 = 2")
+	(assert (_jit_x2p2 -3) -4 "jit: -3*2+2 = -4")
+
 	/* alu.go: sql_abs */
 	(print "testing sql_abs ...")
 	(assert (equal? (sql_abs -5) 5) true "sql_abs of -5 = 5")
