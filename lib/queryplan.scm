@@ -270,7 +270,7 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 		(cons
 			(cons 'list (cons "unique" (cons "group" (list (cons 'list (map keys (lambda (col) (concat col))))))))
 			(map keys (lambda (col) (list 'list "column" (concat col) "any" '(list) '(list)))))))
-	(define kt_partition_code (cons 'list (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) (list (list 'list (concat col) (shardcolumn schema tbl scol))) '()))))))
+	(define kt_partition_code (cons 'list (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) (list (list 'list (concat col) (cons 'list (shardcolumn schema tbl scol)))) '()))))))
 	(define init_code (list 'begin
 		'('createtable schema keytable_name kt_cols_code '(list "engine" "sloppy") true)
 		'('partitiontable schema keytable_name kt_partition_code)))
