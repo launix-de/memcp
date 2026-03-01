@@ -48,15 +48,7 @@ func init_alu() {
 		true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 			d0 := args[0]
-			var d1 JITValueDesc
-			if d0.Loc == LocImm {
-				d1 = JITValueDesc{Loc: LocImm, Imm: NewInt(int64(d0.Imm.GetTag()))}
-			} else {
-				d1.Reg = ctx.AllocReg()
-				d1.Loc = LocReg
-				ctx.W.EmitGetTag(d1.Reg, d0.Reg, d0.Reg2)
-				ctx.FreeDesc(&d0)
-			}
+			d1 := ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
 			var d2 JITValueDesc
 			if d1.Loc == LocImm {
 				d2 = JITValueDesc{Loc: LocImm, Imm: NewBool(d1.Imm.Int() == 4)}

@@ -553,15 +553,39 @@ func (w *JITWriter) EmitShrRegImm8(dst Reg, imm uint8) {
 	w.emitBytes(rex, 0xC1, modrm, imm)
 }
 
-// --- GetTag inline emitter ---
+// --- GetTag ---
 
-// EmitGetTag emits inline code for (Scmer).GetTag().
+// EmitGetTagDesc extracts the type tag from a Scmer value descriptor.
+// Follows the standard emitter contract: consumes src (frees registers),
+// places the tag int into result according to result.Loc.
+func (ctx *JITContext) EmitGetTagDesc(src *JITValueDesc, result JITValueDesc) JITValueDesc {
+	if src.Loc == LocImm {
+		r := JITValueDesc{Loc: LocImm, Imm: NewInt(int64(src.Imm.GetTag()))}
+		if result.Loc == LocAny {
+			return r
+		}
+		ctx.W.EmitMakeInt(result, r)
+		return result
+	}
+	dst := ctx.AllocReg()
+	ctx.W.emitGetTagRegs(dst, src.Reg, src.Reg2)
+	ctx.FreeDesc(src)
+	r := JITValueDesc{Loc: LocReg, Reg: dst}
+	if result.Loc == LocAny {
+		return r
+	}
+	ctx.W.EmitMakeInt(result, r)
+	ctx.FreeReg(dst)
+	return result
+}
+
+// emitGetTagRegs emits inline code for (Scmer).GetTag().
 // Input: ptrReg holds s.ptr, auxReg holds s.aux.
 // Output: result in dstReg as uint16.
 // Logic: if ptr == &scmerIntSentinel → tagInt (4)
 //        if ptr == &scmerFloatSentinel → tagFloat (3)
 //        else → aux >> 48
-func (w *JITWriter) EmitGetTag(dst, ptrReg, auxReg Reg) {
+func (w *JITWriter) emitGetTagRegs(dst, ptrReg, auxReg Reg) {
 	// CMP ptrReg, &scmerIntSentinel (via R11 as scratch)
 	w.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
 	w.EmitCmpInt64(ptrReg, RegR11)

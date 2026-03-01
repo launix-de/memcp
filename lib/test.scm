@@ -1022,10 +1022,29 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (a b) (equal? a b))) 3.14 3.14) true "jit: equal? float same")
 	(assert ((jit (lambda () (equal? 5 5)))) true "jit: equal? constant fold")
 
-	/* JIT emitter: int? register-path corner cases */
-	(assert ((jit (lambda (x) (int? x))) 3.14) false "jit: int? register path float")
-	(assert ((jit (lambda (x) (int? x))) "hello") false "jit: int? register path string")
-	(assert ((jit (lambda (x) (int? x))) nil) false "jit: int? register path nil")
+	/* JIT emitter: int? — constant fold (LocImm) */
+	(assert ((jit (lambda () (int? nil)))) false "jit: int? const nil")
+	(assert ((jit (lambda () (int? true)))) false "jit: int? const bool true")
+	(assert ((jit (lambda () (int? false)))) false "jit: int? const bool false")
+	(assert ((jit (lambda () (int? "hello")))) false "jit: int? const string")
+	(assert ((jit (lambda () (int? 3.14)))) false "jit: int? const float")
+
+	/* JIT emitter: int? — register path (LocRegPair) with all types */
+	(define _jit_int? (jit (lambda (x) (int? x))))
+	(assert (_jit_int? nil) false "jit: int? reg nil")
+	(assert (_jit_int? true) false "jit: int? reg bool true")
+	(assert (_jit_int? false) false "jit: int? reg bool false")
+	(assert (_jit_int? 3.14) false "jit: int? reg float")
+	(assert (_jit_int? "hello") false "jit: int? reg string")
+	(assert (_jit_int? (size "abc")) true "jit: int? reg int from size")
+	(assert (_jit_int? (* 2 3)) true "jit: int? reg int from mul")
+	(assert (_jit_int? (+ (size "abc") (size "de"))) true "jit: int? reg int from add")
+	(assert (_jit_int? (* 0 1)) true "jit: int? reg int zero")
+	(assert (_jit_int? (* -1 42)) true "jit: int? reg negative int")
+
+	/* JIT emitter: int? — result feeds into other operations */
+	(assert ((jit (lambda (x) (! (int? x)))) 3.14) true "jit: int? chained with !")
+	(assert ((jit (lambda (x) (! (int? x)))) (size "a")) false "jit: int? chained with ! on int")
 
 	/* alu.go: sql_abs */
 	(print "testing sql_abs ...")
