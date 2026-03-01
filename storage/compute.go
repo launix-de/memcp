@@ -100,7 +100,15 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	s.mu.RUnlock()
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.computor = computor // update lambda
-		proxy.InvalidateAll()
+		// skip recompute if proxy is still valid (no invalidation since last compute)
+		if proxy.compressed && len(proxy.delta) == 0 {
+			if filter.IsNil() {
+				return true // fully compressed, nothing to do
+			}
+			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
+			proxy.CompressFiltered(filterCols, filter)
+			return true
+		}
 		if !filter.IsNil() {
 			proxy.CompressFiltered(filterCols, filter)
 		} else {
