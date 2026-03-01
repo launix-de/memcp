@@ -30,90 +30,7 @@ import (
 	"encoding/binary"
 	"math"
 	"strings"
-	"unsafe"
 )
-
-// jitEmitCompare builds a JIT emitter for comparison operators (<, <=, >, >=).
-// goFn computes the compile-time result from two Scmer values (for constant folding).
-// swap=true swaps operands for the register path (> is CMP(b,a)).
-// intCc/floatCc are condition codes for signed int CMP / unsigned float UCOMISD.
-func jitEmitCompare(swap bool, intCc, floatCc byte) func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-	return func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-		a, b := args[0], args[1]
-		// Constant fold using the same semantics as the Go function
-		if a.Loc == LocImm && b.Loc == LocImm {
-			var val bool
-			switch intCc {
-			case CcL: // < : Less(a, b)
-				if swap {
-					val = Less(b.Imm, a.Imm)
-				} else {
-					val = Less(a.Imm, b.Imm)
-				}
-			case CcLE: // <= : !Less(b, a)
-				val = !Less(b.Imm, a.Imm)
-			case CcGE: // >= : !Less(a, b)
-				val = !Less(a.Imm, b.Imm)
-			}
-			r := JITValueDesc{Loc: LocImm, Imm: NewBool(val)}
-			if result.Loc == LocAny {
-				return r
-			}
-			ctx.EnsureResultRegPair(&result)
-			ctx.W.EmitMakeBool(result, r)
-			return result
-		}
-		if swap {
-			a, b = b, a
-		}
-		ctx.MaterializeToRegPair(&a)
-		ctx.MaterializeToRegPair(&b)
-		ctx.EnsureResultRegPair(&result)
-		boolReg := ctx.AllocReg()
-		lblNotBothInt := ctx.W.ReserveLabel()
-		lblDone := ctx.W.ReserveLabel()
-		// Check both int
-		ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-		ctx.W.EmitCmpInt64(a.Reg, RegR11)
-		ctx.W.EmitJcc(CcNE, lblNotBothInt)
-		ctx.W.EmitCmpInt64(b.Reg, RegR11)
-		ctx.W.EmitJcc(CcNE, lblNotBothInt)
-		// Both int: CMP a.aux, b.aux
-		ctx.W.EmitCmpInt64(a.Reg2, b.Reg2)
-		ctx.W.EmitSetcc(boolReg, intCc)
-		ctx.W.EmitJmp(lblDone)
-		// Float path
-		ctx.W.MarkLabel(lblNotBothInt)
-		ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-		lblF0 := ctx.W.ReserveLabel()
-		lblG0 := ctx.W.ReserveLabel()
-		ctx.W.EmitCmpInt64(a.Reg, RegR11)
-		ctx.W.EmitJcc(CcNE, lblF0)
-		ctx.W.EmitCvtInt64ToFloat64(RegX0, a.Reg2)
-		ctx.W.EmitJmp(lblG0)
-		ctx.W.MarkLabel(lblF0)
-		ctx.W.emitMovqGprToXmm(RegX0, a.Reg2)
-		ctx.W.MarkLabel(lblG0)
-		lblF1 := ctx.W.ReserveLabel()
-		lblG1 := ctx.W.ReserveLabel()
-		ctx.W.EmitCmpInt64(b.Reg, RegR11)
-		ctx.W.EmitJcc(CcNE, lblF1)
-		ctx.W.EmitCvtInt64ToFloat64(RegX1, b.Reg2)
-		ctx.W.EmitJmp(lblG1)
-		ctx.W.MarkLabel(lblF1)
-		ctx.W.emitMovqGprToXmm(RegX1, b.Reg2)
-		ctx.W.MarkLabel(lblG1)
-		ctx.W.EmitUcomisd(RegX0, RegX1)
-		ctx.W.EmitSetcc(boolReg, floatCc)
-		ctx.W.MarkLabel(lblDone)
-		ctx.FreeDesc(&a)
-		ctx.FreeDesc(&b)
-		src := JITValueDesc{Loc: LocReg, Reg: boolReg}
-		ctx.W.EmitMakeBool(result, src)
-		ctx.FreeReg(boolReg)
-		return result
-	}
-}
 
 func init_alu() {
 	// string functions
@@ -168,42 +85,7 @@ func init_alu() {
 			return NewBool(tag == tagFloat || tag == tagInt || tag == tagDate)
 		},
 		true, false, nil,
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			a := args[0]
-			if a.Loc == LocImm {
-				tag := a.Imm.GetTag()
-				r := JITValueDesc{Loc: LocImm, Imm: NewBool(tag == tagFloat || tag == tagInt || tag == tagDate)}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeBool(result, r)
-				return result
-			}
-			// Register path: GetTag → check tagFloat(3), tagInt(4), tagDate(15)
-			tagReg := ctx.AllocReg()
-			ctx.W.EmitGetTag(tagReg, a.Reg, a.Reg2)
-			ctx.FreeDesc(&a)
-			lblYes := ctx.W.ReserveLabel()
-			lblDone := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagFloat))
-			ctx.W.EmitJcc(CcE, lblYes)
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagInt))
-			ctx.W.EmitJcc(CcE, lblYes)
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagDate))
-			ctx.W.EmitJcc(CcE, lblYes)
-			// Not a number
-			ctx.W.emitXorReg(tagReg) // tagReg = 0 (false)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblYes)
-			ctx.W.EmitMovRegImm64(tagReg, 1) // tagReg = 1 (true)
-			ctx.W.MarkLabel(lblDone)
-			src := JITValueDesc{Loc: LocReg, Reg: tagReg}
-			ctx.EnsureResultRegPair(&result)
-			ctx.W.EmitMakeBool(result, src)
-			ctx.FreeReg(tagReg)
-			return result
-		},
+		nil /* TODO: If: if t3 goto 2 else 3 */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"+", "adds two or more numbers",
@@ -239,157 +121,7 @@ func init_alu() {
 			return NewFloat(sumFloat)
 		},
 		true, false, &TypeDescriptor{Optimize: optimizeAssociative},
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			// Constant fold: all LocImm
-			allImm := true
-			for _, a := range args {
-				if a.Loc != LocImm {
-					allImm = false
-					break
-				}
-			}
-			if allImm {
-				var sumInt int64
-				j := 0
-				for j < len(args) {
-					if args[j].Imm.IsInt() {
-						sumInt += args[j].Imm.Int()
-						j++
-						continue
-					}
-					break
-				}
-				if j == len(args) {
-					r := JITValueDesc{Loc: LocImm, Imm: NewInt(sumInt)}
-					if result.Loc == LocAny {
-						return r
-					}
-					ctx.EnsureResultRegPair(&result)
-					ctx.W.EmitMakeInt(result, r)
-					return result
-				}
-				sumFloat := float64(sumInt)
-				for ; j < len(args); j++ {
-					if args[j].Imm.IsNil() {
-						r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-						if result.Loc == LocAny {
-							return r
-						}
-						ctx.EnsureResultRegPair(&result)
-						ctx.W.EmitMakeNil(result)
-						return result
-					}
-					sumFloat += args[j].Imm.Float()
-				}
-				r := JITValueDesc{Loc: LocImm, Imm: NewFloat(sumFloat)}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeFloat(result, r)
-				return result
-			}
-			// Register path: 2-arg fast path with int/float dispatch
-			if len(args) != 2 {
-				// Variadic > 2: materialize and chain pairwise
-				// For now, only handle 2 args; fall back for more
-				return JITValueDesc{}
-			}
-			a, b := args[0], args[1]
-			// Check for LocImm nil short-circuit
-			if a.Loc == LocImm && a.Imm.IsNil() {
-				ctx.FreeDesc(&b)
-				r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeNil(result)
-				return result
-			}
-			if b.Loc == LocImm && b.Imm.IsNil() {
-				ctx.FreeDesc(&a)
-				r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeNil(result)
-				return result
-			}
-			// Materialize any remaining LocImm to registers
-			ctx.MaterializeToRegPair(&a)
-			ctx.MaterializeToRegPair(&b)
-			ctx.EnsureResultRegPair(&result)
-			// Labels for branching
-			lblNotBothInt := ctx.W.ReserveLabel()
-			lblNilResult := ctx.W.ReserveLabel()
-			lblFloat0 := ctx.W.ReserveLabel()
-			lblGotFloat0 := ctx.W.ReserveLabel()
-			lblFloat1 := ctx.W.ReserveLabel()
-			lblGotFloat1 := ctx.W.ReserveLabel()
-			lblDone := ctx.W.ReserveLabel()
-			// Check both are int
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothInt)
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothInt)
-			// Both int: ADD aux values
-			ctx.W.EmitAddInt64(a.Reg2, b.Reg2)
-			ctx.W.emitMovRegReg(result.Reg, RegR11) // R11 = &scmerIntSentinel
-			ctx.W.emitMovRegReg(result.Reg2, a.Reg2)
-			ctx.W.EmitJmp(lblDone)
-			// Not both int: check for nil
-			ctx.W.MarkLabel(lblNotBothInt)
-			ctx.W.EmitTestRegReg(a.Reg)
-			ctx.W.EmitJcc(CcNE, lblFloat0) // ptr != nil → not nil
-			ctx.W.EmitTestRegReg(a.Reg2)
-			ctx.W.EmitJcc(CcE, lblNilResult) // ptr == nil && aux == 0 → nil
-			// a has ptr=nil but aux!=0 (bool/etc) → treat as float
-			ctx.W.MarkLabel(lblFloat0)
-			// Check nil for b
-			ctx.W.EmitTestRegReg(b.Reg)
-			ctx.W.EmitJcc(CcNE, lblFloat1)
-			ctx.W.EmitTestRegReg(b.Reg2)
-			ctx.W.EmitJcc(CcE, lblNilResult)
-			ctx.W.MarkLabel(lblFloat1)
-			// Float path: convert both to float64 and add
-			// arg0: int → CVTSI2SDQ, float → MOVQ bits
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblGotFloat0)
-			ctx.W.EmitCvtInt64ToFloat64(RegX0, a.Reg2)
-			ctx.W.EmitJmp(lblGotFloat1) // skip the MOVQ
-			ctx.W.MarkLabel(lblGotFloat0)
-			ctx.W.emitMovqGprToXmm(RegX0, a.Reg2) // float bits → XMM
-			ctx.W.MarkLabel(lblGotFloat1)
-			// arg1: same dispatch
-			lblCvt1 := ctx.W.ReserveLabel()
-			lblGotBoth := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblCvt1)
-			ctx.W.EmitCvtInt64ToFloat64(RegX1, b.Reg2)
-			ctx.W.EmitJmp(lblGotBoth)
-			ctx.W.MarkLabel(lblCvt1)
-			ctx.W.emitMovqGprToXmm(RegX1, b.Reg2)
-			ctx.W.MarkLabel(lblGotBoth)
-			// ADDSD
-			ctx.W.EmitAddFloat64(RegX0, RegX1)
-			// Construct NewFloat
-			ctx.W.EmitMovRegImm64(result.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
-			ctx.W.emitMovqXmmToGpr(result.Reg2, RegX0)
-			ctx.W.EmitJmp(lblDone)
-			// Nil result
-			ctx.W.MarkLabel(lblNilResult)
-			ctx.W.emitXorReg(result.Reg)
-			ctx.W.emitXorReg(result.Reg2)
-			ctx.W.MarkLabel(lblDone)
-			// Free input registers
-			ctx.FreeDesc(&a)
-			ctx.FreeDesc(&b)
-			return result
-		},
+		nil /* TODO: Jump: jump 3 */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"-", "subtracts two or more numbers from the first one",
@@ -429,150 +161,7 @@ func init_alu() {
 			return NewFloat(diffFloat)
 		},
 		true, false, nil,
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			// Constant fold
-			allImm := true
-			for _, a := range args {
-				if a.Loc != LocImm {
-					allImm = false
-					break
-				}
-			}
-			if allImm {
-				// Check nil
-				for _, a := range args {
-					if a.Imm.IsNil() {
-						r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-						if result.Loc == LocAny {
-							return r
-						}
-						ctx.EnsureResultRegPair(&result)
-						ctx.W.EmitMakeNil(result)
-						return result
-					}
-				}
-				if args[0].Imm.IsInt() {
-					diff := args[0].Imm.Int()
-					allInt := true
-					for i := 1; i < len(args); i++ {
-						if args[i].Imm.IsInt() {
-							diff -= args[i].Imm.Int()
-						} else {
-							allInt = false
-							break
-						}
-					}
-					if allInt {
-						r := JITValueDesc{Loc: LocImm, Imm: NewInt(diff)}
-						if result.Loc == LocAny {
-							return r
-						}
-						ctx.EnsureResultRegPair(&result)
-						ctx.W.EmitMakeInt(result, r)
-						return result
-					}
-				}
-				diffFloat := args[0].Imm.Float()
-				for i := 1; i < len(args); i++ {
-					diffFloat -= args[i].Imm.Float()
-				}
-				r := JITValueDesc{Loc: LocImm, Imm: NewFloat(diffFloat)}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeFloat(result, r)
-				return result
-			}
-			if len(args) != 2 {
-				return JITValueDesc{}
-			}
-			a, b := args[0], args[1]
-			// Nil short-circuit
-			if a.Loc == LocImm && a.Imm.IsNil() {
-				ctx.FreeDesc(&b)
-				r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeNil(result)
-				return result
-			}
-			if b.Loc == LocImm && b.Imm.IsNil() {
-				ctx.FreeDesc(&a)
-				r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeNil(result)
-				return result
-			}
-			ctx.MaterializeToRegPair(&a)
-			ctx.MaterializeToRegPair(&b)
-			ctx.EnsureResultRegPair(&result)
-			lblNotBothInt := ctx.W.ReserveLabel()
-			lblNilResult := ctx.W.ReserveLabel()
-			lblDone := ctx.W.ReserveLabel()
-			// Check both int
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothInt)
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothInt)
-			// Both int: SUB
-			ctx.W.EmitSubInt64(a.Reg2, b.Reg2)
-			ctx.W.emitMovRegReg(result.Reg, RegR11)
-			ctx.W.emitMovRegReg(result.Reg2, a.Reg2)
-			ctx.W.EmitJmp(lblDone)
-			// Not both int
-			ctx.W.MarkLabel(lblNotBothInt)
-			// Nil checks
-			ctx.W.EmitTestRegReg(a.Reg)
-			lblA := ctx.W.ReserveLabel()
-			ctx.W.EmitJcc(CcNE, lblA)
-			ctx.W.EmitTestRegReg(a.Reg2)
-			ctx.W.EmitJcc(CcE, lblNilResult)
-			ctx.W.MarkLabel(lblA)
-			ctx.W.EmitTestRegReg(b.Reg)
-			lblB := ctx.W.ReserveLabel()
-			ctx.W.EmitJcc(CcNE, lblB)
-			ctx.W.EmitTestRegReg(b.Reg2)
-			ctx.W.EmitJcc(CcE, lblNilResult)
-			ctx.W.MarkLabel(lblB)
-			// Float path
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-			lblF0 := ctx.W.ReserveLabel()
-			lblG0 := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblF0)
-			ctx.W.EmitCvtInt64ToFloat64(RegX0, a.Reg2)
-			ctx.W.EmitJmp(lblG0)
-			ctx.W.MarkLabel(lblF0)
-			ctx.W.emitMovqGprToXmm(RegX0, a.Reg2)
-			ctx.W.MarkLabel(lblG0)
-			lblF1 := ctx.W.ReserveLabel()
-			lblG1 := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblF1)
-			ctx.W.EmitCvtInt64ToFloat64(RegX1, b.Reg2)
-			ctx.W.EmitJmp(lblG1)
-			ctx.W.MarkLabel(lblF1)
-			ctx.W.emitMovqGprToXmm(RegX1, b.Reg2)
-			ctx.W.MarkLabel(lblG1)
-			ctx.W.EmitSubFloat64(RegX0, RegX1)
-			ctx.W.EmitMovRegImm64(result.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
-			ctx.W.emitMovqXmmToGpr(result.Reg2, RegX0)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblNilResult)
-			ctx.W.emitXorReg(result.Reg)
-			ctx.W.emitXorReg(result.Reg2)
-			ctx.W.MarkLabel(lblDone)
-			ctx.FreeDesc(&a)
-			ctx.FreeDesc(&b)
-			return result
-		},
+		nil /* TODO: dynamic call: len(a) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"*", "multiplies two or more numbers",
@@ -616,143 +205,7 @@ func init_alu() {
 			return NewFloat(prodFloat)
 		},
 		true, false, &TypeDescriptor{Optimize: optimizeAssociative},
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			allImm := true
-			for _, a := range args {
-				if a.Loc != LocImm {
-					allImm = false
-					break
-				}
-			}
-			if allImm {
-				for _, a := range args {
-					if a.Imm.IsNil() {
-						r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-						if result.Loc == LocAny {
-							return r
-						}
-						ctx.EnsureResultRegPair(&result)
-						ctx.W.EmitMakeNil(result)
-						return result
-					}
-				}
-				prod := int64(1)
-				allInt := true
-				for _, a := range args {
-					if a.Imm.IsInt() {
-						prod *= a.Imm.Int()
-					} else {
-						allInt = false
-						break
-					}
-				}
-				if allInt {
-					r := JITValueDesc{Loc: LocImm, Imm: NewInt(prod)}
-					if result.Loc == LocAny {
-						return r
-					}
-					ctx.EnsureResultRegPair(&result)
-					ctx.W.EmitMakeInt(result, r)
-					return result
-				}
-				prodFloat := float64(1)
-				for _, a := range args {
-					prodFloat *= a.Imm.Float()
-				}
-				r := JITValueDesc{Loc: LocImm, Imm: NewFloat(prodFloat)}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeFloat(result, r)
-				return result
-			}
-			if len(args) != 2 {
-				return JITValueDesc{}
-			}
-			a, b := args[0], args[1]
-			if a.Loc == LocImm && a.Imm.IsNil() {
-				ctx.FreeDesc(&b)
-				r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeNil(result)
-				return result
-			}
-			if b.Loc == LocImm && b.Imm.IsNil() {
-				ctx.FreeDesc(&a)
-				r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeNil(result)
-				return result
-			}
-			ctx.MaterializeToRegPair(&a)
-			ctx.MaterializeToRegPair(&b)
-			ctx.EnsureResultRegPair(&result)
-			lblNotBothInt := ctx.W.ReserveLabel()
-			lblNilResult := ctx.W.ReserveLabel()
-			lblDone := ctx.W.ReserveLabel()
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothInt)
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothInt)
-			// Both int: IMUL
-			ctx.W.EmitImulInt64(a.Reg2, b.Reg2)
-			ctx.W.emitMovRegReg(result.Reg, RegR11)
-			ctx.W.emitMovRegReg(result.Reg2, a.Reg2)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblNotBothInt)
-			// Nil checks
-			ctx.W.EmitTestRegReg(a.Reg)
-			lblA := ctx.W.ReserveLabel()
-			ctx.W.EmitJcc(CcNE, lblA)
-			ctx.W.EmitTestRegReg(a.Reg2)
-			ctx.W.EmitJcc(CcE, lblNilResult)
-			ctx.W.MarkLabel(lblA)
-			ctx.W.EmitTestRegReg(b.Reg)
-			lblB := ctx.W.ReserveLabel()
-			ctx.W.EmitJcc(CcNE, lblB)
-			ctx.W.EmitTestRegReg(b.Reg2)
-			ctx.W.EmitJcc(CcE, lblNilResult)
-			ctx.W.MarkLabel(lblB)
-			// Float path
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-			lblF0 := ctx.W.ReserveLabel()
-			lblG0 := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblF0)
-			ctx.W.EmitCvtInt64ToFloat64(RegX0, a.Reg2)
-			ctx.W.EmitJmp(lblG0)
-			ctx.W.MarkLabel(lblF0)
-			ctx.W.emitMovqGprToXmm(RegX0, a.Reg2)
-			ctx.W.MarkLabel(lblG0)
-			lblF1 := ctx.W.ReserveLabel()
-			lblG1 := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblF1)
-			ctx.W.EmitCvtInt64ToFloat64(RegX1, b.Reg2)
-			ctx.W.EmitJmp(lblG1)
-			ctx.W.MarkLabel(lblF1)
-			ctx.W.emitMovqGprToXmm(RegX1, b.Reg2)
-			ctx.W.MarkLabel(lblG1)
-			ctx.W.EmitMulFloat64(RegX0, RegX1)
-			ctx.W.EmitMovRegImm64(result.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
-			ctx.W.emitMovqXmmToGpr(result.Reg2, RegX0)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblNilResult)
-			ctx.W.emitXorReg(result.Reg)
-			ctx.W.emitXorReg(result.Reg2)
-			ctx.W.MarkLabel(lblDone)
-			ctx.FreeDesc(&a)
-			ctx.FreeDesc(&b)
-			return result
-		},
+		nil /* TODO: dynamic call: len(a) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"/", "divides two or more numbers from the first one",
@@ -774,103 +227,7 @@ func init_alu() {
 			return NewFloat(v)
 		},
 		true, false, nil,
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			allImm := true
-			for _, a := range args {
-				if a.Loc != LocImm {
-					allImm = false
-					break
-				}
-			}
-			if allImm {
-				for _, a := range args {
-					if a.Imm.IsNil() {
-						r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-						if result.Loc == LocAny {
-							return r
-						}
-						ctx.EnsureResultRegPair(&result)
-						ctx.W.EmitMakeNil(result)
-						return result
-					}
-				}
-				v := args[0].Imm.Float()
-				for i := 1; i < len(args); i++ {
-					v /= args[i].Imm.Float()
-				}
-				r := JITValueDesc{Loc: LocImm, Imm: NewFloat(v)}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeFloat(result, r)
-				return result
-			}
-			if len(args) != 2 {
-				return JITValueDesc{}
-			}
-			a, b := args[0], args[1]
-			if (a.Loc == LocImm && a.Imm.IsNil()) || (b.Loc == LocImm && b.Imm.IsNil()) {
-				ctx.FreeDesc(&a)
-				ctx.FreeDesc(&b)
-				r := JITValueDesc{Loc: LocImm, Imm: NewNil()}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeNil(result)
-				return result
-			}
-			ctx.MaterializeToRegPair(&a)
-			ctx.MaterializeToRegPair(&b)
-			ctx.EnsureResultRegPair(&result)
-			lblNilResult := ctx.W.ReserveLabel()
-			lblDone := ctx.W.ReserveLabel()
-			// Nil checks
-			ctx.W.EmitTestRegReg(a.Reg)
-			lblA := ctx.W.ReserveLabel()
-			ctx.W.EmitJcc(CcNE, lblA)
-			ctx.W.EmitTestRegReg(a.Reg2)
-			ctx.W.EmitJcc(CcE, lblNilResult)
-			ctx.W.MarkLabel(lblA)
-			ctx.W.EmitTestRegReg(b.Reg)
-			lblB := ctx.W.ReserveLabel()
-			ctx.W.EmitJcc(CcNE, lblB)
-			ctx.W.EmitTestRegReg(b.Reg2)
-			ctx.W.EmitJcc(CcE, lblNilResult)
-			ctx.W.MarkLabel(lblB)
-			// Always float: convert both to float64
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-			lblF0 := ctx.W.ReserveLabel()
-			lblG0 := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblF0)
-			ctx.W.EmitCvtInt64ToFloat64(RegX0, a.Reg2)
-			ctx.W.EmitJmp(lblG0)
-			ctx.W.MarkLabel(lblF0)
-			ctx.W.emitMovqGprToXmm(RegX0, a.Reg2)
-			ctx.W.MarkLabel(lblG0)
-			lblF1 := ctx.W.ReserveLabel()
-			lblG1 := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblF1)
-			ctx.W.EmitCvtInt64ToFloat64(RegX1, b.Reg2)
-			ctx.W.EmitJmp(lblG1)
-			ctx.W.MarkLabel(lblF1)
-			ctx.W.emitMovqGprToXmm(RegX1, b.Reg2)
-			ctx.W.MarkLabel(lblG1)
-			ctx.W.EmitDivFloat64(RegX0, RegX1)
-			ctx.W.EmitMovRegImm64(result.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
-			ctx.W.emitMovqXmmToGpr(result.Reg2, RegX0)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblNilResult)
-			ctx.W.emitXorReg(result.Reg)
-			ctx.W.emitXorReg(result.Reg2)
-			ctx.W.MarkLabel(lblDone)
-			ctx.FreeDesc(&a)
-			ctx.FreeDesc(&b)
-			return result
-		},
+		nil /* TODO: dynamic call: len(a) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<=", "compares two numbers or strings",
@@ -882,7 +239,7 @@ func init_alu() {
 			return NewBool(!Less(a[1], a[0]))
 		},
 		true, false, nil,
-		jitEmitCompare(false, CcLE, CcAE),
+		nil /* TODO: unsupported call: Less(t1, t3) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<", "compares two numbers or strings",
@@ -894,7 +251,7 @@ func init_alu() {
 			return NewBool(Less(a[0], a[1]))
 		},
 		true, false, nil,
-		jitEmitCompare(false, CcL, CcB),
+		nil /* TODO: unsupported call: Less(t1, t3) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		">", "compares two numbers or strings",
@@ -906,7 +263,7 @@ func init_alu() {
 			return NewBool(Less(a[1], a[0]))
 		},
 		true, false, nil,
-		jitEmitCompare(true, CcL, CcB),
+		nil /* TODO: unsupported call: Less(t1, t3) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		">=", "compares two numbers or strings",
@@ -918,7 +275,7 @@ func init_alu() {
 			return NewBool(!Less(a[0], a[1]))
 		},
 		true, false, nil,
-		jitEmitCompare(false, CcGE, CcAE),
+		nil /* TODO: unsupported call: Less(t1, t3) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal?", "compares two values of the same type, (equal? nil nil) is true",
@@ -930,66 +287,7 @@ func init_alu() {
 			return NewBool(Equal(a[0], a[1]))
 		},
 		true, false, nil,
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			a, b := args[0], args[1]
-			if a.Loc == LocImm && b.Loc == LocImm {
-				r := JITValueDesc{Loc: LocImm, Imm: NewBool(Equal(a.Imm, b.Imm))}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeBool(result, r)
-				return result
-			}
-			// Register path: compare both int fast, fallback to aux comparison
-			ctx.MaterializeToRegPair(&a)
-			ctx.MaterializeToRegPair(&b)
-			ctx.EnsureResultRegPair(&result)
-			boolReg := ctx.AllocReg()
-			lblDone := ctx.W.ReserveLabel()
-			lblNotSamePtr := ctx.W.ReserveLabel()
-			// Fast: if both ptr and aux match, values are equal
-			ctx.W.EmitCmpInt64(a.Reg, b.Reg)
-			ctx.W.EmitJcc(CcNE, lblNotSamePtr)
-			ctx.W.EmitCmpInt64(a.Reg2, b.Reg2)
-			ctx.W.EmitSetcc(boolReg, CcE)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblNotSamePtr)
-			// Both int sentinel → compare aux (int values)
-			lblNotBothInt := ctx.W.ReserveLabel()
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothInt)
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothInt)
-			ctx.W.EmitCmpInt64(a.Reg2, b.Reg2)
-			ctx.W.EmitSetcc(boolReg, CcE)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblNotBothInt)
-			// Both float sentinel → compare as float
-			lblNotBothFloat := ctx.W.ReserveLabel()
-			ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
-			ctx.W.EmitCmpInt64(a.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothFloat)
-			ctx.W.EmitCmpInt64(b.Reg, RegR11)
-			ctx.W.EmitJcc(CcNE, lblNotBothFloat)
-			ctx.W.emitMovqGprToXmm(RegX0, a.Reg2)
-			ctx.W.emitMovqGprToXmm(RegX1, b.Reg2)
-			ctx.W.EmitUcomisd(RegX0, RegX1)
-			ctx.W.EmitSetcc(boolReg, CcE)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblNotBothFloat)
-			// Mixed types or complex: conservative false (not perfectly correct but
-			// handles the hot path of same-type numeric comparisons)
-			ctx.W.emitXorReg(boolReg)
-			ctx.W.MarkLabel(lblDone)
-			ctx.FreeDesc(&a)
-			ctx.FreeDesc(&b)
-			src := JITValueDesc{Loc: LocReg, Reg: boolReg}
-			ctx.W.EmitMakeBool(result, src)
-			ctx.FreeReg(boolReg)
-			return result
-		},
+		nil /* TODO: unsupported call: Equal(t1, t3) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal??", "performs a SQL compliant sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive, (equal? nil nil) is nil",
@@ -1001,25 +299,7 @@ func init_alu() {
 			return EqualSQL(a[0], a[1])
 		},
 		true, false, nil,
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			a, b := args[0], args[1]
-			if a.Loc == LocImm && b.Loc == LocImm {
-				r := JITValueDesc{Loc: LocImm, Imm: EqualSQL(a.Imm, b.Imm)}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				tag := r.Imm.GetTag()
-				if tag == tagNil {
-					ctx.W.EmitMakeNil(result)
-				} else {
-					ctx.W.EmitMakeBool(result, r)
-				}
-				return result
-			}
-			// No register path — too complex (SQL semantics with nil propagation)
-			return JITValueDesc{}
-		},
+		nil /* TODO: unsupported call: EqualSQL(t1, t3) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"equal_collate", "performs SQL equality with a specified collation (e.g. *_ci case-insensitive, *_bin case-sensitive); returns nil if either arg is nil",
@@ -1077,48 +357,7 @@ func init_alu() {
 			return NewBool(!a[0].Bool())
 		},
 		true, false, nil,
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			a := args[0]
-			if a.Loc == LocImm {
-				r := JITValueDesc{Loc: LocImm, Imm: NewBool(!a.Imm.Bool())}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeBool(result, r)
-				return result
-			}
-			// Register path: tag dispatch for !Bool()
-			// tagNil → true, tagBool → flip low bit, else → false
-			tagReg := ctx.AllocReg()
-			ctx.W.EmitGetTag(tagReg, a.Reg, a.Reg2)
-			boolReg := a.Reg // reuse ptr reg for result bool
-			lblIsBool := ctx.W.ReserveLabel()
-			lblDone := ctx.W.ReserveLabel()
-			// Check nil first
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagNil))
-			ctx.FreeReg(tagReg)
-			ctx.W.EmitSetcc(boolReg, CcE) // boolReg = 1 if nil (nil is falsy, !false = true)
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagBool))
-			ctx.W.EmitJcc(CcE, lblIsBool)
-			// For nil: boolReg already has the right value (1)
-			// For non-nil non-bool: truthy → !true = false
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagNil))
-			ctx.W.EmitSetcc(boolReg, CcE) // 1 if nil, 0 otherwise
-			ctx.W.EmitJmp(lblDone)
-			// Bool path: extract low bit of aux, flip it
-			ctx.W.MarkLabel(lblIsBool)
-			ctx.W.emitMovRegReg(boolReg, a.Reg2) // boolReg = aux
-			ctx.W.emitAndRegImm32(boolReg, 1)     // isolate low bit
-			ctx.W.EmitXorRegImm8(boolReg, 1)      // flip
-			ctx.W.MarkLabel(lblDone)
-			ctx.FreeReg(a.Reg2) // free aux reg
-			src := JITValueDesc{Loc: LocReg, Reg: boolReg}
-			ctx.EnsureResultRegPair(&result)
-			ctx.W.EmitMakeBool(result, src)
-			ctx.FreeReg(boolReg)
-			return result
-		},
+		nil /* TODO: unsupported call: (Scmer).Bool(t1) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"not", "negates the boolean value",
@@ -1130,41 +369,7 @@ func init_alu() {
 			return NewBool(!a[0].Bool())
 		},
 		true, false, nil,
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			a := args[0]
-			if a.Loc == LocImm {
-				r := JITValueDesc{Loc: LocImm, Imm: NewBool(!a.Imm.Bool())}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeBool(result, r)
-				return result
-			}
-			tagReg := ctx.AllocReg()
-			ctx.W.EmitGetTag(tagReg, a.Reg, a.Reg2)
-			boolReg := a.Reg
-			lblIsBool := ctx.W.ReserveLabel()
-			lblDone := ctx.W.ReserveLabel()
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagBool))
-			ctx.W.EmitJcc(CcE, lblIsBool)
-			ctx.FreeReg(tagReg)
-			// nil → true, else → false
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagNil))
-			ctx.W.EmitSetcc(boolReg, CcE)
-			ctx.W.EmitJmp(lblDone)
-			ctx.W.MarkLabel(lblIsBool)
-			ctx.W.emitMovRegReg(boolReg, a.Reg2)
-			ctx.W.emitAndRegImm32(boolReg, 1)
-			ctx.W.EmitXorRegImm8(boolReg, 1)
-			ctx.W.MarkLabel(lblDone)
-			ctx.FreeReg(a.Reg2)
-			src := JITValueDesc{Loc: LocReg, Reg: boolReg}
-			ctx.EnsureResultRegPair(&result)
-			ctx.W.EmitMakeBool(result, src)
-			ctx.FreeReg(boolReg)
-			return result
-		},
+		nil /* TODO: unsupported call: (Scmer).Bool(t1) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nil?", "returns true if value is nil",
@@ -1176,28 +381,7 @@ func init_alu() {
 			return NewBool(a[0].IsNil())
 		},
 		true, false, nil,
-		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			a := args[0]
-			if a.Loc == LocImm {
-				r := JITValueDesc{Loc: LocImm, Imm: NewBool(a.Imm.IsNil())}
-				if result.Loc == LocAny {
-					return r
-				}
-				ctx.EnsureResultRegPair(&result)
-				ctx.W.EmitMakeBool(result, r)
-				return result
-			}
-			tagReg := ctx.AllocReg()
-			ctx.W.EmitGetTag(tagReg, a.Reg, a.Reg2)
-			ctx.FreeDesc(&a)
-			ctx.W.EmitCmpRegImm32(tagReg, int32(tagNil))
-			ctx.W.EmitSetcc(tagReg, CcE)
-			src := JITValueDesc{Loc: LocReg, Reg: tagReg}
-			ctx.EnsureResultRegPair(&result)
-			ctx.W.EmitMakeBool(result, src)
-			ctx.FreeReg(tagReg)
-			return result
-		},
+		nil /* TODO: unsupported call: (Scmer).IsNil(t1) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"min", "returns the smallest value",
