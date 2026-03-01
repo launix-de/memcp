@@ -176,6 +176,9 @@ func extractScannedTables(expr scm.Scmer) []tableRef {
 func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 	refs := extractScannedTables(computor)
 	targetSchema := t.schema.Name
+	// Collect trigger names placed on source tables for self-cleanup
+	type triggerRef struct{ schema, name string }
+	var registeredNames []triggerRef
 	for _, ref := range refs {
 		srcDB := GetDatabase(ref.schema)
 		if srcDB == nil {
@@ -199,21 +202,21 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 					break
 				}
 			}
-			if exists {
-				continue
+			if !exists {
+				srcTable.AddTrigger(TriggerDescription{
+					Name:     triggerName,
+					Timing:   timing,
+					IsSystem: true,
+					Priority: 100,
+					Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("invalidatecolumn"),
+						scm.NewString(targetSchema),
+						scm.NewString(t.Name),
+						scm.NewString(name),
+					})),
+				})
 			}
-			srcTable.AddTrigger(TriggerDescription{
-				Name:     triggerName,
-				Timing:   timing,
-				IsSystem: true,
-				Priority: 100,
-				Func: buildFKProc(scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("invalidatecolumn"),
-					scm.NewString(targetSchema),
-					scm.NewString(t.Name),
-					scm.NewString(name),
-				})),
-			})
+			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
 		}
 		// AfterDropTable: when source table is dropped, drop the target table too
 		dropTriggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + AfterDropTable.String()
@@ -236,6 +239,37 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 					scm.NewString(t.Name),
 					scm.NewBool(true),
 				})),
+			})
+		}
+		registeredNames = append(registeredNames, triggerRef{ref.schema, dropTriggerName})
+	}
+	// Register self-cleanup on target table: when this keytable is dropped,
+	// remove all triggers we placed on source tables.
+	if len(registeredNames) > 0 {
+		selfCleanupName := ".self_cleanup:" + t.Name + ":" + name
+		exists := false
+		for _, tr := range t.Triggers {
+			if tr.Name == selfCleanupName {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			calls := []scm.Scmer{scm.NewSymbol("begin")}
+			for _, rn := range registeredNames {
+				calls = append(calls, scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("droptrigger"),
+					scm.NewString(rn.schema),
+					scm.NewString(rn.name),
+					scm.NewBool(true),
+				}))
+			}
+			t.AddTrigger(TriggerDescription{
+				Name:     selfCleanupName,
+				Timing:   AfterDropTable,
+				IsSystem: true,
+				Priority: 50,
+				Func:     buildFKProc(scm.NewSlice(calls)),
 			})
 		}
 	}

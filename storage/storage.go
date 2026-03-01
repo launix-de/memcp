@@ -1742,6 +1742,10 @@ func Init(en scm.Env) {
 				timing = BeforeDelete
 			case "after_delete":
 				timing = AfterDelete
+			case "after_drop_table":
+				timing = AfterDropTable
+			case "after_drop_column":
+				timing = AfterDropColumn
 			default:
 				panic("invalid trigger timing: " + timingStr)
 			}

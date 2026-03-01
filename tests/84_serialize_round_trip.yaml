@@ -1,0 +1,130 @@
+# Serialize round-trip test for computed columns (StorageComputeProxy).
+# Verifies that GROUP BY cache survives SHUTDOWN/restart and that
+# invalidation still works after deserialization.
+
+metadata:
+  version: "1.0"
+  description: "StorageComputeProxy serialize round-trip: persist, restart, verify"
+
+test_cases:
+  # --- Setup ---
+  - name: "Drop leftover table"
+    sql: "DROP TABLE IF EXISTS sr_data"
+
+  - name: "Create base table"
+    sql: "CREATE TABLE sr_data (id INT PRIMARY KEY, category VARCHAR(20), amount INT)"
+
+  - name: "Insert initial data"
+    sql: |
+      INSERT INTO sr_data (id, category, amount) VALUES
+        (1, 'Alpha', 100),
+        (2, 'Alpha', 200),
+        (3, 'Beta', 150),
+        (4, 'Beta', 50),
+        (5, 'Gamma', 300)
+
+  # --- Baseline GROUP BY (creates keytable + StorageComputeProxy) ---
+  - name: "Baseline: SUM per category"
+    sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "Alpha"
+          s: 300
+        - category: "Beta"
+          s: 200
+        - category: "Gamma"
+          s: 300
+
+  - name: "Baseline: COUNT per category"
+    sql: "SELECT category, COUNT(*) AS c FROM sr_data GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "Alpha"
+          c: 2
+        - category: "Beta"
+          c: 2
+        - category: "Gamma"
+          c: 1
+
+  # --- SHUTDOWN to persist computed columns ---
+  - name: "SHUTDOWN to persist StorageComputeProxy"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # --- Re-query after restart: must return identical results ---
+  - name: "After restart: SUM per category unchanged"
+    sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "Alpha"
+          s: 300
+        - category: "Beta"
+          s: 200
+        - category: "Gamma"
+          s: 300
+
+  - name: "After restart: COUNT per category unchanged"
+    sql: "SELECT category, COUNT(*) AS c FROM sr_data GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "Alpha"
+          c: 2
+        - category: "Beta"
+          c: 2
+        - category: "Gamma"
+          c: 1
+
+  # --- DML after restart: verify invalidation still works ---
+  - name: "Insert new row after restart"
+    sql: "INSERT INTO sr_data (id, category, amount) VALUES (6, 'Alpha', 400)"
+
+  - name: "After post-restart INSERT: SUM updated"
+    sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "Alpha"
+          s: 700
+        - category: "Beta"
+          s: 200
+        - category: "Gamma"
+          s: 300
+
+  - name: "Update row after restart"
+    sql: "UPDATE sr_data SET amount = 999 WHERE id = 3"
+
+  - name: "After post-restart UPDATE: SUM reflects change"
+    sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "Alpha"
+          s: 700
+        - category: "Beta"
+          s: 1049
+        - category: "Gamma"
+          s: 300
+
+  - name: "Delete row after restart"
+    sql: "DELETE FROM sr_data WHERE id = 5"
+
+  - name: "After post-restart DELETE: Gamma SUM is 0"
+    sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
+    expect:
+      rows: 3
+      data:
+        - category: "Alpha"
+          s: 700
+        - category: "Beta"
+          s: 1049
+        - category: "Gamma"
+          s: 0
+
+  # --- Cleanup ---
+  - name: "Cleanup sr_data"
+    sql: "DROP TABLE IF EXISTS sr_data"
