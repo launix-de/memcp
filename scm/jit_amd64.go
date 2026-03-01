@@ -49,20 +49,13 @@ func jitNthArgument(idx int) []byte { // up to 16 params
 	return code
 }
 
-// jitCompileProc pattern-matches a Proc body and returns amd64 machine code or nil.
-//
-// Native code emission is limited to frameless patterns (literal returns, param
-// returns) because Go's stack walker cannot handle invisible JIT frames:
-//   - CALL from JIT into Go causes "unexpected return pc" (Go doesn't know JIT PCs)
-//   - JMP with JIT frame left on stack confuses frame-size-based stack walking
-//   - No-frame approach has no safe memory for the variadic arg slice
-//
-// Function calls fall through to OptimizeProcToSerialFunction (Go closure).
+// jitCompileProc compiles a Proc body to amd64 machine code or returns nil.
 func jitCompileProc(proc *Proc) []byte {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		body = body.SourceInfo().value
 	}
+	// Trivial patterns: literal returns, parameter passthrough
 	switch body.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString:
 		return jitReturnLiteral(body)
@@ -72,73 +65,122 @@ func jitCompileProc(proc *Proc) []byte {
 		// Function call: (fn arg0 arg1 ...)
 		return jitCompileCall(body.Slice())
 	}
+	// Expression compilation via JITEmit
+	if body.GetTag() == tagSlice {
+		return jitCompileExprBody(body)
+	}
 	return nil
 }
 
-// jitCompileCall compiles a function call expression using Declaration.JITEmit.
-func jitCompileCall(call []Scmer) []byte {
-	if len(call) < 1 {
-		return nil
-	}
-	// Look up the Declaration for the head
-	decl := DeclarationForValue(call[0])
-	if decl == nil || decl.JITEmit == nil {
-		return nil
-	}
+// jitCompileExprBody compiles a Scheme expression body to machine code
+// using Declaration.JITEmit callbacks. Returns nil if any sub-expression
+// is not JIT-compilable.
+func jitCompileExprBody(body Scmer) (code []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			code = nil
+		}
+	}()
 
-	// Allocate a scratch buffer for code generation
-	buf := make([]byte, 4096)
+	// Allocate temp buffer for code emission
+	codeBuf := make([]byte, 16384)
 	w := &JITWriter{
-		Ptr:   unsafe.Pointer(&buf[0]),
-		Start: unsafe.Pointer(&buf[0]),
-		End:   unsafe.Pointer(&buf[len(buf)-1]),
+		Ptr:   unsafe.Pointer(&codeBuf[0]),
+		Start: unsafe.Pointer(&codeBuf[0]),
+		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 	}
 
-	args := call[1:]
-
-	// Emit stack frame prologue (required by Go calling convention)
-	// PUSH RBP; MOV RBP, RSP; SUB RSP, frameSize
-	frameSize := byte(0x10)                  // 16 bytes for saving RAX (args slice ptr)
-	w.emitByte(0x55)                         // PUSH RBP
-	w.emitBytes(0x48, 0x89, 0xE5)            // MOV RBP, RSP
-	w.emitBytes(0x48, 0x83, 0xEC, frameSize) // SUB RSP, frameSize
-
-	// Save RAX (args slice pointer) on stack before clobbering it
-	// MOV [RSP], RAX
-	w.emitBytes(0x48, 0x89, 0x04, 0x24) // MOV [RSP], RAX
-
-	// Available GPRs (excluding RAX/RBX=return, RSP, RBP, R14=g)
+	// Free registers: all GPRs except RAX (result ptr), RBX (result aux),
+	// RSP, RBP, R11 (scratch), R12 (slice base)
 	ctx := &JITContext{
 		W: w,
-		FreeRegs: (1 << RegRCX) | (1 << RegRDX) | (1 << RegRSI) | (1 << RegRDI) |
-			(1 << RegR8) | (1 << RegR9) | (1 << RegR10) | (1 << RegR11) |
-			(1 << RegR12) | (1 << RegR13) | (1 << RegR15),
+		FreeRegs: (1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
+			(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
+			(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
+			(1 << uint(RegR13)) | (1 << uint(RegR14)) | (1 << uint(RegR15)),
 	}
 
-	// Load each argument from the Scmer slice into register pairs
-	// Use RSP-saved RAX as base for arg loads
-	descs := make([]JITValueDesc, len(args))
-	for i := range args {
-		ptrReg := ctx.AllocReg()
-		auxReg := ctx.AllocReg()
-		// MOV ptrReg, [RAX + i*16]     (Scmer.ptr)
-		w.emitMovRegMem(ptrReg, RegRAX, int32(i*16))
-		// MOV auxReg, [RAX + i*16 + 8] (Scmer.aux)
-		w.emitMovRegMem(auxReg, RegRAX, int32(i*16+8))
-		descs[i] = JITValueDesc{Type: JITTypeUnknown, Loc: LocRegPair, Reg: ptrReg, Reg2: auxReg}
+	// Emit: MOV R12, RAX (save slice base pointer)
+	w.emitMovRegReg(RegR12, RegRAX)
+
+	// Compile body, place result into RAX+RBX (Scmer return registers)
+	result := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
+	desc := jitCompileExpr(ctx, body, RegR12, result)
+
+	// If result came back as LocImm, materialize into RAX+RBX
+	if desc.Loc == LocImm {
+		switch desc.Imm.GetTag() {
+		case tagBool:
+			w.EmitReturnBool(desc)
+		case tagInt:
+			w.EmitReturnInt(desc)
+		case tagFloat:
+			w.EmitReturnFloat(desc)
+		case tagNil:
+			w.EmitReturnNil()
+		default:
+			return nil
+		}
+	} else {
+		// Result already materialized in RAX+RBX by the emitter
+		w.emitByte(0xC3) // RET
 	}
-
-	// Result goes into RAX (ptr) + RBX (aux) — the Go return registers
-	resultDesc := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
-	decl.JITEmit(ctx, args, descs, resultDesc)
-
-	// Emit stack frame epilogue + RET
-	w.emitBytes(0x48, 0x83, 0xC4, frameSize) // ADD RSP, frameSize
-	w.emitByte(0x5D)                         // POP RBP
-	w.emitByte(0xC3)                         // RET
 
 	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
-	return buf[:codeLen]
+	return codeBuf[:codeLen]
+}
+
+// jitCompileExpr recursively compiles a Scheme expression to machine code.
+// sliceBase is the GPR holding the variadic args slice pointer.
+// result tells the emitter where to place the output.
+// Panics on unsupported expressions (caught by jitCompileExprBody).
+func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	if expr.GetTag() == tagSourceInfo {
+		expr = expr.SourceInfo().value
+	}
+	switch expr.GetTag() {
+	case tagNil:
+		return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: expr}
+	case tagBool:
+		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: expr}
+	case tagInt:
+		return JITValueDesc{Loc: LocImm, Type: tagInt, Imm: expr}
+	case tagFloat:
+		return JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: expr}
+	case tagString:
+		return JITValueDesc{Loc: LocImm, Type: tagString, Imm: expr}
+	case tagNthLocalVar:
+		// Load parameter from args slice: ptr at [base+i*16], aux at [base+i*16+8]
+		idx := int(expr.NthLocalVar())
+		ptrReg := ctx.AllocReg()
+		auxReg := ctx.AllocReg()
+		ctx.W.emitMovRegMem(ptrReg, sliceBase, int32(idx*16))
+		ctx.W.emitMovRegMem(auxReg, sliceBase, int32(idx*16+8))
+		return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: auxReg}
+	case tagSlice:
+		list := expr.Slice()
+		if len(list) == 0 {
+			return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+		}
+		// Resolve operator
+		if !list[0].IsSymbol() {
+			panic("jit: non-symbol in call position")
+		}
+		name := string(list[0].Symbol())
+		decl, ok := declarations[name]
+		if !ok || decl.JITEmit == nil {
+			panic("jit: no JITEmit for " + name)
+		}
+		// Compile arguments (intermediate results use LocAny)
+		args := make([]JITValueDesc, len(list)-1)
+		for i := 1; i < len(list); i++ {
+			args[i-1] = jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+		}
+		// Call the JITEmit callback
+		return decl.JITEmit(ctx, args, result)
+	default:
+		panic("jit: unsupported expression tag")
+	}
 }
 
 func jitStackFrame(size uint8) []byte {

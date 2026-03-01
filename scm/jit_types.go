@@ -89,16 +89,10 @@ Generated emitters (tools/jitgen):
 // (RAX, R8, X0, etc.) are defined in architecture-specific files.
 type Reg uint8
 
-// JITType describes the known type of a value during JIT compilation.
-type JITType uint8
-
-const (
-	JITTypeUnknown JITType = iota // Scmer, no specific type
-	JITTypeInt64                  // Guaranteed int64
-	JITTypeFloat64                // Guaranteed float64
-	JITTypeString                 // Guaranteed string
-	JITTypeBool                   // Guaranteed bool
-)
+// JITTypeUnknown means the Scmer type is not known at compile time.
+// All other type values are tag constants (tagInt, tagFloat, tagBool, etc.)
+// so GetTag can be constant-folded when Type != JITTypeUnknown.
+const JITTypeUnknown uint16 = 0xFFFF
 
 // JITLoc describes where a value resides during JIT compilation.
 type JITLoc uint8
@@ -116,8 +110,20 @@ const (
 // JITValueDesc describes a value during JIT compilation: its type and
 // storage location. Flows through expression compilation for type
 // propagation — analogous to optimizerMetainfo in the optimizer.
+//
+// Type uses the tag constants (tagInt, tagFloat, tagBool, ...) directly,
+// or JITTypeUnknown (0xFFFF) when the type is not known at compile time.
+// This means GetTag can be constant-folded: if Type != JITTypeUnknown,
+// the tag IS Type — no machine code needed.
+//
+// Type resolution (fixed vs flexible):
+//
+//   LocImm:     ALWAYS fixed. Imm.GetTag() == Type. Constant-fold everything.
+//   LocReg:     ALWAYS fixed. Unboxed primitive in a register. Type says what.
+//   LocRegPair: Fixed if Type != JITTypeUnknown, flexible otherwise.
+//   LocAny:     Result placement hint only ("I don't care where you put it").
 type JITValueDesc struct {
-	Type     JITType
+	Type     uint16 // tag constant (tagInt, tagFloat, ...) or JITTypeUnknown
 	Nullable bool
 	Loc      JITLoc
 	Reg      Reg

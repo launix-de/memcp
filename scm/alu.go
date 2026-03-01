@@ -51,17 +51,20 @@ func init_alu() {
 			d1 := ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
 			var d2 JITValueDesc
 			if d1.Loc == LocImm {
-				d2 = JITValueDesc{Loc: LocImm, Imm: NewBool(d1.Imm.Int() == 4)}
+				d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d1.Imm.Int() == 4)}
 			} else {
+				r0 := ctx.AllocReg()
 				ctx.W.EmitCmpRegImm32(d1.Reg, 4)
-				ctx.W.EmitSetcc(d1.Reg, CcE)
-				d2 = JITValueDesc{Loc: LocReg, Reg: d1.Reg}
+				ctx.W.EmitSetcc(r0, CcE)
+				d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
 			}
 			if d2.Loc == LocImm {
 				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d2.Imm} }
 				ctx.W.EmitMakeBool(result, d2)
 			} else {
+				if result.Loc == LocAny { return d2 }
 				ctx.W.EmitMakeBool(result, d2)
+				ctx.FreeReg(d2.Reg)
 			}
 			return result
 		},
@@ -77,7 +80,90 @@ func init_alu() {
 			return NewBool(tag == tagFloat || tag == tagInt || tag == tagDate)
 		},
 		true, false, nil,
-		nil /* TODO: If: if t3 goto 2 else 3 */,
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			r0 := ctx.AllocReg()
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			lbl0 := ctx.W.ReserveLabel()
+			d0 := args[0]
+			d1 := ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
+			var d2 JITValueDesc
+			if d1.Loc == LocImm {
+				d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d1.Imm.Int() == 3)}
+			} else {
+				r1 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d1.Reg, 3)
+				ctx.W.EmitSetcc(r1, CcE)
+				d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
+			}
+			lbl1 := ctx.W.ReserveLabel()
+			lbl2 := ctx.W.ReserveLabel()
+			lbl3 := ctx.W.ReserveLabel()
+			if d2.Loc == LocImm {
+				if d2.Imm.Bool() {
+					ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Imm: NewInt(1)})
+					ctx.W.EmitJmp(lbl1)
+				} else {
+					ctx.W.EmitJmp(lbl2)
+				}
+			} else {
+				ctx.W.EmitCmpRegImm32(d2.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl3)
+				ctx.W.EmitJmp(lbl2)
+				ctx.W.MarkLabel(lbl3)
+				ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Imm: NewInt(1)})
+				ctx.W.EmitJmp(lbl1)
+			}
+			ctx.W.MarkLabel(lbl2)
+			var d3 JITValueDesc
+			if d1.Loc == LocImm {
+				d3 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d1.Imm.Int() == 4)}
+			} else {
+				r2 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d1.Reg, 4)
+				ctx.W.EmitSetcc(r2, CcE)
+				d3 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r2}
+			}
+			lbl4 := ctx.W.ReserveLabel()
+			lbl5 := ctx.W.ReserveLabel()
+			if d3.Loc == LocImm {
+				if d3.Imm.Bool() {
+					ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Imm: NewInt(1)})
+					ctx.W.EmitJmp(lbl1)
+				} else {
+					ctx.W.EmitJmp(lbl4)
+				}
+			} else {
+				ctx.W.EmitCmpRegImm32(d3.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl5)
+				ctx.W.EmitJmp(lbl4)
+				ctx.W.MarkLabel(lbl5)
+				ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Imm: NewInt(1)})
+				ctx.W.EmitJmp(lbl1)
+			}
+			ctx.W.MarkLabel(lbl1)
+			d4 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r0}
+			ctx.W.EmitMakeBool(result, d4)
+			if d4.Loc == LocReg { ctx.FreeReg(d4.Reg) }
+			result.Type = tagBool
+			ctx.W.EmitJmp(lbl0)
+			ctx.W.MarkLabel(lbl4)
+			var d5 JITValueDesc
+			if d1.Loc == LocImm {
+				d5 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d1.Imm.Int() == 15)}
+			} else {
+				r3 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d1.Reg, 15)
+				ctx.W.EmitSetcc(r3, CcE)
+				d5 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r3}
+			}
+			ctx.EmitMovToReg(r0, d5)
+			ctx.W.EmitJmp(lbl1)
+			ctx.W.MarkLabel(lbl0)
+			ctx.W.ResolveFixups()
+			return result
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		"+", "adds two or more numbers",
@@ -113,7 +199,7 @@ func init_alu() {
 			return NewFloat(sumFloat)
 		},
 		true, false, &TypeDescriptor{Optimize: optimizeAssociative},
-		nil /* TODO: Jump: jump 3 */,
+		nil /* TODO: expected constant, got phi [0: 0:int, 4: t11] #i */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"-", "subtracts two or more numbers from the first one",
@@ -153,7 +239,7 @@ func init_alu() {
 			return NewFloat(diffFloat)
 		},
 		true, false, nil,
-		nil /* TODO: dynamic call: len(a) */,
+		nil /* TODO: expected constant, got t1 + 1:int */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"*", "multiplies two or more numbers",
@@ -197,7 +283,7 @@ func init_alu() {
 			return NewFloat(prodFloat)
 		},
 		true, false, &TypeDescriptor{Optimize: optimizeAssociative},
-		nil /* TODO: dynamic call: len(a) */,
+		nil /* TODO: expected constant, got t1 + 1:int */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"/", "divides two or more numbers from the first one",
@@ -219,7 +305,7 @@ func init_alu() {
 			return NewFloat(v)
 		},
 		true, false, nil,
-		nil /* TODO: dynamic call: len(a) */,
+		nil /* TODO: Slice: slice a[1:int:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"<=", "compares two numbers or strings",
@@ -319,7 +405,7 @@ func init_alu() {
 			return EqualSQL(a[0], a[1])
 		},
 		true, false, nil,
-		nil /* TODO: If: if t2 goto 1 else 3 */,
+		nil /* TODO: unsupported call: String(t5) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"notequal_collate", "performs SQL inequality with a specified collation; returns nil if either arg is nil",
@@ -380,7 +466,9 @@ func init_alu() {
 				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d1.Imm} }
 				ctx.W.EmitMakeBool(result, d1)
 			} else {
+				if result.Loc == LocAny { return d1 }
 				ctx.W.EmitMakeBool(result, d1)
+				ctx.FreeReg(d1.Reg)
 			}
 			return result
 		},
@@ -403,7 +491,7 @@ func init_alu() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: dynamic call: len(a) */,
+		nil /* TODO: unsupported return type for phi [0: Scmer{}:Scmer, 4: t6, 5: t1, 7: t1, 6: t6] #result */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"max", "returns the highest value",
@@ -423,7 +511,7 @@ func init_alu() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: dynamic call: len(a) */,
+		nil /* TODO: unsupported return type for phi [0: Scmer{}:Scmer, 4: t6, 5: t1, 7: t1, 6: t6] #result */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"floor", "rounds the number down",
@@ -435,7 +523,7 @@ func init_alu() {
 			return NewFloat(math.Floor(a[0].Float()))
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: (Scmer).Float(t1) */,
+		nil /* TODO: unsupported call: math.Floor(t2) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"ceil", "rounds the number up",
@@ -447,7 +535,7 @@ func init_alu() {
 			return NewFloat(math.Ceil(a[0].Float()))
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: (Scmer).Float(t1) */,
+		nil /* TODO: unsupported call: math.Ceil(t2) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"round", "rounds the number",
@@ -459,7 +547,7 @@ func init_alu() {
 			return NewFloat(math.Round(a[0].Float()))
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: (Scmer).Float(t1) */,
+		nil /* TODO: unsupported call: math.Round(t2) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_abs", "SQL ABS(): returns absolute value, NULL-safe",
@@ -482,7 +570,7 @@ func init_alu() {
 			return NewFloat(v)
 		},
 		true, false, nil,
-		nil /* TODO: If: if t2 goto 1 else 2 */,
+		nil /* TODO: unsupported call: ToInt(t11) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sqrt", "returns the square root of a number",
@@ -501,7 +589,7 @@ func init_alu() {
 			return NewFloat(math.Sqrt(v))
 		},
 		true, false, nil,
-		nil /* TODO: If: if t2 goto 1 else 2 */,
+		nil /* TODO: unsupported call: math.Sqrt(t6) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_rand", "SQL RAND(): returns a random float in [0,1)",

@@ -560,7 +560,17 @@ func (w *JITWriter) EmitShrRegImm8(dst Reg, imm uint8) {
 // places the tag int into result according to result.Loc.
 func (ctx *JITContext) EmitGetTagDesc(src *JITValueDesc, result JITValueDesc) JITValueDesc {
 	if src.Loc == LocImm {
-		r := JITValueDesc{Loc: LocImm, Imm: NewInt(int64(src.Imm.GetTag()))}
+		r := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(src.Imm.GetTag()))}
+		if result.Loc == LocAny {
+			return r
+		}
+		ctx.W.EmitMakeInt(result, r)
+		return result
+	}
+	if src.Type != JITTypeUnknown {
+		// Type is known at compile time — constant-fold
+		ctx.FreeDesc(src)
+		r := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(src.Type))}
 		if result.Loc == LocAny {
 			return r
 		}
@@ -570,7 +580,7 @@ func (ctx *JITContext) EmitGetTagDesc(src *JITValueDesc, result JITValueDesc) JI
 	dst := ctx.AllocReg()
 	ctx.W.emitGetTagRegs(dst, src.Reg, src.Reg2)
 	ctx.FreeDesc(src)
-	r := JITValueDesc{Loc: LocReg, Reg: dst}
+	r := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: dst}
 	if result.Loc == LocAny {
 		return r
 	}
@@ -583,7 +593,17 @@ func (ctx *JITContext) EmitGetTagDesc(src *JITValueDesc, result JITValueDesc) JI
 // Equivalent to GetTag(src) == tag. Consumes src, produces a bool.
 func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITValueDesc) JITValueDesc {
 	if src.Loc == LocImm {
-		r := JITValueDesc{Loc: LocImm, Imm: NewBool(src.Imm.GetTag() == tag)}
+		r := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(src.Imm.GetTag() == tag)}
+		if result.Loc == LocAny {
+			return r
+		}
+		ctx.W.EmitMakeBool(result, r)
+		return result
+	}
+	if src.Type != JITTypeUnknown {
+		// Type is known at compile time — constant-fold
+		ctx.FreeDesc(src)
+		r := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(src.Type == tag)}
 		if result.Loc == LocAny {
 			return r
 		}
@@ -595,7 +615,7 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 	ctx.FreeDesc(src)
 	ctx.W.EmitCmpRegImm32(tagReg, int32(tag))
 	ctx.W.EmitSetcc(tagReg, CcE)
-	r := JITValueDesc{Loc: LocReg, Reg: tagReg}
+	r := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
 	if result.Loc == LocAny {
 		return r
 	}
@@ -603,6 +623,20 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 	ctx.FreeReg(tagReg)
 	return result
 }
+
+// EmitMovToReg moves a JITValueDesc value into a specific GPR register.
+// Handles LocImm (materializes constant) and LocReg (register-to-register move).
+func (ctx *JITContext) EmitMovToReg(dst Reg, src JITValueDesc) {
+	switch src.Loc {
+	case LocImm:
+		ctx.W.EmitMovRegImm64(dst, uint64(src.Imm.Int()))
+	case LocReg:
+		if src.Reg != dst {
+			ctx.W.emitMovRegReg(dst, src.Reg)
+		}
+	}
+}
+
 
 // emitGetTagRegs emits inline code for (Scmer).GetTag().
 // Input: ptrReg holds s.ptr, auxReg holds s.aux.

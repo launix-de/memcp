@@ -42,7 +42,7 @@ func init_streams() {
 			}()
 			return NewAny(io.Reader(reader))
 		}, false, false, nil,
-		nil,
+		nil /* TODO: Alloc: new []Scmer (a) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"gzip", "compresses a stream with gzip. Create streams with (stream filename)",
@@ -66,7 +66,7 @@ func init_streams() {
 			}()
 			return NewAny(io.Reader(reader))
 		}, false, false, nil,
-		nil,
+		nil /* TODO: Alloc: new io.Reader (stream) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"xz", "compresses a stream with xz. Create streams with (stream filename)",
@@ -93,7 +93,7 @@ func init_streams() {
 			}
 			return NewAny(io.Reader(reader))
 		}, false, false, nil,
-		nil,
+		nil /* TODO: Alloc: new io.Reader (stream) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"zcat", "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
@@ -112,7 +112,7 @@ func init_streams() {
 			}
 			return NewAny(reader)
 		}, false, false, nil,
-		nil,
+		nil /* TODO: unsupported call: (Scmer).Any(t1) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"xzcat", "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
@@ -131,6 +131,6 @@ func init_streams() {
 			}
 			return NewAny(reader)
 		}, false, false, nil,
-		nil,
+		nil /* TODO: unsupported call: (Scmer).Any(t1) */,
 	})
 }

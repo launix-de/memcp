@@ -730,7 +730,7 @@ func init() {
 		}, "int", func(a ...Scmer) Scmer {
 			return NewInt(int64(ComputeSize(a[0])))
 		}, true, false, nil,
-		nil,
+		nil /* TODO: unsupported call: ComputeSize(t1) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",
@@ -740,7 +740,7 @@ func init() {
 		}, "any", func(a ...Scmer) Scmer {
 			return Optimize(a[0], &Globalenv)
 		}, true, false, nil,
-		nil,
+		nil /* TODO: unsupported call: Optimize(t1, Globalenv) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"time", "measures the time it takes to compute the first argument",
@@ -830,7 +830,7 @@ func init() {
 				panic(b.String())
 			}
 		}, false, false, nil,
-		nil,
+		nil /* TODO: Alloc: new strings.Builder (b) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
@@ -849,7 +849,7 @@ func init() {
 			result = Apply(a[0])
 			return
 		}, true, false, nil,
-		nil,
+		nil /* TODO: Alloc: new []Scmer (a) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply", "runs the function with its arguments",
@@ -861,7 +861,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return Apply(a[0], asSlice(a[1], "apply")...)
 		}, true, false, nil,
-		nil,
+		nil /* TODO: unsupported call: asSlice(t3, "apply":string) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
@@ -873,7 +873,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
 		}, true, false, nil,
-		nil,
+		nil /* TODO: unsupported call: asSlice(t3, "apply_assoc":string) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
@@ -884,7 +884,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return NewSymbol(String(a[0]))
 		}, false, false, nil,
-		nil,
+		nil /* TODO: unsupported call: String(t1) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list", "returns a list containing the parameters as alements",
@@ -917,7 +917,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("for_mut")},
-		nil,
+		nil /* TODO: Alloc: new [0]Scmer (slicelit) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"for_mut", "in-place for loop (optimizer-only, skips defensive state copy)",
@@ -941,7 +941,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
+		nil /* TODO: unsupported call: asSlice(t1, "for_mut init":string) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
@@ -952,7 +952,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return NewString(String(a[0]))
 		}, true, false, nil,
-		nil,
+		nil /* TODO: unsupported call: String(t1) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"match", `takes a value evaluates the branch that first matches the given pattern
@@ -1025,7 +1025,7 @@ Patterns can be any of:
 				a[3],
 			})
 		}, true, false, nil,
-		nil,
+		nil /* TODO: Alloc: local SourceInfo (complit) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"scheme", "parses a scheme expression into a list",
@@ -1041,7 +1041,7 @@ Patterns can be any of:
 			}
 			return Read(filename, String(a[0]))
 		}, true, false, nil,
-		nil,
+		nil /* TODO: unsupported phi constant: "eval":string */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"serialize", "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
@@ -1052,7 +1052,7 @@ Patterns can be any of:
 		func(a ...Scmer) Scmer {
 			return NewString(SerializeToString(a[0], &Globalenv))
 		}, false, false, nil,
-		nil,
+		nil /* TODO: unsupported call: SerializeToString(t1, Globalenv) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"pretty_print", "formats Scheme code as an indented, human-readable string; expressions up to width characters are kept on one line, longer ones are expanded with one argument per line",
