@@ -852,6 +852,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* Native pipeline validation */
 	(assert ((jit (lambda (a) a)) 5) 5 "jit: identity lambda native")
 	(assert ((jit (lambda () 42))) 42 "jit: constant body native")
+	(assert ((jit (lambda (a b) b)) 1 7) 7 "jit: return 2nd param native")
+	(assert ((jit (lambda (a b c) c)) 1 2 9) 9 "jit: return 3rd param native")
+	(assert ((jit (lambda (a b) a)) 3 4) 3 "jit: return 1st of 2 params native")
+	(assert ((jit (lambda (a b c) b)) 1 8 3) 8 "jit: return 2nd of 3 params native")
 
 	/* Basic arithmetic with single parameter */
 	(assert ((jit (lambda (x) (+ x 1))) 4) 5 "jit: x + 1")
