@@ -982,35 +982,24 @@ func init_list() {
 				mfn := OptimizeProcToSerialFunction(a[3])
 				mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
 			}
-			slice, fd := asAssoc(a[0], "set_assoc_mut")
-			if fd == nil {
-				list := slice
-				for i := 0; i < len(list); i += 2 {
-					if Equal(list[i], a[1]) {
-						if mergeFn != nil {
-							list[i+1] = mergeFn(list[i+1], a[2])
-						} else {
-							list[i+1] = a[2]
-						}
-						return NewSlice(list)
-					}
+			// Always operate on FastDict; promote slice/nil inputs
+			var fd *FastDict
+			if a[0].IsFastDict() {
+				fd = a[0].FastDict()
+			} else if a[0].IsSlice() {
+				list := a[0].Slice()
+				fd = NewFastDictValue(len(list)/2 + 4)
+				for i := 0; i+1 < len(list); i += 2 {
+					fd.Set(list[i], list[i+1], nil)
 				}
-				list = append(list, a[1], a[2])
-				if len(list) >= 10 {
-					fd := NewFastDictValue(len(list)/2 + 4)
-					for i := 0; i < len(list); i += 2 {
-						fd.Set(list[i], list[i+1], nil)
-					}
-					return NewFastDict(fd)
-				}
-				return NewSlice(list)
 			} else {
-				fd.Set(a[1], a[2], mergeFn)
-				return NewFastDict(fd)
+				fd = NewFastDictValue(8)
 			}
+			fd.Set(a[1], a[2], mergeFn)
+			return NewFastDict(fd)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: asAssoc(t9, "set_assoc_mut":string) */,
+		nil /* TODO */,
 	})
 
 	// Tier 3: append/grow
