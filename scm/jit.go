@@ -18,6 +18,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -28,6 +29,9 @@ import (
 	"syscall"
 	"unsafe"
 )
+
+// LogJIT enables JIT compilation logging. Set via (settings "LogJIT" true).
+var LogJIT bool
 
 /*
 memcp JIT compiler
@@ -260,22 +264,39 @@ func jitCompile(a ...Scmer) Scmer {
 	case tagProc:
 		// Lambda/procedure - attempt native compilation first
 		proc := v.Proc()
+		if LogJIT {
+			var b bytes.Buffer
+			Serialize(&b, v, &Globalenv)
+			fmt.Println("jit: compiling", b.String())
+		}
 		if code := jitCompileProc(proc); code != nil {
 			buf, err := allocExec(len(code))
 			if err == nil {
 				dst := (*[1 << 30]byte)(buf.ptr)[:len(code):len(code)]
 				copy(dst, code)
 				if err2 := buf.makeRX(); err2 == nil {
-					fn2 := unsafe.Pointer(&struct{ *byte }{&dst[0]})
-					nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
+					cs := &jitClosure{&dst[0]}
+					csPtr := unsafe.Pointer(cs)
+					nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&csPtr))
+					if LogJIT {
+						fmt.Printf("jit: native %d bytes:", len(code))
+						for _, b := range code {
+							fmt.Printf(" %02x", b)
+						}
+						fmt.Println()
+					}
 					return NewJIT(&JITEntryPoint{
-						Native: nativeFn,
+						Native:  nativeFn,
+						Closure: cs, // prevent GC from collecting the closure
 						Proc:   *proc,
 						Arch:   runtime.GOARCH,
 					})
 				}
 				syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
 			}
+		}
+		if LogJIT {
+			fmt.Println("jit: fallback to Go closure")
 		}
 		// fallback: Go closure
 		fn := OptimizeProcToSerialFunction(v)

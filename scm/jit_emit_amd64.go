@@ -154,6 +154,73 @@ func (w *JITWriter) EmitReturnBool(src JITValueDesc) {
 	w.emitByte(0xC3) // RET
 }
 
+// --- Scmer construction emitters (no RET) ---
+
+// EmitMakeBool constructs a Scmer bool into dst.Reg (ptr) and dst.Reg2 (aux).
+// src.Reg holds the 0/1 boolean value.
+func (w *JITWriter) EmitMakeBool(dst JITValueDesc, src JITValueDesc) {
+	// dst.Reg = nil (XOR reg, reg)
+	w.emitXorReg(dst.Reg)
+	switch src.Loc {
+	case LocImm:
+		aux := makeAux(tagBool, uint64(src.Imm)&1)
+		w.EmitMovRegImm64(dst.Reg2, aux)
+	case LocReg:
+		// dst.Reg2 = tagBool<<48 | (src.Reg & 1)
+		if dst.Reg2 != src.Reg {
+			w.emitMovRegReg(dst.Reg2, src.Reg)
+		}
+		w.emitAndRegImm32(dst.Reg2, 1)
+		w.EmitMovRegImm64(RegR11, uint64(tagBool)<<48)
+		w.emitOrRegReg(dst.Reg2, RegR11)
+	}
+}
+
+// EmitMakeInt constructs a Scmer int into dst.Reg (ptr) and dst.Reg2 (aux).
+// src.Reg holds the int64 value.
+func (w *JITWriter) EmitMakeInt(dst JITValueDesc, src JITValueDesc) {
+	w.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
+	switch src.Loc {
+	case LocReg:
+		if dst.Reg2 != src.Reg {
+			w.emitMovRegReg(dst.Reg2, src.Reg)
+		}
+	case LocImm:
+		w.EmitMovRegImm64(dst.Reg2, uint64(src.Imm))
+	}
+}
+
+// EmitMakeNil constructs a Scmer nil into dst.Reg (ptr) and dst.Reg2 (aux).
+func (w *JITWriter) EmitMakeNil(dst JITValueDesc) {
+	w.emitXorReg(dst.Reg)
+	w.emitXorReg(dst.Reg2)
+}
+
+// emitXorReg emits XOR r32, r32 (zeros 64-bit register via 32-bit op)
+func (w *JITWriter) emitXorReg(r Reg) {
+	if r >= 8 {
+		w.emitBytes(0x45, 0x31, byte(0xC0|(byte(r&7)<<3)|byte(r&7)))
+	} else {
+		w.emitBytes(0x31, byte(0xC0|(byte(r)<<3)|byte(r)))
+	}
+}
+
+// emitAndRegImm32 emits AND r64, sign-extended imm32
+func (w *JITWriter) emitAndRegImm32(dst Reg, imm int32) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01
+	}
+	modrm := byte(0xE0) | byte(dst&7) // /4 = AND
+	w.emitBytes(rex, 0x81, modrm)
+	w.emitU32(uint32(imm))
+}
+
+// emitOrRegReg emits OR dst, src (64-bit)
+func (w *JITWriter) emitOrRegReg(dst, src Reg) {
+	w.emitAluRegReg(0x09, dst, src) // OR r/m64, r64
+}
+
 // --- ALU emitters (type-specialized) ---
 
 // EmitAddInt64 emits: ADD dst, src (GPR += GPR)
@@ -305,8 +372,9 @@ func (w *JITWriter) EmitMovRegImm64(dst Reg, imm uint64) {
 	w.emitU64(imm)
 }
 
-// emitMovRegMem emits MOV dst, [base + disp32] (load 64-bit from memory)
-func (w *JITWriter) emitMovRegMem(dst, base Reg, disp int32) {
+// emitRegMemOp emits <opcode> dst, [base + disp] (REX.W r64, r/m64 with ModRM)
+// opcode: 0x8B = MOV (load), 0x8D = LEA (address computation)
+func (w *JITWriter) emitRegMemOp(opcode byte, dst, base Reg, disp int32) {
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x04 // REX.R
@@ -320,26 +388,37 @@ func (w *JITWriter) emitMovRegMem(dst, base Reg, disp int32) {
 	if disp == 0 && baseEnc != 5 { // RBP/R13 always needs disp
 		modrm := (dstEnc << 3) | baseEnc
 		if baseEnc == 4 { // RSP/R12 needs SIB
-			w.emitBytes(rex, 0x8B, modrm, 0x24)
+			w.emitBytes(rex, opcode, modrm, 0x24)
 		} else {
-			w.emitBytes(rex, 0x8B, modrm)
+			w.emitBytes(rex, opcode, modrm)
 		}
 	} else if disp >= -128 && disp <= 127 {
 		modrm := 0x40 | (dstEnc << 3) | baseEnc
 		if baseEnc == 4 {
-			w.emitBytes(rex, 0x8B, modrm, 0x24, byte(int8(disp)))
+			w.emitBytes(rex, opcode, modrm, 0x24, byte(int8(disp)))
 		} else {
-			w.emitBytes(rex, 0x8B, modrm, byte(int8(disp)))
+			w.emitBytes(rex, opcode, modrm, byte(int8(disp)))
 		}
 	} else {
 		modrm := 0x80 | (dstEnc << 3) | baseEnc
 		if baseEnc == 4 {
-			w.emitBytes(rex, 0x8B, modrm, 0x24)
+			w.emitBytes(rex, opcode, modrm, 0x24)
 		} else {
-			w.emitBytes(rex, 0x8B, modrm)
+			w.emitBytes(rex, opcode, modrm)
 		}
 		w.emitU32(uint32(disp))
 	}
+}
+
+// emitMovRegMem emits MOV dst, [base + disp32] (load 64-bit from memory)
+func (w *JITWriter) emitMovRegMem(dst, base Reg, disp int32) {
+	w.emitRegMemOp(0x8B, dst, base, disp)
+}
+
+// EmitLeaRegMem emits LEA dst, [base + disp32] (compute address, no memory access)
+// For IndexAddr: LEA dst, [sliceBase + idx*16] computes &a[idx]
+func (w *JITWriter) EmitLeaRegMem(dst, base Reg, disp int32) {
+	w.emitRegMemOp(0x8D, dst, base, disp)
 }
 
 // --- SSE helpers ---
@@ -418,6 +497,111 @@ func (w *JITWriter) emitMovqMemToXmm(xmm, base Reg, disp int32) {
 		}
 		w.emitU32(uint32(disp))
 	}
+}
+
+// --- Compare helpers ---
+
+// EmitCmpRegImm32 emits CMP r64, sign-extended imm32
+func (w *JITWriter) EmitCmpRegImm32(dst Reg, imm int32) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xF8) | byte(dst&7) // /7 = CMP
+	w.emitBytes(rex, 0x81, modrm)
+	w.emitU32(uint32(imm))
+}
+
+// EmitSetcc emits SETcc r/m8 + MOVZX r32, r8 → zero-extended 0 or 1 in full 64-bit register
+func (w *JITWriter) EmitSetcc(dst Reg, cc byte) {
+	dstEnc := byte(dst & 7)
+	// SETcc r/m8: 0F 9x /0
+	if dst >= 8 {
+		w.emitBytes(0x41, 0x0F, 0x90|cc, 0xC0|dstEnc)
+	} else if dst >= 4 {
+		w.emitBytes(0x40, 0x0F, 0x90|cc, 0xC0|dstEnc) // REX for SIL/DIL/BPL/SPL
+	} else {
+		w.emitBytes(0x0F, 0x90|cc, 0xC0|dstEnc)
+	}
+	// MOVZX r32, r8: 0F B6 /r (32-bit write zeros upper 32)
+	modrm := byte(0xC0) | (dstEnc << 3) | dstEnc
+	if dst >= 8 {
+		w.emitBytes(0x45, 0x0F, 0xB6, modrm)
+	} else if dst >= 4 {
+		w.emitBytes(0x40, 0x0F, 0xB6, modrm)
+	} else {
+		w.emitBytes(0x0F, 0xB6, modrm)
+	}
+}
+
+// --- Shift emitters ---
+
+// EmitShrRegImm8 emits SHR r64, imm8 (logical shift right by immediate)
+func (w *JITWriter) EmitShrRegImm8(dst Reg, imm uint8) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xE8) | byte(dst&7) // /5 = SHR
+	w.emitBytes(rex, 0xC1, modrm, imm)
+}
+
+// --- GetTag inline emitter ---
+
+// EmitGetTag emits inline code for (Scmer).GetTag().
+// Input: ptrReg holds s.ptr, auxReg holds s.aux.
+// Output: result in dstReg as uint16.
+// Logic: if ptr == &scmerIntSentinel → tagInt (4)
+//        if ptr == &scmerFloatSentinel → tagFloat (3)
+//        else → aux >> 48
+func (w *JITWriter) EmitGetTag(dst, ptrReg, auxReg Reg) {
+	// CMP ptrReg, &scmerIntSentinel (via R11 as scratch)
+	w.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
+	w.EmitCmpInt64(ptrReg, RegR11)
+	// JE .is_int (patch later)
+	w.emitBytes(0x0F, 0x84) // JE rel32
+	isIntFixup := w.Ptr
+	w.emitU32(0)
+
+	// CMP ptrReg, &scmerFloatSentinel
+	w.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
+	w.EmitCmpInt64(ptrReg, RegR11)
+	// JE .is_float (patch later)
+	w.emitBytes(0x0F, 0x84) // JE rel32
+	isFloatFixup := w.Ptr
+	w.emitU32(0)
+
+	// Default: dst = aux >> 48
+	if dst != auxReg {
+		w.emitMovRegReg(dst, auxReg)
+	}
+	w.EmitShrRegImm8(dst, 48)
+	// JMP .done
+	w.emitByte(0xE9) // JMP rel32
+	doneFixup := w.Ptr
+	w.emitU32(0)
+
+	// .is_int: dst = tagInt (4)
+	isIntTarget := w.Ptr
+	w.EmitMovRegImm64(dst, uint64(tagInt))
+	// JMP .done
+	w.emitByte(0xE9) // JMP rel32
+	doneFixup2 := w.Ptr
+	w.emitU32(0)
+
+	// .is_float: dst = tagFloat (3)
+	isFloatTarget := w.Ptr
+	w.EmitMovRegImm64(dst, uint64(tagFloat))
+	// fall through to .done
+
+	// .done:
+	doneTarget := w.Ptr
+
+	// Patch fixups
+	*(*int32)(isIntFixup) = int32(uintptr(isIntTarget) - uintptr(isIntFixup) - 4)
+	*(*int32)(isFloatFixup) = int32(uintptr(isFloatTarget) - uintptr(isFloatFixup) - 4)
+	*(*int32)(doneFixup) = int32(uintptr(doneTarget) - uintptr(doneFixup) - 4)
+	*(*int32)(doneFixup2) = int32(uintptr(doneTarget) - uintptr(doneFixup2) - 4)
 }
 
 // --- GPR ALU encoding helper ---

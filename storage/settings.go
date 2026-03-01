@@ -41,15 +41,17 @@ type SettingsT struct {
 	MetricsTracing         bool  // when true, periodically insert metrics into system.perf_metrics
 	MetricsTracingInterval int   // interval in seconds (0 = default 60s)
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
+	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0, false, 0, 0}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0, false, 0, 0, false}
 
 // call this after you filled Settings
 func InitSettings() {
 	scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 	scm.SetTrace(Settings.Trace)
 	scm.TracePrint = Settings.TracePrint
+	scm.LogJIT = Settings.LogJIT
 	onexit.Register(func() { scm.SetTrace(false) }) // close trace file on exit
 	InitCacheManager()
 }
@@ -72,6 +74,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("MetricsTracing"), scm.NewBool(Settings.MetricsTracing),
 			scm.NewString("MetricsTracingInterval"), scm.NewInt(int64(Settings.MetricsTracingInterval)),
 			scm.NewString("ShutdownDrainSeconds"), scm.NewInt(int64(Settings.ShutdownDrainSeconds)),
+			scm.NewString("LogJIT"), scm.NewBool(Settings.LogJIT),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -103,6 +106,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.MetricsTracingInterval))
 		case "ShutdownDrainSeconds":
 			return scm.NewInt(int64(Settings.ShutdownDrainSeconds))
+		case "LogJIT":
+			return scm.NewBool(Settings.LogJIT)
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -147,6 +152,9 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.MetricsTracingInterval = scm.ToInt(a[1])
 		case "ShutdownDrainSeconds":
 			Settings.ShutdownDrainSeconds = scm.ToInt(a[1])
+		case "LogJIT":
+			Settings.LogJIT = scm.ToBool(a[1])
+			scm.LogJIT = Settings.LogJIT
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}

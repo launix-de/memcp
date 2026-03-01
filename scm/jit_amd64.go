@@ -60,8 +60,77 @@ func jitCompileProc(proc *Proc) []byte {
 		return jitReturnLiteral(body)
 	case tagNthLocalVar:
 		return jitNthArgument(int(body.NthLocalVar()))
+	case tagSlice:
+		// Function call: (fn arg0 arg1 ...)
+		return jitCompileCall(body.Slice())
 	}
 	return nil
+}
+
+// jitCompileCall compiles a function call expression using Declaration.JITEmit.
+func jitCompileCall(call []Scmer) []byte {
+	if len(call) < 1 {
+		return nil
+	}
+	// Look up the Declaration for the head
+	decl := DeclarationForValue(call[0])
+	if decl == nil || decl.JITEmit == nil {
+		return nil
+	}
+
+	// Allocate a scratch buffer for code generation
+	buf := make([]byte, 4096)
+	w := &JITWriter{
+		Ptr:   unsafe.Pointer(&buf[0]),
+		Start: unsafe.Pointer(&buf[0]),
+		End:   unsafe.Pointer(&buf[len(buf)-1]),
+	}
+
+	args := call[1:]
+
+	// Emit stack frame prologue (required by Go calling convention)
+	// PUSH RBP; MOV RBP, RSP; SUB RSP, frameSize
+	frameSize := byte(0x10) // 16 bytes for saving RAX (args slice ptr)
+	w.emitByte(0x55)                          // PUSH RBP
+	w.emitBytes(0x48, 0x89, 0xE5)             // MOV RBP, RSP
+	w.emitBytes(0x48, 0x83, 0xEC, frameSize)  // SUB RSP, frameSize
+
+	// Save RAX (args slice pointer) on stack before clobbering it
+	// MOV [RSP], RAX
+	w.emitBytes(0x48, 0x89, 0x04, 0x24) // MOV [RSP], RAX
+
+	// Available GPRs (excluding RAX/RBX=return, RSP, RBP, R14=g)
+	ctx := &JITContext{
+		W: w,
+		FreeRegs: (1 << RegRCX) | (1 << RegRDX) | (1 << RegRSI) | (1 << RegRDI) |
+			(1 << RegR8) | (1 << RegR9) | (1 << RegR10) | (1 << RegR11) |
+			(1 << RegR12) | (1 << RegR13) | (1 << RegR15),
+	}
+
+	// Load each argument from the Scmer slice into register pairs
+	// Use RSP-saved RAX as base for arg loads
+	descs := make([]JITValueDesc, len(args))
+	for i := range args {
+		ptrReg := ctx.AllocReg()
+		auxReg := ctx.AllocReg()
+		// MOV ptrReg, [RAX + i*16]     (Scmer.ptr)
+		w.emitMovRegMem(ptrReg, RegRAX, int32(i*16))
+		// MOV auxReg, [RAX + i*16 + 8] (Scmer.aux)
+		w.emitMovRegMem(auxReg, RegRAX, int32(i*16+8))
+		descs[i] = JITValueDesc{Type: JITTypeUnknown, Loc: LocRegPair, Reg: ptrReg, Reg2: auxReg}
+	}
+
+	// Result goes into RAX (ptr) + RBX (aux) — the Go return registers
+	resultDesc := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
+	decl.JITEmit(ctx, args, descs, resultDesc)
+
+	// Emit stack frame epilogue + RET
+	w.emitBytes(0x48, 0x83, 0xC4, frameSize)  // ADD RSP, frameSize
+	w.emitByte(0x5D)                           // POP RBP
+	w.emitByte(0xC3)                           // RET
+
+	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	return buf[:codeLen]
 }
 
 func jitStackFrame(size uint8) []byte {

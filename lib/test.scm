@@ -919,6 +919,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (s) (strlike s "%ll%"))) "hello") true "jit: strlike infix")
 	(assert ((jit (lambda (s p) (strlike s p))) "hello" "h%") true "jit: strlike dynamic pattern")
 
+	/* Type check JIT (Declaration.JITEmit) */
+	(assert ((jit (lambda (x) (int? x))) (size "abc")) true "jit: int? on int = true")
+	(assert ((jit (lambda (x) (int? x))) 42) false "jit: int? on number = false")
+	(assert ((jit (lambda (x) (int? x))) 3.14) false "jit: int? on float = false")
+	(assert ((jit (lambda (x) (int? x))) "hello") false "jit: int? on string = false")
+	(assert ((jit (lambda (x) (int? x))) nil) false "jit: int? on nil = false")
+
 	/* Mixed types and nil handling */
 	(assert (nil? ((jit (lambda (x) (+ x nil))) 5)) true "jit: + with nil returns nil")
 	(assert (nil? ((jit (lambda (x) (* x nil))) 5)) true "jit: * with nil returns nil")

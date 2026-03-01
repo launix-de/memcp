@@ -24,10 +24,15 @@ import "unsafe"
 type ShardJITPool struct {
 }
 
+// jitClosure is the closure struct for a JIT-compiled function pointer.
+// It must be kept alive as long as the function value is used.
+type jitClosure struct{ fn *byte }
+
 // JITEntryPoint holds a JIT-compiled function alongside its original
 // Scheme representation for serialization and fallback.
 type JITEntryPoint struct {
 	Native   func(...Scmer) Scmer // compiled native function pointer
+	Closure  *jitClosure          // prevents GC from collecting the closure struct
 	Pages    []*JITPage           // mmap'd pages holding machine code
 	Pool     *ShardJITPool        // pool for returning pages
 	Proc     Proc                 // original Proc for serialization

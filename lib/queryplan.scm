@@ -250,32 +250,48 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 )))
 
 /* make_keytable: create a canonically named group/key table with sloppy engine
-Returns (keytable_name init_code) where init_code is plan-time code that ensures
+Returns (keytable_name init_code fk_pk_col) where init_code is plan-time code that ensures
 the table exists at execution time (survives cache eviction of sloppy tables).
+fk_pk_col is non-nil when FK→PK reuse is active (parent table used instead of temp keytable).
 condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 (define make_keytable (lambda (schema tbl keys tblvar condition_suffix) (begin
-	(define keytable_name (if (nil? condition_suffix)
-		(concat "." tbl ":" keys)
-		(concat "." tbl ":" keys "|" condition_suffix)))
-	/* compute column definitions and partition spec at compile time */
-	(define kt_cols (cons
-		'("unique" "group" (map keys (lambda (col) (concat col))))
-		(map keys (lambda (col) '("column" (concat col) "any" '() '())))))
-	(define kt_partition (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) '((concat col) (shardcolumn schema tbl scol)) '())))))
-	/* create at compile time (needed for recursive build_queryplan) */
-	(createtable schema keytable_name kt_cols '("engine" "sloppy") true)
-	(partitiontable schema keytable_name kt_partition)
-	/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
-	(define kt_cols_code (cons 'list
-		(cons
-			(cons 'list (cons "unique" (cons "group" (list (cons 'list (map keys (lambda (col) (concat col))))))))
-			(map keys (lambda (col) (list 'list "column" (concat col) "any" '(list) '(list)))))))
-	(define kt_partition_code (cons 'list (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) (list (list 'list (concat col) (cons 'list (shardcolumn schema tbl scol)))) '()))))))
-	(define init_code (list 'begin
-		'('createtable schema keytable_name kt_cols_code '(list "engine" "sloppy") true)
-		'('partitiontable schema keytable_name kt_partition_code)))
-	/* return (name init_code) */
-	(list keytable_name init_code)
+	/* FK→PK reuse: if single-column GROUP BY on a FK column without condition,
+	   reuse the parent (referenced) table instead of creating a temp keytable */
+	(define fk_result (if (and (nil? condition_suffix) (equal? 1 (length keys)))
+		(match (car keys)
+			'('get_column (eval tblvar) false scol false) (begin
+				(define fk_info (get_fk_target schema tbl scol))
+				(if (not (nil? fk_info))
+					(list (car fk_info) nil (car (cdr fk_info)))
+					nil))
+			nil)
+		nil))
+	(if (not (nil? fk_result))
+		fk_result
+		(begin
+			(define keytable_name (if (nil? condition_suffix)
+				(concat "." tbl ":" keys)
+				(concat "." tbl ":" keys "|" condition_suffix)))
+			/* compute column definitions and partition spec at compile time */
+			(define kt_cols (cons
+				'("unique" "group" (map keys (lambda (col) (concat col))))
+				(map keys (lambda (col) '("column" (concat col) "any" '() '())))))
+			(define kt_partition (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) '((concat col) (shardcolumn schema tbl scol)) '())))))
+			/* create at compile time (needed for recursive build_queryplan) */
+			(createtable schema keytable_name kt_cols '("engine" "sloppy") true)
+			(partitiontable schema keytable_name kt_partition)
+			/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
+			(define kt_cols_code (cons 'list
+				(cons
+					(cons 'list (cons "unique" (cons "group" (list (cons 'list (map keys (lambda (col) (concat col))))))))
+					(map keys (lambda (col) (list 'list "column" (concat col) "any" '(list) '(list)))))))
+			(define kt_partition_code (cons 'list (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) (list (list 'list (concat col) (cons 'list (shardcolumn schema tbl scol)))) '()))))))
+			(define init_code (list 'begin
+				'('createtable schema keytable_name kt_cols_code '(list "engine" "sloppy") true)
+				'('partitiontable schema keytable_name kt_partition_code)
+				'('touch_keytable schema keytable_name)))
+			/* return (name init_code nil) — third element nil means no FK reuse */
+			(list keytable_name init_code nil)))
 )))
 
 /* make_col_replacer: create a function that rewrites column/aggregate references to point at a group table

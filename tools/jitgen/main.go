@@ -27,6 +27,7 @@ package main
 import (
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -39,6 +40,7 @@ import (
 
 var dumpOp string
 var doPatch bool
+var verbose bool
 
 func main() {
 	var files []string
@@ -47,6 +49,8 @@ func main() {
 			dumpOp = arg[len("-dump="):]
 		} else if arg == "-patch" {
 			doPatch = true
+		} else if arg == "-v" || arg == "--verbose" {
+			verbose = true
 		} else {
 			files = append(files, arg)
 		}
@@ -125,20 +129,19 @@ func main() {
 			dumpSSA(ssaFn)
 		}
 
-		jitable, reason := analyzeSSA(ssaFn)
-		if jitable {
+		// Single-pass: try to generate, recover on failure
+		newText, genErr := generateClosure(op.name, ssaFn)
+		if genErr == "" {
 			fmt.Printf("  %s: %s OK\n", op.path, op.name)
 		} else {
-			fmt.Printf("  %s: %s SKIP: %s\n", op.path, op.name, reason)
+			fmt.Printf("  %s: %s SKIP: %s\n", op.path, op.name, genErr)
+			if verbose {
+				dumpSSA(ssaFn)
+			}
+			newText = fmt.Sprintf("nil /* TODO: %s */", genErr)
 		}
 
 		if doPatch && len(op.comp.Elts) >= 11 {
-			var newText string
-			if jitable {
-				newText = generateClosure(op.name)
-			} else {
-				newText = fmt.Sprintf("nil /* TODO: %s is not emittable yet */", reason)
-			}
 			jitField := op.comp.Elts[10]
 			pos := fset.Position(jitField.Pos())
 			end := fset.Position(jitField.End())
@@ -207,34 +210,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 	return ops
 }
 
-// --- SSA analysis ---
-
-func analyzeSSA(fn *ssa.Function) (bool, string) {
-	for _, block := range fn.Blocks {
-		for _, instr := range block.Instrs {
-			if !canEmit(instr) {
-				return false, instrDesc(instr)
-			}
-		}
-	}
-	return true, ""
-}
-
-// canEmit returns true if we can emit JIT code for this SSA instruction.
-// Add cases here as we implement emitters.
-func canEmit(instr ssa.Instruction) bool {
-	switch instr.(type) {
-	// nothing implemented yet
-	default:
-		return false
-	}
-}
-
-func instrDesc(instr ssa.Instruction) string {
-	typeName := fmt.Sprintf("%T", instr)
-	typeName = strings.TrimPrefix(typeName, "*ssa.")
-	return fmt.Sprintf("%s: %s", typeName, instr)
-}
+// --- SSA dump ---
 
 func dumpSSA(fn *ssa.Function) {
 	fmt.Printf("\n  SSA for %s (%d blocks):\n", fn.Name(), len(fn.Blocks))
@@ -249,11 +225,7 @@ func dumpSSA(fn *ssa.Function) {
 		}
 		fmt.Println()
 		for _, instr := range block.Instrs {
-			mark := " "
-			if !canEmit(instr) {
-				mark = "!"
-			}
-			fmt.Printf("      %s %-60s %T\n", mark, instr, instr)
+			fmt.Printf("      %-60s %T\n", instr, instr)
 		}
 		succs := block.Succs
 		if len(succs) > 0 {
@@ -269,8 +241,211 @@ func dumpSSA(fn *ssa.Function) {
 
 // --- codegen ---
 
-func generateClosure(op string) string {
-	return fmt.Sprintf(`func(ctx *JITContext, args []Scmer, descs []JITValueDesc) JITValueDesc { /* %s */ panic("TODO") }`, op)
+// genVal tracks how an SSA value is represented in the generated Go code.
+// goVar is a Go variable name: either a JITValueDesc (isDesc=true) or a Reg.
+type genVal struct {
+	goVar  string
+	isDesc bool   // true = JITValueDesc (Scmer pair), false = Reg (scalar)
+	argIdx int    // >= 0: deferred arg reference from IndexAddr, not yet loaded
+	marker string // "_newbool"/"_newint"/"_newfloat" for deferred constructors
+}
+
+type codeGen struct {
+	w         strings.Builder
+	vals      map[string]genVal
+	paramName string
+	nextDesc  int
+	nextReg   int
+}
+
+func (g *codeGen) allocDesc() string {
+	name := fmt.Sprintf("d%d", g.nextDesc)
+	g.nextDesc++
+	return name
+}
+
+func (g *codeGen) allocReg() string {
+	name := fmt.Sprintf("r%d", g.nextReg)
+	g.nextReg++
+	return name
+}
+
+func (g *codeGen) emit(format string, a ...any) {
+	fmt.Fprintf(&g.w, "\t\t\t"+format+"\n", a...)
+}
+
+// generateClosure tries to generate a JIT emitter closure for the given SSA function.
+// Returns (closureCode, "") on success, or ("", errorDescription) on failure.
+func generateClosure(opName string, fn *ssa.Function) (code string, errMsg string) {
+	defer func() {
+		if r := recover(); r != nil {
+			code = ""
+			errMsg = fmt.Sprintf("%v", r)
+		}
+	}()
+
+	g := &codeGen{vals: map[string]genVal{}}
+	if len(fn.Params) > 0 {
+		g.paramName = fn.Params[0].Name()
+	}
+
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			g.emitInstr(instr)
+		}
+	}
+
+	result := fmt.Sprintf("func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s\t\t}",
+		g.w.String())
+	return result, ""
+}
+
+func (g *codeGen) emitInstr(instr ssa.Instruction) {
+	val, isVal := instr.(ssa.Value)
+	name := ""
+	if isVal {
+		name = val.Name()
+	}
+
+	switch v := instr.(type) {
+	case *ssa.IndexAddr:
+		if v.X.Name() == g.paramName {
+			idx := constInt(v.Index)
+			g.vals[name] = genVal{argIdx: int(idx)}
+		} else {
+			panic(fmt.Sprintf("IndexAddr on non-parameter: %s", v))
+		}
+
+	case *ssa.UnOp:
+		if v.Op == token.MUL {
+			src := g.vals[v.X.Name()]
+			if src.argIdx >= 0 {
+				// Fused IndexAddr+Deref → descs[i] already describes this argument
+				dv := g.allocDesc()
+				g.emit("%s := descs[%d]", dv, src.argIdx)
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else {
+				panic(fmt.Sprintf("deref of non-arg pointer: %s", v))
+			}
+		} else {
+			panic(fmt.Sprintf("unsupported UnOp %s", v.Op))
+		}
+
+	case *ssa.Call:
+		callee := v.Call.StaticCallee()
+		if callee == nil {
+			panic(fmt.Sprintf("dynamic call: %s", v))
+		}
+		switch callee.Name() {
+		case "GetTag":
+			arg := g.vals[v.Call.Args[0].Name()]
+			if !arg.isDesc {
+				panic("GetTag expects Scmer descriptor")
+			}
+			rv := g.allocReg()
+			g.emit("%s := ctx.AllocReg()", rv)
+			g.emit("ctx.W.EmitGetTag(%s, %s.Reg, %s.Reg2)", rv, arg.goVar, arg.goVar)
+			g.emit("ctx.FreeDesc(&%s)", arg.goVar)
+			g.vals[name] = genVal{goVar: rv}
+		case "NewBool":
+			src := g.lookup(v.Call.Args[0])
+			g.vals[name] = genVal{goVar: src.goVar, marker: "_newbool"}
+		case "NewInt":
+			src := g.lookup(v.Call.Args[0])
+			g.vals[name] = genVal{goVar: src.goVar, marker: "_newint"}
+		case "NewFloat":
+			src := g.lookup(v.Call.Args[0])
+			g.vals[name] = genVal{goVar: src.goVar, marker: "_newfloat"}
+		default:
+			panic(fmt.Sprintf("unsupported call: %s", v))
+		}
+
+	case *ssa.BinOp:
+		xVal := g.lookup(v.X)
+		cc := opToCC(v.Op)
+		if cc != "" {
+			if c, ok := v.Y.(*ssa.Const); ok {
+				g.emit("ctx.W.EmitCmpRegImm32(%s, %d)", xVal.goVar, c.Int64())
+			} else {
+				yVal := g.lookup(v.Y)
+				g.emit("ctx.W.EmitCmpInt64(%s, %s)", xVal.goVar, yVal.goVar)
+			}
+			g.emit("ctx.W.EmitSetcc(%s, %s)", xVal.goVar, cc)
+			g.vals[name] = genVal{goVar: xVal.goVar} // reuse register after SETE+MOVZX
+		} else {
+			panic(fmt.Sprintf("unsupported BinOp %s", v.Op))
+		}
+
+	case *ssa.Return:
+		if len(v.Results) == 0 {
+			g.emit("ctx.W.EmitMakeNil(result)")
+			g.emit("return result")
+			return
+		}
+		res := g.vals[v.Results[0].Name()]
+		switch res.marker {
+		case "_newbool":
+			g.emit("ctx.W.EmitMakeBool(result, JITValueDesc{Loc: LocReg, Reg: %s})", res.goVar)
+			g.emit("return result")
+		case "_newint":
+			g.emit("ctx.W.EmitMakeInt(result, JITValueDesc{Loc: LocReg, Reg: %s})", res.goVar)
+			g.emit("return result")
+		case "_newfloat":
+			g.emit("ctx.W.EmitMakeFloat(result, JITValueDesc{Loc: LocReg, Reg: %s})", res.goVar)
+			g.emit("return result")
+		default:
+			panic(fmt.Sprintf("unsupported return type for %s", v.Results[0]))
+		}
+
+	default:
+		panic(instrDesc(instr))
+	}
+}
+
+func (g *codeGen) lookup(v ssa.Value) genVal {
+	if gv, ok := g.vals[v.Name()]; ok {
+		return gv
+	}
+	panic(fmt.Sprintf("unresolved SSA value: %s", v))
+}
+
+// constInt extracts the int64 from a constant SSA value.
+func constInt(v ssa.Value) int64 {
+	c, ok := v.(*ssa.Const)
+	if !ok {
+		panic(fmt.Sprintf("expected constant, got %s", v))
+	}
+	val, ok := constant.Int64Val(c.Value)
+	if !ok {
+		panic(fmt.Sprintf("constant not int64: %s", c))
+	}
+	return val
+}
+
+// opToCC maps a Go comparison token to the JIT condition code constant name.
+func opToCC(op token.Token) string {
+	switch op {
+	case token.EQL:
+		return "CcE"
+	case token.NEQ:
+		return "CcNE"
+	case token.LSS:
+		return "CcL"
+	case token.GTR:
+		return "CcG"
+	case token.LEQ:
+		return "CcLE"
+	case token.GEQ:
+		return "CcGE"
+	default:
+		return ""
+	}
+}
+
+func instrDesc(instr ssa.Instruction) string {
+	typeName := fmt.Sprintf("%T", instr)
+	typeName = strings.TrimPrefix(typeName, "*ssa.")
+	return fmt.Sprintf("%s: %s", typeName, instr)
 }
 
 // --- patching ---

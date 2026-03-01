@@ -24,6 +24,7 @@ import "time"
 import "strconv"
 import "reflect"
 import "strings"
+import "sync/atomic"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
 
@@ -1143,6 +1144,46 @@ func Init(en scm.Env) {
 				})
 			}
 			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"touch_keytable", "extends the lease on a keytable so CacheManager defers eviction",
+		2, 2,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "database name", nil},
+			scm.DeclarationParameter{"table", "string", "keytable name", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil { return scm.NewBool(false) }
+			tbl := db.GetTable(scm.String(a[1]))
+			if tbl == nil { return scm.NewBool(false) }
+			atomic.StoreInt64(&tbl.leaseUntil, time.Now().Add(time.Second).UnixNano())
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"get_fk_target", "returns (ref_table ref_column) if a single-column FK exists for the given column, nil otherwise",
+		3, 3,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "database name", nil},
+			scm.DeclarationParameter{"table", "string", "table name", nil},
+			scm.DeclarationParameter{"column", "string", "column name", nil},
+		}, "any",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil { return scm.NewNil() }
+			tbl := db.GetTable(scm.String(a[1]))
+			if tbl == nil { return scm.NewNil() }
+			col := scm.String(a[2])
+			for _, fk := range tbl.Foreign {
+				if fk.Tbl1 == tbl.Name && len(fk.Cols1) == 1 && fk.Cols1[0] == col {
+					return scm.NewSlice([]scm.Scmer{scm.NewString(fk.Tbl2), scm.NewString(fk.Cols2[0])})
+				}
+			}
+			return scm.NewNil()
 		}, false, false, nil,
 		nil,
 	})

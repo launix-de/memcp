@@ -152,6 +152,9 @@ type table struct {
 	Charset         string
 	Comment         string
 
+	// lease: CacheManager defers eviction until this time (UnixNano, atomic)
+	leaseUntil int64
+
 	// index column frequency: used to sort equality columns by frequency
 	// so that the most-queried columns come first, maximizing prefix overlap.
 	colFreq   map[string]int64

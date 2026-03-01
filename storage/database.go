@@ -22,6 +22,7 @@ import "sync"
 import "time"
 import "runtime"
 import "strings"
+import "sync/atomic"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
@@ -739,6 +740,10 @@ func RenameTable(schema, oldname, newname string) {
 // MUST NOT use Lock on schemalock (deadlock: CreateTable holds schemalock → AddItem → evict → here).
 // Returns false if the schemalock is busy (item pushed back for later retry).
 func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) bool {
+	// lease active: defer eviction, CacheManager will retry later
+	if time.Now().UnixNano() < atomic.LoadInt64(&tbl.leaseUntil) {
+		return false
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println("error: keytableCleanup panic for", schemaName+"."+tbl.Name, ":", r)
