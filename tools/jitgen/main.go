@@ -19,10 +19,9 @@ Copyright (C) 2026  Carl-Philip Hänsch
 // operator function bodies, and generates JIT emitter closures.
 //
 // Usage:
-//
-//	go run ./tools/jitgen/ scm/alu.go                    # list operators
-//	go run ./tools/jitgen/ -dump=+ scm/alu.go             # SSA dump for +
-//	go run ./tools/jitgen/ -patch scm/alu.go              # patch source
+//   go run ./tools/jitgen/ scm/alu.go                    # list operators
+//   go run ./tools/jitgen/ -dump=+ scm/alu.go             # SSA dump for +
+//   go run ./tools/jitgen/ -patch scm/alu.go              # patch source
 package main
 
 import (
@@ -296,7 +295,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		}
 	}
 
-	result := fmt.Sprintf("func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s\t\t}",
+	result := fmt.Sprintf("func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s\t\t}",
 		g.w.String())
 	return result, ""
 }
@@ -321,9 +320,9 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 		if v.Op == token.MUL {
 			src := g.vals[v.X.Name()]
 			if src.argIdx >= 0 {
-				// Fused IndexAddr+Deref → descs[i] already describes this argument
+				// Fused IndexAddr+Deref → args[i] already describes this argument
 				dv := g.allocDesc()
-				g.emit("%s := descs[%d]", dv, src.argIdx)
+				g.emit("%s := args[%d]", dv, src.argIdx)
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
 			} else {
 				panic(fmt.Sprintf("deref of non-arg pointer: %s", v))
@@ -343,11 +342,18 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			if !arg.isDesc {
 				panic("GetTag expects Scmer descriptor")
 			}
-			rv := g.allocReg()
-			g.emit("%s := ctx.AllocReg()", rv)
-			g.emit("ctx.W.EmitGetTag(%s, %s.Reg, %s.Reg2)", rv, arg.goVar, arg.goVar)
-			g.emit("ctx.FreeDesc(&%s)", arg.goVar)
-			g.vals[name] = genVal{goVar: rv}
+			// Produce a JITValueDesc: LocImm if input is constant, LocReg otherwise
+			dv := g.allocDesc()
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", arg.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Imm: NewInt(int64(%s.Imm.GetTag()))}", dv, arg.goVar)
+			g.emit("} else {")
+			g.emit("\t%s.Reg = ctx.AllocReg()", dv)
+			g.emit("\t%s.Loc = LocReg", dv)
+			g.emit("\tctx.W.EmitGetTag(%s.Reg, %s.Reg, %s.Reg2)", dv, arg.goVar, arg.goVar)
+			g.emit("\tctx.FreeDesc(&%s)", arg.goVar)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewBool":
 			src := g.lookup(v.Call.Args[0])
 			g.vals[name] = genVal{goVar: src.goVar, marker: "_newbool"}
@@ -364,21 +370,39 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 	case *ssa.BinOp:
 		xVal := g.lookup(v.X)
 		cc := opToCC(v.Op)
+		goOp := goOpStr(v.Op)
 		if cc != "" {
+			dv := g.allocDesc()
 			if c, ok := v.Y.(*ssa.Const); ok {
-				g.emit("ctx.W.EmitCmpRegImm32(%s, %d)", xVal.goVar, c.Int64())
+				cmpVal := c.Int64()
+				// Constant-fold if x is LocImm
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s.Loc == LocImm {", xVal.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocImm, Imm: NewBool(%s.Imm.Int() %s %d)}", dv, xVal.goVar, goOp, cmpVal)
+				g.emit("} else {")
+				g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, %d)", xVal.goVar, cmpVal)
+				g.emit("\tctx.W.EmitSetcc(%s.Reg, %s)", xVal.goVar, cc)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s.Reg}", dv, xVal.goVar)
+				g.emit("}")
 			} else {
 				yVal := g.lookup(v.Y)
-				g.emit("ctx.W.EmitCmpInt64(%s, %s)", xVal.goVar, yVal.goVar)
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s.Loc == LocImm && %s.Loc == LocImm {", xVal.goVar, yVal.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocImm, Imm: NewBool(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOp, yVal.goVar)
+				g.emit("} else {")
+				g.emit("\tctx.W.EmitCmpInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
+				g.emit("\tctx.W.EmitSetcc(%s.Reg, %s)", xVal.goVar, cc)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s.Reg}", dv, xVal.goVar)
+				g.emit("}")
 			}
-			g.emit("ctx.W.EmitSetcc(%s, %s)", xVal.goVar, cc)
-			g.vals[name] = genVal{goVar: xVal.goVar} // reuse register after SETE+MOVZX
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		} else {
 			panic(fmt.Sprintf("unsupported BinOp %s", v.Op))
 		}
 
 	case *ssa.Return:
 		if len(v.Results) == 0 {
+			g.emit("if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: NewNil()} }")
 			g.emit("ctx.W.EmitMakeNil(result)")
 			g.emit("return result")
 			return
@@ -386,13 +410,28 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 		res := g.vals[v.Results[0].Name()]
 		switch res.marker {
 		case "_newbool":
-			g.emit("ctx.W.EmitMakeBool(result, JITValueDesc{Loc: LocReg, Reg: %s})", res.goVar)
+			g.emit("if %s.Loc == LocImm {", res.goVar)
+			g.emit("\tif result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: %s.Imm} }", res.goVar)
+			g.emit("\tctx.W.EmitMakeBool(result, %s)", res.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.W.EmitMakeBool(result, %s)", res.goVar)
+			g.emit("}")
 			g.emit("return result")
 		case "_newint":
-			g.emit("ctx.W.EmitMakeInt(result, JITValueDesc{Loc: LocReg, Reg: %s})", res.goVar)
+			g.emit("if %s.Loc == LocImm {", res.goVar)
+			g.emit("\tif result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: %s.Imm} }", res.goVar)
+			g.emit("\tctx.W.EmitMakeInt(result, %s)", res.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.W.EmitMakeInt(result, %s)", res.goVar)
+			g.emit("}")
 			g.emit("return result")
 		case "_newfloat":
-			g.emit("ctx.W.EmitMakeFloat(result, JITValueDesc{Loc: LocReg, Reg: %s})", res.goVar)
+			g.emit("if %s.Loc == LocImm {", res.goVar)
+			g.emit("\tif result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: %s.Imm} }", res.goVar)
+			g.emit("\tctx.W.EmitMakeFloat(result, %s)", res.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.W.EmitMakeFloat(result, %s)", res.goVar)
+			g.emit("}")
 			g.emit("return result")
 		default:
 			panic(fmt.Sprintf("unsupported return type for %s", v.Results[0]))
@@ -438,6 +477,26 @@ func opToCC(op token.Token) string {
 		return "CcLE"
 	case token.GEQ:
 		return "CcGE"
+	default:
+		return ""
+	}
+}
+
+// goOpStr maps a Go comparison token to the Go operator string for codegen.
+func goOpStr(op token.Token) string {
+	switch op {
+	case token.EQL:
+		return "=="
+	case token.NEQ:
+		return "!="
+	case token.LSS:
+		return "<"
+	case token.GTR:
+		return ">"
+	case token.LEQ:
+		return "<="
+	case token.GEQ:
+		return ">="
 	default:
 		return ""
 	}
