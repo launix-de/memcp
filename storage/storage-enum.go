@@ -358,6 +358,9 @@ func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
 	}
 	return result
 }
+func (s *StorageEnum) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 // GetValueCached provides O(1) sequential access using a per-goroutine cache.
 // The cache must not be shared between goroutines.

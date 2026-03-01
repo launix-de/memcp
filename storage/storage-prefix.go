@@ -52,6 +52,9 @@ func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 	prefix := s.prefixdictionary[idx]
 	return scm.NewString(prefix + inner.String())
 }
+func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 func (s *StoragePrefix) prepare() {
 	// set up scan
