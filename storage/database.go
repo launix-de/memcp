@@ -688,6 +688,8 @@ func DropTable(schema, name string, ifexists bool) {
 	db.tables.Remove(name)
 	db.save()
 	db.schemalock.Unlock()
+	// fire AfterDropTable triggers after releasing schemalock (avoids deadlock on cascading drops)
+	t.ExecuteTableLifecycleTriggers(AfterDropTable)
 
 	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
 	// Must be AFTER schemalock.Unlock to avoid deadlock: Remove → run() → evict → keytableCleanup → TryLock

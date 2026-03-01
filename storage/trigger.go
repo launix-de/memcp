@@ -31,6 +31,8 @@ const (
 	AfterUpdate
 	BeforeDelete
 	AfterDelete
+	AfterDropTable
+	AfterDropColumn
 )
 
 func (tt TriggerTiming) String() string {
@@ -47,6 +49,10 @@ func (tt TriggerTiming) String() string {
 		return "BEFORE DELETE"
 	case AfterDelete:
 		return "AFTER DELETE"
+	case AfterDropTable:
+		return "AFTER DROP TABLE"
+	case AfterDropColumn:
+		return "AFTER DROP COLUMN"
 	default:
 		return "UNKNOWN"
 	}
@@ -67,6 +73,10 @@ func (tt TriggerTiming) MarshalJSON() ([]byte, error) {
 		s = "before_delete"
 	case AfterDelete:
 		s = "after_delete"
+	case AfterDropTable:
+		s = "after_drop_table"
+	case AfterDropColumn:
+		s = "after_drop_column"
 	default:
 		return nil, errors.New("unknown trigger timing")
 	}
@@ -90,6 +100,10 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 			*tt = BeforeDelete
 		case "after_delete":
 			*tt = AfterDelete
+		case "after_drop_table":
+			*tt = AfterDropTable
+		case "after_drop_column":
+			*tt = AfterDropColumn
 		default:
 			return errors.New("unknown trigger timing: " + s)
 		}
@@ -100,7 +114,7 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &n); err != nil {
 		return errors.New("trigger timing must be string or number")
 	}
-	if n > uint8(AfterDelete) {
+	if n > uint8(AfterDropColumn) {
 		return fmt.Errorf("unknown trigger timing number: %d", n)
 	}
 	*tt = TriggerTiming(n)
@@ -236,6 +250,25 @@ func (t *table) rowToDictWithColumns(row dataset, columns []string) scm.Scmer {
 		}
 	}
 	return scm.NewFastDict(fd)
+}
+
+// ExecuteTableLifecycleTriggers executes AfterDropTable or AfterDropColumn triggers.
+// These are non-row-level triggers: OLD and NEW are both nil.
+func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming) {
+	triggers := t.GetTriggers(timing)
+	for _, tr := range triggers {
+		if tr.Func.IsNil() {
+			continue
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// lifecycle triggers are best-effort; log but don't propagate
+				}
+			}()
+			scm.Apply(tr.Func, scm.NewNil(), scm.NewNil())
+		}()
+	}
 }
 
 // ExecuteBeforeInsertTriggers executes BEFORE INSERT triggers and returns modified rows.

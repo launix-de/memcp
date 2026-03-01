@@ -172,6 +172,7 @@ func extractScannedTables(expr scm.Scmer) []tableRef {
 
 // registerComputeTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers
 // on source tables so that changes automatically invalidate the computed column.
+// Also installs AfterDropTable so that dropping a source table cascades to the target.
 func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 	refs := extractScannedTables(computor)
 	targetSchema := t.schema.Name
@@ -211,6 +212,29 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 					scm.NewString(targetSchema),
 					scm.NewString(t.Name),
 					scm.NewString(name),
+				})),
+			})
+		}
+		// AfterDropTable: when source table is dropped, drop the target table too
+		dropTriggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + AfterDropTable.String()
+		dropExists := false
+		for _, tr := range srcTable.Triggers {
+			if tr.Name == dropTriggerName {
+				dropExists = true
+				break
+			}
+		}
+		if !dropExists {
+			srcTable.AddTrigger(TriggerDescription{
+				Name:     dropTriggerName,
+				Timing:   AfterDropTable,
+				IsSystem: true,
+				Priority: 100,
+				Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("droptable"),
+					scm.NewString(targetSchema),
+					scm.NewString(t.Name),
+					scm.NewBool(true),
 				})),
 			})
 		}

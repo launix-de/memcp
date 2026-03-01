@@ -162,10 +162,10 @@ test_cases:
   - name: "Delete inactive employee"
     sql: "DELETE FROM sc_base WHERE id = 4"
 
-  - name: "After DELETE: COUNT per dept"
+  - name: "After DELETE: COUNT per dept (empty group removed)"
     sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
-      rows: 4
+      rows: 3
       data:
         - dept: "Engineering"
           c: 3
@@ -173,11 +173,9 @@ test_cases:
           c: 2
         - dept: "Marketing"
           c: 1
-        - dept: "Sales"
-          c: 0
 
-  - name: "After DELETE: SUM(salary) with no empty groups"
-    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept HAVING COUNT(*) > 0 ORDER BY dept"
+  - name: "After DELETE: SUM(salary) per dept (stale key removed)"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 3
       data:
@@ -188,17 +186,17 @@ test_cases:
         - dept: "Marketing"
           s: 80
 
-  - name: "Keytable still contains Sales key after DELETE (stale key, filtered by HAVING)"
+  - name: "Keytable has Sales key removed after DELETE (cleanup trigger)"
     noncritical: true
     sql: "SELECT * FROM `.sc_base:((get_column sc_base false dept false))` ORDER BY `(get_column sc_base false dept false)`"
     expect:
-      rows: 4
+      rows: 3
 
   - name: "Delete all Sales employees to fully empty that group"
     sql: "DELETE FROM sc_base WHERE dept = 'Sales'"
 
-  - name: "After full group deletion: HAVING filters empty group"
-    sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept HAVING COUNT(*) > 0 ORDER BY dept"
+  - name: "After full group deletion: empty group removed from keytable"
+    sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
     expect:
       rows: 3
       data:
@@ -245,6 +243,75 @@ test_cases:
         - dept: "Marketing"
           active: 1
           c: 1
+
+  # === UPDATE group key to BRAND NEW value ===
+  # State: Engineering(4,650), HR(2,270), Marketing(1,80)
+  - name: "UPDATE group key to brand new value"
+    sql: "UPDATE sc_base SET dept = 'Legal' WHERE id = 7"
+
+  - name: "After UPDATE to new key: old group disappears, new group appears"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 3
+      data:
+        - dept: "Engineering"
+          s: 650
+        - dept: "HR"
+          s: 270
+        - dept: "Legal"
+          s: 80
+
+  # === Re-insert into emptied group ===
+  - name: "Re-insert into emptied group (Marketing was emptied above)"
+    sql: "INSERT INTO sc_base (id, dept, salary, active) VALUES (9, 'Marketing', 200, true)"
+
+  - name: "After re-insert: emptied group reappears"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 4
+      data:
+        - dept: "Engineering"
+          s: 650
+        - dept: "HR"
+          s: 270
+        - dept: "Legal"
+          s: 80
+        - dept: "Marketing"
+          s: 200
+
+  # === UPDATE non-key non-aggregate column ===
+  - name: "UPDATE non-key non-aggregate column (active flag)"
+    sql: "UPDATE sc_base SET active = false WHERE id = 1"
+
+  - name: "After non-key UPDATE: aggregates unchanged"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 4
+      data:
+        - dept: "Engineering"
+          s: 650
+        - dept: "HR"
+          s: 270
+        - dept: "Legal"
+          s: 80
+        - dept: "Marketing"
+          s: 200
+
+  # === Bulk UPDATE affecting multiple groups ===
+  - name: "Bulk UPDATE: move Legal employees to HR"
+    sql: "UPDATE sc_base SET dept = 'HR' WHERE dept = 'Legal'"
+
+  - name: "After bulk UPDATE: Legal gone, HR grew"
+    sql: "SELECT dept, SUM(salary) AS s FROM sc_base GROUP BY dept ORDER BY dept"
+    expect:
+      rows: 3
+      data:
+        - dept: "Engineering"
+          s: 650
+        - dept: "HR"
+          s: 350
+        - dept: "Marketing"
+          s: 200
 
   # === Multi-table GROUP BY (prejoin path) ===
   - name: "Create lookup table for prejoin test"
@@ -315,6 +382,367 @@ test_cases:
         - name: "Sales"
           s: 150
 
+  # === Prejoin: UPDATE join key in fact table ===
+  # State: dept(1=Eng,2=Sales,3=HR), emp(1→1,2→1,3→2,5→3)
+  - name: "Prejoin: UPDATE join key (move emp from HR to Sales)"
+    sql: "UPDATE sc_emp SET dept_id = 2 WHERE id = 5"
+
+  - name: "Prejoin GROUP BY after FK UPDATE"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Engineering"
+          s: 300
+        - name: "Sales"
+          s: 270
+
+  # === Prejoin: UPDATE in lookup table (rename department) ===
+  - name: "Prejoin: UPDATE lookup table (rename Engineering to R&D)"
+    sql: "UPDATE sc_dept SET name = 'R&D' WHERE id = 1"
+
+  - name: "Prejoin GROUP BY after lookup UPDATE"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 2
+      data:
+        - name: "R&D"
+          s: 300
+        - name: "Sales"
+          s: 270
+
+  # === Prejoin: DELETE from lookup table ===
+  - name: "Add temporary department with employee"
+    sql: "INSERT INTO sc_dept (id, name, region) VALUES (4, 'Ops', 'North')"
+  - name: "Add employee in temporary department"
+    sql: "INSERT INTO sc_emp (id, dept_id, salary) VALUES (6, 4, 75)"
+
+  - name: "Prejoin GROUP BY with new department"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 3
+      data:
+        - name: "Ops"
+          s: 75
+        - name: "R&D"
+          s: 300
+        - name: "Sales"
+          s: 270
+
+  - name: "Prejoin: DELETE from lookup table (drop department)"
+    sql: "DELETE FROM sc_dept WHERE id = 4"
+
+  - name: "Prejoin GROUP BY after lookup DELETE (Ops employee orphaned)"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 2
+      data:
+        - name: "R&D"
+          s: 300
+        - name: "Sales"
+          s: 270
+
+  # =============================================================
+  # Cache hit: identical query twice with no DML between
+  # =============================================================
+
+  - name: "Setup cache hit test table"
+    sql: "DROP TABLE IF EXISTS sc_hit"
+  - name: "Create cache hit test table"
+    sql: "CREATE TABLE sc_hit (id INT PRIMARY KEY, grp VARCHAR(10), val INT)"
+  - name: "Insert cache hit test data"
+    sql: "INSERT INTO sc_hit VALUES (1,'A',10),(2,'A',20),(3,'B',30)"
+
+  - name: "Cache hit: first query computes"
+    sql: "SELECT grp, SUM(val) AS s FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 30
+        - grp: "B"
+          s: 30
+
+  - name: "Cache hit: identical query returns same result from cache"
+    sql: "SELECT grp, SUM(val) AS s FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 30
+        - grp: "B"
+          s: 30
+
+  - name: "Cache hit: COUNT variant also cached independently"
+    sql: "SELECT grp, COUNT(*) AS c FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          c: 2
+        - grp: "B"
+          c: 1
+
+  - name: "Cache hit: COUNT re-query from cache"
+    sql: "SELECT grp, COUNT(*) AS c FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          c: 2
+        - grp: "B"
+          c: 1
+
+  # =============================================================
+  # Multiple aggregates in one query: SUM + COUNT
+  # =============================================================
+
+  - name: "Multi-agg baseline: SUM and COUNT together"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 30
+          c: 2
+        - grp: "B"
+          s: 30
+          c: 1
+
+  - name: "Multi-agg: mutate then both must update"
+    sql: "INSERT INTO sc_hit VALUES (4,'B',70)"
+
+  - name: "Multi-agg after INSERT: both SUM and COUNT updated"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 30
+          c: 2
+        - grp: "B"
+          s: 100
+          c: 2
+
+  # =============================================================
+  # Interleaved GROUP BY on different columns
+  # =============================================================
+
+  - name: "Setup interleaved test table"
+    sql: "DROP TABLE IF EXISTS sc_inter"
+  - name: "Create interleaved test table"
+    sql: "CREATE TABLE sc_inter (id INT PRIMARY KEY, color VARCHAR(10), size VARCHAR(10), qty INT)"
+  - name: "Insert interleaved test data"
+    sql: "INSERT INTO sc_inter VALUES (1,'red','S',1),(2,'red','M',2),(3,'blue','S',3),(4,'blue','M',4)"
+
+  - name: "Interleaved: GROUP BY color"
+    sql: "SELECT color, SUM(qty) AS s FROM sc_inter GROUP BY color ORDER BY color"
+    expect:
+      rows: 2
+      data:
+        - color: "blue"
+          s: 7
+        - color: "red"
+          s: 3
+
+  - name: "Interleaved: GROUP BY size"
+    sql: "SELECT size, SUM(qty) AS s FROM sc_inter GROUP BY size ORDER BY size"
+    expect:
+      rows: 2
+      data:
+        - size: "M"
+          s: 6
+        - size: "S"
+          s: 4
+
+  - name: "Interleaved: mutate base table"
+    sql: "INSERT INTO sc_inter VALUES (5,'red','S',10)"
+
+  - name: "Interleaved: GROUP BY color after INSERT"
+    sql: "SELECT color, SUM(qty) AS s FROM sc_inter GROUP BY color ORDER BY color"
+    expect:
+      rows: 2
+      data:
+        - color: "blue"
+          s: 7
+        - color: "red"
+          s: 13
+
+  - name: "Interleaved: GROUP BY size after INSERT"
+    sql: "SELECT size, SUM(qty) AS s FROM sc_inter GROUP BY size ORDER BY size"
+    expect:
+      rows: 2
+      data:
+        - size: "M"
+          s: 6
+        - size: "S"
+          s: 14
+
+  # =============================================================
+  # Filtered aggregate cache hit + invalidation
+  # =============================================================
+
+  - name: "Filtered agg: WHERE + GROUP BY baseline"
+    sql: "SELECT grp, SUM(val) AS s FROM sc_hit WHERE val > 15 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 20
+        - grp: "B"
+          s: 100
+
+  - name: "Filtered agg: same query again (cache hit)"
+    sql: "SELECT grp, SUM(val) AS s FROM sc_hit WHERE val > 15 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 20
+        - grp: "B"
+          s: 100
+
+  - name: "Filtered agg: mutate base"
+    sql: "INSERT INTO sc_hit VALUES (5,'A',50)"
+
+  - name: "Filtered agg: after INSERT, filtered result updates"
+    sql: "SELECT grp, SUM(val) AS s FROM sc_hit WHERE val > 15 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 70
+        - grp: "B"
+          s: 100
+
+  # =============================================================
+  # UPDATE within same group (no key change, value change)
+  # =============================================================
+
+  - name: "Same-group UPDATE: change val without changing grp"
+    sql: "UPDATE sc_hit SET val = 99 WHERE id = 1"
+
+  - name: "Same-group UPDATE: SUM reflects new value"
+    sql: "SELECT grp, SUM(val) AS s FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 169
+        - grp: "B"
+          s: 100
+
+  - name: "Same-group UPDATE: COUNT unchanged"
+    sql: "SELECT grp, COUNT(*) AS c FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          c: 3
+        - grp: "B"
+          c: 2
+
+  # =============================================================
+  # DELETE leaving group non-empty (key stays, value updates)
+  # =============================================================
+  # sc_hit state: A(id=1:99, id=2:20, id=5:50), B(id=3:30, id=4:70)
+
+  - name: "DELETE from non-empty group: remove one of three"
+    sql: "DELETE FROM sc_hit WHERE id = 5"
+
+  - name: "After partial DELETE: group A still exists with updated SUM"
+    sql: "SELECT grp, SUM(val) AS s FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 119
+        - grp: "B"
+          s: 100
+
+  - name: "After partial DELETE: COUNT decremented"
+    sql: "SELECT grp, COUNT(*) AS c FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          c: 2
+        - grp: "B"
+          c: 2
+
+  # =============================================================
+  # DELETE all from one group (key removed, other groups intact)
+  # =============================================================
+
+  - name: "DELETE all from group B"
+    sql: "DELETE FROM sc_hit WHERE grp = 'B'"
+
+  - name: "After full group DELETE: B gone, A intact"
+    sql: "SELECT grp, SUM(val) AS s FROM sc_hit GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 1
+      data:
+        - grp: "A"
+          s: 119
+
+  # =============================================================
+  # Multi-column GROUP BY: DELETE + UPDATE on composite keys
+  # =============================================================
+  # sc_inter state: red/S(1:1, 5:10), red/M(2:2), blue/S(3:3), blue/M(4:4)
+
+  - name: "Multi-col DELETE: remove the only blue/M entry"
+    sql: "DELETE FROM sc_inter WHERE id = 4"
+
+  - name: "After multi-col DELETE: blue/M group removed"
+    sql: "SELECT color, size, SUM(qty) AS s FROM sc_inter GROUP BY color, size ORDER BY color, size"
+    expect:
+      rows: 3
+      data:
+        - color: "blue"
+          size: "S"
+          s: 3
+        - color: "red"
+          size: "M"
+          s: 2
+        - color: "red"
+          size: "S"
+          s: 11
+
+  - name: "Multi-col UPDATE: change key to new composite (blue/S -> green/L)"
+    sql: "UPDATE sc_inter SET color = 'green', size = 'L' WHERE id = 3"
+
+  - name: "After multi-col UPDATE: blue/S gone, green/L appears"
+    sql: "SELECT color, size, SUM(qty) AS s FROM sc_inter GROUP BY color, size ORDER BY color, size"
+    expect:
+      rows: 3
+      data:
+        - color: "green"
+          size: "L"
+          s: 3
+        - color: "red"
+          size: "M"
+          s: 2
+        - color: "red"
+          size: "S"
+          s: 11
+
+  # =============================================================
+  # Prejoin: DELETE all employees from one department
+  # =============================================================
+  # sc_emp state: 1→1(Eng), 2→1(Eng), 3→2(Sales), 5→2(Sales), 6→4(orphan)
+  # sc_dept: 1=R&D, 2=Sales, 3=HR, 4=deleted
+
+  - name: "Prejoin: delete all R&D employees"
+    sql: "DELETE FROM sc_emp WHERE dept_id = 1"
+
+  - name: "Prejoin after deleting all from dept: R&D gone"
+    sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
+    expect:
+      rows: 1
+      data:
+        - name: "Sales"
+          s: 270
+
   # --- Cleanup ---
   - name: "Cleanup sc_base"
     sql: "DROP TABLE IF EXISTS sc_base"
@@ -324,3 +752,9 @@ test_cases:
 
   - name: "Cleanup sc_emp"
     sql: "DROP TABLE IF EXISTS sc_emp"
+
+  - name: "Cleanup sc_hit"
+    sql: "DROP TABLE IF EXISTS sc_hit"
+
+  - name: "Cleanup sc_inter"
+    sql: "DROP TABLE IF EXISTS sc_inter"

@@ -1389,7 +1389,16 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 								))
 							))))) "compute"))
 
-						(list 'begin keytable_init collect_plan compute_plan grouped_plan)
+						/* build key column pairs for keytable cleanup triggers: ((base_col kt_col) ...) */
+						(define key_pairs (map stage_group (lambda (expr)
+							(match expr
+								'('get_column _ _ col _) (list col (concat expr))
+								(list (concat expr) (concat expr))
+							))))
+						(define cleanup_plan (list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
+							(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p)))))))
+
+						(list 'begin keytable_init cleanup_plan collect_plan compute_plan grouped_plan)
 				))
 			)
 			(begin /* multi-table GROUP BY via prejoin materialization */
@@ -1472,14 +1481,16 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 					pj_all_groups
 					schemas
 					replace_find_column))
-				/* assemble: drop + create + materialize + grouped result */
-				(list 'begin
-					'('droptable pj_schema prejointbl true)
-					'('createtable pj_schema prejointbl
-						(cons 'list (map mat_col_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
-						'(list "engine" "sloppy") true)
-					'('time materialize_plan "materialize")
-					grouped_result)
+				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
+				(cons 'begin (merge
+					(list
+						'('createtable pj_schema prejointbl
+							(cons 'list (map mat_col_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
+							'(list "engine" "sloppy") true)
+						(list 'if (list 'equal? 0 (list 'scan pj_schema prejointbl '() '('lambda '() true) '() '('lambda '() 1) '+ 0 nil))
+							'('time materialize_plan "materialize")))
+					(map tables (lambda (t) (list 'register_prejoin_invalidation (nth t 1) (nth t 2) pj_schema prejointbl)))
+					(list grouped_result)))
 			)
 		)
 	) (optimize (begin

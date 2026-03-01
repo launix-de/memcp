@@ -710,6 +710,25 @@ func Init(en scm.Env) {
 				t.repartition(ps) // perform repartitioning immediately
 				return scm.NewBool(true)
 			} else {
+				// early exit if all requested columns are already partitioned
+				allPresent := true
+				for i := 0; i < len(cols)/2; i++ {
+					colName := scm.String(cols[2*i])
+					found := false
+					for _, dim := range t.PDimensions {
+						if dim.Column == colName {
+							found = true
+							break
+						}
+					}
+					if !found {
+						allPresent = false
+						break
+					}
+				}
+				if allPresent {
+					return scm.NewBool(false)
+				}
 				// increase partitioning scores
 				for i, c := range t.Columns {
 					if pivots, ok := cols.Get(c.Name); ok {
@@ -904,6 +923,224 @@ func Init(en scm.Env) {
 				if proxy, ok := col.(*StorageComputeProxy); ok {
 					proxy.InvalidateAll()
 				}
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"register_prejoin_invalidation", "registers triggers on a source table to drop a prejoin table when source data changes",
+		4, 4,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"src_schema", "string", "database of the source table", nil},
+			scm.DeclarationParameter{"src_table", "string", "name of the source table", nil},
+			scm.DeclarationParameter{"pj_schema", "string", "database of the prejoin table", nil},
+			scm.DeclarationParameter{"pj_table", "string", "name of the prejoin table", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			srcDB := GetDatabase(scm.String(a[0]))
+			if srcDB == nil { return scm.NewBool(false) }
+			srcTable := srcDB.GetTable(scm.String(a[1]))
+			if srcTable == nil { return scm.NewBool(false) }
+			pjSchema := scm.String(a[2])
+			pjTable := scm.String(a[3])
+			for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+				triggerName := ".prejoin:" + pjTable + "|" + srcTable.Name + "|" + timing.String()
+				exists := false
+				for _, tr := range srcTable.Triggers {
+					if tr.Name == triggerName { exists = true; break }
+				}
+				if exists { continue }
+				srcTable.AddTrigger(TriggerDescription{
+					Name:     triggerName,
+					Timing:   timing,
+					IsSystem: true,
+					Priority: 100,
+					Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("droptable"),
+						scm.NewString(pjSchema),
+						scm.NewString(pjTable),
+						scm.NewBool(true),
+					})),
+				})
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"register_keytable_cleanup", "registers triggers on a base table to maintain keytable entries (insert/delete group keys)",
+		6, 6,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"base_schema", "string", "database of the base table", nil},
+			scm.DeclarationParameter{"base_table", "string", "name of the base table", nil},
+			scm.DeclarationParameter{"kt_schema", "string", "database of the keytable", nil},
+			scm.DeclarationParameter{"kt_name", "string", "name of the keytable", nil},
+			scm.DeclarationParameter{"tblvar", "string", "table alias used in scan column prefixes", nil},
+			scm.DeclarationParameter{"key_pairs", "list", "list of (base_col kt_col) pairs", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			baseDB := GetDatabase(scm.String(a[0]))
+			if baseDB == nil { return scm.NewBool(false) }
+			baseTable := baseDB.GetTable(scm.String(a[1]))
+			if baseTable == nil { return scm.NewBool(false) }
+			ktSchema := scm.String(a[2])
+			ktName := scm.String(a[3])
+			tblvar := scm.String(a[4])
+			pairs := a[5].Slice()
+
+			// Extract column name pairs
+			var baseCols, ktCols []string
+			for _, p := range pairs {
+				pp := p.Slice()
+				baseCols = append(baseCols, scm.String(pp[0]))
+				ktCols = append(ktCols, scm.String(pp[1]))
+			}
+
+			baseSchema := scm.String(a[0])
+
+			// Helper: build (and (equal? x1 y1) (equal? x2 y2) ...) or just (equal? x y) for single key
+			buildAndEquals := func(xs, ys []scm.Scmer) scm.Scmer {
+				if len(xs) == 1 {
+					return scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), xs[0], ys[0]})
+				}
+				parts := make([]scm.Scmer, 1+len(xs))
+				parts[0] = scm.NewSymbol("and")
+				for i := range xs {
+					parts[1+i] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), xs[i], ys[i]})
+				}
+				return scm.NewSlice(parts)
+			}
+
+			// Helper: build scan filter lambda params as tblvar.col symbols
+			scanFilterParams := func(prefix string, cols []string) scm.Scmer {
+				params := make([]scm.Scmer, len(cols))
+				for i, col := range cols {
+					params[i] = scm.NewSymbol(prefix + "." + col)
+				}
+				return scm.NewSlice(params)
+			}
+
+			// Helper: build scan filter column list (list "col1" "col2" ...)
+			scanFilterCols := func(cols []string) scm.Scmer {
+				elems := make([]scm.Scmer, 1+len(cols))
+				elems[0] = scm.NewSymbol("list")
+				for i, col := range cols {
+					elems[1+i] = scm.NewString(col)
+				}
+				return scm.NewSlice(elems)
+			}
+
+			// Helper: build symbols for scan param references
+			scanParamSyms := func(prefix string, cols []string) []scm.Scmer {
+				syms := make([]scm.Scmer, len(cols))
+				for i, col := range cols {
+					syms[i] = scm.NewSymbol(prefix + "." + col)
+				}
+				return syms
+			}
+
+			// Helper: build (get_assoc <sym> "col") list
+			getAssocs := func(sym string, cols []string) []scm.Scmer {
+				result := make([]scm.Scmer, len(cols))
+				for i, col := range cols {
+					result[i] = fkGetAssocExpr(sym, col)
+				}
+				return result
+			}
+
+			// Build count-scan: (scan base_schema base_table (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
+			buildCountScan := func(dictSym string) scm.Scmer {
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("scan"),
+					scm.NewString(baseSchema), scm.NewString(baseTable.Name),
+					scanFilterCols(baseCols),
+					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
+						buildAndEquals(scanParamSyms(tblvar, baseCols), getAssocs(dictSym, baseCols)))),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewInt(1)}),
+					scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
+				})
+			}
+
+			// Build delete-scan: (scan kt_schema kt_name (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
+			buildDeleteScan := func(dictSym string) scm.Scmer {
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("scan"),
+					scm.NewString(ktSchema), scm.NewString(ktName),
+					scanFilterCols(ktCols),
+					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
+						buildAndEquals(scanParamSyms(ktName, ktCols), getAssocs(dictSym, baseCols)))),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$update")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")})}),
+					scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
+				})
+			}
+
+			// Build insert: (insert kt_schema kt_name (list kt_cols...) (list (list vals...)) (list) (lambda () true) true)
+			buildInsert := func(dictSym string) scm.Scmer {
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("insert"),
+					scm.NewString(ktSchema), scm.NewString(ktName),
+					scanFilterCols(ktCols),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"),
+						fkValListExpr(dictSym, baseCols)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewBool(true)}),
+					scm.NewBool(true),
+				})
+			}
+
+			// AfterDelete body: if count=0 then delete from keytable
+			deleteBody := scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("if"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewInt(0), buildCountScan("OLD")}),
+				buildDeleteScan("OLD"),
+			})
+
+			// AfterInsert body: insert new key into keytable (INSERT IGNORE)
+			insertBody := buildInsert("NEW")
+
+			// AfterUpdate body: if key changed, clean up old + insert new
+			keyChangedCheck := buildAndEquals(getAssocs("OLD", baseCols), getAssocs("NEW", baseCols))
+			updateBody := scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("if"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("not"), keyChangedCheck}),
+				scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("begin"),
+					scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("if"),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewInt(0), buildCountScan("OLD")}),
+						buildDeleteScan("OLD"),
+					}),
+					buildInsert("NEW"),
+				}),
+			})
+
+			// Register triggers with idempotency
+			triggerDefs := []struct {
+				timing TriggerTiming
+				body   scm.Scmer
+			}{
+				{AfterDelete, deleteBody},
+				{AfterInsert, insertBody},
+				{AfterUpdate, updateBody},
+			}
+			for _, td := range triggerDefs {
+				triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + td.timing.String()
+				exists := false
+				for _, tr := range baseTable.Triggers {
+					if tr.Name == triggerName { exists = true; break }
+				}
+				if exists { continue }
+				baseTable.AddTrigger(TriggerDescription{
+					Name:     triggerName,
+					Timing:   td.timing,
+					IsSystem: true,
+					Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
+					Func:     buildFKProc(td.body),
+				})
 			}
 			return scm.NewBool(true)
 		}, false, false, nil,
