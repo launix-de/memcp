@@ -96,9 +96,9 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 	}
 }
 
-// jitBuildLoopFunc compiles a JIT function that internally loops over 0..count-1,
-// calling JITEmit for each index. Returns func() (no per-call overhead).
-func jitBuildLoopFunc(tb testing.TB, s *StorageInt, count int64, constThisptr bool) (fn func(), cleanup func()) {
+// jitBuildSumFunc compiles a JIT function that loops 0..count-1, reads each
+// value via JITEmit and accumulates SUM in R14. Returns func() int64.
+func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr bool) (fn func() int64, cleanup func()) {
 	tb.Helper()
 	if runtime.GOARCH != "amd64" {
 		tb.Skip("JIT benchmarks only on amd64")
@@ -111,47 +111,52 @@ func jitBuildLoopFunc(tb testing.TB, s *StorageInt, count int64, constThisptr bo
 		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 	}
 
-	// R15 = loop counter (not in free pool)
-	// R13 = thisptr for LocReg case (not in free pool if used)
+	// R15 = loop counter, R14 = accumulator (SUM), R12 = slice base (unused but reserved)
+	// R13 = thisptr for LocReg case
 	ctx := &scm.JITContext{
 		W: w,
 		FreeRegs: (1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 			(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 			(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 			(1 << uint(scm.RegR11)) | (1 << uint(scm.RegR13)),
-		// R15 reserved for loop counter, not in free pool
+		// R14 = accumulator, R15 = loop counter — both reserved
 	}
 
 	var thisptr scm.JITValueDesc
 	if constThisptr {
 		thisptr = scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s))))}
 	} else {
-		// Use R13 for thisptr (remove from free pool)
 		ctx.FreeRegs &^= 1 << uint(scm.RegR13)
 		w.EmitMovRegImm64(scm.RegR13, uint64(uintptr(unsafe.Pointer(s))))
 		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegR13}
 	}
 
-	// XOR R15, R15 (zero the loop counter)
+	// PUSH R14 (save Go's g pointer)
+	w.EmitByte(0x41); w.EmitByte(0x56)
+	// XOR R15, R15 (zero loop counter)
 	w.EmitByte(0x4D); w.EmitByte(0x31); w.EmitByte(0xFF)
+	// XOR R14, R14 (zero accumulator)
+	w.EmitByte(0x4D); w.EmitByte(0x31); w.EmitByte(0xF6)
 
-	// Loop top label
 	lblTop := w.ReserveLabel()
 	w.MarkLabel(lblTop)
 
-	// Copy R15 (loop counter) to a scratch register for the body to consume.
-	// The body will destroy the scratch via IMUL etc., but R15 stays intact.
+	// Copy R15 to scratch for body consumption
 	idxReg := ctx.AllocReg()
 	w.EmitMovRegReg(idxReg, scm.RegR15)
 	idx := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxReg}
 
-	// Emit the JITEmit body — result goes to RAX+RBX (discarded each iteration)
+	// Emit JITEmit body — result goes wherever JITEmit chooses
 	result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
 	desc := s.JITEmit(ctx, thisptr, idx, result)
-	// Free the result registers so the code-gen free pool is restored
+
+	// Scmer LocRegPair: Reg=sentinel ptr, Reg2=int value (aux field).
+	// For null: EmitMakeNil zeroes both, so adding Reg2=0 is correct for SUM.
+	// ADD R14, desc.Reg2
+	w.EmitAddInt64(scm.RegR14, desc.Reg2)
 	ctx.FreeDesc(&desc)
 
-	// INC R15: REX.WB=0x49, FF /0, ModRM=0xC7 (reg=0, rm=R15&7=7)
+	// INC R15
 	w.EmitByte(0x49); w.EmitByte(0xFF); w.EmitByte(0xC7)
 
 	// CMP R15, count
@@ -160,6 +165,10 @@ func jitBuildLoopFunc(tb testing.TB, s *StorageInt, count int64, constThisptr bo
 	// JL loopTop
 	w.EmitJcc(scm.CcL, lblTop)
 
+	// MOV RAX, R14 (return accumulator)
+	w.EmitByte(0x4C); w.EmitByte(0x89); w.EmitByte(0xF0)
+	// POP R14 (restore Go's g pointer)
+	w.EmitByte(0x41); w.EmitByte(0x5E)
 	// RET
 	w.EmitByte(0xC3)
 
@@ -168,7 +177,6 @@ func jitBuildLoopFunc(tb testing.TB, s *StorageInt, count int64, constThisptr bo
 	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
 	code := codeBuf[:codeLen]
 
-	// Allocate executable memory
 	pageSize := syscall.Getpagesize()
 	n := (len(code) + pageSize - 1) &^ (pageSize - 1)
 	b, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
@@ -186,9 +194,9 @@ func jitBuildLoopFunc(tb testing.TB, s *StorageInt, count int64, constThisptr bo
 	}
 	hdr := &funcHeader{fnptr: &b[0]}
 	hdrPtr := unsafe.Pointer(hdr)
-	jitFn := *(*func())(unsafe.Pointer(&hdrPtr))
+	jitFn := *(*func() int64)(unsafe.Pointer(&hdrPtr))
 
-	tb.Logf("JIT loop code size: %d bytes (constThisptr=%v, count=%d)", codeLen, constThisptr, count)
+	tb.Logf("JIT SUM code size: %d bytes (constThisptr=%v, count=%d)", codeLen, constThisptr, count)
 
 	return jitFn, func() {
 		runtime.KeepAlive(hdr)
@@ -196,34 +204,127 @@ func jitBuildLoopFunc(tb testing.TB, s *StorageInt, count int64, constThisptr bo
 	}
 }
 
-// BenchmarkStorageIntGetValue — baseline: plain Go GetValue calls.
-func BenchmarkStorageIntGetValue(b *testing.B) {
-	s := buildBenchStorageInt(benchN)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		for j := uint32(0); j < benchN; j++ {
-			_ = s.GetValue(j)
-		}
+// buildBenchShard creates a minimal storageShard with a single "x" column backed by s.
+func buildBenchShard(s *StorageInt, count uint32) *storageShard {
+	t := &table{
+		Columns: []*column{{Name: "x", Typ: "int"}},
 	}
+	shard := &storageShard{
+		t:            t,
+		columns:      map[string]ColumnStorage{"x": s},
+		deltaColumns: make(map[string]int),
+		main_count:   count,
+	}
+	shard.deletions.Reset()
+	return shard
 }
 
-// BenchmarkStorageIntJITLoop — JIT with internal loop (no Go call overhead per item).
-func BenchmarkStorageIntJITLoop(b *testing.B) {
+// BenchmarkStorageIntSum — SUM(x) over 60k items across 4 implementations.
+func BenchmarkStorageIntSum(b *testing.B) {
 	s := buildBenchStorageInt(benchN)
-	b.Run("ConstFold", func(b *testing.B) {
-		jitLoop, cleanup := jitBuildLoopFunc(b, s, benchN, true)
-		defer cleanup()
+
+	// Pre-compute expected sum for validation
+	var expectedSum int64
+	for i := uint32(0); i < benchN; i++ {
+		v := s.GetValue(i)
+		if !v.IsNil() {
+			expectedSum += v.Int()
+		}
+	}
+	b.Logf("expected SUM = %d", expectedSum)
+
+	// 1) Go baseline: plain GetValue + accumulate
+	b.Run("Go", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			jitLoop()
+			var sum int64
+			for j := uint32(0); j < benchN; j++ {
+				v := s.GetValue(j)
+				if !v.IsNil() {
+					sum += v.Int()
+				}
+			}
+			if sum != expectedSum {
+				b.Fatalf("sum mismatch: got %d, want %d", sum, expectedSum)
+			}
 		}
 	})
-	b.Run("RegPtr", func(b *testing.B) {
-		jitLoop, cleanup := jitBuildLoopFunc(b, s, benchN, false)
+
+	// 2) JIT ConstFold: thisptr baked as immediate
+	b.Run("JIT_ConstFold", func(b *testing.B) {
+		if runtime.GOARCH != "amd64" {
+			b.Skip("JIT only on amd64")
+		}
+		jitSum, cleanup := jitBuildSumFunc(b, s, benchN, true)
 		defer cleanup()
+		// validate
+		if got := jitSum(); got != expectedSum {
+			b.Fatalf("JIT ConstFold sum mismatch: got %d, want %d", got, expectedSum)
+		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			jitLoop()
+			jitSum()
+		}
+	})
+
+	// 3) JIT RegPtr: thisptr in register
+	b.Run("JIT_RegPtr", func(b *testing.B) {
+		if runtime.GOARCH != "amd64" {
+			b.Skip("JIT only on amd64")
+		}
+		jitSum, cleanup := jitBuildSumFunc(b, s, benchN, false)
+		defer cleanup()
+		if got := jitSum(); got != expectedSum {
+			b.Fatalf("JIT RegPtr sum mismatch: got %d, want %d", got, expectedSum)
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			jitSum()
+		}
+	})
+
+	// 4) MapReducer: Proc-based map=(lambda (x) x), reduce=(lambda (acc new) (+ acc new))
+	b.Run("MapReducer", func(b *testing.B) {
+		shard := buildBenchShard(s, benchN)
+
+		// identity map: (lambda (x) x) — body = (var 0), NumVars=1
+		mapProc := scm.NewProcStruct(scm.Proc{
+			Params:  scm.NewSlice([]scm.Scmer{scm.NewSymbol("x")}),
+			Body:    scm.NewNthLocalVar(0),
+			En:      &scm.Globalenv,
+			NumVars: 1,
+		})
+
+		// reduce: (lambda (acc new) (+ acc new))
+		reduceProc := scm.NewProcStruct(scm.Proc{
+			Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("new")}),
+			Body: scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("+"),
+				scm.NewNthLocalVar(0),
+				scm.NewNthLocalVar(1),
+			}),
+			En:      &scm.Globalenv,
+			NumVars: 2,
+		})
+
+		mr := shard.OpenMapReducer([]string{"x"}, mapProc, reduceProc)
+		defer mr.Close()
+
+		// build recid list [0..benchN-1]
+		recids := make([]uint32, benchN)
+		for i := range recids {
+			recids[i] = uint32(i)
+		}
+
+		// validate
+		got := mr.Stream(scm.NewInt(0), recids)
+		if got.Int() != expectedSum {
+			b.Fatalf("MapReducer sum mismatch: got %d, want %d", got.Int(), expectedSum)
+		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			mr.Stream(scm.NewInt(0), recids)
 		}
 	})
 }
