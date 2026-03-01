@@ -529,7 +529,15 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.vals[name] = genVal{argIdx: -1, argIdxVar: idxVal.goVar}
 			}
 		} else {
-			panic(fmt.Sprintf("IndexAddr on non-parameter: %s", v))
+			// IndexAddr on a local slice (e.g. from Slice())
+			src := g.vals[v.X.Name()]
+			if src.marker == "_slice" {
+				// src.goVar is a JITValueDesc with Reg=data_ptr
+				idxVal := g.resolveValue(v.Index)
+				g.vals[name] = genVal{argIdx: -1, argIdxVar: idxVal.goVar, marker: "_sliceaddr:" + src.goVar}
+			} else {
+				panic(fmt.Sprintf("IndexAddr on non-parameter: %s", v))
+			}
 		}
 
 	case *ssa.UnOp:
@@ -593,7 +601,16 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 					g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}", dv)
 					g.vals[name] = genVal{goVar: dv, isDesc: true}
 				} else {
-					panic(fmt.Sprintf("len on non-parameter: %s", v))
+					// len of a local slice variable (e.g. from Slice())
+					src := g.vals[arg.Name()]
+					if src.marker == "_slice" {
+						// Slice result: Reg=data_ptr, Reg2=length
+						dv := g.allocDesc()
+						g.emit("%s := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, src.goVar)
+						g.vals[name] = genVal{goVar: dv, isDesc: true}
+					} else {
+						panic(fmt.Sprintf("len on non-parameter: %s", v))
+					}
 				}
 			default:
 				panic(fmt.Sprintf("unsupported builtin: %s", builtin.Name()))
@@ -639,6 +656,11 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagSlice, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "IsFastDict":
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagFastDict, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Int":
 			// (Scmer).Int() — extract int64 from Scmer
 			// LocImm: compile-time extraction; LocRegPair: aux IS the raw int64
@@ -676,6 +698,80 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			g.vals[name] = genVal{goVar: src.goVar, marker: "_newfloat"}
 		case "NewNil":
 			g.vals[name] = genVal{goVar: "", marker: "_newnil"}
+		case "NewFastDict":
+			// NewFastDict(fd *FastDict) Scmer — construct Scmer from *FastDict ptr
+			// arg: 1 word (raw pointer), result: 2 words (Scmer)
+			src := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", src.goVar)
+			g.emit("\tpanic(\"NewFastDict: LocImm not expected at JIT compile time\")")
+			g.emit("} else {")
+			auxReg := g.allocReg()
+			g.emit("\t%s := ctx.AllocReg()", auxReg)
+			g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(tagFastDict) << 48)", auxReg)
+			g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: tagFastDict, Reg: %s.Reg, Reg2: %s}", dv, src.goVar, auxReg)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "NewFastDictValue":
+			// NewFastDictValue(cap int) *FastDict — Go call, returns 1 word
+			arg := g.resolveValue(v.Call.Args[0])
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "OptimizeProcToSerialFunction":
+			// OptimizeProcToSerialFunction(Scmer) func(...Scmer) Scmer
+			// arg: Scmer (2 words), result: func value (1 word)
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(OptimizeProcToSerialFunction), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "FastDict":
+			// (Scmer).FastDict() *FastDict — extract ptr field, free aux
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", arg.goVar)
+			g.emit("\tpanic(\"FastDict: LocImm not expected at JIT compile time\")")
+			g.emit("} else {")
+			g.emit("\tctx.FreeReg(%s.Reg2)", arg.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s.Reg}", dv, arg.goVar)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "Set":
+			// (*FastDict).Set(fd, key, value, mergeFn) — void Go call
+			recv := g.vals[v.Call.Args[0].Name()] // *FastDict (1 word)
+			key := g.vals[v.Call.Args[1].Name()]   // Scmer (2 words)
+			val := g.vals[v.Call.Args[2].Name()]   // Scmer (2 words)
+			mergeFn := g.resolveValue(v.Call.Args[3]) // func (1 word)
+			g.emit("ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{%s, %s, %s, %s})", recv.goVar, key.goVar, val.goVar, mergeFn.goVar)
+		case "Slice":
+			// (Scmer).Slice() []Scmer — extract data ptr and length from Scmer
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			// ptr field = data pointer (Reg), aux lower 48 bits = length
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", arg.goVar)
+			g.emit("\tslice := %s.Imm.Slice()", arg.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagSlice, Imm: NewInt(int64(len(slice)))}", dv)
+			g.emit("} else {")
+			// Extract length from aux: AND with mask, SHR not needed (auxVal = aux & ((1<<48)-1))
+			lenReg := g.allocReg()
+			g.emit("\t%s := ctx.AllocReg()", lenReg)
+			g.emit("\tctx.W.emitMovRegReg(%s, %s.Reg2)", lenReg, arg.goVar)
+			g.emit("\tctx.W.EmitShlRegImm8(%s, 16)", lenReg) // clear top 16 bits (tag)
+		g.emit("\tctx.W.EmitShrRegImm8(%s, 16)", lenReg)
+			g.emit("\tctx.FreeReg(%s.Reg2)", arg.goVar) // free aux
+			g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s.Reg, Reg2: %s}", dv, arg.goVar, lenReg)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+		case "JITBuildMergeClosure":
+			// JITBuildMergeClosure(func(...Scmer) Scmer) func(Scmer, Scmer) Scmer
+			// arg: 1 word, result: 1 word
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildMergeClosure), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		default:
 			panic(fmt.Sprintf("unsupported call: %s", v))
 		}
@@ -771,6 +867,31 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("}")
 			}
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		} else if v.Op == token.QUO {
+			// Integer division: uses SHR for power-of-2, IDIV otherwise
+			dv := g.allocDesc()
+			if c, ok := v.Y.(*ssa.Const); ok {
+				divisor := c.Int64()
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s.Loc == LocImm {", xVal.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() / %d)}", dv, xVal.goVar, divisor)
+				g.emit("} else {")
+				// Use SHR for power of 2
+				if divisor > 0 && (divisor&(divisor-1)) == 0 {
+					shift := 0
+					for d := divisor; d > 1; d >>= 1 {
+						shift++
+					}
+					g.emit("\tctx.W.EmitShrRegImm8(%s.Reg, %d)", xVal.goVar, shift)
+				} else {
+					g.emit("\tctx.W.EmitIdivRegImm(%s.Reg, %d)", xVal.goVar, divisor)
+				}
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				g.emit("}")
+			} else {
+				panic(fmt.Sprintf("non-const division: %s", v))
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		} else {
 			panic(fmt.Sprintf("unsupported BinOp %s", v.Op))
 		}
@@ -863,6 +984,37 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			panic(fmt.Sprintf("unsupported Convert %s → %s", srcType, dstType))
 		}
 
+	case *ssa.Alloc:
+		// Track allocation — no machine code emitted.
+		// The actual value will be set by Store and consumed by MakeClosure.
+		g.vals[name] = genVal{marker: "_alloc"}
+
+	case *ssa.Store:
+		dst := g.vals[v.Addr.Name()]
+		if dst.marker == "_alloc" {
+			// Storing to an allocation: just remember the stored value
+			src := g.vals[v.Val.Name()]
+			g.vals[v.Addr.Name()] = genVal{goVar: src.goVar, isDesc: src.isDesc, marker: "_alloc_stored"}
+		} else {
+			panic(fmt.Sprintf("unsupported Store: %s", v))
+		}
+
+	case *ssa.MakeClosure:
+		// Construct closure from captured variables.
+		// The binding should reference an _alloc_stored value (the func to wrap).
+		if len(v.Bindings) != 1 {
+			panic(fmt.Sprintf("MakeClosure with %d bindings", len(v.Bindings)))
+		}
+		binding := g.vals[v.Bindings[0].Name()]
+		if binding.marker != "_alloc_stored" {
+			panic("MakeClosure binding not an alloc-stored value")
+		}
+		// The stored value is a func(...Scmer) Scmer (1 word in a register).
+		// Call JITBuildMergeClosure to wrap it.
+		dv := g.allocDesc()
+		g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildMergeClosure), []JITValueDesc{%s}, 1)", dv, binding.goVar)
+		g.vals[name] = genVal{goVar: dv, isDesc: true}
+
 	default:
 		panic(instrDesc(instr))
 	}
@@ -943,7 +1095,13 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 		g.emit("ctx.W.EmitMakeNil(result)")
 		g.emit("result.Type = tagNil")
 	default:
-		panic(fmt.Sprintf("unsupported return type for %s", v.Results[0]))
+		// Already-materialized Scmer in LocRegPair — MOV to result registers
+		if res.isDesc {
+			g.emit("ctx.EmitMovPairToResult(&%s, &result)", res.goVar)
+			g.emit("result.Type = %s.Type", res.goVar)
+		} else {
+			panic(fmt.Sprintf("unsupported return type for %s", v.Results[0]))
+		}
 	}
 	g.emit("ctx.W.EmitJmp(%s)", g.endLabel)
 }

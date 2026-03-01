@@ -116,7 +116,7 @@ func init_list() {
 			panic("count expects a list")
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: (Scmer).Slice(t5) */,
+		nil /* TODO: unsupported Convert int → int64 */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nth", "get the nth item of a list",
@@ -177,7 +177,7 @@ func init_list() {
 			return NewSlice(base)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_mut")},
-		nil /* TODO: Alloc: new [0]Scmer (slicelit) */,
+		nil /* TODO: Slice: slice t0[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
@@ -201,7 +201,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_unique_mut")},
-		nil /* TODO: Alloc: new [0]Scmer (slicelit) */,
+		nil /* TODO: Slice: slice t0[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cons", "constructs a list from a head and a tail list",
@@ -218,7 +218,7 @@ func init_list() {
 			return NewSlice([]Scmer{car, a[1]})
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Alloc: new [2]Scmer (slicelit) */,
+		nil /* TODO: IndexAddr on non-parameter: &t14[0:int] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"car", "extracts the head of a list",
@@ -487,7 +487,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Alloc: new [0]Scmer (makeslice) */,
+		nil /* TODO: Slice: slice t0[:0:int] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"produceN", "returns a list with numbers from 0..n-1, optionally mapped through a function",
@@ -516,7 +516,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Convert: convert int <- int64 (t2) */,
+		nil /* TODO: unsupported Convert int64 → int */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list?", "checks if a value is a list",
@@ -583,7 +583,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_assoc_mut")},
-		nil /* TODO: Alloc: new []Scmer (result) */,
+		nil /* TODO: Slice: slice t1[:0:int] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"map_assoc", "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
@@ -616,7 +616,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("map_assoc_mut")},
-		nil /* TODO: Alloc: new func(...Scmer) Scmer (fn) */,
+		nil /* TODO: unsupported call: asAssoc(t5, "map_assoc":string) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce_assoc", "reduces a dictionary according to a reduce function",
@@ -639,7 +639,7 @@ func init_list() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: Alloc: new Scmer (result) */,
+		nil /* TODO: unsupported call: asAssoc(t8, "reduce_assoc":string) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"has_assoc?", "checks if a dictionary has a key present",
@@ -724,7 +724,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("extract_assoc_mut")},
-		nil /* TODO: Alloc: new func(...Scmer) Scmer (fn) */,
+		nil /* TODO: unsupported call: asAssoc(t5, "extract_assoc":string) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"set_assoc", "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
@@ -802,7 +802,7 @@ func init_list() {
 			return dst
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("merge_assoc_mut")},
-		nil /* TODO: Alloc: new []Scmer (a) */,
+		nil /* TODO: FieldAddr: &Globalenv.Vars [#0] */,
 	})
 
 	// _mut variants: optimizer-only, forbidden from .scm code
@@ -824,7 +824,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: (Scmer).Slice(t1) */,
+		nil /* TODO: unsupported call: NewSlice(t2) */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -843,7 +843,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: (Scmer).Slice(t1) */,
+		nil /* TODO: unsupported call: NewSlice(t2) */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -876,7 +876,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Alloc: new func(...Scmer) Scmer (fn) */,
+		nil /* TODO: unsupported call: asAssoc(t5, "map_assoc_mut":string) */,
 	})
 
 	// Tier 2: shrinking, write-cursor
@@ -901,7 +901,7 @@ func init_list() {
 			return NewSlice(input[:w])
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: (Scmer).Slice(t1) */,
+		nil /* TODO: Slice: slice t2[:t7] */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -935,7 +935,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Alloc: new func(...Scmer) Scmer (fn) */,
+		nil /* TODO: unsupported call: asAssoc(t5, "filter_assoc_mut":string) */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -964,7 +964,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Alloc: new func(...Scmer) Scmer (fn) */,
+		nil /* TODO: unsupported call: asAssoc(t5, "extract_assoc_mut":string) */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -999,7 +999,257 @@ func init_list() {
 			return NewFastDict(fd)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO */,
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			r0 := ctx.AllocReg()
+			r1 := ctx.AllocReg()
+			r2 := ctx.AllocReg()
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			lbl0 := ctx.W.ReserveLabel()
+			d0 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
+			var d1 JITValueDesc
+			if d0.Loc == LocImm {
+				d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() > 3)}
+			} else {
+				r3 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d0.Reg, 3)
+				ctx.W.EmitSetcc(r3, CcG)
+				d1 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r3}
+			}
+			lbl1 := ctx.W.ReserveLabel()
+			lbl2 := ctx.W.ReserveLabel()
+			lbl3 := ctx.W.ReserveLabel()
+			if d1.Loc == LocImm {
+				if d1.Imm.Bool() {
+					ctx.W.EmitJmp(lbl1)
+				} else {
+					ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Imm: NewInt(0)})
+					ctx.W.EmitJmp(lbl2)
+				}
+			} else {
+				ctx.W.EmitCmpRegImm32(d1.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl3)
+				ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Imm: NewInt(0)})
+				ctx.W.EmitJmp(lbl2)
+				ctx.W.MarkLabel(lbl3)
+				ctx.W.EmitJmp(lbl1)
+			}
+			ctx.W.MarkLabel(lbl2)
+			d2 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r0}
+			d3 := args[0]
+			d4 := ctx.EmitTagEquals(&d3, tagFastDict, JITValueDesc{Loc: LocAny})
+			lbl4 := ctx.W.ReserveLabel()
+			lbl5 := ctx.W.ReserveLabel()
+			lbl6 := ctx.W.ReserveLabel()
+			if d4.Loc == LocImm {
+				if d4.Imm.Bool() {
+					ctx.W.EmitJmp(lbl4)
+				} else {
+					ctx.W.EmitJmp(lbl5)
+				}
+			} else {
+				ctx.W.EmitCmpRegImm32(d4.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl6)
+				ctx.W.EmitJmp(lbl5)
+				ctx.W.MarkLabel(lbl6)
+				ctx.W.EmitJmp(lbl4)
+			}
+			ctx.W.MarkLabel(lbl1)
+			d5 := args[3]
+			d6 := ctx.EmitGoCallScalar(GoFuncAddr(OptimizeProcToSerialFunction), []JITValueDesc{d5}, 1)
+			d7 := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildMergeClosure), []JITValueDesc{d6}, 1)
+			ctx.EmitMovToReg(r0, d7)
+			ctx.W.EmitJmp(lbl2)
+			ctx.W.MarkLabel(lbl5)
+			d8 := args[0]
+			d9 := ctx.EmitTagEquals(&d8, tagSlice, JITValueDesc{Loc: LocAny})
+			lbl7 := ctx.W.ReserveLabel()
+			lbl8 := ctx.W.ReserveLabel()
+			lbl9 := ctx.W.ReserveLabel()
+			if d9.Loc == LocImm {
+				if d9.Imm.Bool() {
+					ctx.W.EmitJmp(lbl7)
+				} else {
+					ctx.W.EmitJmp(lbl8)
+				}
+			} else {
+				ctx.W.EmitCmpRegImm32(d9.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl9)
+				ctx.W.EmitJmp(lbl8)
+				ctx.W.MarkLabel(lbl9)
+				ctx.W.EmitJmp(lbl7)
+			}
+			ctx.W.MarkLabel(lbl4)
+			d10 := args[0]
+			var d11 JITValueDesc
+			if d10.Loc == LocImm {
+				panic("FastDict: LocImm not expected at JIT compile time")
+			} else {
+				ctx.FreeReg(d10.Reg2)
+				d11 = JITValueDesc{Loc: LocReg, Reg: d10.Reg}
+			}
+			ctx.EmitMovToReg(r1, d11)
+			lbl10 := ctx.W.ReserveLabel()
+			ctx.W.EmitJmp(lbl10)
+			ctx.W.MarkLabel(lbl8)
+			d12 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
+			d13 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d12}, 1)
+			ctx.EmitMovToReg(r1, d13)
+			ctx.W.EmitJmp(lbl10)
+			ctx.W.MarkLabel(lbl7)
+			d14 := args[0]
+			var d15 JITValueDesc
+			if d14.Loc == LocImm {
+				slice := d14.Imm.Slice()
+				d15 = JITValueDesc{Loc: LocImm, Type: tagSlice, Imm: NewInt(int64(len(slice)))}
+			} else {
+				r4 := ctx.AllocReg()
+				ctx.W.emitMovRegReg(r4, d14.Reg2)
+				ctx.W.EmitShlRegImm8(r4, 16)
+				ctx.W.EmitShrRegImm8(r4, 16)
+				ctx.FreeReg(d14.Reg2)
+				d15 = JITValueDesc{Loc: LocRegPair, Reg: d14.Reg, Reg2: r4}
+			}
+			d16 := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d15.Reg2}
+			var d17 JITValueDesc
+			if d16.Loc == LocImm {
+				d17 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d16.Imm.Int() / 2)}
+			} else {
+				ctx.W.EmitShrRegImm8(d16.Reg, 1)
+				d17 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d16.Reg}
+			}
+			var d18 JITValueDesc
+			if d17.Loc == LocImm {
+				d18 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d17.Imm.Int() + 4)}
+			} else {
+				scratch := ctx.AllocReg()
+				ctx.W.EmitMovRegImm64(scratch, uint64(4))
+				ctx.W.EmitAddInt64(d17.Reg, scratch)
+				ctx.FreeReg(scratch)
+				d18 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d17.Reg}
+			}
+			d19 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d18}, 1)
+			ctx.EmitMovToReg(r2, JITValueDesc{Loc: LocImm, Imm: NewInt(0)})
+			lbl11 := ctx.W.ReserveLabel()
+			ctx.W.EmitJmp(lbl11)
+			ctx.W.MarkLabel(lbl10)
+			d20 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r1}
+			d21 := args[1]
+			d22 := args[2]
+			ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{d20, d21, d22, d2})
+			var d23 JITValueDesc
+			if d20.Loc == LocImm {
+				panic("NewFastDict: LocImm not expected at JIT compile time")
+			} else {
+				r5 := ctx.AllocReg()
+				ctx.W.EmitMovRegImm64(r5, uint64(tagFastDict) << 48)
+				d23 = JITValueDesc{Loc: LocRegPair, Type: tagFastDict, Reg: d20.Reg, Reg2: r5}
+			}
+			ctx.EmitMovPairToResult(&d23, &result)
+			result.Type = d23.Type
+			ctx.W.EmitJmp(lbl0)
+			ctx.W.MarkLabel(lbl11)
+			d24 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r2}
+			var d25 JITValueDesc
+			if d24.Loc == LocImm {
+				d25 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 1)}
+			} else {
+				scratch := ctx.AllocReg()
+				ctx.W.EmitMovRegImm64(scratch, uint64(1))
+				ctx.W.EmitAddInt64(d24.Reg, scratch)
+				ctx.FreeReg(scratch)
+				d25 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d24.Reg}
+			}
+			d26 := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d15.Reg2}
+			var d27 JITValueDesc
+			if d25.Loc == LocImm && d26.Loc == LocImm {
+				d27 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d25.Imm.Int() < d26.Imm.Int())}
+			} else if d26.Loc == LocImm {
+				r6 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d25.Reg, int32(d26.Imm.Int()))
+				ctx.W.EmitSetcc(r6, CcL)
+				d27 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r6}
+			} else if d25.Loc == LocImm {
+				r7 := ctx.AllocReg()
+				scratch := ctx.AllocReg()
+				ctx.W.EmitMovRegImm64(scratch, uint64(d25.Imm.Int()))
+				ctx.W.EmitCmpInt64(scratch, d26.Reg)
+				ctx.FreeReg(scratch)
+				ctx.W.EmitSetcc(r7, CcL)
+				d27 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r7}
+			} else {
+				r8 := ctx.AllocReg()
+				ctx.W.EmitCmpInt64(d25.Reg, d26.Reg)
+				ctx.W.EmitSetcc(r8, CcL)
+				d27 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r8}
+			}
+			lbl12 := ctx.W.ReserveLabel()
+			lbl13 := ctx.W.ReserveLabel()
+			if d27.Loc == LocImm {
+				if d27.Imm.Bool() {
+					ctx.W.EmitJmp(lbl12)
+				} else {
+					ctx.EmitMovToReg(r1, d19)
+					ctx.W.EmitJmp(lbl10)
+				}
+			} else {
+				ctx.W.EmitCmpRegImm32(d27.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl13)
+				ctx.EmitMovToReg(r1, d19)
+				ctx.W.EmitJmp(lbl10)
+				ctx.W.MarkLabel(lbl13)
+				ctx.W.EmitJmp(lbl12)
+			}
+			ctx.W.MarkLabel(lbl12)
+			r9 := ctx.AllocReg()
+			ctx.W.emitMovRegReg(r9, d24.Reg)
+			ctx.W.EmitShlRegImm8(r9, 4)
+			ctx.W.EmitAddInt64(r9, ctx.SliceBase)
+			r10 := ctx.AllocReg()
+			r11 := ctx.AllocReg()
+			ctx.W.emitMovRegMem(r10, r9, 0)
+			ctx.W.emitMovRegMem(r11, r9, 8)
+			ctx.FreeReg(r9)
+			d28 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r10, Reg2: r11}
+			var d29 JITValueDesc
+			if d24.Loc == LocImm {
+				d29 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 1)}
+			} else {
+				scratch := ctx.AllocReg()
+				ctx.W.EmitMovRegImm64(scratch, uint64(1))
+				ctx.W.EmitAddInt64(d24.Reg, scratch)
+				ctx.FreeReg(scratch)
+				d29 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d24.Reg}
+			}
+			r12 := ctx.AllocReg()
+			ctx.W.emitMovRegReg(r12, d29.Reg)
+			ctx.W.EmitShlRegImm8(r12, 4)
+			ctx.W.EmitAddInt64(r12, ctx.SliceBase)
+			r13 := ctx.AllocReg()
+			r14 := ctx.AllocReg()
+			ctx.W.emitMovRegMem(r13, r12, 0)
+			ctx.W.emitMovRegMem(r14, r12, 8)
+			ctx.FreeReg(r12)
+			d30 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r13, Reg2: r14}
+			d31 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+			ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{d19, d28, d30, d31})
+			var d32 JITValueDesc
+			if d24.Loc == LocImm {
+				d32 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 2)}
+			} else {
+				scratch := ctx.AllocReg()
+				ctx.W.EmitMovRegImm64(scratch, uint64(2))
+				ctx.W.EmitAddInt64(d24.Reg, scratch)
+				ctx.FreeReg(scratch)
+				d32 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d24.Reg}
+			}
+			ctx.EmitMovToReg(r2, d32)
+			ctx.W.EmitJmp(lbl11)
+			ctx.W.MarkLabel(lbl0)
+			ctx.W.ResolveFixups()
+			return result
+		},
 	})
 
 	// Tier 3: append/grow
@@ -1073,6 +1323,6 @@ func init_list() {
 			return dst
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Alloc: new []Scmer (a) */,
+		nil /* TODO: FieldAddr: &Globalenv.Vars [#0] */,
 	})
 }
