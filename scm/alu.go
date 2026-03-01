@@ -319,7 +319,7 @@ func init_alu() {
 			return EqualSQL(a[0], a[1])
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: (Scmer).IsNil(t1) */,
+		nil /* TODO: If: if t2 goto 1 else 3 */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"notequal_collate", "performs SQL inequality with a specified collation; returns nil if either arg is nil",
@@ -373,7 +373,17 @@ func init_alu() {
 			return NewBool(a[0].IsNil())
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: (Scmer).IsNil(t1) */,
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			d0 := args[0]
+			d1 := ctx.EmitTagEquals(&d0, tagNil, JITValueDesc{Loc: LocAny})
+			if d1.Loc == LocImm {
+				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d1.Imm} }
+				ctx.W.EmitMakeBool(result, d1)
+			} else {
+				ctx.W.EmitMakeBool(result, d1)
+			}
+			return result
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		"min", "returns the smallest value",
@@ -472,7 +482,7 @@ func init_alu() {
 			return NewFloat(v)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: (Scmer).IsNil(t1) */,
+		nil /* TODO: If: if t2 goto 1 else 2 */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sqrt", "returns the square root of a number",
@@ -491,7 +501,7 @@ func init_alu() {
 			return NewFloat(math.Sqrt(v))
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: (Scmer).IsNil(t1) */,
+		nil /* TODO: If: if t2 goto 1 else 2 */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_rand", "SQL RAND(): returns a random float in [0,1)",

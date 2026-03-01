@@ -345,6 +345,31 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			g.emit("%s := ctx.EmitGetTagDesc(&%s, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "IsNil":
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagNil, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "IsInt":
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagInt, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "IsFloat":
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagFloat, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "IsBool":
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagBool, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "IsSlice":
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagSlice, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewBool":
 			src := g.lookup(v.Call.Args[0])
 			g.vals[name] = genVal{goVar: src.goVar, marker: "_newbool"}
@@ -354,6 +379,8 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 		case "NewFloat":
 			src := g.lookup(v.Call.Args[0])
 			g.vals[name] = genVal{goVar: src.goVar, marker: "_newfloat"}
+		case "NewNil":
+			g.vals[name] = genVal{goVar: "", marker: "_newnil"}
 		default:
 			panic(fmt.Sprintf("unsupported call: %s", v))
 		}
@@ -423,6 +450,10 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			g.emit("} else {")
 			g.emit("\tctx.W.EmitMakeFloat(result, %s)", res.goVar)
 			g.emit("}")
+			g.emit("return result")
+		case "_newnil":
+			g.emit("if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: NewNil()} }")
+			g.emit("ctx.W.EmitMakeNil(result)")
 			g.emit("return result")
 		default:
 			panic(fmt.Sprintf("unsupported return type for %s", v.Results[0]))
