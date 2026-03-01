@@ -1398,7 +1398,11 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(define cleanup_plan (list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 							(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p)))))))
 
-						(list 'begin keytable_init cleanup_plan collect_plan compute_plan grouped_plan)
+						(list 'begin keytable_init cleanup_plan
+						(list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
+							collect_plan
+							nil)
+						compute_plan grouped_plan)
 				))
 			)
 			(begin /* multi-table GROUP BY via prejoin materialization */
@@ -1487,7 +1491,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						'('createtable pj_schema prejointbl
 							(cons 'list (map mat_col_names (lambda (col) (list 'list "column" col "any" '(list) '(list)))))
 							'(list "engine" "sloppy") true)
-						(list 'if (list 'equal? 0 (list 'scan pj_schema prejointbl '() '('lambda '() true) '() '('lambda '() 1) '+ 0 nil))
+						(list 'if (list 'equal? 0 (list 'scan_estimate pj_schema prejointbl))
 							'('time materialize_plan "materialize")))
 					(map tables (lambda (t) (list 'register_prejoin_invalidation (nth t 1) (nth t 2) pj_schema prejointbl)))
 					(list grouped_result)))
