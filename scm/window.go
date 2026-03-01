@@ -104,7 +104,7 @@ func init_window() {
 			return NewSlice(result)
 		},
 		false, false, nil,
-		nil,
+		nil /* TODO: unsupported call: asSlice(t1, "window_mut":string) */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -153,6 +153,6 @@ func init_window() {
 			return NewNil()
 		},
 		false, false, nil,
-		nil,
+		nil /* TODO: unsupported call: asSlice(t1, "window_flush":string) */,
 	})
 }

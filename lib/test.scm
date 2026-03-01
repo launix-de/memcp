@@ -1062,6 +1062,37 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (_jit_nil? (size "abc")) false "jit: nil? reg int")
 	(assert (_jit_nil? (* 2 3)) false "jit: nil? reg int from mul")
 
+	/* number? with If/Phi/Jump */
+	(define _jit_number? (jit (lambda (x) (number? x))))
+	(assert (_jit_number? 42) true "jit: number? int")
+	(assert (_jit_number? (size "abc")) true "jit: number? int from size")
+	(assert (_jit_number? 3.14) true "jit: number? float")
+	(assert (_jit_number? nil) false "jit: number? nil")
+	(assert (_jit_number? true) false "jit: number? bool")
+	(assert (_jit_number? "hello") false "jit: number? string")
+	(assert (_jit_number? false) false "jit: number? bool false")
+
+	/* nested JIT operator calls — test constant folding and type propagation */
+	(define _jit_int_of_number (jit (lambda (x) (int? (number? x)))))
+	(assert (_jit_int_of_number 42) false "jit: int?(number? 42) = false (bool)")
+	(assert (_jit_int_of_number "hi") false "jit: int?(number? str) = false (bool)")
+
+	(define _jit_nil_of_nil (jit (lambda (x) (nil? (nil? x)))))
+	(assert (_jit_nil_of_nil nil) false "jit: nil?(nil? nil) = false (bool, not nil)")
+	(assert (_jit_nil_of_nil 42) false "jit: nil?(nil? 42) = false (bool)")
+
+	(define _jit_number_of_number (jit (lambda (x) (number? (number? x)))))
+	(assert (_jit_number_of_number 42) false "jit: number?(number? 42) = false (bool)")
+
+	/* critical: number? is multi-block, returns LocRegPair — Type must not be 0 */
+	(define _jit_nil_of_number (jit (lambda (x) (nil? (number? x)))))
+	(assert (_jit_nil_of_number 42) false "jit: nil?(number? 42) = false (bool, not nil)")
+	(assert (_jit_nil_of_number "hi") false "jit: nil?(number? str) = false (bool, not nil)")
+
+	(define _jit_int_of_nil (jit (lambda (x) (int? (nil? x)))))
+	(assert (_jit_int_of_nil nil) false "jit: int?(nil? nil) = false (bool)")
+	(assert (_jit_int_of_nil 5) false "jit: int?(nil? 5) = false (bool)")
+
 	/* alu.go: sql_abs */
 	(print "testing sql_abs ...")
 	(assert (equal? (sql_abs -5) 5) true "sql_abs of -5 = 5")
