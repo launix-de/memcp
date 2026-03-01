@@ -141,6 +141,9 @@ func (s *OverlayBlob) GetValue(i uint32) scm.Scmer {
 	}
 	return v
 }
+func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 func (s *OverlayBlob) prepare() {
 	// set up scan

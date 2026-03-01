@@ -116,6 +116,9 @@ func (s *StorageSeq) GetValue(i uint32) scm.Scmer {
 	return scm.NewFloat(float64(value + int64(int64(i)-recid)*stride))
 
 }
+func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 func (s *StorageSeq) prepare() {
 	// set up scan

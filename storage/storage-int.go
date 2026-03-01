@@ -104,6 +104,9 @@ func (s *StorageInt) GetValue(i uint32) scm.Scmer {
 	}
 	return scm.NewInt(int64(v) + s.offset)
 }
+func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 // SetValue overwrites a single element in the bit-packed array.
 // The new value must fit within the existing [offset, offset+2^bitsize) range.

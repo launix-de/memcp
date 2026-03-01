@@ -121,6 +121,9 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 		return scm.NewString(s.dictionary[startIdx:endIdx])
 	}
 }
+func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 func (s *StorageString) prepare() {
 	// set up scan

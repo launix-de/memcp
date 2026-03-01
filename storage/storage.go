@@ -37,6 +37,7 @@ type ColumnReader interface {
 type ColumnStorage interface {
 	// info
 	GetValue(uint32) scm.Scmer     // read function (concurrent-safe, no mutable state)
+	JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc // JIT-compile GetValue: emit code that reads column value for thisptr + record idx
 	GetCachedReader() ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
 	String() string                // self-description
 	scm.Sizable

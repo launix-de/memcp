@@ -88,6 +88,9 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 
 	return val
 }
+func (p *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 func (p *StorageComputeProxy) GetCachedReader() ColumnReader {
 	return p

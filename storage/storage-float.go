@@ -71,6 +71,9 @@ func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
 	}
 	return scm.NewFloat(s.values[i])
 }
+func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 func (s *StorageFloat) scan(i uint32, value scm.Scmer) {
 }

@@ -113,6 +113,9 @@ func (s *StorageSparse) GetValue(i uint32) scm.Scmer {
 
 	}
 }
+func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 func (s *StorageSparse) scan(i uint32, value scm.Scmer) {
 	if !value.IsNil() {

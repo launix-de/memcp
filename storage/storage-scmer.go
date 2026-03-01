@@ -86,6 +86,9 @@ func (s *StorageSCMER) GetCachedReader() ColumnReader { return s }
 func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 	return s.values[i]
 }
+func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 func (s *StorageSCMER) SetValue(i uint32, v scm.Scmer) {
 	s.values[i] = v

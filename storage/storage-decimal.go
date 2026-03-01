@@ -118,6 +118,9 @@ func (s *StorageDecimal) GetValue(i uint32) scm.Scmer {
 	// scaleExp < 0 → result is float
 	return scm.NewFloat(float64(v) * pow10f[int(s.scaleExp)+15])
 }
+func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	panic("TODO")
+}
 
 // scaleValue converts a scm.Scmer to the scaled integer representation
 func (s *StorageDecimal) scaleValue(value scm.Scmer) scm.Scmer {
