@@ -1139,7 +1139,8 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				fieldName := parts[2]
 
 				if goType == "slice" {
-					// Immutable slice: constant-fold data ptr and len at JIT compile time.
+					// Immutable slice: constant-fold data ptr at JIT compile time.
+					// Length is loaded lazily only if len() is actually called.
 					// Uses field cache (slice registers are long-lived, unlike scalar LocImm).
 					cacheKey := fieldName
 					if cached, ok := g.fieldCache[cacheKey]; ok {
@@ -1149,27 +1150,20 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 					dv := g.allocDesc()
 					g.emit("var %s JITValueDesc", dv)
 					g.emit("if thisptr.Loc == LocImm {")
-					// LocImm: read slice header at JIT compile time, embed values directly
+					// LocImm: read data pointer at JIT compile time, embed directly
 					ptrReg1 := g.allocReg()
-					lenReg1 := g.allocReg()
 					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*%s)(nil).%s)", g.typeName, fieldName)
 					g.emit("\tdataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))")
-					g.emit("\tsliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))")
 					g.emit("\t%s := ctx.AllocReg()", ptrReg1)
-					g.emit("\t%s := ctx.AllocReg()", lenReg1)
 					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(dataPtr))", ptrReg1)
-					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(sliceLen))", lenReg1)
-					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg1, lenReg1)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg1)
 					g.emit("} else {")
-					// LocReg: register-relative loads
+					// LocReg: register-relative load of data pointer only
 					g.emit("\toff := int32(unsafe.Offsetof((*%s)(nil).%s))", g.typeName, fieldName)
 					ptrReg2 := g.allocReg()
-					lenReg2 := g.allocReg()
 					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
-					g.emit("\t%s := ctx.AllocReg()", lenReg2)
 					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg2)
-					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg2)
-					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg2, lenReg2)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg2)
 					g.emit("}")
 					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
 					g.vals[name] = gv
