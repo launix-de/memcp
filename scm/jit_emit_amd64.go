@@ -46,12 +46,12 @@ const (
 	RegR14 Reg = 14
 	RegR15 Reg = 15
 	// XMM registers start at 16
-	RegX0  Reg = 16
-	RegX1  Reg = 17
-	RegX2  Reg = 18
-	RegX3  Reg = 19
-	RegX4  Reg = 20
-	RegX5  Reg = 21
+	RegX0 Reg = 16
+	RegX1 Reg = 17
+	RegX2 Reg = 18
+	RegX3 Reg = 19
+	RegX4 Reg = 20
+	RegX5 Reg = 21
 )
 
 // emitByte appends a single byte to the writer.
@@ -125,7 +125,7 @@ func (w *JITWriter) EmitReturnNil() {
 	w.emitBytes(
 		0x31, 0xC0, // XOR EAX, EAX
 		0x31, 0xDB, // XOR EBX, EBX
-		0xC3,       // RET
+		0xC3, // RET
 	)
 }
 
@@ -452,10 +452,147 @@ func (w *JITWriter) emitMovRegMem(dst, base Reg, disp int32) {
 	w.emitRegMemOp(0x8B, dst, base, disp)
 }
 
+// EmitMovRegMem emits MOV dst, [base + disp32] (load 64-bit from memory) — exported wrapper.
+func (w *JITWriter) EmitMovRegMem(dst, base Reg, disp int32) {
+	w.emitMovRegMem(dst, base, disp)
+}
+
 // EmitLeaRegMem emits LEA dst, [base + disp32] (compute address, no memory access)
 // For IndexAddr: LEA dst, [sliceBase + idx*16] computes &a[idx]
 func (w *JITWriter) EmitLeaRegMem(dst, base Reg, disp int32) {
 	w.emitRegMemOp(0x8D, dst, base, disp)
+}
+
+// EmitMovRegMem64 loads a 64-bit value from an absolute memory address into dst.
+// Uses dst itself as scratch for the address (avoids clobbering R11).
+func (w *JITWriter) EmitMovRegMem64(dst Reg, addr uintptr) {
+	w.EmitMovRegImm64(dst, uint64(addr))
+	w.emitMovRegMem(dst, dst, 0)
+}
+
+// EmitMovRegMem32 loads a 32-bit value (zero-extended to 64 bits) from an absolute address.
+// Uses dst itself as scratch for the address (avoids clobbering R11).
+func (w *JITWriter) EmitMovRegMem32(dst Reg, addr uintptr) {
+	w.EmitMovRegImm64(dst, uint64(addr))
+	// MOV r32, [dst+0] — 32-bit load zero-extends to 64 bits (no REX.W)
+	w.emitRegMemOp32(0x8B, dst, dst, 0)
+}
+
+// EmitMovRegMem8 loads a byte (zero-extended to 64 bits) from an absolute address.
+// Uses dst itself as scratch for the address (avoids clobbering R11).
+func (w *JITWriter) EmitMovRegMem8(dst Reg, addr uintptr) {
+	w.EmitMovRegImm64(dst, uint64(addr))
+	// MOVZX r64, byte [dst+0]
+	w.emitRegMemOp2(0x0F, 0xB6, dst, dst, 0)
+}
+
+// EmitMovRegMem16 loads a 16-bit value (zero-extended to 64 bits) from an absolute address.
+// Uses dst itself as scratch for the address (avoids clobbering R11).
+func (w *JITWriter) EmitMovRegMem16(dst Reg, addr uintptr) {
+	w.EmitMovRegImm64(dst, uint64(addr))
+	// MOVZX r64, word [dst+0]
+	w.emitRegMemOp2(0x0F, 0xB7, dst, dst, 0)
+}
+
+// emitRegMemOp32 emits a 32-bit register-memory operation (no REX.W, for zero-extending loads).
+func (w *JITWriter) emitRegMemOp32(opcode byte, dst, base Reg, disp int32) {
+	rex := byte(0x40)
+	needRex := false
+	if dst >= 8 {
+		rex |= 0x04 // REX.R
+		needRex = true
+	}
+	if base >= 8 {
+		rex |= 0x01 // REX.B
+		needRex = true
+	}
+	baseEnc := byte(base & 7)
+	dstEnc := byte(dst & 7)
+
+	if disp == 0 && baseEnc != 5 {
+		modrm := (dstEnc << 3) | baseEnc
+		if needRex {
+			if baseEnc == 4 {
+				w.emitBytes(rex, opcode, modrm, 0x24)
+			} else {
+				w.emitBytes(rex, opcode, modrm)
+			}
+		} else {
+			if baseEnc == 4 {
+				w.emitBytes(opcode, modrm, 0x24)
+			} else {
+				w.emitBytes(opcode, modrm)
+			}
+		}
+	} else if disp >= -128 && disp <= 127 {
+		modrm := 0x40 | (dstEnc << 3) | baseEnc
+		if needRex {
+			if baseEnc == 4 {
+				w.emitBytes(rex, opcode, modrm, 0x24, byte(int8(disp)))
+			} else {
+				w.emitBytes(rex, opcode, modrm, byte(int8(disp)))
+			}
+		} else {
+			if baseEnc == 4 {
+				w.emitBytes(opcode, modrm, 0x24, byte(int8(disp)))
+			} else {
+				w.emitBytes(opcode, modrm, byte(int8(disp)))
+			}
+		}
+	} else {
+		modrm := 0x80 | (dstEnc << 3) | baseEnc
+		if needRex {
+			if baseEnc == 4 {
+				w.emitBytes(rex, opcode, modrm, 0x24)
+			} else {
+				w.emitBytes(rex, opcode, modrm)
+			}
+		} else {
+			if baseEnc == 4 {
+				w.emitBytes(opcode, modrm, 0x24)
+			} else {
+				w.emitBytes(opcode, modrm)
+			}
+		}
+		w.emitU32(uint32(disp))
+	}
+}
+
+// emitRegMemOp2 emits a 2-byte opcode register-memory operation with REX.W (for MOVZX etc.).
+func (w *JITWriter) emitRegMemOp2(op1, op2 byte, dst, base Reg, disp int32) {
+	rex := byte(0x48) // REX.W
+	if dst >= 8 {
+		rex |= 0x04 // REX.R
+	}
+	if base >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	baseEnc := byte(base & 7)
+	dstEnc := byte(dst & 7)
+
+	if disp == 0 && baseEnc != 5 {
+		modrm := (dstEnc << 3) | baseEnc
+		if baseEnc == 4 {
+			w.emitBytes(rex, op1, op2, modrm, 0x24)
+		} else {
+			w.emitBytes(rex, op1, op2, modrm)
+		}
+	} else if disp >= -128 && disp <= 127 {
+		modrm := 0x40 | (dstEnc << 3) | baseEnc
+		if baseEnc == 4 {
+			w.emitBytes(rex, op1, op2, modrm, 0x24, byte(int8(disp)))
+		} else {
+			w.emitBytes(rex, op1, op2, modrm, byte(int8(disp)))
+		}
+	} else {
+		modrm := 0x80 | (dstEnc << 3) | baseEnc
+		if baseEnc == 4 {
+			w.emitBytes(rex, op1, op2, modrm, 0x24)
+		} else {
+			w.emitBytes(rex, op1, op2, modrm)
+		}
+		w.emitU32(uint32(disp))
+	}
 }
 
 // --- SSE helpers ---
@@ -593,6 +730,42 @@ func (w *JITWriter) EmitShrRegImm8(dst Reg, imm uint8) {
 	w.emitBytes(rex, 0xC1, modrm, imm)
 }
 
+// EmitShlRegCl emits SHL r64, CL (shift left by variable amount in CL register)
+func (w *JITWriter) EmitShlRegCl(dst Reg) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xE0) | byte(dst&7) // /4 = SHL
+	w.emitBytes(rex, 0xD3, modrm)
+}
+
+// EmitShrRegCl emits SHR r64, CL (shift right by variable amount in CL register)
+func (w *JITWriter) EmitShrRegCl(dst Reg) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xE8) | byte(dst&7) // /5 = SHR
+	w.emitBytes(rex, 0xD3, modrm)
+}
+
+// EmitAndRegImm32 emits AND r64, imm32 (sign-extended)
+func (w *JITWriter) EmitAndRegImm32(dst Reg, imm int32) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xE0) | byte(dst&7) // /4 = AND
+	w.emitBytes(rex, 0x81, modrm)
+	w.emitU32(uint32(imm))
+}
+
+// EmitOrInt64 emits OR dst, src (64-bit OR)
+func (w *JITWriter) EmitOrInt64(dst, src Reg) {
+	w.emitAluRegReg(0x09, dst, src) // OR r/m64, r64
+}
+
 // --- GetTag ---
 
 // EmitGetTagDesc extracts the type tag from a Scmer value descriptor.
@@ -677,13 +850,13 @@ func (ctx *JITContext) EmitMovToReg(dst Reg, src JITValueDesc) {
 	}
 }
 
-
 // emitGetTagRegs emits inline code for (Scmer).GetTag().
 // Input: ptrReg holds s.ptr, auxReg holds s.aux.
 // Output: result in dstReg as uint16.
 // Logic: if ptr == &scmerIntSentinel → tagInt (4)
-//        if ptr == &scmerFloatSentinel → tagFloat (3)
-//        else → aux >> 48
+//
+//	if ptr == &scmerFloatSentinel → tagFloat (3)
+//	else → aux >> 48
 func (w *JITWriter) emitGetTagRegs(dst, ptrReg, auxReg Reg) {
 	// CMP ptrReg, &scmerIntSentinel (via R11 as scratch)
 	w.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
