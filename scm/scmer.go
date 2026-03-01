@@ -76,9 +76,15 @@ const (
 
 // Exported tag constants for type checking in other packages
 const (
-	TagString = tagString
-	TagSymbol = tagSymbol
-	TagDate   = tagDate
+	TagNil      = tagNil
+	TagString   = tagString
+	TagSymbol   = tagSymbol
+	TagFloat    = tagFloat
+	TagInt      = tagInt
+	TagBool     = tagBool
+	TagSlice    = tagSlice
+	TagFastDict = tagFastDict
+	TagDate     = tagDate
 )
 
 var scmerIntSentinel byte
