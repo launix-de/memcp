@@ -72,7 +72,9 @@ func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
 	return scm.NewFloat(s.values[i])
 }
 func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	panic("TODO")
+
+	/* TODO: FieldAddr: &s.values [#0] */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageFloat).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 func (s *StorageFloat) scan(i uint32, value scm.Scmer) {

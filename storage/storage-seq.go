@@ -117,7 +117,9 @@ func (s *StorageSeq) GetValue(i uint32) scm.Scmer {
 
 }
 func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	panic("TODO")
+
+	/* TODO: FieldAddr: &s.lastValue [#5] */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 func (s *StorageSeq) prepare() {

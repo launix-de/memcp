@@ -107,6 +107,7 @@ func main() {
 
 	// Collect operators from AST (for patching byte offsets)
 	var ops []operatorInfo
+	var stInfos []storageInfo
 	for _, astFile := range pkg.Syntax {
 		fname := fset.Position(astFile.Pos()).Filename
 		abs, _ := filepath.Abs(fname)
@@ -114,9 +115,10 @@ func main() {
 			continue
 		}
 		ops = append(ops, collectOperators(fset, astFile, fname)...)
+		stInfos = append(stInfos, collectStorageMethods(fset, astFile, fname)...)
 	}
 
-	// Process each operator
+	// Process each operator (pattern 1: Declare)
 	patches := map[string][]patchEntry{}
 	for _, op := range ops {
 		ssaFn := ssaFuncs[op.funcLit.Pos()]
@@ -150,6 +152,44 @@ func main() {
 				endOff:   end.Offset,
 				newText:  newText,
 				opName:   op.name,
+			})
+		}
+	}
+
+	// Process each storage type (pattern 2: ColumnStorage.GetValue → JITEmit)
+	for _, si := range stInfos {
+		ssaFn := ssaFuncs[si.getValuePos]
+		if ssaFn == nil {
+			fmt.Fprintf(os.Stderr, "  %s: %s.GetValue — SSA function not found\n", si.path, si.typeName)
+			continue
+		}
+
+		if dumpOp == si.typeName || dumpOp == si.typeName+".GetValue" {
+			dumpSSA(ssaFn)
+		}
+
+		newText, genErr := generateStorageBody(si.typeName, ssaFn)
+		if genErr == "" {
+			fmt.Printf("  %s: %s.GetValue OK\n", si.path, si.typeName)
+		} else {
+			fmt.Printf("  %s: %s.GetValue SKIP: %s\n", si.path, si.typeName, genErr)
+			if verbose {
+				dumpSSA(ssaFn)
+			}
+			// Fallback: emit a Go call to GetValue (unbound method, receiver as first arg)
+			newText = "\n\t/* TODO: " + genErr + " */\n" +
+				"\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*" + si.typeName + ").GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n"
+		}
+
+		if doPatch {
+			// Patch body of JITEmit method (between { and })
+			bodyStart := fset.Position(si.jitEmitBody.Lbrace).Offset + 1
+			bodyEnd := fset.Position(si.jitEmitBody.Rbrace).Offset
+			patches[si.path] = append(patches[si.path], patchEntry{
+				startOff: bodyStart,
+				endOff:   bodyEnd,
+				newText:  "\n" + newText,
+				opName:   si.typeName + ".JITEmit",
 			})
 		}
 	}
@@ -210,6 +250,73 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 	return ops
 }
 
+// --- Storage method collection (pattern 2: ColumnStorage.GetValue → JITEmit) ---
+
+type storageInfo struct {
+	typeName    string          // e.g. "StorageInt"
+	path        string          // source file path
+	recvName    string          // receiver variable name (e.g. "s", "p")
+	getValuePos token.Pos       // position of GetValue func keyword (for SSA lookup)
+	jitEmitBody *ast.BlockStmt  // body of JITEmit method (for patching)
+}
+
+// collectStorageMethods finds types in f that have both GetValue and JITEmit methods.
+func collectStorageMethods(fset *token.FileSet, f *ast.File, path string) []storageInfo {
+	// First pass: collect all methods by receiver type name
+	type methodInfo struct {
+		funcPos  token.Pos       // position of func name (for SSA lookup)
+		body     *ast.BlockStmt
+		recvName string          // receiver variable name
+	}
+	getValues := map[string]methodInfo{}
+	jitEmits := map[string]methodInfo{}
+
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || len(fn.Recv.List) == 0 {
+			continue
+		}
+		// Extract receiver type name (handle *T)
+		recvType := fn.Recv.List[0].Type
+		if star, ok := recvType.(*ast.StarExpr); ok {
+			recvType = star.X
+		}
+		ident, ok := recvType.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		typeName := ident.Name
+		recvName := ""
+		if len(fn.Recv.List[0].Names) > 0 {
+			recvName = fn.Recv.List[0].Names[0].Name
+		}
+
+		switch fn.Name.Name {
+		case "GetValue":
+			getValues[typeName] = methodInfo{funcPos: fn.Name.Pos(), body: fn.Body, recvName: recvName}
+		case "JITEmit":
+			jitEmits[typeName] = methodInfo{funcPos: fn.Name.Pos(), body: fn.Body, recvName: recvName}
+		}
+	}
+
+	// Second pass: pair them up
+	var result []storageInfo
+	for typeName, gv := range getValues {
+		je, ok := jitEmits[typeName]
+		if !ok {
+			continue
+		}
+		result = append(result, storageInfo{
+			typeName:    typeName,
+			path:        path,
+			recvName:    je.recvName,
+			getValuePos: gv.funcPos,
+			jitEmitBody: je.body,
+		})
+	}
+	return result
+}
+
 // --- SSA dump ---
 
 func dumpSSA(fn *ssa.Function) {
@@ -264,8 +371,9 @@ type codeGen struct {
 	bbQueue   []int           // queue of BB indices to generate
 	phiRegs    map[string]string // SSA phi name → register var name
 	curBlock   int              // current BB index being generated
-	multiBlock bool             // true if function has >1 block
-	endLabel   string           // label for shared epilogue (multi-block)
+	multiBlock  bool             // true if function has >1 block
+	endLabel    string           // label for shared epilogue (multi-block)
+	storageMode bool             // true for ColumnStorage.GetValue pattern (vs Declare pattern)
 }
 
 func (g *codeGen) allocDesc() string {
@@ -508,6 +616,82 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 	result := fmt.Sprintf("func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s\t\t}",
 		g.w.String())
 	return result, ""
+}
+
+// generateStorageBody generates the body of a JITEmit method from GetValue SSA.
+// The generated code lives inside:
+//   func (s *StorageXxx) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc { ... }
+func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg string) {
+	defer func() {
+		if r := recover(); r != nil {
+			code = ""
+			errMsg = fmt.Sprintf("%v", r)
+		}
+	}()
+
+	g := &codeGen{
+		vals:        map[string]genVal{},
+		fn:          fn,
+		bbLabels:    map[int]string{},
+		bbDone:      map[int]bool{},
+		phiRegs:     map[string]string{},
+		storageMode: true,
+	}
+
+	// GetValue has 2 params: receiver (s *StorageXxx) and index (i uint32)
+	// Map receiver to thisptr, index to idx
+	if len(fn.Params) >= 1 {
+		g.vals[fn.Params[0].Name()] = genVal{goVar: "thisptr", isDesc: true, marker: "_storage_recv"}
+	}
+	if len(fn.Params) >= 2 {
+		g.vals[fn.Params[1].Name()] = genVal{goVar: "idx", isDesc: true}
+	}
+
+	g.multiBlock = len(fn.Blocks) > 1
+
+	// Pre-allocate registers for all phi nodes
+	g.allocPhiRegs()
+
+	if g.multiBlock {
+		g.emit("if result.Loc == LocAny {")
+		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+		g.emit("}")
+		g.endLabel = g.allocLabel()
+		g.emit("%s := ctx.W.ReserveLabel()", g.endLabel)
+	}
+
+	// Process BBs via queue, starting from BB0
+	g.bbQueue = []int{0}
+	for len(g.bbQueue) > 0 {
+		bbIdx := g.bbQueue[0]
+		g.bbQueue = g.bbQueue[1:]
+		if g.bbDone[bbIdx] {
+			continue
+		}
+		g.bbDone[bbIdx] = true
+		g.curBlock = bbIdx
+
+		if lbl, ok := g.bbLabels[bbIdx]; ok {
+			g.emit("ctx.W.MarkLabel(%s)", lbl)
+		}
+
+		block := fn.Blocks[bbIdx]
+		for _, instr := range block.Instrs {
+			g.emitInstr(instr)
+		}
+	}
+
+	if g.multiBlock {
+		g.emit("ctx.W.MarkLabel(%s)", g.endLabel)
+		g.emit("ctx.W.ResolveFixups()")
+	} else if len(g.bbLabels) > 0 {
+		g.emit("ctx.W.ResolveFixups()")
+	}
+	if g.multiBlock {
+		g.emit("return result")
+	}
+
+	return g.w.String(), ""
 }
 
 func (g *codeGen) emitInstr(instr ssa.Instruction) {
@@ -1251,10 +1435,6 @@ func applyPatches(path string, patches []patchEntry) {
 		}
 
 		old := string(src[p.startOff:endOff])
-		if old != "nil" && !strings.HasPrefix(old, "func(") && !strings.HasPrefix(old, "nil ") {
-			fmt.Printf("  %s: %s JITEmit field is %q — skipping\n", path, p.opName, old)
-			continue
-		}
 		if old == p.newText {
 			continue
 		}

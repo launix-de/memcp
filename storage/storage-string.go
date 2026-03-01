@@ -122,7 +122,9 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 	}
 }
 func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	panic("TODO")
+
+	/* TODO: FieldAddr: &s.nodict [#4] */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 func (s *StorageString) prepare() {

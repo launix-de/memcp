@@ -114,7 +114,9 @@ func (s *StorageSparse) GetValue(i uint32) scm.Scmer {
 	}
 }
 func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	panic("TODO")
+
+	/* TODO: FieldAddr: &s.i [#0] */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSparse).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 func (s *StorageSparse) scan(i uint32, value scm.Scmer) {

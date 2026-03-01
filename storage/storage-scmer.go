@@ -87,7 +87,9 @@ func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 	return s.values[i]
 }
 func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	panic("TODO")
+
+	/* TODO: FieldAddr: &s.values [#0] */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSCMER).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 func (s *StorageSCMER) SetValue(i uint32, v scm.Scmer) {

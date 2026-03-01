@@ -105,7 +105,9 @@ func (s *StorageInt) GetValue(i uint32) scm.Scmer {
 	return scm.NewInt(int64(v) + s.offset)
 }
 func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	panic("TODO")
+
+	/* TODO: unsupported call: (*StorageInt).GetValueUInt(s, i) */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageInt).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 // SetValue overwrites a single element in the bit-packed array.
