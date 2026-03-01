@@ -919,6 +919,38 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (s) (strlike s "%ll%"))) "hello") true "jit: strlike infix")
 	(assert ((jit (lambda (s p) (strlike s p))) "hello" "h%") true "jit: strlike dynamic pattern")
 
+	/* Deeply nested arithmetic */
+	(assert ((jit (lambda (x) (+ (* x x) (* 2 x) 1))) 3) 16 "jit: x²+2x+1 = (x+1)²")
+	(assert ((jit (lambda (x) (+ (* x x) (* 2 x) 1))) 5) 36 "jit: 5²+10+1 = 36")
+	(assert ((jit (lambda (a b) (* (+ a b) (- a b)))) 7 3) 40 "jit: (a+b)(a-b) = a²-b²")
+	(assert ((jit (lambda (x) (* (+ x 1) (+ x 2)))) 3) 20 "jit: (x+1)(x+2)")
+	(assert ((jit (lambda (x) (- (* 3 (* x x)) (* 2 x)))) 4) 40 "jit: 3x²-2x")
+	(assert ((jit (lambda (a b c) (+ (* a a) (* b b) (* c c)))) 3 4 5) 50 "jit: a²+b²+c² = 50")
+	(assert ((jit (lambda (a b c) (* (+ a b) (+ b c) (+ a c)))) 1 2 3) 60 "jit: (a+b)(b+c)(a+c)")
+	(assert ((jit (lambda (x) (+ (* (* x x) x) (* x x) x 1))) 2) 15 "jit: x³+x²+x+1")
+
+	/* Chained operations with constants */
+	(assert ((jit (lambda (x) (+ (* x 10) (* x 5) (* x 1)))) 3) 48 "jit: 10x+5x+x = 16x")
+	(assert ((jit (lambda (x) (* (+ x 1) (- x 1)))) 5) 24 "jit: (x+1)(x-1) = x²-1")
+	(assert ((jit (lambda (a b) (+ (* 3 a) (* 4 b)))) 2 5) 26 "jit: 3a+4b")
+	(assert ((jit (lambda (a b) (- (* a b) (+ a b)))) 6 4) 14 "jit: ab-(a+b)")
+
+	/* Four parameters */
+	(assert ((jit (lambda (a b c d) (+ (* a d) (* b c)))) 2 3 4 5) 22 "jit: ad+bc")
+	(assert ((jit (lambda (a b c d) (- (* a b) (* c d)))) 5 4 3 2) 14 "jit: ab-cd")
+	(assert ((jit (lambda (a b c d) (* (+ a b) (+ c d)))) 1 2 3 4) 21 "jit: (a+b)(c+d)")
+
+	/* Conditional with nested arithmetic */
+	(assert ((jit (lambda (x) (if (> (* x x) 10) (* x 2) (+ x 1)))) 4) 8 "jit: if x²>10 then 2x else x+1 (true)")
+	(assert ((jit (lambda (x) (if (> (* x x) 10) (* x 2) (+ x 1)))) 2) 3 "jit: if x²>10 then 2x else x+1 (false)")
+	(assert ((jit (lambda (a b) (if (> (+ a b) 10) (* a b) (+ a b)))) 7 5) 35 "jit: if a+b>10 then a*b else a+b (true)")
+	(assert ((jit (lambda (a b) (if (> (+ a b) 10) (* a b) (+ a b)))) 3 4) 7 "jit: if a+b>10 then a*b else a+b (false)")
+
+	/* Nested comparisons and boolean logic */
+	(assert ((jit (lambda (x) (and (> (* x 2) 5) (< (* x 3) 20)))) 3) true "jit: 2x>5 and 3x<20")
+	(assert ((jit (lambda (x) (and (> (* x 2) 5) (< (* x 3) 20)))) 7) false "jit: 2x>5 and 3x<20 (false)")
+	(assert ((jit (lambda (x) (or (< x 0) (> (* x x) 100)))) 11) true "jit: x<0 or x²>100")
+
 	/* Mixed types and nil handling */
 	(assert (nil? ((jit (lambda (x) (+ x nil))) 5)) true "jit: + with nil returns nil")
 	(assert (nil? ((jit (lambda (x) (* x nil))) 5)) true "jit: * with nil returns nil")
