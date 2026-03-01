@@ -144,3 +144,47 @@ func TestStorageIntJITEmitWithOffset(t *testing.T) {
 		}
 	}
 }
+
+// jitExecRawStorageInt builds JIT code with func(int64) Scmer signature (LocReg thisptr).
+func jitExecRawStorageInt(t *testing.T, s *StorageInt) func(int64) scm.Scmer {
+	t.Helper()
+	fn, cleanup := jitBuildRawFunc(t, s, false)
+	t.Cleanup(cleanup)
+	return fn
+}
+
+func TestStorageIntJITEmitRegPtr(t *testing.T) {
+	values := []scm.Scmer{
+		scm.NewInt(10), scm.NewInt(20), scm.NewInt(30), scm.NewInt(40), scm.NewInt(50),
+	}
+	s := buildStorageInt(values)
+	jitGet := jitExecRawStorageInt(t, s)
+
+	for i := uint32(0); i < uint32(len(values)); i++ {
+		got := jitGet(int64(i))
+		expected := s.GetValue(i)
+		if expected.IsNil() != got.IsNil() {
+			t.Errorf("idx=%d: nil mismatch: JIT=%v GetValue=%v", i, got, expected)
+		} else if !expected.IsNil() && got.Int() != expected.Int() {
+			t.Errorf("idx=%d: JIT got %v, GetValue got %v", i, got, expected)
+		}
+	}
+}
+
+func TestStorageIntJITEmitRegPtrWithNull(t *testing.T) {
+	values := []scm.Scmer{
+		scm.NewInt(5), scm.NewNil(), scm.NewInt(10), scm.NewNil(), scm.NewInt(15),
+	}
+	s := buildStorageInt(values)
+	jitGet := jitExecRawStorageInt(t, s)
+
+	for i := uint32(0); i < uint32(len(values)); i++ {
+		got := jitGet(int64(i))
+		expected := s.GetValue(i)
+		if expected.IsNil() != got.IsNil() {
+			t.Errorf("idx=%d: nil mismatch: JIT=%v GetValue=%v", i, got, expected)
+		} else if !expected.IsNil() && got.Int() != expected.Int() {
+			t.Errorf("idx=%d: JIT got %v, GetValue got %v", i, got, expected)
+		}
+	}
+}

@@ -1090,10 +1090,17 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			field := structType.Field(v.Field)
 			fieldName := field.Name()
 			fieldType := field.Type().Underlying()
+
+			// Check struct tag for immutable-after-finish annotation
+			tag := structType.Tag(v.Field)
+			isImmutable := strings.Contains(tag, `jit:"immutable-after-finish"`)
+
 			// Determine field size for the load instruction
 			var sizeStr string
+			var goTypeName string // precise Go type for constant folding
 			switch t := fieldType.(type) {
 			case *types.Basic:
+				goTypeName = t.Name() // "uint8", "bool", "int64", "uint64", etc.
 				switch t.Kind() {
 				case types.Bool, types.Uint8, types.Int8:
 					sizeStr = "1"
@@ -1109,7 +1116,15 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			default:
 				sizeStr = "8"
 			}
-			g.vals[name] = genVal{marker: "_fieldaddr:" + sizeStr + ":" + fieldName}
+
+			// For immutable fields, use _fieldconst marker for compile-time folding
+			if isImmutable && sizeStr == "slice" {
+				g.vals[name] = genVal{marker: "_fieldconst:slice:" + fieldName}
+			} else if isImmutable && goTypeName != "" {
+				g.vals[name] = genVal{marker: "_fieldconst:" + goTypeName + ":" + fieldName}
+			} else {
+				g.vals[name] = genVal{marker: "_fieldaddr:" + sizeStr + ":" + fieldName}
+			}
 		} else {
 			panic(fmt.Sprintf("FieldAddr on non-receiver: %s", v))
 		}
@@ -1117,7 +1132,113 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 	case *ssa.UnOp:
 		if v.Op == token.MUL {
 			src := g.vals[v.X.Name()]
-			if strings.HasPrefix(src.marker, "_fieldaddr:") {
+			if strings.HasPrefix(src.marker, "_fieldconst:") {
+				// Deref of immutable FieldAddr → constant-fold (LocImm thisptr) or runtime load (LocReg thisptr).
+				parts := strings.SplitN(src.marker, ":", 3) // "_fieldconst", goType, fieldName
+				goType := parts[1]
+				fieldName := parts[2]
+
+				if goType == "slice" {
+					// Immutable slice: constant-fold data ptr and len at JIT compile time.
+					// Uses field cache (slice registers are long-lived, unlike scalar LocImm).
+					cacheKey := fieldName
+					if cached, ok := g.fieldCache[cacheKey]; ok {
+						g.vals[name] = cached
+						break
+					}
+					dv := g.allocDesc()
+					g.emit("var %s JITValueDesc", dv)
+					g.emit("if thisptr.Loc == LocImm {")
+					// LocImm: read slice header at JIT compile time, embed values directly
+					ptrReg1 := g.allocReg()
+					lenReg1 := g.allocReg()
+					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*%s)(nil).%s)", g.typeName, fieldName)
+					g.emit("\tdataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))")
+					g.emit("\tsliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))")
+					g.emit("\t%s := ctx.AllocReg()", ptrReg1)
+					g.emit("\t%s := ctx.AllocReg()", lenReg1)
+					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(dataPtr))", ptrReg1)
+					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(sliceLen))", lenReg1)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg1, lenReg1)
+					g.emit("} else {")
+					// LocReg: register-relative loads
+					g.emit("\toff := int32(unsafe.Offsetof((*%s)(nil).%s))", g.typeName, fieldName)
+					ptrReg2 := g.allocReg()
+					lenReg2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
+					g.emit("\t%s := ctx.AllocReg()", lenReg2)
+					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg2)
+					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg2)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg2, lenReg2)
+					g.emit("}")
+					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
+					g.vals[name] = gv
+					g.fieldCache[cacheKey] = gv
+					break
+				}
+
+				// Scalar immutable field: no field deduplication (LocImm re-reads are free,
+				// LocReg reloads use fresh short-lived registers to avoid pressure).
+
+				// Determine register-relative load emit helper for LocReg thisptr path
+				var emitLoadRel string
+				switch goType {
+				case "bool", "uint8", "int8":
+					emitLoadRel = "EmitMovRegMemB"
+				case "uint16", "int16":
+					emitLoadRel = "EmitMovRegMemW"
+				case "uint32", "int32":
+					emitLoadRel = "EmitMovRegMemL"
+				default: // int64, uint64
+					emitLoadRel = "EmitMovRegMem"
+				}
+
+				dv := g.allocDesc()
+				rv := g.allocReg()
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if thisptr.Loc == LocImm {")
+				// thisptr is compile-time constant → read immutable field at JIT compile time
+				g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*%s)(nil).%s)", g.typeName, fieldName)
+				switch goType {
+				case "bool":
+					g.emit("\tval := *(*bool)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(val)}", dv)
+				case "uint8":
+					g.emit("\tval := *(*uint8)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
+				case "int8":
+					g.emit("\tval := *(*int8)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
+				case "uint16":
+					g.emit("\tval := *(*uint16)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
+				case "int16":
+					g.emit("\tval := *(*int16)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
+				case "uint32":
+					g.emit("\tval := *(*uint32)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
+				case "int32":
+					g.emit("\tval := *(*int32)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
+				case "int64":
+					g.emit("\tval := *(*int64)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(val)}", dv)
+				case "uint64":
+					g.emit("\tval := *(*uint64)(unsafe.Pointer(fieldAddr))")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(val))}", dv)
+				default:
+					panic(fmt.Sprintf("unsupported immutable field type %s for %s", goType, fieldName))
+				}
+				g.emit("} else {")
+				// thisptr is in a register → emit register-relative load at runtime
+				g.emit("\toff := int32(unsafe.Offsetof((*%s)(nil).%s))", g.typeName, fieldName)
+				g.emit("\t%s := ctx.AllocReg()", rv)
+				g.emit("\tctx.W.%s(%s, thisptr.Reg, off)", emitLoadRel, rv)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				g.emit("}")
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else if strings.HasPrefix(src.marker, "_fieldaddr:") {
 				// Deref of FieldAddr → load from struct field at compile-time address
 				parts := strings.SplitN(src.marker, ":", 3) // "_fieldaddr", size, fieldName
 				sizeStr := parts[1]
@@ -1171,7 +1292,38 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
 				}
 				g.emit("} else {")
-				g.emit("\tpanic(\"FieldAddr: thisptr not LocImm\")")
+				// thisptr is in a register → emit register-relative loads
+				g.emit("\toff := int32(unsafe.Offsetof((*%s)(nil).%s))", g.typeName, fieldName)
+				switch sizeStr {
+				case "1":
+					rv2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv2)
+					g.emit("\tctx.W.EmitMovRegMemB(%s, thisptr.Reg, off)", rv2)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv2)
+				case "2":
+					rv2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv2)
+					g.emit("\tctx.W.EmitMovRegMemW(%s, thisptr.Reg, off)", rv2)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv2)
+				case "4":
+					rv2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv2)
+					g.emit("\tctx.W.EmitMovRegMemL(%s, thisptr.Reg, off)", rv2)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv2)
+				case "8":
+					rv2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv2)
+					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off)", rv2)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv2)
+				case "slice":
+					ptrReg2 := g.allocReg()
+					lenReg2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
+					g.emit("\t%s := ctx.AllocReg()", lenReg2)
+					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg2)       // data ptr
+					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg2)     // length
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg2, lenReg2)
+				}
 				g.emit("}")
 				if sizeStr == "slice" {
 					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
@@ -1553,6 +1705,24 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s.Loc == LocImm && %s.Loc == LocImm {", xVal.goVar, yVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOpStr(v.Op), yVal.goVar)
+				// Identity optimizations: ADD/SUB 0 is no-op
+				if v.Op == token.ADD || v.Op == token.SUB {
+					// y is LocImm 0 → x + 0 = x, x - 0 = x
+					g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", yVal.goVar, yVal.goVar)
+					if xMultiUse {
+						copyReg := g.allocReg()
+						g.emit("\t%s := ctx.AllocReg()", copyReg)
+						g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
+						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
+					} else {
+						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+					}
+				}
+				if v.Op == token.ADD {
+					// x is LocImm 0 → 0 + y = y (commutative)
+					g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", xVal.goVar, xVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, yVal.goVar)
+				}
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
 				// x is const, y is reg → materialize x, ALU
 				g.emit("\tscratch := ctx.AllocReg()")
