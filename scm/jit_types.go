@@ -16,6 +16,75 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package scm
 
+/*
+JIT Emitter Contract
+====================
+
+Each Declaration may provide a JITEmit callback:
+
+	func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc
+
+This callback emits machine code for the operation. The contract between
+caller and emitter is as follows.
+
+Input arguments (args):
+
+  Each args[i] describes where the i-th operand lives at the point of the
+  call. The emitter must handle all location modes:
+
+  - LocImm:     compile-time constant. args[i].Imm holds a Scmer value;
+                Imm.GetTag() carries the type. No register is allocated.
+                The emitter SHOULD constant-fold when all inputs are LocImm.
+  - LocReg:     unboxed primitive in args[i].Reg.
+  - LocRegPair: boxed Scmer in args[i].Reg (ptr) + args[i].Reg2 (aux).
+  - LocStack:   value on the stack at args[i].StackOff.
+  - LocMem:     value at fixed memory address args[i].MemPtr.
+
+  The emitter takes ownership of input registers: it MUST call
+  ctx.FreeDesc(&args[i]) for every register-located input it consumes.
+  Inputs in LocImm/LocStack/LocMem need no freeing.
+
+Result placement (result):
+
+  The result parameter tells the emitter WHERE to put its output.
+
+  - LocAny:     emitter chooses freely. May return LocImm (best: zero code
+                emitted), LocReg, or anything else. Use this when the caller
+                will immediately pass the result into another emitter.
+  - LocReg:     result MUST be placed into result.Reg.
+  - LocRegPair: result MUST be placed into result.Reg + result.Reg2.
+  - LocStack:   result MUST be written to result.StackOff.
+  - LocMem:     result MUST be written to result.MemPtr.
+
+  The emitter returns a JITValueDesc describing where the result actually
+  ended up. When result.Loc != LocAny, the returned desc must match.
+
+Constant propagation:
+
+  When all inputs are LocImm, emitters SHOULD compute the result at
+  compile time and return JITValueDesc{Loc: LocImm, Imm: <result>}
+  without emitting any machine code. This enables chains of operations
+  on constants to collapse to a single LocImm value.
+
+  When result.Loc == LocAny, returning LocImm is always valid and
+  preferred. When result.Loc demands a specific register or memory
+  location, the emitter must still materialize the constant there
+  (e.g. via EmitMakeBool/EmitMakeInt with the LocImm source).
+
+Register discipline:
+
+  - Allocate registers with ctx.AllocReg(), free with ctx.FreeReg(r).
+  - Free consumed input registers via ctx.FreeDesc(&args[i]).
+  - Never hold more registers than necessary between operations.
+  - Scratch registers (R11) are reserved for internal use by emit helpers.
+
+Generated emitters (tools/jitgen):
+
+  The jitgen tool reads Go SSA for Declaration function bodies and
+  generates JITEmit closures that follow this contract automatically.
+  Run: go run ./tools/jitgen/ -patch scm/alu.go
+*/
+
 // Reg represents a hardware register index. The actual register constants
 // (RAX, R8, X0, etc.) are defined in architecture-specific files.
 type Reg uint8
