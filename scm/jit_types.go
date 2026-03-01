@@ -41,6 +41,7 @@ const (
 	LocStack                 // On the stack (StackOff)
 	LocMem                   // At a fixed memory address (MemPtr)
 	LocImm                   // Compile-time constant (Imm)
+	LocAny                   // "I don't care" — result may be constant, register, or memory
 )
 
 // JITValueDesc describes a value during JIT compilation: its type and
@@ -54,7 +55,7 @@ type JITValueDesc struct {
 	Reg2     Reg     // second register (for Scmer: ptr+aux)
 	StackOff int32   // stack offset (if Loc == LocStack)
 	MemPtr   uintptr // memory address (if Loc == LocMem)
-	Imm      int64   // immediate value (if Loc == LocImm)
+	Imm      Scmer   // compile-time constant (if Loc == LocImm); Imm.GetTag() carries type info
 }
 
 // JITFixup records a forward reference that must be patched after all
