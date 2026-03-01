@@ -399,13 +399,34 @@ func (w *JITWriter) emitMovRegReg(dst, src Reg) {
 	w.emitBytes(rex, 0x89, modrm) // MOV r/m64, r64
 }
 
-// EmitMovRegImm64 emits MOV reg, imm64
+// EmitMovRegImm64 loads an immediate into a 64-bit register using the
+// shortest encoding: XOR reg,reg (2-3 B) for 0, MOV r32,imm32 (5-6 B)
+// for values ≤ 0xFFFFFFFF, or full MOV r64,imm64 (10 B) otherwise.
 func (w *JITWriter) EmitMovRegImm64(dst Reg, imm uint64) {
+	dstEnc := byte(dst & 7)
+	if imm == 0 {
+		// XOR r32, r32 — zero-extends to 64 bits (2 or 3 bytes)
+		if dst >= 8 {
+			w.EmitByte(0x45) // REX.R + REX.B
+		}
+		w.emitBytes(0x31, 0xC0|(dstEnc<<3)|dstEnc)
+		return
+	}
+	if imm <= 0xFFFFFFFF {
+		// MOV r32, imm32 — zero-extends to 64 bits (5 or 6 bytes)
+		if dst >= 8 {
+			w.EmitByte(0x41) // REX.B
+		}
+		w.EmitByte(0xB8 | dstEnc)
+		w.emitU32(uint32(imm))
+		return
+	}
+	// Full MOV r64, imm64 (10 bytes)
 	rex := byte(0x48)
 	if dst >= 8 {
 		rex |= 0x01 // REX.B
 	}
-	w.emitBytes(rex, 0xB8|byte(dst&7))
+	w.emitBytes(rex, 0xB8|dstEnc)
 	w.emitU64(imm)
 }
 
@@ -455,6 +476,21 @@ func (w *JITWriter) emitMovRegMem(dst, base Reg, disp int32) {
 // EmitMovRegMem emits MOV dst, [base + disp32] (load 64-bit from memory) — exported wrapper.
 func (w *JITWriter) EmitMovRegMem(dst, base Reg, disp int32) {
 	w.emitMovRegMem(dst, base, disp)
+}
+
+// EmitMovRegMemB emits MOVZX dst, byte [base + disp32] (8-bit zero-extended load).
+func (w *JITWriter) EmitMovRegMemB(dst, base Reg, disp int32) {
+	w.emitRegMemOp2(0x0F, 0xB6, dst, base, disp)
+}
+
+// EmitMovRegMemW emits MOVZX dst, word [base + disp32] (16-bit zero-extended load).
+func (w *JITWriter) EmitMovRegMemW(dst, base Reg, disp int32) {
+	w.emitRegMemOp2(0x0F, 0xB7, dst, base, disp)
+}
+
+// EmitMovRegMemL emits MOV r32, [base + disp32] (32-bit zero-extended load).
+func (w *JITWriter) EmitMovRegMemL(dst, base Reg, disp int32) {
+	w.emitRegMemOp32(0x8B, dst, base, disp)
 }
 
 // EmitLeaRegMem emits LEA dst, [base + disp32] (compute address, no memory access)
