@@ -1,5 +1,8 @@
-all:
+all: jitgen
 	go build
+
+jitgen:
+	go run ./tools/jitgen/ -patch scm/alu.go scm/list.go scm/strings.go scm/scm.go scm/date.go scm/streams.go scm/sync.go scm/metrics.go scm/scheduler.go scm/window.go scm/vector.go scm/packrat.go scm/jit.go
 
 ceph:
 	go build -tags=ceph
@@ -24,4 +27,4 @@ docker-release:
 	sudo docker build -t carli2/memcp:latest .
 	sudo docker push carli2/memcp:latest
 
-.PHONY: memcp.sif docs
+.PHONY: memcp.sif docs jitgen
