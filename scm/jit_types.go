@@ -16,6 +16,8 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package scm
 
+import "reflect"
+
 /*
 JIT Emitter Contract
 ====================
@@ -206,4 +208,131 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 		ctx.FreeReg(desc.Reg2)
 	}
 	desc.Loc = LocNone
+}
+
+// JITBuildMergeClosure wraps a func(...Scmer) Scmer into func(Scmer, Scmer) Scmer.
+// Called from JIT code at runtime.
+func JITBuildMergeClosure(mfn func(...Scmer) Scmer) func(Scmer, Scmer) Scmer {
+	return func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
+}
+
+// GoFuncAddr returns the entry point address of a Go function value.
+func GoFuncAddr(fn interface{}) uint64 {
+	return uint64(reflect.ValueOf(fn).Pointer())
+}
+
+// GoABIIntRegs lists integer argument/result registers in Go internal ABI order.
+var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, RegR10, RegR11}
+
+// EmitGoCall emits a call to a Go function from JIT code.
+// argWords: registers holding argument words in Go ABI order.
+// numResultWords: how many result words to capture.
+// Returns registers holding the result words.
+// All live JIT registers are saved/restored around the call.
+func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []Reg, numResultWords int) []Reg {
+	// Collect all currently-allocated registers (not free, not RSP/RBP)
+	var liveRegs []Reg
+	for r := Reg(0); r <= RegR15; r++ {
+		if r == RegRSP || r == RegRBP || r == RegR11 {
+			continue
+		}
+		if ctx.FreeRegs&(1<<uint(r)) == 0 {
+			// Register is allocated (not free) — save it
+			liveRegs = append(liveRegs, r)
+		}
+	}
+
+	// Save live registers (PUSH)
+	for _, r := range liveRegs {
+		ctx.W.EmitPushReg(r)
+	}
+	// Align stack to 16 bytes if needed (odd number of pushes)
+	padded := len(liveRegs)%2 == 1
+	if padded {
+		ctx.W.EmitPushReg(RegRAX) // dummy
+	}
+
+	// Move argument words into Go ABI registers.
+	// Process in reverse to avoid clobbering sources.
+	for i := len(argWords) - 1; i >= 0; i-- {
+		target := GoABIIntRegs[i]
+		if argWords[i] != target {
+			ctx.W.emitMovRegReg(target, argWords[i])
+		}
+	}
+
+	// CALL
+	ctx.W.EmitCallIndirect(funcAddr)
+
+	// Move results to high registers (R13-R15) that won't conflict with POPs
+	resultSlots := make([]Reg, numResultWords)
+	safeRegs := []Reg{RegR13, RegR14, RegR15}
+	for i := 0; i < numResultWords; i++ {
+		if GoABIIntRegs[i] != safeRegs[i] {
+			ctx.W.emitMovRegReg(safeRegs[i], GoABIIntRegs[i])
+		}
+		resultSlots[i] = safeRegs[i]
+	}
+
+	// Restore (POP in reverse)
+	if padded {
+		ctx.W.EmitPopReg(RegRAX)
+	}
+	for i := len(liveRegs) - 1; i >= 0; i-- {
+		ctx.W.EmitPopReg(liveRegs[i])
+	}
+
+	// Move results from safe slots to freshly allocated registers
+	results := make([]Reg, numResultWords)
+	for i := 0; i < numResultWords; i++ {
+		r := ctx.AllocReg()
+		ctx.W.emitMovRegReg(r, resultSlots[i])
+		results[i] = r
+	}
+	return results
+}
+
+// flattenArgs converts JITValueDesc arguments to ABI word registers.
+// LocRegPair → 2 words (Reg, Reg2), LocReg → 1 word, LocImm → materialize.
+func (ctx *JITContext) flattenArgs(args []JITValueDesc) []Reg {
+	var words []Reg
+	for _, a := range args {
+		switch a.Loc {
+		case LocRegPair:
+			words = append(words, a.Reg, a.Reg2)
+		case LocReg:
+			words = append(words, a.Reg)
+		case LocImm:
+			r := ctx.AllocReg()
+			ctx.W.EmitMovRegImm64(r, uint64(a.Imm.Int()))
+			words = append(words, r)
+		}
+	}
+	return words
+}
+
+// EmitGoCallScalar calls a Go function and returns a single-word result as JITValueDesc.
+func (ctx *JITContext) EmitGoCallScalar(funcAddr uint64, args []JITValueDesc, numResultWords int) JITValueDesc {
+	words := ctx.flattenArgs(args)
+	results := ctx.EmitGoCall(funcAddr, words, numResultWords)
+	if numResultWords == 1 {
+		return JITValueDesc{Loc: LocReg, Reg: results[0]}
+	}
+	return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
+}
+
+// EmitMovPairToResult moves a LocRegPair value into the result descriptor registers.
+func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc) {
+	if src.Reg != dst.Reg {
+		ctx.W.emitMovRegReg(dst.Reg, src.Reg)
+	}
+	if src.Reg2 != dst.Reg2 {
+		ctx.W.emitMovRegReg(dst.Reg2, src.Reg2)
+	}
+}
+
+// EmitGoCallVoid calls a Go function with no return value.
+func (ctx *JITContext) EmitGoCallVoid(funcAddr uint64, args []JITValueDesc) {
+	words := ctx.flattenArgs(args)
+	ctx.EmitGoCall(funcAddr, words, 0)
 }

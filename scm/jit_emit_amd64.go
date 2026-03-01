@@ -718,6 +718,69 @@ func (w *JITWriter) emitGetTagRegs(dst, ptrReg, auxReg Reg) {
 	*(*int32)(doneFixup2) = int32(uintptr(doneTarget) - uintptr(doneFixup2) - 4)
 }
 
+// --- PUSH/POP/CALL ---
+
+// EmitPushReg emits PUSH r64
+func (w *JITWriter) EmitPushReg(r Reg) {
+	if r >= 8 {
+		w.emitBytes(0x41, 0x50|byte(r&7))
+	} else {
+		w.emitByte(0x50 | byte(r))
+	}
+}
+
+// EmitPopReg emits POP r64
+func (w *JITWriter) EmitPopReg(r Reg) {
+	if r >= 8 {
+		w.emitBytes(0x41, 0x58|byte(r&7))
+	} else {
+		w.emitByte(0x58 | byte(r))
+	}
+}
+
+// EmitCallIndirect emits MOV R11, imm64; CALL R11
+func (w *JITWriter) EmitCallIndirect(addr uint64) {
+	w.EmitMovRegImm64(RegR11, addr)
+	w.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
+}
+
+// emitStoreRegMem emits MOV [base + disp], src (store 64-bit register to memory)
+func (w *JITWriter) emitStoreRegMem(src, base Reg, disp int32) {
+	rex := byte(0x48)
+	if src >= 8 {
+		rex |= 0x04 // REX.R
+	}
+	if base >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	baseEnc := byte(base & 7)
+	srcEnc := byte(src & 7)
+
+	if disp == 0 && baseEnc != 5 {
+		modrm := (srcEnc << 3) | baseEnc
+		if baseEnc == 4 {
+			w.emitBytes(rex, 0x89, modrm, 0x24)
+		} else {
+			w.emitBytes(rex, 0x89, modrm)
+		}
+	} else if disp >= -128 && disp <= 127 {
+		modrm := 0x40 | (srcEnc << 3) | baseEnc
+		if baseEnc == 4 {
+			w.emitBytes(rex, 0x89, modrm, 0x24, byte(int8(disp)))
+		} else {
+			w.emitBytes(rex, 0x89, modrm, byte(int8(disp)))
+		}
+	} else {
+		modrm := 0x80 | (srcEnc << 3) | baseEnc
+		if baseEnc == 4 {
+			w.emitBytes(rex, 0x89, modrm, 0x24)
+		} else {
+			w.emitBytes(rex, 0x89, modrm)
+		}
+		w.emitU32(uint32(disp))
+	}
+}
+
 // --- GPR ALU encoding helper ---
 
 // emitAluRegReg emits a REX.W ALU op: <opcode> r/m64, r64
