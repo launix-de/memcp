@@ -36,17 +36,32 @@ func jitReturnLiteral(value Scmer) []byte {
 }
 
 func jitNthArgument(idx int) []byte { // up to 16 params
-	// TODO: corner case 0, corner case >=16
-	code := []byte{
-
-		0x48, 0x83, 0xC0, byte(idx * 16), // add rax, 16*value
-		0x48, 0x8b, 0x08, // mov    (%rax),%rcx -> type descriptor
-		0x48, 0x8b, 0x58, 0x08, // mov    0x8(%rax),%rbx -> value
-		0x48, 0x89, 0xc8, // mov    %rcx,%rax -> type=return value
-
-		0xC3, /* ret */
+	var code []byte
+	if idx > 0 {
+		code = append(code, 0x48, 0x83, 0xC0, byte(idx*16)) // add rax, 16*idx
 	}
+	code = append(code,
+		0x48, 0x8b, 0x08,       // mov rcx, [rax]
+		0x48, 0x8b, 0x58, 0x08, // mov rbx, [rax+8]
+		0x48, 0x89, 0xc8,       // mov rax, rcx
+		0xC3,                    // ret
+	)
 	return code
+}
+
+// jitCompileProc pattern-matches a Proc body and returns amd64 machine code or nil.
+func jitCompileProc(proc *Proc) []byte {
+	body := proc.Body
+	if body.GetTag() == tagSourceInfo {
+		body = body.SourceInfo().value
+	}
+	switch body.GetTag() {
+	case tagNil, tagBool, tagInt, tagFloat, tagString:
+		return jitReturnLiteral(body)
+	case tagNthLocalVar:
+		return jitNthArgument(int(body.NthLocalVar()))
+	}
+	return nil
 }
 
 func jitStackFrame(size uint8) []byte {

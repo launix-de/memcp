@@ -47,6 +47,11 @@ func jitStackFrame(size uint8) []byte {
 	}
 }
 
+// jitCompileProc is a stub for arm64 — native compilation not yet implemented.
+func jitCompileProc(proc *Proc) []byte {
+	return nil // arm64 not yet implemented
+}
+
 /* TODO: peephole optimizer:
 - remove argument checks (test rbx,rbx 48 85 db 76 xx)
 - shorten immediate values

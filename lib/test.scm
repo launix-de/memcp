@@ -849,6 +849,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* JIT compilation */
 	(print "testing JIT compilation ...")
 
+	/* Native pipeline validation */
+	(assert ((jit (lambda (a) a)) 5) 5 "jit: identity lambda native")
+	(assert ((jit (lambda () 42))) 42 "jit: constant body native")
+
 	/* Basic arithmetic with single parameter */
 	(assert ((jit (lambda (x) (+ x 1))) 4) 5 "jit: x + 1")
 	(assert ((jit (lambda (x) (- x 3))) 10) 7 "jit: x - 3")

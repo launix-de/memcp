@@ -258,8 +258,26 @@ func jitCompile(a ...Scmer) Scmer {
 		return v
 
 	case tagProc:
-		// Lambda/procedure - compile it
-		// Use OptimizeProcToSerialFunction as fallback/baseline
+		// Lambda/procedure - attempt native compilation first
+		proc := v.Proc()
+		if code := jitCompileProc(proc); code != nil {
+			buf, err := allocExec(len(code))
+			if err == nil {
+				dst := (*[1 << 30]byte)(buf.ptr)[:len(code):len(code)]
+				copy(dst, code)
+				if err2 := buf.makeRX(); err2 == nil {
+					fn2 := unsafe.Pointer(&struct{ *byte }{&dst[0]})
+					nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
+					return NewJIT(&JITEntryPoint{
+						Native: nativeFn,
+						Proc:   *proc,
+						Arch:   runtime.GOARCH,
+					})
+				}
+				syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
+			}
+		}
+		// fallback: Go closure
 		fn := OptimizeProcToSerialFunction(v)
 		return NewFunc(fn)
 
