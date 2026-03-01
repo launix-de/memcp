@@ -173,6 +173,7 @@ type JITContext struct {
 	FreeRegs    uint64
 	W           *JITWriter
 	StackOffset int32
+	SliceBase   Reg // register holding the args slice pointer (for variable-index access)
 }
 
 // AllocReg picks a free register from the bitmap and marks it used.

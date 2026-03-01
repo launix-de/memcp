@@ -95,6 +95,7 @@ func jitCompileExprBody(body Scmer) (code []byte) {
 			(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
 			(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
 			(1 << uint(RegR13)) | (1 << uint(RegR14)) | (1 << uint(RegR15)),
+		SliceBase: RegR12,
 	}
 
 	// Emit: MOV R12, RAX (save slice base pointer)
