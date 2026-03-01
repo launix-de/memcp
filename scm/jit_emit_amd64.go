@@ -579,6 +579,31 @@ func (ctx *JITContext) EmitGetTagDesc(src *JITValueDesc, result JITValueDesc) JI
 	return result
 }
 
+// EmitTagEquals checks if a Scmer's type tag equals a constant.
+// Equivalent to GetTag(src) == tag. Consumes src, produces a bool.
+func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITValueDesc) JITValueDesc {
+	if src.Loc == LocImm {
+		r := JITValueDesc{Loc: LocImm, Imm: NewBool(src.Imm.GetTag() == tag)}
+		if result.Loc == LocAny {
+			return r
+		}
+		ctx.W.EmitMakeBool(result, r)
+		return result
+	}
+	tagReg := ctx.AllocReg()
+	ctx.W.emitGetTagRegs(tagReg, src.Reg, src.Reg2)
+	ctx.FreeDesc(src)
+	ctx.W.EmitCmpRegImm32(tagReg, int32(tag))
+	ctx.W.EmitSetcc(tagReg, CcE)
+	r := JITValueDesc{Loc: LocReg, Reg: tagReg}
+	if result.Loc == LocAny {
+		return r
+	}
+	ctx.W.EmitMakeBool(result, r)
+	ctx.FreeReg(tagReg)
+	return result
+}
+
 // emitGetTagRegs emits inline code for (Scmer).GetTag().
 // Input: ptrReg holds s.ptr, auxReg holds s.aux.
 // Output: result in dstReg as uint16.

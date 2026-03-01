@@ -1046,6 +1046,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (x) (! (int? x)))) 3.14) true "jit: int? chained with !")
 	(assert ((jit (lambda (x) (! (int? x)))) (size "a")) false "jit: int? chained with ! on int")
 
+	/* JIT emitter: nil? — constant fold */
+	(assert ((jit (lambda () (nil? nil)))) true "jit: nil? const nil")
+	(assert ((jit (lambda () (nil? true)))) false "jit: nil? const bool")
+	(assert ((jit (lambda () (nil? 3.14)))) false "jit: nil? const float")
+	(assert ((jit (lambda () (nil? "hi")))) false "jit: nil? const string")
+
+	/* JIT emitter: nil? — register path */
+	(define _jit_nil? (jit (lambda (x) (nil? x))))
+	(assert (_jit_nil? nil) true "jit: nil? reg nil")
+	(assert (_jit_nil? true) false "jit: nil? reg bool true")
+	(assert (_jit_nil? false) false "jit: nil? reg bool false")
+	(assert (_jit_nil? 3.14) false "jit: nil? reg float")
+	(assert (_jit_nil? "hello") false "jit: nil? reg string")
+	(assert (_jit_nil? (size "abc")) false "jit: nil? reg int")
+	(assert (_jit_nil? (* 2 3)) false "jit: nil? reg int from mul")
+
 	/* alu.go: sql_abs */
 	(print "testing sql_abs ...")
 	(assert (equal? (sql_abs -5) 5) true "sql_abs of -5 = 5")
