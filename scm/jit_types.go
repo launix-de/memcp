@@ -230,26 +230,34 @@ var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, R
 // Returns registers holding the result words.
 // All live JIT registers are saved/restored around the call.
 func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []Reg, numResultWords int) []Reg {
-	// Collect all currently-allocated registers (not free, not RSP/RBP)
+	// Collect all currently-allocated registers (not free).
+	// Skip RSP/RBP (frame), R11 (call scratch), R14 (Go goroutine ptr "g").
 	var liveRegs []Reg
 	for r := Reg(0); r <= RegR15; r++ {
-		if r == RegRSP || r == RegRBP || r == RegR11 {
+		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
 			continue
 		}
 		if ctx.FreeRegs&(1<<uint(r)) == 0 {
-			// Register is allocated (not free) — save it
 			liveRegs = append(liveRegs, r)
 		}
+	}
+
+	// Reserve stack space for result words (above saved registers).
+	// After restoring saved regs, these slots will be at [RSP+0..].
+	resultBytes := numResultWords * 8
+	if resultBytes > 0 {
+		ctx.W.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, imm8
 	}
 
 	// Save live registers (PUSH)
 	for _, r := range liveRegs {
 		ctx.W.EmitPushReg(r)
 	}
-	// Align stack to 16 bytes if needed (odd number of pushes)
-	padded := len(liveRegs)%2 == 1
+	// Align stack to 16 bytes if needed (odd total items)
+	totalItems := numResultWords + len(liveRegs)
+	padded := totalItems%2 == 1
 	if padded {
-		ctx.W.EmitPushReg(RegRAX) // dummy
+		ctx.W.EmitPushReg(RegRAX) // dummy padding
 	}
 
 	// Move argument words into Go ABI registers.
@@ -264,14 +272,14 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []Reg, numResultWord
 	// CALL
 	ctx.W.EmitCallIndirect(funcAddr)
 
-	// Move results to high registers (R13-R15) that won't conflict with POPs
-	resultSlots := make([]Reg, numResultWords)
-	safeRegs := []Reg{RegR13, RegR14, RegR15}
+	// Store results to reserved stack slots (above saved regs + padding)
+	paddingSize := 0
+	if padded {
+		paddingSize = 8
+	}
 	for i := 0; i < numResultWords; i++ {
-		if GoABIIntRegs[i] != safeRegs[i] {
-			ctx.W.emitMovRegReg(safeRegs[i], GoABIIntRegs[i])
-		}
-		resultSlots[i] = safeRegs[i]
+		offset := int32(paddingSize + len(liveRegs)*8 + i*8)
+		ctx.W.emitStoreRegMem(GoABIIntRegs[i], RegRSP, offset)
 	}
 
 	// Restore (POP in reverse)
@@ -282,11 +290,11 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []Reg, numResultWord
 		ctx.W.EmitPopReg(liveRegs[i])
 	}
 
-	// Move results from safe slots to freshly allocated registers
+	// Pop results from reserved slots into freshly allocated registers
 	results := make([]Reg, numResultWords)
 	for i := 0; i < numResultWords; i++ {
 		r := ctx.AllocReg()
-		ctx.W.emitMovRegReg(r, resultSlots[i])
+		ctx.W.EmitPopReg(r)
 		results[i] = r
 	}
 	return results

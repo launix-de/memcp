@@ -119,7 +119,9 @@ func (s *StorageDecimal) GetValue(i uint32) scm.Scmer {
 	return scm.NewFloat(float64(v) * pow10f[int(s.scaleExp)+15])
 }
 func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	panic("TODO")
+
+	/* TODO: FieldAddr: &s.inner [#0] */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageDecimal).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 // scaleValue converts a scm.Scmer to the scaled integer representation

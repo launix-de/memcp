@@ -335,6 +335,17 @@ func (w *JITWriter) EmitLoadArgFloat64(xmmDst, sliceBase Reg, idx int) {
 	w.emitMovqMemToXmm(xmmDst, sliceBase, int32(idx*16+8))
 }
 
+// EmitLoadArgPair loads the idx-th Scmer (ptr+aux pair) from the args slice.
+func (w *JITWriter) EmitLoadArgPair(dstPtr, dstAux, sliceBase Reg, idx int) {
+	w.emitMovRegMem(dstPtr, sliceBase, int32(idx*16))   // ptr field
+	w.emitMovRegMem(dstAux, sliceBase, int32(idx*16+8)) // aux field
+}
+
+// EmitByte emits a single byte (exported for test harnesses).
+func (w *JITWriter) EmitByte(b byte) {
+	w.emitByte(b)
+}
+
 // --- Compare emitters ---
 
 // EmitCmpInt64 emits: CMP reg1, reg2
@@ -371,6 +382,11 @@ const (
 // --- MOV helpers ---
 
 // emitMovRegReg emits MOV dst, src (64-bit GPR to GPR)
+// EmitMovRegReg emits MOV r64, r64
+func (w *JITWriter) EmitMovRegReg(dst, src Reg) {
+	w.emitMovRegReg(dst, src)
+}
+
 func (w *JITWriter) emitMovRegReg(dst, src Reg) {
 	rex := byte(0x48)
 	if src >= 8 {

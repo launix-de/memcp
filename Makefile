@@ -3,6 +3,7 @@ all: jitgen
 
 jitgen:
 	go run ./tools/jitgen/ -patch scm/alu.go scm/list.go scm/strings.go scm/scm.go scm/date.go scm/streams.go scm/sync.go scm/metrics.go scm/scheduler.go scm/window.go scm/vector.go scm/packrat.go scm/jit.go
+	go run ./tools/jitgen/ -patch storage/storage-int.go storage/storage-float.go storage/storage-decimal.go storage/storage-string.go storage/storage-prefix.go storage/storage-enum.go storage/storage-scmer.go storage/storage-sparse.go storage/storage-seq.go storage/overlay-blob.go storage/compute_proxy.go
 
 ceph:
 	go build -tags=ceph

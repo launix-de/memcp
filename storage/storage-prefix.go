@@ -53,7 +53,9 @@ func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 	return scm.NewString(prefix + inner.String())
 }
 func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	panic("TODO")
+
+	/* TODO: FieldAddr: &s.values [#2] */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StoragePrefix).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 func (s *StoragePrefix) prepare() {
