@@ -626,3 +626,112 @@ func (w *JITWriter) emitAluRegReg(opcode byte, dst, src Reg) {
 	modrm := byte(0xC0) | (byte(src&7) << 3) | byte(dst&7)
 	w.emitBytes(rex, opcode, modrm)
 }
+
+// --- Additional helpers for JIT emitters ---
+
+// EmitMakeFloat constructs a Scmer float into dst.Reg (ptr) and dst.Reg2 (aux).
+// src.Reg must be an XMM register holding the float64 value when src.Loc == LocReg.
+func (w *JITWriter) EmitMakeFloat(dst JITValueDesc, src JITValueDesc) {
+	w.EmitMovRegImm64(dst.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
+	switch src.Loc {
+	case LocReg:
+		w.emitMovqXmmToGpr(dst.Reg2, src.Reg)
+	case LocImm:
+		w.EmitMovRegImm64(dst.Reg2, math.Float64bits(src.Imm.Float()))
+	}
+}
+
+// emitMovqGprToXmm emits MOVQ xmm, gpr (66 REX.W 0F 6E /r)
+func (w *JITWriter) emitMovqGprToXmm(xmm, gpr Reg) {
+	x := xmm - 16
+	rex := byte(0x48)
+	if x >= 8 {
+		rex |= 0x04
+	}
+	if gpr >= 8 {
+		rex |= 0x01
+	}
+	modrm := byte(0xC0) | (byte(x&7) << 3) | byte(gpr&7)
+	w.emitBytes(0x66, rex, 0x0F, 0x6E, modrm)
+}
+
+// EmitUcomisd emits UCOMISD xmm1, xmm2 (unordered compare scalar double, sets EFLAGS)
+func (w *JITWriter) EmitUcomisd(a, b Reg) {
+	da := a - 16
+	db := b - 16
+	rex := byte(0)
+	if da >= 8 || db >= 8 {
+		rex = 0x40
+		if da >= 8 {
+			rex |= 0x04
+		}
+		if db >= 8 {
+			rex |= 0x01
+		}
+	}
+	modrm := byte(0xC0) | (byte(da&7) << 3) | byte(db&7)
+	if rex != 0 {
+		w.emitBytes(0x66, rex, 0x0F, 0x2E, modrm)
+	} else {
+		w.emitBytes(0x66, 0x0F, 0x2E, modrm)
+	}
+}
+
+// EmitTestRegReg emits TEST r64, r64 (sets ZF if reg == 0)
+func (w *JITWriter) EmitTestRegReg(r Reg) {
+	w.emitAluRegReg(0x85, r, r) // TEST r/m64, r64
+}
+
+// EmitXorRegImm8 emits XOR r64, sign-extended imm8
+func (w *JITWriter) EmitXorRegImm8(dst Reg, imm byte) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01
+	}
+	modrm := byte(0xF0) | byte(dst&7) // /6 = XOR
+	w.emitBytes(rex, 0x83, modrm, imm)
+}
+
+// MaterializeToRegPair ensures a JITValueDesc is in LocRegPair by emitting
+// MOV instructions for LocImm values. Panics on unsupported locations.
+func (ctx *JITContext) MaterializeToRegPair(d *JITValueDesc) {
+	if d.Loc == LocRegPair {
+		return
+	}
+	if d.Loc != LocImm {
+		panic("jit: MaterializeToRegPair: unsupported loc")
+	}
+	d.Reg = ctx.AllocReg()
+	d.Reg2 = ctx.AllocReg()
+	d.Loc = LocRegPair
+	tag := d.Imm.GetTag()
+	switch tag {
+	case tagNil:
+		ctx.W.emitXorReg(d.Reg)
+		ctx.W.emitXorReg(d.Reg2)
+	case tagInt:
+		ctx.W.EmitMovRegImm64(d.Reg, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
+		ctx.W.EmitMovRegImm64(d.Reg2, uint64(d.Imm.Int()))
+	case tagFloat:
+		ctx.W.EmitMovRegImm64(d.Reg, uint64(uintptr(unsafe.Pointer(&scmerFloatSentinel))))
+		ctx.W.EmitMovRegImm64(d.Reg2, math.Float64bits(d.Imm.Float()))
+	case tagBool:
+		ctx.W.emitXorReg(d.Reg) // ptr = nil for bool
+		var bval uint64
+		if d.Imm.Bool() {
+			bval = 1
+		}
+		ctx.W.EmitMovRegImm64(d.Reg2, makeAux(tagBool, bval))
+	default:
+		panic("jit: MaterializeToRegPair: unsupported type for materialization")
+	}
+}
+
+// EnsureResultRegPair allocates registers for result if result.Loc == LocAny.
+func (ctx *JITContext) EnsureResultRegPair(result *JITValueDesc) {
+	if result.Loc == LocAny {
+		result.Reg = ctx.AllocReg()
+		result.Reg2 = ctx.AllocReg()
+		result.Loc = LocRegPair
+	}
+}

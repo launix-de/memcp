@@ -957,6 +957,76 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (x) (if (nil? x) 0 x))) nil) 0 "jit: nil? check true")
 	(assert ((jit (lambda (x) (if (nil? x) 0 x))) 42) 42 "jit: nil? check false")
 
+	/* JIT emitter: nil? */
+	(assert ((jit (lambda (x) (nil? x))) nil) true "jit: nil? of nil")
+	(assert ((jit (lambda (x) (nil? x))) 0) false "jit: nil? of 0")
+	(assert ((jit (lambda (x) (nil? x))) false) false "jit: nil? of false")
+	(assert ((jit (lambda (x) (nil? x))) "") false "jit: nil? of empty string")
+
+	/* JIT emitter: number? */
+	(assert ((jit (lambda (x) (number? x))) 42) true "jit: number? of int")
+	(assert ((jit (lambda (x) (number? x))) 3.14) true "jit: number? of float")
+	(assert ((jit (lambda (x) (number? x))) "hello") false "jit: number? of string")
+	(assert ((jit (lambda (x) (number? x))) nil) false "jit: number? of nil")
+	(assert ((jit (lambda (x) (number? x))) true) false "jit: number? of bool")
+
+	/* JIT emitter: ! and not */
+	(assert ((jit (lambda (x) (! x))) true) false "jit: ! true")
+	(assert ((jit (lambda (x) (! x))) false) true "jit: ! false")
+	(assert ((jit (lambda (x) (not x))) true) false "jit: not true")
+	(assert ((jit (lambda (x) (not x))) false) true "jit: not false")
+
+	/* JIT emitter: + constant folding */
+	(assert ((jit (lambda () (+ 3 4)))) 7 "jit: + constant fold int")
+	(assert ((jit (lambda () (+ 1.5 2.5)))) 4.0 "jit: + constant fold float")
+	(assert (nil? ((jit (lambda () (+ 1 nil))))) true "jit: + constant fold nil")
+
+	/* JIT emitter: - */
+	(assert ((jit (lambda (a b) (- a b))) 10 3) 7 "jit: a - b int")
+	(assert ((jit (lambda (a b) (- a b))) 10.0 3.0) 7.0 "jit: a - b float")
+	(assert (nil? ((jit (lambda (x) (- x nil))) 5)) true "jit: - with nil")
+	(assert ((jit (lambda () (- 10 3)))) 7 "jit: - constant fold")
+
+	/* JIT emitter: * */
+	(assert ((jit (lambda (a b) (* a b))) 3 4) 12 "jit: a * b int")
+	(assert ((jit (lambda (a b) (* a b))) 2.5 4.0) 10.0 "jit: a * b float")
+	(assert (nil? ((jit (lambda (x) (* x nil))) 5)) true "jit: * with nil arg")
+	(assert ((jit (lambda () (* 6 7)))) 42 "jit: * constant fold")
+
+	/* JIT emitter: / */
+	(assert ((jit (lambda (a b) (/ a b))) 10 4) 2.5 "jit: a / b")
+	(assert ((jit (lambda (a b) (/ a b))) 10.0 2.0) 5.0 "jit: a / b float")
+	(assert (nil? ((jit (lambda (x) (/ x nil))) 5)) true "jit: / with nil")
+	(assert ((jit (lambda () (/ 10 4)))) 2.5 "jit: / constant fold")
+
+	/* JIT emitter: < <= > >= */
+	(assert ((jit (lambda (a b) (< a b))) 3 5) true "jit: 3 < 5")
+	(assert ((jit (lambda (a b) (< a b))) 5 3) false "jit: 5 < 3")
+	(assert ((jit (lambda (a b) (<= a b))) 3 3) true "jit: 3 <= 3")
+	(assert ((jit (lambda (a b) (<= a b))) 4 3) false "jit: 4 <= 3")
+	(assert ((jit (lambda (a b) (> a b))) 5 3) true "jit: 5 > 3")
+	(assert ((jit (lambda (a b) (> a b))) 3 5) false "jit: 3 > 5")
+	(assert ((jit (lambda (a b) (>= a b))) 3 3) true "jit: 3 >= 3")
+	(assert ((jit (lambda (a b) (>= a b))) 2 3) false "jit: 2 >= 3")
+	/* Float comparisons */
+	(assert ((jit (lambda (a b) (< a b))) 1.5 2.5) true "jit: 1.5 < 2.5")
+	(assert ((jit (lambda (a b) (> a b))) 2.5 1.5) true "jit: 2.5 > 1.5")
+	/* Constant fold comparisons */
+	(assert ((jit (lambda () (< 3 5)))) true "jit: < constant fold true")
+	(assert ((jit (lambda () (< 5 3)))) false "jit: < constant fold false")
+	(assert ((jit (lambda () (>= 3 3)))) true "jit: >= constant fold equal")
+
+	/* JIT emitter: equal? */
+	(assert ((jit (lambda (a b) (equal? a b))) 5 5) true "jit: equal? int same")
+	(assert ((jit (lambda (a b) (equal? a b))) 5 6) false "jit: equal? int diff")
+	(assert ((jit (lambda (a b) (equal? a b))) 3.14 3.14) true "jit: equal? float same")
+	(assert ((jit (lambda () (equal? 5 5)))) true "jit: equal? constant fold")
+
+	/* JIT emitter: int? register-path corner cases */
+	(assert ((jit (lambda (x) (int? x))) 3.14) false "jit: int? register path float")
+	(assert ((jit (lambda (x) (int? x))) "hello") false "jit: int? register path string")
+	(assert ((jit (lambda (x) (int? x))) nil) false "jit: int? register path nil")
+
 	/* alu.go: sql_abs */
 	(print "testing sql_abs ...")
 	(assert (equal? (sql_abs -5) 5) true "sql_abs of -5 = 5")
