@@ -342,17 +342,8 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 			if !arg.isDesc {
 				panic("GetTag expects Scmer descriptor")
 			}
-			// Produce a JITValueDesc: LocImm if input is constant, LocReg otherwise
 			dv := g.allocDesc()
-			g.emit("var %s JITValueDesc", dv)
-			g.emit("if %s.Loc == LocImm {", arg.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocImm, Imm: NewInt(int64(%s.Imm.GetTag()))}", dv, arg.goVar)
-			g.emit("} else {")
-			g.emit("\t%s.Reg = ctx.AllocReg()", dv)
-			g.emit("\t%s.Loc = LocReg", dv)
-			g.emit("\tctx.W.EmitGetTag(%s.Reg, %s.Reg, %s.Reg2)", dv, arg.goVar, arg.goVar)
-			g.emit("\tctx.FreeDesc(&%s)", arg.goVar)
-			g.emit("}")
+			g.emit("%s := ctx.EmitGetTagDesc(&%s, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewBool":
 			src := g.lookup(v.Call.Args[0])
