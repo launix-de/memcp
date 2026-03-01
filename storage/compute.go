@@ -170,11 +170,257 @@ func extractScannedTables(expr scm.Scmer) []tableRef {
 	return result
 }
 
+// scanJoinInfo describes a source table scanned by a computor and the equality
+// join conditions connecting source columns to computor input columns.
+type scanJoinInfo struct {
+	schema    string
+	table     string
+	srcCols   []string // source table columns in equality filter
+	inputCols []string // corresponding computor input column names
+}
+
+// extractScanJoinInfo walks a computor lambda and returns one scanJoinInfo per
+// scan call found, together with the equality join pairs extracted from the
+// filter lambda. If the filter cannot be analyzed, the info is returned with
+// empty srcCols/inputCols so callers can fall back to full invalidation.
+func extractScanJoinInfo(computor scm.Scmer) []scanJoinInfo {
+	if computor.IsProc() {
+		return extractScanJoinInfoBody(computor.Proc().Body)
+	}
+	return extractScanJoinInfoBody(computor)
+}
+
+func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
+	if !expr.IsSlice() {
+		return nil
+	}
+	items := expr.Slice()
+	if len(items) >= 5 && items[0].IsSymbol() {
+		sym := items[0].String()
+		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
+			info := scanJoinInfo{
+				schema: scm.String(items[1]),
+				table:  scm.String(items[2]),
+			}
+			// items[3] = condCols (list "col1" "col2" ...), items[4] = filter lambda
+			condCols := extractStringListFromAST(items[3])
+			if len(condCols) > 0 {
+				info.srcCols, info.inputCols = extractEqualityJoins(items[4], condCols)
+			}
+			result := []scanJoinInfo{info}
+			for _, item := range items[5:] {
+				result = append(result, extractScanJoinInfoBody(item)...)
+			}
+			return result
+		}
+	}
+	var result []scanJoinInfo
+	for _, item := range items {
+		result = append(result, extractScanJoinInfoBody(item)...)
+	}
+	return result
+}
+
+// extractStringListFromAST parses (list "a" "b" ...) into a Go string slice.
+func extractStringListFromAST(expr scm.Scmer) []string {
+	if !expr.IsSlice() {
+		return nil
+	}
+	items := expr.Slice()
+	if len(items) < 1 || !items[0].IsSymbol() || items[0].String() != "list" {
+		return nil
+	}
+	result := make([]string, 0, len(items)-1)
+	for _, item := range items[1:] {
+		if !item.IsString() {
+			return nil // non-literal condCol → bail
+		}
+		result = append(result, scm.String(item))
+	}
+	return result
+}
+
+// extractEqualityJoins inspects a filter lambda for patterns like
+// (equal? filterParam (outer inputCol)) and returns matched srcCol/inputCol pairs.
+// filterParam is matched by position against condCols.
+func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inputCols []string) {
+	// Unwrap lambda to get params and body
+	var params []scm.Scmer
+	var body scm.Scmer
+	if filterExpr.IsProc() {
+		proc := filterExpr.Proc()
+		if proc.Params.IsSlice() {
+			params = proc.Params.Slice()
+		}
+		body = proc.Body
+	} else if filterExpr.IsSlice() {
+		items := filterExpr.Slice()
+		// (lambda (params...) body)
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			if items[1].IsSlice() {
+				params = items[1].Slice()
+			}
+			body = items[2]
+		}
+	}
+	if len(params) == 0 || body.IsNil() {
+		return nil, nil
+	}
+
+	// Build param name → index map
+	paramIdx := make(map[string]int, len(params))
+	for i, p := range params {
+		if p.IsSymbol() {
+			paramIdx[p.String()] = i
+		}
+	}
+
+	// Collect equality comparisons from body
+	equalities := collectEqualities(body)
+	for _, eq := range equalities {
+		// Check pattern: (equal? paramSym (outer inputSym)) or reversed
+		pIdx, iCol := matchJoinEquality(eq[0], eq[1], paramIdx)
+		if pIdx < 0 {
+			pIdx, iCol = matchJoinEquality(eq[1], eq[0], paramIdx)
+		}
+		if pIdx >= 0 && pIdx < len(condCols) {
+			srcCols = append(srcCols, condCols[pIdx])
+			inputCols = append(inputCols, iCol)
+		}
+	}
+	return srcCols, inputCols
+}
+
+// collectEqualities extracts pairs of expressions from (equal? A B) forms,
+// handling (and ...) wrapping.
+func collectEqualities(body scm.Scmer) [][2]scm.Scmer {
+	if !body.IsSlice() {
+		return nil
+	}
+	items := body.Slice()
+	if len(items) < 1 || !items[0].IsSymbol() {
+		return nil
+	}
+	sym := items[0].String()
+	if sym == "equal?" && len(items) == 3 {
+		return [][2]scm.Scmer{{items[1], items[2]}}
+	}
+	if sym == "and" {
+		var result [][2]scm.Scmer
+		for _, item := range items[1:] {
+			result = append(result, collectEqualities(item)...)
+		}
+		return result
+	}
+	return nil
+}
+
+// matchJoinEquality checks if a is a filter param symbol and b is (outer inputCol).
+// Returns the param index and input column name, or (-1, "") on mismatch.
+func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int) (int, string) {
+	if !a.IsSymbol() {
+		return -1, ""
+	}
+	idx, ok := paramIdx[a.String()]
+	if !ok {
+		return -1, ""
+	}
+	// b must be (outer <symbol>)
+	if !b.IsSlice() {
+		return -1, ""
+	}
+	bItems := b.Slice()
+	if len(bItems) != 2 || !bItems[0].IsSymbol() || bItems[0].String() != "outer" {
+		return -1, ""
+	}
+	if !bItems[1].IsSymbol() {
+		return -1, ""
+	}
+	return idx, bItems[1].String()
+}
+
+// buildInvalidateScan builds a scan expression that walks the keytable, matches rows
+// by join key values from a trigger dict (OLD or NEW), and invokes $invalidate: closures.
+// Pattern: (scan targetSchema targetTable '("inputCol1" ...) (lambda (kt.col ...) (and (equal? kt.col (get_assoc dictSym "srcCol")) ...)) '("$invalidate:colName") (lambda ($inv) ($inv)) + 0 nil false)
+func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inputCols []string, dictSym string) scm.Scmer {
+	// Build filter column list: '("inputCol1" "inputCol2" ...)
+	filterColElems := make([]scm.Scmer, 1+len(inputCols))
+	filterColElems[0] = scm.NewSymbol("list")
+	for i, col := range inputCols {
+		filterColElems[1+i] = scm.NewString(col)
+	}
+
+	// Build filter lambda params: (kt.inputCol1 kt.inputCol2 ...)
+	filterParams := make([]scm.Scmer, len(inputCols))
+	for i, col := range inputCols {
+		filterParams[i] = scm.NewSymbol(targetTable + "." + col)
+	}
+
+	// Build filter body: (equal? kt.col (get_assoc dictSym "srcCol")) per pair
+	paramSyms := make([]scm.Scmer, len(inputCols))
+	getAssocExprs := make([]scm.Scmer, len(srcCols))
+	for i := range inputCols {
+		paramSyms[i] = scm.NewSymbol(targetTable + "." + inputCols[i])
+		getAssocExprs[i] = fkGetAssocExpr(dictSym, srcCols[i])
+	}
+	var filterBody scm.Scmer
+	if len(inputCols) == 1 {
+		filterBody = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), paramSyms[0], getAssocExprs[0]})
+	} else {
+		parts := make([]scm.Scmer, 1+len(inputCols))
+		parts[0] = scm.NewSymbol("and")
+		for i := range inputCols {
+			parts[1+i] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), paramSyms[i], getAssocExprs[i]})
+		}
+		filterBody = scm.NewSlice(parts)
+	}
+
+	// Build result col list: '("$invalidate:colName")
+	invColName := "$invalidate:" + colName
+
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("scan"),
+		scm.NewString(targetSchema), scm.NewString(targetTable),
+		scm.NewSlice(filterColElems),
+		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString(invColName)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("$inv")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("$inv")})}),
+		scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(), scm.NewBool(false),
+	})
+}
+
+// buildSelectiveInvalidationBody constructs the trigger body for selective cache
+// invalidation. For AfterInsert/AfterDelete it scans with NEW/OLD respectively.
+// For AfterUpdate it scans both OLD and NEW to invalidate both old and new group keys.
+func buildSelectiveInvalidationBody(targetSchema, targetTable, colName string, srcCols, inputCols []string, timing TriggerTiming) scm.Scmer {
+	switch timing {
+	case AfterInsert:
+		return buildInvalidateScan(targetSchema, targetTable, colName, srcCols, inputCols, "NEW")
+	case AfterDelete:
+		return buildInvalidateScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD")
+	case AfterUpdate:
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("begin"),
+			buildInvalidateScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD"),
+			buildInvalidateScan(targetSchema, targetTable, colName, srcCols, inputCols, "NEW"),
+		})
+	default:
+		// Fallback: full invalidation
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("invalidatecolumn"),
+			scm.NewString(targetSchema),
+			scm.NewString(targetTable),
+			scm.NewString(colName),
+		})
+	}
+}
+
 // registerComputeTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers
 // on source tables so that changes automatically invalidate the computed column.
 // Also installs AfterDropTable so that dropping a source table cascades to the target.
 func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
-	refs := extractScannedTables(computor)
+	refs := extractScanJoinInfo(computor)
 	targetSchema := t.schema.Name
 	// Collect trigger names placed on source tables for self-cleanup
 	type triggerRef struct{ schema, name string }
@@ -192,6 +438,10 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 		if srcTable == t {
 			continue
 		}
+
+		// Determine trigger bodies: selective if join pairs are available
+		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
+
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + timing.String()
 			// idempotency: skip if trigger already exists
@@ -203,17 +453,24 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 				}
 			}
 			if !exists {
+				var body scm.Scmer
+				if selective {
+					body = buildSelectiveInvalidationBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, timing)
+				} else {
+					// Fall back to full invalidation
+					body = scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("invalidatecolumn"),
+						scm.NewString(targetSchema),
+						scm.NewString(t.Name),
+						scm.NewString(name),
+					})
+				}
 				srcTable.AddTrigger(TriggerDescription{
 					Name:     triggerName,
 					Timing:   timing,
 					IsSystem: true,
 					Priority: 100,
-					Func: buildFKProc(scm.NewSlice([]scm.Scmer{
-						scm.NewSymbol("invalidatecolumn"),
-						scm.NewString(targetSchema),
-						scm.NewString(t.Name),
-						scm.NewString(name),
-					})),
+					Func:     buildFKProc(body),
 				})
 			}
 			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})

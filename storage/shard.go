@@ -650,16 +650,18 @@ func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
 // processMainBlock/processDeltaBlock – tight loops suitable for JIT compilation.
 // For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
 type ShardMapReducer struct {
-	shard       *storageShard
-	mainCols    []ColumnStorage // direct main storage access (nil for $update cols)
-	colNames    []string        // column names for delta getDelta access
-	isUpdate    []bool          // true for $update columns
-	args        []scm.Scmer     // pre-allocated args buffer
-	mapFn       func(...scm.Scmer) scm.Scmer
-	reduceFn    func(...scm.Scmer) scm.Scmer
-	mapScmer    scm.Scmer // original Scmer for network serialization
-	reduceScmer scm.Scmer // original Scmer for network serialization
-	mainCount   uint32
+	shard           *storageShard
+	mainCols        []ColumnStorage          // direct main storage access (nil for $update/$invalidate cols)
+	colNames        []string                 // column names for delta getDelta access
+	isUpdate        []bool                   // true for $update columns
+	isInvalidate    []bool                   // true for $invalidate: columns
+	invalidateProxy []*StorageComputeProxy   // proxy per $invalidate col (nil if not found)
+	args            []scm.Scmer              // pre-allocated args buffer
+	mapFn           func(...scm.Scmer) scm.Scmer
+	reduceFn        func(...scm.Scmer) scm.Scmer
+	mapScmer        scm.Scmer // original Scmer for network serialization
+	reduceScmer     scm.Scmer // original Scmer for network serialization
+	mainCount       uint32
 }
 
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
@@ -668,22 +670,31 @@ type ShardMapReducer struct {
 // OptimizeProcToSerialFunction is called here (TODO: replace with JIT compilation).
 func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer) *ShardMapReducer {
 	mr := &ShardMapReducer{
-		shard:       t,
-		mainCols:    make([]ColumnStorage, len(cols)),
-		colNames:    cols,
-		isUpdate:    make([]bool, len(cols)),
-		args:        make([]scm.Scmer, len(cols)),
-		mapFn:       scm.OptimizeProcToSerialFunction(mapFn),
-		reduceFn:    scm.OptimizeProcToSerialFunction(reduceFn),
-		mapScmer:    mapFn,
-		reduceScmer: reduceFn,
-		mainCount:   t.main_count,
+		shard:           t,
+		mainCols:        make([]ColumnStorage, len(cols)),
+		colNames:        cols,
+		isUpdate:        make([]bool, len(cols)),
+		isInvalidate:    make([]bool, len(cols)),
+		invalidateProxy: make([]*StorageComputeProxy, len(cols)),
+		args:            make([]scm.Scmer, len(cols)),
+		mapFn:           scm.OptimizeProcToSerialFunction(mapFn),
+		reduceFn:        scm.OptimizeProcToSerialFunction(reduceFn),
+		mapScmer:        mapFn,
+		reduceScmer:     reduceFn,
+		mainCount:       t.main_count,
 	}
 	for i, col := range cols {
 		if col == "$update" {
 			mr.isUpdate[i] = true
 		} else if len(col) >= 4 && col[:4] == "NEW." {
 			mr.isUpdate[i] = true // NEW. columns always return nil
+		} else if len(col) > 12 && col[:12] == "$invalidate:" {
+			mr.isInvalidate[i] = true
+			cacheColName := col[12:]
+			cs := t.getColumnStorageOrPanic(cacheColName)
+			if proxy, ok := cs.(*StorageComputeProxy); ok {
+				mr.invalidateProxy[i] = proxy
+			}
 		} else {
 			mr.mainCols[i] = t.getColumnStorageOrPanic(col)
 		}
@@ -720,7 +731,17 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32) scm.Scmer {
 func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
 	for _, id := range recids {
 		for i, col := range m.mainCols {
-			if m.isUpdate[i] {
+			if m.isInvalidate[i] {
+				if proxy := m.invalidateProxy[i]; proxy != nil {
+					capturedId := id
+					m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+						proxy.Invalidate(capturedId)
+						return scm.NewBool(true)
+					})
+				} else {
+					m.args[i] = scm.NewBool(true)
+				}
+			} else if m.isUpdate[i] {
 				m.args[i] = scm.NewFunc(m.shard.UpdateFunction(id, true))
 			} else {
 				m.args[i] = col.GetValue(id)
@@ -735,7 +756,12 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
 	for _, id := range recids {
 		for i, col := range m.colNames {
-			if m.isUpdate[i] {
+			if m.isInvalidate[i] {
+				// delta rows are outside proxy range — no-op
+				m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					return scm.NewBool(true)
+				})
+			} else if m.isUpdate[i] {
 				m.args[i] = scm.NewFunc(m.shard.UpdateFunction(id, true))
 			} else if len(col) >= 4 && col[:4] == "NEW." {
 				m.args[i] = scm.NewNil()
