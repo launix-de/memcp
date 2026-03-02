@@ -118,7 +118,7 @@ func (s *StorageSeq) GetValue(i uint32) scm.Scmer {
 }
 func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: unsupported Convert int64 → float64 */
+	/* TODO: unsupported call: GetValueUInt (forced fallback for StorageSeq) */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSeq).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
