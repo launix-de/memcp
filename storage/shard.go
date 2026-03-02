@@ -797,9 +797,25 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	}
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
+	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
 	t.insertDataset(columns, values, onFirstInsertId)
 	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
-		t.logfile.Write(LogEntryInsert{columns, values})
+		// Log the actual inserted rows (not the original columns/values) so that
+		// auto-incremented IDs and column defaults are preserved across restarts.
+		idx2col := make([]string, len(t.deltaColumns))
+		for name, idx := range t.deltaColumns {
+			if idx < len(idx2col) {
+				idx2col[idx] = name
+			}
+		}
+		newRows := t.inserts[firstNewInsertIdx:]
+		logVals := make([][]scm.Scmer, len(newRows))
+		for i, row := range newRows {
+			rowCopy := make([]scm.Scmer, len(idx2col))
+			copy(rowCopy, row)
+			logVals[i] = rowCopy
+		}
+		t.logfile.Write(LogEntryInsert{idx2col, logVals})
 	}
 	if t.next != nil {
 		// also insert into next storage
@@ -1249,6 +1265,16 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// from destroying column data that rebuild reads from.
 		GlobalCache.Remove(t)
 		removedFromCache = true
+
+		// Ensure all columns are loaded from disk. shardCleanup sets column
+		// values to nil (while keeping the key) to free memory under pressure.
+		// rebuild must read all columns, so materialize any nil entries now
+		// while t.mu is not held (ensureColumnLoaded acquires it internally).
+		for col, c := range t.columns {
+			if c == nil {
+				t.ensureColumnLoaded(col, false)
+			}
+		}
 
 		// transfer indexes early so we know which index is Native (physically sorted)
 		rebuildIndexes(t, result)

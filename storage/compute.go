@@ -89,6 +89,9 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
 		return false // can't compute in shards with delta storage
 	}
+	// Ensure shard is loaded from disk before we mark it WRITE (ensureLoaded
+	// guards on COLD state; setting WRITE first would skip the load entirely).
+	s.ensureLoaded()
 	// We are going to mutate this shard's columns: mark shard as WRITE (not COLD)
 	s.srState = WRITE
 	// Ensure main_count and input storages are initialized before compute
