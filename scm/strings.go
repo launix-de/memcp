@@ -22,6 +22,9 @@ import "html"
 import "regexp"
 import "strings"
 import "net/url"
+import "hash/fnv"
+import "crypto/sha1"
+import "crypto/sha256"
 import "encoding/json"
 import "encoding/base64"
 import "encoding/hex"
@@ -849,6 +852,44 @@ func init_strings() {
 			}
 			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
 		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpReplace},
+		nil,
+	})
+
+	Declare(&Globalenv, &Declaration{
+		"fnv_hash", "computes a fast non-cryptographic 64-bit FNV-1a hash of a string, returns a 16-character hex string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"str", "string", "input string to hash", nil},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			h := fnv.New64a()
+			h.Write([]byte(String(a[0])))
+			return NewString(fmt.Sprintf("%016x", h.Sum64()))
+		}, true, false, nil,
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"sha1", "computes the SHA-1 digest of a string, returns a 40-character lowercase hex string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"str", "string", "input string to hash", nil},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			sum := sha1.Sum([]byte(String(a[0])))
+			return NewString(hex.EncodeToString(sum[:]))
+		}, true, false, nil,
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"sha256", "computes the SHA-256 digest of a string, returns a 64-character lowercase hex string",
+		1, 1,
+		[]DeclarationParameter{
+			DeclarationParameter{"str", "string", "input string to hash", nil},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			sum := sha256.Sum256([]byte(String(a[0])))
+			return NewString(hex.EncodeToString(sum[:]))
+		}, true, false, nil,
 		nil,
 	})
 

@@ -25,11 +25,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (set psql_queryplan_cache (newcachemap))
 
 /* cached_parse: wraps a parser with cachemap-based caching.
-cache_key = username:schema:query — per-user isolation (policy checked at parse time).
+cache_key = username:schema:hash(query) — per-user isolation (policy checked at parse time).
+The query is hashed with FNV-1a (fnv_hash) so long SQL strings don't bloat the cache index.
 On parse error the result is not cached (e.g. table does not exist yet). */
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username)
 	(begin
-		(define cache_key (concat username ":" schema ":" query))
+		(define cache_key (concat username ":" schema ":" (fnv_hash query)))
 		(define cached (queryplan_cache cache_key))
 		(if cached cached
 			(begin

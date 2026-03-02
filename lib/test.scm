@@ -1101,6 +1101,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define less_rev (collate "en" true))
 	(assert (less_rev "b" "a") true "english reverse b before a")
 
+	/* strings.go: hash functions */
+	(assert (equal? (fnv_hash "hello") (fnv_hash "hello")) true "fnv_hash is deterministic")
+	(assert (equal? (fnv_hash "hello") (fnv_hash "world")) false "fnv_hash differs for different inputs")
+	(assert (strlen (fnv_hash "test")) 16 "fnv_hash returns 16-char hex string")
+	(assert (equal? (fnv_hash "") (fnv_hash "")) true "fnv_hash of empty string is deterministic")
+	(assert (equal? (sha1 "hello") (sha1 "hello")) true "sha1 is deterministic")
+	(assert (equal? (sha1 "hello") (sha1 "world")) false "sha1 differs for different inputs")
+	(assert (strlen (sha1 "test")) 40 "sha1 returns 40-char hex string")
+	(assert (equal? (sha256 "hello") (sha256 "hello")) true "sha256 is deterministic")
+	(assert (equal? (sha256 "hello") (sha256 "world")) false "sha256 differs for different inputs")
+	(assert (strlen (sha256 "test")) 64 "sha256 returns 64-char hex string")
+
 	/* scm.go: string (type conversion) / printer.go coverage */
 	(print "testing type conversion and apply ...")
 	(assert (equal? (string 42) "42") true "string converts number to string")
