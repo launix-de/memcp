@@ -225,6 +225,22 @@ func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
 	cs, present := u.columns[colName]
 	u.mu.RUnlock()
 	if !present {
+		// The column may be missing from this shard's map because it was created
+		// after the shard (e.g. a PShards shard created during repartition before
+		// all columns were installed, or a race between CreateColumn and scan).
+		// If the column exists in the table schema, add it as StorageSparse so
+		// the scan can proceed without panicking.
+		for _, c := range u.t.Columns {
+			if c.Name == colName {
+				u.mu.Lock()
+				if _, present2 := u.columns[colName]; !present2 {
+					u.columns[colName] = new(StorageSparse)
+				}
+				cs2 := u.columns[colName]
+				u.mu.Unlock()
+				return cs2
+			}
+		}
 		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
 	}
 	if cs != nil {
