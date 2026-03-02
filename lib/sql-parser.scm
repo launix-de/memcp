@@ -54,6 +54,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define sql_identifier_quoted (parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`"))) /* with backtick */
 (define sql_identifier (parser (define x (or sql_identifier_unquoted sql_identifier_quoted)) x))
 
+/* MySQL 'username'@'host' syntax used in CREATE USER, DROP USER, GRANT, REVOKE.
+   Extracts only the username portion; the @host part is accepted but ignored. */
+(define sql_user_ident (parser (or
+	(parser '((define u sql_string) "@" sql_string) u)
+	(parser '((define u sql_string) "@" sql_identifier) u)
+	sql_string
+	sql_identifier
+)))
+
 (define sql_column (parser (or
 	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_unquoted)) '((quote get_column) tbl true col true))
 	(parser '((define tbl sql_identifier_unquoted) "." (define col sql_identifier_quoted)) '((quote get_column) tbl true col false))
@@ -1408,44 +1417,61 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 		/* CREATE DATABASE name FROM source_db */
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (atom "FROM" true) (define from_db sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil from_db)))
+		/* CREATE DATABASE name [DEFAULT] CHARACTER SET charset [COLLATE collation] — charset/collation ignored */
+		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (? (atom "DEFAULT" true)) (atom "CHARACTER" true) (atom "SET" true) sql_identifier (? (atom "COLLATE" true) sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil nil)))
 		/* CREATE DATABASE name [SET key=val, ...] */
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (define opts (? (atom "SET" true) (+ (parser '((define k sql_identifier) "=" (define v sql_literal)) '(k v)) ",")))) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) (if opts (cons (quote list) (merge opts)) nil) nil)))
-		(parser '((atom "CREATE" true) (atom "USER" true) (define username sql_identifier)
+		/* DROP USER [IF EXISTS] user — deletes from system.user */
+		(parser '((atom "DROP" true) (atom "USER" true) (? (atom "IF" true) (atom "EXISTS" true)) (define username sql_user_ident))
+			(begin (if policy (policy "system" true true) true)
+				'((quote scan) "system" "user"
+					'('list "username")
+					'((quote lambda) '((quote username)) '((quote equal??) (quote username) username))
+					'(list "$update")
+					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+					(quote +)
+					0
+				)
+		))
+		(parser '((atom "CREATE" true) (atom "USER" true) (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "user" '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
 		))
-		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_identifier)
+		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
 		))
 
+		/* FLUSH PRIVILEGES / FLUSH TABLES / FLUSH ... — no-op in memcp */
+		(parser '((atom "FLUSH" true) (+ (or sql_identifier (atom "TABLES" true) (atom "PRIVILEGES" true) ","))) true)
+
 		/* GRANT syntax (MySQL-style) -> reflect only admin and database-level access */
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
-		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_identifier))
+		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
 		))
 		/* GRANT <anything> ON db.* TO user -> insert access */
-		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_identifier))
+		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
 		))
 		/* GRANT <anything> ON db.table TO user -> also insert access at db level */
-		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "TO" true) (define username sql_identifier))
+		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
 		))
 
 		/* REVOKE syntax (MySQL-style) -> mirror GRANT behavior */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
-		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_identifier))
+		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
-		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_identifier))
+		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					"system"
@@ -1458,7 +1484,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					0
 		)))
 		/* REVOKE <anything> ON db.table FROM user -> treat as db-level and delete access entry */
-		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "FROM" true) (define username sql_identifier))
+		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan)
 					"system"
