@@ -113,7 +113,7 @@ test_cases:
   - name: "Delete row after restart"
     sql: "DELETE FROM sr_data WHERE id = 5"
 
-  - name: "After post-restart DELETE: Gamma removed (empty group)"
+  - name: "After post-restart DELETE: Gamma removed (no source rows)"
     sql: "SELECT category, SUM(amount) AS s FROM sr_data GROUP BY category ORDER BY category"
     expect:
       rows: 2
