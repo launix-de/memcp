@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /build
 
@@ -16,11 +16,10 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go get
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o memcp .
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:3.21
 
 # Install ca-certificates for HTTPS requests
 RUN apk --no-cache add ca-certificates
@@ -31,13 +30,15 @@ WORKDIR /app
 COPY --from=builder /build/memcp .
 # Copy Scheme library (runtime scripts)
 COPY --from=builder /build/lib ./lib
+# Copy dashboard and static assets
+COPY --from=builder /build/assets ./assets
 
 # Create data directory
 RUN mkdir -p /data
 
 # Set up volumes and expose ports
 VOLUME /data
-EXPOSE 4332
+EXPOSE 4321
 EXPOSE 3307
 
 # Set environment variables (overridable via docker-compose)
@@ -47,5 +48,5 @@ ENV ROOT_PASSWORD=admin
 ENV APP=lib/main.scm
 
 # Run the application (load default Scheme entrypoint)
-# If ROOT_PASSWORD is set, pass it as --root-password; otherwise rely on default in lib/sql.scm
-CMD ./memcp -data /data --root-password="$ROOT_PASSWORD" $PARAMS $APP
+# --no-repl prevents the process from exiting when stdin is closed (required in containers)
+CMD ./memcp --no-repl -data /data --root-password="$ROOT_PASSWORD" $PARAMS $APP
