@@ -1,0 +1,837 @@
+# Incremental aggregate tests.
+# Validates that GROUP BY aggregate caches produce correct results after
+# INSERT, UPDATE, and DELETE on the source table.
+# Each aggregate function (SUM, COUNT, MIN, MAX, AVG) is tested separately
+# to enable future incremental update optimization per aggregate pattern.
+#
+# Aggregate triple patterns (from sql-parser.scm):
+#   COUNT(*)  -> (1 + 0)
+#   COUNT(e)  -> ((if (nil? e) 0 1) + 0)
+#   SUM(e)    -> (e + 0)
+#   AVG(e)    -> (/ (aggregate e + 0) (aggregate 1 + 0))
+#   MIN(e)    -> (e min nil)
+#   MAX(e)    -> (e max nil)
+
+metadata:
+  version: "1.0"
+  description: "Incremental aggregate correctness: SUM, COUNT, MIN, MAX, AVG after INSERT/UPDATE/DELETE"
+
+test_cases:
+  # ============================================================
+  # Setup
+  # ============================================================
+  - name: "Drop leftover tables"
+    sql: "DROP TABLE IF EXISTS ia_data"
+
+  - name: "Create base table"
+    sql: |
+      CREATE TABLE ia_data (
+        id INT PRIMARY KEY,
+        grp VARCHAR(20),
+        val INT,
+        nullable_val INT
+      )
+
+  - name: "Insert initial data"
+    sql: |
+      INSERT INTO ia_data (id, grp, val, nullable_val) VALUES
+        (1, 'A', 10, 10),
+        (2, 'A', 20, NULL),
+        (3, 'B', 30, 30),
+        (4, 'B', 40, 40),
+        (5, 'C', 50, NULL)
+
+  # ============================================================
+  # Section 1: SUM — pattern (expr + 0)
+  # ============================================================
+  - name: "SUM baseline"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 30
+        - grp: "B"
+          s: 70
+        - grp: "C"
+          s: 50
+
+  # INSERT: SUM should increase by NEW.val
+  - name: "SUM after INSERT into existing group"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (6, 'A', 100, 100)"
+
+  - name: "SUM verify INSERT"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 130
+        - grp: "B"
+          s: 70
+        - grp: "C"
+          s: 50
+
+  # INSERT: new group should appear
+  - name: "SUM after INSERT new group"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (7, 'D', 200, 200)"
+
+  - name: "SUM verify new group"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 4
+      data:
+        - grp: "A"
+          s: 130
+        - grp: "B"
+          s: 70
+        - grp: "C"
+          s: 50
+        - grp: "D"
+          s: 200
+
+  # UPDATE: SUM should adjust by (NEW.val - OLD.val)
+  - name: "SUM after UPDATE same group"
+    sql: "UPDATE ia_data SET val = 15 WHERE id = 1"
+
+  - name: "SUM verify UPDATE same group"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 4
+      data:
+        - grp: "A"
+          s: 135
+        - grp: "B"
+          s: 70
+        - grp: "C"
+          s: 50
+        - grp: "D"
+          s: 200
+
+  # UPDATE: move row to different group
+  - name: "SUM after UPDATE group key change"
+    sql: "UPDATE ia_data SET grp = 'B' WHERE id = 6"
+
+  - name: "SUM verify group key change"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 4
+      data:
+        - grp: "A"
+          s: 35
+        - grp: "B"
+          s: 170
+        - grp: "C"
+          s: 50
+        - grp: "D"
+          s: 200
+
+  # DELETE: SUM should decrease by OLD.val
+  - name: "SUM after DELETE"
+    sql: "DELETE FROM ia_data WHERE id = 4"
+
+  - name: "SUM verify DELETE"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 4
+      data:
+        - grp: "A"
+          s: 35
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+        - grp: "D"
+          s: 200
+
+  # DELETE: last row in group -> group disappears
+  - name: "SUM after DELETE last row in group"
+    sql: "DELETE FROM ia_data WHERE id = 7"
+
+  - name: "SUM verify group removed"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 35
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+
+  # ============================================================
+  # Section 2: COUNT(*) — pattern (1 + 0)
+  # ============================================================
+  - name: "COUNT(*) baseline"
+    sql: "SELECT grp, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 2
+        - grp: "B"
+          c: 2
+        - grp: "C"
+          c: 1
+
+  # INSERT: COUNT(*) should += 1
+  - name: "COUNT(*) after INSERT"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (8, 'A', 5, 5)"
+
+  - name: "COUNT(*) verify INSERT"
+    sql: "SELECT grp, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 3
+        - grp: "B"
+          c: 2
+        - grp: "C"
+          c: 1
+
+  # DELETE: COUNT(*) should -= 1
+  - name: "COUNT(*) after DELETE"
+    sql: "DELETE FROM ia_data WHERE id = 8"
+
+  - name: "COUNT(*) verify DELETE"
+    sql: "SELECT grp, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 2
+        - grp: "B"
+          c: 2
+        - grp: "C"
+          c: 1
+
+  # UPDATE group key: count moves between groups
+  - name: "COUNT(*) after UPDATE group change"
+    sql: "UPDATE ia_data SET grp = 'C' WHERE id = 3"
+
+  - name: "COUNT(*) verify UPDATE group change"
+    sql: "SELECT grp, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 2
+        - grp: "B"
+          c: 1
+        - grp: "C"
+          c: 2
+
+  # Undo group change
+  - name: "COUNT(*) undo group change"
+    sql: "UPDATE ia_data SET grp = 'B' WHERE id = 3"
+
+  # ============================================================
+  # Section 3: COUNT(col) with NULLs — pattern ((if (nil? col) 0 1) + 0)
+  # ============================================================
+  - name: "COUNT(col) baseline with NULLs"
+    sql: "SELECT grp, COUNT(nullable_val) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 1
+        - grp: "B"
+          c: 2
+        - grp: "C"
+          c: 0
+
+  # INSERT NULL: COUNT(col) should not change
+  - name: "COUNT(col) after INSERT NULL"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (9, 'A', 1, NULL)"
+
+  - name: "COUNT(col) verify INSERT NULL"
+    sql: "SELECT grp, COUNT(nullable_val) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 1
+        - grp: "B"
+          c: 2
+        - grp: "C"
+          c: 0
+
+  # INSERT non-NULL: COUNT(col) should += 1
+  - name: "COUNT(col) after INSERT non-NULL"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (10, 'C', 1, 99)"
+
+  - name: "COUNT(col) verify INSERT non-NULL"
+    sql: "SELECT grp, COUNT(nullable_val) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 1
+        - grp: "B"
+          c: 2
+        - grp: "C"
+          c: 1
+
+  # UPDATE NULL->non-NULL: COUNT(col) should += 1
+  - name: "COUNT(col) after UPDATE NULL to non-NULL"
+    sql: "UPDATE ia_data SET nullable_val = 77 WHERE id = 2"
+
+  - name: "COUNT(col) verify UPDATE NULL to non-NULL"
+    sql: "SELECT grp, COUNT(nullable_val) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 2
+        - grp: "B"
+          c: 2
+        - grp: "C"
+          c: 1
+
+  # UPDATE non-NULL->NULL: COUNT(col) should -= 1
+  - name: "COUNT(col) after UPDATE non-NULL to NULL"
+    sql: "UPDATE ia_data SET nullable_val = NULL WHERE id = 2"
+
+  - name: "COUNT(col) verify UPDATE non-NULL to NULL"
+    sql: "SELECT grp, COUNT(nullable_val) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          c: 1
+        - grp: "B"
+          c: 2
+        - grp: "C"
+          c: 1
+
+  # Cleanup COUNT(col) extras
+  - name: "Cleanup COUNT(col) extras"
+    sql: "DELETE FROM ia_data WHERE id IN (9, 10)"
+
+  # ============================================================
+  # Section 4: MIN — pattern (expr min nil)
+  # ============================================================
+  - name: "MIN baseline"
+    sql: "SELECT grp, MIN(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 15
+        - grp: "B"
+          m: 30
+        - grp: "C"
+          m: 50
+
+  # INSERT smaller value: MIN should decrease
+  - name: "MIN after INSERT smaller"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (11, 'B', 5, 5)"
+
+  - name: "MIN verify INSERT smaller"
+    sql: "SELECT grp, MIN(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 15
+        - grp: "B"
+          m: 5
+        - grp: "C"
+          m: 50
+
+  # INSERT larger value: MIN should not change
+  - name: "MIN after INSERT larger"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (12, 'A', 999, 999)"
+
+  - name: "MIN verify INSERT larger (unchanged)"
+    sql: "SELECT grp, MIN(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 15
+        - grp: "B"
+          m: 5
+        - grp: "C"
+          m: 50
+
+  # DELETE the minimum: MIN must rescan to find new min
+  - name: "MIN after DELETE of min value"
+    sql: "DELETE FROM ia_data WHERE id = 11"
+
+  - name: "MIN verify DELETE of min (rescan needed)"
+    sql: "SELECT grp, MIN(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 15
+        - grp: "B"
+          m: 30
+        - grp: "C"
+          m: 50
+
+  # DELETE non-min: MIN should not change
+  - name: "MIN after DELETE of non-min value"
+    sql: "DELETE FROM ia_data WHERE id = 12"
+
+  - name: "MIN verify DELETE of non-min (unchanged)"
+    sql: "SELECT grp, MIN(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 15
+        - grp: "B"
+          m: 30
+        - grp: "C"
+          m: 50
+
+  # UPDATE to new minimum
+  - name: "MIN after UPDATE to new min"
+    sql: "UPDATE ia_data SET val = 1 WHERE id = 6"
+
+  - name: "MIN verify UPDATE to new min"
+    sql: "SELECT grp, MIN(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 15
+        - grp: "B"
+          m: 1
+        - grp: "C"
+          m: 50
+
+  # UPDATE away from minimum (change the min value to something larger)
+  - name: "MIN after UPDATE away from min"
+    sql: "UPDATE ia_data SET val = 100 WHERE id = 6"
+
+  - name: "MIN verify UPDATE away from min (rescan needed)"
+    sql: "SELECT grp, MIN(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 15
+        - grp: "B"
+          m: 30
+        - grp: "C"
+          m: 50
+
+  # ============================================================
+  # Section 5: MAX — pattern (expr max nil)
+  # ============================================================
+  - name: "MAX baseline"
+    sql: "SELECT grp, MAX(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 20
+        - grp: "B"
+          m: 100
+        - grp: "C"
+          m: 50
+
+  # INSERT larger value: MAX should increase
+  - name: "MAX after INSERT larger"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (13, 'A', 500, 500)"
+
+  - name: "MAX verify INSERT larger"
+    sql: "SELECT grp, MAX(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 500
+        - grp: "B"
+          m: 100
+        - grp: "C"
+          m: 50
+
+  # DELETE the maximum: MAX must rescan
+  - name: "MAX after DELETE of max value"
+    sql: "DELETE FROM ia_data WHERE id = 13"
+
+  - name: "MAX verify DELETE of max (rescan needed)"
+    sql: "SELECT grp, MAX(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 20
+        - grp: "B"
+          m: 100
+        - grp: "C"
+          m: 50
+
+  # UPDATE to new max
+  - name: "MAX after UPDATE to new max"
+    sql: "UPDATE ia_data SET val = 999 WHERE id = 1"
+
+  - name: "MAX verify UPDATE to new max"
+    sql: "SELECT grp, MAX(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 999
+        - grp: "B"
+          m: 100
+        - grp: "C"
+          m: 50
+
+  # UPDATE away from max
+  - name: "MAX after UPDATE away from max"
+    sql: "UPDATE ia_data SET val = 10 WHERE id = 1"
+
+  - name: "MAX verify UPDATE away from max (rescan needed)"
+    sql: "SELECT grp, MAX(val) AS m FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          m: 20
+        - grp: "B"
+          m: 100
+        - grp: "C"
+          m: 50
+
+  # ============================================================
+  # Section 6: AVG — derived from SUM/COUNT: (/ (aggregate e + 0) (aggregate 1 + 0))
+  # ============================================================
+  - name: "AVG baseline"
+    sql: "SELECT grp, AVG(val) AS a FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          a: 15
+        - grp: "B"
+          a: 65
+        - grp: "C"
+          a: 50
+
+  # INSERT: AVG should change
+  - name: "AVG after INSERT"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (14, 'A', 45, 45)"
+
+  - name: "AVG verify INSERT"
+    sql: "SELECT grp, AVG(val) AS a FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          a: 25
+        - grp: "B"
+          a: 65
+        - grp: "C"
+          a: 50
+
+  # DELETE: AVG should change
+  - name: "AVG after DELETE"
+    sql: "DELETE FROM ia_data WHERE id = 14"
+
+  - name: "AVG verify DELETE"
+    sql: "SELECT grp, AVG(val) AS a FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          a: 15
+        - grp: "B"
+          a: 65
+        - grp: "C"
+          a: 50
+
+  # UPDATE: AVG should change
+  - name: "AVG after UPDATE"
+    sql: "UPDATE ia_data SET val = 30 WHERE id = 1"
+
+  - name: "AVG verify UPDATE"
+    sql: "SELECT grp, AVG(val) AS a FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          a: 25
+        - grp: "B"
+          a: 65
+        - grp: "C"
+          a: 50
+
+  # Restore original value
+  - name: "Restore val for id=1"
+    sql: "UPDATE ia_data SET val = 10 WHERE id = 1"
+
+  # ============================================================
+  # Section 7: Multiple aggregates in one query
+  # ============================================================
+  - name: "Multi-aggregate baseline"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c, MIN(val) AS mi, MAX(val) AS ma FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 30
+          c: 2
+          mi: 10
+          ma: 20
+        - grp: "B"
+          s: 130
+          c: 2
+          mi: 30
+          ma: 100
+        - grp: "C"
+          s: 50
+          c: 1
+          mi: 50
+          ma: 50
+
+  # INSERT affects all aggregates
+  - name: "Multi-aggregate after INSERT"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (15, 'A', 5, 5)"
+
+  - name: "Multi-aggregate verify INSERT"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c, MIN(val) AS mi, MAX(val) AS ma FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 35
+          c: 3
+          mi: 5
+          ma: 20
+        - grp: "B"
+          s: 130
+          c: 2
+          mi: 30
+          ma: 100
+        - grp: "C"
+          s: 50
+          c: 1
+          mi: 50
+          ma: 50
+
+  # DELETE affects all aggregates
+  - name: "Multi-aggregate after DELETE"
+    sql: "DELETE FROM ia_data WHERE id = 15"
+
+  - name: "Multi-aggregate verify DELETE"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c, MIN(val) AS mi, MAX(val) AS ma FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 30
+          c: 2
+          mi: 10
+          ma: 20
+        - grp: "B"
+          s: 130
+          c: 2
+          mi: 30
+          ma: 100
+        - grp: "C"
+          s: 50
+          c: 1
+          mi: 50
+          ma: 50
+
+  # ============================================================
+  # Section 8: WHERE-filtered aggregates
+  # ============================================================
+  - name: "Filtered SUM baseline"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data WHERE val > 15 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 20
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+
+  # INSERT passing filter: SUM should increase
+  - name: "Filtered SUM after INSERT passing filter"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (16, 'A', 25, 25)"
+
+  - name: "Filtered SUM verify INSERT passing filter"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data WHERE val > 15 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 45
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+
+  # INSERT not passing filter: should not affect result
+  - name: "Filtered SUM after INSERT not passing filter"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (17, 'A', 5, 5)"
+
+  - name: "Filtered SUM verify INSERT not passing filter (unchanged)"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data WHERE val > 15 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 45
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+
+  # UPDATE changes filter membership: id=1 val=10 -> 100 (now passes val > 15)
+  - name: "Filtered SUM after UPDATE crossing filter boundary"
+    sql: "UPDATE ia_data SET val = 100 WHERE id = 1"
+
+  - name: "Filtered SUM verify UPDATE crossing filter"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data WHERE val > 15 GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 145
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+
+  # Restore
+  - name: "Restore id=1 val"
+    sql: "UPDATE ia_data SET val = 10 WHERE id = 1"
+
+  # Cleanup filter test rows
+  - name: "Cleanup filter test rows"
+    sql: "DELETE FROM ia_data WHERE id IN (16, 17)"
+
+  # ============================================================
+  # Section 9: Rapid successive DML (burst invalidation)
+  # ============================================================
+  - name: "Burst: baseline SUM"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 30
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+
+  - name: "Burst: insert 3 rows quickly"
+    sql: |
+      INSERT INTO ia_data (id, grp, val, nullable_val) VALUES
+        (20, 'A', 1, 1),
+        (21, 'A', 2, 2),
+        (22, 'A', 3, 3)
+
+  - name: "Burst: verify after multi-insert"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 36
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+
+  - name: "Burst: delete the 3 rows"
+    sql: "DELETE FROM ia_data WHERE id IN (20, 21, 22)"
+
+  - name: "Burst: verify after multi-delete"
+    sql: "SELECT grp, SUM(val) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 30
+        - grp: "B"
+          s: 130
+        - grp: "C"
+          s: 50
+
+  # ============================================================
+  # Section 10: Edge cases — single-row groups, empty table
+  # ============================================================
+  - name: "Edge: delete all rows in group C"
+    sql: "DELETE FROM ia_data WHERE grp = 'C'"
+
+  - name: "Edge: verify group C gone"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 30
+          c: 2
+        - grp: "B"
+          s: 130
+          c: 2
+
+  - name: "Edge: re-insert into group C"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (30, 'C', 77, 77)"
+
+  - name: "Edge: verify group C reappears"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 30
+          c: 2
+        - grp: "B"
+          s: 130
+          c: 2
+        - grp: "C"
+          s: 77
+          c: 1
+
+  # ============================================================
+  # Section 11: SUM with expression — SUM(val * 2)
+  # ============================================================
+  - name: "SUM(expr) baseline"
+    sql: "SELECT grp, SUM(val * 2) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 60
+        - grp: "B"
+          s: 260
+        - grp: "C"
+          s: 154
+
+  - name: "SUM(expr) after INSERT"
+    sql: "INSERT INTO ia_data (id, grp, val, nullable_val) VALUES (31, 'A', 10, 10)"
+
+  - name: "SUM(expr) verify INSERT"
+    sql: "SELECT grp, SUM(val * 2) AS s FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 80
+        - grp: "B"
+          s: 260
+        - grp: "C"
+          s: 154
+
+  - name: "Cleanup SUM(expr) row"
+    sql: "DELETE FROM ia_data WHERE id = 31"
+
+  # ============================================================
+  # Cleanup
+  # ============================================================
+  - name: "Cleanup ia_data"
+    sql: "DROP TABLE IF EXISTS ia_data"
