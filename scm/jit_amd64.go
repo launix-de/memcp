@@ -1,7 +1,7 @@
 //go:build amd64
 
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -41,10 +41,10 @@ func jitNthArgument(idx int) []byte { // up to 16 params
 		code = append(code, 0x48, 0x83, 0xC0, byte(idx*16)) // add rax, 16*idx
 	}
 	code = append(code,
-		0x48, 0x8b, 0x08,       // mov rcx, [rax]
+		0x48, 0x8b, 0x08, // mov rcx, [rax]
 		0x48, 0x8b, 0x58, 0x08, // mov rbx, [rax+8]
-		0x48, 0x89, 0xc8,       // mov rax, rcx
-		0xC3,                    // ret
+		0x48, 0x89, 0xc8, // mov rax, rcx
+		0xC3, // ret
 	)
 	return code
 }
@@ -150,8 +150,27 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	case tagString:
 		return JITValueDesc{Loc: LocImm, Type: tagString, Imm: expr}
 	case tagNthLocalVar:
-		// Load parameter from args slice: ptr at [base+i*16], aux at [base+i*16+8]
+		// Load parameter: check inline env first (JITEmitProcInline places args here).
 		idx := int(expr.NthLocalVar())
+		if ctx.Env != nil && idx < len(ctx.Env.Numbered) {
+			src := ctx.Env.Numbered[idx]
+			switch src.Loc {
+			case LocImm:
+				return src // constants are always safe to alias
+			case LocReg:
+				// Allocate a fresh register so each use is independently freeable.
+				r := ctx.AllocRegExcept(src.Reg)
+				ctx.W.emitMovRegReg(r, src.Reg)
+				return JITValueDesc{Loc: LocReg, Type: src.Type, Reg: r}
+			case LocRegPair:
+				r1 := ctx.AllocRegExcept(src.Reg, src.Reg2)
+				r2 := ctx.AllocRegExcept(src.Reg, src.Reg2, r1)
+				ctx.W.emitMovRegReg(r1, src.Reg)
+				ctx.W.emitMovRegReg(r2, src.Reg2)
+				return JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: r1, Reg2: r2}
+			}
+		}
+		// Fallback: load from args slice: ptr at [base+i*16], aux at [base+i*16+8]
 		ptrReg := ctx.AllocReg()
 		auxReg := ctx.AllocReg()
 		ctx.W.emitMovRegMem(ptrReg, sliceBase, int32(idx*16))
@@ -171,8 +190,17 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		if !ok || decl.JITEmit == nil {
 			panic("jit: no JITEmit for " + name)
 		}
-		// Compile arguments (intermediate results use LocAny)
-		args := make([]JITValueDesc, len(list)-1)
+		// Compile arguments (intermediate results use LocAny).
+		// Use a stack-allocated buffer for the common case of ≤8 args;
+		// fall back to heap allocation for larger expressions.
+		var argsBuf [8]JITValueDesc
+		n := len(list) - 1
+		var args []JITValueDesc
+		if n <= len(argsBuf) {
+			args = argsBuf[:n]
+		} else {
+			args = make([]JITValueDesc, n)
+		}
 		for i := 1; i < len(list); i++ {
 			args[i-1] = jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
 		}
@@ -194,6 +222,30 @@ func jitStackFrame(size uint8) []byte {
 		0x5d, //pop    %rbp
 		0xc3, //ret
 	}
+}
+
+// JITEmitProcInline emits a Proc's body inline into the current JIT stream.
+// args[i] provides the pre-placed descriptor for the i-th parameter (NthLocalVar(i)).
+// Each NthLocalVar reference emits a fresh register copy so the descriptor is
+// independently freeable per use site (safe for expressions that reference a
+// parameter more than once).
+// sliceBase is passed through to jitCompileExpr for any fallback slice-based
+// NthLocalVar loads (in practice not reached when all params are in args).
+// Panics on any un-emittable sub-expression — callers should recover and fall back.
+func JITEmitProcInline(ctx *JITContext, proc *Proc, args []JITValueDesc, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	innerEnv := &JITEnv{
+		Numbered: args,
+		Outer:    ctx.Env,
+	}
+	oldEnv := ctx.Env
+	ctx.Env = innerEnv
+	defer func() { ctx.Env = oldEnv }()
+
+	body := proc.Body
+	if body.GetTag() == tagSourceInfo {
+		body = body.SourceInfo().value
+	}
+	return jitCompileExpr(ctx, body, sliceBase, result)
 }
 
 /* TODO: peephole optimizer:

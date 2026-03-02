@@ -1118,3 +1118,23 @@ func (ctx *JITContext) EmitStoreToStack(src JITValueDesc, disp int32) {
 func (ctx *JITContext) EmitLoadFromStack(dst Reg, disp int32) {
 	ctx.W.EmitMovRegMem(dst, RegRSP, disp)
 }
+
+// EmitStoreScmerToStack stores a full Scmer (16 bytes: ptr at disp, aux at disp+8)
+// from a LocRegPair or LocImm descriptor to consecutive stack slots [RSP+disp..RSP+disp+15].
+// Uses R11 as scratch for LocImm values.
+func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
+	switch desc.Loc {
+	case LocRegPair:
+		ctx.W.EmitStoreRegMem(desc.Reg, RegRSP, disp)
+		ctx.W.EmitStoreRegMem(desc.Reg2, RegRSP, disp+8)
+	case LocImm:
+		// Store ptr word
+		ctx.W.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(desc.Imm.ptr))))
+		ctx.W.EmitStoreRegMem(RegR11, RegRSP, disp)
+		// Store aux word
+		ctx.W.EmitMovRegImm64(RegR11, desc.Imm.aux)
+		ctx.W.EmitStoreRegMem(RegR11, RegRSP, disp+8)
+	default:
+		panic("jit: EmitStoreScmerToStack: unsupported location")
+	}
+}

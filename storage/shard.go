@@ -654,12 +654,15 @@ type ShardMapReducer struct {
 	mainCols    []ColumnStorage // direct main storage access (nil for $update cols)
 	colNames    []string        // column names for delta getDelta access
 	isUpdate    []bool          // true for $update columns
-	args        []scm.Scmer     // pre-allocated args buffer
+	args        []scm.Scmer     // pre-allocated args buffer (interpreted fallback)
 	mapFn       func(...scm.Scmer) scm.Scmer
 	reduceFn    func(...scm.Scmer) scm.Scmer
 	mapScmer    scm.Scmer // original Scmer for network serialization
 	reduceScmer scm.Scmer // original Scmer for network serialization
 	mainCount   uint32
+	// JIT-compiled fused loop for main storage (nil = use interpreted fallback).
+	compiledMain fusedMainFn
+	cleanupJIT   func()
 }
 
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
@@ -688,6 +691,8 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			mr.mainCols[i] = t.getColumnStorageOrPanic(col)
 		}
 	}
+	// Attempt JIT compilation of the fused main loop; fall back to interpreted if it fails.
+	mr.compiledMain, mr.cleanupJIT = compileFusedMainLoop(mr.mainCols, mr.isUpdate, mapFn, reduceFn)
 	return mr
 }
 
@@ -716,8 +721,12 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32) scm.Scmer {
 }
 
 // processMainBlock is a tight loop over main-storage records – no branching
-// on main vs delta, direct ColumnStorage.GetValue calls. JIT candidate.
+// on main vs delta, direct ColumnStorage.GetValue calls.
+// Uses JIT-compiled fused loop when available, interpreted fallback otherwise.
 func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
+	if m.compiledMain != nil {
+		return m.compiledMain(acc, recids)
+	}
 	for _, id := range recids {
 		for i, col := range m.mainCols {
 			if m.isUpdate[i] {
@@ -748,8 +757,12 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 	return acc
 }
 
-// Close releases resources held by the MapReducer. No-op for local shards.
+// Close releases resources held by the MapReducer (mmap'd JIT code pages).
 func (m *ShardMapReducer) Close() {
+	if m.cleanupJIT != nil {
+		m.cleanupJIT()
+		m.cleanupJIT = nil
+	}
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) {
