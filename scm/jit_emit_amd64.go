@@ -290,10 +290,12 @@ func (w *JITWriter) EmitDivFloat64(dst, src Reg) {
 
 // --- Conversion emitters ---
 
-// EmitCvtInt64ToFloat64 emits: CVTSI2SDQ xmmDst, gprSrc
+// EmitCvtInt64ToFloat64 converts an int64 in gprSrc to float64 bits in gprSrc.
+// Uses the XMM register corresponding to gprSrc as scratch:
+//   CVTSI2SDQ xmm(gprSrc), gprSrc   — int64 → float64 in XMM
+//   MOVQ      gprSrc, xmm(gprSrc)   — extract float64 bits back to GPR
 func (w *JITWriter) EmitCvtInt64ToFloat64(xmmDst, gprSrc Reg) {
-	// F2 REX.W 0F 2A /r
-	xmm := xmmDst - 16 // convert to XMM index
+	xmm := xmmDst - 16 // convert to XMM index (unsigned underflow is fine)
 	rex := byte(0x48)
 	if xmm >= 8 {
 		rex |= 0x04 // REX.R
@@ -302,7 +304,10 @@ func (w *JITWriter) EmitCvtInt64ToFloat64(xmmDst, gprSrc Reg) {
 		rex |= 0x01 // REX.B
 	}
 	modrm := byte(0xC0) | (byte(xmm&7) << 3) | byte(gprSrc&7)
+	// CVTSI2SDQ xmm, gpr (int64 → float64 in XMM)
 	w.emitBytes(0xF2, rex, 0x0F, 0x2A, modrm)
+	// MOVQ xmm → gpr (66 REX.W 0F 7E /r) — extract float64 bits to GPR
+	w.emitBytes(0x66, rex, 0x0F, 0x7E, modrm)
 }
 
 // EmitXorpdReg emits: XORPD xmm, xmm (zero a float register)
@@ -382,8 +387,11 @@ const (
 // --- MOV helpers ---
 
 // emitMovRegReg emits MOV dst, src (64-bit GPR to GPR)
-// EmitMovRegReg emits MOV r64, r64
+// EmitMovRegReg emits MOV r64, r64 (no-op if dst == src)
 func (w *JITWriter) EmitMovRegReg(dst, src Reg) {
+	if dst == src {
+		return
+	}
 	w.emitMovRegReg(dst, src)
 }
 
@@ -1020,4 +1028,59 @@ func (w *JITWriter) emitAluRegReg(opcode byte, dst, src Reg) {
 	}
 	modrm := byte(0xC0) | (byte(src&7) << 3) | byte(dst&7)
 	w.emitBytes(rex, opcode, modrm)
+}
+
+// EmitStoreRegMem is the exported version of emitStoreRegMem:
+// MOV [base+disp], src (64-bit store).
+func (w *JITWriter) EmitStoreRegMem(src, base Reg, disp int32) {
+	w.emitStoreRegMem(src, base, disp)
+}
+
+// EmitSubRSP emits SUB RSP, imm8 to reserve stack space.
+func (w *JITWriter) EmitSubRSP(n uint8) {
+	w.emitBytes(0x48, 0x83, 0xEC, n)
+}
+
+// EmitAddRSP emits ADD RSP, imm8 to release stack space.
+func (w *JITWriter) EmitAddRSP(n uint8) {
+	w.emitBytes(0x48, 0x83, 0xC4, n)
+}
+
+// EmitSubRSP32Fixup emits SUB RSP, imm32 with a zero placeholder and returns
+// a pointer to the 4-byte immediate so it can be patched later via PatchInt32.
+func (w *JITWriter) EmitSubRSP32Fixup() unsafe.Pointer {
+	w.emitBytes(0x48, 0x81, 0xEC, 0x00, 0x00, 0x00, 0x00)
+	return unsafe.Add(w.Ptr, -4)
+}
+
+// PatchInt32 writes a 32-bit little-endian value at the given position.
+func (w *JITWriter) PatchInt32(pos unsafe.Pointer, val int32) {
+	*(*int32)(pos) = val
+}
+
+// EmitAddRSP32 emits ADD RSP, imm32.
+func (w *JITWriter) EmitAddRSP32(val int32) {
+	w.emitBytes(0x48, 0x81, 0xC4)
+	p := w.Ptr
+	*(*int32)(p) = val
+	w.Ptr = unsafe.Add(p, 4)
+}
+
+// EmitStoreToStack stores a JITValueDesc value to a stack slot at [RSP+disp].
+// Uses R11 as scratch for LocImm values.
+// No SpillDepth adjustment needed — spills use a separate buffer, not RSP.
+func (ctx *JITContext) EmitStoreToStack(src JITValueDesc, disp int32) {
+	switch src.Loc {
+	case LocImm:
+		ctx.W.EmitMovRegImm64(RegR11, uint64(src.Imm.Int()))
+		ctx.W.EmitStoreRegMem(RegR11, RegRSP, disp)
+	case LocReg:
+		ctx.W.EmitStoreRegMem(src.Reg, RegRSP, disp)
+	}
+}
+
+// EmitLoadFromStack loads a value from stack slot [RSP+disp] into a register.
+// No SpillDepth adjustment needed — spills use a separate buffer, not RSP.
+func (ctx *JITContext) EmitLoadFromStack(dst Reg, disp int32) {
+	ctx.W.EmitMovRegMem(dst, RegRSP, disp)
 }
