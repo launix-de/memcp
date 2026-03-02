@@ -218,6 +218,44 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 	delete(p.delta, idx)
 }
 
+// IncrementalUpdate adds delta to the cached value at idx.
+// If the row is not valid (not yet computed), this is a no-op (the next read will compute fresh).
+// This avoids shard rebuilds by modifying the cached value in-place.
+func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.compressed && !p.validMask.Get(idx) {
+		return // not valid → will be computed fresh on next read
+	}
+	var oldVal scm.Scmer
+	if v, ok := p.delta[idx]; ok {
+		oldVal = v
+	} else if p.main != nil {
+		oldVal = p.main.GetValue(idx)
+	} else {
+		return
+	}
+	// Add oldVal + delta using Go arithmetic (avoids Scheme runtime overhead)
+	var newVal scm.Scmer
+	if oldVal.IsInt() && delta.IsInt() {
+		newVal = scm.NewInt(oldVal.Int() + delta.Int())
+	} else if oldVal.IsNil() || delta.IsNil() {
+		newVal = scm.NewNil()
+	} else {
+		newVal = scm.NewFloat(oldVal.Float() + delta.Float())
+	}
+	p.delta[idx] = newVal
+	if p.compressed {
+		p.compressed = false
+		// All rows were valid while compressed (values in main). Now that we're
+		// non-compressed, mark all rows as valid so IncrementalUpdate works for
+		// other indices too. Values not in delta will fall through to main.
+		for i := uint32(0); i < p.count; i++ {
+			p.validMask.Set(i, true)
+		}
+	}
+}
+
 // InvalidateAll marks all rows as needing recomputation.
 func (p *StorageComputeProxy) InvalidateAll() {
 	p.mu.Lock()

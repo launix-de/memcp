@@ -1046,17 +1046,19 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		var lock *sync.Mutex
 		lock = &t.uniquelock
 		uniquelockHeld := false
+		// Always register panic recovery so both outer (t.uniquelock) and inner
+		// (shard.uniquelock) lock releases are handled on panic.
+		defer func() {
+			if r := recover(); r != nil {
+				if uniquelockHeld {
+					lock.Unlock()
+				}
+				panic(r) // re-panic after releasing lock
+			}
+		}()
 		if (!allowPruning || len(t.Unique) > 1) && idx == 0 {
 			lock.Lock()
 			uniquelockHeld = true
-			defer func() {
-				if r := recover(); r != nil {
-					if uniquelockHeld {
-						lock.Unlock()
-					}
-					panic(r) // re-panic after releasing lock
-				}
-			}()
 		}
 
 		last_j := 0
@@ -1081,6 +1083,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if len(t.Unique) == 1 {
 					lock = &shardlist2[0].uniquelock
 					lock.Lock()
+					uniquelockHeld = true
 				}
 			}
 			for _, s := range shardlist2 {
@@ -1139,6 +1142,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		nextrow:
 			if allowPruning {
 				if len(t.Unique) == 1 && !skipUniqueCheck {
+					uniquelockHeld = false
 					lock.Unlock()
 				}
 			}

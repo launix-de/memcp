@@ -225,6 +225,22 @@ func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
 	cs, present := u.columns[colName]
 	u.mu.RUnlock()
 	if !present {
+		// The column may be missing from this shard's map because it was created
+		// after the shard (e.g. a PShards shard created during repartition before
+		// all columns were installed, or a race between CreateColumn and scan).
+		// If the column exists in the table schema, add it as StorageSparse so
+		// the scan can proceed without panicking.
+		for _, c := range u.t.Columns {
+			if c.Name == colName {
+				u.mu.Lock()
+				if _, present2 := u.columns[colName]; !present2 {
+					u.columns[colName] = new(StorageSparse)
+				}
+				cs2 := u.columns[colName]
+				u.mu.Unlock()
+				return cs2
+			}
+		}
 		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
 	}
 	if cs != nil {
@@ -651,11 +667,13 @@ func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
 // For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
 type ShardMapReducer struct {
 	shard           *storageShard
-	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate cols)
+	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate/$increment cols)
 	colNames        []string               // column names for delta getDelta access
 	isUpdate        []bool                 // true for $update columns
 	isInvalidate    []bool                 // true for $invalidate: columns
 	invalidateProxy []*StorageComputeProxy // proxy per $invalidate col (nil if not found)
+	isIncrement     []bool                 // true for $increment: columns
+	incrementProxy  []*StorageComputeProxy // proxy per $increment col (nil if not found)
 	args            []scm.Scmer            // pre-allocated args buffer
 	mapFn           func(...scm.Scmer) scm.Scmer
 	reduceFn        func(...scm.Scmer) scm.Scmer
@@ -676,6 +694,8 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		isUpdate:        make([]bool, len(cols)),
 		isInvalidate:    make([]bool, len(cols)),
 		invalidateProxy: make([]*StorageComputeProxy, len(cols)),
+		isIncrement:     make([]bool, len(cols)),
+		incrementProxy:  make([]*StorageComputeProxy, len(cols)),
 		args:            make([]scm.Scmer, len(cols)),
 		mapFn:           scm.OptimizeProcToSerialFunction(mapFn),
 		reduceFn:        scm.OptimizeProcToSerialFunction(reduceFn),
@@ -694,6 +714,13 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			cs := t.getColumnStorageOrPanic(cacheColName)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.invalidateProxy[i] = proxy
+			}
+		} else if len(col) > 11 && col[:11] == "$increment:" {
+			mr.isIncrement[i] = true
+			cacheColName := col[11:]
+			cs := t.getColumnStorageOrPanic(cacheColName)
+			if proxy, ok := cs.(*StorageComputeProxy); ok {
+				mr.incrementProxy[i] = proxy
 			}
 		} else {
 			mr.mainCols[i] = t.getColumnStorageOrPanic(col)
@@ -741,6 +768,18 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				} else {
 					m.args[i] = scm.NewBool(true)
 				}
+			} else if m.isIncrement[i] {
+				if proxy := m.incrementProxy[i]; proxy != nil {
+					capturedId := id
+					m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+						if len(args) > 0 {
+							proxy.IncrementalUpdate(capturedId, args[0])
+						}
+						return scm.NewBool(true)
+					})
+				} else {
+					m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+				}
 			} else if m.isUpdate[i] {
 				m.args[i] = scm.NewFunc(m.shard.UpdateFunction(id, true))
 			} else {
@@ -756,7 +795,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
 	for _, id := range recids {
 		for i, col := range m.colNames {
-			if m.isInvalidate[i] {
+			if m.isInvalidate[i] || m.isIncrement[i] {
 				// delta rows are outside proxy range — no-op
 				m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 					return scm.NewBool(true)

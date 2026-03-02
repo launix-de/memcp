@@ -287,9 +287,9 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 					(map keys (lambda (col) (list 'list "column" (concat col) "any" '(list) '(list)))))))
 			(define kt_partition_code (cons 'list (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) (list (list 'list (concat col) (cons 'list (shardcolumn schema tbl scol)))) '()))))))
 			(define init_code (list 'begin
-				'('createtable schema keytable_name kt_cols_code '(list "engine" "sloppy") true)
-				'('partitiontable schema keytable_name kt_partition_code)
-				'('touch_keytable schema keytable_name)))
+				(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
+				(list 'partitiontable schema keytable_name kt_partition_code)
+				(list 'touch_keytable schema keytable_name)))
 			/* return (name init_code nil) — third element nil means no FK reuse */
 			(list keytable_name init_code nil)))
 )))

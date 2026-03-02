@@ -231,6 +231,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
+	// Ensure shard is loaded from disk before accessing columns.
+	// ensureLoaded() must run before getColumnStorageOrPanic so that COLD
+	// shards have their column map populated by load(t) first.
+	// ensureMainCount then loads at least one column to initialize main_count.
+	t.ensureLoaded()
+	t.ensureMainCount(false)
+
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
 	for i, k := range conditionCols {
@@ -241,9 +248,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// MapReducer for map+reduce phase (builds column readers internally)
 	mapper := t.OpenMapReducer(callbackCols, callback, aggregate)
 	defer mapper.Close()
-
-	// initialize main_count lazily if needed
-	t.ensureMainCount(false)
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	t.mu.RLock()
 	locked := true
