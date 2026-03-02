@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	units "github.com/docker/go-units"
@@ -91,12 +92,34 @@ func isPersistedType(t EvictableType) bool {
 	return t == TypeShard || t == TypeIndex
 }
 
+// systemFreeThreshold is the minimum fraction of total RAM that must remain free
+// system-wide before the cache triggers eviction (regardless of our own budget).
+const systemFreeThreshold = 10 // percent
+
+// systemPressureCheckInterval is the minimum time between /proc/meminfo reads.
+const systemPressureCheckInterval = time.Second
+
+// systemMemInfo returns (freeBytes, totalBytes) of physical RAM via syscall.Sysinfo.
+// freeBytes is MemFree — hard-unallocated RAM, not counting reclaimable page cache.
+// Freeing our own cache directly increases this value.
+// Returns (0, 0) on error.
+func systemMemInfo() (free, total int64) {
+	var info syscall.Sysinfo_t
+	if err := syscall.Sysinfo(&info); err != nil {
+		return 0, 0
+	}
+	unit := int64(info.Unit)
+	return int64(info.Freeram) * unit, int64(info.Totalram) * unit
+}
+
 // CacheManager manages memory-limited soft references with two-phase eviction.
 // Two budgets: persistedBudget (shards+indexes) and memoryBudget (total).
 type CacheManager struct {
 	memoryBudget    int64 // total budget (default 50% of RAM)
 	persistedBudget int64 // budget for persisted shards+indexes (default 30% of RAM)
 	currentMemory   int64
+
+	lastSysCheck time.Time // last time /proc/meminfo was read for pressure check
 
 	sizeByType  [numEvictableTypes]int64
 	countByType [numEvictableTypes]int64
@@ -268,9 +291,32 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
 	if cm.persistedBudget > 0 {
 		cm.evict(cm.persistedMemory(), cm.persistedBudget, additionalSize, isPersistedType)
 	}
-	// Tier 2: total budget (all types)
-	if cm.memoryBudget > 0 {
-		cm.evict(cm.currentMemory, cm.memoryBudget, additionalSize, nil)
+
+	// Tier 2+3: total budget merged with system-pressure budget — single evict pass.
+	// Start with the configured memory budget (0 = unconfigured = no constraint).
+	effectiveBudget := cm.memoryBudget
+
+	// Check system-wide free RAM (throttled to once per second).
+	now := time.Now()
+	if now.Sub(cm.lastSysCheck) >= systemPressureCheckInterval {
+		cm.lastSysCheck = now
+		free, total := systemMemInfo()
+		if total > 0 && free*100 < int64(systemFreeThreshold)*total {
+			// How much we'd need to release for the system to reach the threshold.
+			needed := total*int64(systemFreeThreshold)/100 - free
+			sysBudget := cm.currentMemory - needed
+			if sysBudget < 0 {
+				sysBudget = 0
+			}
+			// Use the more restrictive of both budgets.
+			if effectiveBudget <= 0 || sysBudget < effectiveBudget {
+				effectiveBudget = sysBudget
+			}
+		}
+	}
+
+	if effectiveBudget > 0 {
+		cm.evict(cm.currentMemory, effectiveBudget, additionalSize, nil)
 	}
 }
 
