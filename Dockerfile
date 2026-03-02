@@ -8,8 +8,9 @@ WORKDIR /build
 # Install git for go modules that might need it
 RUN apk add --no-cache git
 
-# Copy go mod files first for better caching
+# Copy go mod files and local replace dependencies first for better caching
 COPY go.mod go.sum ./
+COPY third_party/ ./third_party/
 RUN go mod download
 
 # Copy source code
