@@ -21,13 +21,20 @@ SELECT * FROM users WHERE id = 1;
 ### 🌐 **Built-in REST API Server**
 ```bash
 # Start MemCP with REST API
-./memcp --api-port=4321
+./memcp --api-port=4321 lib/main.scm
 
 # Query via HTTP instantly
 curl -X POST http://localhost:4321/sql/mydb \
   -d "SELECT * FROM users" \
   -H "Authorization: Basic cm9vdDphZG1pbg=="
 ```
+
+**API Endpoints:**
+- `/sql/<database>` — MySQL-dialect SQL
+- `/psql/<database>` — PostgreSQL-dialect SQL
+- `/rdf/<database>` — SPARQL queries
+- `/rdf/<database>/load_ttl` — load RDF/Turtle data
+- `/dashboard` — WebSocket admin dashboard
 
 ### 📊 **Perfect for Modern Workloads**
 - **Microservices** - Embedded database per service
@@ -81,7 +88,7 @@ docker run -it -p 4321:4321 -p 3307:3307 carli2/memcp
 - **Data persistence options** when needed
 
 ### **🔧 Developer-Friendly**
-- **Comprehensive test suite** with 150+ test cases
+- **Comprehensive test suite** with 2470+ SQL tests across 100+ test suites
 - **YAML-based testing framework**
 - **Extensive error handling and validation**
 - **Built-in performance monitoring**
@@ -90,11 +97,14 @@ docker run -it -p 4321:4321 -p 3307:3307 carli2/memcp
 
 ```bash
 # 1. Build MemCP
-go get
+go mod download
 make
 
 # 2. Start with REST API
-./memcp --api-port=4321 --mysql-port=3307
+./memcp --api-port=4321 --mysql-port=3307 lib/main.scm
+
+# Run as a background daemon (use --no-repl to avoid exiting when stdin closes)
+./memcp --no-repl --api-port=4321 --mysql-port=3307 lib/main.scm &
 
 # 3. Create your first database
 curl -X POST http://localhost:4321/sql/system \
@@ -108,6 +118,19 @@ curl -X POST http://localhost:4321/sql/myapp \
 
 ```
 
+### CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-port=PORT` | `4321` | HTTP API listen port |
+| `--mysql-port=PORT` | `3307` | MySQL protocol listen port |
+| `--mysql-socket=PATH` | `/tmp/memcp.sock` | MySQL Unix socket path |
+| `--root-password=PASSWORD` | `admin` | Initial root password (first run only) |
+| `--disable-api` | — | Disable HTTP API server |
+| `--disable-mysql` | — | Disable MySQL protocol server |
+| `--no-repl` | — | Disable interactive REPL (required for daemon/background use) |
+| `-data DIR` | `./data` | Data directory |
+
 ### Authentication
 - Default credentials: `root` / `admin`.
 - Set the initial root password via CLI: `--root-password=supersecret` at the first run (on a fresh -data folder), or via Docker env `ROOT_PASSWORD`.
@@ -115,7 +138,7 @@ curl -X POST http://localhost:4321/sql/myapp \
 ```yaml
 services:
   memcp:
-    image: yourrepo/memcp:latest
+    image: carli2/memcp:latest
     environment:
       - ROOT_PASSWORD=supersecret
       - PARAMS=--api-port=4321
@@ -175,14 +198,14 @@ curl -X POST http://localhost:4321/sql/system \
 ```bash
 # 1. Fork the repository
 # 2. Clone your fork
-git clone https://github.com/yourusername/memcp.git
+git clone https://github.com/launix-de/memcp.git
 
 # 3. Set up development environment
 cd memcp
 go build -o memcp
 
-# 4. Run the test suite
-python3 run_sql_tests.py tests/01_basic_sql.yaml 4400
+# 4. Run the test suite (starts its own server automatically)
+python3 run_sql_tests.py tests/01_basic_sql.yaml
 
 # 5. Make your changes and add tests
 # 6. Submit a pull request!
@@ -206,10 +229,13 @@ make test
 # Or if you want to contribute, deploy this as a Pre-commit hook:
 cp git-pre-commit .git/hooks/pre-commit
 
-# Run specific test suites
-python3 run_sql_tests.py tests/01_basic_sql.yaml 4400      # Basic operations
-python3 run_sql_tests.py tests/02_functions.yaml 4400     # SQL functions
-python3 run_sql_tests.py tests/07_error_cases.yaml 4400   # Error handling
+# Run specific test suites (starts its own server automatically)
+python3 run_sql_tests.py tests/01_basic_sql.yaml      # Basic operations
+python3 run_sql_tests.py tests/02_functions.yaml      # SQL functions
+python3 run_sql_tests.py tests/07_error_cases.yaml    # Error handling
+
+# Connect to an already-running instance (skip startup)
+python3 run_sql_tests.py tests/01_basic_sql.yaml 4321 --connect-only
 ```
 
 ## Performance Testing 📊
@@ -243,11 +269,11 @@ PERF_TEST=1 PERF_EXPLAIN=1 make test
 ### Output Format
 
 ```
-✅ Perf: COUNT (7.9ms / 30000ms, 20,000 rows, 0.39µs/row, 11.4MB heap)
-         │       │         │            │        │           └─ Heap memory after insert
-         │       │         │            │        └─ Time per row
-         │       │         │            └─ Calibrated row count
-         │       │         └─ Threshold (from baseline × 1.3)
+✅ Perf: COUNT (7.9ms / 8700ms, 20,000 rows, 0.39µs/row, 11.4MB heap)
+         │       │        │           │        │           └─ Heap memory after insert
+         │       │        │           │        └─ Time per row
+         │       │        │           └─ Calibrated row count
+         │       │        └─ Threshold (from baseline × 1.1)
          │       └─ Actual query time
          └─ Test name
 ```
@@ -425,7 +451,7 @@ MemCP is open source software. See the LICENSE file for details.
 
 ---
 
-**Ready to experience database performance like never before?** 
-[Get Started](#quick-start) • [Contribute](#contributing) • [Join our Community](https://github.com/yourusername/memcp/discussions)
+**Ready to experience database performance like never before?**
+[Get Started](#quick-start) • [Contribute](#contributing) • [Join our Community](https://github.com/launix-de/memcp/discussions)
 
 *MemCP: Because your applications deserve better than "good enough" performance.* ⚡
