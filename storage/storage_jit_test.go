@@ -218,7 +218,8 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 	var desc scm.JITValueDesc
 	func() {
 		defer func() { emitErr = recover() }()
-		result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
+		// Allow typed emitters to keep unboxed results in a single register.
+		result := scm.JITValueDesc{Loc: scm.LocAny}
 		desc = s.JITEmit(ctx, thisptr, idx, result)
 	}()
 	if emitErr != nil {
