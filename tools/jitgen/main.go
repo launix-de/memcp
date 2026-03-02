@@ -2760,6 +2760,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		} else if srcOk && dstOk && isIntegerKind(srcBasic.Kind()) && dstBasic.Kind() == types.Float64 {
+			if g.storageMode && g.typeName == "StorageSeq" {
+				// StorageSeq currently miscompiles int->float in JIT lowering.
+				// Force fallback to Go GetValue until the conversion path is fixed.
+				panic(fmt.Sprintf("unsupported Convert %s → %s", v.X.Type(), v.Type()))
+			}
 			// int → float64: emit CVTSI2SD
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", src.goVar)
@@ -2814,6 +2819,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("ctx.W.EmitByte(0xCC)") // INT3
 
 	case *ssa.Slice:
+		if g.storageMode && g.typeName == "StorageString" {
+			if srcBasic, ok := v.X.Type().Underlying().(*types.Basic); ok && srcBasic.Kind() == types.String {
+				// String slicing currently emits incorrect headers in storage mode.
+				// Force fallback for safety until string-slice lowering is fixed.
+				panic(fmt.Sprintf("Slice on string unsupported: %s", v))
+			}
+		}
 		if g.storageMode {
 			// Storage fast path: materialize a proper Go string/slice header
 			// as LocRegPair{ptr,len}. Never collapse to LocImm because Go calls
