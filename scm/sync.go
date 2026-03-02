@@ -310,13 +310,24 @@ func init_sync() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 			d0 := args[0]
+			var d1 JITValueDesc
 			if d0.Loc == LocImm {
-				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d0.Imm} }
-				ctx.W.EmitMakeInt(result, d0)
+				d1 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(int64(int32(d0.Imm.Int()))))}
 			} else {
-				if result.Loc == LocAny { return d0 }
-				ctx.W.EmitMakeInt(result, d0)
-				ctx.FreeReg(d0.Reg)
+				r0 := ctx.AllocReg()
+				ctx.W.EmitMovRegReg(r0, d0.Reg)
+				ctx.W.EmitShlRegImm8(r0, 32)
+				ctx.W.EmitSarRegImm8(r0, 32)
+				d1 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
+			}
+			ctx.FreeDesc(&d0)
+			if d1.Loc == LocImm {
+				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d1.Imm} }
+				ctx.W.EmitMakeInt(result, d1)
+			} else {
+				if result.Loc == LocAny { return d1 }
+				ctx.W.EmitMakeInt(result, d1)
+				ctx.FreeReg(d1.Reg)
 			}
 			return result
 		},

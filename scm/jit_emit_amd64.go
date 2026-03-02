@@ -396,6 +396,8 @@ func (w *JITWriter) EmitJmp(labelID uint8) {
 const (
 	CcE  byte = 0x04 // JE  / JZ  (ZF=1)
 	CcNE byte = 0x05 // JNE / JNZ (ZF=0)
+	CcBE byte = 0x06 // JBE (unsigned <=)
+	CcA  byte = 0x07 // JA  (unsigned >)
 	CcL  byte = 0x0C // JL        (SF!=OF)
 	CcGE byte = 0x0D // JGE       (SF=OF)
 	CcLE byte = 0x0E // JLE       (ZF=1 || SF!=OF)
@@ -849,6 +851,16 @@ func (w *JITWriter) EmitShrRegImm8(dst Reg, imm uint8) {
 		rex |= 0x01 // REX.B
 	}
 	modrm := byte(0xE8) | byte(dst&7) // /5 = SHR
+	w.emitBytes(rex, 0xC1, modrm, imm)
+}
+
+// EmitSarRegImm8 emits SAR r64, imm8 (arithmetic shift right by immediate)
+func (w *JITWriter) EmitSarRegImm8(dst Reg, imm uint8) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xF8) | byte(dst&7) // /7 = SAR
 	w.emitBytes(rex, 0xC1, modrm, imm)
 }
 
