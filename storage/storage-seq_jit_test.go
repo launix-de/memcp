@@ -17,6 +17,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"math/rand"
 	"runtime"
 	"testing"
 
@@ -157,6 +158,73 @@ func TestStorageSeqJITEmitConstants(t *testing.T) {
 		if !scmerEqual(got, expected) {
 			t.Errorf("idx=%d: JIT got %v, GetValue got %v", i, got, expected)
 		}
+	}
+}
+
+func makeRandomStorageSeqValues(r *rand.Rand, n int) []scm.Scmer {
+	values := make([]scm.Scmer, n)
+	pos := 0
+	for pos < n {
+		segLen := 1 + r.Intn(16)
+		if pos+segLen > n {
+			segLen = n - pos
+		}
+		if r.Intn(6) == 0 {
+			for j := 0; j < segLen; j++ {
+				values[pos+j] = scm.NewNil()
+			}
+		} else {
+			start := int64(r.Intn(400) - 200)
+			stride := int64(r.Intn(11) - 5)
+			for j := 0; j < segLen; j++ {
+				values[pos+j] = scm.NewFloat(float64(start + int64(j)*stride))
+			}
+		}
+		pos += segLen
+	}
+	return values
+}
+
+func checkStorageSeqJITParity(t *testing.T, values []scm.Scmer, constThisptr bool, access []int64) {
+	t.Helper()
+	sExpected := buildStorageSeq(values)
+	sJIT := buildStorageSeq(values)
+	jitGet, cleanup := jitBuildGetValueFunc(t, sJIT, constThisptr)
+	defer cleanup()
+
+	for k, idx := range access {
+		expected := sExpected.GetValue(uint32(idx))
+		got := jitGet(idx)
+		if !scmerEqual(got, expected) {
+			t.Fatalf("step=%d idx=%d constThisptr=%v: JIT got %v (nil=%v), GetValue got %v (nil=%v)",
+				k, idx, constThisptr, got, got.IsNil(), expected, expected.IsNil())
+		}
+	}
+}
+
+func TestStorageSeqJITEmitRandomizedParity(t *testing.T) {
+	r := rand.New(rand.NewSource(20260302))
+	for tc := 0; tc < 12; tc++ {
+		n := 64 + r.Intn(192)
+		values := makeRandomStorageSeqValues(r, n)
+
+		seqAccess := make([]int64, 0, 3*n)
+		for i := 0; i < n; i++ {
+			seqAccess = append(seqAccess, int64(i))
+		}
+		for i := n - 1; i >= 0; i-- {
+			seqAccess = append(seqAccess, int64(i))
+		}
+		for i := 0; i < n; i++ {
+			seqAccess = append(seqAccess, int64(r.Intn(n)))
+		}
+
+		t.Run("const_ptr", func(t *testing.T) {
+			checkStorageSeqJITParity(t, values, true, seqAccess)
+		})
+		t.Run("reg_ptr", func(t *testing.T) {
+			checkStorageSeqJITParity(t, values, false, seqAccess)
+		})
 	}
 }
 

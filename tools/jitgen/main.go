@@ -188,7 +188,6 @@ func main() {
 		}
 
 		newText, genErr := generateStorageBody(si.typeName, ssaFn)
-		patchBody := true
 		if genErr == "" {
 			fmt.Printf("  %s: %s.GetValue OK\n", si.path, si.typeName)
 		} else {
@@ -196,17 +195,12 @@ func main() {
 			if verbose {
 				dumpSSA(ssaFn)
 			}
-			if strings.Contains(genErr, "temporarily disabled") {
-				// Keep manually maintained emitter bodies for temporarily disabled types.
-				patchBody = false
-			} else {
-				// Fallback: emit a Go call to GetValue (unbound method, receiver as first arg)
-				newText = "\n\t/* TODO: " + genErr + " */\n" +
-					"\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*" + si.typeName + ").GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n"
-			}
+			// Fallback: emit a Go call to GetValue (unbound method, receiver as first arg)
+			newText = "\n\t/* TODO: " + genErr + " */\n" +
+				"\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*" + si.typeName + ").GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n"
 		}
 
-		if doPatch && patchBody {
+		if doPatch {
 			// Patch body of JITEmit method (between { and })
 			bodyStart := fset.Position(si.jitEmitBody.Lbrace).Offset + 1
 			bodyEnd := fset.Position(si.jitEmitBody.Rbrace).Offset
@@ -476,6 +470,22 @@ func bothImmCond(x, y string) string {
 		return x + ".Loc == LocImm"
 	}
 	return x + ".Loc == LocImm && " + y + ".Loc == LocImm"
+}
+
+func fitsInt32(v int64) bool {
+	return v >= -2147483648 && v <= 2147483647
+}
+
+// isFieldCachedDesc reports whether goVar is one of the cached field descriptors.
+// Cached field values are semantically read-only sources and must not be
+// destructively modified in-place by ALU emission.
+func (g *codeGen) isFieldCachedDesc(goVar string) bool {
+	for _, cached := range g.fieldCache {
+		if cached.goVar == goVar && cached.isDesc {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureBBLabel returns the label var name for a BB, reserving it if needed.
@@ -947,7 +957,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 	}()
 
 	// Temporary safety guard: these generated emitters are currently
-	// semantically incorrect in JIT tests; use the existing Go-call fallback.
+	// semantically incorrect in JIT tests; use the Go-call fallback.
 	if typeName == "StorageSeq" || typeName == "StorageString" {
 		return "", "temporarily disabled: use Go-call fallback for correctness"
 	}
@@ -1991,6 +2001,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		if _, isConst := v.X.(*ssa.Const); !isConst {
 			xMultiUse = g.ssaValueUsesRemaining(v.X.Name()) > 1
 		}
+		if g.isFieldCachedDesc(xVal.goVar) {
+			xMultiUse = true
+		}
 		cc := opToCC(v.Op)
 		goOp := goOpStr(v.Op)
 		if cc != "" {
@@ -2057,20 +2070,50 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						// SUB is non-commutative: copy x, then subtract const
 						g.emitAllocRegExcept("scratch", "\t", true, xVal)
 						g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
-						g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
-						g.emit("\tctx.W.EmitSubInt64(scratch, RegR11)")
+						if fitsInt32(cmpVal) {
+							g.emit("\tctx.W.EmitSubRegImm32(scratch, int32(%d))", cmpVal)
+						} else {
+							g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
+							g.emit("\tctx.W.EmitSubInt64(scratch, RegR11)")
+						}
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
 						g.emitAllocRegExcept("scratch", "\t", true, xVal)
-						g.emit("\tctx.W.EmitMovRegImm64(scratch, uint64(%d))", cmpVal)
-						g.emit("\tctx.W.%s(scratch, %s.Reg)", aluOp, xVal.goVar)
+						g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
+						if fitsInt32(cmpVal) {
+							if v.Op == token.ADD {
+								g.emit("\tctx.W.EmitAddRegImm32(scratch, int32(%d))", cmpVal)
+							} else if v.Op == token.MUL {
+								g.emit("\tctx.W.EmitImulRegImm32(scratch, int32(%d))", cmpVal)
+							} else {
+								g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
+								g.emit("\tctx.W.%s(scratch, RegR11)", aluOp)
+							}
+						} else {
+							g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
+							g.emit("\tctx.W.%s(scratch, RegR11)", aluOp)
+						}
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					}
 				} else {
-					// x is consumed → use R11 as scratch for the constant, result stays in x.Reg
-					g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
-					g.emit("\tctx.W.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
+					// x is consumed; prefer immediate-form ALU to avoid materializing constants in a temp register.
+					if fitsInt32(cmpVal) {
+						switch v.Op {
+						case token.ADD:
+							g.emit("\tctx.W.EmitAddRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
+						case token.SUB:
+							g.emit("\tctx.W.EmitSubRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
+						case token.MUL:
+							g.emit("\tctx.W.EmitImulRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
+						default:
+							g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
+							g.emit("\tctx.W.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
+						}
+					} else {
+						g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
+						g.emit("\tctx.W.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
+					}
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
 				g.emit("}")
@@ -2110,19 +2153,49 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						// SUB is non-commutative: copy x, then subtract y
 						g.emitAllocRegExcept("scratch", "\t", true, xVal)
 						g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
-						g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
-						g.emit("\tctx.W.EmitSubInt64(scratch, RegR11)")
+						g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
+						g.emit("\t\tctx.W.EmitSubRegImm32(scratch, int32(%s.Imm.Int()))", yVal.goVar)
+						g.emit("\t} else {")
+						g.emit("\t\tctx.W.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
+						g.emit("\t\tctx.W.EmitSubInt64(scratch, RegR11)")
+						g.emit("\t}")
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
 						g.emitAllocRegExcept("scratch", "\t", true, xVal)
-						g.emit("\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", yVal.goVar)
-						g.emit("\tctx.W.%s(scratch, %s.Reg)", aluOp, xVal.goVar)
+						g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
+						g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
+						if v.Op == token.ADD {
+							g.emit("\t\tctx.W.EmitAddRegImm32(scratch, int32(%s.Imm.Int()))", yVal.goVar)
+						} else if v.Op == token.MUL {
+							g.emit("\t\tctx.W.EmitImulRegImm32(scratch, int32(%s.Imm.Int()))", yVal.goVar)
+						} else {
+							g.emit("\t\tctx.W.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
+							g.emit("\t\tctx.W.%s(scratch, RegR11)", aluOp)
+						}
+						g.emit("\t} else {")
+						g.emit("\t\tctx.W.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
+						g.emit("\t\tctx.W.%s(scratch, RegR11)", aluOp)
+						g.emit("\t}")
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					}
 				} else {
+					// x consumed, y constant: immediate-form ALU when possible.
+					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
+					if v.Op == token.ADD {
+						g.emit("\t\tctx.W.EmitAddRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
+					} else if v.Op == token.SUB {
+						g.emit("\t\tctx.W.EmitSubRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
+					} else if v.Op == token.MUL {
+						g.emit("\t\tctx.W.EmitImulRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
+					} else {
+						g.emit("\t\tctx.W.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
+						g.emit("\t\tctx.W.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
+					}
+					g.emit("\t} else {")
 					g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
 					g.emit("\tctx.W.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)
+					g.emit("\t}")
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
 				}
 				g.emit("} else {")
@@ -2319,30 +2392,94 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s.Loc == LocImm {", xVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() | %d)}", dv, xVal.goVar, cmpVal)
+				g.emit("} else if %d == 0 {", cmpVal)
+				if xMultiUse {
+					copyReg := g.allocReg()
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
+				} else {
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				}
 				g.emit("} else {")
-				g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
-				g.emit("\tctx.W.EmitOrInt64(%s.Reg, RegR11)", xVal.goVar)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				if xMultiUse {
+					copyReg := g.allocReg()
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
+					if fitsInt32(cmpVal) {
+						g.emit("\tctx.W.EmitOrRegImm32(%s, int32(%d))", copyReg, cmpVal)
+					} else {
+						g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
+						g.emit("\tctx.W.EmitOrInt64(%s, RegR11)", copyReg)
+					}
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
+				} else {
+					if fitsInt32(cmpVal) {
+						g.emit("\tctx.W.EmitOrRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
+					} else {
+						g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
+						g.emit("\tctx.W.EmitOrInt64(%s.Reg, RegR11)", xVal.goVar)
+					}
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				}
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() | %s.Imm.Int())}", dv, xVal.goVar, yVal.goVar)
+				g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", xVal.goVar, xVal.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, yVal.goVar)
+				g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", yVal.goVar, yVal.goVar)
+				if xMultiUse {
+					copyReg := g.allocReg()
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
+				} else {
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				}
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
 				g.emit("\tscratch := ctx.AllocReg()")
 				g.emit("\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", xVal.goVar)
 				g.emit("\tctx.W.EmitOrInt64(scratch, %s.Reg)", yVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
-				g.emit("\tscratch := ctx.AllocReg()")
-				g.emit("\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", yVal.goVar)
-				g.emit("\tctx.W.EmitOrInt64(%s.Reg, scratch)", xVal.goVar)
-				g.emit("\tctx.FreeReg(scratch)")
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				if xMultiUse {
+					copyReg := g.allocReg()
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
+					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
+					g.emit("\t\tctx.W.EmitOrRegImm32(%s, int32(%s.Imm.Int()))", copyReg, yVal.goVar)
+					g.emit("\t} else {")
+					g.emit("\t\tscratch := ctx.AllocReg()")
+					g.emit("\t\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", yVal.goVar)
+					g.emit("\t\tctx.W.EmitOrInt64(%s, scratch)", copyReg)
+					g.emit("\t\tctx.FreeReg(scratch)")
+					g.emit("\t}")
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
+				} else {
+					g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
+					g.emit("\t\tctx.W.EmitOrRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
+					g.emit("\t} else {")
+					g.emit("\t\tscratch := ctx.AllocReg()")
+					g.emit("\t\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", yVal.goVar)
+					g.emit("\t\tctx.W.EmitOrInt64(%s.Reg, scratch)", xVal.goVar)
+					g.emit("\t\tctx.FreeReg(scratch)")
+					g.emit("\t}")
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				}
 				g.emit("} else {")
-				g.emit("\tctx.W.EmitOrInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
-				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				if xMultiUse {
+					copyReg := g.allocReg()
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
+					g.emit("\tctx.W.EmitOrInt64(%s, %s.Reg)", copyReg, yVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
+				} else {
+					g.emit("\tctx.W.EmitOrInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, xVal.goVar)
+				}
 				g.emit("}")
 			}
 			// Neutralize xVal if its register was transferred to the result
