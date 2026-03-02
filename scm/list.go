@@ -1145,8 +1145,7 @@ func init_list() {
 			if d17.Loc == LocImm {
 				d18 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d17.Imm.Int() + 4)}
 			} else {
-				ctx.W.EmitMovRegImm64(RegR11, uint64(4))
-				ctx.W.EmitAddInt64(d17.Reg, RegR11)
+				ctx.W.EmitAddRegImm32(d17.Reg, int32(4))
 				d18 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d17.Reg}
 			}
 			if d18.Loc == LocReg && d17.Loc == LocReg && d18.Reg == d17.Reg {
@@ -1195,8 +1194,8 @@ func init_list() {
 				d25 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 1)}
 			} else {
 				scratch := ctx.AllocRegExcept(d24.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(scratch, d24.Reg)
+				ctx.W.EmitMovRegReg(scratch, d24.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(1))
 				d25 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
 			if d25.Loc == LocReg && d24.Loc == LocReg && d25.Reg == d24.Reg {
@@ -1276,8 +1275,8 @@ func init_list() {
 				d29 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 1)}
 			} else {
 				scratch := ctx.AllocRegExcept(d24.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(scratch, d24.Reg)
+				ctx.W.EmitMovRegReg(scratch, d24.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(1))
 				d29 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
 			if d29.Loc == LocReg && d24.Loc == LocReg && d29.Reg == d24.Reg {
@@ -1312,8 +1311,7 @@ func init_list() {
 			if d24.Loc == LocImm {
 				d32 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 2)}
 			} else {
-				ctx.W.EmitMovRegImm64(RegR11, uint64(2))
-				ctx.W.EmitAddInt64(d24.Reg, RegR11)
+				ctx.W.EmitAddRegImm32(d24.Reg, int32(2))
 				d32 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d24.Reg}
 			}
 			if d32.Loc == LocReg && d24.Loc == LocReg && d32.Reg == d24.Reg {

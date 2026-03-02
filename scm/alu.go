@@ -385,8 +385,13 @@ func init_alu() {
 				d10 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			} else if d9.Loc == LocImm {
 				scratch := ctx.AllocRegExcept(d0.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(d9.Imm.Int()))
-				ctx.W.EmitAddInt64(scratch, d0.Reg)
+				ctx.W.EmitMovRegReg(scratch, d0.Reg)
+				if d9.Imm.Int() >= -2147483648 && d9.Imm.Int() <= 2147483647 {
+					ctx.W.EmitAddRegImm32(scratch, int32(d9.Imm.Int()))
+				} else {
+					ctx.W.EmitMovRegImm64(RegR11, uint64(d9.Imm.Int()))
+					ctx.W.EmitAddInt64(scratch, RegR11)
+				}
 				d10 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			} else {
 				r13 := ctx.AllocRegExcept(d0.Reg)
@@ -404,8 +409,8 @@ func init_alu() {
 				d11 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d1.Imm.Int() + 1)}
 			} else {
 				scratch := ctx.AllocRegExcept(d1.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(scratch, d1.Reg)
+				ctx.W.EmitMovRegReg(scratch, d1.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(1))
 				d11 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
 			if d11.Loc == LocReg && d1.Loc == LocReg && d11.Reg == d1.Reg {
@@ -526,8 +531,13 @@ func init_alu() {
 				d19 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			} else if d18.Loc == LocImm {
 				scratch := ctx.AllocRegExcept(d13.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(d18.Imm.Int()))
-				ctx.W.EmitAddInt64(scratch, d13.Reg)
+				ctx.W.EmitMovRegReg(scratch, d13.Reg)
+				if d18.Imm.Int() >= -2147483648 && d18.Imm.Int() <= 2147483647 {
+					ctx.W.EmitAddRegImm32(scratch, int32(d18.Imm.Int()))
+				} else {
+					ctx.W.EmitMovRegImm64(RegR11, uint64(d18.Imm.Int()))
+					ctx.W.EmitAddInt64(scratch, RegR11)
+				}
 				d19 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			} else {
 				r23 := ctx.AllocRegExcept(d13.Reg)
@@ -545,8 +555,8 @@ func init_alu() {
 				d20 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d12.Imm.Int() + 1)}
 			} else {
 				scratch := ctx.AllocRegExcept(d12.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(scratch, d12.Reg)
+				ctx.W.EmitMovRegReg(scratch, d12.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(1))
 				d20 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
 			if d20.Loc == LocReg && d12.Loc == LocReg && d20.Reg == d12.Reg {
@@ -625,8 +635,7 @@ func init_alu() {
 			if d1.Loc == LocImm {
 				d2 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d1.Imm.Int() + 1)}
 			} else {
-				ctx.W.EmitMovRegImm64(RegR11, uint64(1))
-				ctx.W.EmitAddInt64(d1.Reg, RegR11)
+				ctx.W.EmitAddRegImm32(d1.Reg, int32(1))
 				d2 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d1.Reg}
 			}
 			if d2.Loc == LocReg && d1.Loc == LocReg && d2.Reg == d1.Reg {
@@ -901,8 +910,12 @@ func init_alu() {
 			} else if d21.Loc == LocImm {
 				scratch := ctx.AllocRegExcept(d12.Reg)
 				ctx.W.EmitMovRegReg(scratch, d12.Reg)
-				ctx.W.EmitMovRegImm64(RegR11, uint64(d21.Imm.Int()))
-				ctx.W.EmitSubInt64(scratch, RegR11)
+				if d21.Imm.Int() >= -2147483648 && d21.Imm.Int() <= 2147483647 {
+					ctx.W.EmitSubRegImm32(scratch, int32(d21.Imm.Int()))
+				} else {
+					ctx.W.EmitMovRegImm64(RegR11, uint64(d21.Imm.Int()))
+					ctx.W.EmitSubInt64(scratch, RegR11)
+				}
 				d22 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			} else {
 				r22 := ctx.AllocRegExcept(d12.Reg)
@@ -920,8 +933,8 @@ func init_alu() {
 				d23 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d13.Imm.Int() + 1)}
 			} else {
 				scratch := ctx.AllocRegExcept(d13.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(scratch, d13.Reg)
+				ctx.W.EmitMovRegReg(scratch, d13.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(1))
 				d23 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
 			if d23.Loc == LocReg && d13.Loc == LocReg && d23.Reg == d13.Reg {
@@ -1053,8 +1066,12 @@ func init_alu() {
 			} else if d30.Loc == LocImm {
 				scratch := ctx.AllocRegExcept(d16.Reg)
 				ctx.W.EmitMovRegReg(scratch, d16.Reg)
-				ctx.W.EmitMovRegImm64(RegR11, uint64(d30.Imm.Int()))
-				ctx.W.EmitSubInt64(scratch, RegR11)
+				if d30.Imm.Int() >= -2147483648 && d30.Imm.Int() <= 2147483647 {
+					ctx.W.EmitSubRegImm32(scratch, int32(d30.Imm.Int()))
+				} else {
+					ctx.W.EmitMovRegImm64(RegR11, uint64(d30.Imm.Int()))
+					ctx.W.EmitSubInt64(scratch, RegR11)
+				}
 				d31 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			} else {
 				r33 := ctx.AllocRegExcept(d16.Reg)
@@ -1072,8 +1089,8 @@ func init_alu() {
 				d32 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d17.Imm.Int() + 1)}
 			} else {
 				scratch := ctx.AllocRegExcept(d17.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(scratch, d17.Reg)
+				ctx.W.EmitMovRegReg(scratch, d17.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(1))
 				d32 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
 			if d32.Loc == LocReg && d17.Loc == LocReg && d32.Reg == d17.Reg {
@@ -1174,8 +1191,12 @@ func init_alu() {
 			} else if d38.Loc == LocImm {
 				scratch := ctx.AllocRegExcept(d34.Reg)
 				ctx.W.EmitMovRegReg(scratch, d34.Reg)
-				ctx.W.EmitMovRegImm64(RegR11, uint64(d38.Imm.Int()))
-				ctx.W.EmitSubInt64(scratch, RegR11)
+				if d38.Imm.Int() >= -2147483648 && d38.Imm.Int() <= 2147483647 {
+					ctx.W.EmitSubRegImm32(scratch, int32(d38.Imm.Int()))
+				} else {
+					ctx.W.EmitMovRegImm64(RegR11, uint64(d38.Imm.Int()))
+					ctx.W.EmitSubInt64(scratch, RegR11)
+				}
 				d39 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			} else {
 				r43 := ctx.AllocRegExcept(d34.Reg)
@@ -1193,8 +1214,8 @@ func init_alu() {
 				d40 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d33.Imm.Int() + 1)}
 			} else {
 				scratch := ctx.AllocRegExcept(d33.Reg)
-				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(scratch, d33.Reg)
+				ctx.W.EmitMovRegReg(scratch, d33.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(1))
 				d40 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
 			if d40.Loc == LocReg && d33.Loc == LocReg && d40.Reg == d33.Reg {

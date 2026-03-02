@@ -764,6 +764,50 @@ func (w *JITWriter) EmitCmpRegImm32(dst Reg, imm int32) {
 	w.emitU32(uint32(imm))
 }
 
+// EmitAddRegImm32 emits ADD r64, sign-extended imm32.
+func (w *JITWriter) EmitAddRegImm32(dst Reg, imm int32) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xC0) | byte(dst&7) // /0 = ADD
+	w.emitBytes(rex, 0x81, modrm)
+	w.emitU32(uint32(imm))
+}
+
+// EmitSubRegImm32 emits SUB r64, sign-extended imm32.
+func (w *JITWriter) EmitSubRegImm32(dst Reg, imm int32) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xE8) | byte(dst&7) // /5 = SUB
+	w.emitBytes(rex, 0x81, modrm)
+	w.emitU32(uint32(imm))
+}
+
+// EmitOrRegImm32 emits OR r64, sign-extended imm32.
+func (w *JITWriter) EmitOrRegImm32(dst Reg, imm int32) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xC8) | byte(dst&7) // /1 = OR
+	w.emitBytes(rex, 0x81, modrm)
+	w.emitU32(uint32(imm))
+}
+
+// EmitImulRegImm32 emits IMUL r64, r64, imm32.
+func (w *JITWriter) EmitImulRegImm32(dst Reg, imm int32) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x05 // REX.R | REX.B (reg and r/m are both dst)
+	}
+	modrm := byte(0xC0) | (byte(dst&7) << 3) | byte(dst&7)
+	w.emitBytes(rex, 0x69, modrm)
+	w.emitU32(uint32(imm))
+}
+
 // EmitSetcc emits SETcc r/m8 + MOVZX r32, r8 → zero-extended 0 or 1 in full 64-bit register
 func (w *JITWriter) EmitSetcc(dst Reg, cc byte) {
 	dstEnc := byte(dst & 7)
