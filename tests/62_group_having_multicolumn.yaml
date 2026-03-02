@@ -142,10 +142,10 @@ test_cases:
         - year: 2024
           c: 10
 
-  - name: "GROUP BY on empty result"
+  - name: "GROUP BY on empty result: no matching rows -> 0 groups"
     sql: "SELECT region, COUNT(*) AS c FROM ghm_sales WHERE year = 9999 GROUP BY region"
     expect:
-      rows: 2
+      rows: 0
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ghm_sales"

@@ -103,6 +103,12 @@ func (p *StorageComputeProxy) Compress() {
 		return
 	}
 
+	// Empty shard: nothing to compute, avoid accessing input column storages
+	if p.count == 0 {
+		p.compressed = true
+		return
+	}
+
 	fn := scm.OptimizeProcToSerialFunction(p.computor)
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
@@ -154,6 +160,11 @@ func (p *StorageComputeProxy) Compress() {
 func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.Scmer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Empty shard: nothing to compute
+	if p.count == 0 {
+		return
+	}
 
 	fn := scm.OptimizeProcToSerialFunction(p.computor)
 	filterFn := scm.OptimizeProcToSerialFunction(filter)

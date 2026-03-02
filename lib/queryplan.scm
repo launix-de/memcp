@@ -1300,8 +1300,10 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(set condition (replace_find_column (coalesceNil condition true)))
 				(set filtercols (extract_columns_for_tblvar tblvar condition))
 
-				/* collect plan: insert unique group keys into group table (shared by dedup and normal stages) */
-				(define collect_plan
+				/* make_collect: builds collect plan with optional WHERE filter
+				with_filter=true: apply WHERE condition (for DEDUP)
+				with_filter=false: collect ALL group keys (for NORMAL) */
+				(define make_collect (lambda (with_filter)
 					'('time '('begin
 						/* If grouping is global (group='(1)), avoid base scan and insert one key row */
 						(if (equal? stage_group '(1))
@@ -1310,8 +1312,10 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 								/* key columns */
 								(set keycols (merge_unique (map stage_group (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
 								(scan_wrapper 'scan schema tbl
-									(cons list filtercols)
-									'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
+									(if with_filter (cons list filtercols) '(list))
+									(if with_filter
+										'((quote lambda) (map filtercols (lambda(col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
+										'((quote lambda) '() true))
 									(cons list keycols)
 									'((quote lambda)
 										(map keycols (lambda (col) (symbol (concat tblvar "." col))))
@@ -1328,7 +1332,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									isOuter)
 							)
 						)
-					) "collect"))
+					) "collect")))
 
 				(if is_dedup (begin
 					/* DEDUP-ONLY stage: no aggregate computation, just collect unique keys and pass through to next stage */
@@ -1350,7 +1354,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						transformed_rest_groups
 						schemas
 						replace_find_column))
-					(list 'begin keytable_init collect_plan grouped_plan)
+					(list 'begin keytable_init (make_collect true) grouped_plan)
 				) (begin
 						/* NORMAL group stage: extract aggregates, compute, and continue.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
@@ -1367,14 +1371,16 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							(if (coalesce grouped_order stage_limit stage_offset) (list (make_group_stage nil nil grouped_order stage_limit stage_offset)) '())
 							rest_groups
 						))
-						/* FK reuse: extract child FK column name and define exists column name */
+						/* FK reuse: extract child FK column name */
 						(define fk_child_col (if is_fk_reuse
 							(match (car stage_group) '('get_column _ false scol false) scol)
 							nil))
-						(define exists_col_name (if is_fk_reuse (concat ".exists|" condition) nil))
+						/* exists column: needed when WHERE condition present (non-global aggregate) */
+						(define needs_exists (and (not (equal? condition true)) (not (equal? stage_group '(1)))))
+						(define exists_col_name (if needs_exists (concat ".exists|" condition) nil))
 
-						/* FK reuse: AND exists>0 into HAVING so empty parent rows are excluded */
-						(define effective_having (if is_fk_reuse
+						/* AND exists>0 into HAVING so empty/non-matching groups are excluded */
+						(define effective_having (if needs_exists
 							(begin
 								(define exists_check '('> '('get_column grouptbl false exists_col_name false) 0))
 								(define replaced_having (replace_group_key_or_fetch stage_having))
@@ -1390,39 +1396,40 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							schemas
 							replace_find_column))
 
-						/* check if WHERE condition only references group-key columns;
-						if so, we can push the filter into createcolumn options for sparse computation */
-						(define condition_uses_only_keys
-							(and (not (equal? condition true))
-								(reduce filtercols
-									(lambda (acc col) (and acc
-										(reduce tblvar_cols (lambda (found g) (or found (equal? g col))) false)))
-									true)))
-						(define filter_options (if condition_uses_only_keys
-							(list "filtercols" (cons 'list (map stage_group (lambda (col) (concat col))))
-								"filter" '((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
-									(optimize (replace_columns_from_expr condition))))
-							'()))
+						/* createcolumn options: filter by exists column when WHERE condition is present */
 						(define createcol_options (cons 'list (merge '("temp" true)
-							(if is_fk_reuse
+							(if needs_exists
 								(list "filtercols" (list 'list exists_col_name)
 									"filter" '((quote lambda) (list (symbol exists_col_name)) '('> (symbol exists_col_name) 0)))
-								filter_options))))
+								'()))))
 
-						/* FK reuse: exists column counts ≥1 child match per parent row (braking=1) */
-						(define exists_plan (if is_fk_reuse
-							(list '((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
-								'(list fk_pk_col)
-								'((quote lambda) (list (symbol fk_pk_col))
-									(scan_wrapper 'scan schema tbl
-										(cons list (merge (list fk_child_col) filtercols))
-										'((quote lambda) (map (merge (list fk_child_col) filtercols) (lambda (c) (symbol (concat tblvar "." c))))
-											(optimize (cons (quote and) (cons (replace_columns_from_expr condition)
-												(list '((quote equal?) (symbol (concat tblvar "." fk_child_col)) '((quote outer) (symbol fk_pk_col))))))))
-										'(list)
-										'((quote lambda) '() 1)
-										'+ 0 1 isOuter))))
-							'()))
+						/* exists column: counts ≥1 matching source row per group key (braking=1) */
+						(define exists_plan (if (not needs_exists) '()
+							(if is_fk_reuse
+								/* FK reuse: scan child table, check FK=PK equality + WHERE */
+								(list '((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
+									'(list fk_pk_col)
+									'((quote lambda) (list (symbol fk_pk_col))
+										(scan_wrapper 'scan schema tbl
+											(cons list (merge (list fk_child_col) filtercols))
+											'((quote lambda) (map (merge (list fk_child_col) filtercols) (lambda (c) (symbol (concat tblvar "." c))))
+												(optimize (cons (quote and) (cons (replace_columns_from_expr condition)
+													(list '((quote equal?) (symbol (concat tblvar "." fk_child_col)) '((quote outer) (symbol fk_pk_col))))))))
+											'(list)
+											'((quote lambda) '() 1)
+											'+ 0 1 isOuter))))
+								/* Normal keytable: scan source with WHERE + group key equality */
+								(list '((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
+									(cons list (map stage_group (lambda (col) (concat col))))
+									'((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
+										(scan_wrapper 'scan schema tbl
+											(cons list (merge tblvar_cols filtercols))
+											'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (c) (symbol (concat tblvar "." c))))
+												(optimize (cons (quote and) (cons (replace_columns_from_expr condition)
+													(map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))))
+											'(list)
+											'((quote lambda) '() 1)
+											'+ 0 1 isOuter)))))))
 
 						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 							(set cols (extract_columns_for_tblvar tblvar expr))
@@ -1444,7 +1451,16 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						)))))
 
 						(define compute_plan
-							'('time (cons 'parallel (merge exists_plan agg_plans)) "compute"))
+							'('time (if needs_exists
+								(list 'begin (car exists_plan) (cons 'parallel agg_plans))
+								(cons 'parallel agg_plans)) "compute"))
+
+						/* global aggregates (stage_group='(1)): invalidate computed columns before recompute
+						so correlated subqueries get fresh values per outer row */
+						(define invalidation_plan (if (equal? stage_group '(1))
+							(cons 'begin (map ags (lambda (ag) (match ag '(expr reduce neutral)
+								'('invalidatecolumn schema grouptbl (concat ag "|" condition))))))
+							nil))
 
 						/* build key column pairs for keytable cleanup triggers: ((base_col kt_col) ...) */
 						(define key_pairs (map stage_group (lambda (expr)
@@ -1452,16 +1468,16 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 								'('get_column _ _ col _) (list col (concat expr))
 								(list (concat expr) (concat expr))
 						))))
-						(define cleanup_plan (if is_fk_reuse nil
+						(define cleanup_plan (if (or is_fk_reuse (equal? stage_group '(1))) nil
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
 								(cons 'list (map key_pairs (lambda (p) (list 'list (car p) (cadr p))))))))
 
 						(list 'begin keytable_init cleanup_plan
 							(if is_fk_reuse nil
 								(list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
-									collect_plan
+									(make_collect true)
 									nil))
-							compute_plan grouped_plan)
+							invalidation_plan compute_plan grouped_plan)
 				))
 			)
 			(begin /* multi-table GROUP BY via prejoin materialization */

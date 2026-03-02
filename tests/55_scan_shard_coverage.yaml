@@ -601,10 +601,10 @@ test_cases:
       data:
         - cnt: 0
 
-  - name: "SELECT with impossible WHERE + GROUP BY"
+  - name: "SELECT with impossible WHERE + GROUP BY: no matching rows -> 0 groups"
     sql: "SELECT cat, COUNT(*) AS cnt FROM cov_big WHERE val < 0 GROUP BY cat"
     expect:
-      rows: 2
+      rows: 0
 
   # ==========================================================
   # SHUTDOWN to rebuild: moves delta data into main storage
