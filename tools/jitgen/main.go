@@ -2035,19 +2035,6 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			} else {
 				panic(fmt.Sprintf("StoreInt64 dst is not a field address: marker=%q", dst.marker))
 			}
-		case "GetValueUInt":
-			if g.storageMode && (g.typeName == "StorageString" || g.typeName == "StorageSeq") {
-				panic(fmt.Sprintf("unsupported call: %s (forced fallback for %s)", callee.Name(), g.typeName))
-			}
-			// Inline like other known SSA callees (no method-name special-casing).
-			if callee.Blocks != nil {
-				result := g.inlineCall(callee, v.Call.Args)
-				if name != "" {
-					g.vals[name] = result
-				}
-			} else {
-				panic(fmt.Sprintf("unsupported call: %s", v))
-			}
 		default:
 			// Try to inline: if callee SSA is available, inline its body
 			if callee.Blocks != nil {
