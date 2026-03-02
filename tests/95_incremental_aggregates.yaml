@@ -831,6 +831,151 @@ test_cases:
     sql: "DELETE FROM ia_data WHERE id = 31"
 
   # ============================================================
+  # Section 12: UPDATE group key change — keytable row management
+  # Tests the interaction between the keytable cleanup trigger
+  # (which INSERT/DELETEs group key rows) and the compute trigger
+  # (which invalidates/increments cached aggregate values).
+  # ============================================================
+
+  # State: (1,A,10),(2,A,20),(3,B,30),(6,B,100),(30,C,77)
+  # A=30, B=130, C=77
+
+  # UPDATE to brand new group key (keytable must create new row)
+  - name: "Key change: move to brand new group"
+    sql: "UPDATE ia_data SET grp = 'E' WHERE id = 2"
+
+  - name: "Key change: verify new group appears, old group shrinks"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 4
+      data:
+        - grp: "A"
+          s: 10
+          c: 1
+        - grp: "B"
+          s: 130
+          c: 2
+        - grp: "C"
+          s: 77
+          c: 1
+        - grp: "E"
+          s: 20
+          c: 1
+
+  # UPDATE last row out of group (keytable must remove old group row)
+  - name: "Key change: move last row out of group"
+    sql: "UPDATE ia_data SET grp = 'A' WHERE id = 30"
+
+  - name: "Key change: verify group C disappears"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 87
+          c: 2
+        - grp: "B"
+          s: 130
+          c: 2
+        - grp: "E"
+          s: 20
+          c: 1
+
+  # Sequential key changes: ping-pong a row between groups
+  - name: "Key change: move row A→B"
+    sql: "UPDATE ia_data SET grp = 'B' WHERE id = 1"
+
+  - name: "Key change: verify after A→B"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 77
+          c: 1
+        - grp: "B"
+          s: 140
+          c: 3
+        - grp: "E"
+          s: 20
+          c: 1
+
+  - name: "Key change: move row back B→A"
+    sql: "UPDATE ia_data SET grp = 'A' WHERE id = 1"
+
+  - name: "Key change: verify undo restores original"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 87
+          c: 2
+        - grp: "B"
+          s: 130
+          c: 2
+        - grp: "E"
+          s: 20
+          c: 1
+
+  # UPDATE group key + value simultaneously
+  - name: "Key change: move row and change value simultaneously"
+    sql: "UPDATE ia_data SET grp = 'B', val = 99 WHERE id = 2"
+
+  - name: "Key change: verify combined key+value change"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+      data:
+        - grp: "A"
+          s: 87
+          c: 2
+        - grp: "B"
+          s: 229
+          c: 3
+
+  # Move row to create and destroy groups in one UPDATE
+  - name: "Key change: move last row to create new group"
+    sql: "UPDATE ia_data SET grp = 'F' WHERE id = 2"
+
+  - name: "Key change: verify group created, source group unchanged"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 87
+          c: 2
+        - grp: "B"
+          s: 130
+          c: 2
+        - grp: "F"
+          s: 99
+          c: 1
+
+  # Restore state for cleanup
+  - name: "Key change: restore id=2 to group A"
+    sql: "UPDATE ia_data SET grp = 'A', val = 20 WHERE id = 2"
+
+  - name: "Key change: restore id=30 to group C"
+    sql: "UPDATE ia_data SET grp = 'C', val = 77 WHERE id = 30"
+
+  - name: "Key change: verify restored state"
+    sql: "SELECT grp, SUM(val) AS s, COUNT(*) AS c FROM ia_data GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 3
+      data:
+        - grp: "A"
+          s: 30
+          c: 2
+        - grp: "B"
+          s: 130
+          c: 2
+        - grp: "C"
+          s: 77
+          c: 1
+
+  # ============================================================
   # Cleanup
   # ============================================================
   - name: "Cleanup ia_data"
