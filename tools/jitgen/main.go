@@ -459,6 +459,47 @@ func (g *codeGen) emitAllocRegExcept(dstVar, indent string, guard bool, gv genVa
 	}
 }
 
+// emitNormalizeUnsignedNarrow canonicalizes an integer descriptor to unsigned
+// N-bit semantics (N < 64). Arithmetic executes in 64-bit registers, so this
+// keeps uint8/uint16/uint32 wrap-around behavior correct.
+func (g *codeGen) emitNormalizeUnsignedNarrow(descVar string, bits int) {
+	if bits <= 0 || bits >= 64 {
+		return
+	}
+	mask := (uint64(1) << uint(bits)) - 1
+	shift := 64 - bits
+	g.emit("if %s.Loc == LocImm {", descVar)
+	g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: %s.Type, Imm: NewInt(int64(uint64(%s.Imm.Int()) & 0x%x))}", descVar, descVar, descVar, mask)
+	g.emit("} else {")
+	g.emit("\tctx.W.EmitShlRegImm8(%s.Reg, %d)", descVar, shift)
+	g.emit("\tctx.W.EmitShrRegImm8(%s.Reg, %d)", descVar, shift)
+	g.emit("}")
+}
+
+// emitNormalizeSignedNarrow canonicalizes an integer descriptor to signed
+// N-bit semantics (N < 64) by sign-extending from bit N-1.
+func (g *codeGen) emitNormalizeSignedNarrow(descVar string, bits int) {
+	if bits <= 0 || bits >= 64 {
+		return
+	}
+	shift := 64 - bits
+	g.emit("if %s.Loc == LocImm {", descVar)
+	switch bits {
+	case 8:
+		g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: %s.Type, Imm: NewInt(int64(int8(%s.Imm.Int())))}", descVar, descVar, descVar)
+	case 16:
+		g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: %s.Type, Imm: NewInt(int64(int16(%s.Imm.Int())))}", descVar, descVar, descVar)
+	case 32:
+		g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: %s.Type, Imm: NewInt(int64(int32(%s.Imm.Int())))}", descVar, descVar, descVar)
+	default:
+		g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: %s.Type, Imm: NewInt(%s.Imm.Int())}", descVar, descVar, descVar)
+	}
+	g.emit("} else {")
+	g.emit("\tctx.W.EmitShlRegImm8(%s.Reg, %d)", descVar, shift)
+	g.emit("\tctx.W.EmitSarRegImm8(%s.Reg, %d)", descVar, shift)
+	g.emit("}")
+}
+
 func (g *codeGen) emit(format string, a ...any) {
 	fmt.Fprintf(&g.w, "\t\t\t"+format+"\n", a...)
 }
@@ -528,7 +569,7 @@ func (g *codeGen) emitEdgePhiMoves(targetBBIdx int) {
 		for i, pred := range targetBlock.Preds {
 			if pred.Index == g.curBlock {
 				edge := phi.Edges[i]
-				g.emitPhiMov(phiReg, edge)
+				g.emitPhiMov(phiReg, edge, phi.Type())
 				break
 			}
 		}
@@ -537,7 +578,7 @@ func (g *codeGen) emitEdgePhiMoves(targetBBIdx int) {
 
 // emitPhiMov emits a machine-code store from an SSA value to a phi stack slot.
 // phiOff is the stack offset string (e.g. "0", "8", "16").
-func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value) {
+func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 	if c, ok := v.(*ssa.Const); ok {
 		if c.Value == nil {
 			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOff)
@@ -550,6 +591,9 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value) {
 			}
 		} else if c.Value.Kind() == constant.Int {
 			ival, _ := constant.Int64Val(c.Value)
+			if signed, bits, ok := intTypeInfo(phiType); ok {
+				ival = normalizeIntConstForType(ival, signed, bits)
+			}
 			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(%d)}, %s)", ival, phiOff)
 		} else if c.Value.Kind() == constant.Float {
 			fval, _ := constant.Float64Val(c.Value)
@@ -560,7 +604,18 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value) {
 	} else {
 		src := g.vals[v.Name()]
 		if src.isDesc {
-			g.emit("ctx.EmitStoreToStack(%s, %s)", src.goVar, phiOff)
+			if signed, bits, ok := intTypeInfo(phiType); ok && bits > 0 && bits < 64 {
+				tmp := g.allocDesc()
+				g.emit("%s := %s", tmp, src.goVar)
+				if signed {
+					g.emitNormalizeSignedNarrow(tmp, bits)
+				} else {
+					g.emitNormalizeUnsignedNarrow(tmp, bits)
+				}
+				g.emit("ctx.EmitStoreToStack(%s, %s)", tmp, phiOff)
+			} else {
+				g.emit("ctx.EmitStoreToStack(%s, %s)", src.goVar, phiOff)
+			}
 			// Note: we do NOT call useOperand here. Phi edge references keep the
 			// value alive (inflated refcount) but are not consumed. This prevents
 			// over-decrement when the same value appears on mutually exclusive
@@ -586,7 +641,8 @@ func (g *codeGen) emitEdgePhiMovesIndent(targetBBIdx int, indent string) {
 		for i, pred := range targetBlock.Preds {
 			if pred.Index == g.curBlock {
 				edge := phi.Edges[i]
-				g.emitPhiMovIndent(phiReg, edge, indent)
+				_ = indent
+				g.emitPhiMov(phiReg, edge, phi.Type())
 				break
 			}
 		}
@@ -956,12 +1012,6 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		}
 	}()
 
-	// Temporary safety guard: these generated emitters are currently
-	// semantically incorrect in JIT tests; use the Go-call fallback.
-	if typeName == "StorageSeq" || typeName == "StorageString" {
-		return "", "temporarily disabled: use Go-call fallback for correctness"
-	}
-
 	g := &codeGen{
 		vals:            map[string]genVal{},
 		fn:              fn,
@@ -992,6 +1042,13 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		g.emit("\tidxInt = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: idx.Reg2}")
 		g.emit("} else {")
 		g.emit("\tidxInt = idx")
+		g.emit("}")
+		// GetValue's index parameter is uint32: normalize once at entry.
+		g.emit("if idxInt.Loc == LocImm {")
+		g.emit("\tidxInt = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}")
+		g.emit("} else {")
+		g.emit("\tctx.W.EmitShlRegImm8(idxInt.Reg, 32)")
+		g.emit("\tctx.W.EmitShrRegImm8(idxInt.Reg, 32)")
 		g.emit("}")
 		g.vals[fn.Params[1].Name()] = genVal{goVar: "idxInt", isDesc: true}
 	}
@@ -1068,10 +1125,12 @@ func addScmPrefix(code string) string {
 		"ConcatStrings":                true,
 		"OptimizeProcToSerialFunction": true,
 		"CcE":                          true, "CcNE": true, "CcL": true, "CcG": true, "CcLE": true, "CcGE": true,
+		"CcB": true, "CcAE": true, "CcBE": true, "CcA": true,
 		"RegRAX": true, "RegRBX": true, "RegRCX": true, "RegRDX": true,
 		"RegRSI": true, "RegRDI": true, "RegRSP": true, "RegRBP": true,
 		"RegR8": true, "RegR9": true, "RegR10": true, "RegR11": true,
 		"RegR12": true, "RegR13": true, "RegR14": true, "RegR15": true,
+		"RegX0": true, "RegX1": true, "RegX2": true, "RegX3": true, "RegX4": true, "RegX5": true,
 	}
 	// Map unexported tag constants to their exported equivalents
 	scmTagMap := map[string]string{
@@ -1969,6 +2028,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			} else {
 				panic(fmt.Sprintf("StoreInt64 dst is not a field address: marker=%q", dst.marker))
 			}
+		case "GetValueUInt":
+			// Inline like other known SSA callees (no method-name special-casing).
+			if callee.Blocks != nil {
+				result := g.inlineCall(callee, v.Call.Args)
+				if name != "" {
+					g.vals[name] = result
+				}
+			} else {
+				panic(fmt.Sprintf("unsupported call: %s", v))
+			}
 		default:
 			// Try to inline: if callee SSA is available, inline its body
 			if callee.Blocks != nil {
@@ -2004,7 +2073,15 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		if g.isFieldCachedDesc(xVal.goVar) {
 			xMultiUse = true
 		}
+		xSigned, _, xIsInt := intTypeInfo(v.X.Type())
+		ySigned, _, yIsInt := intTypeInfo(v.Y.Type())
+		resSigned, resBits, resIsInt := intTypeInfo(v.Type())
+		narrowUnsigned := resIsInt && !resSigned && resBits > 0 && resBits < 64
 		cc := opToCC(v.Op)
+		unsignedCompare := cc != "" && xIsInt && yIsInt && !xSigned && !ySigned
+		if unsignedCompare {
+			cc = opToCCUnsigned(v.Op)
+		}
 		goOp := goOpStr(v.Op)
 		if cc != "" {
 			dv := g.allocDesc()
@@ -2013,13 +2090,24 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				// Constant-fold if x is LocImm
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s.Loc == LocImm {", xVal.goVar)
-				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %d)}", dv, xVal.goVar, goOp, cmpVal)
+				if unsignedCompare {
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(%s.Imm.Int()) %s uint64(%d))}", dv, xVal.goVar, goOp, cmpVal)
+				} else {
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %d)}", dv, xVal.goVar, goOp, cmpVal)
+				}
 				g.emit("} else {")
 				// Fresh register for result — CMP is non-destructive, SetCC writes only the target.
 				// Protect xVal.Reg when multi-use: AllocReg must not return xVal.Reg (SetCC would clobber it).
 				rv := g.allocReg()
 				g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
-				g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, %d)", xVal.goVar, cmpVal)
+				if fitsInt32(cmpVal) {
+					g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, %d)", xVal.goVar, cmpVal)
+				} else {
+					g.emit("\tscratch := ctx.AllocReg()")
+					g.emit("\tctx.W.EmitMovRegImm64(scratch, uint64(%d))", cmpVal)
+					g.emit("\tctx.W.EmitCmpInt64(%s.Reg, scratch)", xVal.goVar)
+					g.emit("\tctx.FreeReg(scratch)")
+				}
 				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv, cc)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
 				g.emit("}")
@@ -2027,12 +2115,23 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				yVal := g.resolveValue(v.Y)
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
-				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOp, yVal.goVar)
+				if unsignedCompare {
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(%s.Imm.Int()) %s uint64(%s.Imm.Int()))}", dv, xVal.goVar, goOp, yVal.goVar)
+				} else {
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOp, yVal.goVar)
+				}
 				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
 				// y is imm, x is reg → CmpRegImm32. Protect xVal.Reg when multi-use.
 				rv := g.allocReg()
 				g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
-				g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
+				g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
+				g.emit("\t\tctx.W.EmitCmpRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
+				g.emit("\t} else {")
+				g.emit("\t\tscratch := ctx.AllocReg()")
+				g.emit("\t\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", yVal.goVar)
+				g.emit("\t\tctx.W.EmitCmpInt64(%s.Reg, scratch)", xVal.goVar)
+				g.emit("\t\tctx.FreeReg(scratch)")
+				g.emit("\t}")
 				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv, cc)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
@@ -2212,6 +2311,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			}
 			// Neutralize xVal if its register was transferred to the result (destructive ALU)
+			if narrowUnsigned {
+				g.emitNormalizeUnsignedNarrow(dv, resBits)
+			}
 			g.emit("if %s.Loc == LocReg && %s.Loc == LocReg && %s.Reg == %s.Reg {", dv, xVal.goVar, dv, xVal.goVar)
 			g.emit("\tctx.TransferReg(%s.Reg)", xVal.goVar)
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
@@ -2258,6 +2360,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				panic(fmt.Sprintf("non-const division: %s", v))
 			}
 			// Neutralize xVal if its register was transferred to the result
+			if narrowUnsigned {
+				g.emitNormalizeUnsignedNarrow(dv, resBits)
+			}
 			g.emit("if %s.Loc == LocReg && %s.Loc == LocReg && %s.Reg == %s.Reg {", dv, xVal.goVar, dv, xVal.goVar)
 			g.emit("\tctx.TransferReg(%s.Reg)", xVal.goVar)
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
@@ -2295,6 +2400,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				panic(fmt.Sprintf("non-const modulo: %s", v))
 			}
 			// Neutralize xVal if its register was transferred to the result
+			if narrowUnsigned {
+				g.emitNormalizeUnsignedNarrow(dv, resBits)
+			}
 			g.emit("if %s.Loc == LocReg && %s.Loc == LocReg && %s.Reg == %s.Reg {", dv, xVal.goVar, dv, xVal.goVar)
 			g.emit("\tctx.TransferReg(%s.Reg)", xVal.goVar)
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
@@ -2379,6 +2487,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			}
 			// Neutralize xVal if its register was transferred to the result
+			if narrowUnsigned {
+				g.emitNormalizeUnsignedNarrow(dv, resBits)
+			}
 			g.emit("if %s.Loc == LocReg && %s.Loc == LocReg && %s.Reg == %s.Reg {", dv, xVal.goVar, dv, xVal.goVar)
 			g.emit("\tctx.TransferReg(%s.Reg)", xVal.goVar)
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
@@ -2483,6 +2594,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			}
 			// Neutralize xVal if its register was transferred to the result
+			if narrowUnsigned {
+				g.emitNormalizeUnsignedNarrow(dv, resBits)
+			}
 			g.emit("if %s.Loc == LocReg && %s.Loc == LocReg && %s.Reg == %s.Reg {", dv, xVal.goVar, dv, xVal.goVar)
 			g.emit("\tctx.TransferReg(%s.Reg)", xVal.goVar)
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
@@ -2584,29 +2698,74 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		srcBasic, srcOk := srcType.(*types.Basic)
 		dstBasic, dstOk := dstType.(*types.Basic)
 		if srcOk && dstOk && isIntegerKind(srcBasic.Kind()) && isIntegerKind(dstBasic.Kind()) {
-			// Integer-to-integer: no-op on amd64 (all fit in 64-bit register).
-			// Reuse source genVal directly and redirect refcounts via alias
-			// to avoid register aliasing bugs (FreeDesc on alias frees shared register).
-			srcName := v.X.Name()
-			if _, isConst := v.X.(*ssa.Const); !isConst {
-				g.ssaAliases[name] = srcName
-				// Merge convert result's uses into source's refcount
-				g.refCounts[srcName] += g.refCounts[name]
-				delete(g.refCounts, name)
+			srcSigned, srcBits, srcInfoOK := intTypeInfo(v.X.Type())
+			dstSigned, dstBits, dstInfoOK := intTypeInfo(v.Type())
+			if !srcInfoOK || !dstInfoOK {
+				panic(fmt.Sprintf("unsupported integer Convert %s → %s", v.X.Type(), v.Type()))
 			}
-			g.vals[name] = src
-			if !src.isDesc {
-				// Bare register → wrap in JITValueDesc
-				g.emit("%s := JITValueDesc{Loc: LocReg, Reg: %s}", dv, src.goVar)
-				g.vals[name] = genVal{goVar: dv, isDesc: true}
+
+			// Exact same integer representation: alias source.
+			if srcSigned == dstSigned && srcBits == dstBits {
+				srcName := v.X.Name()
+				if _, isConst := v.X.(*ssa.Const); !isConst {
+					g.ssaAliases[name] = srcName
+					// Merge convert result's uses into source's refcount
+					g.refCounts[srcName] += g.refCounts[name]
+					delete(g.refCounts, name)
+				}
+				g.vals[name] = src
+				if !src.isDesc {
+					// Bare register → wrap in JITValueDesc
+					g.emit("%s := JITValueDesc{Loc: LocReg, Reg: %s}", dv, src.goVar)
+					g.vals[name] = genVal{goVar: dv, isDesc: true}
+				}
+				break
 			}
+
+			srcTy := intTypeName(srcSigned, srcBits)
+			dstTy := intTypeName(dstSigned, dstBits)
+			if srcTy == "" || dstTy == "" {
+				panic(fmt.Sprintf("unsupported integer Convert %s → %s", v.X.Type(), v.Type()))
+			}
+
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", src.goVar)
+			// Materialize with explicit source+destination casts to preserve wrap/sign semantics.
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(%s(%s(%s.Imm.Int()))))}", dv, dstTy, srcTy, src.goVar)
+			g.emit("} else {")
+			tmpReg := g.allocReg()
+			g.emit("\t%s := ctx.AllocReg()", tmpReg)
+			g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", tmpReg, src.goVar)
+			// Normalize source width/sign first.
+			if srcBits > 0 && srcBits < 64 {
+				shift := 64 - srcBits
+				g.emit("\tctx.W.EmitShlRegImm8(%s, %d)", tmpReg, shift)
+				if srcSigned {
+					g.emit("\tctx.W.EmitSarRegImm8(%s, %d)", tmpReg, shift)
+				} else {
+					g.emit("\tctx.W.EmitShrRegImm8(%s, %d)", tmpReg, shift)
+				}
+			}
+			// Then normalize destination width/sign for actual conversion target.
+			if dstBits > 0 && dstBits < 64 {
+				shift := 64 - dstBits
+				g.emit("\tctx.W.EmitShlRegImm8(%s, %d)", tmpReg, shift)
+				if dstSigned {
+					g.emit("\tctx.W.EmitSarRegImm8(%s, %d)", tmpReg, shift)
+				} else {
+					g.emit("\tctx.W.EmitShrRegImm8(%s, %d)", tmpReg, shift)
+				}
+			}
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, tmpReg)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		} else if srcOk && dstOk && isIntegerKind(srcBasic.Kind()) && dstBasic.Kind() == types.Float64 {
 			// int → float64: emit CVTSI2SD
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", src.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(float64(%s.Imm.Int()))}", dv, src.goVar)
 			g.emit("} else {")
-			g.emit("\tctx.W.EmitCvtInt64ToFloat64(%s.Reg, %s.Reg)", src.goVar, src.goVar)
+			g.emit("\tctx.W.EmitCvtInt64ToFloat64(RegX0, %s.Reg)", src.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, src.goVar)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
@@ -2655,6 +2814,63 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("ctx.W.EmitByte(0xCC)") // INT3
 
 	case *ssa.Slice:
+		if g.storageMode {
+			// Storage fast path: materialize a proper Go string/slice header
+			// as LocRegPair{ptr,len}. Never collapse to LocImm because Go calls
+			// expect 2 ABI words for string/slice values.
+			x := g.vals[v.X.Name()]
+			if !x.isDesc {
+				panic(fmt.Sprintf("Slice on non-desc: %s", v))
+			}
+			low := g.resolveValue(v.Low)
+			high := g.resolveValue(v.High)
+			ptrReg := g.allocReg()
+			lenReg := g.allocReg()
+			dv := g.allocDesc()
+			g.emit("%s := ctx.AllocReg()", ptrReg)
+			g.emit("%s := ctx.AllocReg()", lenReg)
+			g.emit("if %s.Loc == LocImm {", x.goVar)
+			g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", ptrReg, x.goVar)
+			g.emit("} else if %s.Loc == LocRegPair {", x.goVar)
+			g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", ptrReg, x.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", ptrReg, x.goVar)
+			g.emit("}")
+			g.emit("if %s.Loc == LocImm {", low.goVar)
+			g.emit("\tif %s.Imm.Int() != 0 {", low.goVar)
+			g.emit("\t\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", low.goVar, low.goVar)
+			g.emit("\t\t\tctx.W.EmitAddRegImm32(%s, int32(%s.Imm.Int()))", ptrReg, low.goVar)
+			g.emit("\t\t} else {")
+			g.emit("\t\t\tscratch := ctx.AllocReg()")
+			g.emit("\t\t\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", low.goVar)
+			g.emit("\t\t\tctx.W.EmitAddInt64(%s, scratch)", ptrReg)
+			g.emit("\t\t\tctx.FreeReg(scratch)")
+			g.emit("\t\t}")
+			g.emit("\t}")
+			g.emit("} else {")
+			g.emit("\tctx.W.EmitAddInt64(%s, %s.Reg)", ptrReg, low.goVar)
+			g.emit("}")
+			g.emit("if %s.Loc == LocImm {", high.goVar)
+			g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", lenReg, high.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", lenReg, high.goVar)
+			g.emit("}")
+			g.emit("if %s.Loc == LocImm {", low.goVar)
+			g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", low.goVar, low.goVar)
+			g.emit("\t\tctx.W.EmitSubRegImm32(%s, int32(%s.Imm.Int()))", lenReg, low.goVar)
+			g.emit("\t} else {")
+			g.emit("\t\tscratch := ctx.AllocReg()")
+			g.emit("\t\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", low.goVar)
+			g.emit("\t\tctx.W.EmitSubInt64(%s, scratch)", lenReg)
+			g.emit("\t\tctx.FreeReg(scratch)")
+			g.emit("\t}")
+			g.emit("} else {")
+			g.emit("\tctx.W.EmitSubInt64(%s, %s.Reg)", lenReg, low.goVar)
+			g.emit("}")
+			g.emit("%s := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring"}
+			break
+		}
 		// Sub-slice: str[low:high] or slice[low:high]
 		// Result is a LocRegPair {dataPtr, length} representing a Go string/slice header.
 		x := g.vals[v.X.Name()]
@@ -2958,6 +3174,25 @@ func opToCC(op token.Token) string {
 	}
 }
 
+func opToCCUnsigned(op token.Token) string {
+	switch op {
+	case token.EQL:
+		return "CcE"
+	case token.NEQ:
+		return "CcNE"
+	case token.LSS:
+		return "CcB"
+	case token.GTR:
+		return "CcA"
+	case token.LEQ:
+		return "CcBE"
+	case token.GEQ:
+		return "CcAE"
+	default:
+		return ""
+	}
+}
+
 // goOpStr maps a Go token to the Go operator string for codegen.
 func goOpStr(op token.Token) string {
 	switch op {
@@ -2996,6 +3231,79 @@ func aluEmitFunc(op token.Token) string {
 	default:
 		return ""
 	}
+}
+
+func intTypeInfo(t types.Type) (signed bool, bits int, ok bool) {
+	b, ok := t.Underlying().(*types.Basic)
+	if !ok {
+		return false, 0, false
+	}
+	switch b.Kind() {
+	case types.Int8:
+		return true, 8, true
+	case types.Int16:
+		return true, 16, true
+	case types.Int32:
+		return true, 32, true
+	case types.Int64:
+		return true, 64, true
+	case types.Int, types.UntypedInt:
+		return true, 64, true
+	case types.Uint8:
+		return false, 8, true
+	case types.Uint16:
+		return false, 16, true
+	case types.Uint32:
+		return false, 32, true
+	case types.Uint64:
+		return false, 64, true
+	case types.Uint, types.Uintptr:
+		return false, 64, true
+	default:
+		return false, 0, false
+	}
+}
+
+func intTypeName(signed bool, bits int) string {
+	if signed {
+		switch bits {
+		case 8:
+			return "int8"
+		case 16:
+			return "int16"
+		case 32:
+			return "int32"
+		case 64:
+			return "int64"
+		}
+		return ""
+	}
+	switch bits {
+	case 8:
+		return "uint8"
+	case 16:
+		return "uint16"
+	case 32:
+		return "uint32"
+	case 64:
+		return "uint64"
+	}
+	return ""
+}
+
+func normalizeIntConstForType(v int64, signed bool, bits int) int64 {
+	if bits <= 0 || bits >= 64 {
+		return v
+	}
+	mask := (uint64(1) << uint(bits)) - 1
+	u := uint64(v) & mask
+	if signed {
+		signBit := uint64(1) << uint(bits-1)
+		if (u & signBit) != 0 {
+			u |= ^mask
+		}
+	}
+	return int64(u)
 }
 
 // elemSizeOf returns the size in bytes of a Go type (for array/slice element sizing).
