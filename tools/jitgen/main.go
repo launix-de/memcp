@@ -2036,6 +2036,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				panic(fmt.Sprintf("StoreInt64 dst is not a field address: marker=%q", dst.marker))
 			}
 		case "GetValueUInt":
+			if g.storageMode && (g.typeName == "StorageString" || g.typeName == "StorageSeq") {
+				panic(fmt.Sprintf("unsupported call: %s (forced fallback for %s)", callee.Name(), g.typeName))
+			}
 			// Inline like other known SSA callees (no method-name special-casing).
 			if callee.Blocks != nil {
 				result := g.inlineCall(callee, v.Call.Args)
@@ -2839,8 +2842,26 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			ptrReg := g.allocReg()
 			lenReg := g.allocReg()
 			dv := g.allocDesc()
-			g.emit("%s := ctx.AllocReg()", ptrReg)
-			g.emit("%s := ctx.AllocReg()", lenReg)
+			excludedRegs := []string{}
+			if x.isDesc {
+				excludedRegs = append(excludedRegs, x.goVar+".Reg")
+				excludedRegs = append(excludedRegs, x.goVar+".Reg2")
+			}
+			if low.isDesc {
+				excludedRegs = append(excludedRegs, low.goVar+".Reg")
+				excludedRegs = append(excludedRegs, low.goVar+".Reg2")
+			}
+			if high.isDesc {
+				excludedRegs = append(excludedRegs, high.goVar+".Reg")
+				excludedRegs = append(excludedRegs, high.goVar+".Reg2")
+			}
+			if len(excludedRegs) > 0 {
+				g.emit("%s := ctx.AllocRegExcept(%s)", ptrReg, strings.Join(excludedRegs, ", "))
+				g.emit("%s := ctx.AllocRegExcept(%s, %s)", lenReg, strings.Join(excludedRegs, ", "), ptrReg)
+			} else {
+				g.emit("%s := ctx.AllocReg()", ptrReg)
+				g.emit("%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
+			}
 			g.emit("if %s.Loc == LocImm {", x.goVar)
 			g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", ptrReg, x.goVar)
 			g.emit("} else if %s.Loc == LocRegPair {", x.goVar)
@@ -3323,6 +3344,9 @@ func elemSizeOf(t types.Type) int {
 	switch tt := t.Underlying().(type) {
 	case *types.Basic:
 		switch tt.Kind() {
+		case types.String:
+			// Go string headers are 2 words: data pointer + length.
+			return 16
 		case types.Bool, types.Uint8, types.Int8:
 			return 1
 		case types.Uint16, types.Int16:
