@@ -123,10 +123,10 @@ const (
 //
 // Type resolution (fixed vs flexible):
 //
-//   LocImm:     ALWAYS fixed. Imm.GetTag() == Type. Constant-fold everything.
-//   LocReg:     ALWAYS fixed. Unboxed primitive in a register. Type says what.
-//   LocRegPair: Fixed if Type != JITTypeUnknown, flexible otherwise.
-//   LocAny:     Result placement hint only ("I don't care where you put it").
+//	LocImm:     ALWAYS fixed. Imm.GetTag() == Type. Constant-fold everything.
+//	LocReg:     ALWAYS fixed. Unboxed primitive in a register. Type says what.
+//	LocRegPair: Fixed if Type != JITTypeUnknown, flexible otherwise.
+//	LocAny:     Result placement hint only ("I don't care where you put it").
 type JITValueDesc struct {
 	Type     uint16 // tag constant (tagInt, tagFloat, ...) or JITTypeUnknown
 	Nullable bool
@@ -189,13 +189,15 @@ type JITContext struct {
 	// Register spilling: when all registers are occupied, we save the
 	// register to a pre-allocated spill buffer (not the stack).
 	// This avoids modifying RSP, which would break phi stack offsets.
-	SpillStack    []spillEntry
-	RegOwners     [16]*JITValueDesc // register → owner descriptor (nil = untracked)
-	SpillBuf           [64]int64 // pre-allocated spill buffer (heap-stable, not on stack)
-	SpillTop           int       // high-water mark in SpillBuf (next fresh slot)
-	spillFreeList      []int     // recycled SpillBuf slot indices
-	ProtectedRegs      uint64   // bitmask of registers that must not be spilled
-	ProtectedRegCounts [16]int  // per-register protection refcount (supports nested protection)
+	spillStack         [16]spillEntry // fixed-size: at most 16 hardware registers can be live
+	spillStackLen      int
+	RegOwners          [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	SpillBuf           [64]int64         // pre-allocated spill buffer (heap-stable, not on stack)
+	SpillTop           int               // high-water mark in SpillBuf (next fresh slot)
+	spillFreeArr       [16]int           // recycled SpillBuf slot indices
+	spillFreeLen       int
+	ProtectedRegs      uint64  // bitmask of registers that must not be spilled
+	ProtectedRegCounts [16]int // per-register protection refcount (supports nested protection)
 	// EvictedCounts tracks how many times each register was evicted by AllocReg.
 	// When AllocReg spills register R and returns R as a fresh register, both the
 	// old holder and the new holder think they own R. EvictedCounts[R] counts the
@@ -257,9 +259,9 @@ func (ctx *JITContext) AllocReg() Reg {
 	}
 	// Allocate a spill slot: prefer recycled slots to keep SpillTop low.
 	var slot int
-	if n := len(ctx.spillFreeList); n > 0 {
-		slot = ctx.spillFreeList[n-1]
-		ctx.spillFreeList = ctx.spillFreeList[:n-1]
+	if ctx.spillFreeLen > 0 {
+		ctx.spillFreeLen--
+		slot = ctx.spillFreeArr[ctx.spillFreeLen]
 	} else {
 		slot = ctx.SpillTop
 		if slot >= len(ctx.SpillBuf) {
@@ -270,7 +272,8 @@ func (ctx *JITContext) AllocReg() Reg {
 	spillAddr := uint64(uintptr(unsafe.Pointer(&ctx.SpillBuf[slot])))
 	ctx.W.EmitMovRegImm64(RegR11, spillAddr)
 	ctx.W.EmitStoreRegMem(r, RegR11, 0) // MOV [R11], reg
-	ctx.SpillStack = append(ctx.SpillStack, spillEntry{reg: r, slot: slot})
+	ctx.spillStack[ctx.spillStackLen] = spillEntry{reg: r, slot: slot}
+	ctx.spillStackLen++
 	// Increment eviction count: the old holder's FreeReg(r) will burn this
 	// count instead of returning r to FreeRegs, preventing a double-free.
 	ctx.EvictedCounts[r]++
@@ -287,10 +290,12 @@ func (ctx *JITContext) FreeReg(r Reg) {
 		ctx.EvictedCounts[r]--
 		// Reclaim the oldest SpillStack slot for this register so it can
 		// be reused, preventing spill buffer overflow on long functions.
-		for i, e := range ctx.SpillStack {
-			if e.reg == r {
-				ctx.spillFreeList = append(ctx.spillFreeList, e.slot)
-				ctx.SpillStack = append(ctx.SpillStack[:i], ctx.SpillStack[i+1:]...)
+		for i := 0; i < ctx.spillStackLen; i++ {
+			if ctx.spillStack[i].reg == r {
+				ctx.spillFreeArr[ctx.spillFreeLen] = ctx.spillStack[i].slot
+				ctx.spillFreeLen++
+				copy(ctx.spillStack[i:ctx.spillStackLen-1], ctx.spillStack[i+1:ctx.spillStackLen])
+				ctx.spillStackLen--
 				break
 			}
 		}
@@ -314,10 +319,12 @@ func (ctx *JITContext) BindReg(r Reg, desc *JITValueDesc) {
 func (ctx *JITContext) TransferReg(r Reg) {
 	if ctx.EvictedCounts[r] > 0 {
 		ctx.EvictedCounts[r]--
-		for i, e := range ctx.SpillStack {
-			if e.reg == r {
-				ctx.spillFreeList = append(ctx.spillFreeList, e.slot)
-				ctx.SpillStack = append(ctx.SpillStack[:i], ctx.SpillStack[i+1:]...)
+		for i := 0; i < ctx.spillStackLen; i++ {
+			if ctx.spillStack[i].reg == r {
+				ctx.spillFreeArr[ctx.spillFreeLen] = ctx.spillStack[i].slot
+				ctx.spillFreeLen++
+				copy(ctx.spillStack[i:ctx.spillStackLen-1], ctx.spillStack[i+1:ctx.spillStackLen])
+				ctx.spillStackLen--
 				break
 			}
 		}
@@ -363,13 +370,13 @@ func (ctx *JITContext) EnsureReg(desc *JITValueDesc) {
 // RestoreSpills restores all spilled registers from the spill buffer in reverse order.
 // Since spills use a pre-allocated buffer (not RSP), this doesn't modify the stack pointer.
 func (ctx *JITContext) RestoreSpills() {
-	for i := len(ctx.SpillStack) - 1; i >= 0; i-- {
-		slot := ctx.SpillStack[i].slot
+	for i := ctx.spillStackLen - 1; i >= 0; i-- {
+		slot := ctx.spillStack[i].slot
 		spillAddr := uint64(uintptr(unsafe.Pointer(&ctx.SpillBuf[slot])))
 		ctx.W.EmitMovRegImm64(RegR11, spillAddr)
-		ctx.W.EmitMovRegMem(ctx.SpillStack[i].reg, RegR11, 0)
+		ctx.W.EmitMovRegMem(ctx.spillStack[i].reg, RegR11, 0)
 	}
-	ctx.SpillStack = nil
+	ctx.spillStackLen = 0
 	ctx.SpillTop = 0
 }
 
@@ -408,23 +415,38 @@ func ConcatStrings(a, b string) string {
 // GoABIIntRegs lists integer argument/result registers in Go internal ABI order.
 var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, RegR10, RegR11}
 
+type goCallArgWord struct {
+	loc JITLoc
+	reg Reg
+	imm uint64
+}
+
 // EmitGoCall emits a call to a Go function from JIT code.
 // argWords: registers holding argument words in Go ABI order.
 // numResultWords: how many result words to capture.
 // Returns registers holding the result words.
 // All live JIT registers are saved/restored around the call.
-func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []Reg, numResultWords int) []Reg {
+// EmitGoCall emits a call to a Go function from JIT code.
+// argWords: registers holding argument words in Go ABI order.
+// numResultWords: how many result words to capture.
+// resultsBuf: caller-provided [16]Reg buffer for results (no heap alloc).
+// Returns a slice into resultsBuf holding the result registers.
+// All live JIT registers are saved/restored around the call.
+func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg) []Reg {
 	// Collect all currently-allocated registers (not free).
 	// Skip RSP/RBP (frame), R11 (call scratch), R14 (Go goroutine ptr "g").
-	var liveRegs []Reg
+	var liveRegsArr [16]Reg
+	liveRegCount := 0
 	for r := Reg(0); r <= RegR15; r++ {
 		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
 			continue
 		}
 		if ctx.FreeRegs&(1<<uint(r)) == 0 {
-			liveRegs = append(liveRegs, r)
+			liveRegsArr[liveRegCount] = r
+			liveRegCount++
 		}
 	}
+	liveRegs := liveRegsArr[:liveRegCount]
 
 	// Reserve stack space for result words (above saved registers).
 	// After restoring saved regs, these slots will be at [RSP+0..].
@@ -448,8 +470,15 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []Reg, numResultWord
 	// Process in reverse to avoid clobbering sources.
 	for i := len(argWords) - 1; i >= 0; i-- {
 		target := GoABIIntRegs[i]
-		if argWords[i] != target {
-			ctx.W.emitMovRegReg(target, argWords[i])
+		switch argWords[i].loc {
+		case LocReg:
+			if argWords[i].reg != target {
+				ctx.W.emitMovRegReg(target, argWords[i].reg)
+			}
+		case LocImm:
+			ctx.W.EmitMovRegImm64(target, argWords[i].imm)
+		default:
+			panic("jit: unsupported Go-call arg location")
 		}
 	}
 
@@ -475,38 +504,45 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []Reg, numResultWord
 	}
 
 	// Pop results from reserved slots into freshly allocated registers
-	results := make([]Reg, numResultWords)
 	for i := 0; i < numResultWords; i++ {
 		r := ctx.AllocReg()
 		ctx.W.EmitPopReg(r)
-		results[i] = r
+		resultsBuf[i] = r
 	}
-	return results
+	return resultsBuf[:numResultWords]
 }
 
-// flattenArgs converts JITValueDesc arguments to ABI word registers.
-// LocRegPair → 2 words (Reg, Reg2), LocReg → 1 word, LocImm → materialize.
-func (ctx *JITContext) flattenArgs(args []JITValueDesc) []Reg {
-	var words []Reg
+// flattenArgs converts JITValueDesc arguments to ABI words.
+// LocRegPair → 2 words (Reg, Reg2), LocReg → 1 word, LocImm → deferred imm.
+// buf is a caller-provided [16]goCallArgWord scratch buffer; returns a slice into it.
+func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) []goCallArgWord {
+	n := 0
 	for _, a := range args {
 		switch a.Loc {
 		case LocRegPair:
-			words = append(words, a.Reg, a.Reg2)
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
+			n++
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg2}
+			n++
 		case LocReg:
-			words = append(words, a.Reg)
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
+			n++
 		case LocImm:
-			r := ctx.AllocReg()
-			ctx.W.EmitMovRegImm64(r, uint64(a.Imm.Int()))
-			words = append(words, r)
+			buf[n] = goCallArgWord{loc: LocImm, imm: uint64(a.Imm.Int())}
+			n++
+		default:
+			panic("jit: unsupported arg desc location in flattenArgs")
 		}
 	}
-	return words
+	return buf[:n]
 }
 
 // EmitGoCallScalar calls a Go function and returns a single-word result as JITValueDesc.
 func (ctx *JITContext) EmitGoCallScalar(funcAddr uint64, args []JITValueDesc, numResultWords int) JITValueDesc {
-	words := ctx.flattenArgs(args)
-	results := ctx.EmitGoCall(funcAddr, words, numResultWords)
+	var wordsBuf [16]goCallArgWord
+	var resultsBuf [16]Reg
+	words := ctx.flattenArgs(args, &wordsBuf)
+	results := ctx.EmitGoCall(funcAddr, words, numResultWords, &resultsBuf)
 	if numResultWords == 1 {
 		return JITValueDesc{Loc: LocReg, Reg: results[0]}
 	}
@@ -525,6 +561,8 @@ func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc)
 
 // EmitGoCallVoid calls a Go function with no return value.
 func (ctx *JITContext) EmitGoCallVoid(funcAddr uint64, args []JITValueDesc) {
-	words := ctx.flattenArgs(args)
-	ctx.EmitGoCall(funcAddr, words, 0)
+	var wordsBuf [16]goCallArgWord
+	var resultsBuf [16]Reg
+	words := ctx.flattenArgs(args, &wordsBuf)
+	ctx.EmitGoCall(funcAddr, words, 0, &resultsBuf)
 }
