@@ -36,11 +36,12 @@ curl -X POST http://localhost:4321/sql/mydb \
 ```
 
 **API Endpoints:**
+
 - `/sql/<database>` — MySQL-dialect SQL
 - `/psql/<database>` — PostgreSQL-dialect SQL
 - `/rdf/<database>` — SPARQL queries
 - `/rdf/<database>/load_ttl` — load RDF/Turtle data
-- `/dashboard` — WebSocket admin dashboard
+- `/dashboard` — admin dashboard with live CPU/memory/connection gauges, database browser, shard and compression statistics, and user management
 
 ### 📊 **Perfect for Modern Workloads**
 - **Microservices** - Embedded database per service
