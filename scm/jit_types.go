@@ -16,7 +16,10 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package scm
 
-import "reflect"
+import (
+	"reflect"
+	"unsafe"
+)
 
 /*
 JIT Emitter Contract
@@ -169,33 +172,183 @@ func (env *JITEnv) Set(sym Symbol, desc JITValueDesc) {
 	env.Vars[sym] = desc
 }
 
+// spillEntry records a register that was evicted to the spill buffer.
+type spillEntry struct {
+	reg  Reg // which register was saved
+	slot int // index in SpillBuf
+}
+
 // JITContext is the central structure for descriptor-based JIT compilation.
 type JITContext struct {
 	Env         *JITEnv
 	FreeRegs    uint64
+	AllRegs     uint64 // original set of all allocatable registers (for spilling)
 	W           *JITWriter
 	StackOffset int32
 	SliceBase   Reg // register holding the args slice pointer (for variable-index access)
+	// Register spilling: when all registers are occupied, we save the
+	// register to a pre-allocated spill buffer (not the stack).
+	// This avoids modifying RSP, which would break phi stack offsets.
+	SpillStack    []spillEntry
+	RegOwners     [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	SpillBuf           [64]int64 // pre-allocated spill buffer (heap-stable, not on stack)
+	SpillTop           int       // high-water mark in SpillBuf (next fresh slot)
+	spillFreeList      []int     // recycled SpillBuf slot indices
+	ProtectedRegs      uint64   // bitmask of registers that must not be spilled
+	ProtectedRegCounts [16]int  // per-register protection refcount (supports nested protection)
+	// EvictedCounts tracks how many times each register was evicted by AllocReg.
+	// When AllocReg spills register R and returns R as a fresh register, both the
+	// old holder and the new holder think they own R. EvictedCounts[R] counts the
+	// pending "burns": FreeReg(R) decrements the count without adding to FreeRegs,
+	// ensuring only the final FreeReg call (from the real live holder) returns R.
+	EvictedCounts [16]int
+}
+
+// ProtectReg marks a register as non-spillable by AllocReg.
+// Multiple callers can protect the same register; it becomes spillable
+// again only when all protections are removed via UnprotectReg.
+func (ctx *JITContext) ProtectReg(r Reg) {
+	ctx.ProtectedRegCounts[r]++
+	ctx.ProtectedRegs |= 1 << uint(r)
+}
+
+// UnprotectReg removes one protection from a register. When the last
+// protection is removed, the register becomes spillable again.
+func (ctx *JITContext) UnprotectReg(r Reg) {
+	if ctx.ProtectedRegCounts[r] > 0 {
+		ctx.ProtectedRegCounts[r]--
+		if ctx.ProtectedRegCounts[r] == 0 {
+			ctx.ProtectedRegs &^= 1 << uint(r)
+		}
+	}
 }
 
 // AllocReg picks a free register from the bitmap and marks it used.
+// If no registers are free, spills the highest-numbered in-use register
+// to a pre-allocated buffer and returns it.
 func (ctx *JITContext) AllocReg() Reg {
-	if ctx.FreeRegs == 0 {
-		panic("jit: no free registers")
+	if ctx.FreeRegs != 0 {
+		// Normal path: pick lowest free bit
+		bit := ctx.FreeRegs & (-ctx.FreeRegs)
+		ctx.FreeRegs &^= bit
+		r := Reg(0)
+		for b := bit; b > 1; b >>= 1 {
+			r++
+		}
+		return r
 	}
-	// find lowest set bit
-	bit := ctx.FreeRegs & (-ctx.FreeRegs)
-	ctx.FreeRegs &^= bit
-	r := Reg(0)
-	for b := bit; b > 1; b >>= 1 {
-		r++
+	// Spill path: find highest-numbered in-use register and evict it.
+	// Save to SpillBuf (a pre-allocated heap buffer) instead of modifying RSP.
+	// This avoids stack pointer changes that would break phi slot offsets.
+	// Exclude protected registers (caller values needed across inline boundaries).
+	spillable := ctx.AllRegs &^ ctx.FreeRegs &^ ctx.ProtectedRegs
+	if spillable == 0 {
+		panic("jit: no free registers and no spillable registers")
 	}
+	// Pick highest bit (least likely to be needed immediately)
+	var r Reg
+	for bit := Reg(15); bit > 0; bit-- {
+		if spillable&(1<<uint(bit)) != 0 {
+			r = bit
+			break
+		}
+	}
+	// Allocate a spill slot: prefer recycled slots to keep SpillTop low.
+	var slot int
+	if n := len(ctx.spillFreeList); n > 0 {
+		slot = ctx.spillFreeList[n-1]
+		ctx.spillFreeList = ctx.spillFreeList[:n-1]
+	} else {
+		slot = ctx.SpillTop
+		if slot >= len(ctx.SpillBuf) {
+			panic("jit: spill buffer overflow")
+		}
+		ctx.SpillTop++
+	}
+	spillAddr := uint64(uintptr(unsafe.Pointer(&ctx.SpillBuf[slot])))
+	ctx.W.EmitMovRegImm64(RegR11, spillAddr)
+	ctx.W.EmitStoreRegMem(r, RegR11, 0) // MOV [R11], reg
+	ctx.SpillStack = append(ctx.SpillStack, spillEntry{reg: r, slot: slot})
+	// Increment eviction count: the old holder's FreeReg(r) will burn this
+	// count instead of returning r to FreeRegs, preventing a double-free.
+	ctx.EvictedCounts[r]++
 	return r
 }
 
 // FreeReg returns a register to the free pool.
+// If the register was evicted by AllocReg (EvictedCounts[r] > 0), this call
+// "burns" one eviction token and reclaims the spill slot. The register stays
+// live in the new holder. Only the final FreeReg call (EvictedCounts[r] == 0)
+// actually releases the register back to FreeRegs.
 func (ctx *JITContext) FreeReg(r Reg) {
+	if ctx.EvictedCounts[r] > 0 {
+		ctx.EvictedCounts[r]--
+		// Reclaim the oldest SpillStack slot for this register so it can
+		// be reused, preventing spill buffer overflow on long functions.
+		for i, e := range ctx.SpillStack {
+			if e.reg == r {
+				ctx.spillFreeList = append(ctx.spillFreeList, e.slot)
+				ctx.SpillStack = append(ctx.SpillStack[:i], ctx.SpillStack[i+1:]...)
+				break
+			}
+		}
+		return
+	}
 	ctx.FreeRegs |= 1 << uint(r)
+	ctx.RegOwners[r] = nil
+}
+
+// BindReg associates a register with a JITValueDesc owner for spill tracking.
+// Call this after placing a value in a register so AllocReg can evict it.
+func (ctx *JITContext) BindReg(r Reg, desc *JITValueDesc) {
+	ctx.RegOwners[r] = desc
+}
+
+// TransferReg is called by the generated alias check when the result descriptor
+// reuses the same hardware register as an input descriptor (which will be set to
+// LocNone). If AllocReg had to evict that register to produce this fresh copy,
+// burn one eviction token so the final FreeReg from the new holder correctly
+// returns the register to the free pool.
+func (ctx *JITContext) TransferReg(r Reg) {
+	if ctx.EvictedCounts[r] > 0 {
+		ctx.EvictedCounts[r]--
+		for i, e := range ctx.SpillStack {
+			if e.reg == r {
+				ctx.spillFreeList = append(ctx.spillFreeList, e.slot)
+				ctx.SpillStack = append(ctx.SpillStack[:i], ctx.SpillStack[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
+// EnsureReg checks if a descriptor was spilled and restores it.
+// If the value is still in a register, this is a no-op.
+// If spilled, allocates a new register, emits a load, and updates the desc.
+func (ctx *JITContext) EnsureReg(desc *JITValueDesc) {
+	if desc.Loc != LocStack {
+		return
+	}
+	r := ctx.AllocReg()
+	// Load from spill buffer using the absolute address stored in MemPtr
+	ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
+	ctx.W.EmitMovRegMem(r, RegR11, 0)
+	desc.Loc = LocReg
+	desc.Reg = r
+	ctx.RegOwners[r] = desc
+}
+
+// RestoreSpills restores all spilled registers from the spill buffer in reverse order.
+// Since spills use a pre-allocated buffer (not RSP), this doesn't modify the stack pointer.
+func (ctx *JITContext) RestoreSpills() {
+	for i := len(ctx.SpillStack) - 1; i >= 0; i-- {
+		slot := ctx.SpillStack[i].slot
+		spillAddr := uint64(uintptr(unsafe.Pointer(&ctx.SpillBuf[slot])))
+		ctx.W.EmitMovRegImm64(RegR11, spillAddr)
+		ctx.W.EmitMovRegMem(ctx.SpillStack[i].reg, RegR11, 0)
+	}
+	ctx.SpillStack = nil
+	ctx.SpillTop = 0
 }
 
 // FreeDesc releases any registers held by a value descriptor.
@@ -206,6 +359,10 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	case LocRegPair:
 		ctx.FreeReg(desc.Reg)
 		ctx.FreeReg(desc.Reg2)
+	case LocStack:
+		// Value was spilled — clean up spill slot.
+		// For simplicity, we just mark it freed; the spill stack
+		// is cleaned up in bulk by RestoreSpills.
 	}
 	desc.Loc = LocNone
 }
@@ -219,6 +376,11 @@ func JITBuildMergeClosure(mfn func(...Scmer) Scmer) func(Scmer, Scmer) Scmer {
 // GoFuncAddr returns the entry point address of a Go function value.
 func GoFuncAddr(fn interface{}) uint64 {
 	return uint64(reflect.ValueOf(fn).Pointer())
+}
+
+// ConcatStrings concatenates two Go strings. Used as a JIT helper for string + string.
+func ConcatStrings(a, b string) string {
+	return a + b
 }
 
 // GoABIIntRegs lists integer argument/result registers in Go internal ABI order.
@@ -279,7 +441,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []Reg, numResultWord
 	}
 	for i := 0; i < numResultWords; i++ {
 		offset := int32(paddingSize + len(liveRegs)*8 + i*8)
-		ctx.W.emitStoreRegMem(GoABIIntRegs[i], RegRSP, offset)
+		ctx.W.EmitStoreRegMem(GoABIIntRegs[i], RegRSP, offset)
 	}
 
 	// Restore (POP in reverse)
