@@ -324,6 +324,7 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
+	(define scalar_result_cache (newsession))
 
 	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
 	(define _cd_is_subquery (lambda (sym) (match sym
@@ -471,26 +472,50 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 							expr
 						)))
 						(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
+						/* Build-time key: hash of tables+fields+condition to identify identical subqueries */
+						(define _sq_build_key (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
+						/* Extract (outer sym) references from an expression for runtime cache key */
+						(define _sq_extract_outer_syms (lambda (expr) (match expr
+							(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
+								args
+								(merge (map args _sq_extract_outer_syms)))
+							'())))
+						(define _sq_outer_syms (merge (list (_sq_extract_outer_syms condition2) (_sq_extract_outer_syms fields2))))
+						/* Runtime key expr: wrap (outer sym) in an immediately-invoked lambda (IILF).
+						The lambda captures the outer scan call env as proc.En, so (outer sym) can
+						use the suffix fallback to find prefixed variables (e.g. id:t3.id for t3.id).
+						Using (outer sym) avoids make_col_replacer transforming (get_column ...) forms
+						in GROUP BY context, and replace_column_alias does not recurse into the lambda. */
+						(define _sq_rt_key_expr (cons (quote list) (cons _sq_build_key
+							(map _sq_outer_syms (lambda (sym)
+								(list (list (quote lambda) '() (list (quote outer) sym))))))))
 						(list (quote begin)
-							(list (quote set) (symbol "accsess") (list (quote newsession)))
-							(list (symbol "accsess") "acc" scalar_neutral)
-							(list (quote set) (symbol "__scalar_resultrow")
-								(list (quote lambda) (list (symbol "row"))
-									(list (quote begin)
-										(list (symbol "accsess") "acc"
-											(list scalar_reduce
-												(list (symbol "accsess") "acc")
-												(list (quote nth) (symbol "row") 1)))
-										true
+							(list (quote set) (symbol "__sq_rt_key") _sq_rt_key_expr)
+							(list (quote set) (symbol "__sq_cached") (list scalar_result_cache (symbol "__sq_rt_key")))
+							(list (quote if) (list (quote nil?) (symbol "__sq_cached"))
+								(list (quote begin)
+									(list (quote set) (symbol "accsess") (list (quote newsession)))
+									(list (symbol "accsess") "acc" scalar_neutral)
+									(list (quote set) (symbol "__scalar_resultrow")
+										(list (quote lambda) (list (symbol "row"))
+											(list (quote begin)
+												(list (symbol "accsess") "acc"
+													(list scalar_reduce
+														(list (symbol "accsess") "acc")
+														(list (quote nth) (symbol "row") 1)))
+												true
+											)
+										)
 									)
-								)
-							)
-							subplan
-							(list (quote if)
-								(list (quote equal?) (list (symbol "accsess") "acc") scalar_neutral)
-								nil
-								(list (symbol "accsess") "acc"))
-						)
+									subplan
+									(list (quote set) (symbol "__sq_result")
+										(list (quote if)
+											(list (quote equal?) (list (symbol "accsess") "acc") scalar_neutral)
+											nil
+											(list (symbol "accsess") "acc")))
+									(list scalar_result_cache (symbol "__sq_rt_key") (symbol "__sq_result"))
+									(symbol "__sq_result"))
+								(symbol "__sq_cached")))
 					)
 				)
 			)
@@ -918,7 +943,7 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 										_ (list (quote outer) (replace_column_alias outer_arg))
 									)
 								)
-								(cons sym args) /* function call */ (cons sym (map args replace_column_alias))
+								(cons sym args) /* function call */ (cons (replace_column_alias sym) (map args replace_column_alias))
 								expr
 							)))
 							/* prefix all table aliases and transform their joinexprs */
