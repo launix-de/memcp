@@ -1403,11 +1403,12 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									"filter" '((quote lambda) (list (symbol exists_col_name)) '('> (symbol exists_col_name) 0)))
 								'()))))
 
-						/* exists column: counts ≥1 matching source row per group key (braking=1) */
-						(define exists_plan (if (not needs_exists) '()
+						/* exists column: counts ≥1 matching source row per group key (braking=1).
+						CompressFiltered by aggregate filter lazily computes exists values on demand. */
+						(define exists_plan (if (not needs_exists) nil
 							(if is_fk_reuse
 								/* FK reuse: scan child table, check FK=PK equality + WHERE */
-								(list '((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
+								'((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
 									'(list fk_pk_col)
 									'((quote lambda) (list (symbol fk_pk_col))
 										(scan_wrapper 'scan schema tbl
@@ -1417,9 +1418,9 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 													(list '((quote equal?) (symbol (concat tblvar "." fk_child_col)) '((quote outer) (symbol fk_pk_col))))))))
 											'(list)
 											'((quote lambda) '() 1)
-											'+ 0 1 isOuter))))
+											'+ 0 1 isOuter)))
 								/* Normal keytable: scan source with WHERE + group key equality */
-								(list '((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
+								'((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
 									(cons list (map stage_group (lambda (col) (concat col))))
 									'((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
 										(scan_wrapper 'scan schema tbl
@@ -1429,7 +1430,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 													(map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))))
 											'(list)
 											'((quote lambda) '() 1)
-											'+ 0 1 isOuter)))))))
+											'+ 0 1 isOuter))))))
 
 						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 							(set cols (extract_columns_for_tblvar tblvar expr))
@@ -1452,7 +1453,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 
 						(define compute_plan
 							'('time (if needs_exists
-								(list 'begin (car exists_plan) (cons 'parallel agg_plans))
+								(list 'begin exists_plan (cons 'parallel agg_plans))
 								(cons 'parallel agg_plans)) "compute"))
 
 						/* global aggregates (stage_group='(1)): invalidate computed columns before recompute
@@ -1475,7 +1476,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(list 'begin keytable_init cleanup_plan
 							(if is_fk_reuse nil
 								(list 'if (list 'equal? 0 (list 'scan_estimate schema grouptbl))
-									(make_collect true)
+									(make_collect false)
 									nil))
 							invalidation_plan compute_plan grouped_plan)
 				))
