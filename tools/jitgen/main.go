@@ -440,6 +440,24 @@ func (g *codeGen) allocLabel() string {
 	return name
 }
 
+// emitAllocRegExcept emits a ctx.AllocRegExcept(gv.Reg) when guard is true and
+// gv is a register-located descriptor, otherwise emits ctx.AllocReg().
+//
+// This prevents the eviction-alias bug: without the guard, AllocReg() might
+// evict gv.Reg and return it as the new register, making any subsequent
+// EmitMovRegReg(dst, gv.Reg) a no-op self-copy (and letting the following
+// ALU op destroy the original value).
+//
+// The generated one-liner is architecture-agnostic and hides the
+// protect/unprotect implementation detail from the caller.
+func (g *codeGen) emitAllocRegExcept(dstVar, indent string, guard bool, gv genVal) {
+	if guard && gv.isDesc {
+		g.emit("%s%s := ctx.AllocRegExcept(%s.Reg)", indent, dstVar, gv.goVar)
+	} else {
+		g.emit("%s%s := ctx.AllocReg()", indent, dstVar)
+	}
+}
+
 func (g *codeGen) emit(format string, a ...any) {
 	fmt.Fprintf(&g.w, "\t\t\t"+format+"\n", a...)
 }
@@ -1182,6 +1200,8 @@ func (g *codeGen) ssaValueUsesRemaining(name string) int {
 
 // flushPhiProtections emits UnprotectReg for all phi-loaded registers
 // collected during the current block's Phi instructions.
+// Phi registers are protected during loading to prevent mutual eviction and
+// to keep them live until the block body starts.
 func (g *codeGen) flushPhiProtections() {
 	for _, rv := range g.phiProtectedRegVars {
 		g.emit("ctx.UnprotectReg(%s)", rv)
@@ -1560,25 +1580,21 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				switch elemSize {
 				case "8":
 					// Single 8-byte element → LocReg
-					// Protect scratch so AllocReg cannot spill it and alias rv==scratch.
-					// Without this, FreeReg(scratch) would LIFO-restore and clobber rv.
+					// AllocRegExcept(scratch) prevents the eviction-alias bug: AllocReg might
+					// otherwise return scratch itself, making EmitMovRegMem a self-load.
 					rv := g.allocReg()
-					g.emit("ctx.ProtectReg(%s)", scratch)
-					g.emit("%s := ctx.AllocReg()", rv)
-					g.emit("ctx.UnprotectReg(%s)", scratch)
+					g.emit("%s := ctx.AllocRegExcept(%s)", rv, scratch)
 					g.emit("ctx.W.EmitMovRegMem(%s, %s, 0)", rv, scratch)
 					g.emit("ctx.FreeReg(%s)", scratch)
 					g.emit("%s := JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
 					g.vals[name] = genVal{goVar: dv, isDesc: true}
 				default:
 					// 16-byte element (Scmer pair) → LocRegPair
-					// Protect scratch across both AllocReg calls for the same reason.
+					// AllocRegExcept prevents scratch from being evicted for either alloc.
 					ptrReg := g.allocReg()
 					auxReg := g.allocReg()
-					g.emit("ctx.ProtectReg(%s)", scratch)
-					g.emit("%s := ctx.AllocReg()", ptrReg)
-					g.emit("%s := ctx.AllocReg()", auxReg)
-					g.emit("ctx.UnprotectReg(%s)", scratch)
+					g.emit("%s := ctx.AllocRegExcept(%s)", ptrReg, scratch)
+					g.emit("%s := ctx.AllocRegExcept(%s, %s)", auxReg, scratch, ptrReg)
 					g.emit("ctx.W.EmitMovRegMem(%s, %s, 0)", ptrReg, scratch)
 					g.emit("ctx.W.EmitMovRegMem(%s, %s, 8)", auxReg, scratch)
 					g.emit("ctx.FreeReg(%s)", scratch)
@@ -1623,9 +1639,7 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				// Load value
 				// Protect scratch so AllocReg cannot spill it and alias rv==scratch.
 				rv := g.allocReg()
-				g.emit("ctx.ProtectReg(%s)", scratch)
-				g.emit("%s := ctx.AllocReg()", rv)
-				g.emit("ctx.UnprotectReg(%s)", scratch)
+				g.emit("%s := ctx.AllocRegExcept(%s)", rv, scratch)
 				g.emit("ctx.W.EmitMovRegMem(%s, %s, 0)", rv, scratch)
 				g.emit("ctx.FreeReg(%s)", scratch)
 				g.emit("%s := JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
@@ -1967,9 +1981,10 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("if %s.Loc == LocImm {", xVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %d)}", dv, xVal.goVar, goOp, cmpVal)
 				g.emit("} else {")
-				// Fresh register for result — CMP is non-destructive, SetCC writes only the target
+				// Fresh register for result — CMP is non-destructive, SetCC writes only the target.
+				// Protect xVal.Reg when multi-use: AllocReg must not return xVal.Reg (SetCC would clobber it).
 				rv := g.allocReg()
-				g.emit("\t%s := ctx.AllocReg()", rv)
+				g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
 				g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, %d)", xVal.goVar, cmpVal)
 				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv, cc)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
@@ -1980,9 +1995,9 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOp, yVal.goVar)
 				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
-				// y is imm, x is reg → CmpRegImm32
+				// y is imm, x is reg → CmpRegImm32. Protect xVal.Reg when multi-use.
 				rv := g.allocReg()
-				g.emit("\t%s := ctx.AllocReg()", rv)
+				g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
 				g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, int32(%s.Imm.Int()))", xVal.goVar, yVal.goVar)
 				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv, cc)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
@@ -1997,8 +2012,9 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv2, cc)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv2)
 				g.emit("} else {")
+				// Both regs: protect xVal.Reg when multi-use (SetCC would clobber if rv3==xVal.Reg).
 				rv3 := g.allocReg()
-				g.emit("\t%s := ctx.AllocReg()", rv3)
+				g.emitAllocRegExcept(rv3, "\t", xMultiUse, xVal)
 				g.emit("\tctx.W.EmitCmpInt64(%s.Reg, %s.Reg)", xVal.goVar, yVal.goVar)
 				g.emit("\tctx.W.EmitSetcc(%s, %s)", rv3, cc)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv3)
@@ -2018,14 +2034,14 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 					// x is needed again → result must go into a fresh register
 					if v.Op == token.SUB {
 						// SUB is non-commutative: copy x, then subtract const
-						g.emit("\tscratch := ctx.AllocReg()")
+						g.emitAllocRegExcept("scratch", "\t", true, xVal)
 						g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
 						g.emit("\tctx.W.EmitSubInt64(scratch, RegR11)")
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
-						g.emit("\tscratch := ctx.AllocReg()")
+						g.emitAllocRegExcept("scratch", "\t", true, xVal)
 						g.emit("\tctx.W.EmitMovRegImm64(scratch, uint64(%d))", cmpVal)
 						g.emit("\tctx.W.%s(scratch, %s.Reg)", aluOp, xVal.goVar)
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
@@ -2048,7 +2064,7 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 					g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", yVal.goVar, yVal.goVar)
 					if xMultiUse {
 						copyReg := g.allocReg()
-						g.emit("\t%s := ctx.AllocReg()", copyReg)
+						g.emitAllocRegExcept(copyReg, "\t", true, xVal)
 						g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
 					} else {
@@ -2071,14 +2087,14 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				if xMultiUse {
 					if v.Op == token.SUB {
 						// SUB is non-commutative: copy x, then subtract y
-						g.emit("\tscratch := ctx.AllocReg()")
+						g.emitAllocRegExcept("scratch", "\t", true, xVal)
 						g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", yVal.goVar)
 						g.emit("\tctx.W.EmitSubInt64(scratch, RegR11)")
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
-						g.emit("\tscratch := ctx.AllocReg()")
+						g.emitAllocRegExcept("scratch", "\t", true, xVal)
 						g.emit("\tctx.W.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", yVal.goVar)
 						g.emit("\tctx.W.%s(scratch, %s.Reg)", aluOp, xVal.goVar)
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
@@ -2091,7 +2107,7 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emit("\t%s := ctx.AllocReg()", copyReg)
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
 					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.W.%s(%s, %s.Reg)", aluOp, copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
@@ -2119,7 +2135,7 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				if xMultiUse {
 					// Copy to fresh register (xVal is needed again)
 					copyReg := g.allocReg()
-					g.emit("\t%s := ctx.AllocReg()", copyReg)
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
 					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					if divisor > 0 && (divisor&(divisor-1)) == 0 {
 						shift := 0
@@ -2164,7 +2180,7 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emit("\t%s := ctx.AllocReg()", copyReg)
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
 					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					if divisor > 0 && (divisor&(divisor-1)) == 0 {
 						g.emit("\tctx.W.EmitAndRegImm32(%s, %d)", copyReg, divisor-1)
@@ -2209,7 +2225,7 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emit("\t%s := ctx.AllocReg()", copyReg)
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
 					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.W.%s(%s, %d)", immFn, copyReg, shiftAmt)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
@@ -2227,7 +2243,7 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				// y (shift amount) is const
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emit("\t%s := ctx.AllocReg()", copyReg)
+					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
 					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.W.%s(%s, uint8(%s.Imm.Int()))", immFn, copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
@@ -2243,7 +2259,7 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 				g.emit("\t\tshiftSrc := %s.Reg", xVal.goVar)
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emit("\t\t%s := ctx.AllocReg()", copyReg)
+					g.emitAllocRegExcept(copyReg, "\t\t", true, xVal)
 					g.emit("\t\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\t\tshiftSrc = %s", copyReg)
 				} else {
@@ -2330,11 +2346,17 @@ func (g *codeGen) emitInstr(instr ssa.Instruction) {
 
 	case *ssa.Phi:
 		// Phi values live on the stack. Load into a temp register on each read.
-		// Protect the register so subsequent AllocReg calls (e.g. for other
-		// phi loads at the same convergence point) don't spill it.
+		// Use AllocRegExcept(prev...) so loading phi N does not evict any
+		// already-loaded phi register (mutual exclusion during loading).
+		// Then ProtectReg keeps each register live until the first non-phi
+		// instruction, preventing subsequent AllocReg calls from evicting it.
 		if phiOff, ok := g.phiRegs[name]; ok {
 			rv := g.allocReg()
-			g.emit("%s := ctx.AllocReg()", rv)
+			if len(g.phiProtectedRegVars) == 0 {
+				g.emit("%s := ctx.AllocReg()", rv)
+			} else {
+				g.emit("%s := ctx.AllocRegExcept(%s)", rv, strings.Join(g.phiProtectedRegVars, ", "))
+			}
 			g.emit("ctx.EmitLoadFromStack(%s, %s)", rv, phiOff)
 			g.emit("ctx.ProtectReg(%s)", rv)
 			g.phiProtectedRegVars = append(g.phiProtectedRegVars, rv)

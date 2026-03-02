@@ -64,6 +64,6 @@ func init_vector() {
 			}
 			return NewFloat(result)
 		}, true, false, nil,
-		nil /* TODO: unsupported call: asSlice(t1, "dot v1":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 }

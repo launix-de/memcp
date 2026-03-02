@@ -37,12 +37,14 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 	}
 
+	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
+		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
+		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
+		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
 	ctx := &scm.JITContext{
-		W: w,
-		FreeRegs: (1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
-			(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
-			(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
-			(1 << uint(scm.RegR11)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)),
+		W:        w,
+		FreeRegs: freeRegs,
+		AllRegs:  freeRegs,
 	}
 
 	// Entry: Go ABI — RAX = int64 index argument
@@ -113,13 +115,15 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 
 	// R15 = loop counter, R14 = accumulator (SUM), R12 = slice base (unused but reserved)
 	// R13 = thisptr for LocReg case
+	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
+		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
+		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
+		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)))
+	// R11 = scratch, R14 = accumulator, R15 = loop counter — all reserved
 	ctx := &scm.JITContext{
-		W: w,
-		FreeRegs: (1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
-			(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
-			(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
-			(1 << uint(scm.RegR11)) | (1 << uint(scm.RegR13)),
-		// R14 = accumulator, R15 = loop counter — both reserved
+		W:        w,
+		FreeRegs: freeRegs,
+		AllRegs:  freeRegs,
 	}
 
 	var thisptr scm.JITValueDesc

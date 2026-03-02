@@ -324,6 +324,26 @@ func (ctx *JITContext) TransferReg(r Reg) {
 	}
 }
 
+// AllocRegExcept allocates a fresh register guaranteed not to be any of the
+// excluded registers. Use this when the new register will immediately receive
+// a copy FROM one of the excluded registers — without this guard, AllocReg()
+// might evict an excluded register and return it, making the subsequent copy
+// a no-op self-move (and letting any ALU op on the result destroy the source).
+//
+// Architecture-agnostic: works equally for amd64 (16 regs), arm64 (31 regs),
+// riscv64 (32 regs), etc. The protect/unprotect dance is an implementation
+// detail hidden from callers.
+func (ctx *JITContext) AllocRegExcept(excluded ...Reg) Reg {
+	for _, r := range excluded {
+		ctx.ProtectReg(r)
+	}
+	r := ctx.AllocReg()
+	for _, r := range excluded {
+		ctx.UnprotectReg(r)
+	}
+	return r
+}
+
 // EnsureReg checks if a descriptor was spilled and restores it.
 // If the value is still in a register, this is a no-op.
 // If spilled, allocates a new register, emits a load, and updates the desc.
