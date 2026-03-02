@@ -1,0 +1,182 @@
+# FK→PK GROUP BY reuse tests
+# When GROUP BY targets a single-column FK, the parent (referenced) table is
+# reused as the group table instead of creating a temp keytable.
+# Tests verify correctness and that no temp keytable is created.
+
+metadata:
+  version: "1.0"
+  description: "FK→PK reuse: GROUP BY on FK uses parent table directly"
+
+test_cases:
+  # --- Setup: parent and child tables with FK ---
+  - name: "Drop fkr_orders if exists"
+    sql: "DROP TABLE IF EXISTS fkr_orders"
+
+  - name: "Drop fkr_customers if exists"
+    sql: "DROP TABLE IF EXISTS fkr_customers"
+
+  - name: "Create parent table (customers)"
+    sql: "CREATE TABLE fkr_customers (id INT PRIMARY KEY, name VARCHAR(50))"
+
+  - name: "Create child table with FK"
+    sql: |
+      CREATE TABLE fkr_orders (
+        id INT PRIMARY KEY,
+        customer_id INT,
+        amount INT,
+        status VARCHAR(20),
+        FOREIGN KEY (customer_id) REFERENCES fkr_customers(id)
+      )
+
+  - name: "Insert customers"
+    sql: |
+      INSERT INTO fkr_customers (id, name) VALUES
+        (1, 'Alice'),
+        (2, 'Bob'),
+        (3, 'Charlie'),
+        (4, 'Diana')
+
+  - name: "Insert orders"
+    sql: |
+      INSERT INTO fkr_orders (id, customer_id, amount, status) VALUES
+        (10, 1, 100, 'paid'),
+        (11, 1, 200, 'paid'),
+        (12, 2, 50, 'pending'),
+        (13, 2, 150, 'paid'),
+        (14, 3, 300, 'paid')
+
+  # --- Basic GROUP BY on FK column ---
+  - name: "GROUP BY FK: COUNT orders per customer"
+    sql: "SELECT customer_id, COUNT(*) AS c FROM fkr_orders GROUP BY customer_id ORDER BY customer_id"
+    expect:
+      rows: 3
+      data:
+        - customer_id: 1
+          c: 2
+        - customer_id: 2
+          c: 2
+        - customer_id: 3
+          c: 1
+
+  - name: "GROUP BY FK: SUM amount per customer"
+    sql: "SELECT customer_id, SUM(amount) AS s FROM fkr_orders GROUP BY customer_id ORDER BY customer_id"
+    expect:
+      rows: 3
+      data:
+        - customer_id: 1
+          s: 300
+        - customer_id: 2
+          s: 200
+        - customer_id: 3
+          s: 300
+
+  # --- Empty groups: Diana (id=4) has no orders -> must NOT appear ---
+  - name: "FK reuse filters empty groups: Diana excluded"
+    sql: "SELECT customer_id, SUM(amount) AS s FROM fkr_orders GROUP BY customer_id ORDER BY customer_id"
+    expect:
+      rows: 3
+
+  # --- WHERE + GROUP BY on FK ---
+  - name: "WHERE + GROUP BY FK: only paid orders"
+    sql: "SELECT customer_id, SUM(amount) AS s FROM fkr_orders WHERE status = 'paid' GROUP BY customer_id ORDER BY customer_id"
+    expect:
+      rows: 3
+      data:
+        - customer_id: 1
+          s: 300
+        - customer_id: 2
+          s: 150
+        - customer_id: 3
+          s: 300
+
+  # --- HAVING + GROUP BY on FK ---
+  - name: "HAVING + GROUP BY FK: only customers with total > 200"
+    sql: "SELECT customer_id, SUM(amount) AS s FROM fkr_orders GROUP BY customer_id HAVING SUM(amount) > 200 ORDER BY customer_id"
+    expect:
+      rows: 2
+      data:
+        - customer_id: 1
+          s: 300
+        - customer_id: 3
+          s: 300
+
+  # --- Multiple aggregates ---
+  - name: "Multiple aggregates: COUNT + SUM"
+    sql: "SELECT customer_id, COUNT(*) AS c, SUM(amount) AS s FROM fkr_orders GROUP BY customer_id ORDER BY customer_id"
+    expect:
+      rows: 3
+      data:
+        - customer_id: 1
+          c: 2
+          s: 300
+        - customer_id: 2
+          c: 2
+          s: 200
+        - customer_id: 3
+          c: 1
+          s: 300
+
+  # --- Verify parent table integrity after GROUP BY ---
+  - name: "Parent table still has all 4 rows (including empty-group Diana)"
+    sql: "SELECT COUNT(*) AS c FROM fkr_customers"
+    expect:
+      rows: 1
+      data:
+        - c: 4
+
+  # --- DML: INSERT new order and verify update ---
+  - name: "DML: Insert order for Diana (id=4, was empty group)"
+    sql: "INSERT INTO fkr_orders (id, customer_id, amount, status) VALUES (15, 4, 75, 'paid')"
+
+  - name: "After INSERT: Diana appears in GROUP BY"
+    sql: "SELECT customer_id, SUM(amount) AS s FROM fkr_orders GROUP BY customer_id ORDER BY customer_id"
+    expect:
+      rows: 4
+      data:
+        - customer_id: 1
+          s: 300
+        - customer_id: 2
+          s: 200
+        - customer_id: 3
+          s: 300
+        - customer_id: 4
+          s: 75
+
+  # --- DML: DELETE all orders for customer 3 -> should disappear ---
+  - name: "DML: Delete all orders for customer 3"
+    sql: "DELETE FROM fkr_orders WHERE customer_id = 3"
+
+  - name: "After DELETE: customer 3 excluded from GROUP BY"
+    sql: "SELECT customer_id, SUM(amount) AS s FROM fkr_orders GROUP BY customer_id ORDER BY customer_id"
+    expect:
+      rows: 3
+      data:
+        - customer_id: 1
+          s: 300
+        - customer_id: 2
+          s: 200
+        - customer_id: 4
+          s: 75
+
+  # --- DML: UPDATE amount ---
+  - name: "DML: Update order amount"
+    sql: "UPDATE fkr_orders SET amount = 500 WHERE id = 10"
+
+  - name: "After UPDATE: SUM reflects change"
+    sql: "SELECT customer_id, SUM(amount) AS s FROM fkr_orders GROUP BY customer_id ORDER BY customer_id"
+    expect:
+      rows: 3
+      data:
+        - customer_id: 1
+          s: 700
+        - customer_id: 2
+          s: 200
+        - customer_id: 4
+          s: 75
+
+  # --- Cleanup ---
+  - name: "Cleanup fkr_orders"
+    sql: "DROP TABLE IF EXISTS fkr_orders"
+
+  - name: "Cleanup fkr_customers"
+    sql: "DROP TABLE IF EXISTS fkr_customers"

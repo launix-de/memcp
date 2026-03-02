@@ -651,12 +651,12 @@ func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
 // For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
 type ShardMapReducer struct {
 	shard           *storageShard
-	mainCols        []ColumnStorage          // direct main storage access (nil for $update/$invalidate cols)
-	colNames        []string                 // column names for delta getDelta access
-	isUpdate        []bool                   // true for $update columns
-	isInvalidate    []bool                   // true for $invalidate: columns
-	invalidateProxy []*StorageComputeProxy   // proxy per $invalidate col (nil if not found)
-	args            []scm.Scmer              // pre-allocated args buffer
+	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate cols)
+	colNames        []string               // column names for delta getDelta access
+	isUpdate        []bool                 // true for $update columns
+	isInvalidate    []bool                 // true for $invalidate: columns
+	invalidateProxy []*StorageComputeProxy // proxy per $invalidate col (nil if not found)
+	args            []scm.Scmer            // pre-allocated args buffer
 	mapFn           func(...scm.Scmer) scm.Scmer
 	reduceFn        func(...scm.Scmer) scm.Scmer
 	mapScmer        scm.Scmer // original Scmer for network serialization

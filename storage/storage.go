@@ -913,9 +913,13 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
-			if db == nil { return scm.NewBool(false) }
+			if db == nil {
+				return scm.NewBool(false)
+			}
 			t := db.GetTable(scm.String(a[1]))
-			if t == nil { return scm.NewBool(false) }
+			if t == nil {
+				return scm.NewBool(false)
+			}
 			colName := scm.String(a[2])
 			for _, s := range t.ActiveShards() {
 				s.mu.RLock()
@@ -940,18 +944,27 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			srcDB := GetDatabase(scm.String(a[0]))
-			if srcDB == nil { return scm.NewBool(false) }
+			if srcDB == nil {
+				return scm.NewBool(false)
+			}
 			srcTable := srcDB.GetTable(scm.String(a[1]))
-			if srcTable == nil { return scm.NewBool(false) }
+			if srcTable == nil {
+				return scm.NewBool(false)
+			}
 			pjSchema := scm.String(a[2])
 			pjTable := scm.String(a[3])
 			for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 				triggerName := ".prejoin:" + pjTable + "|" + srcTable.Name + "|" + timing.String()
 				exists := false
 				for _, tr := range srcTable.Triggers {
-					if tr.Name == triggerName { exists = true; break }
+					if tr.Name == triggerName {
+						exists = true
+						break
+					}
 				}
-				if exists { continue }
+				if exists {
+					continue
+				}
 				srcTable.AddTrigger(TriggerDescription{
 					Name:     triggerName,
 					Timing:   timing,
@@ -982,9 +995,13 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			baseDB := GetDatabase(scm.String(a[0]))
-			if baseDB == nil { return scm.NewBool(false) }
+			if baseDB == nil {
+				return scm.NewBool(false)
+			}
 			baseTable := baseDB.GetTable(scm.String(a[1]))
-			if baseTable == nil { return scm.NewBool(false) }
+			if baseTable == nil {
+				return scm.NewBool(false)
+			}
 			ktSchema := scm.String(a[2])
 			ktName := scm.String(a[3])
 			tblvar := scm.String(a[4])
@@ -1132,9 +1149,14 @@ func Init(en scm.Env) {
 				triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + td.timing.String()
 				exists := false
 				for _, tr := range baseTable.Triggers {
-					if tr.Name == triggerName { exists = true; break }
+					if tr.Name == triggerName {
+						exists = true
+						break
+					}
 				}
-				if exists { continue }
+				if exists {
+					continue
+				}
 				baseTable.AddTrigger(TriggerDescription{
 					Name:     triggerName,
 					Timing:   td.timing,
@@ -1156,9 +1178,13 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
-			if db == nil { return scm.NewBool(false) }
+			if db == nil {
+				return scm.NewBool(false)
+			}
 			tbl := db.GetTable(scm.String(a[1]))
-			if tbl == nil { return scm.NewBool(false) }
+			if tbl == nil {
+				return scm.NewBool(false)
+			}
 			atomic.StoreInt64(&tbl.leaseUntil, time.Now().Add(time.Second).UnixNano())
 			return scm.NewBool(true)
 		}, false, false, nil,
@@ -1174,9 +1200,13 @@ func Init(en scm.Env) {
 		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
-			if db == nil { return scm.NewNil() }
+			if db == nil {
+				return scm.NewNil()
+			}
 			tbl := db.GetTable(scm.String(a[1]))
-			if tbl == nil { return scm.NewNil() }
+			if tbl == nil {
+				return scm.NewNil()
+			}
 			col := scm.String(a[2])
 			for _, fk := range tbl.Foreign {
 				if fk.Tbl1 == tbl.Name && len(fk.Cols1) == 1 && fk.Cols1[0] == col {
