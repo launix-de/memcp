@@ -292,8 +292,9 @@ func (w *JITWriter) EmitDivFloat64(dst, src Reg) {
 
 // EmitCvtInt64ToFloat64 converts an int64 in gprSrc to float64 bits in gprSrc.
 // Uses the XMM register corresponding to gprSrc as scratch:
-//   CVTSI2SDQ xmm(gprSrc), gprSrc   — int64 → float64 in XMM
-//   MOVQ      gprSrc, xmm(gprSrc)   — extract float64 bits back to GPR
+//
+//	CVTSI2SDQ xmm(gprSrc), gprSrc   — int64 → float64 in XMM
+//	MOVQ      gprSrc, xmm(gprSrc)   — extract float64 bits back to GPR
 func (w *JITWriter) EmitCvtInt64ToFloat64(xmmDst, gprSrc Reg) {
 	xmm := xmmDst - 16 // convert to XMM index (unsigned underflow is fine)
 	rex := byte(0x48)
@@ -308,6 +309,25 @@ func (w *JITWriter) EmitCvtInt64ToFloat64(xmmDst, gprSrc Reg) {
 	w.emitBytes(0xF2, rex, 0x0F, 0x2A, modrm)
 	// MOVQ xmm → gpr (66 REX.W 0F 7E /r) — extract float64 bits to GPR
 	w.emitBytes(0x66, rex, 0x0F, 0x7E, modrm)
+}
+
+// EmitCvtFloatBitsToInt64 converts raw float64 bits in gprSrc to int64 in dst.
+// Uses XMM0 as scratch:
+//
+//	MOVQ XMM0, gprSrc
+//	CVTTSD2SI dst, XMM0
+func (w *JITWriter) EmitCvtFloatBitsToInt64(dst, gprSrc Reg) {
+	w.emitMovqGprToXmm(RegX0, gprSrc)
+	xmm := RegX0 - 16
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x04 // REX.R
+	}
+	if xmm >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xC0) | (byte(dst&7) << 3) | byte(xmm&7)
+	w.emitBytes(0xF2, rex, 0x0F, 0x2C, modrm)
 }
 
 // EmitXorpdReg emits: XORPD xmm, xmm (zero a float register)
@@ -675,6 +695,20 @@ func (w *JITWriter) emitMovqXmmToGpr(gpr, xmm Reg) {
 	}
 	modrm := byte(0xC0) | (byte(x&7) << 3) | byte(gpr&7)
 	w.emitBytes(0x66, rex, 0x0F, 0x7E, modrm)
+}
+
+// emitMovqGprToXmm emits MOVQ xmmDst, gprSrc (66 REX.W 0F 6E /r)
+func (w *JITWriter) emitMovqGprToXmm(xmm, gpr Reg) {
+	x := xmm - 16
+	rex := byte(0x48)
+	if x >= 8 {
+		rex |= 0x04 // REX.R
+	}
+	if gpr >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xC0) | (byte(x&7) << 3) | byte(gpr&7)
+	w.emitBytes(0x66, rex, 0x0F, 0x6E, modrm)
 }
 
 // emitMovqMemToXmm emits MOVQ xmmDst, [base + disp32] (F3 0F 7E /r m64)
