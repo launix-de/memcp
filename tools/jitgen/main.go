@@ -45,6 +45,8 @@ var doPatch bool
 var doWipe bool
 var verbose bool
 
+const generatedBanner = "/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */"
+
 func main() {
 	var files []string
 	for _, arg := range os.Args[1:] {
@@ -937,6 +939,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		ssaAliases:      map[string]string{},
 		topLevelPkgPath: fn.Pkg.Pkg.Path(),
 	}
+	fmt.Fprintf(&g.w, "\t\t%s\n", generatedBanner)
 	if len(fn.Params) > 0 {
 		g.paramName = fn.Params[0].Name()
 	}
@@ -1025,6 +1028,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		typeName:        typeName,
 		topLevelPkgPath: fn.Pkg.Pkg.Path(),
 	}
+	fmt.Fprintf(&g.w, "\t%s\n", generatedBanner)
 
 	// GetValue has 2 params: receiver (s *StorageXxx) and index (i uint32)
 	// Map receiver to thisptr (LocImm at JIT compile time)
@@ -1403,6 +1407,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		case *types.Basic:
 			goTypeName = t.Name()
 			switch t.Kind() {
+			case types.String:
+				// Go strings are two words: data pointer + length.
+				sizeStr = "slice"
 			case types.Bool, types.Uint8, types.Int8:
 				sizeStr = "1"
 			case types.Uint16, types.Int16:
@@ -2819,13 +2826,6 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("ctx.W.EmitByte(0xCC)") // INT3
 
 	case *ssa.Slice:
-		if g.storageMode && g.typeName == "StorageString" {
-			if srcBasic, ok := v.X.Type().Underlying().(*types.Basic); ok && srcBasic.Kind() == types.String {
-				// String slicing currently emits incorrect headers in storage mode.
-				// Force fallback for safety until string-slice lowering is fixed.
-				panic(fmt.Sprintf("Slice on string unsupported: %s", v))
-			}
-		}
 		if g.storageMode {
 			// Storage fast path: materialize a proper Go string/slice header
 			// as LocRegPair{ptr,len}. Never collapse to LocImm because Go calls
