@@ -176,7 +176,7 @@ test_cases:
 
   # --- Cleanup ---
   - name: "Cleanup fkr_orders"
-    sql: "DROP TABLE IF EXISTS fkr_orders"
+    sql: "DROP TABLE fkr_orders"
 
   - name: "Cleanup fkr_customers"
-    sql: "DROP TABLE IF EXISTS fkr_customers"
+    sql: "DROP TABLE fkr_customers"

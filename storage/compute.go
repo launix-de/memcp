@@ -476,29 +476,32 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
 		}
 		// AfterDropTable: when source table is dropped, drop the target table too
-		dropTriggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + AfterDropTable.String()
-		dropExists := false
-		for _, tr := range srcTable.Triggers {
-			if tr.Name == dropTriggerName {
-				dropExists = true
-				break
+		// Only for internal temp tables (dot-prefixed) — never drop user base tables
+		if strings.HasPrefix(t.Name, ".") {
+			dropTriggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + AfterDropTable.String()
+			dropExists := false
+			for _, tr := range srcTable.Triggers {
+				if tr.Name == dropTriggerName {
+					dropExists = true
+					break
+				}
 			}
+			if !dropExists {
+				srcTable.AddTrigger(TriggerDescription{
+					Name:     dropTriggerName,
+					Timing:   AfterDropTable,
+					IsSystem: true,
+					Priority: 100,
+					Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("droptable"),
+						scm.NewString(targetSchema),
+						scm.NewString(t.Name),
+						scm.NewBool(true),
+					})),
+				})
+			}
+			registeredNames = append(registeredNames, triggerRef{ref.schema, dropTriggerName})
 		}
-		if !dropExists {
-			srcTable.AddTrigger(TriggerDescription{
-				Name:     dropTriggerName,
-				Timing:   AfterDropTable,
-				IsSystem: true,
-				Priority: 100,
-				Func: buildFKProc(scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("droptable"),
-					scm.NewString(targetSchema),
-					scm.NewString(t.Name),
-					scm.NewBool(true),
-				})),
-			})
-		}
-		registeredNames = append(registeredNames, triggerRef{ref.schema, dropTriggerName})
 	}
 	// Register self-cleanup on target table: when this keytable is dropped,
 	// remove all triggers we placed on source tables.
