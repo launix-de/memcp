@@ -421,6 +421,43 @@ type goCallArgWord struct {
 	imm uint64
 }
 
+func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
+	allocatedMask := (^ctx.FreeRegs) & 0xFFFF // track all GPRs, incl. reserved non-alloc regs
+	liveCount := 0
+	unknownCount := 0
+	for r := Reg(0); r <= RegR15; r++ {
+		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
+			continue
+		}
+		if allocatedMask&(1<<uint(r)) == 0 {
+			continue
+		}
+		if ctx.RegOwners[r] == nil {
+			unknownCount++
+			continue
+		}
+		buf[liveCount] = r
+		liveCount++
+	}
+
+	// Conservative fallback: if we have untracked allocated registers, keep the
+	// old semantics and treat all allocated registers as live.
+	if unknownCount > 0 {
+		liveCount = 0
+		for r := Reg(0); r <= RegR15; r++ {
+			if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
+				continue
+			}
+			if allocatedMask&(1<<uint(r)) == 0 {
+				continue
+			}
+			buf[liveCount] = r
+			liveCount++
+		}
+	}
+	return buf[:liveCount]
+}
+
 // EmitGoCall emits a call to a Go function from JIT code.
 // argWords: registers holding argument words in Go ABI order.
 // numResultWords: how many result words to capture.
@@ -433,26 +470,53 @@ type goCallArgWord struct {
 // Returns a slice into resultsBuf holding the result registers.
 // All live JIT registers are saved/restored around the call.
 func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg) []Reg {
-	// Collect all currently-allocated registers (not free).
-	// Skip RSP/RBP (frame), R11 (call scratch), R14 (Go goroutine ptr "g").
-	var liveRegsArr [16]Reg
-	liveRegCount := 0
-	for r := Reg(0); r <= RegR15; r++ {
-		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
-			continue
-		}
-		if ctx.FreeRegs&(1<<uint(r)) == 0 {
-			liveRegsArr[liveRegCount] = r
-			liveRegCount++
-		}
+	if len(argWords) > len(GoABIIntRegs) {
+		panic("jit: too many argument words for Go ABI")
 	}
-	liveRegs := liveRegsArr[:liveRegCount]
+	if numResultWords > len(GoABIIntRegs) {
+		panic("jit: too many result words for Go ABI")
+	}
+
+	// Owner-aware liveness with conservative fallback.
+	var liveRegsArr [16]Reg
+	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+
+	// Fast path: no live registers to preserve. Emit only argument setup + call.
+	if len(liveRegs) == 0 {
+		for i := len(argWords) - 1; i >= 0; i-- {
+			target := GoABIIntRegs[i]
+			switch argWords[i].loc {
+			case LocReg:
+				if argWords[i].reg != target {
+					ctx.W.emitMovRegReg(target, argWords[i].reg)
+				}
+			case LocImm:
+				ctx.W.EmitMovRegImm64(target, argWords[i].imm)
+			default:
+				panic("jit: unsupported Go-call arg location")
+			}
+		}
+		ctx.W.EmitCallIndirect(funcAddr)
+		for i := 0; i < numResultWords; i++ {
+			r := ctx.AllocReg()
+			if r != GoABIIntRegs[i] {
+				ctx.W.emitMovRegReg(r, GoABIIntRegs[i])
+			}
+			resultsBuf[i] = r
+		}
+		return resultsBuf[:numResultWords]
+	}
 
 	// Reserve stack space for result words (above saved registers).
 	// After restoring saved regs, these slots will be at [RSP+0..].
 	resultBytes := numResultWords * 8
 	if resultBytes > 0 {
-		ctx.W.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, imm8
+		if resultBytes < 128 {
+			ctx.W.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, imm8
+		} else {
+			ctx.W.emitBytes(0x48, 0x81, 0xEC)
+			ctx.W.emitU32(uint32(resultBytes)) // SUB RSP, imm32
+		}
 	}
 
 	// Save live registers (PUSH)

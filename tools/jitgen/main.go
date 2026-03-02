@@ -188,6 +188,7 @@ func main() {
 		}
 
 		newText, genErr := generateStorageBody(si.typeName, ssaFn)
+		patchBody := true
 		if genErr == "" {
 			fmt.Printf("  %s: %s.GetValue OK\n", si.path, si.typeName)
 		} else {
@@ -195,12 +196,17 @@ func main() {
 			if verbose {
 				dumpSSA(ssaFn)
 			}
-			// Fallback: emit a Go call to GetValue (unbound method, receiver as first arg)
-			newText = "\n\t/* TODO: " + genErr + " */\n" +
-				"\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*" + si.typeName + ").GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n"
+			if strings.Contains(genErr, "temporarily disabled") {
+				// Keep manually maintained emitter bodies for temporarily disabled types.
+				patchBody = false
+			} else {
+				// Fallback: emit a Go call to GetValue (unbound method, receiver as first arg)
+				newText = "\n\t/* TODO: " + genErr + " */\n" +
+					"\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*" + si.typeName + ").GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n"
+			}
 		}
 
-		if doPatch {
+		if doPatch && patchBody {
 			// Patch body of JITEmit method (between { and })
 			bodyStart := fset.Position(si.jitEmitBody.Lbrace).Offset + 1
 			bodyEnd := fset.Position(si.jitEmitBody.Rbrace).Offset
