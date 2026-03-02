@@ -73,8 +73,32 @@ func (w *JITWriter) AddFixup(labelID uint8, size uint8, relative bool) {
 	w.FixupNext++
 }
 
-// ResolveFixups patches all recorded forward references after code generation.
+// ResolveFixups patches recorded forward references whose labels are defined.
+// Fixups referencing still-undefined labels are kept for a later call.
 func (w *JITWriter) ResolveFixups() {
+	j := uint8(0)
+	for i := uint8(0); i < w.FixupNext; i++ {
+		f := &w.Fixups[i]
+		targetPos := w.Labels[f.LabelID]
+		if targetPos < 0 {
+			// label not yet defined — keep for later
+			w.Fixups[j] = w.Fixups[i]
+			j++
+			continue
+		}
+		patchAddr := unsafe.Add(w.Start, int(f.CodePos))
+		if f.Relative {
+			offset := targetPos - (f.CodePos + int32(f.Size))
+			*(*int32)(patchAddr) = offset
+		} else {
+			*(*int32)(patchAddr) = targetPos
+		}
+	}
+	w.FixupNext = j
+}
+
+// ResolveFixupsFinal patches all remaining fixups, panicking on undefined labels.
+func (w *JITWriter) ResolveFixupsFinal() {
 	for i := uint8(0); i < w.FixupNext; i++ {
 		f := &w.Fixups[i]
 		targetPos := w.Labels[f.LabelID]
@@ -89,4 +113,5 @@ func (w *JITWriter) ResolveFixups() {
 			*(*int32)(patchAddr) = targetPos
 		}
 	}
+	w.FixupNext = 0
 }

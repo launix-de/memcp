@@ -232,7 +232,7 @@ func init_sync() {
 		func(a ...Scmer) Scmer {
 			return WithSession(a[0], a[1])
 		}, false, false, nil,
-		nil /* TODO: unsupported call: WithSession(t1, t3) */,
+		nil /* TODO: unexpected constant value: <nil> */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"context", "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
@@ -258,7 +258,7 @@ func init_sync() {
 				return NewBool(true)
 			}
 		}, false, false, nil,
-		nil /* TODO: unsupported call: GetContext() */,
+		nil /* TODO: unexpected constant value: <nil> */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
@@ -276,7 +276,7 @@ func init_sync() {
 				return once()
 			})
 		}, false, false, nil,
-		nil /* TODO: Alloc: new []Scmer (a) */,
+		nil /* TODO: MakeClosure with 2 bindings */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
@@ -299,7 +299,7 @@ func init_sync() {
 				return Apply(a[0])
 			})
 		}, false, false, nil,
-		nil /* TODO: Alloc: new sync.Mutex (mutex) */,
+		nil /* TODO: MakeClosure binding not an alloc-stored value */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"numcpu", "Returns the number of logical CPUs available for parallel execution",
@@ -308,7 +308,18 @@ func init_sync() {
 		func(a ...Scmer) Scmer {
 			return NewInt(int64(runtime.NumCPU()))
 		}, true, false, nil,
-		nil /* TODO: unsupported call: runtime.NumCPU() */,
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			d0 := args[0]
+			if d0.Loc == LocImm {
+				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d0.Imm} }
+				ctx.W.EmitMakeInt(result, d0)
+			} else {
+				if result.Loc == LocAny { return d0 }
+				ctx.W.EmitMakeInt(result, d0)
+				ctx.FreeReg(d0.Reg)
+			}
+			return result
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		"memstats", "Returns memory statistics as a dict with keys: alloc, total_alloc, sys, heap_alloc, heap_sys (all in bytes)",
@@ -324,6 +335,6 @@ func init_sync() {
 			fd.Set(NewString("heap_sys"), NewInt(int64(m.HeapSys)), nil)
 			return NewFastDict(fd)
 		}, true, false, nil,
-		nil /* TODO: Alloc: local runtime.MemStats (m) */,
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */,
 	})
 }

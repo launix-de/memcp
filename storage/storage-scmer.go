@@ -88,7 +88,7 @@ func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 }
 func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: FieldAddr: &s.values [#0] */
+	/* TODO: unsupported return type for *t2 */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSCMER).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 

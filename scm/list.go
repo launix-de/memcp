@@ -116,7 +116,7 @@ func init_list() {
 			panic("count expects a list")
 		},
 		true, false, nil,
-		nil /* TODO: unsupported Convert int → int64 */,
+		nil /* TODO: unexpected constant value: <nil> */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nth", "get the nth item of a list",
@@ -134,7 +134,7 @@ func init_list() {
 			return list[idx]
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asSlice(t1, "nth":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"slice", "extract a sublist from start (inclusive) to end (exclusive).\n(slice list start end) returns elements list[start..end).",
@@ -162,7 +162,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asSlice(t1, "slice":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
@@ -177,7 +177,7 @@ func init_list() {
 			return NewSlice(base)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_mut")},
-		nil /* TODO: Slice: slice t0[:] */,
+		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
@@ -201,7 +201,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_unique_mut")},
-		nil /* TODO: Slice: slice t0[:] */,
+		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cons", "constructs a list from a head and a tail list",
@@ -234,7 +234,7 @@ func init_list() {
 			return list[0]
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asSlice(t1, "car":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cdr", "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
@@ -250,7 +250,7 @@ func init_list() {
 			return NewSlice(list[1:])
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: asSlice(t1, "cdr":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cadr", "extracts the second element of a list.\nEquivalent to (car (cdr x)).",
@@ -266,7 +266,7 @@ func init_list() {
 			return list[1]
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asSlice(t1, "cadr":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
@@ -377,7 +377,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asSlice(t1, "has?":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"filter", "returns a list that only contains elements that pass the filter function",
@@ -398,7 +398,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_mut")},
-		nil /* TODO: unsupported call: asSlice(t1, "filter":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"map", "returns a list that contains the results of a map function that is applied to the list",
@@ -417,7 +417,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeMap},
-		nil /* TODO: unsupported call: asSlice(t1, "map":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
@@ -436,7 +436,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("mapIndex_mut")},
-		nil /* TODO: unsupported call: asSlice(t1, "mapIndex":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce", "returns a list that contains the result of a map function",
@@ -464,7 +464,7 @@ func init_list() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asSlice(t1, "reduce":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -487,7 +487,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice: slice t0[:0:int] */,
+		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"produceN", "returns a list with numbers from 0..n-1, optionally mapped through a function",
@@ -516,7 +516,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported Convert int64 → int */,
+		nil /* TODO: MakeSlice: make []Scmer t5 t5 */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list?", "checks if a value is a list",
@@ -550,7 +550,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asSlice(t1, "contains?":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 
 	// dictionary functions
@@ -583,7 +583,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_assoc_mut")},
-		nil /* TODO: Slice: slice t1[:0:int] */,
+		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"map_assoc", "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
@@ -616,7 +616,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("map_assoc_mut")},
-		nil /* TODO: unsupported call: asAssoc(t5, "map_assoc":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce_assoc", "reduces a dictionary according to a reduce function",
@@ -639,7 +639,7 @@ func init_list() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asAssoc(t8, "reduce_assoc":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"has_assoc?", "checks if a dictionary has a key present",
@@ -663,7 +663,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asAssoc(t1, "has_assoc?":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"get_assoc", "gets a value from a dictionary by key, returns nil if not found",
@@ -692,7 +692,7 @@ func init_list() {
 			return NewNil()
 		},
 		true, false, nil,
-		nil /* TODO: unsupported call: asAssoc(t1, "get_assoc":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"extract_assoc", "applies a function (key value) on the dictionary and returns the results as a flat list",
@@ -724,7 +724,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("extract_assoc_mut")},
-		nil /* TODO: unsupported call: asAssoc(t5, "extract_assoc":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"set_assoc", "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
@@ -771,7 +771,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("set_assoc_mut")},
-		nil /* TODO: unsupported call: asAssoc(t9, "set_assoc":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge_assoc", "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
@@ -802,7 +802,7 @@ func init_list() {
 			return dst
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("merge_assoc_mut")},
-		nil /* TODO: FieldAddr: &Globalenv.Vars [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */,
 	})
 
 	// _mut variants: optimizer-only, forbidden from .scm code
@@ -824,7 +824,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: NewSlice(t2) */,
+		nil /* TODO: unsupported builtin: SliceData */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -843,7 +843,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: NewSlice(t2) */,
+		nil /* TODO: unsupported builtin: SliceData */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -876,7 +876,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: asAssoc(t5, "map_assoc_mut":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 
 	// Tier 2: shrinking, write-cursor
@@ -901,7 +901,7 @@ func init_list() {
 			return NewSlice(input[:w])
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice: slice t2[:t7] */,
+		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -935,7 +935,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: asAssoc(t5, "filter_assoc_mut":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -964,7 +964,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: asAssoc(t5, "extract_assoc_mut":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1000,9 +1000,7 @@ func init_list() {
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			r0 := ctx.AllocReg()
-			r1 := ctx.AllocReg()
-			r2 := ctx.AllocReg()
+			r0 := ctx.W.EmitSubRSP32Fixup()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -1012,11 +1010,12 @@ func init_list() {
 			if d0.Loc == LocImm {
 				d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.Int() > 3)}
 			} else {
-				r3 := ctx.AllocReg()
+				r1 := ctx.AllocReg()
 				ctx.W.EmitCmpRegImm32(d0.Reg, 3)
-				ctx.W.EmitSetcc(r3, CcG)
-				d1 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r3}
+				ctx.W.EmitSetcc(r1, CcG)
+				d1 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
 			}
+			ctx.FreeDesc(&d0)
 			lbl1 := ctx.W.ReserveLabel()
 			lbl2 := ctx.W.ReserveLabel()
 			lbl3 := ctx.W.ReserveLabel()
@@ -1024,21 +1023,27 @@ func init_list() {
 				if d1.Imm.Bool() {
 					ctx.W.EmitJmp(lbl1)
 				} else {
-					ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Imm: NewInt(0)})
+					ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 0)
 					ctx.W.EmitJmp(lbl2)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d1.Reg, 0)
 				ctx.W.EmitJcc(CcNE, lbl3)
-				ctx.EmitMovToReg(r0, JITValueDesc{Loc: LocImm, Imm: NewInt(0)})
+				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 0)
 				ctx.W.EmitJmp(lbl2)
 				ctx.W.MarkLabel(lbl3)
 				ctx.W.EmitJmp(lbl1)
 			}
+			ctx.FreeDesc(&d1)
 			ctx.W.MarkLabel(lbl2)
-			d2 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r0}
+			r2 := ctx.AllocReg()
+			ctx.EmitLoadFromStack(r2, 0)
+			ctx.ProtectReg(r2)
+			d2 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r2}
+			ctx.UnprotectReg(r2)
 			d3 := args[0]
 			d4 := ctx.EmitTagEquals(&d3, tagFastDict, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d3)
 			lbl4 := ctx.W.ReserveLabel()
 			lbl5 := ctx.W.ReserveLabel()
 			lbl6 := ctx.W.ReserveLabel()
@@ -1055,15 +1060,19 @@ func init_list() {
 				ctx.W.MarkLabel(lbl6)
 				ctx.W.EmitJmp(lbl4)
 			}
+			ctx.FreeDesc(&d4)
 			ctx.W.MarkLabel(lbl1)
 			d5 := args[3]
 			d6 := ctx.EmitGoCallScalar(GoFuncAddr(OptimizeProcToSerialFunction), []JITValueDesc{d5}, 1)
+			ctx.FreeDesc(&d5)
+			ctx.FreeDesc(&d6)
 			d7 := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildMergeClosure), []JITValueDesc{d6}, 1)
-			ctx.EmitMovToReg(r0, d7)
+			ctx.EmitStoreToStack(d7, 0)
 			ctx.W.EmitJmp(lbl2)
 			ctx.W.MarkLabel(lbl5)
 			d8 := args[0]
 			d9 := ctx.EmitTagEquals(&d8, tagSlice, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d8)
 			lbl7 := ctx.W.ReserveLabel()
 			lbl8 := ctx.W.ReserveLabel()
 			lbl9 := ctx.W.ReserveLabel()
@@ -1080,6 +1089,7 @@ func init_list() {
 				ctx.W.MarkLabel(lbl9)
 				ctx.W.EmitJmp(lbl7)
 			}
+			ctx.FreeDesc(&d9)
 			ctx.W.MarkLabel(lbl4)
 			d10 := args[0]
 			var d11 JITValueDesc
@@ -1089,13 +1099,14 @@ func init_list() {
 				ctx.FreeReg(d10.Reg2)
 				d11 = JITValueDesc{Loc: LocReg, Reg: d10.Reg}
 			}
-			ctx.EmitMovToReg(r1, d11)
+			ctx.FreeDesc(&d10)
+			ctx.EmitStoreToStack(d11, 8)
 			lbl10 := ctx.W.ReserveLabel()
 			ctx.W.EmitJmp(lbl10)
 			ctx.W.MarkLabel(lbl8)
 			d12 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
 			d13 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d12}, 1)
-			ctx.EmitMovToReg(r1, d13)
+			ctx.EmitStoreToStack(d13, 8)
 			ctx.W.EmitJmp(lbl10)
 			ctx.W.MarkLabel(lbl7)
 			d14 := args[0]
@@ -1104,14 +1115,20 @@ func init_list() {
 				slice := d14.Imm.Slice()
 				d15 = JITValueDesc{Loc: LocImm, Type: tagSlice, Imm: NewInt(int64(len(slice)))}
 			} else {
-				r4 := ctx.AllocReg()
-				ctx.W.emitMovRegReg(r4, d14.Reg2)
-				ctx.W.EmitShlRegImm8(r4, 16)
-				ctx.W.EmitShrRegImm8(r4, 16)
+				r3 := ctx.AllocReg()
+				ctx.W.EmitMovRegReg(r3, d14.Reg2)
+				ctx.W.EmitShlRegImm8(r3, 16)
+				ctx.W.EmitShrRegImm8(r3, 16)
 				ctx.FreeReg(d14.Reg2)
-				d15 = JITValueDesc{Loc: LocRegPair, Reg: d14.Reg, Reg2: r4}
+				d15 = JITValueDesc{Loc: LocRegPair, Reg: d14.Reg, Reg2: r3}
 			}
-			d16 := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d15.Reg2}
+			ctx.FreeDesc(&d14)
+			var d16 JITValueDesc
+			if d15.Loc == LocImm {
+				d16 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d15.StackOff))}
+			} else {
+				d16 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d15.Reg2}
+			}
 			var d17 JITValueDesc
 			if d16.Loc == LocImm {
 				d17 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d16.Imm.Int() / 2)}
@@ -1119,25 +1136,41 @@ func init_list() {
 				ctx.W.EmitShrRegImm8(d16.Reg, 1)
 				d17 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d16.Reg}
 			}
+			if d17.Loc == LocReg && d16.Loc == LocReg && d17.Reg == d16.Reg {
+				ctx.TransferReg(d16.Reg)
+				d16.Loc = LocNone
+			}
+			ctx.FreeDesc(&d16)
 			var d18 JITValueDesc
 			if d17.Loc == LocImm {
 				d18 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d17.Imm.Int() + 4)}
 			} else {
-				scratch := ctx.AllocReg()
-				ctx.W.EmitMovRegImm64(scratch, uint64(4))
-				ctx.W.EmitAddInt64(d17.Reg, scratch)
-				ctx.FreeReg(scratch)
+				ctx.W.EmitMovRegImm64(RegR11, uint64(4))
+				ctx.W.EmitAddInt64(d17.Reg, RegR11)
 				d18 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d17.Reg}
 			}
+			if d18.Loc == LocReg && d17.Loc == LocReg && d18.Reg == d17.Reg {
+				ctx.TransferReg(d17.Reg)
+				d17.Loc = LocNone
+			}
+			ctx.FreeDesc(&d17)
 			d19 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d18}, 1)
-			ctx.EmitMovToReg(r2, JITValueDesc{Loc: LocImm, Imm: NewInt(0)})
+			ctx.FreeDesc(&d18)
+			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 16)
 			lbl11 := ctx.W.ReserveLabel()
 			ctx.W.EmitJmp(lbl11)
 			ctx.W.MarkLabel(lbl10)
-			d20 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r1}
+			r4 := ctx.AllocReg()
+			ctx.EmitLoadFromStack(r4, 8)
+			ctx.ProtectReg(r4)
+			d20 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r4}
+			ctx.UnprotectReg(r4)
 			d21 := args[1]
 			d22 := args[2]
 			ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{d20, d21, d22, d2})
+			ctx.FreeDesc(&d21)
+			ctx.FreeDesc(&d22)
+			ctx.FreeDesc(&d2)
 			var d23 JITValueDesc
 			if d20.Loc == LocImm {
 				panic("NewFastDict: LocImm not expected at JIT compile time")
@@ -1146,108 +1179,154 @@ func init_list() {
 				ctx.W.EmitMovRegImm64(r5, uint64(tagFastDict) << 48)
 				d23 = JITValueDesc{Loc: LocRegPair, Type: tagFastDict, Reg: d20.Reg, Reg2: r5}
 			}
+			ctx.FreeDesc(&d20)
 			ctx.EmitMovPairToResult(&d23, &result)
 			result.Type = d23.Type
 			ctx.W.EmitJmp(lbl0)
+			ctx.FreeDesc(&d23)
 			ctx.W.MarkLabel(lbl11)
-			d24 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r2}
+			r6 := ctx.AllocReg()
+			ctx.EmitLoadFromStack(r6, 16)
+			ctx.ProtectReg(r6)
+			d24 := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: r6}
+			ctx.UnprotectReg(r6)
 			var d25 JITValueDesc
 			if d24.Loc == LocImm {
 				d25 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 1)}
 			} else {
-				scratch := ctx.AllocReg()
+				scratch := ctx.AllocRegExcept(d24.Reg)
 				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(d24.Reg, scratch)
-				ctx.FreeReg(scratch)
-				d25 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d24.Reg}
+				ctx.W.EmitAddInt64(scratch, d24.Reg)
+				d25 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
-			d26 := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d15.Reg2}
+			if d25.Loc == LocReg && d24.Loc == LocReg && d25.Reg == d24.Reg {
+				ctx.TransferReg(d24.Reg)
+				d24.Loc = LocNone
+			}
+			var d26 JITValueDesc
+			if d15.Loc == LocImm {
+				d26 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d15.StackOff))}
+			} else {
+				d26 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d15.Reg2}
+			}
 			var d27 JITValueDesc
 			if d25.Loc == LocImm && d26.Loc == LocImm {
 				d27 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d25.Imm.Int() < d26.Imm.Int())}
 			} else if d26.Loc == LocImm {
-				r6 := ctx.AllocReg()
-				ctx.W.EmitCmpRegImm32(d25.Reg, int32(d26.Imm.Int()))
-				ctx.W.EmitSetcc(r6, CcL)
-				d27 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r6}
-			} else if d25.Loc == LocImm {
 				r7 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d25.Reg, int32(d26.Imm.Int()))
+				ctx.W.EmitSetcc(r7, CcL)
+				d27 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r7}
+			} else if d25.Loc == LocImm {
+				r8 := ctx.AllocReg()
 				scratch := ctx.AllocReg()
 				ctx.W.EmitMovRegImm64(scratch, uint64(d25.Imm.Int()))
 				ctx.W.EmitCmpInt64(scratch, d26.Reg)
 				ctx.FreeReg(scratch)
-				ctx.W.EmitSetcc(r7, CcL)
-				d27 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r7}
-			} else {
-				r8 := ctx.AllocReg()
-				ctx.W.EmitCmpInt64(d25.Reg, d26.Reg)
 				ctx.W.EmitSetcc(r8, CcL)
 				d27 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r8}
+			} else {
+				r9 := ctx.AllocReg()
+				ctx.W.EmitCmpInt64(d25.Reg, d26.Reg)
+				ctx.W.EmitSetcc(r9, CcL)
+				d27 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r9}
 			}
+			ctx.FreeDesc(&d25)
+			ctx.FreeDesc(&d26)
 			lbl12 := ctx.W.ReserveLabel()
 			lbl13 := ctx.W.ReserveLabel()
 			if d27.Loc == LocImm {
 				if d27.Imm.Bool() {
 					ctx.W.EmitJmp(lbl12)
 				} else {
-					ctx.EmitMovToReg(r1, d19)
+					ctx.EmitStoreToStack(d19, 8)
 					ctx.W.EmitJmp(lbl10)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d27.Reg, 0)
 				ctx.W.EmitJcc(CcNE, lbl13)
-				ctx.EmitMovToReg(r1, d19)
+				ctx.EmitStoreToStack(d19, 8)
 				ctx.W.EmitJmp(lbl10)
 				ctx.W.MarkLabel(lbl13)
 				ctx.W.EmitJmp(lbl12)
 			}
+			ctx.FreeDesc(&d27)
 			ctx.W.MarkLabel(lbl12)
-			r9 := ctx.AllocReg()
-			ctx.W.emitMovRegReg(r9, d24.Reg)
-			ctx.W.EmitShlRegImm8(r9, 4)
-			ctx.W.EmitAddInt64(r9, ctx.SliceBase)
 			r10 := ctx.AllocReg()
-			r11 := ctx.AllocReg()
-			ctx.W.emitMovRegMem(r10, r9, 0)
-			ctx.W.emitMovRegMem(r11, r9, 8)
-			ctx.FreeReg(r9)
-			d28 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r10, Reg2: r11}
+			if d24.Loc == LocImm {
+				ctx.W.EmitMovRegImm64(r10, uint64(d24.Imm.Int()) * 16)
+			} else {
+				ctx.W.EmitMovRegReg(r10, d24.Reg)
+				ctx.W.EmitShlRegImm8(r10, 4)
+			}
+			if d15.Loc == LocImm {
+				ctx.W.EmitMovRegImm64(RegR11, uint64(d15.Imm.Int()))
+				ctx.W.EmitAddInt64(r10, RegR11)
+			} else {
+				ctx.W.EmitAddInt64(r10, d15.Reg)
+			}
+			r11 := ctx.AllocRegExcept(r10)
+			r12 := ctx.AllocRegExcept(r10, r11)
+			ctx.W.EmitMovRegMem(r11, r10, 0)
+			ctx.W.EmitMovRegMem(r12, r10, 8)
+			ctx.FreeReg(r10)
+			d28 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r11, Reg2: r12}
 			var d29 JITValueDesc
 			if d24.Loc == LocImm {
 				d29 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 1)}
 			} else {
-				scratch := ctx.AllocReg()
+				scratch := ctx.AllocRegExcept(d24.Reg)
 				ctx.W.EmitMovRegImm64(scratch, uint64(1))
-				ctx.W.EmitAddInt64(d24.Reg, scratch)
-				ctx.FreeReg(scratch)
-				d29 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d24.Reg}
+				ctx.W.EmitAddInt64(scratch, d24.Reg)
+				d29 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 			}
-			r12 := ctx.AllocReg()
-			ctx.W.emitMovRegReg(r12, d29.Reg)
-			ctx.W.EmitShlRegImm8(r12, 4)
-			ctx.W.EmitAddInt64(r12, ctx.SliceBase)
+			if d29.Loc == LocReg && d24.Loc == LocReg && d29.Reg == d24.Reg {
+				ctx.TransferReg(d24.Reg)
+				d24.Loc = LocNone
+			}
 			r13 := ctx.AllocReg()
-			r14 := ctx.AllocReg()
-			ctx.W.emitMovRegMem(r13, r12, 0)
-			ctx.W.emitMovRegMem(r14, r12, 8)
-			ctx.FreeReg(r12)
-			d30 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r13, Reg2: r14}
+			if d29.Loc == LocImm {
+				ctx.W.EmitMovRegImm64(r13, uint64(d29.Imm.Int()) * 16)
+			} else {
+				ctx.W.EmitMovRegReg(r13, d29.Reg)
+				ctx.W.EmitShlRegImm8(r13, 4)
+			}
+			if d15.Loc == LocImm {
+				ctx.W.EmitMovRegImm64(RegR11, uint64(d15.Imm.Int()))
+				ctx.W.EmitAddInt64(r13, RegR11)
+			} else {
+				ctx.W.EmitAddInt64(r13, d15.Reg)
+			}
+			r14 := ctx.AllocRegExcept(r13)
+			r15 := ctx.AllocRegExcept(r13, r14)
+			ctx.W.EmitMovRegMem(r14, r13, 0)
+			ctx.W.EmitMovRegMem(r15, r13, 8)
+			ctx.FreeReg(r13)
+			d30 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r14, Reg2: r15}
+			ctx.FreeDesc(&d29)
 			d31 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 			ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{d19, d28, d30, d31})
+			ctx.FreeDesc(&d28)
+			ctx.FreeDesc(&d30)
 			var d32 JITValueDesc
 			if d24.Loc == LocImm {
 				d32 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d24.Imm.Int() + 2)}
 			} else {
-				scratch := ctx.AllocReg()
-				ctx.W.EmitMovRegImm64(scratch, uint64(2))
-				ctx.W.EmitAddInt64(d24.Reg, scratch)
-				ctx.FreeReg(scratch)
+				ctx.W.EmitMovRegImm64(RegR11, uint64(2))
+				ctx.W.EmitAddInt64(d24.Reg, RegR11)
 				d32 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d24.Reg}
 			}
-			ctx.EmitMovToReg(r2, d32)
+			if d32.Loc == LocReg && d24.Loc == LocReg && d32.Reg == d24.Reg {
+				ctx.TransferReg(d24.Reg)
+				d24.Loc = LocNone
+			}
+			ctx.FreeDesc(&d24)
+			ctx.EmitStoreToStack(d32, 16)
 			ctx.W.EmitJmp(lbl11)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
+			ctx.W.PatchInt32(r0, int32(24))
+			ctx.W.EmitAddRSP32(int32(24))
 			return result
 		},
 	})
@@ -1267,7 +1346,7 @@ func init_list() {
 			return NewSlice(base)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: asSlice(t1, "append_mut":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1291,7 +1370,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported call: asSlice(t1, "append_unique_mut":string) */,
+		nil /* TODO: unsupported constant kind: String */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1323,6 +1402,6 @@ func init_list() {
 			return dst
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: FieldAddr: &Globalenv.Vars [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */,
 	})
 }

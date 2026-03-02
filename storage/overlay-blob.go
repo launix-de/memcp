@@ -143,7 +143,7 @@ func (s *OverlayBlob) GetValue(i uint32) scm.Scmer {
 }
 func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: FieldAddr: &s.Base [#0] */
+	/* TODO: dynamic call: invoke t1.GetValue(i) */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*OverlayBlob).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 

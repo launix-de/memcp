@@ -24,13 +24,15 @@ func jitExecStorageInt(t *testing.T, s *StorageInt) func(...scm.Scmer) scm.Scmer
 		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 	}
 
-	// Same register setup as jitCompileExprBody
+	// Same register setup as jitCompileExprBody (R11 reserved as scratch)
+	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
+		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
+		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
+		(1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
 	ctx := &scm.JITContext{
-		W: w,
-		FreeRegs: (1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
-			(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
-			(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
-			(1 << uint(scm.RegR11)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)),
+		W:         w,
+		FreeRegs:  freeRegs,
+		AllRegs:   freeRegs,
 		SliceBase: scm.RegR12,
 	}
 

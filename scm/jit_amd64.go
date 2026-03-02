@@ -89,12 +89,14 @@ func jitCompileExprBody(body Scmer) (code []byte) {
 
 	// Free registers: all GPRs except RAX (result ptr), RBX (result aux),
 	// RSP, RBP, R11 (scratch), R12 (slice base), R14 (Go goroutine ptr "g")
+	freeRegs := uint64((1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
+		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
+		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
+		(1 << uint(RegR13)) | (1 << uint(RegR15)))
 	ctx := &JITContext{
-		W: w,
-		FreeRegs: (1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
-			(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
-			(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
-			(1 << uint(RegR13)) | (1 << uint(RegR15)),
+		W:         w,
+		FreeRegs:  freeRegs,
+		AllRegs:   freeRegs,
 		SliceBase: RegR12,
 	}
 
