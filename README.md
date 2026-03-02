@@ -94,6 +94,30 @@ docker run -it -p 4321:4321 -p 3307:3307 carli2/memcp
 - **Automatic compression** reduces storage footprint significantly vs. MySQL
 - **Configurable data directory** — point it at any local or remote path
 
+## Memory Management 🧩
+
+MemCP is designed to run alongside other services on the same machine without blowing up your RAM.
+
+**Automatic compression** — MemCP stores each column in the most compact format that fits the data: small integers get bit-packed, repeated strings become dictionary-encoded, sequential IDs are stored as ranges. A table that takes 10 GB in MySQL often fits in 1–3 GB in MemCP.
+
+**Configurable memory budget** — by default MemCP uses at most 50% of your server's RAM. You can set an exact limit via the dashboard or the settings API:
+
+```bash
+# Limit to 4 GB total
+curl -u root:admin -X POST http://localhost:4321/dashboard/api/settings \
+  -d '{"key":"MaxRamBytes","value":4294967296}'
+
+# Or as a percentage of total RAM (default: 50)
+curl -u root:admin -X POST http://localhost:4321/dashboard/api/settings \
+  -d '{"key":"MaxRamPercent","value":40}'
+```
+
+**Automatic eviction** — when MemCP approaches its memory limit, it automatically unloads the least recently used data from RAM. That data stays safe on disk and is transparently reloaded the next time a query needs it. Frequently accessed hot data stays in memory; cold data steps aside.
+
+**System-wide pressure awareness** — if the whole server runs low on free RAM (below 10%), MemCP detects this and proactively releases its own cache — even if its own budget isn't exhausted yet. This keeps your application, web server, and OS responsive regardless of load spikes.
+
+**Separate budget for persistent data** — a second budget (default: 30% of RAM) controls how much space the on-disk data loaded into RAM may occupy, independently of temporary query working memory. Both limits are tunable at runtime without restart.
+
 ### **🔧 Developer-Friendly**
 - **Comprehensive test suite** with 2470+ SQL tests across 100+ test suites
 - **YAML-based testing framework**
