@@ -1928,6 +1928,10 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			ctx.FreeDesc(&d114)
 			ctx.FreeDesc(&d116)
+			// d117 (start) must survive to the final addition; protect from eviction
+			if d117.Loc == scm.LocReg {
+				ctx.ProtectReg(d117.Reg)
+			}
 			var d118 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSeq)(nil).start) + 56
@@ -3093,6 +3097,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.W.EmitCmpInt64(d117.Reg, d190.Reg)
 				ctx.W.EmitSetcc(r113, scm.CcE)
 				d192 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r113}
+			}
+			if d117.Loc == scm.LocReg {
+				ctx.UnprotectReg(d117.Reg)
 			}
 			ctx.FreeDesc(&d117)
 			ctx.FreeDesc(&d190)

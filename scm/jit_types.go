@@ -227,9 +227,11 @@ func (ctx *JITContext) UnprotectReg(r Reg) {
 // If no registers are free, spills the highest-numbered in-use register
 // to a pre-allocated buffer and returns it.
 func (ctx *JITContext) AllocReg() Reg {
-	if ctx.FreeRegs != 0 {
-		// Normal path: pick lowest free bit
-		bit := ctx.FreeRegs & (-ctx.FreeRegs)
+	// Exclude protected registers from allocation, not just from eviction.
+	available := ctx.FreeRegs &^ ctx.ProtectedRegs
+	if available != 0 {
+		// Normal path: pick lowest free bit, but skip protected ones
+		bit := available & (-available)
 		ctx.FreeRegs &^= bit
 		r := Reg(0)
 		for b := bit; b > 1; b >>= 1 {
