@@ -222,14 +222,26 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 }
 
 // extractStringListFromAST parses (list "a" "b" ...) into a Go string slice.
+// The first element may be the symbol "list" or a resolved native function.
 func extractStringListFromAST(expr scm.Scmer) []string {
 	if !expr.IsSlice() {
 		return nil
 	}
 	items := expr.Slice()
-	if len(items) < 1 || !items[0].IsSymbol() || items[0].String() != "list" {
+	if len(items) < 2 {
 		return nil
 	}
+	// Accept first element as either symbol "list" or resolved native function.
+	// Reject if it's a literal value (string/int/float/nil/bool).
+	first := items[0]
+	if first.IsSymbol() {
+		if first.String() != "list" {
+			return nil
+		}
+	} else if first.IsString() || first.IsInt() || first.IsFloat() || first.IsNil() || first.IsBool() {
+		return nil
+	}
+	// first is symbol "list" or resolved function — extract string elements
 	result := make([]string, 0, len(items)-1)
 	for _, item := range items[1:] {
 		if !item.IsString() {
@@ -278,10 +290,10 @@ func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inp
 	// Collect equality comparisons from body
 	equalities := collectEqualities(body)
 	for _, eq := range equalities {
-		// Check pattern: (equal? paramSym (outer inputSym)) or reversed
-		pIdx, iCol := matchJoinEquality(eq[0], eq[1], paramIdx)
+		// Check pattern: (equal? paramRef (outer inputExpr)) or reversed
+		pIdx, iCol := matchJoinEquality(eq[0], eq[1], paramIdx, len(params), nil)
 		if pIdx < 0 {
-			pIdx, iCol = matchJoinEquality(eq[1], eq[0], paramIdx)
+			pIdx, iCol = matchJoinEquality(eq[1], eq[0], paramIdx, len(params), nil)
 		}
 		if pIdx >= 0 && pIdx < len(condCols) {
 			srcCols = append(srcCols, condCols[pIdx])
@@ -315,28 +327,354 @@ func collectEqualities(body scm.Scmer) [][2]scm.Scmer {
 	return nil
 }
 
-// matchJoinEquality checks if a is a filter param symbol and b is (outer inputCol).
+// matchJoinEquality checks if a is a filter param reference and b is (outer inputCol).
+// a may be a symbol or NthLocalVar (compiled proc).
+// b's inner expression may be a symbol, (get_column tblvar _ col _), or another
+// NthLocalVar (the optimizer may hoist the outer ref into a closure capture).
 // Returns the param index and input column name, or (-1, "") on mismatch.
-func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int) (int, string) {
-	if !a.IsSymbol() {
+func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, computorParams []scm.Scmer) (int, string) {
+	var idx int
+	if a.IsSymbol() {
+		var ok bool
+		idx, ok = paramIdx[a.String()]
+		if !ok {
+			return -1, ""
+		}
+	} else if a.IsNthLocalVar() {
+		idx = int(a.NthLocalVar())
+		if idx < 0 || idx >= paramCount {
+			return -1, ""
+		}
+	} else {
 		return -1, ""
 	}
-	idx, ok := paramIdx[a.String()]
-	if !ok {
-		return -1, ""
+	// b must be (outer <expr>)
+	if b.IsSlice() {
+		bItems := b.Slice()
+		if len(bItems) == 2 && bItems[0].IsSymbol() && bItems[0].String() == "outer" {
+			inner := bItems[1]
+			if inner.IsSymbol() {
+				return idx, inner.String()
+			}
+			if inner.IsSlice() {
+				gcItems := inner.Slice()
+				if len(gcItems) >= 4 && gcItems[0].IsSymbol() && gcItems[0].String() == "get_column" {
+					return idx, scm.String(gcItems[3])
+				}
+			}
+		}
 	}
-	// b must be (outer <symbol>)
-	if !b.IsSlice() {
-		return -1, ""
+	// The optimizer may hoist (outer (get_column tblvar _ col _)) into a
+	// NthLocalVar referencing the computor's params. Detect by checking
+	// if b is an NthLocalVar whose index maps to a computor param whose name
+	// encodes the original column reference.
+	if b.IsNthLocalVar() && computorParams != nil {
+		bIdx := int(b.NthLocalVar())
+		// Filter params come first, computor params follow after paramCount
+		cIdx := bIdx - paramCount
+		if cIdx >= 0 && cIdx < len(computorParams) {
+			p := computorParams[cIdx]
+			if p.IsSymbol() {
+				// Computor param name is "tblvar.col" or the stringified expression
+				return idx, p.String()
+			}
+		}
 	}
-	bItems := b.Slice()
-	if len(bItems) != 2 || !bItems[0].IsSymbol() || bItems[0].String() != "outer" {
-		return -1, ""
+	return -1, ""
+}
+
+// findScanNode walks a computor expression and returns the scan AST node
+// (as a []Scmer slice) for the given source schema+table. Returns nil if not found.
+func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
+	if expr.IsProc() {
+		return findScanNode(expr.Proc().Body, schema, table)
 	}
-	if !bItems[1].IsSymbol() {
-		return -1, ""
+	if !expr.IsSlice() {
+		return nil
 	}
-	return idx, bItems[1].String()
+	items := expr.Slice()
+	if len(items) >= 5 && items[0].IsSymbol() {
+		sym := items[0].String()
+		if (sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order") &&
+			scm.String(items[1]) == schema && scm.String(items[2]) == table {
+			return items
+		}
+	}
+	for _, item := range items {
+		if found := findScanNode(item, schema, table); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// isAdditiveReduce checks whether a reduce function is the + operator.
+// Handles both the unresolved symbol "+" and a resolved native function.
+func isAdditiveReduce(reduce scm.Scmer) bool {
+	if reduce.IsSymbol() && reduce.String() == "+" {
+		return true
+	}
+	// The query planner may resolve "+" to its native function at compile time.
+	// Detect it by testing: reduce(3, 4) == 7.
+	ok := false
+	func() {
+		defer func() { recover() }()
+		result := scm.Apply(reduce, scm.NewInt(3), scm.NewInt(4))
+		ok = result.IsInt() && result.Int() == 7
+	}()
+	return ok
+}
+
+// isAdditiveAggregate checks whether a scan node represents an additive aggregate
+// (reduce=+, neutral=0) whose mapFn contains no inner scans.
+func isAdditiveAggregate(scanNode []scm.Scmer) bool {
+	if len(scanNode) < 9 {
+		return false
+	}
+	// items[7] = reduce, items[8] = neutral
+	reduce := scanNode[7]
+	neutral := scanNode[8]
+	if !isAdditiveReduce(reduce) {
+		return false
+	}
+	isZero := (neutral.IsInt() && neutral.Int() == 0) || (neutral.IsFloat() && neutral.Float() == 0.0)
+	if !isZero {
+		return false
+	}
+	// mapFn must not contain inner scans
+	if containsScan(scanNode[6]) {
+		return false
+	}
+	return true
+}
+
+// containsScan returns true if the expression contains a scan/scan_order/etc. call.
+func containsScan(expr scm.Scmer) bool {
+	if expr.IsProc() {
+		return containsScan(expr.Proc().Body)
+	}
+	if !expr.IsSlice() {
+		return false
+	}
+	items := expr.Slice()
+	if len(items) >= 1 && items[0].IsSymbol() {
+		sym := items[0].String()
+		if sym == "scan" || sym == "scan_order" || sym == "scalar_scan" || sym == "scalar_scan_order" {
+			return true
+		}
+	}
+	for _, item := range items {
+		if containsScan(item) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractDeltaExpr transforms a scan's mapFn body by substituting parameter
+// references (symbols or NthLocalVar) with (get_assoc dictSym "col") to
+// reference OLD/NEW trigger dicts.
+func extractDeltaExpr(mapFn scm.Scmer, dictSym string) scm.Scmer {
+	var params []scm.Scmer
+	var body scm.Scmer
+	if mapFn.IsProc() {
+		proc := mapFn.Proc()
+		if proc.Params.IsSlice() {
+			params = proc.Params.Slice()
+		}
+		body = proc.Body
+	} else if mapFn.IsSlice() {
+		items := mapFn.Slice()
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			if items[1].IsSlice() {
+				params = items[1].Slice()
+			}
+			body = items[2]
+		}
+	}
+	if body.IsNil() {
+		return scm.NewNil()
+	}
+	if len(params) == 0 {
+		// No parameters (e.g. COUNT(*) mapFn = (lambda () 1)) — body is the delta
+		return body
+	}
+	// Build substitution maps: symbol name -> expr AND NthLocalVar index -> expr
+	// Compiled Procs use NthLocalVar for param references; uncompiled lambdas use symbols.
+	symSubs := make(map[string]scm.Scmer, len(params))
+	idxSubs := make(map[int]scm.Scmer, len(params))
+	for i, p := range params {
+		if p.IsSymbol() {
+			name := p.String()
+			// Extract column name: "tblvar.col" -> "col"
+			col := name
+			if dot := strings.LastIndex(name, "."); dot >= 0 {
+				col = name[dot+1:]
+			}
+			expr := fkGetAssocExpr(dictSym, col)
+			symSubs[name] = expr
+			idxSubs[i] = expr
+		}
+	}
+	return substituteParamRefs(body, symSubs, idxSubs)
+}
+
+// substituteParamRefs replaces symbol references and NthLocalVar references in
+// an AST according to the given maps.
+func substituteParamRefs(expr scm.Scmer, symSubs map[string]scm.Scmer, idxSubs map[int]scm.Scmer) scm.Scmer {
+	if expr.IsSymbol() {
+		if sub, ok := symSubs[expr.String()]; ok {
+			return sub
+		}
+		return expr
+	}
+	if expr.IsNthLocalVar() {
+		if sub, ok := idxSubs[int(expr.NthLocalVar())]; ok {
+			return sub
+		}
+		return expr
+	}
+	if expr.IsSlice() {
+		items := expr.Slice()
+		result := make([]scm.Scmer, len(items))
+		for i, item := range items {
+			result[i] = substituteParamRefs(item, symSubs, idxSubs)
+		}
+		return scm.NewSlice(result)
+	}
+	return expr
+}
+
+// buildKeytableScanFilter constructs the filter column list, filter params, and
+// filter body for scanning a keytable by join key values from a trigger dict.
+// Shared by buildInvalidateScan and buildIncrementScan.
+func buildKeytableScanFilter(targetTable string, srcCols, inputCols []string, dictSym string) (filterColElems []scm.Scmer, filterParams []scm.Scmer, filterBody scm.Scmer) {
+	filterColElems = make([]scm.Scmer, 1+len(inputCols))
+	filterColElems[0] = scm.NewSymbol("list")
+	for i, col := range inputCols {
+		filterColElems[1+i] = scm.NewString(col)
+	}
+	filterParams = make([]scm.Scmer, len(inputCols))
+	for i, col := range inputCols {
+		filterParams[i] = scm.NewSymbol(targetTable + "." + col)
+	}
+	paramSyms := make([]scm.Scmer, len(inputCols))
+	getAssocExprs := make([]scm.Scmer, len(srcCols))
+	for i := range inputCols {
+		paramSyms[i] = scm.NewSymbol(targetTable + "." + inputCols[i])
+		getAssocExprs[i] = fkGetAssocExpr(dictSym, srcCols[i])
+	}
+	if len(inputCols) == 1 {
+		filterBody = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), paramSyms[0], getAssocExprs[0]})
+	} else {
+		parts := make([]scm.Scmer, 1+len(inputCols))
+		parts[0] = scm.NewSymbol("and")
+		for i := range inputCols {
+			parts[1+i] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), paramSyms[i], getAssocExprs[i]})
+		}
+		filterBody = scm.NewSlice(parts)
+	}
+	return
+}
+
+// buildIncrementScan builds a scan expression that walks the keytable, matches rows
+// by join key values from a trigger dict (OLD or NEW), and calls the $increment:
+// closure to update the proxy's cached value in-place. No shard rebuild needed.
+func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inputCols []string, dictSym string, deltaExpr scm.Scmer, negate bool) scm.Scmer {
+	filterColElems, filterParams, filterBody := buildKeytableScanFilter(targetTable, srcCols, inputCols, dictSym)
+
+	// Compute value expression: deltaExpr or (- 0 deltaExpr) for negation
+	var valueExpr scm.Scmer
+	if negate {
+		valueExpr = scm.NewSlice([]scm.Scmer{scm.NewSymbol("-"), scm.NewInt(0), deltaExpr})
+	} else {
+		valueExpr = deltaExpr
+	}
+
+	// Result columns: (list "$increment:colName")
+	resultCols := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$increment:" + colName)})
+
+	// Map function: (lambda ($incr) ($incr valueExpr))
+	mapFn := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr"), valueExpr}),
+	})
+
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("scan"),
+		scm.NewString(targetSchema), scm.NewString(targetTable),
+		scm.NewSlice(filterColElems),
+		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
+		resultCols,
+		mapFn,
+		scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(), scm.NewBool(false),
+	})
+}
+
+// buildIncrementalBody constructs the trigger body for incremental aggregate
+// updates. For AfterInsert it adds the delta, for AfterUpdate it subtracts
+// OLD and adds NEW. For AfterDelete it falls back to selective invalidation
+// to ensure proper group removal when the last row in a group is deleted.
+func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, inputCols []string, mapFn scm.Scmer, timing TriggerTiming) scm.Scmer {
+	switch timing {
+	case AfterInsert:
+		deltaExpr := extractDeltaExpr(mapFn, "NEW")
+		return buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "NEW", deltaExpr, false)
+	case AfterUpdate:
+		// Build runtime check: if group key unchanged → $increment, else → invalidate.
+		// When the group key changes, keytable rows may be created/deleted by the
+		// cleanup trigger, making the old $increment targets stale. Full invalidation
+		// lets the next query recompute correctly.
+		oldDelta := extractDeltaExpr(mapFn, "OLD")
+		newDelta := extractDeltaExpr(mapFn, "NEW")
+		incrementBody := scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("begin"),
+			buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD", oldDelta, true),
+			buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "NEW", newDelta, false),
+		})
+		invalidateBody := scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("invalidatecolumn"),
+			scm.NewString(targetSchema),
+			scm.NewString(targetTable),
+			scm.NewString(colName),
+		})
+		// Build (and (equal? (get_assoc "OLD" "srcCol1") (get_assoc "NEW" "srcCol1")) ...)
+		keyEqualChecks := make([]scm.Scmer, len(srcCols))
+		for i, col := range srcCols {
+			keyEqualChecks[i] = scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("equal?"),
+				fkGetAssocExpr("OLD", col),
+				fkGetAssocExpr("NEW", col),
+			})
+		}
+		var keyUnchanged scm.Scmer
+		if len(keyEqualChecks) == 1 {
+			keyUnchanged = keyEqualChecks[0]
+		} else {
+			parts := make([]scm.Scmer, 1+len(keyEqualChecks))
+			parts[0] = scm.NewSymbol("and")
+			copy(parts[1:], keyEqualChecks)
+			keyUnchanged = scm.NewSlice(parts)
+		}
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("if"),
+			keyUnchanged,
+			incrementBody,
+			invalidateBody,
+		})
+	default:
+		// AfterDelete and others: use full invalidation.
+		// Incremental subtraction can leave empty groups (value=0) on the
+		// keytable; full invalidation lets the next query recompute and
+		// correctly remove groups with no source rows.
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("invalidatecolumn"),
+			scm.NewString(targetSchema),
+			scm.NewString(targetTable),
+			scm.NewString(colName),
+		})
+	}
 }
 
 // buildInvalidateScan builds a scan expression that walks the keytable, matches rows
@@ -442,6 +780,16 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 		// Determine trigger bodies: selective if join pairs are available
 		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
 
+		// Check if this scan is an additive aggregate eligible for incremental update
+		var scanNode []scm.Scmer
+		incremental := false
+		if selective {
+			scanNode = findScanNode(computor, ref.schema, ref.table)
+			if scanNode != nil && isAdditiveAggregate(scanNode) {
+				incremental = true
+			}
+		}
+
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + timing.String()
 			// idempotency: skip if trigger already exists
@@ -454,10 +802,11 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			}
 			if !exists {
 				var body scm.Scmer
-				if selective {
-					body = buildSelectiveInvalidationBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, timing)
+				if incremental && timing != AfterDelete {
+					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[6], timing)
 				} else {
-					// Fall back to full invalidation
+					// Full invalidation: correct for all cases including
+					// group removal on DELETE and non-additive aggregates.
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						scm.NewString(targetSchema),
