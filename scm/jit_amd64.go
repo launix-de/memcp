@@ -23,43 +23,6 @@ import "unsafe"
 
 // TODO: create this file for other architectures, too
 
-func jitAdd2Scmer(a, b Scmer) Scmer {
-	if a.IsNil() || b.IsNil() {
-		return NewNil()
-	}
-	if a.IsInt() && b.IsInt() {
-		return NewInt(a.Int() + b.Int())
-	}
-	return NewFloat(a.Float() + b.Float())
-}
-
-func jitEnsureScmerPair(ctx *JITContext, d *JITValueDesc) {
-	if d.Loc == LocRegPair {
-		return
-	}
-	if d.Loc == LocImm {
-		r1 := ctx.AllocReg()
-		r2 := ctx.AllocRegExcept(r1)
-		ptrWord, auxWord := d.Imm.RawWords()
-		ctx.W.EmitMovRegImm64(r1, uint64(ptrWord))
-		ctx.W.EmitMovRegImm64(r2, auxWord)
-		d.Loc = LocRegPair
-		d.Reg = r1
-		d.Reg2 = r2
-		d.Type = d.Imm.GetTag()
-		ctx.BindReg(r1, d)
-		ctx.BindReg(r2, d)
-		return
-	}
-	if d.Loc == LocStack || d.Loc == LocStackPair {
-		ctx.EnsureDesc(d)
-		if d.Loc == LocRegPair {
-			return
-		}
-	}
-	panic("jit: + expects Scmer pair operands")
-}
-
 // all code snippets fill rax+rbx with the return value
 func jitReturnLiteral(value Scmer) []byte {
 	code := []byte{
@@ -216,13 +179,18 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				// Allocate a fresh register so each use is independently freeable.
 				r := ctx.AllocRegExcept(src.Reg)
 				ctx.W.emitMovRegReg(r, src.Reg)
-				return JITValueDesc{Loc: LocReg, Type: src.Type, Reg: r}
+				d := JITValueDesc{Loc: LocReg, Type: src.Type, Reg: r}
+				ctx.BindReg(r, &d)
+				return d
 			case LocRegPair:
 				r1 := ctx.AllocRegExcept(src.Reg, src.Reg2)
 				r2 := ctx.AllocRegExcept(src.Reg, src.Reg2, r1)
 				ctx.W.emitMovRegReg(r1, src.Reg)
 				ctx.W.emitMovRegReg(r2, src.Reg2)
-				return JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: r1, Reg2: r2}
+				d := JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: r1, Reg2: r2}
+				ctx.BindReg(r1, &d)
+				ctx.BindReg(r2, &d)
+				return d
 			}
 		}
 		// Fallback: load from args slice: ptr at [base+i*16], aux at [base+i*16+8]
@@ -230,7 +198,10 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		auxReg := ctx.AllocReg()
 		ctx.W.emitMovRegMem(ptrReg, sliceBase, int32(idx*16))
 		ctx.W.emitMovRegMem(auxReg, sliceBase, int32(idx*16+8))
-		return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: auxReg}
+		d := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: auxReg}
+		ctx.BindReg(ptrReg, &d)
+		ctx.BindReg(auxReg, &d)
+		return d
 	case tagSlice:
 		list := expr.Slice()
 		if len(list) == 0 {
@@ -243,21 +214,6 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			panic("jit: non-symbol in call position")
 		}
 		name := string(list[0].Symbol())
-		if name == "+" && len(list) == 3 {
-			left := jitCompileExpr(ctx, list[1], sliceBase, JITValueDesc{Loc: LocAny})
-			right := jitCompileExpr(ctx, list[2], sliceBase, JITValueDesc{Loc: LocAny})
-			jitEnsureScmerPair(ctx, &left)
-			jitEnsureScmerPair(ctx, &right)
-			out := ctx.EmitGoCallScalar(GoFuncAddr(jitAdd2Scmer), []JITValueDesc{left, right}, 2)
-			ctx.FreeDesc(&left)
-			ctx.FreeDesc(&right)
-			if result.Loc == LocAny {
-				return out
-			}
-			ctx.EmitMovPairToResult(&out, &result)
-			ctx.FreeDesc(&out)
-			return result
-		}
 		decl, ok := declarations[name]
 		if !ok || decl.JITEmit == nil {
 			panic("jit: no JITEmit for " + name)
