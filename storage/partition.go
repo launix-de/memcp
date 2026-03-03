@@ -19,6 +19,7 @@ package storage
 import "fmt"
 import "sort"
 import "sync"
+import "sync/atomic"
 import "time"
 import "runtime"
 import "strings"
@@ -808,7 +809,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	// Register new PShards with CacheManager
 	if t.PersistencyMode != Memory && !strings.HasPrefix(t.Name, ".") {
 		for _, s := range newshards {
-			s.lastAccessed = time.Now()
+			atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 		}
 	}

@@ -58,6 +58,7 @@ type softItem struct {
 	getScore      func(pointer any) float64 // optional type-specific telemetry
 	heapIndex     int                       // position in heap (-1 if not in heap)
 	dynamicScore  float64                   // scratch field for Phase 2
+	registeredAt  int64                     // UnixNano; set once in addInternal as fallback for items whose lastAccessed starts at zero
 }
 
 // softItemHeap implements container/heap.Interface as a max-heap on evictionScore.
@@ -373,6 +374,7 @@ func (cm *CacheManager) addInternal(item *softItem) {
 		cm.itemMap[item.pointer] = item
 		return
 	}
+	item.registeredAt = time.Now().UnixNano()
 	cm.itemMap[item.pointer] = item
 	cm.currentMemory += item.size
 	scm.AdjustMemStats(item.size)
@@ -489,6 +491,15 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		c := candidates[i]
 		// check again — previous cleanup in this loop may have freed this item recursively
 		if _, ok := cm.itemMap[c.pointer]; !ok {
+			continue
+		}
+		// guarantee minimum lifetime of 1s: use the later of registeredAt and getLastUsed
+		lastActive := c.registeredAt
+		if lu := c.getLastUsed(c.pointer).UnixNano(); lu > lastActive {
+			lastActive = lu
+		}
+		if now.UnixNano()-lastActive < int64(time.Second) {
+			heap.Push(&cm.h, c)
 			continue
 		}
 		if !c.cleanup(c.pointer, &freedByType) {
