@@ -183,8 +183,7 @@ func OptimizeForValues(fn func(...Scmer) Scmer, constMask []int /* 0=unknown, 1=
 		fmt.Println("bingo")
 	}
 
-	//code := jitReturnLiteral(constValues[0]) // TODO: compose the real code
-	code := jitNthArgument(1) // TODO: compose the real code
+	code := jitReturnLiteral(constValues[0]) // TODO: compose the real code
 
 	// allocate executable buffer
 	buf, err := allocExec(len(code))

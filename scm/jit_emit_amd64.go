@@ -951,6 +951,8 @@ func (ctx *JITContext) EmitGetTagDesc(src *JITValueDesc, result JITValueDesc) JI
 		ctx.W.EmitMakeInt(result, r)
 		return result
 	}
+	// Dynamic type: materialize spilled descriptors before reading Reg/Reg2.
+	ctx.EnsureDesc(src)
 	dst := ctx.AllocReg()
 	ctx.W.emitGetTagRegs(dst, src.Reg, src.Reg2)
 	ctx.FreeDesc(src)
@@ -984,6 +986,8 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 		ctx.W.EmitMakeBool(result, r)
 		return result
 	}
+	// Dynamic type: materialize spilled descriptors before reading Reg/Reg2.
+	ctx.EnsureDesc(src)
 	tagReg := ctx.AllocReg()
 	ctx.W.emitGetTagRegs(tagReg, src.Reg, src.Reg2)
 	ctx.FreeDesc(src)
