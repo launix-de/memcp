@@ -672,6 +672,7 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				d5.Loc = scm.LocNone
 			}
 			ctx.EnsureDesc(&d27)
+			ctx.EnsureDesc(&d27)
 			var d28 scm.JITValueDesc
 			if d27.Loc == scm.LocImm {
 				d28 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d27.Imm.Int() + 1)}
@@ -1463,6 +1464,7 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				d46.Loc = scm.LocNone
 			}
 			ctx.EnsureDesc(&d68)
+			ctx.EnsureDesc(&d68)
 			var d69 scm.JITValueDesc
 			if d68.Loc == scm.LocImm {
 				d69 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d68.Imm.Int() + 1)}
@@ -2252,6 +2254,7 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				d87.Loc = scm.LocNone
 			}
 			ctx.EnsureDesc(&d109)
+			ctx.EnsureDesc(&d109)
 			var d110 scm.JITValueDesc
 			if d109.Loc == scm.LocImm {
 				d110 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d109.Imm.Int() + 1)}
@@ -2998,6 +3001,7 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.TransferReg(d126.Reg)
 				d126.Loc = scm.LocNone
 			}
+			ctx.EnsureDesc(&d148)
 			ctx.EnsureDesc(&d148)
 			var d149 scm.JITValueDesc
 			if d148.Loc == scm.LocImm {
@@ -3950,6 +3954,7 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.TransferReg(d175.Reg)
 				d175.Loc = scm.LocNone
 			}
+			ctx.EnsureDesc(&d197)
 			ctx.EnsureDesc(&d197)
 			var d198 scm.JITValueDesc
 			if d197.Loc == scm.LocImm {

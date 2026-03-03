@@ -536,6 +536,7 @@ func init_strings() {
 			d7 := ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d6}, 1)
 			ctx.FreeDesc(&d6)
 			ctx.EnsureDesc(&d7)
+			ctx.EnsureDesc(&d7)
 			var d8 JITValueDesc
 			if d7.Loc == LocImm {
 				d8 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d7.Imm.Int() - 1)}

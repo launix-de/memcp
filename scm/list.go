@@ -1347,8 +1347,8 @@ func init_list() {
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl8)
-			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d20 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
 			d21 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d20}, 1)
 			d22 := d21
@@ -1357,8 +1357,8 @@ func init_list() {
 			ctx.EmitStoreToStack(d22, 8)
 			ctx.W.EmitJmp(lbl10)
 			ctx.W.MarkLabel(lbl7)
-			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d23 := args[0]
 			var d24 JITValueDesc
 			if d23.Loc == LocImm {
@@ -1407,6 +1407,7 @@ func init_list() {
 			}
 			ctx.FreeDesc(&d25)
 			ctx.EnsureDesc(&d26)
+			ctx.EnsureDesc(&d26)
 			var d27 JITValueDesc
 			if d26.Loc == LocImm {
 				d27 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d26.Imm.Int() + 4)}
@@ -1430,6 +1431,7 @@ func init_list() {
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d29 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			ctx.EnsureDesc(&d29)
 			ctx.EnsureDesc(&d29)
 			var d30 JITValueDesc
 			if d29.Loc == LocImm {
@@ -1551,6 +1553,7 @@ func init_list() {
 			ctx.BindReg(r8, &d35)
 			ctx.BindReg(r9, &d35)
 			ctx.EnsureDesc(&d29)
+			ctx.EnsureDesc(&d29)
 			var d36 JITValueDesc
 			if d29.Loc == LocImm {
 				d36 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d29.Imm.Int() + 1)}
@@ -1594,6 +1597,7 @@ func init_list() {
 			ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{d28, d35, d37, d38})
 			ctx.FreeDesc(&d35)
 			ctx.FreeDesc(&d37)
+			ctx.EnsureDesc(&d29)
 			ctx.EnsureDesc(&d29)
 			var d39 JITValueDesc
 			if d29.Loc == LocImm {

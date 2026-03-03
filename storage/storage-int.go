@@ -631,6 +631,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				d4.Loc = scm.LocNone
 			}
 			ctx.EnsureDesc(&d26)
+			ctx.EnsureDesc(&d26)
 			var d27 scm.JITValueDesc
 			if d26.Loc == scm.LocImm {
 				d27 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d26.Imm.Int() + 1)}
