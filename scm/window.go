@@ -104,7 +104,7 @@ func init_window() {
 			return NewSlice(result)
 		},
 		false, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -153,6 +153,6 @@ func init_window() {
 			return NewNil()
 		},
 		false, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */
 	})
 }

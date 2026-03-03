@@ -289,9 +289,14 @@ func jitCompile(a ...Scmer) Scmer {
 		if JITLog {
 			fmt.Println("<fallback>")
 		}
-		// fallback: Go closure
+		// fallback: keep a serializable/executable JIT descriptor instead of
+		// returning an unserializable native closure.
 		fn := OptimizeProcToSerialFunction(v)
-		return NewFunc(fn)
+		return NewJIT(&JITEntryPoint{
+			Native: fn,
+			Proc:   *proc,
+			Arch:   runtime.GOARCH,
+		})
 
 	case tagJIT:
 		return v
