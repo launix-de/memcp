@@ -961,8 +961,8 @@ func init_strings() {
 			ctx.EmitStoreToStack(d32, 8)
 			ctx.W.EmitJmp(lbl14)
 			ctx.W.MarkLabel(lbl17)
-			d12 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d29 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d12 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d12)
 			ctx.EnsureDesc(&d29)
 			ctx.EnsureDesc(&d12)
@@ -1375,9 +1375,9 @@ func init_strings() {
 			result.Type = tagBool
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl4)
+			d18 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
 			d6 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d17 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(16)}
-			d18 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {

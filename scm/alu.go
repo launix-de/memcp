@@ -470,8 +470,8 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d7)
 			ctx.W.MarkLabel(lbl6)
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
 			var d9 JITValueDesc
@@ -685,10 +685,10 @@ func init_alu() {
 			ctx.EmitStoreToStack(d20, 8)
 			ctx.W.EmitJmp(lbl1)
 			ctx.W.MarkLabel(lbl13)
-			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d12 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d13 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
+			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			ctx.EnsureDesc(&d13)
 			ctx.EnsureDesc(&d13)
 			ctx.W.EmitMakeFloat(result, d13)
@@ -696,10 +696,10 @@ func init_alu() {
 			result.Type = tagFloat
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl12)
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d12 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d13 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			ctx.EnsureDesc(&d12)
 			var d21 JITValueDesc
 			if d12.Loc == LocImm {
@@ -1364,9 +1364,9 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d26)
 			ctx.W.MarkLabel(lbl11)
+			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d27 := args[0]
 			var d28 JITValueDesc
 			if d27.Loc == LocImm {
@@ -1423,9 +1423,9 @@ func init_alu() {
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(1)}, 16)
 			ctx.W.EmitJmp(lbl23)
 			ctx.W.MarkLabel(lbl23)
-			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d30 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d32 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
@@ -1482,20 +1482,20 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d33)
 			ctx.W.MarkLabel(lbl15)
+			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.W.EmitMakeNil(result)
 			result.Type = tagNil
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl17)
-			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d34 := args[0]
 			d36 := d34
 			d35 := ctx.EmitTagEquals(&d36, tagInt, JITValueDesc{Loc: LocAny})
@@ -1518,11 +1518,11 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d35)
 			ctx.W.MarkLabel(lbl21)
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d23)
 			ctx.EnsureDesc(&d23)
 			ctx.W.EmitMakeFloat(result, d23)
@@ -1530,11 +1530,11 @@ func init_alu() {
 			result.Type = tagFloat
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl20)
-			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			ctx.EnsureDesc(&d24)
 			var d37 JITValueDesc
 			if d24.Loc == LocImm {
@@ -1713,11 +1713,11 @@ func init_alu() {
 			ctx.EmitStoreToStack(d42, 48)
 			ctx.W.EmitJmp(lbl19)
 			ctx.W.MarkLabel(lbl25)
+			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d43 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 			ctx.EnsureDesc(&d31)
 			ctx.EnsureDesc(&d43)
@@ -1897,11 +1897,11 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d46)
 			ctx.W.MarkLabel(lbl28)
+			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d48 := args[0]
 			var d49 JITValueDesc
 			if d48.Loc == LocImm {
@@ -1982,11 +1982,11 @@ func init_alu() {
 			result.Type = tagFloat
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl27)
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d53 := args[1]
 			d55 := d53
 			d54 := ctx.EmitTagEquals(&d55, tagInt, JITValueDesc{Loc: LocAny})
@@ -2008,11 +2008,11 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d54)
 			ctx.W.MarkLabel(lbl32)
+			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			ctx.EnsureDesc(&d30)
 			ctx.EnsureDesc(&d30)
 			var d56 JITValueDesc
@@ -2095,13 +2095,13 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d62)
 			ctx.W.MarkLabel(lbl31)
+			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d59 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d60 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d30)
 			ctx.EnsureDesc(&d30)
 			ctx.W.EmitMakeInt(result, d30)
@@ -2109,13 +2109,13 @@ func init_alu() {
 			result.Type = tagInt
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl35)
+			d59 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
+			d60 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d59 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
-			d60 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			ctx.EnsureDesc(&d31)
 			var d63 JITValueDesc
 			if d31.Loc == LocImm {
@@ -2332,13 +2332,13 @@ func init_alu() {
 			ctx.EmitStoreToStack(d68, 16)
 			ctx.W.EmitJmp(lbl23)
 			ctx.W.MarkLabel(lbl37)
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d59 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d60 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d69 := args[0]
 			var d70 JITValueDesc
 			if d69.Loc == LocImm {
@@ -2500,13 +2500,13 @@ func init_alu() {
 			result.Type = tagFloat
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl40)
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d59 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d60 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d23 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d24 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d31 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d59)
 			var d74 JITValueDesc
 			if d59.Loc == LocImm {
@@ -3065,9 +3065,9 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d14)
 			ctx.W.MarkLabel(lbl6)
-			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d4 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d5)
 			var d15 JITValueDesc
 			if d5.Loc == LocImm {
@@ -3278,11 +3278,11 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d24)
 			ctx.W.MarkLabel(lbl12)
-			d21 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
-			d22 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d4 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d21 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
+			d22 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			ctx.EnsureDesc(&d4)
 			ctx.EnsureDesc(&d4)
 			ctx.W.EmitMakeInt(result, d4)
@@ -3290,11 +3290,11 @@ func init_alu() {
 			result.Type = tagInt
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl17)
-			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d21 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d22 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d4 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d26 := d15
 			d25 := ctx.EmitTagEquals(&d26, tagFloat, JITValueDesc{Loc: LocAny})
 			lbl23 := ctx.W.ReserveLabel()
@@ -3314,11 +3314,11 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d25)
 			ctx.W.MarkLabel(lbl16)
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d4 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d21 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d22 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d4 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			var d27 JITValueDesc
 			if d15.Loc == LocImm {
 				d27 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d15.Imm.Int())}
@@ -3410,11 +3410,11 @@ func init_alu() {
 			ctx.EmitStoreToStack(d29, 24)
 			ctx.W.EmitJmp(lbl25)
 			ctx.W.MarkLabel(lbl25)
-			d21 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
-			d22 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d4 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d21 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
+			d22 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d30 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			ctx.EnsureDesc(&d5)
 			ctx.EnsureDesc(&d5)
@@ -3442,12 +3442,12 @@ func init_alu() {
 			ctx.EmitStoreToStack(d33, 16)
 			ctx.W.EmitJmp(lbl5)
 			ctx.W.MarkLabel(lbl21)
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d4 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d21 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d22 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d22)
 			ctx.EnsureDesc(&d22)
 			ctx.W.EmitMakeFloat(result, d22)
@@ -3455,12 +3455,12 @@ func init_alu() {
 			result.Type = tagFloat
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl20)
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d4 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d30 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d21 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d22 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d21)
 			var d34 JITValueDesc
 			if d21.Loc == LocImm {
@@ -4842,8 +4842,8 @@ func init_alu() {
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl2)
-			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d3)
 			var d5 JITValueDesc
 			if d3.Loc == LocImm {
@@ -4964,8 +4964,8 @@ func init_alu() {
 			}
 			ctx.FreeDesc(&d6)
 			ctx.W.MarkLabel(lbl7)
-			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d9 := d5
 			d8 := ctx.EmitTagEquals(&d9, tagNil, JITValueDesc{Loc: LocAny})
 			lbl9 := ctx.W.ReserveLabel()
@@ -5667,8 +5667,26 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl5)
 			ctx.EnsureDesc(&d4)
-			d6 := ctx.EmitGoCallScalar(GoFuncAddr(math.Sqrt), []JITValueDesc{d4}, 1)
-			d6.Type = tagFloat
+			var d6 JITValueDesc
+			if d4.Loc == LocImm {
+				d6 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(math.Sqrt(d4.Imm.Float()))}
+			} else {
+				ctx.EnsureDesc(&d4)
+				var d7 JITValueDesc
+				if d4.Loc == LocRegPair {
+					ctx.FreeReg(d4.Reg)
+					d7 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d4.Reg2}
+					ctx.BindReg(d4.Reg2, &d7)
+					ctx.BindReg(d4.Reg2, &d7)
+				} else {
+					d7 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: d4.Reg}
+					ctx.BindReg(d4.Reg, &d7)
+					ctx.BindReg(d4.Reg, &d7)
+				}
+				d6 = ctx.EmitGoCallScalar(GoFuncAddr(JITSqrtBits), []JITValueDesc{d7}, 1)
+				d6.Type = tagFloat
+				ctx.BindReg(d6.Reg, &d6)
+			}
 			ctx.FreeDesc(&d4)
 			ctx.EnsureDesc(&d6)
 			ctx.EnsureDesc(&d6)

@@ -641,6 +641,26 @@ func JITScmerToFloatBits(v Scmer) uint64 {
 	return math.Float64bits(v.Float())
 }
 
+func JITFloorBits(v uint64) uint64 {
+	return math.Float64bits(math.Floor(math.Float64frombits(v)))
+}
+
+func JITCeilBits(v uint64) uint64 {
+	return math.Float64bits(math.Ceil(math.Float64frombits(v)))
+}
+
+func JITTruncBits(v uint64) uint64 {
+	return math.Float64bits(math.Trunc(math.Float64frombits(v)))
+}
+
+func JITSqrtBits(v uint64) uint64 {
+	return math.Float64bits(math.Sqrt(math.Float64frombits(v)))
+}
+
+func JITAbsBits(v uint64) uint64 {
+	return math.Float64bits(math.Abs(math.Float64frombits(v)))
+}
+
 // JITIntDiv performs int64 division for JIT fallback lowering paths.
 func JITIntDiv(a, b int64) int64 {
 	return a / b
