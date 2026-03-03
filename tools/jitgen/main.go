@@ -654,19 +654,22 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 	} else {
 		src := g.vals[v.Name()]
 		if src.isDesc {
+			edgeSrc := g.allocDesc()
+			g.emit("%s := %s", edgeSrc, src.goVar)
+			g.emit("if %s.Loc == LocNone { panic(\"jit: phi source has no location\") }", edgeSrc)
+			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", edgeSrc, edgeSrc, edgeSrc)
 			if phiPair {
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", src.goVar, src.goVar, src.goVar)
-				g.emit("if %s.Loc == LocRegPair || %s.Loc == LocImm {", src.goVar, src.goVar)
-				g.emit("\tctx.EmitStoreScmerToStack(%s, %s)", src.goVar, phiOff)
+				g.emit("if %s.Loc == LocRegPair || %s.Loc == LocImm {", edgeSrc, edgeSrc)
+				g.emit("\tctx.EmitStoreScmerToStack(%s, %s)", edgeSrc, phiOff)
 				g.emit("} else {")
-				g.emit("\tctx.EmitStoreToStack(%s, %s)", src.goVar, phiOff)
+				g.emit("\tctx.EmitStoreToStack(%s, %s)", edgeSrc, phiOff)
 				g.emit("\tctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
 				g.emit("}")
 				return
 			}
 			if signed, bits, ok := intTypeInfo(phiType); ok && bits > 0 && bits < 64 {
 				tmp := g.allocDesc()
-				g.emit("%s := %s", tmp, src.goVar)
+				g.emit("%s := %s", tmp, edgeSrc)
 				if signed {
 					g.emitNormalizeSignedNarrow(tmp, bits)
 				} else {
@@ -674,7 +677,7 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 				}
 				g.emit("ctx.EmitStoreToStack(%s, %s)", tmp, phiOff)
 			} else {
-				g.emit("ctx.EmitStoreToStack(%s, %s)", src.goVar, phiOff)
+				g.emit("ctx.EmitStoreToStack(%s, %s)", edgeSrc, phiOff)
 			}
 			// Note: we do NOT call useOperand here. Phi edge references keep the
 			// value alive (inflated refcount) but are not consumed. This prevents
@@ -1153,6 +1156,8 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		g.emit("if idxInt.Loc == LocImm {")
 		g.emit("\tidxInt = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}")
 		g.emit("} else {")
+		g.emit("\tif idxInt.Loc == LocStack || idxInt.Loc == LocStackPair { ctx.EnsureDesc(&idxInt) }")
+		g.emit("\tif idxInt.Loc != LocReg { panic(\"jit: idxInt not in register\") }")
 		g.emit("\tctx.W.EmitShlRegImm8(idxInt.Reg, 32)")
 		g.emit("\tctx.W.EmitShrRegImm8(idxInt.Reg, 32)")
 		g.emit("\tctx.BindReg(idxInt.Reg, &idxInt)")
@@ -1600,32 +1605,32 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				fieldName := parts[2]
 
 				if goType == "slice" {
-					// Immutable slice: constant-fold data ptr at JIT compile time.
-					// Length is loaded lazily only if len() is actually called.
-					// Uses field cache to avoid re-reading the same field.
+					// Immutable slice/string header: keep data pointer in a register.
+					// Do NOT encode raw pointers as NewInt immediates; they are plain
+					// addresses, not tagged integers.
 					cacheKey := fieldName
 					if cached, ok := g.fieldCache[cacheKey]; ok {
 						g.vals[name] = cached
 						break
 					}
 					dv := g.allocDesc()
+					ptrReg2 := g.allocReg()
 					g.emit("var %s JITValueDesc", dv)
+					g.emit("%s := ctx.AllocReg()", ptrReg2)
 					g.emit("if thisptr.Loc == LocImm {")
-					// LocImm: read data pointer at JIT compile time as immediate (NO register allocated).
-					// The pointer will be materialized into a temp register only when actually used
-					// for element access, keeping register pressure low.
+					// Constant receiver: fold load address, but still materialize pointer in a GPR.
 					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
 					g.emit("\tdataPtr := *(*uintptr)(unsafe.Pointer(fieldAddr))")
 					g.emit("\tsliceLen := *(*int)(unsafe.Pointer(fieldAddr + 8))")
-					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(dataPtr)), StackOff: int32(sliceLen)}", dv)
+					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(dataPtr))", ptrReg2)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s, StackOff: int32(sliceLen)}", dv, ptrReg2)
 					g.emit("} else {")
-					// LocReg: register-relative load of data pointer only
+					// Register receiver: load data pointer from field.
 					g.emit("\toff := int32(%s)", src.offsetExpr)
-					ptrReg2 := g.allocReg()
-					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
 					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg2)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg2)
 					g.emit("}")
+					g.emit("ctx.BindReg(%s, &%s)", ptrReg2, dv)
 					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
 					g.vals[name] = gv
 					g.fieldCache[cacheKey] = gv
@@ -2984,43 +2989,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 
 	case *ssa.Phi:
-		// Phi values live on the stack. Load into a temp register on each read.
-		// Use AllocRegExcept(prev...) so loading phi N does not evict any
-		// already-loaded phi register (mutual exclusion during loading).
-		// Then ProtectReg keeps each register live until the first non-phi
-		// instruction, preventing subsequent AllocReg calls from evicting it.
+		// Phi output locations are fixed stack slots. Keep descriptors on stack
+		// and materialize into registers only at use sites.
 		if phiOff, ok := g.phiRegs[name]; ok {
 			if g.phiPair[name] {
-				rv1 := g.allocReg()
-				rv2 := g.allocReg()
-				if len(g.phiProtectedRegVars) == 0 {
-					g.emit("%s := ctx.AllocReg()", rv1)
-					g.emit("%s := ctx.AllocRegExcept(%s)", rv2, rv1)
-				} else {
-					ex := strings.Join(g.phiProtectedRegVars, ", ")
-					g.emit("%s := ctx.AllocRegExcept(%s)", rv1, ex)
-					g.emit("%s := ctx.AllocRegExcept(%s, %s)", rv2, ex, rv1)
-				}
-				g.emit("ctx.EmitLoadFromStack(%s, %s)", rv1, phiOff)
-				g.emit("ctx.EmitLoadFromStack(%s, (%s)+8)", rv2, phiOff)
-				g.emit("ctx.ProtectReg(%s)", rv1)
-				g.emit("ctx.ProtectReg(%s)", rv2)
-				g.phiProtectedRegVars = append(g.phiProtectedRegVars, rv1, rv2)
 				dv := g.allocDesc()
-				g.emit("%s := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: %s, Reg2: %s}", dv, rv1, rv2)
+				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)}", dv, phiOff)
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
 			} else {
-				rv := g.allocReg()
-				if len(g.phiProtectedRegVars) == 0 {
-					g.emit("%s := ctx.AllocReg()", rv)
-				} else {
-					g.emit("%s := ctx.AllocRegExcept(%s)", rv, strings.Join(g.phiProtectedRegVars, ", "))
-				}
-				g.emit("ctx.EmitLoadFromStack(%s, %s)", rv, phiOff)
-				g.emit("ctx.ProtectReg(%s)", rv)
-				g.phiProtectedRegVars = append(g.phiProtectedRegVars, rv)
 				dv := g.allocDesc()
-				g.emit("%s := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: %s}", dv, rv)
+				g.emit("%s := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(%s)}", dv, phiOff)
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
 			}
 		} else {
@@ -3097,6 +3075,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 
 	case *ssa.Convert:
 		src := g.resolveValue(v.X)
+		if src.isDesc {
+			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", src.goVar, src.goVar, src.goVar)
+		}
 		dv := g.allocDesc()
 		srcType := v.X.Type().Underlying()
 		dstType := v.Type().Underlying()

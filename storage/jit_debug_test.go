@@ -192,7 +192,10 @@ func TestStorageSeqJITDebug(t *testing.T) {
 		}
 		rawGot := *(*scmerRaw)(unsafe.Pointer(&got))
 		rawExp := *(*scmerRaw)(unsafe.Pointer(&exp))
+		goVal := s.GetValue(uint32(i))
+		rawGo := *(*scmerRaw)(unsafe.Pointer(&goVal))
 		t.Logf("JIT(%d): ptr=0x%x aux=0x%x lastValue=%d | expected: ptr=0x%x aux=0x%x",
 			i, rawGot.ptr, rawGot.aux, lv, rawExp.ptr, rawExp.aux)
+		t.Logf("GO(%d): ptr=0x%x aux=0x%x", i, rawGo.ptr, rawGo.aux)
 	}
 }
