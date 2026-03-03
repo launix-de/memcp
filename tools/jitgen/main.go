@@ -655,6 +655,24 @@ func fitsInt32(v int64) bool {
 	return v >= -2147483648 && v <= 2147483647
 }
 
+func (g *codeGen) emitMulConstOnReg(regExpr string, k int64, indent string) {
+	switch k {
+	case 0:
+		g.emit("%sctx.W.EmitMovRegImm64(%s, 0)", indent, regExpr)
+	case 1:
+		// no-op
+	case 2:
+		g.emit("%sctx.W.EmitAddInt64(%s, %s)", indent, regExpr, regExpr)
+	default:
+		if fitsInt32(k) {
+			g.emit("%sctx.W.EmitImulRegImm32(%s, int32(%d))", indent, regExpr, k)
+		} else {
+			g.emit("%sctx.W.EmitMovRegImm64(RegR11, uint64(%d))", indent, k)
+			g.emit("%sctx.W.EmitImulInt64(%s, RegR11)", indent, regExpr)
+		}
+	}
+}
+
 // isFieldCachedDesc reports whether goVar is one of the cached field descriptors.
 // Cached field values are semantically read-only sources and must not be
 // destructively modified in-place by ALU emission.
@@ -2464,9 +2482,29 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t\t\tctx.W.EmitMovRegReg(%s, tmp.Reg2)", auxReg)
 				g.emit("\t\t\tctx.FreeDesc(&tmp)")
 				g.emit("\t\tcase LocImm:")
-				g.emit("\t\t\tptrWord, auxWord := ai.Imm.RawWords()")
-				g.emit("\t\t\tctx.W.EmitMovRegImm64(%s, uint64(ptrWord))", ptrReg)
-				g.emit("\t\t\tctx.W.EmitMovRegImm64(%s, auxWord)", auxReg)
+				g.emit("\t\t\tpair := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", ptrReg, auxReg)
+				g.emit("\t\t\tif ai.Imm.GetTag() == tagInt {")
+				g.emit("\t\t\t\tsrc := ai")
+				g.emit("\t\t\t\tsrc.Type = tagInt")
+				g.emit("\t\t\t\tsrc.Imm = NewInt(ai.Imm.Int())")
+				g.emit("\t\t\t\tctx.W.EmitMakeInt(pair, src)")
+				g.emit("\t\t\t} else if ai.Imm.GetTag() == tagFloat {")
+				g.emit("\t\t\t\tsrc := ai")
+				g.emit("\t\t\t\tsrc.Type = tagFloat")
+				g.emit("\t\t\t\tsrc.Imm = NewFloat(ai.Imm.Float())")
+				g.emit("\t\t\t\tctx.W.EmitMakeFloat(pair, src)")
+				g.emit("\t\t\t} else if ai.Imm.GetTag() == tagBool {")
+				g.emit("\t\t\t\tsrc := ai")
+				g.emit("\t\t\t\tsrc.Type = tagBool")
+				g.emit("\t\t\t\tsrc.Imm = NewBool(ai.Imm.Bool())")
+				g.emit("\t\t\t\tctx.W.EmitMakeBool(pair, src)")
+				g.emit("\t\t\t} else if ai.Imm.GetTag() == tagNil {")
+				g.emit("\t\t\t\tctx.W.EmitMakeNil(pair)")
+				g.emit("\t\t\t} else {")
+				g.emit("\t\t\t\tptrWord, auxWord := ai.Imm.RawWords()")
+				g.emit("\t\t\t\tctx.W.EmitMovRegImm64(%s, uint64(ptrWord))", ptrReg)
+				g.emit("\t\t\t\tctx.W.EmitMovRegImm64(%s, auxWord)", auxReg)
+				g.emit("\t\t\t}")
 				g.emit("\t\tdefault:")
 				g.emit("\t\t\tpanic(\"jitgen: emitter args index expected Scmer pair\")")
 				g.emit("\t\t}")
@@ -2696,6 +2734,34 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, arg.goVar)
 			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
+			g.emit("} else if %s.Loc == LocRegPair {", arg.goVar)
+			g.emit("\ttmpTag := %s", arg.goVar)
+			g.emit("\tisInt := ctx.EmitTagEquals(&tmpTag, tagInt, JITValueDesc{Loc: LocAny})")
+			g.emit("\tlblInt := ctx.W.ReserveLabel()")
+			g.emit("\tlblFallback := ctx.W.ReserveLabel()")
+			g.emit("\tlblJoin := ctx.W.ReserveLabel()")
+			g.emit("\tif isInt.Loc == LocImm {")
+			g.emit("\t\tif isInt.Imm.Bool() {")
+			g.emit("\t\t\tctx.W.EmitJmp(lblInt)")
+			g.emit("\t\t} else {")
+			g.emit("\t\t\tctx.W.EmitJmp(lblFallback)")
+			g.emit("\t\t}")
+			g.emit("\t} else {")
+			g.emit("\t\tctx.W.EmitCmpRegImm32(isInt.Reg, 0)")
+			g.emit("\t\tctx.W.EmitJcc(CcNE, lblInt)")
+			g.emit("\t\tctx.W.EmitJmp(lblFallback)")
+			g.emit("\t}")
+			g.emit("\tctx.FreeDesc(&isInt)")
+			g.emit("\tctx.W.MarkLabel(lblInt)")
+			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, arg.goVar)
+			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
+			g.emit("\tctx.W.EmitJmp(lblJoin)")
+			g.emit("\tctx.W.MarkLabel(lblFallback)")
+			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("\t%s.Type = tagInt", dv)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
+			g.emit("\tctx.W.MarkLabel(lblJoin)")
 			g.emit("} else if %s.Type == tagInt && %s.Loc == LocReg {", arg.goVar, arg.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, arg.goVar)
 			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
@@ -2823,11 +2889,29 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("%s.Type = tagFloat", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "archTrunc":
-			// math arch helper for trunc(float64) float64
+			fallthrough
+		case "Trunc":
+			// trunc(float64) float64 without Go-call ABI float args.
 			arg := g.resolveValue(v.Call.Args[0])
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Trunc), []JITValueDesc{%s}, 1)", dv, arg.goVar)
-			g.emit("%s.Type = tagFloat", dv)
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", arg.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(math.Trunc(%s.Imm.Float()))}", dv, arg.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.EnsureDesc(&%s)", arg.goVar)
+			g.emit("\tvar truncSrc Reg")
+			g.emit("\tif %s.Loc == LocRegPair {", arg.goVar)
+			g.emit("\t\tctx.FreeReg(%s.Reg)", arg.goVar)
+			g.emit("\t\ttruncSrc = %s.Reg2", arg.goVar)
+			g.emit("\t} else {")
+			g.emit("\t\ttruncSrc = %s.Reg", arg.goVar)
+			g.emit("\t}")
+			g.emit("\ttruncInt := ctx.AllocRegExcept(truncSrc)")
+			g.emit("\tctx.W.EmitCvtFloatBitsToInt64(truncInt, truncSrc)")
+			g.emit("\tctx.W.EmitCvtInt64ToFloat64(RegX0, truncInt)")
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: truncInt}", dv)
+			g.emit("\tctx.BindReg(truncInt, &%s)", dv)
+			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Slice":
 			// (Scmer).Slice() []Scmer — extract data ptr and length from Scmer
@@ -3211,6 +3295,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if !ok {
 					panic(fmt.Sprintf("unsupported arithmetic const kind: %s", c))
 				}
+				if xVal.isDesc {
+					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
+				}
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s.Loc == LocImm {", xVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() %s %d)}", dv, xVal.goVar, goOpStr(v.Op), cmpVal)
@@ -3232,15 +3319,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						// ADD/MUL: commutative, order doesn't matter
 						g.emitAllocRegExcept("scratch", "\t", true, xVal)
 						g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
-						if fitsInt32(cmpVal) {
-							if v.Op == token.ADD {
-								g.emit("\tctx.W.EmitAddRegImm32(scratch, int32(%d))", cmpVal)
-							} else if v.Op == token.MUL {
-								g.emit("\tctx.W.EmitImulRegImm32(scratch, int32(%d))", cmpVal)
-							} else {
-								g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
-								g.emit("\tctx.W.%s(scratch, RegR11)", aluOp)
-							}
+						if v.Op == token.MUL {
+							g.emitMulConstOnReg("scratch", cmpVal, "\t")
+						} else if fitsInt32(cmpVal) {
+							g.emit("\tctx.W.EmitAddRegImm32(scratch, int32(%d))", cmpVal)
 						} else {
 							g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
 							g.emit("\tctx.W.%s(scratch, RegR11)", aluOp)
@@ -3249,14 +3331,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					}
 				} else {
 					// x is consumed; prefer immediate-form ALU to avoid materializing constants in a temp register.
-					if fitsInt32(cmpVal) {
+					if v.Op == token.MUL {
+						g.emitMulConstOnReg(fmt.Sprintf("%s.Reg", xVal.goVar), cmpVal, "\t")
+					} else if fitsInt32(cmpVal) {
 						switch v.Op {
 						case token.ADD:
 							g.emit("\tctx.W.EmitAddRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
 						case token.SUB:
 							g.emit("\tctx.W.EmitSubRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
-						case token.MUL:
-							g.emit("\tctx.W.EmitImulRegImm32(%s.Reg, int32(%d))", xVal.goVar, cmpVal)
 						default:
 							g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", cmpVal)
 							g.emit("\tctx.W.%s(%s.Reg, RegR11)", aluOp, xVal.goVar)

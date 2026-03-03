@@ -640,6 +640,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 				d4.Loc = scm.LocNone
 			}
 			ctx.EnsureDesc(&d26)
+			ctx.EnsureDesc(&d26)
 			var d27 scm.JITValueDesc
 			if d26.Loc == scm.LocImm {
 				d27 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d26.Imm.Int() + 1)}
@@ -1058,6 +1059,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 				d45 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r53}
 				ctx.BindReg(r53, &d45)
 			}
+			ctx.EnsureDesc(&d45)
 			ctx.EnsureDesc(&d45)
 			var d46 scm.JITValueDesc
 			if d45.Loc == scm.LocImm {
