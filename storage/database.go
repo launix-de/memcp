@@ -19,10 +19,10 @@ package storage
 import "os"
 import "fmt"
 import "sync"
+import "sync/atomic"
 import "time"
 import "runtime"
 import "strings"
-import "sync/atomic"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
@@ -740,10 +740,6 @@ func RenameTable(schema, oldname, newname string) {
 // MUST NOT use Lock on schemalock (deadlock: CreateTable holds schemalock → AddItem → evict → here).
 // Returns false if the schemalock is busy (item pushed back for later retry).
 func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTypes]int64) bool {
-	// lease active: defer eviction, CacheManager will retry later
-	if time.Now().UnixNano() < atomic.LoadInt64(&tbl.leaseUntil) {
-		return false
-	}
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println("error: keytableCleanup panic for", schemaName+"."+tbl.Name, ":", r)
@@ -789,16 +785,16 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 func keytableLastUsed(ptr any) time.Time {
 	tbl := ptr.(*table)
 	// use the newest shard lastAccessed as proxy
-	var latest time.Time
+	var latestNs uint64
 	for _, s := range tbl.Shards {
-		if s.lastAccessed.After(latest) {
-			latest = s.lastAccessed
+		if v := atomic.LoadUint64(&s.lastAccessed); v > latestNs {
+			latestNs = v
 		}
 	}
 	for _, s := range tbl.PShards {
-		if s.lastAccessed.After(latest) {
-			latest = s.lastAccessed
+		if v := atomic.LoadUint64(&s.lastAccessed); v > latestNs {
+			latestNs = v
 		}
 	}
-	return latest
+	return time.Unix(0, int64(latestNs))
 }

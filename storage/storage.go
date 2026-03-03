@@ -20,11 +20,11 @@ import "fmt"
 import "io"
 import "sort"
 import "sync"
+import "sync/atomic"
 import "time"
 import "strconv"
 import "reflect"
 import "strings"
-import "sync/atomic"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
 
@@ -1185,7 +1185,19 @@ func Init(en scm.Env) {
 			if tbl == nil {
 				return scm.NewBool(false)
 			}
-			atomic.StoreInt64(&tbl.leaseUntil, time.Now().Add(time.Second).UnixNano())
+			now := time.Now()
+			nowNs := uint64(now.UnixNano())
+			for _, s := range tbl.Shards {
+				atomic.StoreUint64(&s.lastAccessed, nowNs)
+			}
+			for _, s := range tbl.PShards {
+				atomic.StoreUint64(&s.lastAccessed, nowNs)
+			}
+			for _, c := range tbl.Columns {
+				if c.IsTemp {
+					atomic.StoreInt64(&c.lastAccessed, now.UnixNano())
+				}
+			}
 			return scm.NewBool(true)
 		}, false, false, nil,
 		nil,

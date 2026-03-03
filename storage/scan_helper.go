@@ -238,25 +238,14 @@ func safeLogScan(schema, table string, ordered bool, filter, order string, input
 	t.Insert(cols, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
 }
 
-// touchTempColumns updates lastAccessed on temp columns used by this scan (lock-free).
+// touchTempColumns updates lastAccessed on all temp columns of the table (lock-free).
+// Touching every temp column (not just the ones in the scan's column lists) prevents
+// a concurrent eviction from modifying t.Columns while the scan is in progress.
 func touchTempColumns(t *table, colSets ...[]string) {
 	now := time.Now().UnixNano()
 	for _, c := range t.Columns {
-		if !c.IsTemp {
-			continue
-		}
-		for _, cols := range colSets {
-			found := false
-			for _, col := range cols {
-				if col == c.Name {
-					atomic.StoreInt64(&c.lastAccessed, now)
-					found = true
-					break
-				}
-			}
-			if found {
-				break
-			}
+		if c.IsTemp {
+			atomic.StoreInt64(&c.lastAccessed, now)
 		}
 	}
 }
