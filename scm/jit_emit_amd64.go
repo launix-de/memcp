@@ -43,12 +43,12 @@ const (
 	RegR14 Reg = 14
 	RegR15 Reg = 15
 	// XMM registers start at 16
-	RegX0  Reg = 16
-	RegX1  Reg = 17
-	RegX2  Reg = 18
-	RegX3  Reg = 19
-	RegX4  Reg = 20
-	RegX5  Reg = 21
+	RegX0 Reg = 16
+	RegX1 Reg = 17
+	RegX2 Reg = 18
+	RegX3 Reg = 19
+	RegX4 Reg = 20
+	RegX5 Reg = 21
 )
 
 // emitByte appends a single byte to the writer.
@@ -122,7 +122,7 @@ func (w *JITWriter) EmitReturnNil() {
 	w.emitBytes(
 		0x31, 0xC0, // XOR EAX, EAX
 		0x31, 0xDB, // XOR EBX, EBX
-		0xC3,       // RET
+		0xC3, // RET
 	)
 }
 
@@ -552,8 +552,9 @@ func (w *JITWriter) EmitShrRegImm8(dst Reg, imm uint8) {
 // Input: ptrReg holds s.ptr, auxReg holds s.aux.
 // Output: result in dstReg as uint16.
 // Logic: if ptr == &scmerIntSentinel → tagInt (4)
-//        if ptr == &scmerFloatSentinel → tagFloat (3)
-//        else → aux >> 48
+//
+//	if ptr == &scmerFloatSentinel → tagFloat (3)
+//	else → aux >> 48
 func (w *JITWriter) EmitGetTag(dst, ptrReg, auxReg Reg) {
 	// CMP ptrReg, &scmerIntSentinel (via R11 as scratch)
 	w.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))

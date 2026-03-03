@@ -33,6 +33,9 @@ type columnboundaries struct {
 	lowerInclusive bool
 	upper          scm.Scmer
 	upperInclusive bool
+	// for computed index columns (col starts with ".")
+	mapCols []string  // source columns needed to compute the value
+	mapFn   scm.Scmer // function: mapFn(mapCols values...) → index value
 }
 
 type boundaries []columnboundaries
@@ -121,8 +124,10 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		return nil
 	}
 	symbolmapping := make(map[scm.Symbol]string)
+	var params []scm.Scmer
 	if p.Params.IsSlice() {
-		for i, sym := range p.Params.Slice() {
+		params = p.Params.Slice()
+		for i, sym := range params {
 			symbolmapping[mustSymbolValue(sym)] = conditionCols[i]
 		}
 	}
@@ -168,7 +173,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				sym := scm.Symbol(v[1].String())
 				if col, ok := symbolmapping[sym]; ok {
 					if v2, ok := extractConstant(v[2]); ok {
-						return boundaries{columnboundaries{col, v2, true, v2, true}}
+						return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 					}
 				}
 			}
@@ -177,36 +182,85 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				sym := scm.Symbol(v[2].String())
 				if col, ok := symbolmapping[sym]; ok {
 					if v2, ok := extractConstant(v[1]); ok {
-						return boundaries{columnboundaries{col, v2, true, v2, true}}
+						return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
+					}
+				}
+			}
+			// computed col: (equal? rawDataset independent) or reversed
+			if len(params) > 0 && v[1].IsSlice() {
+				if isRawDataset(params, v[1]) && isIndependent(params, v[2]) {
+					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
+						canon := canonicalColName(v[1], params, conditionCols)
+						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
+						}
+					}
+				}
+			}
+			if len(params) > 0 && v[2].IsSlice() {
+				if isRawDataset(params, v[2]) && isIndependent(params, v[1]) {
+					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
+						canon := canonicalColName(v[2], params, conditionCols)
+						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
+						}
 					}
 				}
 			}
 			return nil
 		} else if v[0].SymbolEquals("<") || v[0].SymbolEquals("<=") {
+			incl := v[0].SymbolEquals("<=")
 			if v[1].IsSymbol() {
 				sym := scm.Symbol(v[1].String())
 				if col, ok := symbolmapping[sym]; ok {
 					if v2, ok := extractConstant(v[2]); ok {
-						return boundaries{columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals("<=")}}
+						return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 					}
 				}
 			}
-			// reversed: (< const col) means col > const, (<=  const col) means col >= const
+			// reversed: (< const col) means col > const, (<= const col) means col >= const
 			if v[2].IsSymbol() {
 				sym := scm.Symbol(v[2].String())
 				if col, ok := symbolmapping[sym]; ok {
 					if v2, ok := extractConstant(v[1]); ok {
-						return boundaries{columnboundaries{col, v2, v[0].SymbolEquals("<="), scm.NewNil(), false}}
+						return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
+					}
+				}
+			}
+			// computed col: rawDataset < independent → rawDataset has upper bound
+			if len(params) > 0 && v[1].IsSlice() {
+				if isRawDataset(params, v[1]) && isIndependent(params, v[2]) {
+					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
+						canon := canonicalColName(v[1], params, conditionCols)
+						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
+						}
+					}
+				}
+			}
+			// reversed computed: independent < rawDataset → rawDataset has lower bound
+			if len(params) > 0 && v[2].IsSlice() {
+				if isRawDataset(params, v[2]) && isIndependent(params, v[1]) {
+					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
+						canon := canonicalColName(v[2], params, conditionCols)
+						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
+						}
 					}
 				}
 			}
 			return nil
 		} else if v[0].SymbolEquals(">") || v[0].SymbolEquals(">=") {
+			incl := v[0].SymbolEquals(">=")
 			if v[1].IsSymbol() {
 				sym := scm.Symbol(v[1].String())
 				if col, ok := symbolmapping[sym]; ok {
 					if v2, ok := extractConstant(v[2]); ok {
-						return boundaries{columnboundaries{col, v2, v[0].SymbolEquals(">="), scm.NewNil(), false}}
+						return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 					}
 				}
 			}
@@ -215,7 +269,31 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				sym := scm.Symbol(v[2].String())
 				if col, ok := symbolmapping[sym]; ok {
 					if v2, ok := extractConstant(v[1]); ok {
-						return boundaries{columnboundaries{col, scm.NewNil(), false, v2, v[0].SymbolEquals(">=")}}
+						return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
+					}
+				}
+			}
+			// computed col: rawDataset > independent → rawDataset has lower bound
+			if len(params) > 0 && v[1].IsSlice() {
+				if isRawDataset(params, v[1]) && isIndependent(params, v[2]) {
+					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
+						canon := canonicalColName(v[1], params, conditionCols)
+						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
+						}
+					}
+				}
+			}
+			// reversed computed: independent > rawDataset → rawDataset has upper bound
+			if len(params) > 0 && v[2].IsSlice() {
+				if isRawDataset(params, v[2]) && isIndependent(params, v[1]) {
+					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
+						canon := canonicalColName(v[2], params, conditionCols)
+						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						if !mf.IsNil() && mc != nil {
+							return boundaries{columnboundaries{col: canon, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
+						}
 					}
 				}
 			}
@@ -225,7 +303,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			if v[1].IsSymbol() {
 				sym := scm.Symbol(v[1].String())
 				if col, ok := symbolmapping[sym]; ok {
-					return boundaries{columnboundaries{col, scm.NewNil(), true, scm.NewNil(), true}}
+					return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
 				}
 			}
 			return nil
@@ -256,7 +334,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 								}
 							}
 							if found {
-								return boundaries{columnboundaries{col, lo, true, hi, true}}
+								return boundaries{columnboundaries{col: col, lower: lo, lowerInclusive: true, upper: hi, upperInclusive: true}}
 							}
 						}
 					}
@@ -275,7 +353,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 							prefix := pattern[:idx]
 							upperBytes := []byte(prefix)
 							upperBytes[len(upperBytes)-1]++
-							return boundaries{columnboundaries{col, scm.NewString(prefix), true, scm.NewString(string(upperBytes)), false}}
+							return boundaries{columnboundaries{col: col, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
 						}
 					}
 				}

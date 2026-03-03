@@ -114,7 +114,10 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 		default:
 			// Prefer tag-based decoding for special cases.
 			if node.IsProc() {
-				io.WriteString(w, "?")
+				// Use pointer address to produce a unique stable name per lambda within
+				// the session. Prevents YEAR, MONTH, DAY, etc. from colliding on the
+				// same canonical index name.
+				io.WriteString(w, fmt.Sprintf("%p", node.Proc()))
 				return
 			}
 			if node.IsNthLocalVar() {

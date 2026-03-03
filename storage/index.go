@@ -17,7 +17,6 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 package storage
 
-import "fmt"
 import "sort"
 import "sync"
 import "sync/atomic"
@@ -34,11 +33,35 @@ type indexPair struct {
 
 // (no op) numeric helper removed; collations now use golang.org/x/text/collate for ordering
 
+// colGetter retrieves a single index-column value for a given record ID.
+// For raw columns it reads directly from ColumnStorage; for computed columns
+// it evaluates the mapFn over the source column storages.
+type colGetter struct {
+	raw     ColumnStorage                // non-nil for raw columns
+	mapCols []ColumnStorage              // non-nil for computed columns
+	mapFn   func(...scm.Scmer) scm.Scmer // non-nil for computed columns
+}
+
+func (g colGetter) get(recid uint32) scm.Scmer {
+	if g.mapFn != nil {
+		vals := make([]scm.Scmer, len(g.mapCols))
+		for i, cs := range g.mapCols {
+			vals[i] = cs.GetValue(recid)
+		}
+		return g.mapFn(vals...)
+	}
+	return g.raw.GetValue(recid)
+}
+
 type StorageIndex struct {
-	Cols        []string   // sort equal-cols alphabetically, so similar conditions are canonical
-	Savings     float64    // store the amount of time savings here -> add selectivity (outputted / size) on each
-	Native      bool       // true when data is physically sorted by this index (zero-cost)
-	mainIndexes StorageInt // we can do binary searches here (unused when Native)
+	Cols []string // sort equal-cols alphabetically, so similar conditions are canonical
+	// ColMapCols[i] and ColMapFn[i] are set for computed index columns (col starts with ".").
+	// Both are nil for raw columns.
+	ColMapCols  [][]string  // per-column source col names; nil entry means raw column
+	ColMapFn    []scm.Scmer // per-column compute fn; IsNil() entry means raw column
+	Savings     float64     // store the amount of time savings here -> add selectivity (outputted / size) on each
+	Native      bool        // true when data is physically sorted by this index (zero-cost)
+	mainIndexes StorageInt  // we can do binary searches here (unused when Native)
 	// deltaBtree holds delta inserts in index-column order. Contract:
 	// when active==true, deltaBtree is non-nil. It is built during index
 	// construction and kept in sync by shard.insertDataset on every insert.
@@ -50,6 +73,26 @@ type StorageIndex struct {
 	active     bool
 	lastHit    atomic.Uint32 // last binary search position for sorted access pattern optimization
 	mu         sync.Mutex
+}
+
+// buildGetters returns per-column value getters for this index, reading from the
+// shard under a currently-held RLock. Must be called with s.t.mu.RLock held.
+func (s *StorageIndex) buildGetters() []colGetter {
+	getters := make([]colGetter, len(s.Cols))
+	for i, col := range s.Cols {
+		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
+			// computed column: read mapCols and apply mapFn
+			mapColStorages := make([]ColumnStorage, len(s.ColMapCols[i]))
+			for j, mc := range s.ColMapCols[i] {
+				mapColStorages[j] = s.t.getColumnStorageRLocked(mc)
+			}
+			fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[i])
+			getters[i] = colGetter{mapCols: mapColStorages, mapFn: fn}
+		} else {
+			getters[i] = colGetter{raw: s.t.getColumnStorageRLocked(col)}
+		}
+	}
+	return getters
 }
 
 func (idx *StorageIndex) ComputeSize() uint {
@@ -66,13 +109,27 @@ func (idx *StorageIndex) String() string {
 	return strings.Join(idx.Cols, "|")
 }
 
-// iterates over items
+// getDeltaValue returns the raw column value for a delta row.
 func (s *StorageIndex) getDeltaValue(data []scm.Scmer, col string) scm.Scmer {
 	colpos, ok := s.t.deltaColumns[col]
 	if ok && colpos < len(data) {
 		return data[colpos]
 	}
 	return scm.NewNil()
+}
+
+// getDeltaColValue returns the index-column value for a delta row at column index colIdx.
+// For computed columns it reads the source cols and applies the mapFn.
+func (s *StorageIndex) getDeltaColValue(data []scm.Scmer, colIdx int) scm.Scmer {
+	if len(s.ColMapFn) > colIdx && !s.ColMapFn[colIdx].IsNil() {
+		fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[colIdx])
+		vals := make([]scm.Scmer, len(s.ColMapCols[colIdx]))
+		for i, mc := range s.ColMapCols[colIdx] {
+			vals[i] = s.getDeltaValue(data, mc)
+		}
+		return fn(vals...)
+	}
+	return s.getDeltaValue(data, s.Cols[colIdx])
 }
 
 func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
@@ -101,10 +158,10 @@ func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast
 	return true, false
 }
 
-func (s *StorageIndex) compareMainAndDelta(mainRecid uint32, mainCols []ColumnStorage, delta indexPair) int {
-	for i, col := range s.Cols {
-		mainVal := mainCols[i].GetValue(mainRecid)
-		deltaVal := s.getDeltaValue(delta.data, col)
+func (s *StorageIndex) compareMainAndDelta(mainRecid uint32, mainGetters []colGetter, delta indexPair) int {
+	for i := range s.Cols {
+		mainVal := mainGetters[i].get(mainRecid)
+		deltaVal := s.getDeltaColValue(delta.data, i)
 		if scm.Less(mainVal, deltaVal) {
 			return -1
 		}
@@ -183,8 +240,12 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 		}
 		index := new(StorageIndex)
 		index.Cols = make([]string, len(lower))
+		index.ColMapCols = make([][]string, len(lower))
+		index.ColMapFn = make([]scm.Scmer, len(lower))
 		for i := range lower {
 			index.Cols[i] = cols[i].col
+			index.ColMapCols[i] = cols[i].mapCols // nil for raw columns
+			index.ColMapFn[i] = cols[i].mapFn     // IsNil() for raw columns
 		}
 		index.Savings = 0.0  // count how many cost we wasted so we decide when to build the index
 		index.active = false // tell the engine that index has to be built first
@@ -231,6 +292,12 @@ func indexHasComputedCol(s *storageShard, idx *StorageIndex) bool {
 			}
 		}
 	}
+	// also check new-style computed index columns
+	for i := range idx.Cols {
+		if len(idx.ColMapFn) > i && !idx.ColMapFn[i].IsNil() {
+			return true
+		}
+	}
 	return false
 }
 
@@ -245,6 +312,8 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 		clone := new(StorageIndex)
 		clone.Cols = make([]string, len(idx.Cols))
 		copy(clone.Cols, idx.Cols)
+		clone.ColMapCols = idx.ColMapCols // shallow copy OK (immutable per-col slices)
+		clone.ColMapFn = idx.ColMapFn     // shallow copy OK
 		clone.Savings = idx.Savings * 0.9
 		clone.t = t2
 		clone.active = false
@@ -336,11 +405,9 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func(
 }
 
 // buildIndex constructs the index data structures (mainIndexes and deltaBtree).
-// cols must contain column storages for each index column in order.
+// cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
-func (s *StorageIndex) buildIndex(cols []ColumnStorage) {
-	fmt.Println("building index on", s.t.t.Name, "over", s.Cols)
-
+func (s *StorageIndex) buildIndex(cols []colGetter) {
 	if !s.Native {
 		// main storage: build sort-order index
 		tmp := make([]uint32, s.t.main_count)
@@ -349,9 +416,9 @@ func (s *StorageIndex) buildIndex(cols []ColumnStorage) {
 		}
 		// sort indexes
 		sort.Slice(tmp, func(i, j int) bool {
-			for _, c := range cols {
-				a := c.GetValue(tmp[i])
-				b := c.GetValue(tmp[j])
+			for _, g := range cols {
+				a := g.get(tmp[i])
+				b := g.get(tmp[j])
 				if scm.Less(a, b) {
 					return true // less
 				} else if !scm.Equal(a, b) {
@@ -374,30 +441,21 @@ func (s *StorageIndex) buildIndex(cols []ColumnStorage) {
 	}
 	// else: Native index — data is physically sorted, no mainIndexes needed
 
-	// delta storage
-	s.deltaBtree = btree.NewG[indexPair](8, func(i, j indexPair) bool {
-		for _, col := range s.Cols {
-			colpos, ok := s.t.deltaColumns[col]
-			if !ok {
-				continue // non-existing column -> don't compare
-			}
-			var a, b scm.Scmer
-			if colpos < len(i.data) {
-				a = i.data[colpos]
-			}
-			if colpos < len(j.data) {
-				b = j.data[colpos]
-			}
-			if scm.Less(a, b) {
+	// delta storage — comparator uses getDeltaColValue so computed columns work
+	s.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
+		for colIdx := range s.Cols {
+			av := s.getDeltaColValue(a.data, colIdx)
+			bv := s.getDeltaColValue(b.data, colIdx)
+			if scm.Less(av, bv) {
 				return true // less
-			} else if !scm.Equal(a, b) {
+			} else if !scm.Equal(av, bv) {
 				return false // greater
 			}
 			// otherwise: next iteration
 		}
 		// tiebreak by itemid so duplicate key values are never "equal"
 		// (prevents ReplaceOrInsert from dropping rows with same key)
-		return i.itemid < j.itemid
+		return a.itemid < b.itemid
 	})
 	// fill deltaBtree with global record IDs
 	for i, data := range s.t.inserts {
@@ -410,14 +468,11 @@ func (s *StorageIndex) buildIndex(cols []ColumnStorage) {
 // iterate over index using a caller-provided buffer for batching
 func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
 
-	// find columns in storage — use RLocked variant because the caller
+	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
 	// Re-acquiring RLock via getColumnStorageOrPanic would deadlock when a
 	// concurrent writer is waiting for s.t.mu.Lock() (write-preferring RWMutex).
-	cols := make([]ColumnStorage, len(s.Cols))
-	for i, c := range s.Cols {
-		cols[i] = s.t.getColumnStorageRLocked(c)
-	}
+	cols := s.buildGetters()
 	// no collation-specific helpers in the current implementation
 
 	savings_threshold := 2.0    // building an index costs 1x the time as traversing the list
@@ -476,7 +531,7 @@ start_scan:
 	searchLo := 0
 	searchN := int(s.t.main_count)
 	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && cmpCols > 0 && !lower[0].IsNil() {
-		hintVal := cols[0].GetValue(getRecid(hint))
+		hintVal := cols[0].get(getRecid(hint))
 		if !hintVal.IsNil() {
 			if scm.Less(hintVal, lower[0]) {
 				searchLo = hint
@@ -490,7 +545,7 @@ start_scan:
 		idx2 := getRecid(searchLo + idx)
 		for i := 0; i < cmpCols; i++ {
 			a := lower[i]
-			b := cols[i].GetValue(idx2)
+			b := cols[i].get(idx2)
 			if scm.Less(a, b) {
 				return true // less
 			} else if scm.Less(b, a) {
@@ -505,7 +560,7 @@ start_scan:
 	if !lowerInclusive && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
 		for uint32(mainIdx) < s.t.main_count {
 			recid := getRecid(mainIdx)
-			if !scm.Equal(cols[cmpCols-1].GetValue(recid), lower[cmpCols-1]) {
+			if !scm.Equal(cols[cmpCols-1].get(recid), lower[cmpCols-1]) {
 				break
 			}
 			mainIdx++
@@ -520,7 +575,7 @@ start_scan:
 			recid := getRecid(mainIdx)
 			mainIdx++
 			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
-				return cols[i].GetValue(recid)
+				return cols[i].get(recid)
 			})
 			if inRange {
 				return recid, true
@@ -559,20 +614,8 @@ start_scan:
 	mainRecid, mainOk := nextMain()
 
 	if maxInsertIndex > 0 && snapDeltaBtree != nil {
-		maxCol := 0
-		for _, col := range s.Cols {
-			if pos, ok := s.t.deltaColumns[col]; ok && pos+1 > maxCol {
-				maxCol = pos + 1
-			}
-		}
-		refLower := make([]scm.Scmer, maxCol)
-		for i := 0; i < cmpCols; i++ {
-			col := s.Cols[i]
-			if pos, ok := s.t.deltaColumns[col]; ok {
-				refLower[pos] = lower[i]
-			}
-		}
-		snapDeltaBtree.AscendGreaterOrEqual(indexPair{-1, refLower}, func(p indexPair) bool {
+		// iterFn handles each delta item in btree order.
+		iterFn := func(p indexPair) bool {
 			if stopped {
 				return false
 			}
@@ -584,7 +627,7 @@ start_scan:
 				return true
 			}
 			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
-				return s.getDeltaValue(p.data, s.Cols[i])
+				return s.getDeltaColValue(p.data, i)
 			})
 			if !inRange {
 				return !beyond
@@ -603,7 +646,35 @@ start_scan:
 				emit(uint32(p.itemid))
 			}
 			return !beyond && !stopped
-		})
+		}
+
+		// For computed columns the AscendGreaterOrEqual reference item cannot be
+		// constructed (computed col names have no entry in deltaColumns), so scan all.
+		hasComputedInBounds := false
+		for i := 0; i < cmpCols; i++ {
+			if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
+				hasComputedInBounds = true
+				break
+			}
+		}
+		if hasComputedInBounds {
+			snapDeltaBtree.Ascend(iterFn)
+		} else {
+			maxCol := 0
+			for _, col := range s.Cols {
+				if pos, ok := s.t.deltaColumns[col]; ok && pos+1 > maxCol {
+					maxCol = pos + 1
+				}
+			}
+			refLower := make([]scm.Scmer, maxCol)
+			for i := 0; i < cmpCols; i++ {
+				col := s.Cols[i]
+				if pos, ok := s.t.deltaColumns[col]; ok {
+					refLower[pos] = lower[i]
+				}
+			}
+			snapDeltaBtree.AscendGreaterOrEqual(indexPair{-1, refLower}, iterFn)
+		}
 	}
 
 	// drain remaining main items
