@@ -132,10 +132,24 @@ func init_strings() {
 			DeclarationParameter{"value", "any", "value", nil},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			_, ok := a[0].Any().(string)
-			return NewBool(ok)
+			return NewBool(a[0].IsString())
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.aux [#1] */,
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			d0 := args[0]
+			d1 := ctx.EmitTagEquals(&d0, tagString, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d0)
+			if d1.Loc == LocStack || d1.Loc == LocStackPair { ctx.EnsureDesc(&d1) }
+			if d1.Loc == LocImm {
+				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d1.Imm} }
+				ctx.W.EmitMakeBool(result, d1)
+			} else {
+				if result.Loc == LocAny { return d1 }
+				ctx.W.EmitMakeBool(result, d1)
+				ctx.FreeReg(d1.Reg)
+			}
+			return result
+		},
 	})
 	Declare(&Globalenv, &Declaration{
 		"concat", "concatenates stringable values and returns a string",
@@ -154,7 +168,7 @@ func init_strings() {
 			}
 			return NewString(sb.String())
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.aux [#1] */,
+		nil /* TODO: unsupported compare const kind: 0:float64 */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"substr", "returns a substring (0-based index)",
@@ -253,7 +267,7 @@ func init_strings() {
 			}
 			return NewBool(StrLike(value, pattern))
 		}, true, false, nil,
-		nil /* TODO: unsupported phi constant: "utf8mb4_general_ci":string */,
+		nil /* TODO: len on non-parameter: len(substr) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlike_cs", "matches the string against a wildcard pattern (case-sensitive)",
@@ -323,7 +337,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: unsupported compare const kind: "":string */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"strrtrim", "trims whitespace from the right of a string",
@@ -334,7 +348,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: unsupported compare const kind: "":string */,
 	})
 	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
 	Declare(&Globalenv, &Declaration{
@@ -363,7 +377,7 @@ func init_strings() {
 			}
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: unsupported compare const kind: "":string */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_rtrim", "SQL RTRIM(): NULL-safe trim of whitespace from right",
@@ -377,7 +391,7 @@ func init_strings() {
 			}
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: unsupported compare const kind: "":string */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"split", "splits a string using a separator or space",
@@ -398,7 +412,7 @@ func init_strings() {
 			}
 			return NewSlice(result)
 		}, true, false, nil,
-		nil /* TODO: unsupported phi constant: " ":string */,
+		nil /* TODO: unsupported compare const kind: "":string */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -418,7 +432,7 @@ func init_strings() {
 			}
 			return NewString(strings.Repeat(String(a[0]), int(n)))
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: len on non-parameter: len(s) */,
 	})
 
 	/* comparison */
@@ -605,7 +619,7 @@ func init_strings() {
 				return NewFunc(LessScm)
 			}
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: len on non-parameter: len(s) */,
 	})
 
 	/* escaping functions similar to PHP */
