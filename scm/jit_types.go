@@ -209,6 +209,7 @@ type JITContext struct {
 	ProtectedRegs      uint64  // bitmask of registers that must not be spilled
 	ProtectedRegCounts [16]int // per-register protection refcount (supports nested protection)
 	nextDescID         uint32
+	descOwners         map[uint32]*JITValueDesc
 	descSpills         map[uint32]descSpillMeta
 	// EvictedCounts tracks how many times each register was evicted by AllocReg.
 	// When AllocReg spills register R and returns R as a fresh register, both the
@@ -271,6 +272,29 @@ func (ctx *JITContext) UnprotectReg(r Reg) {
 // If no registers are free, spills the highest-numbered in-use register
 // to a pre-allocated buffer and returns it.
 func (ctx *JITContext) AllocReg() Reg {
+	// Sanitize stale owner links: if an owner descriptor no longer claims this
+	// hardware register, drop the stale owner edge and mark the register free.
+	for rr := Reg(0); rr <= RegR15; rr++ {
+		if (ctx.AllRegs & (1 << uint(rr))) == 0 {
+			continue
+		}
+		owner := ctx.RegOwners[rr]
+		if owner == nil {
+			continue
+		}
+		valid := false
+		switch owner.Loc {
+		case LocReg:
+			valid = owner.Reg == rr
+		case LocRegPair:
+			valid = owner.Reg == rr || owner.Reg2 == rr
+		}
+		if !valid {
+			ctx.RegOwners[rr] = nil
+			ctx.FreeRegs |= 1 << uint(rr)
+		}
+	}
+
 	// Exclude protected registers from allocation, not just from eviction.
 	available := ctx.FreeRegs &^ ctx.ProtectedRegs
 	if available != 0 {
@@ -327,7 +351,16 @@ func (ctx *JITContext) AllocReg() Reg {
 		break
 	}
 	if r == 0xFF {
-		panic("jit: register spill required (fallback)")
+		ownerMask := uint64(0)
+		ownerDump := ""
+		for rr := Reg(0); rr <= RegR15; rr++ {
+			if ctx.RegOwners[rr] != nil {
+				ownerMask |= 1 << uint(rr)
+				o := ctx.RegOwners[rr]
+				ownerDump += fmt.Sprintf(" r%d(loc=%d reg=%d reg2=%d)", rr, o.Loc, o.Reg, o.Reg2)
+			}
+		}
+		panic(fmt.Sprintf("jit: register spill required (fallback) free=%#x all=%#x prot=%#x owners=%#x%s", ctx.FreeRegs, ctx.AllRegs, ctx.ProtectedRegs, ownerMask, ownerDump))
 	}
 
 	owner := ctx.RegOwners[r]
@@ -463,9 +496,18 @@ func (ctx *JITContext) BindReg(r Reg, desc *JITValueDesc) {
 		ctx.nextDescID++
 		desc.ID = ctx.nextDescID
 	}
+	if ctx.descOwners == nil {
+		ctx.descOwners = make(map[uint32]*JITValueDesc)
+	}
+	owner := ctx.descOwners[desc.ID]
+	if owner == nil {
+		owner = &JITValueDesc{}
+		ctx.descOwners[desc.ID] = owner
+	}
+	*owner = *desc
 	// A bound register is live and must not be treated as free.
 	ctx.FreeRegs &^= 1 << uint(r)
-	ctx.RegOwners[r] = desc
+	ctx.RegOwners[r] = owner
 	if desc.ID != 0 && ctx.descSpills != nil {
 		delete(ctx.descSpills, desc.ID)
 	}
@@ -550,20 +592,20 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	case LocReg:
 		if desc.Reg <= RegR15 {
 			owner := ctx.RegOwners[desc.Reg]
-			if owner == desc || owner == nil {
+			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(desc.Reg)
 			}
 		}
 	case LocRegPair:
 		if desc.Reg <= RegR15 {
 			owner := ctx.RegOwners[desc.Reg]
-			if owner == desc || owner == nil {
+			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(desc.Reg)
 			}
 		}
 		if desc.Reg2 <= RegR15 {
 			owner := ctx.RegOwners[desc.Reg2]
-			if owner == desc || owner == nil {
+			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
 				ctx.FreeReg(desc.Reg2)
 			}
 		}
@@ -743,6 +785,10 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 
 	// Move argument words into Go ABI registers.
 	// Process in reverse to avoid clobbering sources.
+	stackArgBaseDisp := int32(resultBytes + len(liveRegs)*8)
+	if padded {
+		stackArgBaseDisp += 8
+	}
 	for i := len(argWords) - 1; i >= 0; i-- {
 		target := GoABIIntRegs[i]
 		switch argWords[i].loc {
@@ -757,7 +803,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 				ctx.W.EmitMovRegImm64(RegR11, uint64(argWords[i].memPtr))
 				ctx.W.EmitMovRegMem(target, RegR11, argWords[i].stackOff)
 			} else {
-				ctx.W.EmitMovRegMem(target, RegRSP, argWords[i].stackOff)
+				ctx.W.EmitMovRegMem(target, RegRSP, stackArgBaseDisp+argWords[i].stackOff)
 			}
 		default:
 			panic("jit: unsupported Go-call arg location")
@@ -837,9 +883,14 @@ func (ctx *JITContext) EmitGoCallScalar(funcAddr uint64, args []JITValueDesc, nu
 	words := ctx.flattenArgs(args, &wordsBuf)
 	results := ctx.EmitGoCall(funcAddr, words, numResultWords, &resultsBuf)
 	if numResultWords == 1 {
-		return JITValueDesc{Loc: LocReg, Reg: results[0]}
+		d := JITValueDesc{Loc: LocReg, Reg: results[0]}
+		ctx.BindReg(results[0], &d)
+		return d
 	}
-	return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
+	d := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
+	ctx.BindReg(results[0], &d)
+	ctx.BindReg(results[1], &d)
+	return d
 }
 
 // EmitMovPairToResult moves a LocRegPair value into the result descriptor registers.

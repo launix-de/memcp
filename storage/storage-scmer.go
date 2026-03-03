@@ -102,7 +102,7 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			if idxInt.Loc == scm.LocImm {
 				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
 			} else {
-				if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
+				ctx.EnsureDesc(&idxInt)
 				if idxInt.Loc != scm.LocReg { panic("jit: idxInt not in register") }
 				ctx.W.EmitShlRegImm8(idxInt.Reg, 32)
 				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
@@ -128,10 +128,10 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				ctx.BindReg(r2, &d0)
 				ctx.BindReg(r3, &d0)
 			}
-			if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
+			ctx.EnsureDesc(&idxInt)
 			r4 := ctx.AllocReg()
-			if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
-			if d0.Loc == scm.LocStack || d0.Loc == scm.LocStackPair { ctx.EnsureDesc(&d0) }
+			ctx.EnsureDesc(&idxInt)
+			ctx.EnsureDesc(&d0)
 			if idxInt.Loc == scm.LocImm {
 				ctx.W.EmitMovRegImm64(r4, uint64(idxInt.Imm.Int()) * 16)
 			} else {

@@ -140,7 +140,7 @@ func init_strings() {
 			d2 := d0
 			d1 := ctx.EmitTagEquals(&d2, tagString, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
-			if d1.Loc == LocStack || d1.Loc == LocStackPair { ctx.EnsureDesc(&d1) }
+			ctx.EnsureDesc(&d1)
 			if d1.Loc == LocImm {
 				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d1.Imm} }
 				ctx.W.EmitMakeBool(result, d1)
@@ -169,7 +169,7 @@ func init_strings() {
 			}
 			return NewString(sb.String())
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: 0:float64 */, /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */
+		nil /* TODO: unsupported compare const kind: 0:float64 */, /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"substr", "returns a substring (0-based index)",
@@ -200,7 +200,7 @@ func init_strings() {
 			d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d0}, 2)
 			ctx.FreeDesc(&d0)
 			d2 := args[1]
-			if d2.Loc == LocStack || d2.Loc == LocStackPair { ctx.EnsureDesc(&d2) }
+			ctx.EnsureDesc(&d2)
 			d3 := d2
 			_ = d3
 			r0 := d2.Loc == LocReg
@@ -223,13 +223,13 @@ func init_strings() {
 				d4.Type = tagInt
 				ctx.BindReg(d4.Reg, &d4)
 			}
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
+			ctx.EnsureDesc(&d4)
+			ctx.EnsureDesc(&d4)
+			ctx.EnsureDesc(&d4)
 			if r0 { ctx.UnprotectReg(r1) }
 			ctx.FreeDesc(&d2)
 			d6 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
-			if d6.Loc == LocStack || d6.Loc == LocStackPair { ctx.EnsureDesc(&d6) }
+			ctx.EnsureDesc(&d6)
 			var d7 JITValueDesc
 			if d6.Loc == LocImm {
 				d7 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d6.Imm.Int() > 2)}
@@ -259,9 +259,9 @@ func init_strings() {
 			}
 			ctx.FreeDesc(&d7)
 			ctx.W.MarkLabel(lbl2)
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
+			ctx.EnsureDesc(&d4)
 			var d8 JITValueDesc
-			if d1.Loc == LocStack || d1.Loc == LocStackPair { ctx.EnsureDesc(&d1) }
+			ctx.EnsureDesc(&d1)
 			if d1.Loc == LocRegPair {
 				d8 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d1.Reg2}
 				ctx.BindReg(d1.Reg2, &d8)
@@ -335,7 +335,7 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl1)
 			d14 := args[2]
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
+			ctx.EnsureDesc(&d14)
 			d15 := d14
 			_ = d15
 			r7 := d14.Loc == LocReg
@@ -358,17 +358,17 @@ func init_strings() {
 				d16.Type = tagInt
 				ctx.BindReg(d16.Reg, &d16)
 			}
-			if d16.Loc == LocStack || d16.Loc == LocStackPair { ctx.EnsureDesc(&d16) }
-			if d16.Loc == LocStack || d16.Loc == LocStackPair { ctx.EnsureDesc(&d16) }
-			if d16.Loc == LocStack || d16.Loc == LocStackPair { ctx.EnsureDesc(&d16) }
+			ctx.EnsureDesc(&d16)
+			ctx.EnsureDesc(&d16)
+			ctx.EnsureDesc(&d16)
 			if r7 { ctx.UnprotectReg(r8) }
 			ctx.FreeDesc(&d14)
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
-			if d16.Loc == LocStack || d16.Loc == LocStackPair { ctx.EnsureDesc(&d16) }
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
-			if d16.Loc == LocStack || d16.Loc == LocStackPair { ctx.EnsureDesc(&d16) }
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
-			if d16.Loc == LocStack || d16.Loc == LocStackPair { ctx.EnsureDesc(&d16) }
+			ctx.EnsureDesc(&d4)
+			ctx.EnsureDesc(&d16)
+			ctx.EnsureDesc(&d4)
+			ctx.EnsureDesc(&d16)
+			ctx.EnsureDesc(&d4)
+			ctx.EnsureDesc(&d16)
 			var d18 JITValueDesc
 			if d4.Loc == LocImm && d16.Loc == LocImm {
 				d18 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d4.Imm.Int() + d16.Imm.Int())}
@@ -409,8 +409,8 @@ func init_strings() {
 				d4.Loc = LocNone
 			}
 			ctx.FreeDesc(&d16)
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
-			if d18.Loc == LocStack || d18.Loc == LocStackPair { ctx.EnsureDesc(&d18) }
+			ctx.EnsureDesc(&d4)
+			ctx.EnsureDesc(&d18)
 			var d20 JITValueDesc
 			if d18.Loc == LocImm && d4.Loc == LocImm {
 				d20 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d18.Imm.Int() - d4.Imm.Int())}
@@ -555,7 +555,7 @@ func init_strings() {
 			if d4.Loc == LocImm {
 				d5 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(d4.Imm.String())))}
 			} else {
-				if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
+				ctx.EnsureDesc(&d4)
 				if d4.Loc == LocRegPair {
 					d5 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d4.Reg2}
 					ctx.BindReg(d4.Reg2, &d5)
@@ -569,7 +569,7 @@ func init_strings() {
 				}
 			}
 			d6 := args[1]
-			if d6.Loc == LocStack || d6.Loc == LocStackPair { ctx.EnsureDesc(&d6) }
+			ctx.EnsureDesc(&d6)
 			d7 := d6
 			_ = d7
 			r1 := d6.Loc == LocReg
@@ -592,12 +592,12 @@ func init_strings() {
 				d8.Type = tagInt
 				ctx.BindReg(d8.Reg, &d8)
 			}
-			if d8.Loc == LocStack || d8.Loc == LocStackPair { ctx.EnsureDesc(&d8) }
-			if d8.Loc == LocStack || d8.Loc == LocStackPair { ctx.EnsureDesc(&d8) }
-			if d8.Loc == LocStack || d8.Loc == LocStackPair { ctx.EnsureDesc(&d8) }
+			ctx.EnsureDesc(&d8)
+			ctx.EnsureDesc(&d8)
+			ctx.EnsureDesc(&d8)
 			if r1 { ctx.UnprotectReg(r2) }
 			ctx.FreeDesc(&d6)
-			if d8.Loc == LocStack || d8.Loc == LocStackPair { ctx.EnsureDesc(&d8) }
+			ctx.EnsureDesc(&d8)
 			var d10 JITValueDesc
 			if d8.Loc == LocImm {
 				d10 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d8.Imm.Int() - 1)}
@@ -611,7 +611,7 @@ func init_strings() {
 				d8.Loc = LocNone
 			}
 			ctx.FreeDesc(&d8)
-			if d10.Loc == LocStack || d10.Loc == LocStackPair { ctx.EnsureDesc(&d10) }
+			ctx.EnsureDesc(&d10)
 			var d11 JITValueDesc
 			if d10.Loc == LocImm {
 				d11 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d10.Imm.Int() < 0)}
@@ -631,7 +631,7 @@ func init_strings() {
 				} else {
 			d12 := d10
 			if d12.Loc == LocNone { panic("jit: phi source has no location") }
-			if d12.Loc == LocStack || d12.Loc == LocStackPair { ctx.EnsureDesc(&d12) }
+			ctx.EnsureDesc(&d12)
 			ctx.EmitStoreToStack(d12, 0)
 					ctx.W.EmitJmp(lbl5)
 				}
@@ -640,7 +640,7 @@ func init_strings() {
 				ctx.W.EmitJcc(CcNE, lbl6)
 			d13 := d10
 			if d13.Loc == LocNone { panic("jit: phi source has no location") }
-			if d13.Loc == LocStack || d13.Loc == LocStackPair { ctx.EnsureDesc(&d13) }
+			ctx.EnsureDesc(&d13)
 			ctx.EmitStoreToStack(d13, 0)
 				ctx.W.EmitJmp(lbl5)
 				ctx.W.MarkLabel(lbl6)
@@ -653,12 +653,12 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl5)
 			d14 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d5)
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d5)
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d5)
 			var d15 JITValueDesc
 			if d14.Loc == LocImm && d5.Loc == LocImm {
 				d15 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d14.Imm.Int() >= d5.Imm.Int())}
@@ -711,7 +711,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl8)
 			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d16 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
-			if d16.Loc == LocStack || d16.Loc == LocStackPair { ctx.EnsureDesc(&d16) }
+			ctx.EnsureDesc(&d16)
 			var d17 JITValueDesc
 			if d16.Loc == LocImm {
 				d17 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d16.Imm.Int() > 2)}
@@ -748,9 +748,9 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl11)
 			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
+			ctx.EnsureDesc(&d14)
 			var d19 JITValueDesc
-			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
+			ctx.EnsureDesc(&d4)
 			if d4.Loc == LocRegPair {
 				d19 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d4.Reg2}
 				ctx.BindReg(d4.Reg2, &d19)
@@ -825,7 +825,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl10)
 			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 := args[2]
-			if d25.Loc == LocStack || d25.Loc == LocStackPair { ctx.EnsureDesc(&d25) }
+			ctx.EnsureDesc(&d25)
 			d26 := d25
 			_ = d26
 			r12 := d25.Loc == LocReg
@@ -848,17 +848,17 @@ func init_strings() {
 				d27.Type = tagInt
 				ctx.BindReg(d27.Reg, &d27)
 			}
-			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
-			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
-			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
+			ctx.EnsureDesc(&d27)
+			ctx.EnsureDesc(&d27)
+			ctx.EnsureDesc(&d27)
 			if r12 { ctx.UnprotectReg(r13) }
 			ctx.FreeDesc(&d25)
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d27)
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d27)
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d27)
 			var d29 JITValueDesc
 			if d14.Loc == LocImm && d27.Loc == LocImm {
 				d29 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d14.Imm.Int() + d27.Imm.Int())}
@@ -898,12 +898,12 @@ func init_strings() {
 				ctx.TransferReg(d14.Reg)
 				d14.Loc = LocNone
 			}
-			if d29.Loc == LocStack || d29.Loc == LocStackPair { ctx.EnsureDesc(&d29) }
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
-			if d29.Loc == LocStack || d29.Loc == LocStackPair { ctx.EnsureDesc(&d29) }
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
-			if d29.Loc == LocStack || d29.Loc == LocStackPair { ctx.EnsureDesc(&d29) }
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
+			ctx.EnsureDesc(&d29)
+			ctx.EnsureDesc(&d5)
+			ctx.EnsureDesc(&d29)
+			ctx.EnsureDesc(&d5)
+			ctx.EnsureDesc(&d29)
+			ctx.EnsureDesc(&d5)
 			var d30 JITValueDesc
 			if d29.Loc == LocImm && d5.Loc == LocImm {
 				d30 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d29.Imm.Int() > d5.Imm.Int())}
@@ -942,7 +942,7 @@ func init_strings() {
 				} else {
 			d31 := d27
 			if d31.Loc == LocNone { panic("jit: phi source has no location") }
-			if d31.Loc == LocStack || d31.Loc == LocStackPair { ctx.EnsureDesc(&d31) }
+			ctx.EnsureDesc(&d31)
 			ctx.EmitStoreToStack(d31, 8)
 					ctx.W.EmitJmp(lbl14)
 				}
@@ -951,7 +951,7 @@ func init_strings() {
 				ctx.W.EmitJcc(CcNE, lbl15)
 			d32 := d27
 			if d32.Loc == LocNone { panic("jit: phi source has no location") }
-			if d32.Loc == LocStack || d32.Loc == LocStackPair { ctx.EnsureDesc(&d32) }
+			ctx.EnsureDesc(&d32)
 			ctx.EmitStoreToStack(d32, 8)
 				ctx.W.EmitJmp(lbl14)
 				ctx.W.MarkLabel(lbl15)
@@ -961,7 +961,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl14)
 			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d33 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			if d33.Loc == LocStack || d33.Loc == LocStackPair { ctx.EnsureDesc(&d33) }
+			ctx.EnsureDesc(&d33)
 			var d34 JITValueDesc
 			if d33.Loc == LocImm {
 				d34 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d33.Imm.Int() < 0)}
@@ -992,12 +992,12 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl13)
 			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d33 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
+			ctx.EnsureDesc(&d5)
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d5)
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d5)
+			ctx.EnsureDesc(&d14)
 			var d35 JITValueDesc
 			if d5.Loc == LocImm && d14.Loc == LocImm {
 				d35 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d5.Imm.Int() - d14.Imm.Int())}
@@ -1031,18 +1031,18 @@ func init_strings() {
 			ctx.FreeDesc(&d5)
 			d36 := d35
 			if d36.Loc == LocNone { panic("jit: phi source has no location") }
-			if d36.Loc == LocStack || d36.Loc == LocStackPair { ctx.EnsureDesc(&d36) }
+			ctx.EnsureDesc(&d36)
 			ctx.EmitStoreToStack(d36, 8)
 			ctx.W.EmitJmp(lbl14)
 			ctx.W.MarkLabel(lbl17)
 			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d33 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d33.Loc == LocStack || d33.Loc == LocStackPair { ctx.EnsureDesc(&d33) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d33.Loc == LocStack || d33.Loc == LocStackPair { ctx.EnsureDesc(&d33) }
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d33.Loc == LocStack || d33.Loc == LocStackPair { ctx.EnsureDesc(&d33) }
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d33)
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d33)
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d33)
 			var d37 JITValueDesc
 			if d14.Loc == LocImm && d33.Loc == LocImm {
 				d37 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d14.Imm.Int() + d33.Imm.Int())}
@@ -1083,8 +1083,8 @@ func init_strings() {
 				d14.Loc = LocNone
 			}
 			ctx.FreeDesc(&d33)
-			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
-			if d37.Loc == LocStack || d37.Loc == LocStackPair { ctx.EnsureDesc(&d37) }
+			ctx.EnsureDesc(&d14)
+			ctx.EnsureDesc(&d37)
 			var d39 JITValueDesc
 			if d37.Loc == LocImm && d14.Loc == LocImm {
 				d39 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d37.Imm.Int() - d14.Imm.Int())}
@@ -1153,8 +1153,8 @@ func init_strings() {
 			result.Type = tagString
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl16)
-			d33 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d33 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d43 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{}, 2)
 			ctx.EmitMovPairToResult(&d43, &result)
 			result.Type = tagString
@@ -1176,7 +1176,7 @@ func init_strings() {
 			// turn string to number or so
 			return Simplify(String(a[0]))
 		}, true, false, nil,
-		nil /* TODO: Index: s[0:int] */, /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */
+		nil /* TODO: Index: s[0:int] */, /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlen", "returns the length of a string",
@@ -1199,7 +1199,7 @@ func init_strings() {
 			if d1.Loc == LocImm {
 				d2 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(d1.Imm.String())))}
 			} else {
-				if d1.Loc == LocStack || d1.Loc == LocStackPair { ctx.EnsureDesc(&d1) }
+				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocRegPair {
 					d2 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d1.Reg2}
 					ctx.BindReg(d1.Reg2, &d2)
@@ -1212,9 +1212,9 @@ func init_strings() {
 					panic("len on unsupported descriptor location")
 				}
 			}
-			if d2.Loc == LocStack || d2.Loc == LocStackPair { ctx.EnsureDesc(&d2) }
-			if d2.Loc == LocStack || d2.Loc == LocStackPair { ctx.EnsureDesc(&d2) }
-			if d2.Loc == LocStack || d2.Loc == LocStackPair { ctx.EnsureDesc(&d2) }
+			ctx.EnsureDesc(&d2)
+			ctx.EnsureDesc(&d2)
+			ctx.EnsureDesc(&d2)
 			if d2.Loc == LocImm {
 				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d2.Imm} }
 				ctx.W.EmitMakeInt(result, d2)
@@ -1247,7 +1247,7 @@ func init_strings() {
 			}
 			return NewBool(StrLike(value, pattern))
 		}, true, false, nil,
-		nil /* TODO: Index: substr[0:int] */, /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */
+		nil /* TODO: Index: substr[0:int] */, /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlike_cs", "matches the string against a wildcard pattern (case-sensitive)",
@@ -1260,7 +1260,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewBool(StrLike(String(a[0]), String(a[1])))
 		}, true, false, nil,
-		nil /* TODO: Index: t1[0:int] */, /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */
+		nil /* TODO: Index: t1[0:int] */, /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"toLower", "turns a string into lower case",
@@ -1271,7 +1271,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ToLower(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t1] */, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
+		nil /* TODO: Index: s[t1] */, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"toUpper", "turns a string into upper case",
@@ -1282,7 +1282,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ToUpper(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t1] */, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
+		nil /* TODO: Index: s[t1] */, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"replace", "replaces all occurances in a string with another string",
@@ -1295,7 +1295,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2])))
 		}, true, false, nil,
-		nil /* TODO: Range: range s */, /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */
+		nil /* TODO: Range: range s */, /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strtrim", "trims whitespace from both ends of a string",
@@ -1306,7 +1306,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimSpace(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t3] */, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
+		nil /* TODO: Index: s[t3] */, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strltrim", "trims whitespace from the left of a string",
@@ -1317,7 +1317,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strrtrim", "trims whitespace from the right of a string",
@@ -1328,7 +1328,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
 	Declare(&Globalenv, &Declaration{
@@ -1343,7 +1343,7 @@ func init_strings() {
 			}
 			return NewString(strings.TrimSpace(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t3] */, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
+		nil /* TODO: Index: s[t3] */, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_ltrim", "SQL LTRIM(): NULL-safe trim of whitespace from left",
@@ -1357,7 +1357,7 @@ func init_strings() {
 			}
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_rtrim", "SQL RTRIM(): NULL-safe trim of whitespace from right",
@@ -1371,7 +1371,7 @@ func init_strings() {
 			}
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	Declare(&Globalenv, &Declaration{
 		"split", "splits a string using a separator or space",
@@ -1392,7 +1392,7 @@ func init_strings() {
 			}
 			return NewSlice(result)
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1412,7 +1412,7 @@ func init_strings() {
 			}
 			return NewString(strings.Repeat(String(a[0]), int(n)))
 		}, true, false, nil,
-		nil /* TODO: Extract: extract t9 #0 */, /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */
+		nil /* TODO: Extract: extract t9 #0 */, /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */
 	})
 
 	/* comparison */
@@ -1599,7 +1599,7 @@ func init_strings() {
 				return NewFunc(LessScm)
 			}
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &re.prog [#1] */, /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */
+		nil /* TODO: FieldAddr on non-receiver: &re.prog [#1] */, /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */
 	})
 
 	/* escaping functions similar to PHP */
@@ -1612,7 +1612,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(html.EscapeString(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &r.once [#0] */, /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &r.once [#0] */, /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"urlencode", "encodes a string according to URI coding schema",
@@ -1623,7 +1623,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(url.QueryEscape(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
+		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"urldecode", "decodes a string according to URI coding schema",
@@ -1638,7 +1638,7 @@ func init_strings() {
 			}
 			return NewString(result)
 		}, true, false, nil,
-		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
+		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode", "encodes a value in JSON, treats lists as lists",
@@ -1653,7 +1653,7 @@ func init_strings() {
 			}
 			return NewString(string(b))
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: encoding/json.encodeStatePool */, /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */
+		nil /* TODO: unresolved SSA value: encoding/json.encodeStatePool */, /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode_assoc", "encodes a value in JSON, treats lists as associative arrays",
@@ -1694,7 +1694,7 @@ func init_strings() {
 			}
 			return NewString(string(b))
 		}, true, false, nil,
-		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
+		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_decode", "parses JSON into a map",
@@ -1710,7 +1710,7 @@ func init_strings() {
 			}
 			return TransformFromJSON(result)
 		}, true, false, nil,
-		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
+		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1722,7 +1722,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(base64.StdEncoding.EncodeToString([]byte(String(a[0]))))
 		}, true, false, nil,
-		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
+		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
 	})
 	Declare(&Globalenv, &Declaration{
 		"base64_decode", "decodes a Base64 string (standard encoding)",
@@ -1737,7 +1737,7 @@ func init_strings() {
 			}
 			return NewString(string(decoded))
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */, /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */
+		nil /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */, /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
 	Declare(&Globalenv, &Declaration{
@@ -1767,7 +1767,7 @@ func init_strings() {
 			})
 			return NewString(out)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"bin2hex", "turns binary data into hex with lowercase letters",
@@ -1785,7 +1785,7 @@ func init_strings() {
 			}
 			return NewString(string(result))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t4 t4 */, /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */
+		nil /* TODO: MakeSlice: make []byte t4 t4 */, /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"hex2bin", "decodes a hex string into binary data",
@@ -1800,7 +1800,7 @@ func init_strings() {
 			}
 			return NewString(string(decoded))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t1 t1 */, /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */
+		nil /* TODO: MakeSlice: make []byte t1 t1 */, /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1822,7 +1822,7 @@ func init_strings() {
 			}
 			return NewString(string(buf))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t2 t2 */, /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */
+		nil /* TODO: MakeSlice: make []byte t2 t2 */, /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1843,7 +1843,7 @@ func init_strings() {
 			}
 			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
 		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpReplace},
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1863,7 +1863,7 @@ func init_strings() {
 			}
 			return NewBool(re.MatchString(String(a[0])))
 		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpTest},
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 
 }

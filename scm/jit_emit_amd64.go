@@ -1179,7 +1179,22 @@ func (w *JITWriter) EmitAddRSP32(val int32) {
 func (ctx *JITContext) EmitStoreToStack(src JITValueDesc, disp int32) {
 	switch src.Loc {
 	case LocImm:
-		ctx.W.EmitMovRegImm64(RegR11, uint64(src.Imm.Int()))
+		var word uint64
+		switch src.Imm.GetTag() {
+		case tagFloat:
+			word = math.Float64bits(src.Imm.Float())
+		case tagBool:
+			if src.Imm.Bool() {
+				word = 1
+			} else {
+				word = 0
+			}
+		case tagNil:
+			word = 0
+		default:
+			word = uint64(src.Imm.Int())
+		}
+		ctx.W.EmitMovRegImm64(RegR11, word)
 		ctx.W.EmitStoreRegMem(RegR11, RegRSP, disp)
 	case LocReg:
 		ctx.W.EmitStoreRegMem(src.Reg, RegRSP, disp)

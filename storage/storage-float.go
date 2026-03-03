@@ -86,7 +86,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			if idxInt.Loc == scm.LocImm {
 				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
 			} else {
-				if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
+				ctx.EnsureDesc(&idxInt)
 				if idxInt.Loc != scm.LocReg { panic("jit: idxInt not in register") }
 				ctx.W.EmitShlRegImm8(idxInt.Reg, 32)
 				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
@@ -121,10 +121,10 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				ctx.BindReg(r4, &d0)
 				ctx.BindReg(r5, &d0)
 			}
-			if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
+			ctx.EnsureDesc(&idxInt)
 			r6 := ctx.AllocReg()
-			if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
-			if d0.Loc == scm.LocStack || d0.Loc == scm.LocStackPair { ctx.EnsureDesc(&d0) }
+			ctx.EnsureDesc(&idxInt)
+			ctx.EnsureDesc(&d0)
 			if idxInt.Loc == scm.LocImm {
 				ctx.W.EmitMovRegImm64(r6, uint64(idxInt.Imm.Int()) * 8)
 			} else {
@@ -142,18 +142,18 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.FreeReg(r6)
 			d1 := scm.JITValueDesc{Loc: scm.LocReg, Reg: r7}
 			ctx.BindReg(r7, &d1)
-			if d1.Loc == scm.LocStack || d1.Loc == scm.LocStackPair { ctx.EnsureDesc(&d1) }
+			ctx.EnsureDesc(&d1)
 			d2 := d1
 			_ = d2
 			r8 := d1.Loc == scm.LocReg
 			r9 := d1.Reg
 			if r8 { ctx.ProtectReg(r9) }
-			if d2.Loc == scm.LocStack || d2.Loc == scm.LocStackPair { ctx.EnsureDesc(&d2) }
-			if d2.Loc == scm.LocStack || d2.Loc == scm.LocStackPair { ctx.EnsureDesc(&d2) }
-			if d2.Loc == scm.LocStack || d2.Loc == scm.LocStackPair { ctx.EnsureDesc(&d2) }
-			if d2.Loc == scm.LocStack || d2.Loc == scm.LocStackPair { ctx.EnsureDesc(&d2) }
-			if d2.Loc == scm.LocStack || d2.Loc == scm.LocStackPair { ctx.EnsureDesc(&d2) }
-			if d2.Loc == scm.LocStack || d2.Loc == scm.LocStackPair { ctx.EnsureDesc(&d2) }
+			ctx.EnsureDesc(&d2)
+			ctx.EnsureDesc(&d2)
+			ctx.EnsureDesc(&d2)
+			ctx.EnsureDesc(&d2)
+			ctx.EnsureDesc(&d2)
+			ctx.EnsureDesc(&d2)
 			var d3 scm.JITValueDesc
 			if d2.Loc == scm.LocImm {
 				d3 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(d2.Imm.Int() != d2.Imm.Int())}
@@ -182,7 +182,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				d3 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r12}
 				ctx.BindReg(r12, &d3)
 			}
-			if d3.Loc == scm.LocStack || d3.Loc == scm.LocStackPair { ctx.EnsureDesc(&d3) }
+			ctx.EnsureDesc(&d3)
 			if r8 { ctx.UnprotectReg(r9) }
 			ctx.FreeDesc(&d1)
 			lbl1 := ctx.W.ReserveLabel()
@@ -203,10 +203,10 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			}
 			ctx.FreeDesc(&d3)
 			ctx.W.MarkLabel(lbl2)
-			if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
+			ctx.EnsureDesc(&idxInt)
 			r13 := ctx.AllocReg()
-			if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
-			if d0.Loc == scm.LocStack || d0.Loc == scm.LocStackPair { ctx.EnsureDesc(&d0) }
+			ctx.EnsureDesc(&idxInt)
+			ctx.EnsureDesc(&d0)
 			if idxInt.Loc == scm.LocImm {
 				ctx.W.EmitMovRegImm64(r13, uint64(idxInt.Imm.Int()) * 8)
 			} else {
@@ -225,11 +225,11 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			d4 := scm.JITValueDesc{Loc: scm.LocReg, Reg: r14}
 			ctx.BindReg(r14, &d4)
 			ctx.FreeDesc(&idxInt)
-			if d4.Loc == scm.LocStack || d4.Loc == scm.LocStackPair { ctx.EnsureDesc(&d4) }
+			ctx.EnsureDesc(&d4)
 			d5 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
 			ctx.BindReg(r0, &d5)
 			ctx.BindReg(r1, &d5)
-			if d4.Loc == scm.LocStack || d4.Loc == scm.LocStackPair { ctx.EnsureDesc(&d4) }
+			ctx.EnsureDesc(&d4)
 			ctx.W.EmitMakeFloat(d5, d4)
 			if d4.Loc == scm.LocReg { ctx.FreeReg(d4.Reg) }
 			ctx.W.EmitJmp(lbl0)
