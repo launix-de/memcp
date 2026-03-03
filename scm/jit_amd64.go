@@ -23,6 +23,43 @@ import "unsafe"
 
 // TODO: create this file for other architectures, too
 
+func jitAdd2Scmer(a, b Scmer) Scmer {
+	if a.IsNil() || b.IsNil() {
+		return NewNil()
+	}
+	if a.IsInt() && b.IsInt() {
+		return NewInt(a.Int() + b.Int())
+	}
+	return NewFloat(a.Float() + b.Float())
+}
+
+func jitEnsureScmerPair(ctx *JITContext, d *JITValueDesc) {
+	if d.Loc == LocRegPair {
+		return
+	}
+	if d.Loc == LocImm {
+		r1 := ctx.AllocReg()
+		r2 := ctx.AllocRegExcept(r1)
+		ptrWord, auxWord := d.Imm.RawWords()
+		ctx.W.EmitMovRegImm64(r1, uint64(ptrWord))
+		ctx.W.EmitMovRegImm64(r2, auxWord)
+		d.Loc = LocRegPair
+		d.Reg = r1
+		d.Reg2 = r2
+		d.Type = d.Imm.GetTag()
+		ctx.BindReg(r1, d)
+		ctx.BindReg(r2, d)
+		return
+	}
+	if d.Loc == LocStack || d.Loc == LocStackPair {
+		ctx.EnsureDesc(d)
+		if d.Loc == LocRegPair {
+			return
+		}
+	}
+	panic("jit: + expects Scmer pair operands")
+}
+
 // all code snippets fill rax+rbx with the return value
 func jitReturnLiteral(value Scmer) []byte {
 	code := []byte{
@@ -206,6 +243,21 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			panic("jit: non-symbol in call position")
 		}
 		name := string(list[0].Symbol())
+		if name == "+" && len(list) == 3 {
+			left := jitCompileExpr(ctx, list[1], sliceBase, JITValueDesc{Loc: LocAny})
+			right := jitCompileExpr(ctx, list[2], sliceBase, JITValueDesc{Loc: LocAny})
+			jitEnsureScmerPair(ctx, &left)
+			jitEnsureScmerPair(ctx, &right)
+			out := ctx.EmitGoCallScalar(GoFuncAddr(jitAdd2Scmer), []JITValueDesc{left, right}, 2)
+			ctx.FreeDesc(&left)
+			ctx.FreeDesc(&right)
+			if result.Loc == LocAny {
+				return out
+			}
+			ctx.EmitMovPairToResult(&out, &result)
+			ctx.FreeDesc(&out)
+			return result
+		}
 		decl, ok := declarations[name]
 		if !ok || decl.JITEmit == nil {
 			panic("jit: no JITEmit for " + name)

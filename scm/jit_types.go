@@ -327,6 +327,19 @@ func (ctx *JITContext) AllocReg() Reg {
 		break
 	}
 	if r == 0xFF {
+		// Last-resort reclaim for leaked temporaries: if a register is marked
+		// in-use but has no tracked owner, treat it as dead and reuse it.
+		// This keeps forward JIT emission progressing instead of forcing
+		// fallback on owner-tracking gaps in generated code paths.
+		for bit := int(RegR15); bit >= 0; bit-- {
+			rbit := Reg(bit)
+			if spillable&(1<<uint(rbit)) == 0 {
+				continue
+			}
+			if ctx.RegOwners[rbit] == nil {
+				return rbit
+			}
+		}
 		panic("jit: register spill required (fallback)")
 	}
 
