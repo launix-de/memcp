@@ -264,12 +264,7 @@ func jitCompile(a ...Scmer) Scmer {
 	case tagProc:
 		// Lambda/procedure - attempt native compilation first
 		proc := v.Proc()
-		if LogJIT {
-			var b bytes.Buffer
-			Serialize(&b, v, &Globalenv)
-			fmt.Println("jit: compiling", b.String())
-		}
-		if code := jitCompileProc(proc); code != nil {
+		if code, roots := jitCompileProcWithRoots(proc); code != nil {
 			buf, err := allocExec(len(code))
 			if err == nil {
 				dst := (*[1 << 30]byte)(buf.ptr)[:len(code):len(code)]
@@ -286,10 +281,10 @@ func jitCompile(a ...Scmer) Scmer {
 						fmt.Println()
 					}
 					return NewJIT(&JITEntryPoint{
-						Native:  nativeFn,
-						Closure: cs, // prevent GC from collecting the closure
-						Proc:    *proc,
-						Arch:    runtime.GOARCH,
+						Native:     nativeFn,
+						ConstRoots: roots,
+						Proc:       *proc,
+						Arch:       runtime.GOARCH,
 					})
 				}
 				syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])

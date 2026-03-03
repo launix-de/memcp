@@ -214,6 +214,36 @@ type JITContext struct {
 	// pending "burns": FreeReg(R) decrements the count without adding to FreeRegs,
 	// ensuring only the final FreeReg call (from the real live holder) returns R.
 	EvictedCounts [16]int
+	// ConstRoots holds pointer payloads from LocImm Scmer values that were
+	// materialized into machine code immediates. Keeping these pointers in a
+	// Go heap object reachable from JITEntryPoint prevents GC from reclaiming
+	// referenced heap data while JIT code may still dereference it.
+	ConstRoots []unsafe.Pointer
+	rootSet    map[unsafe.Pointer]struct{}
+}
+
+// TrackImm records a LocImm constant's pointer payload as a GC root when needed.
+func (ctx *JITContext) TrackImm(v Scmer) {
+	if ctx == nil {
+		return
+	}
+	ptr, _ := v.RawWords()
+	if ptr == 0 {
+		return
+	}
+	p := unsafe.Pointer(ptr)
+	// Sentinel pointers are static globals and don't need GC rooting.
+	if p == unsafe.Pointer(&scmerIntSentinel) || p == unsafe.Pointer(&scmerFloatSentinel) {
+		return
+	}
+	if ctx.rootSet == nil {
+		ctx.rootSet = make(map[unsafe.Pointer]struct{}, 16)
+	}
+	if _, exists := ctx.rootSet[p]; exists {
+		return
+	}
+	ctx.rootSet[p] = struct{}{}
+	ctx.ConstRoots = append(ctx.ConstRoots, p)
 }
 
 // ProtectReg marks a register as non-spillable by AllocReg.
