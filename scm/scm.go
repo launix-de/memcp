@@ -719,7 +719,7 @@ func init() {
 		}, "int", func(a ...Scmer) Scmer {
 			return NewInt(int64(ComputeSize(a[0])))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */
+		nil /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */
 	})
 	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",
@@ -729,7 +729,7 @@ func init() {
 		}, "any", func(a ...Scmer) Scmer {
 			return Optimize(a[0], &Globalenv)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
 	})
 	Declare(&Globalenv, &Declaration{
 		"time", "measures the time it takes to compute the first argument",
@@ -819,7 +819,7 @@ func init() {
 				panic(b.String())
 			}
 		}, false, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &b.addr [#0] */, /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &b.addr [#0] */, /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
@@ -838,7 +838,7 @@ func init() {
 			result = Apply(a[0])
 			return
 		}, true, false, nil,
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply", "runs the function with its arguments",
@@ -850,7 +850,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return Apply(a[0], asSlice(a[1], "apply")...)
 		}, true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
@@ -862,7 +862,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
 		}, true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
@@ -873,7 +873,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return NewSymbol(String(a[0]))
 		}, false, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */, /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */, /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"list", "returns a list containing the parameters as alements",
@@ -906,7 +906,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("for_mut")},
-		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
+		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"for_mut", "in-place for loop (optimizer-only, skips defensive state copy)",
@@ -930,7 +930,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
@@ -1026,7 +1026,7 @@ Patterns can be any of:
 				a[3],
 			})
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.source [#0] */, /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &t0.source [#0] */, /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"scheme", "parses a scheme expression into a list",
@@ -1042,7 +1042,7 @@ Patterns can be any of:
 			}
 			return Read(filename, String(a[0]))
 		}, true, false, nil,
-		nil /* TODO: IndexAddr on non-parameter: &t0[0:int] */, /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */
+		nil /* TODO: IndexAddr on non-parameter: &t0[0:int] */, /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"serialize", "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
@@ -1053,7 +1053,7 @@ Patterns can be any of:
 		func(a ...Scmer) Scmer {
 			return NewString(SerializeToString(a[0], &Globalenv))
 		}, false, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
 	})
 
 	init_alu()

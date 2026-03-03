@@ -327,19 +327,6 @@ func (ctx *JITContext) AllocReg() Reg {
 		break
 	}
 	if r == 0xFF {
-		// Last-resort reclaim for leaked temporaries: if a register is marked
-		// in-use but has no tracked owner, treat it as dead and reuse it.
-		// This keeps forward JIT emission progressing instead of forcing
-		// fallback on owner-tracking gaps in generated code paths.
-		for bit := int(RegR15); bit >= 0; bit-- {
-			rbit := Reg(bit)
-			if spillable&(1<<uint(rbit)) == 0 {
-				continue
-			}
-			if ctx.RegOwners[rbit] == nil {
-				return rbit
-			}
-		}
 		panic("jit: register spill required (fallback)")
 	}
 
@@ -626,9 +613,11 @@ func JITIntRem(a, b int64) int64 {
 var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, RegR10, RegR11}
 
 type goCallArgWord struct {
-	loc JITLoc
-	reg Reg
-	imm uint64
+	loc      JITLoc
+	reg      Reg
+	imm      uint64
+	memPtr   uintptr
+	stackOff int32
 }
 
 func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
@@ -707,6 +696,13 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 				}
 			case LocImm:
 				ctx.W.EmitMovRegImm64(target, argWords[i].imm)
+			case LocStack:
+				if argWords[i].memPtr != 0 {
+					ctx.W.EmitMovRegImm64(RegR11, uint64(argWords[i].memPtr))
+					ctx.W.EmitMovRegMem(target, RegR11, argWords[i].stackOff)
+				} else {
+					ctx.W.EmitMovRegMem(target, RegRSP, argWords[i].stackOff)
+				}
 			default:
 				panic("jit: unsupported Go-call arg location")
 			}
@@ -756,6 +752,13 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			}
 		case LocImm:
 			ctx.W.EmitMovRegImm64(target, argWords[i].imm)
+		case LocStack:
+			if argWords[i].memPtr != 0 {
+				ctx.W.EmitMovRegImm64(RegR11, uint64(argWords[i].memPtr))
+				ctx.W.EmitMovRegMem(target, RegR11, argWords[i].stackOff)
+			} else {
+				ctx.W.EmitMovRegMem(target, RegRSP, argWords[i].stackOff)
+			}
 		default:
 			panic("jit: unsupported Go-call arg location")
 		}
@@ -807,37 +810,18 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
 			n++
 		case LocStack:
-			r := ctx.AllocReg()
-			if a.MemPtr != 0 {
-				ctx.W.EmitMovRegImm64(RegR11, uint64(a.MemPtr))
-				ctx.W.EmitMovRegMem(r, RegR11, 0)
-			} else {
-				ctx.W.EmitMovRegMem(r, RegRSP, a.StackOff)
-			}
-			buf[n] = goCallArgWord{loc: LocReg, reg: r}
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: a.StackOff}
 			n++
 		case LocStackPair:
-			r1 := ctx.AllocReg()
-			r2 := ctx.AllocRegExcept(r1)
-			if a.MemPtr != 0 {
-				ctx.W.EmitMovRegImm64(RegR11, uint64(a.MemPtr))
-				ctx.W.EmitMovRegMem(r1, RegR11, 0)
-				ctx.W.EmitMovRegMem(r2, RegR11, 8)
-			} else {
-				ctx.W.EmitMovRegMem(r1, RegRSP, a.StackOff)
-				ctx.W.EmitMovRegMem(r2, RegRSP, a.StackOff+8)
-			}
-			buf[n] = goCallArgWord{loc: LocReg, reg: r1}
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: a.StackOff}
 			n++
-			buf[n] = goCallArgWord{loc: LocReg, reg: r2}
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: a.StackOff + 8}
 			n++
 		case LocImm:
 			buf[n] = goCallArgWord{loc: LocImm, imm: uint64(a.Imm.Int())}
 			n++
 		case LocNone:
-			r := ctx.AllocReg()
-			ctx.W.EmitMovRegImm64(r, 0)
-			buf[n] = goCallArgWord{loc: LocReg, reg: r}
+			buf[n] = goCallArgWord{loc: LocImm, imm: 0}
 			n++
 		default:
 			panic(fmt.Sprintf("jit: unsupported arg desc location in flattenArgs: %d", a.Loc))

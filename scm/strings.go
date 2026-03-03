@@ -169,7 +169,7 @@ func init_strings() {
 			}
 			return NewString(sb.String())
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: 0:float64 */, /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */
+		nil /* TODO: unsupported compare const kind: 0:float64 */, /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"substr", "returns a substring (0-based index)",
@@ -990,8 +990,8 @@ func init_strings() {
 			}
 			ctx.FreeDesc(&d34)
 			ctx.W.MarkLabel(lbl13)
-			d33 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d33 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
 			if d14.Loc == LocStack || d14.Loc == LocStackPair { ctx.EnsureDesc(&d14) }
 			if d5.Loc == LocStack || d5.Loc == LocStackPair { ctx.EnsureDesc(&d5) }
@@ -1153,8 +1153,8 @@ func init_strings() {
 			result.Type = tagString
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl16)
-			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d33 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d14 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d43 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{}, 2)
 			ctx.EmitMovPairToResult(&d43, &result)
 			result.Type = tagString
@@ -1176,7 +1176,7 @@ func init_strings() {
 			// turn string to number or so
 			return Simplify(String(a[0]))
 		}, true, false, nil,
-		nil /* TODO: Index: s[0:int] */, /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */
+		nil /* TODO: Index: s[0:int] */, /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlen", "returns the length of a string",
@@ -1247,7 +1247,7 @@ func init_strings() {
 			}
 			return NewBool(StrLike(value, pattern))
 		}, true, false, nil,
-		nil /* TODO: Index: substr[0:int] */, /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */
+		nil /* TODO: Index: substr[0:int] */, /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */ /* TODO: Index: substr[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strlike_cs", "matches the string against a wildcard pattern (case-sensitive)",
@@ -1260,7 +1260,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewBool(StrLike(String(a[0]), String(a[1])))
 		}, true, false, nil,
-		nil /* TODO: Index: t1[0:int] */, /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */
+		nil /* TODO: Index: t1[0:int] */, /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"toLower", "turns a string into lower case",
@@ -1271,7 +1271,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ToLower(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t1] */, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
+		nil /* TODO: Index: s[t1] */, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"toUpper", "turns a string into upper case",
@@ -1282,7 +1282,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ToUpper(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t1] */, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
+		nil /* TODO: Index: s[t1] */, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"replace", "replaces all occurances in a string with another string",
@@ -1295,7 +1295,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2])))
 		}, true, false, nil,
-		nil /* TODO: Range: range s */, /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */
+		nil /* TODO: Range: range s */, /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strtrim", "trims whitespace from both ends of a string",
@@ -1306,7 +1306,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimSpace(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t3] */, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
+		nil /* TODO: Index: s[t3] */, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strltrim", "trims whitespace from the left of a string",
@@ -1317,7 +1317,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	Declare(&Globalenv, &Declaration{
 		"strrtrim", "trims whitespace from the right of a string",
@@ -1328,7 +1328,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
 	Declare(&Globalenv, &Declaration{
@@ -1343,7 +1343,7 @@ func init_strings() {
 			}
 			return NewString(strings.TrimSpace(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t3] */, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
+		nil /* TODO: Index: s[t3] */, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_ltrim", "SQL LTRIM(): NULL-safe trim of whitespace from left",
@@ -1357,7 +1357,7 @@ func init_strings() {
 			}
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	Declare(&Globalenv, &Declaration{
 		"sql_rtrim", "SQL RTRIM(): NULL-safe trim of whitespace from right",
@@ -1371,7 +1371,7 @@ func init_strings() {
 			}
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	Declare(&Globalenv, &Declaration{
 		"split", "splits a string using a separator or space",
@@ -1392,7 +1392,7 @@ func init_strings() {
 			}
 			return NewSlice(result)
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: unsupported compare const kind: "":string */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1412,7 +1412,7 @@ func init_strings() {
 			}
 			return NewString(strings.Repeat(String(a[0]), int(n)))
 		}, true, false, nil,
-		nil /* TODO: Extract: extract t9 #0 */, /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */
+		nil /* TODO: Extract: extract t9 #0 */, /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */ /* TODO: Extract: extract t9 #0 */
 	})
 
 	/* comparison */
@@ -1599,7 +1599,7 @@ func init_strings() {
 				return NewFunc(LessScm)
 			}
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &re.prog [#1] */, /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */
+		nil /* TODO: FieldAddr on non-receiver: &re.prog [#1] */, /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */
 	})
 
 	/* escaping functions similar to PHP */
@@ -1612,7 +1612,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(html.EscapeString(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &r.once [#0] */, /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &r.once [#0] */, /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"urlencode", "encodes a string according to URI coding schema",
@@ -1623,7 +1623,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(url.QueryEscape(String(a[0])))
 		}, true, false, nil,
-		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
+		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"urldecode", "decodes a string according to URI coding schema",
@@ -1638,7 +1638,7 @@ func init_strings() {
 			}
 			return NewString(result)
 		}, true, false, nil,
-		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
+		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode", "encodes a value in JSON, treats lists as lists",
@@ -1653,7 +1653,7 @@ func init_strings() {
 			}
 			return NewString(string(b))
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: encoding/json.encodeStatePool */, /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */
+		nil /* TODO: unresolved SSA value: encoding/json.encodeStatePool */, /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode_assoc", "encodes a value in JSON, treats lists as associative arrays",
@@ -1694,7 +1694,7 @@ func init_strings() {
 			}
 			return NewString(string(b))
 		}, true, false, nil,
-		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
+		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_decode", "parses JSON into a map",
@@ -1710,7 +1710,7 @@ func init_strings() {
 			}
 			return TransformFromJSON(result)
 		}, true, false, nil,
-		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
+		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1722,7 +1722,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(base64.StdEncoding.EncodeToString([]byte(String(a[0]))))
 		}, true, false, nil,
-		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
+		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
 	})
 	Declare(&Globalenv, &Declaration{
 		"base64_decode", "decodes a Base64 string (standard encoding)",
@@ -1737,7 +1737,7 @@ func init_strings() {
 			}
 			return NewString(string(decoded))
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */, /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */
+		nil /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */, /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
 	Declare(&Globalenv, &Declaration{
@@ -1767,7 +1767,7 @@ func init_strings() {
 			})
 			return NewString(out)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"bin2hex", "turns binary data into hex with lowercase letters",
@@ -1785,7 +1785,7 @@ func init_strings() {
 			}
 			return NewString(string(result))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t4 t4 */, /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */
+		nil /* TODO: MakeSlice: make []byte t4 t4 */, /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"hex2bin", "decodes a hex string into binary data",
@@ -1800,7 +1800,7 @@ func init_strings() {
 			}
 			return NewString(string(decoded))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t1 t1 */, /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */
+		nil /* TODO: MakeSlice: make []byte t1 t1 */, /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1822,7 +1822,7 @@ func init_strings() {
 			}
 			return NewString(string(buf))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t2 t2 */, /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */
+		nil /* TODO: MakeSlice: make []byte t2 t2 */, /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1843,7 +1843,7 @@ func init_strings() {
 			}
 			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
 		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpReplace},
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1863,7 +1863,7 @@ func init_strings() {
 			}
 			return NewBool(re.MatchString(String(a[0])))
 		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpTest},
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 
 }
