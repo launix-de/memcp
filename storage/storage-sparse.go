@@ -241,8 +241,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			}
 			ctx.FreeDesc(&d6)
 			ctx.W.MarkLabel(lbl3)
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
 			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
 			ctx.EnsureDesc(&d4)
 			ctx.EnsureDesc(&d5)
 			ctx.EnsureDesc(&d4)
@@ -1207,8 +1207,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			}
 			ctx.FreeDesc(&d52)
 			ctx.W.MarkLabel(lbl11)
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
 			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
 			var d53 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSparse)(nil).values)
@@ -1275,8 +1275,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl15)
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d56 := d4
 			if d56.Loc == scm.LocNone { panic("jit: phi source has no location") }
 			ctx.EnsureDesc(&d56)

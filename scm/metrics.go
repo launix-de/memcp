@@ -230,7 +230,38 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewFloat(loadSnapshot().cpuUsage)
 		}, false, false, nil,
-		nil /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
+			var d1 JITValueDesc
+			ctx.EnsureDesc(&d0)
+			if d0.Loc == LocImm {
+				fieldAddr := uintptr(d0.Imm.Int()) + 0
+				r0 := ctx.AllocReg()
+				ctx.W.EmitMovRegMem64(r0, fieldAddr)
+				d1 = JITValueDesc{Loc: LocReg, Reg: r0}
+				ctx.BindReg(r0, &d1)
+			} else {
+				off := int32(0)
+				baseReg := d0.Reg
+				r1 := ctx.AllocRegExcept(baseReg)
+				ctx.W.EmitMovRegMem(r1, baseReg, off)
+				d1 = JITValueDesc{Loc: LocReg, Reg: r1}
+				ctx.BindReg(r1, &d1)
+			}
+			ctx.FreeDesc(&d0)
+			ctx.EnsureDesc(&d1)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			if d1.Loc == LocImm {
+				ctx.W.EmitMakeFloat(result, d1)
+			} else {
+				ctx.W.EmitMakeFloat(result, d1)
+				ctx.FreeReg(d1.Reg)
+			}
+			return result
+		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -241,7 +272,7 @@ func InitMetricsDeclarations() {
 			_, avail := readMemInfo()
 			return NewInt(avail)
 		}, false, false, nil,
-		nil /* TODO: unresolved SSA value: internal/testlog.logger */, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
+		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -252,7 +283,7 @@ func InitMetricsDeclarations() {
 			total, _ := readMemInfo()
 			return NewInt(total)
 		}, false, false, nil,
-		nil /* TODO: unresolved SSA value: internal/testlog.logger */, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
+		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -262,7 +293,21 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewInt(readProcessRSS())
 		}, false, false, nil,
-		nil /* TODO: unresolved SSA value: internal/testlog.logger */, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			d0 := ctx.EmitGoCallScalar(GoFuncAddr(readProcessRSS), []JITValueDesc{}, 1)
+			ctx.EnsureDesc(&d0)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			if d0.Loc == LocImm {
+				ctx.W.EmitMakeInt(result, d0)
+			} else {
+				ctx.W.EmitMakeInt(result, d0)
+				ctx.FreeReg(d0.Reg)
+			}
+			return result
+		}, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -282,7 +327,38 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewInt(loadSnapshot().maxConn10min)
 		}, false, false, nil,
-		nil /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
+			var d1 JITValueDesc
+			ctx.EnsureDesc(&d0)
+			if d0.Loc == LocImm {
+				fieldAddr := uintptr(d0.Imm.Int()) + 16
+				r0 := ctx.AllocReg()
+				ctx.W.EmitMovRegMem64(r0, fieldAddr)
+				d1 = JITValueDesc{Loc: LocReg, Reg: r0}
+				ctx.BindReg(r0, &d1)
+			} else {
+				off := int32(16)
+				baseReg := d0.Reg
+				r1 := ctx.AllocRegExcept(baseReg)
+				ctx.W.EmitMovRegMem(r1, baseReg, off)
+				d1 = JITValueDesc{Loc: LocReg, Reg: r1}
+				ctx.BindReg(r1, &d1)
+			}
+			ctx.FreeDesc(&d0)
+			ctx.EnsureDesc(&d1)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			if d1.Loc == LocImm {
+				ctx.W.EmitMakeInt(result, d1)
+			} else {
+				ctx.W.EmitMakeInt(result, d1)
+				ctx.FreeReg(d1.Reg)
+			}
+			return result
+		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -292,7 +368,38 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewFloat(loadSnapshot().rps)
 		}, false, false, nil,
-		nil /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
+			var d1 JITValueDesc
+			ctx.EnsureDesc(&d0)
+			if d0.Loc == LocImm {
+				fieldAddr := uintptr(d0.Imm.Int()) + 8
+				r0 := ctx.AllocReg()
+				ctx.W.EmitMovRegMem64(r0, fieldAddr)
+				d1 = JITValueDesc{Loc: LocReg, Reg: r0}
+				ctx.BindReg(r0, &d1)
+			} else {
+				off := int32(8)
+				baseReg := d0.Reg
+				r1 := ctx.AllocRegExcept(baseReg)
+				ctx.W.EmitMovRegMem(r1, baseReg, off)
+				d1 = JITValueDesc{Loc: LocReg, Reg: r1}
+				ctx.BindReg(r1, &d1)
+			}
+			ctx.FreeDesc(&d0)
+			ctx.EnsureDesc(&d1)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			if d1.Loc == LocImm {
+				ctx.W.EmitMakeFloat(result, d1)
+			} else {
+				ctx.W.EmitMakeFloat(result, d1)
+				ctx.FreeReg(d1.Reg)
+			}
+			return result
+		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -309,6 +416,6 @@ func InitMetricsDeclarations() {
 			}
 			return NewString(string(data))
 		}, false, false, nil,
-		nil /* TODO: unresolved SSA value: internal/testlog.logger */, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
+		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
 }

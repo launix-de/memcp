@@ -232,7 +232,45 @@ func init_sync() {
 		func(a ...Scmer) Scmer {
 			return WithSession(a[0], a[1])
 		}, false, false, nil,
-		nil /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */, /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			d0 := args[0]
+			d1 := args[1]
+			ctx.EnsureDesc(&d0)
+			ctx.EnsureDesc(&d0)
+			if d0.Loc != LocRegPair && d0.Loc != LocStackPair {
+				panic("jit: generic call arg expects 2-word value")
+			}
+			ctx.EnsureDesc(&d1)
+			ctx.EnsureDesc(&d1)
+			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
+				panic("jit: generic call arg expects 2-word value")
+			}
+			d2 := ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d0, d1}, 2)
+			ctx.FreeDesc(&d0)
+			ctx.FreeDesc(&d1)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			ctx.EnsureDesc(&d2)
+			if d2.Loc == LocRegPair {
+				ctx.EmitMovPairToResult(&d2, &result)
+			} else {
+				switch d2.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(result, d2)
+				case tagInt:
+					ctx.W.EmitMakeInt(result, d2)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(result, d2)
+				case tagNil:
+					ctx.W.EmitMakeNil(result)
+				default:
+					panic("jit: single-block scalar return with unknown type")
+				}
+			}
+			return result
+		}, /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
 	})
 	Declare(&Globalenv, &Declaration{
 		"context", "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
@@ -258,7 +296,7 @@ func init_sync() {
 				return NewBool(true)
 			}
 		}, false, false, nil,
-		nil /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */, /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
+		nil /* TODO: dynamic call: invoke t0.Done() */, /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
 	})
 	Declare(&Globalenv, &Declaration{
 		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
@@ -310,33 +348,18 @@ func init_sync() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-			d0 := args[0]
+			d0 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
-			var d1 JITValueDesc
-			if d0.Loc == LocImm {
-				d1 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(int64(int32(d0.Imm.Int()))))}
-			} else {
-				r0 := ctx.AllocReg()
-				ctx.W.EmitMovRegReg(r0, d0.Reg)
-				ctx.W.EmitShlRegImm8(r0, 32)
-				ctx.W.EmitSarRegImm8(r0, 32)
-				d1 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
-				ctx.BindReg(r0, &d1)
-			}
-			ctx.FreeDesc(&d0)
-			ctx.EnsureDesc(&d1)
-			ctx.EnsureDesc(&d1)
-			ctx.EnsureDesc(&d1)
-			ctx.EnsureDesc(&d1)
+			ctx.EnsureDesc(&d0)
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
-			if d1.Loc == LocImm {
-				ctx.W.EmitMakeInt(result, d1)
+			if d0.Loc == LocImm {
+				ctx.W.EmitMakeInt(result, d0)
 			} else {
-				ctx.W.EmitMakeInt(result, d1)
-				ctx.FreeReg(d1.Reg)
+				ctx.W.EmitMakeInt(result, d0)
+				ctx.FreeReg(d0.Reg)
 			}
 			return result
 		},

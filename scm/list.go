@@ -391,7 +391,7 @@ func init_list() {
 			return NewSlice([]Scmer{car, a[1]})
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: IndexAddr on non-parameter: &t14[0:int] */, /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */
+		nil /* TODO: IndexAddr on non-parameter: &t14[0:int] (x=t14 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"car", "extracts the head of a list",
@@ -1523,9 +1523,9 @@ func init_list() {
 			}
 			ctx.FreeDesc(&d32)
 			ctx.W.MarkLabel(lbl12)
-			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d29 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			ctx.EnsureDesc(&d29)
 			r7 := ctx.AllocReg()
 			ctx.EnsureDesc(&d29)
