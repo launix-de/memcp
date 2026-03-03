@@ -159,6 +159,7 @@ func init_alu() {
 			ctx.W.MarkLabel(lbl1)
 			d4 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
+			if d4.Loc == LocStack || d4.Loc == LocStackPair { ctx.EnsureDesc(&d4) }
 			ctx.W.EmitMakeBool(result, d4)
 			if d4.Loc == LocReg { ctx.FreeReg(d4.Reg) }
 			result.Type = tagBool
@@ -493,6 +494,7 @@ func init_alu() {
 			ctx.FreeDesc(&d14)
 			ctx.W.MarkLabel(lbl5)
 			if d0.Loc == LocStack || d0.Loc == LocStackPair { ctx.EnsureDesc(&d0) }
+			if d0.Loc == LocStack || d0.Loc == LocStackPair { ctx.EnsureDesc(&d0) }
 			ctx.W.EmitMakeInt(result, d0)
 			if d0.Loc == LocReg { ctx.FreeReg(d0.Reg) }
 			result.Type = tagInt
@@ -574,6 +576,7 @@ func init_alu() {
 			ctx.EmitStoreToStack(d19, 8)
 			ctx.W.EmitJmp(lbl1)
 			ctx.W.MarkLabel(lbl13)
+			if d12.Loc == LocStack || d12.Loc == LocStackPair { ctx.EnsureDesc(&d12) }
 			if d12.Loc == LocStack || d12.Loc == LocStackPair { ctx.EnsureDesc(&d12) }
 			ctx.W.EmitMakeFloat(result, d12)
 			if d12.Loc == LocReg { ctx.FreeReg(d12.Reg) }
@@ -1123,6 +1126,7 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl13)
 			if d13.Loc == LocStack || d13.Loc == LocStackPair { ctx.EnsureDesc(&d13) }
+			if d13.Loc == LocStack || d13.Loc == LocStackPair { ctx.EnsureDesc(&d13) }
 			ctx.W.EmitMakeFloat(result, d13)
 			if d13.Loc == LocReg { ctx.FreeReg(d13.Reg) }
 			result.Type = tagFloat
@@ -1477,6 +1481,7 @@ func init_alu() {
 			ctx.FreeDesc(&d40)
 			ctx.W.MarkLabel(lbl20)
 			if d20.Loc == LocStack || d20.Loc == LocStackPair { ctx.EnsureDesc(&d20) }
+			if d20.Loc == LocStack || d20.Loc == LocStackPair { ctx.EnsureDesc(&d20) }
 			ctx.W.EmitMakeInt(result, d20)
 			if d20.Loc == LocReg { ctx.FreeReg(d20.Reg) }
 			result.Type = tagInt
@@ -1622,6 +1627,7 @@ func init_alu() {
 			ctx.EmitStoreToStack(d46, 16)
 			ctx.W.EmitJmp(lbl15)
 			ctx.W.MarkLabel(lbl28)
+			if d38.Loc == LocStack || d38.Loc == LocStackPair { ctx.EnsureDesc(&d38) }
 			if d38.Loc == LocStack || d38.Loc == LocStackPair { ctx.EnsureDesc(&d38) }
 			ctx.W.EmitMakeFloat(result, d38)
 			if d38.Loc == LocReg { ctx.FreeReg(d38.Reg) }
