@@ -632,7 +632,12 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.FreeDesc(&d25)
 			r30 := ctx.AllocReg()
 			if d26.Loc == scm.LocStack || d26.Loc == scm.LocStackPair { ctx.EnsureDesc(&d26) }
-			ctx.EmitMovToReg(r30, d26)
+			if d26.Loc == scm.LocStack || d26.Loc == scm.LocStackPair { ctx.EnsureDesc(&d26) }
+			if d26.Loc == scm.LocRegPair {
+				ctx.W.EmitMovRegReg(r30, d26.Reg2)
+			} else {
+				ctx.EmitMovToReg(r30, d26)
+			}
 			ctx.W.EmitJmp(lbl5)
 			ctx.W.MarkLabel(lbl6)
 			if d12.Loc == scm.LocStack || d12.Loc == scm.LocStackPair { ctx.EnsureDesc(&d12) }
@@ -1196,6 +1201,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			d52 := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r65, Reg2: r66}
 			ctx.BindReg(r65, &d52)
 			ctx.BindReg(r66, &d52)
+			if d52.Loc == scm.LocStack || d52.Loc == scm.LocStackPair { ctx.EnsureDesc(&d52) }
 			if d52.Loc == scm.LocRegPair {
 				ctx.EmitMovPairToResult(&d52, &result)
 				result.Type = d52.Type

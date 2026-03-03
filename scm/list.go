@@ -1128,6 +1128,7 @@ func init_list() {
 				ctx.BindReg(r2, &d17)
 			}
 			ctx.FreeDesc(&d14)
+			if d17.Loc == LocStack || d17.Loc == LocStackPair { ctx.EnsureDesc(&d17) }
 			if d17.Loc == LocRegPair {
 				ctx.EmitMovPairToResult(&d17, &result)
 				result.Type = d17.Type

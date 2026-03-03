@@ -92,6 +92,9 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
 				ctx.BindReg(idxInt.Reg, &idxInt)
 			}
+			idxPinned := idxInt.Loc == scm.LocReg
+			idxPinnedReg := idxInt.Reg
+			if idxPinned { ctx.ProtectReg(idxPinnedReg) }
 			if result.Loc == scm.LocAny {
 				result = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -212,6 +215,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.BindReg(r10, &d3)
 			ctx.FreeDesc(&idxInt)
 			if d3.Loc == scm.LocStack || d3.Loc == scm.LocStackPair { ctx.EnsureDesc(&d3) }
+			if d3.Loc == scm.LocStack || d3.Loc == scm.LocStackPair { ctx.EnsureDesc(&d3) }
 			ctx.W.EmitMakeFloat(result, d3)
 			if d3.Loc == scm.LocReg { ctx.FreeReg(d3.Reg) }
 			result.Type = scm.TagFloat
@@ -222,6 +226,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
+			if idxPinned { ctx.UnprotectReg(idxPinnedReg) }
 			return result
 }
 

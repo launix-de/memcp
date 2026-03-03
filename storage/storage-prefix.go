@@ -74,6 +74,9 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
 				ctx.BindReg(idxInt.Reg, &idxInt)
 			}
+			idxPinned := idxInt.Loc == scm.LocReg
+			idxPinnedReg := idxInt.Reg
+			if idxPinned { ctx.ProtectReg(idxPinnedReg) }
 			if result.Loc == scm.LocAny {
 				result = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -443,7 +446,12 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.FreeDesc(&d17)
 			r24 := ctx.AllocReg()
 			if d18.Loc == scm.LocStack || d18.Loc == scm.LocStackPair { ctx.EnsureDesc(&d18) }
-			ctx.EmitMovToReg(r24, d18)
+			if d18.Loc == scm.LocStack || d18.Loc == scm.LocStackPair { ctx.EnsureDesc(&d18) }
+			if d18.Loc == scm.LocRegPair {
+				ctx.W.EmitMovRegReg(r24, d18.Reg2)
+			} else {
+				ctx.EmitMovToReg(r24, d18)
+			}
 			ctx.W.EmitJmp(lbl5)
 			ctx.W.MarkLabel(lbl6)
 			if d4.Loc == scm.LocStack || d4.Loc == scm.LocStackPair { ctx.EnsureDesc(&d4) }
@@ -1206,7 +1214,12 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.FreeDesc(&d57)
 			r68 := ctx.AllocReg()
 			if d58.Loc == scm.LocStack || d58.Loc == scm.LocStackPair { ctx.EnsureDesc(&d58) }
-			ctx.EmitMovToReg(r68, d58)
+			if d58.Loc == scm.LocStack || d58.Loc == scm.LocStackPair { ctx.EnsureDesc(&d58) }
+			if d58.Loc == scm.LocRegPair {
+				ctx.W.EmitMovRegReg(r68, d58.Reg2)
+			} else {
+				ctx.EmitMovToReg(r68, d58)
+			}
 			ctx.W.EmitJmp(lbl14)
 			ctx.W.MarkLabel(lbl15)
 			if d44.Loc == scm.LocStack || d44.Loc == scm.LocStackPair { ctx.EnsureDesc(&d44) }
@@ -1967,7 +1980,12 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.FreeDesc(&d97)
 			r112 := ctx.AllocReg()
 			if d98.Loc == scm.LocStack || d98.Loc == scm.LocStackPair { ctx.EnsureDesc(&d98) }
-			ctx.EmitMovToReg(r112, d98)
+			if d98.Loc == scm.LocStack || d98.Loc == scm.LocStackPair { ctx.EnsureDesc(&d98) }
+			if d98.Loc == scm.LocRegPair {
+				ctx.W.EmitMovRegReg(r112, d98.Reg2)
+			} else {
+				ctx.EmitMovToReg(r112, d98)
+			}
 			ctx.W.EmitJmp(lbl23)
 			ctx.W.MarkLabel(lbl24)
 			if d84.Loc == scm.LocStack || d84.Loc == scm.LocStackPair { ctx.EnsureDesc(&d84) }
@@ -2686,7 +2704,12 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.FreeDesc(&d135)
 			r154 := ctx.AllocReg()
 			if d136.Loc == scm.LocStack || d136.Loc == scm.LocStackPair { ctx.EnsureDesc(&d136) }
-			ctx.EmitMovToReg(r154, d136)
+			if d136.Loc == scm.LocStack || d136.Loc == scm.LocStackPair { ctx.EnsureDesc(&d136) }
+			if d136.Loc == scm.LocRegPair {
+				ctx.W.EmitMovRegReg(r154, d136.Reg2)
+			} else {
+				ctx.EmitMovToReg(r154, d136)
+			}
 			ctx.W.EmitJmp(lbl29)
 			ctx.W.MarkLabel(lbl30)
 			if d122.Loc == scm.LocStack || d122.Loc == scm.LocStackPair { ctx.EnsureDesc(&d122) }
@@ -3604,7 +3627,12 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.FreeDesc(&d183)
 			r211 := ctx.AllocReg()
 			if d184.Loc == scm.LocStack || d184.Loc == scm.LocStackPair { ctx.EnsureDesc(&d184) }
-			ctx.EmitMovToReg(r211, d184)
+			if d184.Loc == scm.LocStack || d184.Loc == scm.LocStackPair { ctx.EnsureDesc(&d184) }
+			if d184.Loc == scm.LocRegPair {
+				ctx.W.EmitMovRegReg(r211, d184.Reg2)
+			} else {
+				ctx.EmitMovToReg(r211, d184)
+			}
 			ctx.W.EmitJmp(lbl37)
 			ctx.W.MarkLabel(lbl38)
 			if d170.Loc == scm.LocStack || d170.Loc == scm.LocStackPair { ctx.EnsureDesc(&d170) }
@@ -4578,7 +4606,12 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.FreeDesc(&d235)
 			r262 := ctx.AllocReg()
 			if d236.Loc == scm.LocStack || d236.Loc == scm.LocStackPair { ctx.EnsureDesc(&d236) }
-			ctx.EmitMovToReg(r262, d236)
+			if d236.Loc == scm.LocStack || d236.Loc == scm.LocStackPair { ctx.EnsureDesc(&d236) }
+			if d236.Loc == scm.LocRegPair {
+				ctx.W.EmitMovRegReg(r262, d236.Reg2)
+			} else {
+				ctx.EmitMovToReg(r262, d236)
+			}
 			ctx.W.EmitJmp(lbl51)
 			ctx.W.MarkLabel(lbl52)
 			if d222.Loc == scm.LocStack || d222.Loc == scm.LocStackPair { ctx.EnsureDesc(&d222) }
@@ -5113,6 +5146,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
+			if idxPinned { ctx.UnprotectReg(idxPinnedReg) }
 			ctx.W.PatchInt32(r5, int32(48))
 			ctx.W.EmitAddRSP32(int32(48))
 			return result

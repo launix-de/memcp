@@ -140,6 +140,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
 				ctx.BindReg(idxInt.Reg, &idxInt)
 			}
+			idxPinned := idxInt.Loc == scm.LocReg
+			idxPinnedReg := idxInt.Reg
+			if idxPinned { ctx.ProtectReg(idxPinnedReg) }
 			if result.Loc == scm.LocAny {
 				result = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -472,7 +475,12 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ctx.FreeDesc(&d16)
 			r19 := ctx.AllocReg()
 			if d17.Loc == scm.LocStack || d17.Loc == scm.LocStackPair { ctx.EnsureDesc(&d17) }
-			ctx.EmitMovToReg(r19, d17)
+			if d17.Loc == scm.LocStack || d17.Loc == scm.LocStackPair { ctx.EnsureDesc(&d17) }
+			if d17.Loc == scm.LocRegPair {
+				ctx.W.EmitMovRegReg(r19, d17.Reg2)
+			} else {
+				ctx.EmitMovToReg(r19, d17)
+			}
 			ctx.W.EmitJmp(lbl1)
 			ctx.W.MarkLabel(lbl2)
 			if d3.Loc == scm.LocStack || d3.Loc == scm.LocStackPair { ctx.EnsureDesc(&d3) }
@@ -1088,6 +1096,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ctx.FreeDesc(&d43)
 			ctx.FreeDesc(&d46)
 			if d47.Loc == scm.LocStack || d47.Loc == scm.LocStackPair { ctx.EnsureDesc(&d47) }
+			if d47.Loc == scm.LocStack || d47.Loc == scm.LocStackPair { ctx.EnsureDesc(&d47) }
 			ctx.W.EmitMakeFloat(result, d47)
 			if d47.Loc == scm.LocReg { ctx.FreeReg(d47.Reg) }
 			result.Type = scm.TagFloat
@@ -1146,6 +1155,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ctx.FreeDesc(&d38)
 			ctx.FreeDesc(&d48)
 			if d49.Loc == scm.LocStack || d49.Loc == scm.LocStackPair { ctx.EnsureDesc(&d49) }
+			if d49.Loc == scm.LocStack || d49.Loc == scm.LocStackPair { ctx.EnsureDesc(&d49) }
 			ctx.W.EmitMakeInt(result, d49)
 			if d49.Loc == scm.LocReg { ctx.FreeReg(d49.Reg) }
 			result.Type = scm.TagInt
@@ -1156,6 +1166,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
+			if idxPinned { ctx.UnprotectReg(idxPinnedReg) }
 			ctx.W.PatchInt32(r0, int32(8))
 			ctx.W.EmitAddRSP32(int32(8))
 			return result

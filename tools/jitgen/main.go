@@ -3445,14 +3445,17 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	res := g.vals[v.Results[0].Name()]
 	switch res.marker {
 	case "_newbool":
+		g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
 		g.emit("ctx.W.EmitMakeBool(result, %s)", res.goVar)
 		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		g.emit("result.Type = tagBool")
 	case "_newint":
+		g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
 		g.emit("ctx.W.EmitMakeInt(result, %s)", res.goVar)
 		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		g.emit("result.Type = tagInt")
 	case "_newfloat":
+		g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
 		g.emit("ctx.W.EmitMakeFloat(result, %s)", res.goVar)
 		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		g.emit("result.Type = tagFloat")
@@ -3468,6 +3471,7 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	default:
 		// Already-materialized Scmer in LocRegPair — MOV to result registers
 		if res.isDesc {
+			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
 			g.emit("if %s.Loc == LocRegPair {", res.goVar)
 			g.emit("\tctx.EmitMovPairToResult(&%s, &result)", res.goVar)
 			g.emit("\tresult.Type = %s.Type", res.goVar)
@@ -3545,7 +3549,12 @@ func (g *codeGen) emitInlineReturn(v *ssa.Return) {
 		// Scalar return: move single value to result register
 		res := g.resolveValue(v.Results[0])
 		if res.isDesc {
-			g.emit("ctx.EmitMovToReg(%s, %s)", g.inlineReturnReg, res.goVar)
+			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+			g.emit("if %s.Loc == LocRegPair {", res.goVar)
+			g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg2)", g.inlineReturnReg, res.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.EmitMovToReg(%s, %s)", g.inlineReturnReg, res.goVar)
+			g.emit("}")
 		} else {
 			g.emit("ctx.W.EmitMovRegReg(%s, %s)", g.inlineReturnReg, res.goVar)
 		}
