@@ -311,6 +311,7 @@ func init_sync() {
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			d0 := args[0]
+			if d0.Loc == LocStack || d0.Loc == LocStackPair { ctx.EnsureDesc(&d0) }
 			var d1 JITValueDesc
 			if d0.Loc == LocImm {
 				d1 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(int64(int32(d0.Imm.Int()))))}
@@ -320,8 +321,12 @@ func init_sync() {
 				ctx.W.EmitShlRegImm8(r0, 32)
 				ctx.W.EmitSarRegImm8(r0, 32)
 				d1 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
+				ctx.BindReg(r0, &d1)
 			}
 			ctx.FreeDesc(&d0)
+			if d1.Loc == LocStack || d1.Loc == LocStackPair { ctx.EnsureDesc(&d1) }
+			if d1.Loc == LocStack || d1.Loc == LocStackPair { ctx.EnsureDesc(&d1) }
+			if d1.Loc == LocStack || d1.Loc == LocStackPair { ctx.EnsureDesc(&d1) }
 			if d1.Loc == LocImm {
 				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d1.Imm} }
 				ctx.W.EmitMakeInt(result, d1)

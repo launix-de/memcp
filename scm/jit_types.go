@@ -103,13 +103,14 @@ const JITTypeUnknown uint16 = 0xFFFF
 type JITLoc uint8
 
 const (
-	LocNone    JITLoc = iota // Not yet assigned
-	LocReg                   // In a register (Reg) — for primitive types
-	LocRegPair               // In two registers (Reg=ptr, Reg2=aux) — for Scmer
-	LocStack                 // On the stack (StackOff)
-	LocMem                   // At a fixed memory address (MemPtr)
-	LocImm                   // Compile-time constant (Imm)
-	LocAny                   // "I don't care" — result may be constant, register, or memory
+	LocNone      JITLoc = iota // Not yet assigned
+	LocReg                     // In a register (Reg) — for primitive types
+	LocRegPair                 // In two registers (Reg=ptr, Reg2=aux) — for Scmer
+	LocStack                   // On the stack (StackOff)
+	LocStackPair               // Two-word value spilled to stack-like spill buffer (MemPtr, MemPtr+8)
+	LocMem                     // At a fixed memory address (MemPtr)
+	LocImm                     // Compile-time constant (Imm)
+	LocAny                     // "I don't care" — result may be constant, register, or memory
 )
 
 // JITValueDesc describes a value during JIT compilation: its type and
@@ -128,6 +129,7 @@ const (
 //	LocRegPair: Fixed if Type != JITTypeUnknown, flexible otherwise.
 //	LocAny:     Result placement hint only ("I don't care where you put it").
 type JITValueDesc struct {
+	ID       uint32
 	Type     uint16 // tag constant (tagInt, tagFloat, ...) or JITTypeUnknown
 	Nullable bool
 	Loc      JITLoc
@@ -178,6 +180,12 @@ type spillEntry struct {
 	slot int // index in SpillBuf
 }
 
+type descSpillMeta struct {
+	loc      JITLoc
+	memPtr   uintptr
+	stackOff int32
+}
+
 // JITContext is the central structure for descriptor-based JIT compilation.
 type JITContext struct {
 	Env         *JITEnv
@@ -192,12 +200,14 @@ type JITContext struct {
 	spillStack         [16]spillEntry // fixed-size: at most 16 hardware registers can be live
 	spillStackLen      int
 	RegOwners          [16]*JITValueDesc // register → owner descriptor (nil = untracked)
-	SpillBuf           [64]int64         // pre-allocated spill buffer (heap-stable, not on stack)
+	SpillBuf           [4096]int64       // pre-allocated spill buffer (heap-stable, not on stack)
 	SpillTop           int               // high-water mark in SpillBuf (next fresh slot)
 	spillFreeArr       [16]int           // recycled SpillBuf slot indices
 	spillFreeLen       int
 	ProtectedRegs      uint64  // bitmask of registers that must not be spilled
 	ProtectedRegCounts [16]int // per-register protection refcount (supports nested protection)
+	nextDescID         uint32
+	descSpills         map[uint32]descSpillMeta
 	// EvictedCounts tracks how many times each register was evicted by AllocReg.
 	// When AllocReg spills register R and returns R as a fresh register, both the
 	// old holder and the new holder think they own R. EvictedCounts[R] counts the
@@ -241,9 +251,136 @@ func (ctx *JITContext) AllocReg() Reg {
 		}
 		return r
 	}
-	// Conservative safety fallback: spilling currently causes wrong code on some
-	// complex SSA shapes. Panic here so callers can recover and use Go fallback.
-	panic("jit: register spill required (fallback)")
+	// Spill path: spill tracked descriptors (LocReg / LocRegPair).
+	spillable := ctx.AllRegs &^ ctx.FreeRegs &^ ctx.ProtectedRegs
+	var r Reg = 0xFF
+	pairSpill := false
+	var pairR1, pairR2 Reg
+	for bit := int(RegR15); bit >= 0; bit-- {
+		rbit := Reg(bit)
+		if spillable&(1<<uint(rbit)) == 0 {
+			continue
+		}
+		owner := ctx.RegOwners[rbit]
+		if owner == nil {
+			continue
+		}
+		switch owner.Loc {
+		case LocReg:
+			if owner.Reg != rbit {
+				continue
+			}
+			r = rbit
+		case LocRegPair:
+			if owner.Reg != rbit && owner.Reg2 != rbit {
+				continue
+			}
+			pairR1 = owner.Reg
+			pairR2 = owner.Reg2
+			// Pair spill must evict both registers atomically; if either register
+			// is currently protected, try another candidate.
+			if (ctx.ProtectedRegs&(1<<uint(pairR1))) != 0 || (ctx.ProtectedRegs&(1<<uint(pairR2))) != 0 {
+				continue
+			}
+			r = rbit
+			pairSpill = true
+		default:
+			continue
+		}
+		break
+	}
+	if r == 0xFF {
+		panic("jit: register spill required (fallback)")
+	}
+
+	owner := ctx.RegOwners[r]
+	if pairSpill {
+		slot := ctx.SpillTop
+		if slot+1 >= len(ctx.SpillBuf) {
+			panic("jit: spill buffer overflow")
+		}
+		ctx.SpillTop += 2
+		spillAddrPtr := uintptr(unsafe.Pointer(&ctx.SpillBuf[slot]))
+		ctx.W.EmitMovRegImm64(RegR11, uint64(spillAddrPtr))
+		ctx.W.EmitStoreRegMem(pairR1, RegR11, 0)
+		ctx.W.EmitStoreRegMem(pairR2, RegR11, 8)
+
+		owner.Loc = LocStackPair
+		owner.MemPtr = spillAddrPtr
+		owner.StackOff = int32(slot)
+		owner.Reg = 0
+		owner.Reg2 = 0
+		if owner.ID != 0 {
+			if ctx.descSpills == nil {
+				ctx.descSpills = make(map[uint32]descSpillMeta)
+			}
+			ctx.descSpills[owner.ID] = descSpillMeta{loc: LocStackPair, memPtr: spillAddrPtr, stackOff: int32(slot)}
+		}
+		ctx.RegOwners[pairR1] = nil
+		ctx.RegOwners[pairR2] = nil
+		return r
+	}
+
+	// Scalar spill: monotonic slot allocation (no recycle during emission).
+	slot := ctx.SpillTop
+	if slot >= len(ctx.SpillBuf) {
+		panic("jit: spill buffer overflow")
+	}
+	ctx.SpillTop++
+	spillAddrPtr := uintptr(unsafe.Pointer(&ctx.SpillBuf[slot]))
+	ctx.W.EmitMovRegImm64(RegR11, uint64(spillAddrPtr))
+	ctx.W.EmitStoreRegMem(r, RegR11, 0) // MOV [R11], reg
+
+	owner.Loc = LocStack
+	owner.MemPtr = spillAddrPtr
+	owner.StackOff = int32(slot) // spill slot id for recycling
+	owner.Reg = 0
+	if owner.ID != 0 {
+		if ctx.descSpills == nil {
+			ctx.descSpills = make(map[uint32]descSpillMeta)
+		}
+		ctx.descSpills[owner.ID] = descSpillMeta{loc: LocStack, memPtr: spillAddrPtr, stackOff: int32(slot)}
+	}
+	ctx.RegOwners[r] = nil
+	return r
+}
+
+// EnsureDesc restores a descriptor from stack/spill locations to registers.
+func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
+	if desc.Loc == LocReg && desc.ID != 0 && ctx.descSpills != nil {
+		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStack {
+			desc.Loc = LocStack
+			desc.MemPtr = meta.memPtr
+			desc.StackOff = meta.stackOff
+			desc.Reg = 0
+		}
+	}
+	if desc.Loc == LocRegPair && desc.ID != 0 && ctx.descSpills != nil {
+		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStackPair {
+			desc.Loc = LocStackPair
+			desc.MemPtr = meta.memPtr
+			desc.StackOff = meta.stackOff
+			desc.Reg = 0
+			desc.Reg2 = 0
+		}
+	}
+	switch desc.Loc {
+	case LocStack:
+		ctx.EnsureReg(desc)
+	case LocStackPair:
+		r1 := ctx.AllocReg()
+		r2 := ctx.AllocRegExcept(r1)
+		ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
+		ctx.W.EmitMovRegMem(r1, RegR11, 0)
+		ctx.W.EmitMovRegMem(r2, RegR11, 8)
+		desc.Loc = LocRegPair
+		desc.Reg = r1
+		desc.Reg2 = r2
+		desc.MemPtr = 0
+		desc.StackOff = 0
+		ctx.RegOwners[r1] = desc
+		ctx.RegOwners[r2] = desc
+	}
 }
 
 // FreeReg returns a register to the free pool.
@@ -252,20 +389,31 @@ func (ctx *JITContext) AllocReg() Reg {
 // live in the new holder. Only the final FreeReg call (EvictedCounts[r] == 0)
 // actually releases the register back to FreeRegs.
 func (ctx *JITContext) FreeReg(r Reg) {
-	if ctx.EvictedCounts[r] > 0 {
-		ctx.EvictedCounts[r]--
-		// Reclaim the oldest SpillStack slot for this register so it can
-		// be reused, preventing spill buffer overflow on long functions.
-		for i := 0; i < ctx.spillStackLen; i++ {
-			if ctx.spillStack[i].reg == r {
-				ctx.spillFreeArr[ctx.spillFreeLen] = ctx.spillStack[i].slot
-				ctx.spillFreeLen++
-				copy(ctx.spillStack[i:ctx.spillStackLen-1], ctx.spillStack[i+1:ctx.spillStackLen])
-				ctx.spillStackLen--
-				break
+	owner := ctx.RegOwners[r]
+	if owner != nil {
+		switch owner.Loc {
+		case LocReg:
+			if owner.Reg == r {
+				owner.Loc = LocNone
+				owner.Reg = 0
+			}
+		case LocRegPair:
+			// Freeing a single half of a pair means the original pair descriptor
+			// is no longer reliable. Invalidate it and drop tracking for the other
+			// half; callers that want to keep one word must re-bind explicitly.
+			if owner.Reg == r || owner.Reg2 == r {
+				other := owner.Reg
+				if other == r {
+					other = owner.Reg2
+				}
+				if other <= RegR15 {
+					ctx.RegOwners[other] = nil
+				}
+				owner.Loc = LocNone
+				owner.Reg = 0
+				owner.Reg2 = 0
 			}
 		}
-		return
 	}
 	ctx.FreeRegs |= 1 << uint(r)
 	ctx.RegOwners[r] = nil
@@ -274,7 +422,14 @@ func (ctx *JITContext) FreeReg(r Reg) {
 // BindReg associates a register with a JITValueDesc owner for spill tracking.
 // Call this after placing a value in a register so AllocReg can evict it.
 func (ctx *JITContext) BindReg(r Reg, desc *JITValueDesc) {
+	if desc.ID == 0 {
+		ctx.nextDescID++
+		desc.ID = ctx.nextDescID
+	}
 	ctx.RegOwners[r] = desc
+	if desc.ID != 0 && ctx.descSpills != nil {
+		delete(ctx.descSpills, desc.ID)
+	}
 }
 
 // TransferReg is called by the generated alias check when the result descriptor
@@ -283,18 +438,7 @@ func (ctx *JITContext) BindReg(r Reg, desc *JITValueDesc) {
 // burn one eviction token so the final FreeReg from the new holder correctly
 // returns the register to the free pool.
 func (ctx *JITContext) TransferReg(r Reg) {
-	if ctx.EvictedCounts[r] > 0 {
-		ctx.EvictedCounts[r]--
-		for i := 0; i < ctx.spillStackLen; i++ {
-			if ctx.spillStack[i].reg == r {
-				ctx.spillFreeArr[ctx.spillFreeLen] = ctx.spillStack[i].slot
-				ctx.spillFreeLen++
-				copy(ctx.spillStack[i:ctx.spillStackLen-1], ctx.spillStack[i+1:ctx.spillStackLen])
-				ctx.spillStackLen--
-				break
-			}
-		}
-	}
+	_ = r
 }
 
 // AllocRegExcept allocates a fresh register guaranteed not to be any of the
@@ -330,12 +474,22 @@ func (ctx *JITContext) EnsureReg(desc *JITValueDesc) {
 		return
 	}
 	r := ctx.AllocReg()
-	// Load from spill buffer using the absolute address stored in MemPtr
-	ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
-	ctx.W.EmitMovRegMem(r, RegR11, 0)
+	if desc.MemPtr != 0 {
+		// Load from spill buffer using absolute address recorded in MemPtr.
+		ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
+		ctx.W.EmitMovRegMem(r, RegR11, 0)
+	} else {
+		// Generic LocStack value (non-spill): load from [RSP+StackOff].
+		ctx.W.EmitMovRegMem(r, RegRSP, desc.StackOff)
+	}
 	desc.Loc = LocReg
 	desc.Reg = r
+	desc.MemPtr = 0
+	desc.StackOff = 0
 	ctx.RegOwners[r] = desc
+	if desc.ID != 0 && ctx.descSpills != nil {
+		delete(ctx.descSpills, desc.ID)
+	}
 }
 
 // RestoreSpills restores all spilled registers from the spill buffer in reverse order.
@@ -360,11 +514,13 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 		ctx.FreeReg(desc.Reg)
 		ctx.FreeReg(desc.Reg2)
 	case LocStack:
-		// Value was spilled — clean up spill slot.
-		// For simplicity, we just mark it freed; the spill stack
-		// is cleaned up in bulk by RestoreSpills.
+	case LocStackPair:
 	}
 	desc.Loc = LocNone
+	desc.MemPtr = 0
+	if desc.ID != 0 && ctx.descSpills != nil {
+		delete(ctx.descSpills, desc.ID)
+	}
 }
 
 // JITBuildMergeClosure wraps a func(...Scmer) Scmer into func(Scmer, Scmer) Scmer.

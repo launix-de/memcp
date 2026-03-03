@@ -1,0 +1,5 @@
+(print ((jit (lambda (x) (int? x))) 4))
+(print ((jit (lambda (x) (float? x))) 4))
+(print ((jit (lambda (x) (bool? x))) 4))
+(print ((jit (lambda (x) (nil? x))) 4))
+(print ((jit (lambda (x) (number? x))) 4))

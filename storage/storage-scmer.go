@@ -22,6 +22,7 @@ import "bufio"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
+import "unsafe"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
 type StorageSCMER struct {
@@ -87,9 +88,70 @@ func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 	return s.values[i]
 }
 func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-
-	/* TODO: unsupported return type for *t2 */
-	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageSCMER).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var idxInt scm.JITValueDesc
+			if idx.Loc == scm.LocImm {
+				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
+			} else if idx.Loc == scm.LocRegPair {
+				ctx.FreeReg(idx.Reg)
+				idxInt = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idx.Reg2}
+				ctx.BindReg(idx.Reg2, &idxInt)
+			} else {
+				idxInt = idx
+			}
+			if idxInt.Loc == scm.LocImm {
+				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
+			} else {
+				ctx.W.EmitShlRegImm8(idxInt.Reg, 32)
+				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
+				ctx.BindReg(idxInt.Reg, &idxInt)
+			}
+			var d0 scm.JITValueDesc
+			if thisptr.Loc == scm.LocImm {
+				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSCMER)(nil).values)
+				r0 := ctx.AllocReg()
+				r1 := ctx.AllocReg()
+				ctx.W.EmitMovRegMem64(r0, fieldAddr)
+				ctx.W.EmitMovRegMem64(r1, fieldAddr+8)
+				d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+				ctx.BindReg(r0, &d0)
+				ctx.BindReg(r1, &d0)
+			} else {
+				off := int32(unsafe.Offsetof((*StorageSCMER)(nil).values))
+				r2 := ctx.AllocReg()
+				r3 := ctx.AllocReg()
+				ctx.W.EmitMovRegMem(r2, thisptr.Reg, off)
+				ctx.W.EmitMovRegMem(r3, thisptr.Reg, off+8)
+				d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r2, Reg2: r3}
+				ctx.BindReg(r2, &d0)
+				ctx.BindReg(r3, &d0)
+			}
+			if idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair { ctx.EnsureDesc(&idxInt) }
+			r4 := ctx.AllocReg()
+			if idxInt.Loc == scm.LocImm {
+				ctx.W.EmitMovRegImm64(r4, uint64(idxInt.Imm.Int()) * 16)
+			} else {
+				ctx.W.EmitMovRegReg(r4, idxInt.Reg)
+				ctx.W.EmitShlRegImm8(r4, 4)
+			}
+			if d0.Loc == scm.LocImm {
+				ctx.W.EmitMovRegImm64(scm.RegR11, uint64(d0.Imm.Int()))
+				ctx.W.EmitAddInt64(r4, scm.RegR11)
+			} else {
+				ctx.W.EmitAddInt64(r4, d0.Reg)
+			}
+			r5 := ctx.AllocRegExcept(r4)
+			r6 := ctx.AllocRegExcept(r4, r5)
+			ctx.W.EmitMovRegMem(r5, r4, 0)
+			ctx.W.EmitMovRegMem(r6, r4, 8)
+			ctx.FreeReg(r4)
+			d1 := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r5, Reg2: r6}
+			ctx.BindReg(r5, &d1)
+			ctx.BindReg(r6, &d1)
+			ctx.FreeDesc(&idxInt)
+			if result.Loc == scm.LocAny { return d1 }
+			ctx.EmitMovPairToResult(&d1, &result)
+			return result
 }
 
 func (s *StorageSCMER) SetValue(i uint32, v scm.Scmer) {
