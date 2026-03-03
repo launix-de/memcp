@@ -1279,6 +1279,8 @@ func init_list() {
 			ctx.W.MarkLabel(lbl12)
 			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
 			r7 := ctx.AllocReg()
+			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
+			if d22.Loc == LocStack || d22.Loc == LocStackPair { ctx.EnsureDesc(&d22) }
 			if d27.Loc == LocImm {
 				ctx.W.EmitMovRegImm64(r7, uint64(d27.Imm.Int()) * 16)
 			} else {
@@ -1316,6 +1318,8 @@ func init_list() {
 			}
 			if d34.Loc == LocStack || d34.Loc == LocStackPair { ctx.EnsureDesc(&d34) }
 			r10 := ctx.AllocReg()
+			if d34.Loc == LocStack || d34.Loc == LocStackPair { ctx.EnsureDesc(&d34) }
+			if d22.Loc == LocStack || d22.Loc == LocStackPair { ctx.EnsureDesc(&d22) }
 			if d34.Loc == LocImm {
 				ctx.W.EmitMovRegImm64(r10, uint64(d34.Imm.Int()) * 16)
 			} else {

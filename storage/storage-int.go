@@ -246,6 +246,8 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			if d5.Loc == scm.LocStack || d5.Loc == scm.LocStackPair { ctx.EnsureDesc(&d5) }
 			r9 := ctx.AllocReg()
+			if d5.Loc == scm.LocStack || d5.Loc == scm.LocStackPair { ctx.EnsureDesc(&d5) }
+			if d4.Loc == scm.LocStack || d4.Loc == scm.LocStackPair { ctx.EnsureDesc(&d4) }
 			if d5.Loc == scm.LocImm {
 				ctx.W.EmitMovRegImm64(r9, uint64(d5.Imm.Int()) * 8)
 			} else {
@@ -618,6 +620,8 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.FreeDesc(&d25)
 			if d26.Loc == scm.LocStack || d26.Loc == scm.LocStackPair { ctx.EnsureDesc(&d26) }
 			r29 := ctx.AllocReg()
+			if d26.Loc == scm.LocStack || d26.Loc == scm.LocStackPair { ctx.EnsureDesc(&d26) }
+			if d4.Loc == scm.LocStack || d4.Loc == scm.LocStackPair { ctx.EnsureDesc(&d4) }
 			if d26.Loc == scm.LocImm {
 				ctx.W.EmitMovRegImm64(r29, uint64(d26.Imm.Int()) * 8)
 			} else {

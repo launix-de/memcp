@@ -1803,6 +1803,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				dv := g.allocDesc()
 				scratch := g.allocReg()
 				g.emit("%s := ctx.AllocReg()", scratch)
+				// Both index and base descriptor can be spilled between SSA steps.
+				// Always materialize before touching .Reg.
+				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", src.argIdxVar, src.argIdxVar, src.argIdxVar)
+				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", sliceDescVar, sliceDescVar, sliceDescVar)
 				// Compute byte offset: idx * elemSize
 				g.emit("if %s.Loc == LocImm {", src.argIdxVar)
 				switch elemSize {
