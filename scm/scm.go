@@ -933,6 +933,7 @@ func init() {
 			return NewString(String(a[0]))
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			d0 := args[0]
 			d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d0}, 2)
 			ctx.FreeDesc(&d0)

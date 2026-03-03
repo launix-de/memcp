@@ -309,6 +309,7 @@ func init_sync() {
 			return NewInt(int64(runtime.NumCPU()))
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			d0 := args[0]
 			var d1 JITValueDesc
 			if d0.Loc == LocImm {

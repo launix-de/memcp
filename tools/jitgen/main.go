@@ -391,6 +391,7 @@ type codeGen struct {
 	fn             *ssa.Function
 	bbLabels       map[int]string    // BB index → label var name
 	bbDone         map[int]bool      // BB index → already generated
+	bbQueued       map[int]bool      // BB index → queued for future generation
 	bbQueue        []int             // queue of BB indices to generate
 	phiRegs        map[string]string // SSA phi name → stack offset string (e.g. "0", "8", "16")
 	phiStackSize   int               // total bytes reserved on stack for phi nodes (local to current function/inline)
@@ -544,15 +545,20 @@ func (g *codeGen) ensureBBLabel(bbIdx int) string {
 
 // enqueueBB adds a BB to the processing queue if not already done/queued.
 func (g *codeGen) enqueueBB(bbIdx int) {
-	if g.bbDone[bbIdx] {
+	if g.bbDone[bbIdx] || g.bbQueued[bbIdx] {
 		return
 	}
-	for _, q := range g.bbQueue {
-		if q == bbIdx {
-			return
-		}
-	}
 	g.bbQueue = append(g.bbQueue, bbIdx)
+	g.bbQueued[bbIdx] = true
+}
+
+// enqueueBBFront adds a BB to the front of the processing queue if not already done/queued.
+func (g *codeGen) enqueueBBFront(bbIdx int) {
+	if g.bbDone[bbIdx] || g.bbQueued[bbIdx] {
+		return
+	}
+	g.bbQueue = append([]int{bbIdx}, g.bbQueue...)
+	g.bbQueued[bbIdx] = true
 }
 
 // emitEdgePhiMoves emits machine-code-level MOVs for phi edges to targetBB from curBlock.
@@ -733,6 +739,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	savedFn := g.fn
 	savedBBQueue := g.bbQueue
 	savedBBDone := g.bbDone
+	savedBBQueued := g.bbQueued
 	savedBBLabels := g.bbLabels
 	savedCurBlock := g.curBlock
 	savedPhiRegs := g.phiRegs
@@ -745,17 +752,22 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	savedInlineEndLabel := g.inlineEndLabel
 	savedRefCounts := g.refCounts
 	savedAliases := g.ssaAliases
+	savedFieldCache := g.fieldCache
 
 	// Set up callee state
 	g.fn = callee
 	g.bbQueue = nil
 	g.bbDone = map[int]bool{}
+	g.bbQueued = map[int]bool{}
 	g.bbLabels = map[int]string{}
 	g.phiRegs = map[string]string{}
 	g.vals = map[string]genVal{}
 	g.refCounts = computeRefCounts(callee)
 	g.ssaAliases = map[string]string{}
-	// fieldCache is intentionally shared across inline boundary (same receiver)
+	// Do not share cached field loads across inline boundaries:
+	// the callee receiver may be a different sub-struct (e.g. multiple inlined
+	// StorageInt receivers inside StorageString/StorageSeq).
+	g.fieldCache = map[string]genVal{}
 
 	// Map callee params → resolved caller args
 	for i, param := range callee.Params {
@@ -841,9 +853,11 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	// Process callee blocks
 	var singleBlockResult genVal
 	g.bbQueue = []int{0}
+	g.bbQueued[0] = true
 	for len(g.bbQueue) > 0 {
 		bbIdx := g.bbQueue[0]
 		g.bbQueue = g.bbQueue[1:]
+		delete(g.bbQueued, bbIdx)
 		if g.bbDone[bbIdx] {
 			continue
 		}
@@ -902,6 +916,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.fn = savedFn
 	g.bbQueue = savedBBQueue
 	g.bbDone = savedBBDone
+	g.bbQueued = savedBBQueued
 	g.bbLabels = savedBBLabels
 	g.curBlock = savedCurBlock
 	g.phiRegs = savedPhiRegs
@@ -914,6 +929,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.inlineEndLabel = savedInlineEndLabel
 	g.refCounts = savedRefCounts
 	g.ssaAliases = savedAliases
+	g.fieldCache = savedFieldCache
 
 	return result
 }
@@ -933,6 +949,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		fn:              fn,
 		bbLabels:        map[int]string{},
 		bbDone:          map[int]bool{},
+		bbQueued:        map[int]bool{},
 		phiRegs:         map[string]string{},
 		fieldCache:      map[string]genVal{},
 		refCounts:       computeRefCounts(fn),
@@ -961,9 +978,11 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 
 	// Process BBs via queue, starting from BB0
 	g.bbQueue = []int{0}
+	g.bbQueued[0] = true
 	for len(g.bbQueue) > 0 {
 		bbIdx := g.bbQueue[0]
 		g.bbQueue = g.bbQueue[1:]
+		delete(g.bbQueued, bbIdx)
 		if g.bbDone[bbIdx] {
 			continue
 		}
@@ -1020,6 +1039,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		fn:              fn,
 		bbLabels:        map[int]string{},
 		bbDone:          map[int]bool{},
+		bbQueued:        map[int]bool{},
 		phiRegs:         map[string]string{},
 		fieldCache:      map[string]genVal{},
 		refCounts:       computeRefCounts(fn),
@@ -1072,9 +1092,11 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 
 	// Process BBs via queue, starting from BB0
 	g.bbQueue = []int{0}
+	g.bbQueued[0] = true
 	for len(g.bbQueue) > 0 {
 		bbIdx := g.bbQueue[0]
 		g.bbQueue = g.bbQueue[1:]
+		delete(g.bbQueued, bbIdx)
 		if g.bbDone[bbIdx] {
 			continue
 		}
@@ -1751,21 +1773,78 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("%s := args[%d]", dv, src.argIdx)
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
 			} else if src.argIdxVar != "" {
-				// Variable-index IndexAddr+Deref on args slice → emit runtime load from sliceBase
+				// Variable-index IndexAddr+Deref on emitter args.
+				// If the index is known at emit-time, reuse args[idx] directly.
+				// Otherwise, emit runtime selection across the fixed args list.
 				dv := g.allocDesc()
-				scratch := g.allocReg()
-				g.emit("%s := ctx.AllocReg()", scratch)
-				g.emit("ctx.W.EmitMovRegReg(%s, %s.Reg)", scratch, src.argIdxVar)
-				g.emit("ctx.W.EmitShlRegImm8(%s, 4)", scratch) // *16 (Scmer pair)
-				g.emit("ctx.W.EmitAddInt64(%s, ctx.SliceBase)", scratch)
+				idxDescVar := src.argIdxVar
 				ptrReg := g.allocReg()
 				auxReg := g.allocReg()
-				g.emit("%s := ctx.AllocReg()", ptrReg)
-				g.emit("%s := ctx.AllocReg()", auxReg)
-				g.emit("ctx.W.EmitMovRegMem(%s, %s, 0)", ptrReg, scratch)
-				g.emit("ctx.W.EmitMovRegMem(%s, %s, 8)", auxReg, scratch)
-				g.emit("ctx.FreeReg(%s)", scratch)
-				g.emit("%s := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: %s, Reg2: %s}", dv, ptrReg, auxReg)
+				doneLbl := g.allocLabel()
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s.Loc == LocImm {", idxDescVar)
+				g.emit("\tidx := int(%s.Imm.Int())", idxDescVar)
+				g.emit("\tif idx < 0 || idx >= len(args) {")
+				g.emit("\t\tpanic(\"jitgen: dynamic args index out of range\")")
+				g.emit("\t}")
+				g.emit("\t%s = args[idx]", dv)
+				g.emit("} else {")
+				g.emit("\tprotected := make([]Reg, 0, len(args)*2+1)")
+				g.emit("\tseen := make(map[Reg]bool)")
+				g.emit("\tif !seen[%s.Reg] {", idxDescVar)
+				g.emit("\t\tctx.ProtectReg(%s.Reg)", idxDescVar)
+				g.emit("\t\tseen[%s.Reg] = true", idxDescVar)
+				g.emit("\t\tprotected = append(protected, %s.Reg)", idxDescVar)
+				g.emit("\t}")
+				g.emit("\tfor _, ai := range args {")
+				g.emit("\t\tif ai.Loc == LocReg {")
+				g.emit("\t\t\tif !seen[ai.Reg] {")
+				g.emit("\t\t\t\tctx.ProtectReg(ai.Reg)")
+				g.emit("\t\t\t\tseen[ai.Reg] = true")
+				g.emit("\t\t\t\tprotected = append(protected, ai.Reg)")
+				g.emit("\t\t\t}")
+				g.emit("\t\t} else if ai.Loc == LocRegPair {")
+				g.emit("\t\t\tif !seen[ai.Reg] {")
+				g.emit("\t\t\t\tctx.ProtectReg(ai.Reg)")
+				g.emit("\t\t\t\tseen[ai.Reg] = true")
+				g.emit("\t\t\t\tprotected = append(protected, ai.Reg)")
+				g.emit("\t\t\t}")
+				g.emit("\t\t\tif !seen[ai.Reg2] {")
+				g.emit("\t\t\t\tctx.ProtectReg(ai.Reg2)")
+				g.emit("\t\t\t\tseen[ai.Reg2] = true")
+				g.emit("\t\t\t\tprotected = append(protected, ai.Reg2)")
+				g.emit("\t\t\t}")
+				g.emit("\t\t}")
+				g.emit("\t}")
+				g.emit("\t%s := ctx.AllocReg()", ptrReg)
+				g.emit("\t%s := ctx.AllocRegExcept(%s)", auxReg, ptrReg)
+				g.emit("\t%s := ctx.W.ReserveLabel()", doneLbl)
+				g.emit("\tfor i := 0; i < len(args); i++ {")
+				g.emit("\t\tnextLbl := ctx.W.ReserveLabel()")
+				g.emit("\t\tctx.W.EmitCmpRegImm32(%s.Reg, int32(i))", idxDescVar)
+				g.emit("\t\tctx.W.EmitJcc(CcNE, nextLbl)")
+				g.emit("\t\tai := args[i]")
+				g.emit("\t\tswitch ai.Loc {")
+				g.emit("\t\tcase LocRegPair:")
+				g.emit("\t\t\tctx.W.EmitMovRegReg(%s, ai.Reg)", ptrReg)
+				g.emit("\t\t\tctx.W.EmitMovRegReg(%s, ai.Reg2)", auxReg)
+				g.emit("\t\tcase LocImm:")
+				g.emit("\t\t\tptrWord, auxWord := ai.Imm.RawWords()")
+				g.emit("\t\t\tctx.W.EmitMovRegImm64(%s, uint64(ptrWord))", ptrReg)
+				g.emit("\t\t\tctx.W.EmitMovRegImm64(%s, auxWord)", auxReg)
+				g.emit("\t\tdefault:")
+				g.emit("\t\t\tpanic(\"jitgen: emitter args index expected Scmer pair\")")
+				g.emit("\t\t}")
+				g.emit("\t\tctx.W.EmitJmp(%s)", doneLbl)
+				g.emit("\t\tctx.W.MarkLabel(nextLbl)")
+				g.emit("\t}")
+				g.emit("\tpanic(\"jitgen: dynamic args index out of range\")")
+				g.emit("\tctx.W.MarkLabel(%s)", doneLbl)
+				g.emit("\tfor _, r := range protected {")
+				g.emit("\t\tctx.UnprotectReg(r)")
+				g.emit("\t}")
+				g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: %s, Reg2: %s}", dv, ptrReg, auxReg)
+				g.emit("}")
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
 			} else {
 				panic(fmt.Sprintf("deref of non-arg pointer: %s", v))
@@ -2637,9 +2716,26 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 
 	case *ssa.If:
-		cond := g.vals[v.Cond.Name()]
 		thenBB := v.Block().Succs[0].Index
 		elseBB := v.Block().Succs[1].Index
+		// SSA-constant condition: emit only taken edge and enqueue exactly one BB.
+		if c, ok := v.Cond.(*ssa.Const); ok && c.Value != nil && c.Value.Kind() == constant.Bool {
+			takenBB := elseBB
+			if constant.BoolVal(c.Value) {
+				takenBB = thenBB
+			}
+			_ = g.ensureBBLabel(takenBB)
+			g.emitEdgePhiMoves(takenBB)
+			if g.bbDone[takenBB] {
+				lbl := g.ensureBBLabel(takenBB)
+				g.emit("ctx.W.EmitJmp(%s)", lbl)
+			} else {
+				// No jump: continue code emission with taken successor immediately.
+				g.enqueueBBFront(takenBB)
+			}
+			break
+		}
+		cond := g.vals[v.Cond.Name()]
 		if !cond.isDesc {
 			panic(fmt.Sprintf("If condition is not a desc: %s", v.Cond))
 		}
@@ -2677,14 +2773,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 
 	case *ssa.Jump:
 		targetBB := v.Block().Succs[0].Index
+		_ = g.ensureBBLabel(targetBB)
 		g.emitEdgePhiMoves(targetBB)
 		if g.bbDone[targetBB] {
 			lbl := g.ensureBBLabel(targetBB)
 			g.emit("ctx.W.EmitJmp(%s)", lbl)
 		} else {
-			lbl := g.ensureBBLabel(targetBB)
-			g.emit("ctx.W.EmitJmp(%s)", lbl)
-			g.enqueueBB(targetBB)
+			// One-pass forward emission: continue with target BB directly, no JMP.
+			g.enqueueBBFront(targetBB)
 		}
 
 	case *ssa.Convert:

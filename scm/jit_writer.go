@@ -90,6 +90,7 @@ func (w *JITWriter) ResolveFixups() {
 		if f.Relative {
 			offset := targetPos - (f.CodePos + int32(f.Size))
 			*(*int32)(patchAddr) = offset
+			w.tryRewriteTrailingJmpToNop(f, offset)
 		} else {
 			*(*int32)(patchAddr) = targetPos
 		}
@@ -109,9 +110,26 @@ func (w *JITWriter) ResolveFixupsFinal() {
 		if f.Relative {
 			offset := targetPos - (f.CodePos + int32(f.Size))
 			*(*int32)(patchAddr) = offset
+			w.tryRewriteTrailingJmpToNop(f, offset)
 		} else {
 			*(*int32)(patchAddr) = targetPos
 		}
 	}
 	w.FixupNext = 0
+}
+
+// tryRewriteTrailingJmpToNop turns a resolved "jmp +0" (jump-to-next-ip) into
+// five NOP bytes. This keeps one-pass forward emission simple while removing
+// redundant trailing jumps after relocation.
+func (w *JITWriter) tryRewriteTrailingJmpToNop(f *JITFixup, offset int32) {
+	if offset != 0 || f.Size != 4 || f.CodePos <= 0 {
+		return
+	}
+	opAddr := unsafe.Add(w.Start, int(f.CodePos)-1)
+	if *(*byte)(opAddr) != 0xE9 { // JMP rel32 opcode
+		return
+	}
+	for i := 0; i < 5; i++ {
+		*(*byte)(unsafe.Add(opAddr, i)) = 0x90 // NOP
+	}
 }

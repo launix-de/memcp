@@ -107,6 +107,7 @@ func (s *StorageInt) GetValue(i uint32) scm.Scmer {
 	return scm.NewInt(int64(v) + s.offset)
 }
 func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var idxInt scm.JITValueDesc
 			if idx.Loc == scm.LocImm {
 				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}

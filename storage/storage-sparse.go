@@ -115,6 +115,7 @@ func (s *StorageSparse) GetValue(i uint32) scm.Scmer {
 	}
 }
 func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var idxInt scm.JITValueDesc
 			if idx.Loc == scm.LocImm {
 				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -157,6 +158,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.EmitShrRegImm8(r3, 32)
 				d1 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: r3}
 			}
+			lbl1 := ctx.W.ReserveLabel()
 			ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(0)}, 0)
 			d2 := d1
 			if d2.Loc == scm.LocImm {
@@ -166,8 +168,6 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.EmitShrRegImm8(d2.Reg, 32)
 			}
 			ctx.EmitStoreToStack(d2, 8)
-			lbl1 := ctx.W.ReserveLabel()
-			ctx.W.EmitJmp(lbl1)
 			ctx.W.MarkLabel(lbl1)
 			r4 := ctx.AllocReg()
 			ctx.EmitLoadFromStack(r4, 0)

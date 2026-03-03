@@ -106,6 +106,12 @@ func (s Scmer) GetTag() uint16 {
 	return auxTag(s.aux)
 }
 
+// RawWords exposes the underlying 2-word representation for JIT emission.
+// word0 is the pointer payload, word1 is the aux payload.
+func (s Scmer) RawWords() (word0 uintptr, word1 uint64) {
+	return uintptr(unsafe.Pointer(s.ptr)), s.aux
+}
+
 //
 // Constructors
 //
