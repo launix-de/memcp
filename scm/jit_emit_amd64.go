@@ -300,6 +300,16 @@ func (w *JITWriter) EmitDivFloat64(dst, src Reg) {
 	w.emitMovqXmmToGpr(dst, RegX0)
 }
 
+// EmitCmpFloat64Setcc compares two float64 bit-patterns from GPRs and writes
+// 0/1 into dst using SETcc on the floating-point flags.
+func (w *JITWriter) EmitCmpFloat64Setcc(dst, left, right Reg, cc byte) {
+	w.emitMovqGprToXmm(RegX0, left)
+	w.emitMovqGprToXmm(RegX1, right)
+	// UCOMISD XMM0, XMM1
+	w.emitBytes(0x66, 0x0F, 0x2E, 0xC1)
+	w.EmitSetcc(dst, cc)
+}
+
 // --- Conversion emitters ---
 
 // EmitCvtInt64ToFloat64 converts an int64 in gprSrc to float64 bits in gprSrc.
