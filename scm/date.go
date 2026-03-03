@@ -77,7 +77,7 @@ func init_date() {
 			return NewDate(time.Now().Unix())
 		},
 		false, false, nil,
-		nil /* TODO: unsupported call: runtimeNow() */,
+		nil /* TODO: unsupported call: runtimeNow() */, /* TODO: unsupported call: runtimeNow() */
 	})
 	Declare(&Globalenv, &Declaration{
 		"current_date", "returns the current date (midnight in session timezone)",
@@ -90,7 +90,7 @@ func init_date() {
 			return NewDate(midnight.Unix())
 		},
 		false, false, nil,
-		nil /* TODO: unsupported call: runtimeNow() */,
+		nil /* TODO: unsupported call: runtimeNow() */, /* TODO: unsupported call: runtimeNow() */
 	})
 	Declare(&Globalenv, &Declaration{
 		"parse_date", "parses a date from a string",
@@ -114,7 +114,7 @@ func init_date() {
 			return NewNil()
 		},
 		true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */, /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"format_date", "formats a unix timestamp, date, or datetime string into a date string",
@@ -136,7 +136,7 @@ func init_date() {
 			return NewString(formatDateMySQL(t, String(a[1])))
 		},
 		true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */, /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */
 	})
 
 	// EXTRACT(field FROM expr) - implemented as extract_date(expr, field)
@@ -186,7 +186,7 @@ func init_date() {
 			}
 		},
 		true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */, /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */
 	})
 
 	// DATE_ADD(expr, interval_seconds)
@@ -229,7 +229,7 @@ func init_date() {
 			return NewDate(t.Unix())
 		},
 		true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */, /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */
 	})
 
 	// DATE_SUB(expr, amount, unit)
@@ -272,7 +272,7 @@ func init_date() {
 			return NewDate(t.Unix())
 		},
 		true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */, /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */
 	})
 
 	// DATE(expr) - truncate to date only (midnight)
@@ -294,7 +294,7 @@ func init_date() {
 			return NewDate(midnight.Unix())
 		},
 		true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */, /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */
 	})
 
 	// DATEDIFF(date1, date2) - returns number of days between two dates
@@ -320,7 +320,7 @@ func init_date() {
 			return NewInt(days)
 		},
 		true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */, /* TODO: FieldAddr on non-receiver: &t0.wall [#0] */
 	})
 
 	// STR_TO_DATE(str, format) - parse string with MySQL format to date
@@ -344,7 +344,7 @@ func init_date() {
 			return NewNil()
 		},
 		true, false, nil,
-		nil /* TODO: Index: format[t1] */,
+		nil /* TODO: Index: format[t1] */, /* TODO: Index: format[t1] */
 	})
 }
 

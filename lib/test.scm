@@ -856,6 +856,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (a b c) c)) 1 2 9) 9 "jit: return 3rd param native")
 	(assert ((jit (lambda (a b) a)) 3 4) 3 "jit: return 1st of 2 params native")
 	(assert ((jit (lambda (a b c) b)) 1 8 3) 8 "jit: return 2nd of 3 params native")
+	(define jit_add_desc (jit (lambda (a b) (+ a b))))
+	(assert (strlike (serialize jit_add_desc) "(lambda %") true "jit descriptor serializes as lambda")
+	(assert (equal? (eval (list jit_add_desc 2 5)) 7) true "jit descriptor executable via eval")
+	(assert (equal? (apply jit_add_desc '(2 5)) 7) true "jit descriptor executable via apply")
 
 	/* Basic arithmetic with single parameter */
 	(assert ((jit (lambda (x) (+ x 1))) 4) 5 "jit: x + 1")
@@ -1276,6 +1280,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (sql_substr "hello" 2) "ello") true "sql_substr 1-based to end")
 	(assert (equal? (sql_substr "hello" 10) "") true "sql_substr out of bounds returns empty")
 	(assert (nil? (sql_substr nil 1 3)) true "sql_substr nil returns nil")
+	(define jit_sql_substr2 (jit (lambda (s i) (sql_substr s i))))
+	(define jit_sql_substr3 (jit (lambda (s i n) (sql_substr s i n))))
+	(assert ((jit (lambda () (sql_substr "abcdef" 2 3)))) "bcd" "jit sql_substr constant-fold")
+	(assert (equal? (jit_sql_substr2 "hello" 2) (sql_substr "hello" 2)) true "jit sql_substr2 parity basic")
+	(assert (equal? (jit_sql_substr2 "hello" 0) (sql_substr "hello" 0)) true "jit sql_substr2 parity clamp start")
+	(assert (equal? (jit_sql_substr3 "hello" 2 3) (sql_substr "hello" 2 3)) true "jit sql_substr3 parity basic")
+	(assert (equal? (jit_sql_substr3 "hello" 4 10) (sql_substr "hello" 4 10)) true "jit sql_substr3 parity long len")
+	(assert (equal? (jit_sql_substr3 "hello" 2 -1) (sql_substr "hello" 2 -1)) true "jit sql_substr3 parity negative len")
+	(assert (equal? (jit_sql_substr3 "äöüxyz" 2 4) (sql_substr "äöüxyz" 2 4)) true "jit sql_substr3 parity utf8 byte slicing")
+	(assert (nil? (jit_sql_substr3 nil 1 3)) true "jit sql_substr nil returns nil")
 
 	/* strings.go: strlike_cs (case-sensitive) */
 	(assert (strlike_cs "Hello" "H%") true "strlike_cs case-sensitive prefix match")

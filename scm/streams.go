@@ -42,7 +42,7 @@ func init_streams() {
 			}()
 			return NewAny(io.Reader(reader))
 		}, false, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.r [#0] */,
+		nil /* TODO: FieldAddr on non-receiver: &t0.r [#0] */, /* TODO: FieldAddr on non-receiver: &t0.r [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"gzip", "compresses a stream with gzip. Create streams with (stream filename)",
@@ -66,7 +66,7 @@ func init_streams() {
 			}()
 			return NewAny(io.Reader(reader))
 		}, false, false, nil,
-		nil /* TODO: unsupported compare const kind: 0:float64 */,
+		nil /* TODO: unsupported compare const kind: 0:float64 */, /* TODO: unsupported compare const kind: 0:float64 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"xz", "compresses a stream with xz. Create streams with (stream filename)",
@@ -93,7 +93,7 @@ func init_streams() {
 			}
 			return NewAny(io.Reader(reader))
 		}, false, false, nil,
-		nil /* TODO: unsupported compare const kind: 0:float64 */,
+		nil /* TODO: unsupported compare const kind: 0:float64 */, /* TODO: unsupported compare const kind: 0:float64 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"zcat", "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
@@ -112,7 +112,7 @@ func init_streams() {
 			}
 			return NewAny(reader)
 		}, false, false, nil,
-		nil /* TODO: unsupported compare const kind: 0:float64 */,
+		nil /* TODO: unsupported compare const kind: 0:float64 */, /* TODO: unsupported compare const kind: 0:float64 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"xzcat", "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
@@ -131,6 +131,6 @@ func init_streams() {
 			}
 			return NewAny(reader)
 		}, false, false, nil,
-		nil /* TODO: unsupported compare const kind: 0:float64 */,
+		nil /* TODO: unsupported compare const kind: 0:float64 */, /* TODO: unsupported compare const kind: 0:float64 */
 	})
 }
