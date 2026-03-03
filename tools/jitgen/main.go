@@ -31,6 +31,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -92,10 +93,20 @@ func main() {
 	}
 	pkg := pkgs[0]
 	if len(pkg.Errors) > 0 {
+		hardErr := false
 		for _, e := range pkg.Errors {
+			msg := e.Error()
+			if strings.Contains(msg, "declared and not used") {
+				// Regenerating from a temporarily inconsistent generated file is
+				// allowed; the patch pass will rewrite these sections.
+				continue
+			}
+			hardErr = true
 			fmt.Fprintf(os.Stderr, "  %v\n", e)
 		}
-		os.Exit(1)
+		if hardErr {
+			os.Exit(1)
+		}
 	}
 	fset := pkg.Fset
 
@@ -1012,6 +1023,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 		if lbl, ok := g.bbLabels[bbID]; ok {
 			g.emit("ctx.W.MarkLabel(%s)", lbl)
 		}
+		g.resetAllPhiDescsToStack()
 
 		block := callee.Blocks[bbIdx]
 		for _, instr := range block.Instrs {
@@ -1160,6 +1172,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		if lbl, ok := g.bbLabels[bbID]; ok {
 			g.emit("ctx.W.MarkLabel(%s)", lbl)
 		}
+		g.resetAllPhiDescsToStack()
 
 		block := fn.Blocks[bbIdx]
 		for _, instr := range block.Instrs {
@@ -1293,6 +1306,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		if lbl, ok := g.bbLabels[bbID]; ok {
 			g.emit("ctx.W.MarkLabel(%s)", lbl)
 		}
+		g.resetAllPhiDescsToStack()
 
 		block := fn.Blocks[bbIdx]
 		for _, instr := range block.Instrs {
@@ -1512,6 +1526,27 @@ func (g *codeGen) freeDeadOperands(instr ssa.Instruction) {
 			continue
 		}
 		g.useOperand((*op).Name())
+	}
+}
+
+// resetAllPhiDescsToStack restores phi descriptors to their canonical
+// stack-backed locations at BB entry. This prevents stale descriptor state
+// from one emitted BB affecting compile-time lowering decisions in another BB.
+func (g *codeGen) resetAllPhiDescsToStack() {
+	for phiName, phiOff := range g.phiRegs {
+		gv, ok := g.vals[phiName]
+		if !ok || !gv.isDesc {
+			// Phi descriptors are declared lazily when lowering the phi
+			// instruction itself. Skip unseen phis here to avoid generating
+			// unused temporary declarations in functions where some phi values
+			// are not materialized on a given path.
+			continue
+		}
+		if g.phiPair[phiName] {
+			g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)}", gv.goVar, phiOff)
+		} else {
+			g.emit("%s = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(%s)}", gv.goVar, phiOff)
+		}
 	}
 }
 
@@ -2131,7 +2166,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t\tctx.W.EmitJmp(%s)", doneLbl)
 				g.emit("\t\tctx.W.MarkLabel(nextLbl)")
 				g.emit("\t}")
-				g.emit("\tpanic(\"jitgen: dynamic args index out of range\")")
+				g.emit("\tctx.W.EmitByte(0xCC) // unreachable: dynamic args index out of range")
 				g.emit("\tctx.W.MarkLabel(%s)", doneLbl)
 				g.emit("\tfor _, r := range protected {")
 				g.emit("\t\tctx.UnprotectReg(r)")
@@ -2158,17 +2193,30 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}", dv)
 					g.vals[name] = genVal{goVar: dv, isDesc: true}
 				} else {
-					// len of a local slice variable (e.g. from Slice())
+					// len of a local descriptor-backed value (slice/string intermediates)
 					src := g.vals[arg.Name()]
-					if src.marker == "_slice" {
+					if src.marker == "_slice" || src.marker == "_gostring" || src.isDesc {
 						dv := g.allocDesc()
 						g.emit("var %s JITValueDesc", dv)
 						g.emit("if %s.Loc == LocImm {", src.goVar)
-						// LocImm slice: length was stored in StackOff at JIT compile time
-						g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(%s.StackOff))}", dv, src.goVar)
+						if src.marker == "_gostring" {
+							// LocImm Scmer string constant: derive Go-string length.
+							g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(%s.Imm.String())))}", dv, src.goVar)
+						} else {
+							// Legacy LocImm slice path stores length in StackOff.
+							g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(%s.StackOff))}", dv, src.goVar)
+						}
 						g.emit("} else {")
-						// LocReg/LocRegPair: Reg2 = length register
-						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, src.goVar)
+						g.emit("\tif %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", src.goVar, src.goVar, src.goVar)
+						g.emit("\tif %s.Loc == LocRegPair {", src.goVar)
+						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, src.goVar)
+						g.emit("\t\tctx.BindReg(%s.Reg2, &%s)", src.goVar, dv)
+						g.emit("\t} else if %s.Loc == LocReg {", src.goVar)
+						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, src.goVar)
+						g.emit("\t\tctx.BindReg(%s.Reg, &%s)", src.goVar, dv)
+						g.emit("\t} else {")
+						g.emit("\t\tpanic(\"len on unsupported descriptor location\")")
+						g.emit("\t}")
 						g.emit("}")
 						g.vals[name] = genVal{goVar: dv, isDesc: true}
 					} else {
@@ -2262,37 +2310,51 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		case "IsNil":
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitTagEquals(&%s, tagNil, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			tmp := g.allocDesc()
+			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagNil, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsInt":
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitTagEquals(&%s, tagInt, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			tmp := g.allocDesc()
+			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagInt, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsFloat":
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitTagEquals(&%s, tagFloat, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			tmp := g.allocDesc()
+			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagFloat, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsBool":
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitTagEquals(&%s, tagBool, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			tmp := g.allocDesc()
+			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagBool, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsString":
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitTagEquals(&%s, tagString, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			tmp := g.allocDesc()
+			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagString, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsSlice":
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitTagEquals(&%s, tagSlice, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			tmp := g.allocDesc()
+			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagSlice, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsFastDict":
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitTagEquals(&%s, tagFastDict, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
+			tmp := g.allocDesc()
+			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s := ctx.EmitTagEquals(&%s, tagFastDict, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Int":
 			// (Scmer).Int() — extract int64 from Scmer.
@@ -2318,21 +2380,20 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Float":
 			// (Scmer).Float() — extract float64 from Scmer.
-			// Fast-path only when type is statically known float.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", arg.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float())}", dv, arg.goVar)
+			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocReg {", arg.goVar, arg.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, arg.goVar)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
 			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocRegPair {", arg.goVar, arg.goVar)
 			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux (float bits)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg2}", dv, arg.goVar)
 			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
-			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocReg {", arg.goVar, arg.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, arg.goVar)
-			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
 			g.emit("} else {")
-			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Float), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(JITScmerToFloatBits), []JITValueDesc{%s}, 1)", dv, arg.goVar)
 			g.emit("\t%s.Type = tagFloat", dv)
 			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
 			g.emit("}")
@@ -2534,6 +2595,82 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 		if g.isFieldCachedDesc(xVal.goVar) {
 			xMultiUse = true
+		}
+		if floatAluOp := floatAluEmitFunc(v.Op); floatAluOp != "" && isFloat64Type(v.Type()) && isFloat64Type(v.X.Type()) && isFloat64Type(v.Y.Type()) {
+			dv := g.allocDesc()
+			goOp := goOpStr(v.Op)
+			if c, ok := v.Y.(*ssa.Const); ok {
+				cmpVal, ok := constFloat64Value(c.Value)
+				if !ok {
+					panic(fmt.Sprintf("unsupported float arithmetic const kind: %s", c))
+				}
+				bits := math.Float64bits(cmpVal)
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s.Loc == LocImm {", xVal.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float() %s %g)}", dv, xVal.goVar, goOp, cmpVal)
+				g.emit("} else {")
+				if xMultiUse {
+					g.emitAllocRegExcept("scratch", "\t", true, xVal)
+					g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
+					g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", bits)
+					g.emit("\tctx.W.%s(scratch, RegR11)", floatAluOp)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}", dv)
+				} else {
+					g.emit("\tctx.W.EmitMovRegImm64(RegR11, uint64(%d))", bits)
+					g.emit("\tctx.W.%s(%s.Reg, RegR11)", floatAluOp, xVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, xVal.goVar)
+				}
+				g.emit("}")
+			} else {
+				yVal := g.resolveValue(v.Y)
+				if xVal.isDesc {
+					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", xVal.goVar, xVal.goVar, xVal.goVar)
+				}
+				if yVal.isDesc {
+					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", yVal.goVar, yVal.goVar, yVal.goVar)
+				}
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
+				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float() %s %s.Imm.Float())}", dv, xVal.goVar, goOp, yVal.goVar)
+				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
+				g.emitAllocRegExcept("scratch", "\t", true, yVal)
+				g.emit("\t_, xBits := %s.Imm.RawWords()", xVal.goVar)
+				g.emit("\tctx.W.EmitMovRegImm64(scratch, xBits)")
+				g.emit("\tctx.W.%s(scratch, %s.Reg)", floatAluOp, yVal.goVar)
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}", dv)
+				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
+				if xMultiUse {
+					g.emitAllocRegExcept("scratch", "\t", true, xVal)
+					g.emit("\tctx.W.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
+					g.emit("\t_, yBits := %s.Imm.RawWords()", yVal.goVar)
+					g.emit("\tctx.W.EmitMovRegImm64(RegR11, yBits)")
+					g.emit("\tctx.W.%s(scratch, RegR11)", floatAluOp)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}", dv)
+				} else {
+					g.emit("\t_, yBits := %s.Imm.RawWords()", yVal.goVar)
+					g.emit("\tctx.W.EmitMovRegImm64(RegR11, yBits)")
+					g.emit("\tctx.W.%s(%s.Reg, RegR11)", floatAluOp, xVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, xVal.goVar)
+				}
+				g.emit("} else {")
+				if xMultiUse {
+					copyReg := g.allocReg()
+					g.emit("\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
+					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
+					g.emit("\tctx.W.%s(%s, %s.Reg)", floatAluOp, copyReg, yVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s}", dv, copyReg)
+				} else {
+					g.emit("\tctx.W.%s(%s.Reg, %s.Reg)", floatAluOp, xVal.goVar, yVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, xVal.goVar)
+				}
+				g.emit("}")
+			}
+			g.emit("if %s.Loc == LocReg && %s.Loc == LocReg && %s.Reg == %s.Reg {", dv, xVal.goVar, dv, xVal.goVar)
+			g.emit("\tctx.TransferReg(%s.Reg)", xVal.goVar)
+			g.emit("\t%s.Loc = LocNone", xVal.goVar)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			break
 		}
 		xSigned, _, xIsInt := intTypeInfo(v.X.Type())
 		ySigned, _, yIsInt := intTypeInfo(v.Y.Type())
@@ -3947,6 +4084,16 @@ func constInt64Value(v constant.Value) (val int64, ok bool) {
 	return constant.Int64Val(v)
 }
 
+func constFloat64Value(v constant.Value) (val float64, ok bool) {
+	defer func() {
+		if recover() != nil {
+			val = 0
+			ok = false
+		}
+	}()
+	return constant.Float64Val(v)
+}
+
 // opToCC maps a Go comparison token to the JIT condition code constant name.
 func opToCC(op token.Token) string {
 	switch op {
@@ -4024,6 +4171,29 @@ func aluEmitFunc(op token.Token) string {
 	default:
 		return ""
 	}
+}
+
+func floatAluEmitFunc(op token.Token) string {
+	switch op {
+	case token.ADD:
+		return "EmitAddFloat64"
+	case token.SUB:
+		return "EmitSubFloat64"
+	case token.MUL:
+		return "EmitMulFloat64"
+	case token.QUO:
+		return "EmitDivFloat64"
+	default:
+		return ""
+	}
+}
+
+func isFloat64Type(t types.Type) bool {
+	b, ok := t.Underlying().(*types.Basic)
+	if !ok {
+		return false
+	}
+	return b.Kind() == types.Float64 || b.Kind() == types.UntypedFloat
 }
 
 func intTypeInfo(t types.Type) (signed bool, bits int, ok bool) {
