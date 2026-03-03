@@ -27,12 +27,13 @@ type ShardJITPool struct {
 // JITEntryPoint holds a JIT-compiled function alongside its original
 // Scheme representation for serialization and fallback.
 type JITEntryPoint struct {
-	Native   func(...Scmer) Scmer // compiled native function pointer
-	Pages    []*JITPage           // mmap'd pages holding machine code
-	Pool     *ShardJITPool        // pool for returning pages
-	Proc     Proc                 // original Proc for serialization
-	Arch     string               // runtime.GOARCH at compile time
-	BodyHash uint64               // hash of Proc.Body for cache invalidation
+	Native     func(...Scmer) Scmer // compiled native function pointer
+	Pages      []*JITPage           // mmap'd pages holding machine code
+	Pool       *ShardJITPool        // pool for returning pages
+	ConstRoots []unsafe.Pointer     // GC roots for constants embedded into machine code
+	Proc       Proc                 // original Proc for serialization
+	Arch       string               // runtime.GOARCH at compile time
+	BodyHash   uint64               // hash of Proc.Body for cache invalidation
 }
 
 // tagJIT is the first custom tag slot for JIT-compiled functions.

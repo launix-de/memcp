@@ -51,6 +51,13 @@ func jitNthArgument(idx int) []byte { // up to 16 params
 
 // jitCompileProc compiles a Proc body to amd64 machine code or returns nil.
 func jitCompileProc(proc *Proc) []byte {
+	code, _ := jitCompileProcWithRoots(proc)
+	return code
+}
+
+// jitCompileProcWithRoots compiles a Proc body to amd64 machine code and
+// returns GC roots for pointer constants embedded into immediates.
+func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		body = body.SourceInfo().value
@@ -58,24 +65,25 @@ func jitCompileProc(proc *Proc) []byte {
 	// Trivial patterns: literal returns, parameter passthrough
 	switch body.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString:
-		return jitReturnLiteral(body)
+		return jitReturnLiteral(body), nil
 	case tagNthLocalVar:
-		return jitNthArgument(int(body.NthLocalVar()))
+		return jitNthArgument(int(body.NthLocalVar())), nil
 	}
 	// Expression compilation via JITEmit
 	if body.GetTag() == tagSlice {
 		return jitCompileExprBody(body)
 	}
-	return nil
+	return nil, nil
 }
 
 // jitCompileExprBody compiles a Scheme expression body to machine code
 // using Declaration.JITEmit callbacks. Returns nil if any sub-expression
 // is not JIT-compilable.
-func jitCompileExprBody(body Scmer) (code []byte) {
+func jitCompileExprBody(body Scmer) (code []byte, roots []unsafe.Pointer) {
 	defer func() {
 		if r := recover(); r != nil {
 			code = nil
+			roots = nil
 		}
 	}()
 
@@ -119,7 +127,7 @@ func jitCompileExprBody(body Scmer) (code []byte) {
 		case tagNil:
 			w.EmitReturnNil()
 		default:
-			return nil
+			return nil, nil
 		}
 	} else {
 		// Result already materialized in RAX+RBX by the emitter
@@ -127,7 +135,7 @@ func jitCompileExprBody(body Scmer) (code []byte) {
 	}
 
 	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
-	return codeBuf[:codeLen]
+	return codeBuf[:codeLen], ctx.ConstRoots
 }
 
 // jitCompileExpr recursively compiles a Scheme expression to machine code.
@@ -140,14 +148,19 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	}
 	switch expr.GetTag() {
 	case tagNil:
+		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: expr}
 	case tagBool:
+		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: expr}
 	case tagInt:
+		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: tagInt, Imm: expr}
 	case tagFloat:
+		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: expr}
 	case tagString:
+		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: tagString, Imm: expr}
 	case tagNthLocalVar:
 		// Load parameter: check inline env first (JITEmitProcInline places args here).
@@ -156,6 +169,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			src := ctx.Env.Numbered[idx]
 			switch src.Loc {
 			case LocImm:
+				ctx.TrackImm(src.Imm)
 				return src // constants are always safe to alias
 			case LocReg:
 				// Allocate a fresh register so each use is independently freeable.
@@ -179,7 +193,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	case tagSlice:
 		list := expr.Slice()
 		if len(list) == 0 {
-			return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+			imm := NewNil()
+			ctx.TrackImm(imm)
+			return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
 		}
 		// Resolve operator
 		if !list[0].IsSymbol() {
@@ -205,7 +221,11 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			args[i-1] = jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
 		}
 		// Call the JITEmit callback
-		return decl.JITEmit(ctx, args, result)
+		out := decl.JITEmit(ctx, args, result)
+		if out.Loc == LocImm {
+			ctx.TrackImm(out.Imm)
+		}
+		return out
 	default:
 		panic("jit: unsupported expression tag")
 	}

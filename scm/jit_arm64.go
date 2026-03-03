@@ -52,6 +52,11 @@ func jitCompileProc(proc *Proc) []byte {
 	return nil // arm64 not yet implemented
 }
 
+// jitCompileProcWithRoots is a stub for arm64 — native compilation not yet implemented.
+func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
+	return nil, nil
+}
+
 /* TODO: peephole optimizer:
 - remove argument checks (test rbx,rbx 48 85 db 76 xx)
 - shorten immediate values
