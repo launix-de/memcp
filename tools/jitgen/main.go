@@ -426,6 +426,8 @@ type codeGen struct {
 
 	// Top-level package path (the output package, not the inlined callee's package)
 	topLevelPkgPath string
+	// True for storage GetValue emitters that materialize idxInt/idxPinned vars.
+	hasStorageIdx bool
 
 	// Phi register protection: tracks registers protected during phi loads
 	// at a block header. Cleared when the first non-Phi instruction is emitted.
@@ -1162,6 +1164,10 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		g.emit("\tctx.W.EmitShrRegImm8(idxInt.Reg, 32)")
 		g.emit("\tctx.BindReg(idxInt.Reg, &idxInt)")
 		g.emit("}")
+		g.emit("idxPinned := idxInt.Loc == LocReg")
+		g.emit("idxPinnedReg := idxInt.Reg")
+		g.emit("if idxPinned { ctx.ProtectReg(idxPinnedReg) }")
+		g.hasStorageIdx = true
 		g.vals[fn.Params[1].Name()] = genVal{goVar: "idxInt", isDesc: true}
 	}
 
@@ -1211,6 +1217,14 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		g.emit("ctx.W.ResolveFixups()")
 	} else if len(g.bbLabels) > 0 {
 		g.emit("ctx.W.ResolveFixups()")
+	}
+	if g.hasStorageIdx {
+		g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
+		if !g.multiBlock {
+			// Keep Go return-checker happy when single-block body already emitted
+			// returns above: this tail return is unreachable but well-formed.
+			g.emit("return result")
+		}
 	}
 	// Deallocate unified phi stack frame (patch fixup + emit cleanup)
 	if g.globalPhiSize > 0 {
@@ -3454,8 +3468,28 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	default:
 		// Already-materialized Scmer in LocRegPair — MOV to result registers
 		if res.isDesc {
-			g.emit("ctx.EmitMovPairToResult(&%s, &result)", res.goVar)
-			g.emit("result.Type = %s.Type", res.goVar)
+			g.emit("if %s.Loc == LocRegPair {", res.goVar)
+			g.emit("\tctx.EmitMovPairToResult(&%s, &result)", res.goVar)
+			g.emit("\tresult.Type = %s.Type", res.goVar)
+			g.emit("} else {")
+			g.emit("\tswitch %s.Type {", res.goVar)
+			g.emit("\tcase tagBool:")
+			g.emit("\t\tctx.W.EmitMakeBool(result, %s)", res.goVar)
+			g.emit("\t\tresult.Type = tagBool")
+			g.emit("\tcase tagInt:")
+			g.emit("\t\tctx.W.EmitMakeInt(result, %s)", res.goVar)
+			g.emit("\t\tresult.Type = tagInt")
+			g.emit("\tcase tagFloat:")
+			g.emit("\t\tctx.W.EmitMakeFloat(result, %s)", res.goVar)
+			g.emit("\t\tresult.Type = tagFloat")
+			g.emit("\tcase tagNil:")
+			g.emit("\t\tctx.W.EmitMakeNil(result)")
+			g.emit("\t\tresult.Type = tagNil")
+			g.emit("\tdefault:")
+			g.emit("\t\tctx.EmitMovPairToResult(&%s, &result)", res.goVar)
+			g.emit("\t\tresult.Type = %s.Type", res.goVar)
+			g.emit("\t}")
+			g.emit("}")
 		} else {
 			panic(fmt.Sprintf("unsupported return type for %s", v.Results[0]))
 		}
