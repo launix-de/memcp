@@ -247,6 +247,9 @@ func jitCompile(a ...Scmer) Scmer {
 	}
 
 	v := a[0]
+	if v.GetTag() == tagJIT {
+		return v
+	}
 	tag := v.GetTag()
 	if JITLog {
 		fmt.Printf("JIT: compile %s\n", SerializeToString(v, &Globalenv))
@@ -296,9 +299,6 @@ func jitCompile(a ...Scmer) Scmer {
 			Proc:   *proc,
 			Arch:   runtime.GOARCH,
 		})
-
-	case tagJIT:
-		return v
 
 	default:
 		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))
