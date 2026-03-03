@@ -1347,8 +1347,8 @@ func init_list() {
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl8)
-			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d20 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
 			d21 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d20}, 1)
 			d22 := d21

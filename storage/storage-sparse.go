@@ -1137,8 +1137,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.W.EmitMakeNil(d50)
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl12)
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&idxInt)
 			ctx.EnsureDesc(&idxInt)
 			var d51 scm.JITValueDesc

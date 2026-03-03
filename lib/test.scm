@@ -847,6 +847,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (round (* 1000 (dot '(3 4) '(3 4) "EUCLIDEAN"))) 5000) true "euclidean length sqrt(sum) *1000")
 
 	/* JIT compilation */
+	(settings "JITLog" false)
 	(print "testing JIT compilation ...")
 
 	/* Native pipeline validation */
