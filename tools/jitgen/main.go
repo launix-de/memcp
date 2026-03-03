@@ -668,6 +668,13 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 			if phiPair {
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
 			}
+		} else if c.Value.Kind() == constant.String {
+			sval := constant.StringVal(c.Value)
+			if phiPair {
+				g.emit("ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(%q)}, %s)", sval, phiOff)
+			} else {
+				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(%q)}, %s)", sval, phiOff)
+			}
 		} else if c.Value.Kind() == constant.Bool {
 			bval := constant.BoolVal(c.Value)
 			if bval {
@@ -759,6 +766,9 @@ func (g *codeGen) emitPhiMovIndent(phiOff string, v ssa.Value, indent string) {
 	if c, ok := v.(*ssa.Const); ok {
 		if c.Value == nil {
 			fmt.Fprintf(&g.w, "\t\t\t%sctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)\n", indent, phiOff)
+		} else if c.Value.Kind() == constant.String {
+			sval := constant.StringVal(c.Value)
+			fmt.Fprintf(&g.w, "\t\t\t%sctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(%q)}, %s)\n", indent, sval, phiOff)
 		} else if c.Value.Kind() == constant.Bool {
 			bval := constant.BoolVal(c.Value)
 			var ival int
@@ -863,9 +873,22 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	savedAliases := g.ssaAliases
 	savedFieldCache := g.fieldCache
 	savedPhiProtected := g.phiProtectedRegVars
+	savedTypeName := g.typeName
 
 	// Set up callee state
 	g.fn = callee
+	if recv := callee.Signature.Recv(); recv != nil {
+		switch rt := recv.Type().(type) {
+		case *types.Pointer:
+			if n, ok := rt.Elem().(*types.Named); ok && n.Obj() != nil {
+				g.typeName = n.Obj().Name()
+			}
+		case *types.Named:
+			if rt.Obj() != nil {
+				g.typeName = rt.Obj().Name()
+			}
+		}
+	}
 	g.bbQueue = nil
 	g.bbDone = map[uint64]bool{}
 	g.bbQueued = map[uint64]bool{}
@@ -883,16 +906,19 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	// StorageInt receivers inside StorageString/StorageSeq).
 	g.fieldCache = map[string]genVal{}
 
-	// Map callee params → resolved caller args.
-	// Use per-inline descriptor copies so callee-side FreeDesc/Loc rewrites
-	// cannot mutate caller descriptor variables by alias.
+	// Map callee params -> resolved caller args.
+	// Always use per-inline descriptor copies so callee-side FreeDesc/Loc
+	// rewrites cannot mutate caller descriptor variables by alias.
 	for i, param := range callee.Params {
 		arg := resolvedArgs[i]
 		isReceiverParam := (callee.Signature.Recv() != nil && i == 0) || arg.goVar == "thisptr" || arg.marker == "_storage_recv"
 		if arg.isDesc && !isReceiverParam && g.refCounts[param.Name()] > 0 {
 			pv := g.allocDesc()
 			g.emit("%s := %s", pv, arg.goVar)
-			g.vals[param.Name()] = genVal{goVar: pv, isDesc: true, marker: arg.marker}
+			g.emit("_ = %s", pv)
+			copied := arg
+			copied.goVar = pv
+			g.vals[param.Name()] = copied
 		} else {
 			g.vals[param.Name()] = arg
 		}
@@ -1008,9 +1034,8 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	if isMultiBlock {
 		g.emit("ctx.W.MarkLabel(%s)", g.inlineEndLabel)
 	}
-	if len(g.bbLabels) > 0 || isMultiBlock {
-		g.emit("ctx.W.ResolveFixups()")
-	}
+	// Resolve fixups only once at top-level end. Inline bodies may run while
+	// outer-function labels are still pending.
 	// Note: no ADD RSP for inlined callee's phis — the unified phi frame
 	// is managed by the outer function (allocated via fixup, freed at end).
 
@@ -1065,6 +1090,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.ssaAliases = savedAliases
 	g.fieldCache = savedFieldCache
 	g.phiProtectedRegVars = savedPhiProtected
+	g.typeName = savedTypeName
 
 	return result
 }
@@ -1074,6 +1100,9 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 func generateClosure(opName string, fn *ssa.Function) (code string, errMsg string) {
 	defer func() {
 		if r := recover(); r != nil {
+			if os.Getenv("JITGEN_DEBUG_PANIC") == "1" {
+				panic(r)
+			}
 			code = ""
 			errMsg = fmt.Sprintf("%v", r)
 		}
@@ -1566,7 +1595,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 	case *ssa.IndexAddr:
 		if v.X.Name() == g.paramName {
 			if c, ok := v.Index.(*ssa.Const); ok {
-				idx, _ := constant.Int64Val(c.Value)
+				idx, ok := constInt64Value(c.Value)
+				if !ok {
+					panic(fmt.Sprintf("IndexAddr expects int constant index: %s", c))
+				}
 				g.vals[name] = genVal{argIdx: int(idx)}
 			} else {
 				// Variable index (e.g. phi loop counter)
@@ -1641,6 +1673,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			parts := strings.SplitN(src.marker, ":", 3)
 			parentField := parts[2]
 			cacheKey = parentField + "." + fieldName
+		} else if src.isDesc && (fieldName == "ptr" || fieldName == "aux") {
+			// Descriptor-backed Scmer receiver (e.g. inlined methods with signature
+			// like func (s Scmer) ...). Scmer is already split in JITValueDesc as
+			// ptr+aux, so FieldAddr must reference descriptor halves, not thisptr.
+			g.vals[name] = genVal{marker: "_descfield:" + fieldName + ":" + src.goVar}
+			break
 		} else {
 			panic(fmt.Sprintf("FieldAddr on non-receiver: %s", v))
 		}
@@ -1682,7 +1720,35 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 	case *ssa.UnOp:
 		if v.Op == token.MUL {
 			src := g.vals[v.X.Name()]
-			if strings.HasPrefix(src.marker, "_fieldconst:") {
+			if strings.HasPrefix(src.marker, "_descfield:") {
+				// Deref of descriptor-backed Scmer field address.
+				// marker format: "_descfield:<ptr|aux>:<descVar>"
+				parts := strings.SplitN(src.marker, ":", 3)
+				fieldName := parts[1]
+				base := parts[2]
+				dv := g.allocDesc()
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", base, base, base)
+				g.emit("if %s.Loc == LocImm {", base)
+				g.emit("\tptrWord, auxWord := %s.Imm.RawWords()", base)
+				if fieldName == "ptr" {
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(ptrWord))}", dv)
+				} else {
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(auxWord))}", dv)
+				}
+				g.emit("} else {")
+				g.emit("\tif %s.Loc != LocRegPair { panic(\"jitgen: desc field base is not LocRegPair\") }", base)
+				rv := g.allocReg()
+				g.emit("\t%s := ctx.AllocReg()", rv)
+				if fieldName == "ptr" {
+					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", rv, base)
+				} else {
+					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg2)", rv, base)
+				}
+				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, rv)
+				g.emit("}")
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else if strings.HasPrefix(src.marker, "_fieldconst:") {
 				// Deref of immutable FieldAddr → constant-fold (LocImm thisptr) or runtime load (LocReg thisptr).
 				parts := strings.SplitN(src.marker, ":", 3) // "_fieldconst", goType, fieldName
 				goType := parts[1]
@@ -2462,7 +2528,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		if cc != "" {
 			dv := g.allocDesc()
 			if c, ok := v.Y.(*ssa.Const); ok {
-				cmpVal := c.Int64()
+				cmpVal, ok := constInt64Value(c.Value)
+				if !ok {
+					panic(fmt.Sprintf("unsupported compare const kind: %s", c))
+				}
 				// Constant-fold if x is LocImm
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s.Loc == LocImm {", xVal.goVar)
@@ -2542,7 +2611,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// Arithmetic BinOp: ADD, SUB, MUL
 			dv := g.allocDesc()
 			if c, ok := v.Y.(*ssa.Const); ok {
-				cmpVal := c.Int64()
+				cmpVal, ok := constInt64Value(c.Value)
+				if !ok {
+					panic(fmt.Sprintf("unsupported arithmetic const kind: %s", c))
+				}
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s.Loc == LocImm {", xVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() %s %d)}", dv, xVal.goVar, goOpStr(v.Op), cmpVal)
@@ -2697,7 +2769,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+					g.emit("\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
 					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.W.%s(%s, %s.Reg)", aluOp, copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
@@ -2968,7 +3040,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+					g.emit("\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
 					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.W.EmitAndInt64(%s, %s.Reg)", copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
@@ -3070,7 +3142,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+					g.emit("\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
 					g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.W.EmitOrInt64(%s, %s.Reg)", copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
@@ -3198,6 +3270,17 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		dstType := v.Type().Underlying()
 		srcBasic, srcOk := srcType.(*types.Basic)
 		dstBasic, dstOk := dstType.(*types.Basic)
+		if isNoopPointerConvert(v.X.Type(), v.Type()) {
+			srcName := v.X.Name()
+			if _, isConst := v.X.(*ssa.Const); !isConst {
+				g.ssaAliases[name] = srcName
+				// Merge convert result's uses into source's refcount
+				g.refCounts[srcName] += g.refCounts[name]
+				delete(g.refCounts, name)
+			}
+			g.vals[name] = src
+			break
+		}
 		if srcOk && dstOk && isIntegerKind(srcBasic.Kind()) && isIntegerKind(dstBasic.Kind()) {
 			srcSigned, srcBits, srcInfoOK := intTypeInfo(v.X.Type())
 			dstSigned, dstBits, dstInfoOK := intTypeInfo(v.Type())
@@ -3787,6 +3870,9 @@ func (g *codeGen) resolveValue(v ssa.Value) genVal {
 			case constant.Bool:
 				bval := constant.BoolVal(c.Value)
 				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%v)}", dv, bval)
+			case constant.String:
+				sval := constant.StringVal(c.Value)
+				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(%q)}", dv, sval)
 			default:
 				panic(fmt.Sprintf("unsupported constant kind: %s", c.Value.Kind()))
 			}
@@ -3802,11 +3888,21 @@ func constInt(v ssa.Value) int64 {
 	if !ok {
 		panic(fmt.Sprintf("expected constant, got %s", v))
 	}
-	val, ok := constant.Int64Val(c.Value)
+	val, ok := constInt64Value(c.Value)
 	if !ok {
 		panic(fmt.Sprintf("constant not int64: %s", c))
 	}
 	return val
+}
+
+func constInt64Value(v constant.Value) (val int64, ok bool) {
+	defer func() {
+		if recover() != nil {
+			val = 0
+			ok = false
+		}
+	}()
+	return constant.Int64Val(v)
 }
 
 // opToCC maps a Go comparison token to the JIT condition code constant name.
@@ -3917,6 +4013,20 @@ func intTypeInfo(t types.Type) (signed bool, bits int, ok bool) {
 	default:
 		return false, 0, false
 	}
+}
+
+func isNoopPointerConvert(src types.Type, dst types.Type) bool {
+	isPointerLike := func(t types.Type) bool {
+		switch tt := t.Underlying().(type) {
+		case *types.Pointer:
+			return true
+		case *types.Basic:
+			return tt.Kind() == types.UnsafePointer || tt.Kind() == types.Uintptr
+		default:
+			return false
+		}
+	}
+	return isPointerLike(src) && isPointerLike(dst)
 }
 
 func isPhiPairType(t types.Type) bool {
