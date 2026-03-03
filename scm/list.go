@@ -525,13 +525,26 @@ func init_list() {
 			DeclarationParameter{"value", "any", "value to check", nil},
 		}, "bool",
 		func(a ...Scmer) Scmer {
-			if a[0].IsSlice() {
-				return NewBool(true)
-			}
-			return NewBool(false)
+			return NewBool(a[0].IsSlice())
 		},
 		true, false, nil,
-		nil /* TODO: unresolved SSA value: false:bool */, /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			d0 := args[0]
+			d2 := d0
+			d1 := ctx.EmitTagEquals(&d2, tagSlice, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d0)
+			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d1.Imm} }
+				ctx.W.EmitMakeBool(result, d1)
+			} else {
+				if result.Loc == LocAny { return d1 }
+				ctx.W.EmitMakeBool(result, d1)
+				ctx.FreeReg(d1.Reg)
+			}
+			return result
+		}, /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */
 	})
 	Declare(&Globalenv, &Declaration{
 		"contains?", "checks if a value is in a list; uses the equal?? operator",
@@ -1170,8 +1183,8 @@ func init_list() {
 			ctx.EmitStoreToStack(d22, 8)
 			ctx.W.EmitJmp(lbl10)
 			ctx.W.MarkLabel(lbl7)
-			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d23 := args[0]
 			var d24 JITValueDesc
 			if d23.Loc == LocImm {

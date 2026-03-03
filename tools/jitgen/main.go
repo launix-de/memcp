@@ -2409,19 +2409,49 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{%s}, 2)", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring"}
 		case "NewBool":
-			src := g.lookup(v.Call.Args[0])
+			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
 			g.vals[name] = genVal{goVar: src.goVar, marker: "_newbool"}
 		case "NewInt":
-			src := g.lookup(v.Call.Args[0])
+			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
 			g.vals[name] = genVal{goVar: src.goVar, marker: "_newint"}
 		case "NewFloat":
-			src := g.lookup(v.Call.Args[0])
+			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
 			g.vals[name] = genVal{goVar: src.goVar, marker: "_newfloat"}
 		case "NewNil":
 			g.vals[name] = genVal{goVar: "", marker: "_newnil"}
+		case "jitNotBool":
+			// jitNotBool(Scmer) Scmer
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitNotBool), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "jitFloorScmer":
+			// jitFloorScmer(Scmer) Scmer
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitFloorScmer), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "jitCeilScmer":
+			// jitCeilScmer(Scmer) Scmer
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitCeilScmer), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "jitSQLAbs":
+			// jitSQLAbs(Scmer) Scmer
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitSQLAbs), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "jitSqrtScmer":
+			// jitSqrtScmer(Scmer) Scmer
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitSqrtScmer), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewString":
 			// NewString(s string) Scmer — arg is a Go string (2 words: ptr+len), result is Scmer (2 words)
 			arg := g.vals[v.Call.Args[0].Name()]
