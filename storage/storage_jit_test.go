@@ -49,7 +49,8 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 
 	// Free registers: exclude RAX (arg/return), RBX (return aux), RSP, RBP,
 	// R11 (scratch for emit helpers), R14 (Go "g" pointer)
-	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
+	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) |
+		(1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
@@ -58,12 +59,8 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 		FreeRegs: freeRegs,
 		AllRegs:  freeRegs,
 	}
-	// Reserve fixed loop registers. Keep R14 untouched because Go calls
-	// inside fallback emitters require it to hold the runtime g-pointer.
-	ctx.FreeRegs &^= 1 << uint(scm.RegR15) // loop counter
-	ctx.AllRegs &^= 1 << uint(scm.RegR15)
-	ctx.FreeRegs &^= 1 << uint(scm.RegR12) // accumulator
-	ctx.AllRegs &^= 1 << uint(scm.RegR12)
+	// Keep R14 untouched because Go calls inside fallback emitters require
+	// it to hold the runtime g-pointer. No loop-reserved registers needed here.
 
 	// Entry: Go ABI — RAX = int64 index argument
 	idxReg := ctx.AllocReg()
@@ -170,7 +167,8 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 	}
 
-	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
+	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) |
+		(1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))

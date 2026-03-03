@@ -900,6 +900,11 @@ func (w *JITWriter) EmitOrInt64(dst, src Reg) {
 	w.emitAluRegReg(0x09, dst, src) // OR r/m64, r64
 }
 
+// EmitAndInt64 emits AND dst, src (64-bit AND)
+func (w *JITWriter) EmitAndInt64(dst, src Reg) {
+	w.emitAluRegReg(0x21, dst, src) // AND r/m64, r64
+}
+
 // --- GetTag ---
 
 // EmitGetTagDesc extracts the type tag from a Scmer value descriptor.

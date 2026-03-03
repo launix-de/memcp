@@ -360,7 +360,7 @@ func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
 }
 func (s *StorageEnum) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: non-const division: j / t1 */
+	/* TODO: IndexAddr on non-parameter: &t5[t0] */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 

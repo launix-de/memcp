@@ -37,7 +37,8 @@ func TestStorageSeqJITDebugMulti(t *testing.T) {
 		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 	}
 
-	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
+	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) |
+		(1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
@@ -132,7 +133,8 @@ func TestStorageSeqJITDebug(t *testing.T) {
 		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 	}
 
-	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
+	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) |
+		(1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
