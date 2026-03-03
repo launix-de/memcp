@@ -720,7 +720,7 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 			edgeSrc := g.allocDesc()
 			g.emit("%s := %s", edgeSrc, src.goVar)
 			g.emit("if %s.Loc == LocNone { panic(\"jit: phi source has no location\") }", edgeSrc)
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", edgeSrc, edgeSrc, edgeSrc)
+			g.emit("ctx.EnsureDesc(&%s)", edgeSrc)
 			if phiPair {
 				g.emit("if %s.Loc == LocRegPair || %s.Loc == LocImm {", edgeSrc, edgeSrc)
 				g.emit("\tctx.EmitStoreScmerToStack(%s, %s)", edgeSrc, phiOff)
@@ -1258,7 +1258,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		g.emit("if idxInt.Loc == LocImm {")
 		g.emit("\tidxInt = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}")
 		g.emit("} else {")
-		g.emit("\tif idxInt.Loc == LocStack || idxInt.Loc == LocStackPair { ctx.EnsureDesc(&idxInt) }")
+		g.emit("\tctx.EnsureDesc(&idxInt)")
 		g.emit("\tif idxInt.Loc != LocReg { panic(\"jit: idxInt not in register\") }")
 		g.emit("\tctx.W.EmitShlRegImm8(idxInt.Reg, 32)")
 		g.emit("\tctx.W.EmitShrRegImm8(idxInt.Reg, 32)")
@@ -1763,7 +1763,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				base := parts[2]
 				dv := g.allocDesc()
 				g.emit("var %s JITValueDesc", dv)
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", base, base, base)
+				g.emit("ctx.EnsureDesc(&%s)", base)
 				g.emit("if %s.Loc == LocImm {", base)
 				g.emit("\tptrWord, auxWord := %s.Imm.RawWords()", base)
 				if fieldName == "ptr" {
@@ -1990,8 +1990,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("%s := ctx.AllocReg()", scratch)
 				// Both index and base descriptor can be spilled between SSA steps.
 				// Always materialize before touching .Reg.
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", src.argIdxVar, src.argIdxVar, src.argIdxVar)
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", sliceDescVar, sliceDescVar, sliceDescVar)
+				g.emit("ctx.EnsureDesc(&%s)", src.argIdxVar)
+				g.emit("ctx.EnsureDesc(&%s)", sliceDescVar)
 				// Compute byte offset: idx * elemSize
 				g.emit("if %s.Loc == LocImm {", src.argIdxVar)
 				switch elemSize {
@@ -2207,7 +2207,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 							g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(%s.StackOff))}", dv, src.goVar)
 						}
 						g.emit("} else {")
-						g.emit("\tif %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", src.goVar, src.goVar, src.goVar)
+						g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
 						g.emit("\tif %s.Loc == LocRegPair {", src.goVar)
 						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, src.goVar)
 						g.emit("\t\tctx.BindReg(%s.Reg2, &%s)", src.goVar, dv)
@@ -2624,10 +2624,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			} else {
 				yVal := g.resolveValue(v.Y)
 				if xVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", xVal.goVar, xVal.goVar, xVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
 				}
 				if yVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", yVal.goVar, yVal.goVar, yVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
 				}
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
@@ -2716,16 +2716,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				// Conservative spill safety: EnsureDesc(y) may spill x when register
 				// pressure is high. Re-ensure both operands before emitting compare code.
 				if xVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", xVal.goVar, xVal.goVar, xVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
 				}
 				if yVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", yVal.goVar, yVal.goVar, yVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
 				}
 				if xVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", xVal.goVar, xVal.goVar, xVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
 				}
 				if yVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", yVal.goVar, yVal.goVar, yVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
 				}
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
@@ -2833,16 +2833,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				yVal := g.resolveValue(v.Y)
 				// Conservative spill safety for arithmetic BinOps as well.
 				if xVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", xVal.goVar, xVal.goVar, xVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
 				}
 				if yVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", yVal.goVar, yVal.goVar, yVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
 				}
 				if xVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", xVal.goVar, xVal.goVar, xVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
 				}
 				if yVal.isDesc {
-					g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", yVal.goVar, yVal.goVar, yVal.goVar)
+					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
 				}
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
@@ -3420,7 +3420,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 	case *ssa.Convert:
 		src := g.resolveValue(v.X)
 		if src.isDesc {
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", src.goVar, src.goVar, src.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", src.goVar)
 		}
 		dv := g.allocDesc()
 		srcType := v.X.Type().Underlying()
@@ -3565,24 +3565,24 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 			low := g.resolveValue(v.Low)
 			high := g.resolveValue(v.High)
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", x.goVar, x.goVar, x.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", x.goVar)
 			if low.isDesc {
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", low.goVar, low.goVar, low.goVar)
+				g.emit("ctx.EnsureDesc(&%s)", low.goVar)
 			}
 			if high.isDesc {
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", high.goVar, high.goVar, high.goVar)
+				g.emit("ctx.EnsureDesc(&%s)", high.goVar)
 			}
 			ptrReg := g.allocReg()
 			lenReg := g.allocReg()
 			dv := g.allocDesc()
 			g.emit("%s := ctx.AllocReg()", ptrReg)
 			g.emit("%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", x.goVar, x.goVar, x.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", x.goVar)
 			if low.isDesc {
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", low.goVar, low.goVar, low.goVar)
+				g.emit("ctx.EnsureDesc(&%s)", low.goVar)
 			}
 			if high.isDesc {
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", high.goVar, high.goVar, high.goVar)
+				g.emit("ctx.EnsureDesc(&%s)", high.goVar)
 			}
 			g.emit("if %s.Loc == LocImm {", x.goVar)
 			g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", ptrReg, x.goVar)
@@ -3639,7 +3639,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// For descriptor-backed strings/slices, len is carried in Reg2.
 			highDesc := g.allocDesc()
 			g.emit("var %s JITValueDesc", highDesc)
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", x.goVar, x.goVar, x.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", x.goVar)
 			g.emit("if %s.Loc == LocRegPair {", x.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", highDesc, x.goVar)
 			g.emit("} else {")
@@ -3810,15 +3810,15 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 		res := g.vals[v.Results[0].Name()]
 		switch res.marker {
 		case "_newbool":
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 			g.emit("ctx.W.EmitMakeBool(%s, %s)", retDesc, res.goVar)
 			g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		case "_newint":
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 			g.emit("ctx.W.EmitMakeInt(%s, %s)", retDesc, res.goVar)
 			g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		case "_newfloat":
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 			g.emit("ctx.W.EmitMakeFloat(%s, %s)", retDesc, res.goVar)
 			g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		case "_newnil":
@@ -3829,7 +3829,7 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 			g.emit("ctx.EmitMovPairToResult(&%s, &%s)", dv, retDesc)
 		default:
 			if res.isDesc {
-				g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+				g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 				g.emit("if %s.Loc == LocRegPair {", res.goVar)
 				g.emit("\tctx.EmitMovPairToResult(&%s, &%s)", res.goVar, retDesc)
 				g.emit("} else {")
@@ -3865,17 +3865,17 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	res := g.vals[v.Results[0].Name()]
 	switch res.marker {
 	case "_newbool":
-		g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+		g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 		g.emit("ctx.W.EmitMakeBool(result, %s)", res.goVar)
 		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		g.emit("result.Type = tagBool")
 	case "_newint":
-		g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+		g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 		g.emit("ctx.W.EmitMakeInt(result, %s)", res.goVar)
 		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		g.emit("result.Type = tagInt")
 	case "_newfloat":
-		g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+		g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 		g.emit("ctx.W.EmitMakeFloat(result, %s)", res.goVar)
 		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
 		g.emit("result.Type = tagFloat")
@@ -3891,7 +3891,7 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	default:
 		// Already-materialized Scmer in LocRegPair — MOV to result registers
 		if res.isDesc {
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 			g.emit("if %s.Loc == LocRegPair {", res.goVar)
 			g.emit("\tctx.EmitMovPairToResult(&%s, &result)", res.goVar)
 			g.emit("\tresult.Type = %s.Type", res.goVar)
@@ -3971,7 +3971,7 @@ func (g *codeGen) emitInlineReturn(v *ssa.Return) {
 		// Scalar return: move single value to result register
 		res := g.resolveValue(v.Results[0])
 		if res.isDesc {
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", res.goVar, res.goVar, res.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 			g.emit("if %s.Loc == LocRegPair {", res.goVar)
 			g.emit("\tpanic(\"jit: scalar inline return has LocRegPair\")")
 			g.emit("} else {")
@@ -3987,7 +3987,7 @@ func (g *codeGen) emitInlineReturn(v *ssa.Return) {
 func (g *codeGen) lookup(v ssa.Value) genVal {
 	if gv, ok := g.vals[v.Name()]; ok {
 		if gv.isDesc {
-			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", gv.goVar, gv.goVar, gv.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", gv.goVar)
 		}
 		return gv
 	}
