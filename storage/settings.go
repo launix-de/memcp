@@ -30,6 +30,7 @@ type SettingsT struct {
 	Backtrace              bool
 	Trace                  bool
 	TracePrint             bool
+	JITLog                 bool
 	PartitionMaxDimensions int
 	DefaultEngine          string
 	ShardSize              uint
@@ -43,13 +44,14 @@ type SettingsT struct {
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0, false, 0, 0}
+var Settings SettingsT = SettingsT{false, false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0, false, 0, 0}
 
 // call this after you filled Settings
 func InitSettings() {
 	scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 	scm.SetTrace(Settings.Trace)
 	scm.TracePrint = Settings.TracePrint
+	scm.JITLog = Settings.JITLog
 	onexit.Register(func() { scm.SetTrace(false) }) // close trace file on exit
 	InitCacheManager()
 }
@@ -61,6 +63,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("Backtrace"), scm.NewBool(Settings.Backtrace),
 			scm.NewString("Trace"), scm.NewBool(Settings.Trace),
 			scm.NewString("TracePrint"), scm.NewBool(Settings.TracePrint),
+			scm.NewString("JITLog"), scm.NewBool(Settings.JITLog),
 			scm.NewString("PartitionMaxDimensions"), scm.NewInt(int64(Settings.PartitionMaxDimensions)),
 			scm.NewString("DefaultEngine"), scm.NewString(Settings.DefaultEngine),
 			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
@@ -81,6 +84,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(Settings.Trace)
 		case "TracePrint":
 			return scm.NewBool(Settings.TracePrint)
+		case "JITLog":
+			return scm.NewBool(Settings.JITLog)
 		case "PartitionMaxDimensions":
 			return scm.NewInt(int64(Settings.PartitionMaxDimensions))
 		case "DefaultEngine":
@@ -117,6 +122,9 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		case "TracePrint":
 			Settings.TracePrint = scm.ToBool(a[1])
 			scm.TracePrint = Settings.TracePrint
+		case "JITLog":
+			Settings.JITLog = scm.ToBool(a[1])
+			scm.JITLog = Settings.JITLog
 		case "PartitionMaxDimensions":
 			Settings.PartitionMaxDimensions = scm.ToInt(a[1])
 		case "DefaultEngine":
