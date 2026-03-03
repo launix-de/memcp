@@ -257,7 +257,6 @@ func (ctx *JITContext) AllocReg() Reg {
 	spillable := ctx.AllRegs &^ ctx.FreeRegs &^ ctx.ProtectedRegs
 	var r Reg = 0xFF
 	pairSpill := false
-	untrackedReuse := false
 	var pairR1, pairR2 Reg
 	for bit := int(RegR15); bit >= 0; bit-- {
 		rbit := Reg(bit)
@@ -271,20 +270,14 @@ func (ctx *JITContext) AllocReg() Reg {
 		switch owner.Loc {
 		case LocReg:
 			if owner.Reg != rbit {
-				// Stale ownership metadata: reclaim register directly.
-				ctx.RegOwners[rbit] = nil
-				r = rbit
-				untrackedReuse = true
-				break
+				// Stale ownership metadata: do not reclaim implicitly.
+				continue
 			}
 			r = rbit
 		case LocRegPair:
 			if owner.Reg != rbit && owner.Reg2 != rbit {
-				// Stale ownership metadata: reclaim register directly.
-				ctx.RegOwners[rbit] = nil
-				r = rbit
-				untrackedReuse = true
-				break
+				// Stale ownership metadata: do not reclaim implicitly.
+				continue
 			}
 			pairR1 = owner.Reg
 			pairR2 = owner.Reg2
@@ -296,19 +289,13 @@ func (ctx *JITContext) AllocReg() Reg {
 			r = rbit
 			pairSpill = true
 		default:
-			// Unknown owner location: treat as stale and reclaim register.
-			ctx.RegOwners[rbit] = nil
-			r = rbit
-			untrackedReuse = true
+			// Unknown owner location: do not reclaim implicitly.
+			continue
 		}
 		break
 	}
 	if r == 0xFF {
 		panic("jit: register spill required (fallback)")
-	}
-	if untrackedReuse {
-		ctx.RegOwners[r] = nil
-		return r
 	}
 
 	owner := ctx.RegOwners[r]

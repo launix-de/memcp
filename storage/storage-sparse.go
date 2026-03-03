@@ -135,6 +135,9 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
 				ctx.BindReg(idxInt.Reg, &idxInt)
 			}
+			idxPinned := idxInt.Loc == scm.LocReg
+			idxPinnedReg := idxInt.Reg
+			if idxPinned { ctx.ProtectReg(idxPinnedReg) }
 			r0 := ctx.W.EmitSubRSP32Fixup()
 			if result.Loc == scm.LocAny {
 				result = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -1193,8 +1196,28 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			d52 := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r65, Reg2: r66}
 			ctx.BindReg(r65, &d52)
 			ctx.BindReg(r66, &d52)
-			ctx.EmitMovPairToResult(&d52, &result)
-			result.Type = d52.Type
+			if d52.Loc == scm.LocRegPair {
+				ctx.EmitMovPairToResult(&d52, &result)
+				result.Type = d52.Type
+			} else {
+				switch d52.Type {
+				case scm.TagBool:
+					ctx.W.EmitMakeBool(result, d52)
+					result.Type = scm.TagBool
+				case scm.TagInt:
+					ctx.W.EmitMakeInt(result, d52)
+					result.Type = scm.TagInt
+				case scm.TagFloat:
+					ctx.W.EmitMakeFloat(result, d52)
+					result.Type = scm.TagFloat
+				case scm.TagNil:
+					ctx.W.EmitMakeNil(result)
+					result.Type = scm.TagNil
+				default:
+					ctx.EmitMovPairToResult(&d52, &result)
+					result.Type = d52.Type
+				}
+			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl15)
 			d53 := d4
@@ -1267,6 +1290,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.W.EmitJmp(lbl1)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
+			if idxPinned { ctx.UnprotectReg(idxPinnedReg) }
 			ctx.W.PatchInt32(r0, int32(24))
 			ctx.W.EmitAddRSP32(int32(24))
 			return result

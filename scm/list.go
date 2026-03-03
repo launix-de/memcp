@@ -1128,8 +1128,28 @@ func init_list() {
 				ctx.BindReg(r2, &d17)
 			}
 			ctx.FreeDesc(&d14)
-			ctx.EmitMovPairToResult(&d17, &result)
-			result.Type = d17.Type
+			if d17.Loc == LocRegPair {
+				ctx.EmitMovPairToResult(&d17, &result)
+				result.Type = d17.Type
+			} else {
+				switch d17.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(result, d17)
+					result.Type = tagBool
+				case tagInt:
+					ctx.W.EmitMakeInt(result, d17)
+					result.Type = tagInt
+				case tagFloat:
+					ctx.W.EmitMakeFloat(result, d17)
+					result.Type = tagFloat
+				case tagNil:
+					ctx.W.EmitMakeNil(result)
+					result.Type = tagNil
+				default:
+					ctx.EmitMovPairToResult(&d17, &result)
+					result.Type = d17.Type
+				}
+			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl8)
 			d18 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
