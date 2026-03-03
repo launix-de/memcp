@@ -1613,6 +1613,26 @@ func (g *codeGen) flushPhiProtections() {
 	g.phiProtectedRegVars = nil
 }
 
+// emitGoCallScmer1 emits a 1-arg Go call returning Scmer and copies the
+// returned pair into fresh registers so operand cleanup cannot free it via
+// register aliasing with call inputs.
+func (g *codeGen) emitGoCallScmer1(funcExpr string, argDescVar string) string {
+	tmp := g.allocDesc()
+	dv := g.allocDesc()
+	r0 := g.allocReg()
+	r1 := g.allocReg()
+	g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, 2)", tmp, funcExpr, argDescVar)
+	g.emit("%s := ctx.AllocRegExcept(%s.Reg, %s.Reg2)", r0, tmp, tmp)
+	g.emit("%s := ctx.AllocRegExcept(%s.Reg, %s.Reg2, %s)", r1, tmp, tmp, r0)
+	g.emit("ctx.W.EmitMovRegReg(%s, %s.Reg)", r0, tmp)
+	g.emit("ctx.W.EmitMovRegReg(%s, %s.Reg2)", r1, tmp)
+	g.emit("ctx.FreeDesc(&%s)", tmp)
+	g.emit("%s := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: %s, Reg2: %s}", dv, r0, r1)
+	g.emit("ctx.BindReg(%s, &%s)", r0, dv)
+	g.emit("ctx.BindReg(%s, &%s)", r1, dv)
+	return dv
+}
+
 func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 	// When we encounter the first non-Phi instruction in a block,
 	// unprotect all phi-loaded registers. The protection was only needed
@@ -2524,32 +2544,32 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		case "jitNotBool":
 			// jitNotBool(Scmer) Scmer
 			arg := g.vals[v.Call.Args[0].Name()]
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitNotBool), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			dv := g.emitGoCallScmer1("jitNotBool", arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "jitIsIntScmer":
+			// jitIsIntScmer(Scmer) Scmer
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.emitGoCallScmer1("jitIsIntScmer", arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "jitFloorScmer":
 			// jitFloorScmer(Scmer) Scmer
 			arg := g.vals[v.Call.Args[0].Name()]
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitFloorScmer), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			dv := g.emitGoCallScmer1("jitFloorScmer", arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "jitCeilScmer":
 			// jitCeilScmer(Scmer) Scmer
 			arg := g.vals[v.Call.Args[0].Name()]
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitCeilScmer), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			dv := g.emitGoCallScmer1("jitCeilScmer", arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "jitSQLAbs":
 			// jitSQLAbs(Scmer) Scmer
 			arg := g.vals[v.Call.Args[0].Name()]
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitSQLAbs), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			dv := g.emitGoCallScmer1("jitSQLAbs", arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "jitSqrtScmer":
 			// jitSqrtScmer(Scmer) Scmer
 			arg := g.vals[v.Call.Args[0].Name()]
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitSqrtScmer), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			dv := g.emitGoCallScmer1("jitSqrtScmer", arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewString":
 			// NewString(s string) Scmer — arg is a Go string (2 words: ptr+len), result is Scmer (2 words)
