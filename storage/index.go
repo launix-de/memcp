@@ -632,7 +632,7 @@ func indexCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 
 func indexLastUsed(ptr any) time.Time {
 	// use the parent shard's lastAccessed as proxy
-	return ptr.(*StorageIndex).t.lastAccessed
+	return time.Unix(0, int64(atomic.LoadUint64(&ptr.(*StorageIndex).t.lastAccessed)))
 }
 
 func indexGetScore(ptr any) float64 {
