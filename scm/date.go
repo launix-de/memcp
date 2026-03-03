@@ -361,7 +361,7 @@ func init_date() {
 			return NewNil()
 		},
 		true, false, nil,
-		nil /* TODO: len on non-parameter: len(format) */,
+		nil /* TODO: Index: format[t1] */,
 	})
 }
 

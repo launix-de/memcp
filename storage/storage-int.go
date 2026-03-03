@@ -488,6 +488,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			ctx.W.EmitJmp(lbl1)
 			ctx.W.MarkLabel(lbl2)
+			d13 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			if d4.Loc == scm.LocStack || d4.Loc == scm.LocStackPair { ctx.EnsureDesc(&d4) }
 			var d19 scm.JITValueDesc
 			if d4.Loc == scm.LocImm {
@@ -613,6 +614,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			ctx.FreeDesc(&d23)
 			ctx.W.MarkLabel(lbl5)
+			d13 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			if d4.Loc == scm.LocStack || d4.Loc == scm.LocStackPair { ctx.EnsureDesc(&d4) }
 			var d26 scm.JITValueDesc
 			if d4.Loc == scm.LocImm {

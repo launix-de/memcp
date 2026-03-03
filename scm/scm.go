@@ -864,7 +864,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return NewSymbol(String(a[0]))
 		}, false, false, nil,
-		nil /* TODO: len on non-parameter: len(sym) */,
+		nil /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"list", "returns a list containing the parameters as alements",

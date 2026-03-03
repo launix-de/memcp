@@ -207,7 +207,7 @@ func (w *JITWriter) EmitMakeFloat(dst JITValueDesc, src JITValueDesc) {
 			w.emitMovRegReg(dst.Reg2, src.Reg)
 		}
 	case LocImm:
-		w.EmitMovRegImm64(dst.Reg2, uint64(src.Imm.Int())) // float bits stored as int64 in aux
+		w.EmitMovRegImm64(dst.Reg2, math.Float64bits(src.Imm.Float())) // float bits stored in aux
 	}
 }
 
@@ -270,22 +270,34 @@ func (w *JITWriter) EmitImulInt64(dst, src Reg) {
 
 // EmitAddFloat64 emits: ADDSD dst, src (XMM += XMM)
 func (w *JITWriter) EmitAddFloat64(dst, src Reg) {
-	w.emitSseOp(0x58, dst, src) // ADDSD
+	w.emitMovqGprToXmm(RegX0, dst)
+	w.emitMovqGprToXmm(RegX1, src)
+	w.emitSseOp(0x58, RegX0, RegX1) // ADDSD
+	w.emitMovqXmmToGpr(dst, RegX0)
 }
 
 // EmitSubFloat64 emits: SUBSD dst, src (XMM -= XMM)
 func (w *JITWriter) EmitSubFloat64(dst, src Reg) {
-	w.emitSseOp(0x5C, dst, src) // SUBSD
+	w.emitMovqGprToXmm(RegX0, dst)
+	w.emitMovqGprToXmm(RegX1, src)
+	w.emitSseOp(0x5C, RegX0, RegX1) // SUBSD
+	w.emitMovqXmmToGpr(dst, RegX0)
 }
 
 // EmitMulFloat64 emits: MULSD dst, src (XMM *= XMM)
 func (w *JITWriter) EmitMulFloat64(dst, src Reg) {
-	w.emitSseOp(0x59, dst, src) // MULSD
+	w.emitMovqGprToXmm(RegX0, dst)
+	w.emitMovqGprToXmm(RegX1, src)
+	w.emitSseOp(0x59, RegX0, RegX1) // MULSD
+	w.emitMovqXmmToGpr(dst, RegX0)
 }
 
 // EmitDivFloat64 emits: DIVSD dst, src (XMM /= XMM)
 func (w *JITWriter) EmitDivFloat64(dst, src Reg) {
-	w.emitSseOp(0x5E, dst, src) // DIVSD
+	w.emitMovqGprToXmm(RegX0, dst)
+	w.emitMovqGprToXmm(RegX1, src)
+	w.emitSseOp(0x5E, RegX0, RegX1) // DIVSD
+	w.emitMovqXmmToGpr(dst, RegX0)
 }
 
 // --- Conversion emitters ---

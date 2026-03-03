@@ -17,6 +17,8 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"fmt"
+	"math"
 	"reflect"
 	"unsafe"
 )
@@ -413,8 +415,8 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 		desc.Reg2 = r2
 		desc.MemPtr = 0
 		desc.StackOff = 0
-		ctx.RegOwners[r1] = desc
-		ctx.RegOwners[r2] = desc
+		ctx.BindReg(r1, desc)
+		ctx.BindReg(r2, desc)
 	}
 }
 
@@ -461,6 +463,8 @@ func (ctx *JITContext) BindReg(r Reg, desc *JITValueDesc) {
 		ctx.nextDescID++
 		desc.ID = ctx.nextDescID
 	}
+	// A bound register is live and must not be treated as free.
+	ctx.FreeRegs &^= 1 << uint(r)
 	ctx.RegOwners[r] = desc
 	if desc.ID != 0 && ctx.descSpills != nil {
 		delete(ctx.descSpills, desc.ID)
@@ -521,7 +525,7 @@ func (ctx *JITContext) EnsureReg(desc *JITValueDesc) {
 	desc.Reg = r
 	desc.MemPtr = 0
 	desc.StackOff = 0
-	ctx.RegOwners[r] = desc
+	ctx.BindReg(r, desc)
 	if desc.ID != 0 && ctx.descSpills != nil {
 		delete(ctx.descSpills, desc.ID)
 	}
@@ -589,6 +593,12 @@ func ConcatStrings(a, b string) string {
 	return a + b
 }
 
+// JITScmerToFloatBits converts a Scmer to float64 and returns the raw IEEE bits
+// in a GPR-friendly integer return value for JIT helper calls.
+func JITScmerToFloatBits(v Scmer) uint64 {
+	return math.Float64bits(v.Float())
+}
+
 // JITIntDiv performs int64 division for JIT fallback lowering paths.
 func JITIntDiv(a, b int64) int64 {
 	return a / b
@@ -610,6 +620,11 @@ type goCallArgWord struct {
 
 func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
 	allocatedMask := (^ctx.FreeRegs) & 0xFFFF // track all GPRs, incl. reserved non-alloc regs
+	for r := Reg(0); r <= RegR15; r++ {
+		if ctx.RegOwners[r] != nil && (ctx.FreeRegs&(1<<uint(r))) != 0 {
+			panic("jit: internal reg state mismatch (owner set but register marked free)")
+		}
+	}
 	liveCount := 0
 	unknownCount := 0
 	for r := Reg(0); r <= RegR15; r++ {
@@ -778,11 +793,41 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 		case LocReg:
 			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
 			n++
+		case LocStack:
+			r := ctx.AllocReg()
+			if a.MemPtr != 0 {
+				ctx.W.EmitMovRegImm64(RegR11, uint64(a.MemPtr))
+				ctx.W.EmitMovRegMem(r, RegR11, 0)
+			} else {
+				ctx.W.EmitMovRegMem(r, RegRSP, a.StackOff)
+			}
+			buf[n] = goCallArgWord{loc: LocReg, reg: r}
+			n++
+		case LocStackPair:
+			r1 := ctx.AllocReg()
+			r2 := ctx.AllocRegExcept(r1)
+			if a.MemPtr != 0 {
+				ctx.W.EmitMovRegImm64(RegR11, uint64(a.MemPtr))
+				ctx.W.EmitMovRegMem(r1, RegR11, 0)
+				ctx.W.EmitMovRegMem(r2, RegR11, 8)
+			} else {
+				ctx.W.EmitMovRegMem(r1, RegRSP, a.StackOff)
+				ctx.W.EmitMovRegMem(r2, RegRSP, a.StackOff+8)
+			}
+			buf[n] = goCallArgWord{loc: LocReg, reg: r1}
+			n++
+			buf[n] = goCallArgWord{loc: LocReg, reg: r2}
+			n++
 		case LocImm:
 			buf[n] = goCallArgWord{loc: LocImm, imm: uint64(a.Imm.Int())}
 			n++
+		case LocNone:
+			r := ctx.AllocReg()
+			ctx.W.EmitMovRegImm64(r, 0)
+			buf[n] = goCallArgWord{loc: LocReg, reg: r}
+			n++
 		default:
-			panic("jit: unsupported arg desc location in flattenArgs")
+			panic(fmt.Sprintf("jit: unsupported arg desc location in flattenArgs: %d", a.Loc))
 		}
 	}
 	return buf[:n]
