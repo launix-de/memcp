@@ -241,43 +241,9 @@ func (ctx *JITContext) AllocReg() Reg {
 		}
 		return r
 	}
-	// Spill path: find highest-numbered in-use register and evict it.
-	// Save to SpillBuf (a pre-allocated heap buffer) instead of modifying RSP.
-	// This avoids stack pointer changes that would break phi slot offsets.
-	// Exclude protected registers (caller values needed across inline boundaries).
-	spillable := ctx.AllRegs &^ ctx.FreeRegs &^ ctx.ProtectedRegs
-	if spillable == 0 {
-		panic("jit: no free registers and no spillable registers")
-	}
-	// Pick highest bit (least likely to be needed immediately)
-	var r Reg
-	for bit := Reg(15); bit > 0; bit-- {
-		if spillable&(1<<uint(bit)) != 0 {
-			r = bit
-			break
-		}
-	}
-	// Allocate a spill slot: prefer recycled slots to keep SpillTop low.
-	var slot int
-	if ctx.spillFreeLen > 0 {
-		ctx.spillFreeLen--
-		slot = ctx.spillFreeArr[ctx.spillFreeLen]
-	} else {
-		slot = ctx.SpillTop
-		if slot >= len(ctx.SpillBuf) {
-			panic("jit: spill buffer overflow")
-		}
-		ctx.SpillTop++
-	}
-	spillAddr := uint64(uintptr(unsafe.Pointer(&ctx.SpillBuf[slot])))
-	ctx.W.EmitMovRegImm64(RegR11, spillAddr)
-	ctx.W.EmitStoreRegMem(r, RegR11, 0) // MOV [R11], reg
-	ctx.spillStack[ctx.spillStackLen] = spillEntry{reg: r, slot: slot}
-	ctx.spillStackLen++
-	// Increment eviction count: the old holder's FreeReg(r) will burn this
-	// count instead of returning r to FreeRegs, preventing a double-free.
-	ctx.EvictedCounts[r]++
-	return r
+	// Conservative safety fallback: spilling currently causes wrong code on some
+	// complex SSA shapes. Panic here so callers can recover and use Go fallback.
+	panic("jit: register spill required (fallback)")
 }
 
 // FreeReg returns a register to the free pool.
@@ -345,6 +311,11 @@ func (ctx *JITContext) AllocRegExcept(excluded ...Reg) Reg {
 		ctx.ProtectReg(r)
 	}
 	r := ctx.AllocReg()
+	for _, ex := range excluded {
+		if r == ex {
+			panic("jit: AllocRegExcept returned excluded register")
+		}
+	}
 	for _, r := range excluded {
 		ctx.UnprotectReg(r)
 	}
@@ -410,6 +381,16 @@ func GoFuncAddr(fn interface{}) uint64 {
 // ConcatStrings concatenates two Go strings. Used as a JIT helper for string + string.
 func ConcatStrings(a, b string) string {
 	return a + b
+}
+
+// JITIntDiv performs int64 division for JIT fallback lowering paths.
+func JITIntDiv(a, b int64) int64 {
+	return a / b
+}
+
+// JITIntRem performs int64 modulo for JIT fallback lowering paths.
+func JITIntRem(a, b int64) int64 {
+	return a % b
 }
 
 // GoABIIntRegs lists integer argument/result registers in Go internal ABI order.
