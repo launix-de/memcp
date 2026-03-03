@@ -36,20 +36,6 @@ func jitReturnLiteral(value Scmer) []byte {
 	return code
 }
 
-func jitNthArgument(idx int) []byte { // up to 16 params
-	var code []byte
-	if idx > 0 {
-		code = append(code, 0x48, 0x83, 0xC0, byte(idx*16)) // add rax, 16*idx
-	}
-	code = append(code,
-		0x48, 0x8b, 0x08, // mov rcx, [rax]
-		0x48, 0x8b, 0x58, 0x08, // mov rbx, [rax+8]
-		0x48, 0x89, 0xc8, // mov rax, rcx
-		0xC3, // ret
-	)
-	return code
-}
-
 // jitCompileProc compiles a Proc body to amd64 machine code or returns nil.
 func jitCompileProc(proc *Proc) []byte {
 	code, _ := jitCompileProcWithRoots(proc)
@@ -63,15 +49,16 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	if body.GetTag() == tagSourceInfo {
 		body = body.SourceInfo().value
 	}
-	// Trivial patterns: literal returns, parameter passthrough
+	// Trivial literal returns.
 	switch body.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString:
 		return jitReturnLiteral(body), nil
-	case tagNthLocalVar:
-		return jitNthArgument(int(body.NthLocalVar())), nil
 	}
 	// Expression compilation via JITEmit
 	if body.GetTag() == tagSlice {
+		return jitCompileExprBody(body)
+	}
+	if body.GetTag() == tagNthLocalVar {
 		return jitCompileExprBody(body)
 	}
 	return nil, nil
@@ -134,7 +121,31 @@ func jitCompileExprBody(body Scmer) (code []byte, roots []unsafe.Pointer) {
 			return nil, nil
 		}
 	} else {
-		// Result already materialized in RAX+RBX by the emitter
+		// Ensure non-immediate results are in ABI return registers.
+		ctx.EnsureDesc(&desc)
+		switch desc.Loc {
+		case LocRegPair:
+			if desc.Reg != RegRAX {
+				w.emitMovRegReg(RegRAX, desc.Reg)
+			}
+			if desc.Reg2 != RegRBX {
+				w.emitMovRegReg(RegRBX, desc.Reg2)
+			}
+		case LocReg:
+			ret := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
+			switch desc.Type {
+			case tagBool:
+				w.EmitMakeBool(ret, desc)
+			case tagInt:
+				w.EmitMakeInt(ret, desc)
+			case tagFloat:
+				w.EmitMakeFloat(ret, desc)
+			default:
+				return nil, nil
+			}
+		default:
+			return nil, nil
+		}
 		w.emitByte(0xC3) // RET
 	}
 
@@ -171,6 +182,31 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		idx := int(expr.NthLocalVar())
 		if ctx.Env != nil && idx < len(ctx.Env.Numbered) {
 			src := ctx.Env.Numbered[idx]
+			if result.Loc == LocRegPair {
+				switch src.Loc {
+				case LocImm:
+					ctx.TrackImm(src.Imm)
+					ptr, aux := src.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(result.Reg, uint64(ptr))
+					ctx.W.EmitMovRegImm64(result.Reg2, aux)
+					d := JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: result.Reg, Reg2: result.Reg2}
+					ctx.BindReg(result.Reg, &d)
+					ctx.BindReg(result.Reg2, &d)
+					return d
+				case LocRegPair:
+					ctx.EnsureDesc(&src)
+					if src.Reg != result.Reg {
+						ctx.W.emitMovRegReg(result.Reg, src.Reg)
+					}
+					if src.Reg2 != result.Reg2 {
+						ctx.W.emitMovRegReg(result.Reg2, src.Reg2)
+					}
+					d := JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: result.Reg, Reg2: result.Reg2}
+					ctx.BindReg(result.Reg, &d)
+					ctx.BindReg(result.Reg2, &d)
+					return d
+				}
+			}
 			switch src.Loc {
 			case LocImm:
 				ctx.TrackImm(src.Imm)
@@ -192,6 +228,13 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				ctx.BindReg(r2, &d)
 				return d
 			}
+		}
+		if result.Loc == LocRegPair {
+			ctx.W.EmitLoadArgPair(result.Reg, result.Reg2, sliceBase, idx)
+			d := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: result.Reg, Reg2: result.Reg2}
+			ctx.BindReg(result.Reg, &d)
+			ctx.BindReg(result.Reg2, &d)
+			return d
 		}
 		// Fallback: load from args slice: ptr at [base+i*16], aux at [base+i*16+8]
 		ptrReg := ctx.AllocReg()
@@ -231,6 +274,23 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		}
 		for i := 1; i < len(list); i++ {
 			args[i-1] = jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+			// Keep argument descriptors tracked while compiling later args and
+			// inside the callee JITEmit body. Without rebinding to args[] slots,
+			// register spills/reuse can leave stale copies in args and break
+			// non-commutative operators (e.g. subtraction).
+			switch args[i-1].Loc {
+			case LocReg:
+				ctx.BindReg(args[i-1].Reg, &args[i-1])
+			case LocRegPair:
+				ctx.BindReg(args[i-1].Reg, &args[i-1])
+				ctx.BindReg(args[i-1].Reg2, &args[i-1])
+			}
+		}
+		// Arguments can be referenced multiple times inside jitgen-generated CFGs.
+		// Keep them as non-owning source descriptors so FreeDesc on temporary
+		// copies does not release the shared source placement prematurely.
+		for i := range args {
+			args[i].ID = 0
 		}
 		// Call the JITEmit callback
 		out := decl.JITEmit(ctx, args, result)
