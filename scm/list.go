@@ -708,11 +708,12 @@ func init_list() {
 			d1 := ctx.EmitTagEquals(&d2, tagSlice, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
 			if d1.Loc == LocImm {
-				if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: d1.Imm} }
 				ctx.W.EmitMakeBool(result, d1)
 			} else {
-				if result.Loc == LocAny { return d1 }
 				ctx.W.EmitMakeBool(result, d1)
 				ctx.FreeReg(d1.Reg)
 			}
@@ -1356,8 +1357,8 @@ func init_list() {
 			ctx.EmitStoreToStack(d22, 8)
 			ctx.W.EmitJmp(lbl10)
 			ctx.W.MarkLabel(lbl7)
-			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d23 := args[0]
 			var d24 JITValueDesc
 			if d23.Loc == LocImm {
@@ -1522,9 +1523,9 @@ func init_list() {
 			}
 			ctx.FreeDesc(&d32)
 			ctx.W.MarkLabel(lbl12)
-			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d29 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d29)
 			r7 := ctx.AllocReg()
 			ctx.EnsureDesc(&d29)

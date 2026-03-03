@@ -153,8 +153,26 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.BindReg(r5, &d1)
 			ctx.BindReg(r6, &d1)
 			ctx.FreeDesc(&idxInt)
-			if result.Loc == scm.LocAny { return d1 }
-			ctx.EmitMovPairToResult(&d1, &result)
+			if result.Loc == scm.LocAny {
+				result = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			ctx.EnsureDesc(&d1)
+			if d1.Loc == scm.LocRegPair {
+				ctx.EmitMovPairToResult(&d1, &result)
+			} else {
+				switch d1.Type {
+				case scm.TagBool:
+					ctx.W.EmitMakeBool(result, d1)
+				case scm.TagInt:
+					ctx.W.EmitMakeInt(result, d1)
+				case scm.TagFloat:
+					ctx.W.EmitMakeFloat(result, d1)
+				case scm.TagNil:
+					ctx.W.EmitMakeNil(result)
+				default:
+					panic("jit: single-block scalar return with unknown type")
+				}
+			}
 			return result
 }
 

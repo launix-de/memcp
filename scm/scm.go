@@ -719,7 +719,37 @@ func init() {
 		}, "int", func(a ...Scmer) Scmer {
 			return NewInt(int64(ComputeSize(a[0])))
 		}, true, false, nil,
-		nil /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			d0 := args[0]
+			ctx.EnsureDesc(&d0)
+			d1 := ctx.EmitGoCallScalar(GoFuncAddr(ComputeSize), []JITValueDesc{d0}, 1)
+			d1.Type = tagInt
+			ctx.FreeDesc(&d0)
+			ctx.EnsureDesc(&d1)
+			ctx.EnsureDesc(&d1)
+			var d2 JITValueDesc
+			if d1.Loc == LocImm {
+				d2 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(int64(uint64(d1.Imm.Int()))))}
+			} else {
+				r0 := ctx.AllocReg()
+				ctx.W.EmitMovRegReg(r0, d1.Reg)
+				d2 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
+				ctx.BindReg(r0, &d2)
+			}
+			ctx.FreeDesc(&d1)
+			ctx.EnsureDesc(&d2)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			if d2.Loc == LocImm {
+				ctx.W.EmitMakeInt(result, d2)
+			} else {
+				ctx.W.EmitMakeInt(result, d2)
+				ctx.FreeReg(d2.Reg)
+			}
+			return result
+		}, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */
 	})
 	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",

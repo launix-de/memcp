@@ -360,7 +360,7 @@ func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
 }
 func (s *StorageEnum) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: IndexAddr on non-parameter: &t5[t0] */
+	/* TODO: IndexAddr on non-parameter: &t5[t0] (x=t5 marker="_fieldaddr:array:thresholds" isDesc=false goVar=) */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 

@@ -152,33 +152,26 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.EnsureDesc(&d2)
 			ctx.EnsureDesc(&d2)
 			ctx.EnsureDesc(&d2)
-			ctx.EnsureDesc(&d2)
-			ctx.EnsureDesc(&d2)
 			var d3 scm.JITValueDesc
 			if d2.Loc == scm.LocImm {
-				d3 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(d2.Imm.Int() != d2.Imm.Int())}
+				d3 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(d2.Imm.Float() != d2.Imm.Float())}
 			} else if d2.Loc == scm.LocImm {
 				r10 := ctx.AllocRegExcept(d2.Reg)
-				if d2.Imm.Int() >= -2147483648 && d2.Imm.Int() <= 2147483647 {
-					ctx.W.EmitCmpRegImm32(d2.Reg, int32(d2.Imm.Int()))
-				} else {
-					ctx.W.EmitMovRegImm64(scm.RegR11, uint64(d2.Imm.Int()))
-					ctx.W.EmitCmpInt64(d2.Reg, scm.RegR11)
-				}
-				ctx.W.EmitSetcc(r10, scm.CcNE)
+				_, yBits := d2.Imm.RawWords()
+				ctx.W.EmitMovRegImm64(scm.RegR11, yBits)
+				ctx.W.EmitCmpFloat64Setcc(r10, d2.Reg, scm.RegR11, scm.CcNE)
 				d3 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r10}
 				ctx.BindReg(r10, &d3)
 			} else if d2.Loc == scm.LocImm {
-				r11 := ctx.AllocReg()
-				ctx.W.EmitMovRegImm64(scm.RegR11, uint64(d2.Imm.Int()))
-				ctx.W.EmitCmpInt64(scm.RegR11, d2.Reg)
-				ctx.W.EmitSetcc(r11, scm.CcNE)
+				r11 := ctx.AllocRegExcept(d2.Reg)
+				_, xBits := d2.Imm.RawWords()
+				ctx.W.EmitMovRegImm64(scm.RegR11, xBits)
+				ctx.W.EmitCmpFloat64Setcc(r11, scm.RegR11, d2.Reg, scm.CcNE)
 				d3 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r11}
 				ctx.BindReg(r11, &d3)
 			} else {
-				r12 := ctx.AllocRegExcept(d2.Reg)
-				ctx.W.EmitCmpInt64(d2.Reg, d2.Reg)
-				ctx.W.EmitSetcc(r12, scm.CcNE)
+				r12 := ctx.AllocRegExcept(d2.Reg, d2.Reg)
+				ctx.W.EmitCmpFloat64Setcc(r12, d2.Reg, d2.Reg, scm.CcNE)
 				d3 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r12}
 				ctx.BindReg(r12, &d3)
 			}

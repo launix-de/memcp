@@ -1659,7 +1659,29 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		} else {
 			// IndexAddr on a local slice (e.g. from Slice() or FieldAddr)
 			src := g.vals[v.X.Name()]
-			if src.marker == "_slice" {
+			if strings.HasPrefix(src.marker, "_fieldaddr:array:") {
+				// Direct indexing on receiver array field address, e.g. &s.thresholds[i].
+				idxVal := g.resolveValue(v.Index)
+				elemType := v.Type().Underlying().(*types.Pointer).Elem().Underlying()
+				elemSize := elemSizeOf(elemType)
+				baseDesc := g.allocDesc()
+				baseReg := g.allocReg()
+				g.emit("var %s JITValueDesc", baseDesc)
+				g.emit("%s := ctx.AllocReg()", baseReg)
+				g.emit("if thisptr.Loc == LocImm {")
+				g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(uintptr(thisptr.Imm.Int()) + %s))", baseReg, src.offsetExpr)
+				g.emit("} else {")
+				g.emit("\tctx.W.EmitMovRegReg(%s, thisptr.Reg)", baseReg)
+				g.emit("\tctx.W.EmitAddRegImm32(%s, int32(%s))", baseReg, src.offsetExpr)
+				g.emit("}")
+				g.emit("%s = JITValueDesc{Loc: LocReg, Reg: %s}", baseDesc, baseReg)
+				idxSSAName := ""
+				if _, isConst := v.Index.(*ssa.Const); !isConst {
+					idxSSAName = v.Index.Name()
+				}
+				g.vals[name] = genVal{argIdx: -1, argIdxVar: idxVal.goVar,
+					marker: fmt.Sprintf("_sliceaddr:%d:%s", elemSize, baseDesc), deferredIndexSSA: idxSSAName}
+			} else if src.marker == "_slice" {
 				// src.goVar is a JITValueDesc with Reg=data_ptr
 				idxVal := g.resolveValue(v.Index)
 				// Determine element size from pointed-to type
@@ -1672,7 +1694,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.vals[name] = genVal{argIdx: -1, argIdxVar: idxVal.goVar,
 					marker: fmt.Sprintf("_sliceaddr:%d:%s", elemSize, src.goVar), deferredIndexSSA: idxSSAName}
 			} else {
-				panic(fmt.Sprintf("IndexAddr on non-parameter: %s", v))
+				panic(fmt.Sprintf("IndexAddr on non-parameter: %s (x=%s marker=%q isDesc=%v goVar=%s)", v, v.X.Name(), src.marker, src.isDesc, src.goVar))
 			}
 		}
 
@@ -1752,6 +1774,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 		case *types.Slice:
 			sizeStr = "slice"
+		case *types.Array:
+			// Keep array as addressable aggregate; indexed loads are lowered via IndexAddr.
+			sizeStr = "array"
 		default:
 			sizeStr = "8"
 		}
@@ -1890,6 +1915,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.W.EmitMovRegMem64(%s, fieldAddr)", ptrReg)
 					g.emit("\tctx.W.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)
 					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
+				case "array":
+					ptrReg := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", ptrReg)
+					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(fieldAddr))", ptrReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg)
 				}
 				g.emit("} else {")
 				g.emit("\toff := int32(%s)", src.offsetExpr)
@@ -1923,9 +1953,15 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.W.EmitMovRegMem(%s, baseReg, off)", ptrReg)
 					g.emit("\tctx.W.EmitMovRegMem(%s, baseReg, off+8)", lenReg)
 					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
+				case "array":
+					ptrReg := g.allocReg()
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", ptrReg)
+					g.emit("\tctx.W.EmitMovRegReg(%s, baseReg)", ptrReg)
+					g.emit("\tctx.W.EmitAddRegImm32(%s, off)", ptrReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg)
 				}
 				g.emit("}")
-				if sizeStr == "slice" {
+				if sizeStr == "slice" || sizeStr == "array" {
 					g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
 				} else {
 					g.vals[name] = genVal{goVar: dv, isDesc: true}
@@ -2085,6 +2121,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.W.EmitMovRegMem64(%s, fieldAddr)", ptrReg)   // data ptr
 					g.emit("\tctx.W.EmitMovRegMem64(%s, fieldAddr+8)", lenReg) // length
 					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
+				case "array":
+					ptrReg := g.allocReg()
+					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
+					g.emit("\t%s := ctx.AllocReg()", ptrReg)
+					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(fieldAddr))", ptrReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg)
 				}
 				g.emit("} else {")
 				// thisptr is in a register → emit register-relative loads
@@ -2118,9 +2160,15 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg2)   // data ptr
 					g.emit("\tctx.W.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg2) // length
 					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg2, lenReg2)
+				case "array":
+					ptrReg2 := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
+					g.emit("\tctx.W.EmitMovRegReg(%s, thisptr.Reg)", ptrReg2)
+					g.emit("\tctx.W.EmitAddRegImm32(%s, off)", ptrReg2)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, ptrReg2)
 				}
 				g.emit("}")
-				if sizeStr == "slice" {
+				if sizeStr == "slice" || sizeStr == "array" {
 					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
 					g.vals[name] = gv
 					g.fieldCache[cacheKey] = gv
@@ -2651,6 +2699,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Sqrt), []JITValueDesc{%s}, 1)", dv, arg.goVar)
 			g.emit("%s.Type = tagFloat", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "Round":
+			// math.Round(float64) float64 — avoid inlining stdlib internals.
+			arg := g.resolveValue(v.Call.Args[0])
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Round), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("%s.Type = tagFloat", dv)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "archFloor":
 			// math arch helper for floor(float64) float64
 			arg := g.resolveValue(v.Call.Args[0])
@@ -2671,6 +2726,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Trunc), []JITValueDesc{%s}, 1)", dv, arg.goVar)
 			g.emit("%s.Type = tagFloat", dv)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "ComputeSize":
+			// ComputeSize(any) uint — keep as direct Go call to avoid inlining heavy recursive logic.
+			arg := g.resolveValue(v.Call.Args[0])
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(ComputeSize), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("%s.Type = tagInt", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Slice":
 			// (Scmer).Slice() []Scmer — extract data ptr and length from Scmer
