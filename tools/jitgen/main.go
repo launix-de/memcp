@@ -1799,6 +1799,28 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t}")
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		} else if v.Op == token.NOT {
+			src := g.resolveValue(v.X)
+			dv := g.allocDesc()
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocImm {", src.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(!%s.Imm.Bool())}", dv, src.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
+			g.emit("\tnegReg := ctx.AllocReg()")
+			g.emit("\tif %s.Loc == LocRegPair {", src.goVar)
+			g.emit("\t\tctx.W.EmitCmpRegImm32(%s.Reg2, 0)", src.goVar)
+			g.emit("\t\tctx.W.EmitSetcc(negReg, CcE)")
+			g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: negReg}", dv)
+			g.emit("\t} else if %s.Loc == LocReg {", src.goVar)
+			g.emit("\t\tctx.W.EmitCmpRegImm32(%s.Reg, 0)", src.goVar)
+			g.emit("\t\tctx.W.EmitSetcc(negReg, CcE)")
+			g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: negReg}", dv)
+			g.emit("\t} else {")
+			g.emit("\t\tpanic(\"UnOp ! on non-register descriptor\")")
+			g.emit("\t}")
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		} else if v.Op == token.MUL {
 			src := g.vals[v.X.Name()]
 			if strings.HasPrefix(src.marker, "_descfield:") {
@@ -2627,6 +2649,27 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			arg := g.resolveValue(v.Call.Args[0])
 			dv := g.allocDesc()
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Sqrt), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("%s.Type = tagFloat", dv)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "archFloor":
+			// math arch helper for floor(float64) float64
+			arg := g.resolveValue(v.Call.Args[0])
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Floor), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("%s.Type = tagFloat", dv)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "archCeil":
+			// math arch helper for ceil(float64) float64
+			arg := g.resolveValue(v.Call.Args[0])
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Ceil), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("%s.Type = tagFloat", dv)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "archTrunc":
+			// math arch helper for trunc(float64) float64
+			arg := g.resolveValue(v.Call.Args[0])
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Trunc), []JITValueDesc{%s}, 1)", dv, arg.goVar)
 			g.emit("%s.Type = tagFloat", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Slice":
