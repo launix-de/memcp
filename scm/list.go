@@ -107,16 +107,189 @@ func init_list() {
 				return NewInt(int64(len(a[0].Slice())))
 			}
 			if a[0].GetTag() == tagFastDict {
-				fd := a[0].FastDict()
-				if fd == nil {
-					return NewInt(0)
-				}
-				return NewInt(int64(len(fd.Pairs)))
+				return NewInt(int64(len(a[0].FastDict().Pairs)))
 			}
 			panic("count expects a list")
 		},
 		true, false, nil,
-		nil /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */
+		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			}
+			lbl0 := ctx.W.ReserveLabel()
+			d0 := args[0]
+			d1 := ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d0)
+			ctx.EnsureDesc(&d1)
+			var d2 JITValueDesc
+			if d1.Loc == LocImm {
+				d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(6))}
+			} else {
+				r0 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d1.Reg, 6)
+				ctx.W.EmitSetcc(r0, CcE)
+				d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+				ctx.BindReg(r0, &d2)
+			}
+			ctx.FreeDesc(&d1)
+			lbl1 := ctx.W.ReserveLabel()
+			lbl2 := ctx.W.ReserveLabel()
+			lbl3 := ctx.W.ReserveLabel()
+			if d2.Loc == LocImm {
+				if d2.Imm.Bool() {
+					ctx.W.EmitJmp(lbl1)
+				} else {
+					ctx.W.EmitJmp(lbl2)
+				}
+			} else {
+				ctx.W.EmitCmpRegImm32(d2.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl3)
+				ctx.W.EmitJmp(lbl2)
+				ctx.W.MarkLabel(lbl3)
+				ctx.W.EmitJmp(lbl1)
+			}
+			ctx.FreeDesc(&d2)
+			ctx.W.MarkLabel(lbl2)
+			d3 := args[0]
+			d4 := ctx.EmitGetTagDesc(&d3, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d3)
+			ctx.EnsureDesc(&d4)
+			var d5 JITValueDesc
+			if d4.Loc == LocImm {
+				d5 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d4.Imm.Int()) == uint64(14))}
+			} else {
+				r1 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d4.Reg, 14)
+				ctx.W.EmitSetcc(r1, CcE)
+				d5 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
+				ctx.BindReg(r1, &d5)
+			}
+			ctx.FreeDesc(&d4)
+			lbl4 := ctx.W.ReserveLabel()
+			lbl5 := ctx.W.ReserveLabel()
+			lbl6 := ctx.W.ReserveLabel()
+			if d5.Loc == LocImm {
+				if d5.Imm.Bool() {
+					ctx.W.EmitJmp(lbl4)
+				} else {
+					ctx.W.EmitJmp(lbl5)
+				}
+			} else {
+				ctx.W.EmitCmpRegImm32(d5.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl6)
+				ctx.W.EmitJmp(lbl5)
+				ctx.W.MarkLabel(lbl6)
+				ctx.W.EmitJmp(lbl4)
+			}
+			ctx.FreeDesc(&d5)
+			ctx.W.MarkLabel(lbl1)
+			d6 := args[0]
+			var d7 JITValueDesc
+			if d6.Loc == LocImm {
+				slice := d6.Imm.Slice()
+				d7 = JITValueDesc{Loc: LocImm, Type: tagSlice, Imm: NewInt(int64(len(slice)))}
+			} else {
+				r2 := ctx.AllocReg()
+				ctx.W.EmitMovRegReg(r2, d6.Reg2)
+				ctx.W.EmitShlRegImm8(r2, 16)
+				ctx.W.EmitShrRegImm8(r2, 16)
+				ctx.FreeReg(d6.Reg2)
+				d7 = JITValueDesc{Loc: LocRegPair, Reg: d6.Reg, Reg2: r2}
+				ctx.BindReg(d6.Reg, &d7)
+				ctx.BindReg(r2, &d7)
+			}
+			ctx.FreeDesc(&d6)
+			var d8 JITValueDesc
+			if d7.Loc == LocImm {
+				d8 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d7.StackOff))}
+			} else {
+				ctx.EnsureDesc(&d7)
+				if d7.Loc == LocRegPair {
+					d8 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d7.Reg2}
+					ctx.BindReg(d7.Reg2, &d8)
+					ctx.BindReg(d7.Reg2, &d8)
+				} else if d7.Loc == LocReg {
+					d8 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d7.Reg}
+					ctx.BindReg(d7.Reg, &d8)
+					ctx.BindReg(d7.Reg, &d8)
+				} else {
+					panic("len on unsupported descriptor location")
+				}
+			}
+			ctx.EnsureDesc(&d8)
+			ctx.EnsureDesc(&d8)
+			ctx.EnsureDesc(&d8)
+			ctx.EnsureDesc(&d8)
+			ctx.W.EmitMakeInt(result, d8)
+			if d8.Loc == LocReg { ctx.FreeReg(d8.Reg) }
+			result.Type = tagInt
+			ctx.W.EmitJmp(lbl0)
+			ctx.W.MarkLabel(lbl5)
+			ctx.W.EmitByte(0xCC)
+			ctx.W.MarkLabel(lbl4)
+			d10 := args[0]
+			var d11 JITValueDesc
+			if d10.Loc == LocImm {
+				panic("FastDict: LocImm not expected at JIT compile time")
+			} else {
+				ctx.FreeReg(d10.Reg2)
+				d11 = JITValueDesc{Loc: LocReg, Reg: d10.Reg}
+				ctx.BindReg(d10.Reg, &d11)
+			}
+			ctx.FreeDesc(&d10)
+			var d12 JITValueDesc
+			ctx.EnsureDesc(&d11)
+			if d11.Loc == LocImm {
+				fieldAddr := uintptr(d11.Imm.Int()) + 0
+				r3 := ctx.AllocReg()
+				r4 := ctx.AllocReg()
+				ctx.W.EmitMovRegMem64(r3, fieldAddr)
+				ctx.W.EmitMovRegMem64(r4, fieldAddr+8)
+				d12 = JITValueDesc{Loc: LocRegPair, Reg: r3, Reg2: r4}
+				ctx.BindReg(r3, &d12)
+				ctx.BindReg(r4, &d12)
+			} else {
+				off := int32(0)
+				baseReg := d11.Reg
+				r5 := ctx.AllocRegExcept(baseReg)
+				r6 := ctx.AllocRegExcept(baseReg, r5)
+				ctx.W.EmitMovRegMem(r5, baseReg, off)
+				ctx.W.EmitMovRegMem(r6, baseReg, off+8)
+				d12 = JITValueDesc{Loc: LocRegPair, Reg: r5, Reg2: r6}
+				ctx.BindReg(r5, &d12)
+				ctx.BindReg(r6, &d12)
+			}
+			ctx.FreeDesc(&d11)
+			var d13 JITValueDesc
+			if d12.Loc == LocImm {
+				d13 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d12.StackOff))}
+			} else {
+				ctx.EnsureDesc(&d12)
+				if d12.Loc == LocRegPair {
+					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d12.Reg2}
+					ctx.BindReg(d12.Reg2, &d13)
+					ctx.BindReg(d12.Reg2, &d13)
+				} else if d12.Loc == LocReg {
+					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d12.Reg}
+					ctx.BindReg(d12.Reg, &d13)
+					ctx.BindReg(d12.Reg, &d13)
+				} else {
+					panic("len on unsupported descriptor location")
+				}
+			}
+			ctx.EnsureDesc(&d13)
+			ctx.EnsureDesc(&d13)
+			ctx.EnsureDesc(&d13)
+			ctx.EnsureDesc(&d13)
+			ctx.W.EmitMakeInt(result, d13)
+			if d13.Loc == LocReg { ctx.FreeReg(d13.Reg) }
+			result.Type = tagInt
+			ctx.W.EmitJmp(lbl0)
+			ctx.W.MarkLabel(lbl0)
+			ctx.W.ResolveFixups()
+			return result
+		}, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */
 	})
 	Declare(&Globalenv, &Declaration{
 		"nth", "get the nth item of a list",
