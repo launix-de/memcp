@@ -18,7 +18,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import (
-	"bytes"
+	"encoding/hex"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -30,8 +30,7 @@ import (
 	"unsafe"
 )
 
-// LogJIT enables JIT compilation logging. Set via (settings "LogJIT" true).
-var LogJIT bool
+var JITLog bool
 
 /*
 memcp JIT compiler
@@ -251,6 +250,9 @@ func jitCompile(a ...Scmer) Scmer {
 
 	v := a[0]
 	tag := v.GetTag()
+	if JITLog {
+		fmt.Printf("JIT: compile %s\n", SerializeToString(v, &Globalenv))
+	}
 
 	switch tag {
 	case tagFunc:
@@ -265,6 +267,9 @@ func jitCompile(a ...Scmer) Scmer {
 		// Lambda/procedure - attempt native compilation first
 		proc := v.Proc()
 		if code, roots := jitCompileProcWithRoots(proc); code != nil {
+			if JITLog {
+				fmt.Print(hex.Dump(code))
+			}
 			buf, err := allocExec(len(code))
 			if err == nil {
 				dst := (*[1 << 30]byte)(buf.ptr)[:len(code):len(code)]
@@ -290,8 +295,8 @@ func jitCompile(a ...Scmer) Scmer {
 				syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
 			}
 		}
-		if LogJIT {
-			fmt.Println("jit: fallback to Go closure")
+		if JITLog {
+			fmt.Println("<fallback>")
 		}
 		// fallback: Go closure
 		fn := OptimizeProcToSerialFunction(v)
