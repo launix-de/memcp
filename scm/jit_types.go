@@ -252,9 +252,12 @@ func (ctx *JITContext) AllocReg() Reg {
 		return r
 	}
 	// Spill path: spill tracked descriptors (LocReg / LocRegPair).
+	// Note: completely untracked in-use registers must NOT be reused here,
+	// as they may still be referenced by emitted code paths.
 	spillable := ctx.AllRegs &^ ctx.FreeRegs &^ ctx.ProtectedRegs
 	var r Reg = 0xFF
 	pairSpill := false
+	untrackedReuse := false
 	var pairR1, pairR2 Reg
 	for bit := int(RegR15); bit >= 0; bit-- {
 		rbit := Reg(bit)
@@ -268,12 +271,20 @@ func (ctx *JITContext) AllocReg() Reg {
 		switch owner.Loc {
 		case LocReg:
 			if owner.Reg != rbit {
-				continue
+				// Stale ownership metadata: reclaim register directly.
+				ctx.RegOwners[rbit] = nil
+				r = rbit
+				untrackedReuse = true
+				break
 			}
 			r = rbit
 		case LocRegPair:
 			if owner.Reg != rbit && owner.Reg2 != rbit {
-				continue
+				// Stale ownership metadata: reclaim register directly.
+				ctx.RegOwners[rbit] = nil
+				r = rbit
+				untrackedReuse = true
+				break
 			}
 			pairR1 = owner.Reg
 			pairR2 = owner.Reg2
@@ -285,12 +296,19 @@ func (ctx *JITContext) AllocReg() Reg {
 			r = rbit
 			pairSpill = true
 		default:
-			continue
+			// Unknown owner location: treat as stale and reclaim register.
+			ctx.RegOwners[rbit] = nil
+			r = rbit
+			untrackedReuse = true
 		}
 		break
 	}
 	if r == 0xFF {
 		panic("jit: register spill required (fallback)")
+	}
+	if untrackedReuse {
+		ctx.RegOwners[r] = nil
+		return r
 	}
 
 	owner := ctx.RegOwners[r]
@@ -509,10 +527,25 @@ func (ctx *JITContext) RestoreSpills() {
 func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	switch desc.Loc {
 	case LocReg:
-		ctx.FreeReg(desc.Reg)
+		if desc.Reg <= RegR15 {
+			owner := ctx.RegOwners[desc.Reg]
+			if owner == desc || owner == nil {
+				ctx.FreeReg(desc.Reg)
+			}
+		}
 	case LocRegPair:
-		ctx.FreeReg(desc.Reg)
-		ctx.FreeReg(desc.Reg2)
+		if desc.Reg <= RegR15 {
+			owner := ctx.RegOwners[desc.Reg]
+			if owner == desc || owner == nil {
+				ctx.FreeReg(desc.Reg)
+			}
+		}
+		if desc.Reg2 <= RegR15 {
+			owner := ctx.RegOwners[desc.Reg2]
+			if owner == desc || owner == nil {
+				ctx.FreeReg(desc.Reg2)
+			}
+		}
 	case LocStack:
 	case LocStackPair:
 	}
