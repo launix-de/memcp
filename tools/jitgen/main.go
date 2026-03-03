@@ -544,6 +544,104 @@ func (g *codeGen) emit(format string, a ...any) {
 	fmt.Fprintf(&g.w, "\t\t\t"+format+"\n", a...)
 }
 
+func goCallWordCount(t types.Type) int {
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		if u.Kind() == types.String {
+			return 2
+		}
+		return 1
+	case *types.Pointer, *types.Signature, *types.Map, *types.Chan:
+		return 1
+	case *types.Interface:
+		return 2
+	case *types.Slice:
+		// Go slice is 3 words (ptr,len,cap), currently not representable by JITValueDesc.
+		return 0
+	case *types.Struct:
+		sz := types.SizesFor("gc", "amd64").Sizeof(t)
+		if sz == 8 {
+			return 1
+		}
+		if sz == 16 {
+			return 2
+		}
+		return 0
+	default:
+		return 0
+	}
+}
+
+func (g *codeGen) staticFuncExpr(callee *ssa.Function) (string, bool) {
+	if callee == nil || callee.Signature == nil || callee.Signature.Recv() != nil {
+		return "", false
+	}
+	if callee.Pkg == nil || callee.Pkg.Pkg == nil {
+		return "", false
+	}
+	if callee.Pkg.Pkg.Path() == g.topLevelPkgPath {
+		return callee.Name(), true
+	}
+	return callee.Pkg.Pkg.Name() + "." + callee.Name(), true
+}
+
+// emitGenericStaticCall lowers a static non-method Go call using signature-driven
+// ABI word mapping. Returns true if it emitted code, false if caller should fall back.
+func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args []ssa.Value) bool {
+	funcExpr, ok := g.staticFuncExpr(callee)
+	if !ok {
+		return false
+	}
+	sig := callee.Signature
+	params := sig.Params()
+	if params.Len() != len(args) {
+		return false
+	}
+	resolved := make([]genVal, len(args))
+	argVars := make([]string, len(args))
+	for i, a := range args {
+		resolved[i] = g.resolveValue(a)
+		argVars[i] = resolved[i].goVar
+		switch goCallWordCount(params.At(i).Type()) {
+		case 1:
+			// If the value is currently a pair, this call shape is not representable.
+			g.emit("if %s.Loc == LocRegPair || %s.Loc == LocStackPair {", resolved[i].goVar, resolved[i].goVar)
+			g.emit("\tpanic(\"jit: generic call arg expects 1-word value\")")
+			g.emit("}")
+		case 2:
+			// Pair args must be materialized to avoid LocImm flattening to one word.
+			g.emit("ctx.EnsureDesc(&%s)", resolved[i].goVar)
+			g.emit("if %s.Loc != LocRegPair && %s.Loc != LocStackPair {", resolved[i].goVar, resolved[i].goVar)
+			g.emit("\tpanic(\"jit: generic call arg expects 2-word value\")")
+			g.emit("}")
+		default:
+			return false
+		}
+	}
+	argList := strings.Join(argVars, ", ")
+	results := sig.Results()
+	if results.Len() == 0 {
+		g.emit("ctx.EmitGoCallVoid(GoFuncAddr(%s), []JITValueDesc{%s})", funcExpr, argList)
+		return true
+	}
+	if results.Len() != 1 || name == "" {
+		return false
+	}
+	retType := results.At(0).Type()
+	retWords := goCallWordCount(retType)
+	if retWords != 1 && retWords != 2 {
+		return false
+	}
+	dv := g.allocDesc()
+	g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, %d)", dv, funcExpr, argList, retWords)
+	marker := ""
+	if bt, ok := retType.Underlying().(*types.Basic); ok && bt.Kind() == types.String {
+		marker = "_gostring"
+	}
+	g.vals[name] = genVal{goVar: dv, isDesc: true, marker: marker}
+	return true
+}
+
 // bothImmCond returns the Go condition for "both x and y are LocImm".
 // When x == y (self-comparison, e.g. NaN check), emits only one check to avoid vet warning.
 func bothImmCond(x, y string) string {
@@ -2699,13 +2797,6 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Sqrt), []JITValueDesc{%s}, 1)", dv, arg.goVar)
 			g.emit("%s.Type = tagFloat", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
-		case "Round":
-			// math.Round(float64) float64 — avoid inlining stdlib internals.
-			arg := g.resolveValue(v.Call.Args[0])
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Round), []JITValueDesc{%s}, 1)", dv, arg.goVar)
-			g.emit("%s.Type = tagFloat", dv)
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "archFloor":
 			// math arch helper for floor(float64) float64
 			arg := g.resolveValue(v.Call.Args[0])
@@ -2726,13 +2817,6 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(math.Trunc), []JITValueDesc{%s}, 1)", dv, arg.goVar)
 			g.emit("%s.Type = tagFloat", dv)
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
-		case "ComputeSize":
-			// ComputeSize(any) uint — keep as direct Go call to avoid inlining heavy recursive logic.
-			arg := g.resolveValue(v.Call.Args[0])
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(ComputeSize), []JITValueDesc{%s}, 1)", dv, arg.goVar)
-			g.emit("%s.Type = tagInt", dv)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Slice":
 			// (Scmer).Slice() []Scmer — extract data ptr and length from Scmer
@@ -2814,6 +2898,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				panic(fmt.Sprintf("StoreInt64 dst is not a field address: marker=%q", dst.marker))
 			}
 		default:
+			if g.emitGenericStaticCall(name, callee, v.Call.Args) {
+				break
+			}
 			// Try to inline: if callee SSA is available, inline its body
 			if callee.Blocks != nil {
 				result := g.inlineCall(callee, v.Call.Args)
