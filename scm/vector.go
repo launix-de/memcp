@@ -64,6 +64,6 @@ func init_vector() {
 			}
 			return NewFloat(result)
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 }

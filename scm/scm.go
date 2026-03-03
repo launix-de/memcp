@@ -710,7 +710,7 @@ func init() {
 		}, "int", func(a ...Scmer) Scmer {
 			return NewInt(int64(ComputeSize(a[0])))
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */,
+		nil /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"optimize", "optimize the given scheme program",
@@ -841,7 +841,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return Apply(a[0], asSlice(a[1], "apply")...)
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
@@ -853,7 +853,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
 		}, true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
@@ -897,7 +897,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("for_mut")},
-		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
+		nil /* TODO: Slice on non-desc: slice t0[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"for_mut", "in-place for loop (optimizer-only, skips defensive state copy)",
@@ -921,7 +921,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
@@ -935,6 +935,9 @@ func init() {
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			d0 := args[0]
+			if d0.Loc != LocImm && d0.Type == JITTypeUnknown {
+				panic("jit: Scmer.String on unknown dynamic type")
+			}
 			d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d0}, 2)
 			ctx.FreeDesc(&d0)
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d1}, 2)
@@ -1030,7 +1033,7 @@ Patterns can be any of:
 			}
 			return Read(filename, String(a[0]))
 		}, true, false, nil,
-		nil /* TODO: unsupported phi constant: "eval":string */,
+		nil /* TODO: IndexAddr on non-parameter: &t0[0:int] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"serialize", "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",

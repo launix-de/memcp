@@ -171,25 +171,25 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			case LocImm:
 				ctx.TrackImm(src.Imm)
 				return src // constants are always safe to alias
-			case LocReg:
-				// Allocate a fresh register so each use is independently freeable.
-				r := ctx.AllocRegExcept(src.Reg)
-				ctx.W.emitMovRegReg(r, src.Reg)
-				return JITValueDesc{Loc: LocReg, Type: src.Type, Reg: r}
-			case LocRegPair:
-				r1 := ctx.AllocRegExcept(src.Reg, src.Reg2)
-				r2 := ctx.AllocRegExcept(src.Reg, src.Reg2, r1)
-				ctx.W.emitMovRegReg(r1, src.Reg)
-				ctx.W.emitMovRegReg(r2, src.Reg2)
-				return JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: r1, Reg2: r2}
+				case LocReg:
+					// Allocate a fresh register so each use is independently freeable.
+					r := ctx.AllocRegExcept(src.Reg)
+					ctx.W.emitMovRegReg(r, src.Reg)
+					return JITValueDesc{Loc: LocReg, Type: src.Type, Reg: r}
+				case LocRegPair:
+					r1 := ctx.AllocRegExcept(src.Reg, src.Reg2)
+					r2 := ctx.AllocRegExcept(src.Reg, src.Reg2, r1)
+					ctx.W.emitMovRegReg(r1, src.Reg)
+					ctx.W.emitMovRegReg(r2, src.Reg2)
+					return JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: r1, Reg2: r2}
+				}
 			}
-		}
 		// Fallback: load from args slice: ptr at [base+i*16], aux at [base+i*16+8]
-		ptrReg := ctx.AllocReg()
-		auxReg := ctx.AllocReg()
-		ctx.W.emitMovRegMem(ptrReg, sliceBase, int32(idx*16))
-		ctx.W.emitMovRegMem(auxReg, sliceBase, int32(idx*16+8))
-		return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: auxReg}
+			ptrReg := ctx.AllocReg()
+			auxReg := ctx.AllocReg()
+			ctx.W.emitMovRegMem(ptrReg, sliceBase, int32(idx*16))
+			ctx.W.emitMovRegMem(auxReg, sliceBase, int32(idx*16+8))
+			return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: auxReg}
 	case tagSlice:
 		list := expr.Slice()
 		if len(list) == 0 {

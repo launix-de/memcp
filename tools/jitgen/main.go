@@ -1100,7 +1100,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 func generateClosure(opName string, fn *ssa.Function) (code string, errMsg string) {
 	defer func() {
 		if r := recover(); r != nil {
-			if os.Getenv("JITGEN_DEBUG_PANIC") == "1" {
+			if os.Getenv("JITGEN_DEBUG_PANIC") == "1" && (dumpOp == "" || dumpOp == opName) {
 				panic(r)
 			}
 			code = ""
@@ -2295,29 +2295,46 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagFastDict, JITValueDesc{Loc: LocAny})", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Int":
-			// (Scmer).Int() — extract int64 from Scmer
-			// LocImm: compile-time extraction; LocRegPair: aux IS the raw int64
+			// (Scmer).Int() — extract int64 from Scmer.
+			// Fast-path only when type is statically known int; otherwise call helper
+			// for full runtime semantics (float/string/bool/date conversions).
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", arg.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int())}", dv, arg.goVar)
-			g.emit("} else {")
+			g.emit("} else if %s.Type == tagInt && %s.Loc == LocRegPair {", arg.goVar, arg.goVar)
 			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, arg.goVar)
+			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
+			g.emit("} else if %s.Type == tagInt && %s.Loc == LocReg {", arg.goVar, arg.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, arg.goVar)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
+			g.emit("} else {")
+			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("\t%s.Type = tagInt", dv)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Float":
-			// (Scmer).Float() — extract float64 from Scmer
-			// LocImm: compile-time extraction; LocRegPair: aux holds float64 bits
+			// (Scmer).Float() — extract float64 from Scmer.
+			// Fast-path only when type is statically known float.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", arg.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float())}", dv, arg.goVar)
-			g.emit("} else {")
+			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocRegPair {", arg.goVar, arg.goVar)
 			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux (float bits)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg2}", dv, arg.goVar)
+			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
+			g.emit("} else if %s.Type == tagFloat && %s.Loc == LocReg {", arg.goVar, arg.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s.Reg}", dv, arg.goVar)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
+			g.emit("} else {")
+			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Float), []JITValueDesc{%s}, 1)", dv, arg.goVar)
+			g.emit("\t%s.Type = tagFloat", dv)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "String":
@@ -2325,6 +2342,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// arg: Scmer (2 words), result: Go string (2 words: ptr+len)
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
+			g.emit("if %s.Loc != LocImm && %s.Type == JITTypeUnknown {", arg.goVar, arg.goVar)
+			g.emit("\tpanic(\"jit: Scmer.String on unknown dynamic type\")")
+			g.emit("}")
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{%s}, 2)", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring"}
 		case "NewBool":
@@ -3468,8 +3488,30 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// Sub-slice: str[low:high] or slice[low:high]
 		// Result is a LocRegPair {dataPtr, length} representing a Go string/slice header.
 		x := g.vals[v.X.Name()]
-		low := g.resolveValue(v.Low)
-		high := g.resolveValue(v.High)
+		var low genVal
+		if v.Low == nil {
+			lowDesc := g.allocDesc()
+			g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}", lowDesc)
+			low = genVal{goVar: lowDesc, isDesc: true}
+		} else {
+			low = g.resolveValue(v.Low)
+		}
+		var high genVal
+		if v.High == nil {
+			// Go slice syntax x[low:] => high defaults to len(x).
+			// For descriptor-backed strings/slices, len is carried in Reg2.
+			highDesc := g.allocDesc()
+			g.emit("var %s JITValueDesc", highDesc)
+			g.emit("if %s.Loc == LocStack || %s.Loc == LocStackPair { ctx.EnsureDesc(&%s) }", x.goVar, x.goVar, x.goVar)
+			g.emit("if %s.Loc == LocRegPair {", x.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", highDesc, x.goVar)
+			g.emit("} else {")
+			g.emit("\tpanic(\"Slice with omitted high requires descriptor with length in Reg2\")")
+			g.emit("}")
+			high = genVal{goVar: highDesc, isDesc: true}
+		} else {
+			high = g.resolveValue(v.High)
+		}
 		dv := g.allocDesc()
 		// Compute new length: high - low
 		lenDesc := g.allocDesc()
