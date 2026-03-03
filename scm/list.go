@@ -164,7 +164,7 @@ func init_list() {
 			panic("count expects a list")
 		},
 		true, false, nil,
-		nil /* TODO: unexpected constant value: <nil> */,
+		nil /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.FastDict */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"nth", "get the nth item of a list",
@@ -182,7 +182,7 @@ func init_list() {
 			return list[idx]
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"slice", "extract a sublist from start (inclusive) to end (exclusive).\n(slice list start end) returns elements list[start..end).",
@@ -210,7 +210,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
@@ -225,7 +225,7 @@ func init_list() {
 			return NewSlice(base)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_mut")},
-		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
+		nil /* TODO: Slice on non-desc: slice t0[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
@@ -249,7 +249,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_unique_mut")},
-		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
+		nil /* TODO: Slice on non-desc: slice t0[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cons", "constructs a list from a head and a tail list",
@@ -282,7 +282,7 @@ func init_list() {
 			return list[0]
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cdr", "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
@@ -298,7 +298,7 @@ func init_list() {
 			return NewSlice(list[1:])
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"cadr", "extracts the second element of a list.\nEquivalent to (car (cdr x)).",
@@ -314,7 +314,7 @@ func init_list() {
 			return list[1]
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
@@ -425,7 +425,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"filter", "returns a list that only contains elements that pass the filter function",
@@ -446,7 +446,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_mut")},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"map", "returns a list that contains the results of a map function that is applied to the list",
@@ -465,7 +465,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeMap},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
@@ -484,7 +484,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("mapIndex_mut")},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce", "returns a list that contains the result of a map function",
@@ -512,7 +512,7 @@ func init_list() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -535,7 +535,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
+		nil /* TODO: Slice on non-desc: slice t0[:0:int] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"produceN", "returns a list with numbers from 0..n-1, optionally mapped through a function",
@@ -598,7 +598,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 
 	// dictionary functions
@@ -631,7 +631,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_assoc_mut")},
-		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
+		nil /* TODO: Slice on non-desc: slice t1[:0:int] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"map_assoc", "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
@@ -664,7 +664,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("map_assoc_mut")},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce_assoc", "reduces a dictionary according to a reduce function",
@@ -687,7 +687,7 @@ func init_list() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"has_assoc?", "checks if a dictionary has a key present",
@@ -711,7 +711,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"get_assoc", "gets a value from a dictionary by key, returns nil if not found",
@@ -740,7 +740,7 @@ func init_list() {
 			return NewNil()
 		},
 		true, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"extract_assoc", "applies a function (key value) on the dictionary and returns the results as a flat list",
@@ -772,7 +772,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("extract_assoc_mut")},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"set_assoc", "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
@@ -819,7 +819,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("set_assoc_mut")},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge_assoc", "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
@@ -924,7 +924,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 
 	// Tier 2: shrinking, write-cursor
@@ -949,7 +949,7 @@ func init_list() {
 			return NewSlice(input[:w])
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: runtime error: invalid memory address or nil pointer dereference */,
+		nil /* TODO: len on non-parameter: len(slice) */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -983,7 +983,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1012,7 +1012,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1156,6 +1156,7 @@ func init_list() {
 			if d13.Loc == LocNone { panic("jit: phi source has no location") }
 			if d13.Loc == LocStack || d13.Loc == LocStackPair { ctx.EnsureDesc(&d13) }
 			ctx.EmitStoreToStack(d13, 8)
+			ctx.W.EmitJmp(lbl10)
 			ctx.W.MarkLabel(lbl10)
 			d14 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d15 := args[1]
@@ -1265,6 +1266,7 @@ func init_list() {
 			ctx.FreeDesc(&d25)
 			lbl11 := ctx.W.ReserveLabel()
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 16)
+			ctx.W.EmitJmp(lbl11)
 			ctx.W.MarkLabel(lbl11)
 			d27 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			if d27.Loc == LocStack || d27.Loc == LocStackPair { ctx.EnsureDesc(&d27) }
@@ -1289,6 +1291,10 @@ func init_list() {
 				d29 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d22.Reg2}
 				ctx.BindReg(d22.Reg2, &d29)
 			}
+			if d28.Loc == LocStack || d28.Loc == LocStackPair { ctx.EnsureDesc(&d28) }
+			if d29.Loc == LocStack || d29.Loc == LocStackPair { ctx.EnsureDesc(&d29) }
+			if d28.Loc == LocStack || d28.Loc == LocStackPair { ctx.EnsureDesc(&d28) }
+			if d29.Loc == LocStack || d29.Loc == LocStackPair { ctx.EnsureDesc(&d29) }
 			if d28.Loc == LocStack || d28.Loc == LocStackPair { ctx.EnsureDesc(&d28) }
 			if d29.Loc == LocStack || d29.Loc == LocStackPair { ctx.EnsureDesc(&d29) }
 			var d30 JITValueDesc
@@ -1456,7 +1462,7 @@ func init_list() {
 			return NewSlice(base)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1480,7 +1486,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: Slice on non-desc: slice t1[:] */,
 	})
 
 	Declare(&Globalenv, &Declaration{

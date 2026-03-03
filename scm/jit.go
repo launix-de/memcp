@@ -18,7 +18,6 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import (
-	"encoding/hex"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -268,7 +267,7 @@ func jitCompile(a ...Scmer) Scmer {
 		proc := v.Proc()
 		if code, roots := jitCompileProcWithRoots(proc); code != nil {
 			if JITLog {
-				fmt.Print(hex.Dump(code))
+				fmt.Printf("%X\n", code)
 			}
 			buf, err := allocExec(len(code))
 			if err == nil {

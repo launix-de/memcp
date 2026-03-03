@@ -93,6 +93,7 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 	tb.Logf("JIT code size: %d bytes (constThisptr=%v)", codeLen, constThisptr)
 
 	return jitFn, func() {
+		runtime.KeepAlive(ctx) // keeps SpillBuf-backed spill addresses valid for JIT code lifetime
 		runtime.KeepAlive(hdr)
 		syscall.Munmap(b)
 	}

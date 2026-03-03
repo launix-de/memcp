@@ -230,7 +230,7 @@ func InitMetricsDeclarations() {
 			_, avail := readMemInfo()
 			return NewInt(avail)
 		}, false, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: unresolved SSA value: internal/testlog.logger */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -241,7 +241,7 @@ func InitMetricsDeclarations() {
 			total, _ := readMemInfo()
 			return NewInt(total)
 		}, false, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: unresolved SSA value: internal/testlog.logger */,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -251,7 +251,7 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewInt(readProcessRSS())
 		}, false, false, nil,
-		nil /* TODO: unsupported constant kind: String */,
+		nil /* TODO: unresolved SSA value: internal/testlog.logger */,
 	})
 
 	Declare(&Globalenv, &Declaration{
