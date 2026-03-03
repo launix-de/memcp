@@ -1136,6 +1136,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		topLevelPkgPath: fn.Pkg.Pkg.Path(),
 	}
 	fmt.Fprintf(&g.w, "\t%s\n", generatedBanner)
+	g.multiBlock = len(fn.Blocks) > 1
 
 	// GetValue has 2 params: receiver (s *StorageXxx) and index (i uint32)
 	// Map receiver to thisptr (LocImm at JIT compile time)
@@ -1164,14 +1165,14 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		g.emit("\tctx.W.EmitShrRegImm8(idxInt.Reg, 32)")
 		g.emit("\tctx.BindReg(idxInt.Reg, &idxInt)")
 		g.emit("}")
-		g.emit("idxPinned := idxInt.Loc == LocReg")
-		g.emit("idxPinnedReg := idxInt.Reg")
-		g.emit("if idxPinned { ctx.ProtectReg(idxPinnedReg) }")
-		g.hasStorageIdx = true
+		if g.multiBlock {
+			g.emit("idxPinned := idxInt.Loc == LocReg")
+			g.emit("idxPinnedReg := idxInt.Reg")
+			g.emit("if idxPinned { ctx.ProtectReg(idxPinnedReg) }")
+			g.hasStorageIdx = true
+		}
 		g.vals[fn.Params[1].Name()] = genVal{goVar: "idxInt", isDesc: true}
 	}
-
-	g.multiBlock = len(fn.Blocks) > 1
 
 	// Pre-allocate registers for all phi nodes
 	g.allocPhiRegs()
