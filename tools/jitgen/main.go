@@ -399,6 +399,7 @@ type genVal struct {
 	argIdxVar        string // non-empty: deferred arg reference with variable index (goVar of index desc)
 	marker           string // "_newbool"/"_newint"/"_newfloat" for deferred constructors
 	deferredIndexSSA string // SSA name of index operand (for deferred IndexAddr on slices)
+	deferredBaseSSA  string // SSA name of base operand for deferred local FieldAddr deref
 	offsetExpr       string // Go expression for byte offset from thisptr (for _fieldaddr/_fieldconst markers)
 }
 
@@ -1687,6 +1688,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		var offsetExpr string
 		var cacheKey string
 		var isImmutable bool
+		localFieldAddr := false
 
 		if src.marker == "_storage_recv" {
 			// Direct field of receiver
@@ -1714,6 +1716,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// ptr+aux, so FieldAddr must reference descriptor halves, not thisptr.
 			g.vals[name] = genVal{marker: "_descfield:" + fieldName + ":" + src.goVar}
 			break
+		} else if src.isDesc {
+			// FieldAddr on a local pointer descriptor (non-receiver), e.g.
+			// fd := a.FastDict(); &fd.Pairs
+			sizes := types.SizesFor("gc", "amd64")
+			offsets := sizes.Offsetsof(fieldVarsOf(structType))
+			innerOffset := offsets[v.Field]
+			offsetExpr = fmt.Sprintf("%d", innerOffset)
+			localFieldAddr = true
 		} else {
 			panic(fmt.Sprintf("FieldAddr on non-receiver: %s", v))
 		}
@@ -1744,7 +1754,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 
 		// Create marker with offsetExpr
-		if isImmutable && sizeStr == "slice" {
+		if localFieldAddr {
+			g.vals[name] = genVal{
+				goVar:           src.goVar,
+				marker:          "_fieldaddrlocal:" + sizeStr,
+				offsetExpr:      offsetExpr,
+				deferredBaseSSA: v.X.Name(),
+			}
+		} else if isImmutable && sizeStr == "slice" {
 			g.vals[name] = genVal{marker: "_fieldconst:slice:" + cacheKey, offsetExpr: offsetExpr}
 		} else if isImmutable && goTypeName != "" {
 			g.vals[name] = genVal{marker: "_fieldconst:" + goTypeName + ":" + cacheKey, offsetExpr: offsetExpr}
@@ -1783,6 +1800,88 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, rv)
 				g.emit("}")
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else if strings.HasPrefix(src.marker, "_fieldaddrlocal:") {
+				// Deref of FieldAddr on a local pointer descriptor (non-receiver).
+				parts := strings.SplitN(src.marker, ":", 2) // "_fieldaddrlocal", size
+				sizeStr := parts[1]
+				base := src.goVar
+				dv := g.allocDesc()
+				g.emit("var %s JITValueDesc", dv)
+				g.emit("ctx.EnsureDesc(&%s)", base)
+				g.emit("if %s.Loc == LocImm {", base)
+				g.emit("\tfieldAddr := uintptr(%s.Imm.Int()) + %s", base, src.offsetExpr)
+				switch sizeStr {
+				case "1":
+					rv := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv)
+					g.emit("\tctx.W.EmitMovRegMem8(%s, fieldAddr)", rv)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				case "2":
+					rv := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv)
+					g.emit("\tctx.W.EmitMovRegMem16(%s, fieldAddr)", rv)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				case "4":
+					rv := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv)
+					g.emit("\tctx.W.EmitMovRegMem32(%s, fieldAddr)", rv)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				case "8":
+					rv := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", rv)
+					g.emit("\tctx.W.EmitMovRegMem64(%s, fieldAddr)", rv)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				case "slice":
+					ptrReg := g.allocReg()
+					lenReg := g.allocReg()
+					g.emit("\t%s := ctx.AllocReg()", ptrReg)
+					g.emit("\t%s := ctx.AllocReg()", lenReg)
+					g.emit("\tctx.W.EmitMovRegMem64(%s, fieldAddr)", ptrReg)
+					g.emit("\tctx.W.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
+				}
+				g.emit("} else {")
+				g.emit("\toff := int32(%s)", src.offsetExpr)
+				g.emit("\tbaseReg := %s.Reg", base)
+				switch sizeStr {
+				case "1":
+					rv := g.allocReg()
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", rv)
+					g.emit("\tctx.W.EmitMovRegMemB(%s, baseReg, off)", rv)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				case "2":
+					rv := g.allocReg()
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", rv)
+					g.emit("\tctx.W.EmitMovRegMemW(%s, baseReg, off)", rv)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				case "4":
+					rv := g.allocReg()
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", rv)
+					g.emit("\tctx.W.EmitMovRegMemL(%s, baseReg, off)", rv)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				case "8":
+					rv := g.allocReg()
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", rv)
+					g.emit("\tctx.W.EmitMovRegMem(%s, baseReg, off)", rv)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s}", dv, rv)
+				case "slice":
+					ptrReg := g.allocReg()
+					lenReg := g.allocReg()
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg)", ptrReg)
+					g.emit("\t%s := ctx.AllocRegExcept(baseReg, %s)", lenReg, ptrReg)
+					g.emit("\tctx.W.EmitMovRegMem(%s, baseReg, off)", ptrReg)
+					g.emit("\tctx.W.EmitMovRegMem(%s, baseReg, off+8)", lenReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
+				}
+				g.emit("}")
+				if sizeStr == "slice" {
+					g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+				} else {
+					g.vals[name] = genVal{goVar: dv, isDesc: true}
+				}
+				if src.deferredBaseSSA != "" {
+					g.useOperand(src.deferredBaseSSA)
+				}
 			} else if strings.HasPrefix(src.marker, "_fieldconst:") {
 				// Deref of immutable FieldAddr → constant-fold (LocImm thisptr) or runtime load (LocReg thisptr).
 				parts := strings.SplitN(src.marker, ":", 3) // "_fieldconst", goType, fieldName
