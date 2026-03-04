@@ -234,6 +234,8 @@ func init_sync() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			d1 := args[1]
 			ctx.EnsureDesc(&d0)
@@ -249,6 +251,7 @@ func init_sync() {
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d0, d1}, 2)
 			ctx.FreeDesc(&d0)
 			ctx.FreeDesc(&d1)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -348,10 +351,13 @@ func init_sync() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}

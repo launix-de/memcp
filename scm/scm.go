@@ -721,6 +721,8 @@ func init() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
@@ -742,6 +744,7 @@ func init() {
 			}
 			ctx.FreeDesc(&d1)
 			ctx.EnsureDesc(&d2)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -908,6 +911,8 @@ func init() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			if d0.Loc != LocImm && d0.Type == JITTypeUnknown {
 				panic("jit: Scmer.String on unknown dynamic type")
@@ -920,6 +925,7 @@ func init() {
 				panic("jit: generic call arg expects 2-word value")
 			}
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1}, 2)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -1011,12 +1017,15 @@ func init() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			if d0.Loc != LocImm && d0.Type == JITTypeUnknown {
 				panic("jit: Scmer.String on unknown dynamic type")
 			}
 			d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d0}, 2)
 			ctx.FreeDesc(&d0)
+			ctx.W.ResolveFixups()
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d1}, 2)
 			if result.Loc == LocAny { return d2 }
 			ctx.EmitMovPairToResult(&d2, &result)
@@ -1117,6 +1126,8 @@ Patterns can be any of:
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			lbl0 := ctx.W.ReserveLabel()
+			lbl1 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl1)
 			d0 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 			ctx.EnsureDesc(&d0)
 			var d1 JITValueDesc
@@ -1130,87 +1141,94 @@ Patterns can be any of:
 				ctx.BindReg(r1, &d1)
 			}
 			ctx.FreeDesc(&d0)
-			lbl1 := ctx.W.ReserveLabel()
+			d2 := d1
+			ctx.EnsureDesc(&d2)
+			if d2.Loc != LocImm && d2.Loc != LocReg {
+				panic("jit: If condition is neither LocImm nor LocReg")
+			}
 			lbl2 := ctx.W.ReserveLabel()
 			lbl3 := ctx.W.ReserveLabel()
-			if d1.Loc == LocImm {
-				if d1.Imm.Bool() {
-					ctx.W.EmitJmp(lbl1)
+			lbl4 := ctx.W.ReserveLabel()
+			lbl5 := ctx.W.ReserveLabel()
+			if d2.Loc == LocImm {
+				if d2.Imm.Bool() {
+					ctx.W.EmitJmp(lbl4)
 				} else {
-			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, 0)
-					ctx.W.EmitJmp(lbl2)
+					ctx.W.EmitJmp(lbl5)
 				}
 			} else {
-				ctx.W.EmitCmpRegImm32(d1.Reg, 0)
-				ctx.W.EmitJcc(CcNE, lbl3)
-			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, 0)
-				ctx.W.EmitJmp(lbl2)
-				ctx.W.MarkLabel(lbl3)
-				ctx.W.EmitJmp(lbl1)
+				ctx.W.EmitCmpRegImm32(d2.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl4)
+				ctx.W.EmitJmp(lbl5)
 			}
+			ctx.W.MarkLabel(lbl4)
+			ctx.W.EmitJmp(lbl2)
+			ctx.W.MarkLabel(lbl5)
+			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, 0)
+			ctx.W.EmitJmp(lbl3)
 			ctx.FreeDesc(&d1)
-			ctx.W.MarkLabel(lbl2)
-			d2 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
-			d3 := args[0]
-			if d3.Loc != LocImm && d3.Type == JITTypeUnknown {
+			ctx.W.MarkLabel(lbl3)
+			d3 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d4 := args[0]
+			if d4.Loc != LocImm && d4.Type == JITTypeUnknown {
 				panic("jit: Scmer.String on unknown dynamic type")
 			}
-			d4 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d3}, 2)
-			ctx.FreeDesc(&d3)
-			ctx.EnsureDesc(&d2)
-			ctx.EnsureDesc(&d2)
-			if d2.Loc != LocRegPair && d2.Loc != LocStackPair {
+			d5 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d4}, 2)
+			ctx.FreeDesc(&d4)
+			ctx.EnsureDesc(&d3)
+			ctx.EnsureDesc(&d3)
+			if d3.Loc != LocRegPair && d3.Loc != LocStackPair {
 				panic("jit: generic call arg expects 2-word value")
 			}
-			ctx.EnsureDesc(&d4)
-			ctx.EnsureDesc(&d4)
-			if d4.Loc != LocRegPair && d4.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
-			}
-			d5 := ctx.EmitGoCallScalar(GoFuncAddr(Read), []JITValueDesc{d2, d4}, 2)
-			ctx.FreeDesc(&d2)
 			ctx.EnsureDesc(&d5)
-			if d5.Loc == LocRegPair {
-				ctx.EmitMovPairToResult(&d5, &result)
-				result.Type = d5.Type
+			ctx.EnsureDesc(&d5)
+			if d5.Loc != LocRegPair && d5.Loc != LocStackPair {
+				panic("jit: generic call arg expects 2-word value")
+			}
+			d6 := ctx.EmitGoCallScalar(GoFuncAddr(Read), []JITValueDesc{d3, d5}, 2)
+			ctx.FreeDesc(&d3)
+			ctx.EnsureDesc(&d6)
+			if d6.Loc == LocRegPair {
+				ctx.EmitMovPairToResult(&d6, &result)
+				result.Type = d6.Type
 			} else {
-				switch d5.Type {
+				switch d6.Type {
 				case tagBool:
-					ctx.W.EmitMakeBool(result, d5)
+					ctx.W.EmitMakeBool(result, d6)
 					result.Type = tagBool
 				case tagInt:
-					ctx.W.EmitMakeInt(result, d5)
+					ctx.W.EmitMakeInt(result, d6)
 					result.Type = tagInt
 				case tagFloat:
-					ctx.W.EmitMakeFloat(result, d5)
+					ctx.W.EmitMakeFloat(result, d6)
 					result.Type = tagFloat
 				case tagNil:
 					ctx.W.EmitMakeNil(result)
 					result.Type = tagNil
 				default:
-					ctx.EmitMovPairToResult(&d5, &result)
-					result.Type = d5.Type
+					ctx.EmitMovPairToResult(&d6, &result)
+					result.Type = d6.Type
 				}
 			}
 			ctx.W.EmitJmp(lbl0)
-			ctx.W.MarkLabel(lbl1)
-			d2 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
-			d6 := args[1]
-			if d6.Loc != LocImm && d6.Type == JITTypeUnknown {
+			ctx.W.MarkLabel(lbl2)
+			d3 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d7 := args[1]
+			if d7.Loc != LocImm && d7.Type == JITTypeUnknown {
 				panic("jit: Scmer.String on unknown dynamic type")
 			}
-			d7 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d6}, 2)
-			ctx.FreeDesc(&d6)
-			d8 := d7
-			if d8.Loc == LocNone { panic("jit: phi source has no location") }
-			ctx.EnsureDesc(&d8)
-			if d8.Loc == LocRegPair || d8.Loc == LocImm {
-				ctx.EmitStoreScmerToStack(d8, 0)
+			d8 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d7}, 2)
+			ctx.FreeDesc(&d7)
+			d9 := d8
+			if d9.Loc == LocNone { panic("jit: phi source has no location") }
+			ctx.EnsureDesc(&d9)
+			if d9.Loc == LocRegPair || d9.Loc == LocImm {
+				ctx.EmitStoreScmerToStack(d9, 0)
 			} else {
-				ctx.EmitStoreToStack(d8, 0)
+				ctx.EmitStoreToStack(d9, 0)
 				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (0)+8)
 			}
-			ctx.W.EmitJmp(lbl2)
+			ctx.W.EmitJmp(lbl3)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
 			ctx.W.PatchInt32(r0, int32(16))
@@ -1242,8 +1260,6 @@ Patterns can be any of:
 	init_scheduler()
 	init_jit()
 	InitMetricsDeclarations()
-
-	RunJitTest()
 }
 
 /* TODO: quotient, remainder, modulo, gcd, lcm, expt

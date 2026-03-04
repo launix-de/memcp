@@ -101,6 +101,8 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			r0 := ctx.AllocReg()
 			r1 := ctx.AllocRegExcept(r0)
 			lbl0 := ctx.W.ReserveLabel()
+			lbl1 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl1)
 			var d0 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageFloat)(nil).values)
@@ -148,24 +150,32 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			}
 			d2 := ctx.EmitGoCallScalar(scm.GoFuncAddr(math.IsNaN), []scm.JITValueDesc{d1}, 1)
 			ctx.FreeDesc(&d1)
-			lbl1 := ctx.W.ReserveLabel()
+			d3 := d2
+			ctx.EnsureDesc(&d3)
+			if d3.Loc != scm.LocImm && d3.Loc != scm.LocReg {
+				panic("jit: If condition is neither scm.LocImm nor scm.LocReg")
+			}
 			lbl2 := ctx.W.ReserveLabel()
 			lbl3 := ctx.W.ReserveLabel()
-			if d2.Loc == scm.LocImm {
-				if d2.Imm.Bool() {
-					ctx.W.EmitJmp(lbl1)
+			lbl4 := ctx.W.ReserveLabel()
+			lbl5 := ctx.W.ReserveLabel()
+			if d3.Loc == scm.LocImm {
+				if d3.Imm.Bool() {
+					ctx.W.EmitJmp(lbl4)
 				} else {
-					ctx.W.EmitJmp(lbl2)
+					ctx.W.EmitJmp(lbl5)
 				}
 			} else {
-				ctx.W.EmitCmpRegImm32(d2.Reg, 0)
-				ctx.W.EmitJcc(scm.CcNE, lbl3)
-				ctx.W.EmitJmp(lbl2)
-				ctx.W.MarkLabel(lbl3)
-				ctx.W.EmitJmp(lbl1)
+				ctx.W.EmitCmpRegImm32(d3.Reg, 0)
+				ctx.W.EmitJcc(scm.CcNE, lbl4)
+				ctx.W.EmitJmp(lbl5)
 			}
+			ctx.W.MarkLabel(lbl4)
+			ctx.W.EmitJmp(lbl2)
+			ctx.W.MarkLabel(lbl5)
+			ctx.W.EmitJmp(lbl3)
 			ctx.FreeDesc(&d2)
-			ctx.W.MarkLabel(lbl2)
+			ctx.W.MarkLabel(lbl3)
 			ctx.EnsureDesc(&idxInt)
 			r8 := ctx.AllocReg()
 			ctx.EnsureDesc(&idxInt)
@@ -185,28 +195,28 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			r9 := ctx.AllocRegExcept(r8)
 			ctx.W.EmitMovRegMem(r9, r8, 0)
 			ctx.FreeReg(r8)
-			d3 := scm.JITValueDesc{Loc: scm.LocReg, Reg: r9}
-			ctx.BindReg(r9, &d3)
+			d4 := scm.JITValueDesc{Loc: scm.LocReg, Reg: r9}
+			ctx.BindReg(r9, &d4)
 			ctx.FreeDesc(&idxInt)
-			ctx.EnsureDesc(&d3)
-			d4 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-			ctx.BindReg(r0, &d4)
-			ctx.BindReg(r1, &d4)
-			ctx.EnsureDesc(&d3)
-			ctx.W.EmitMakeFloat(d4, d3)
-			if d3.Loc == scm.LocReg { ctx.FreeReg(d3.Reg) }
-			ctx.W.EmitJmp(lbl0)
-			ctx.W.MarkLabel(lbl1)
+			ctx.EnsureDesc(&d4)
 			d5 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
 			ctx.BindReg(r0, &d5)
 			ctx.BindReg(r1, &d5)
-			ctx.W.EmitMakeNil(d5)
+			ctx.EnsureDesc(&d4)
+			ctx.W.EmitMakeFloat(d5, d4)
+			if d4.Loc == scm.LocReg { ctx.FreeReg(d4.Reg) }
 			ctx.W.EmitJmp(lbl0)
-			ctx.W.MarkLabel(lbl0)
+			ctx.W.MarkLabel(lbl2)
 			d6 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
 			ctx.BindReg(r0, &d6)
 			ctx.BindReg(r1, &d6)
-			ctx.EmitMovPairToResult(&d6, &result)
+			ctx.W.EmitMakeNil(d6)
+			ctx.W.EmitJmp(lbl0)
+			ctx.W.MarkLabel(lbl0)
+			d7 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+			ctx.BindReg(r0, &d7)
+			ctx.BindReg(r1, &d7)
+			ctx.EmitMovPairToResult(&d7, &result)
 			ctx.FreeReg(r0)
 			ctx.FreeReg(r1)
 			ctx.W.ResolveFixups()

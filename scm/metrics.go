@@ -232,6 +232,8 @@ func InitMetricsDeclarations() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
 			var d1 JITValueDesc
 			ctx.EnsureDesc(&d0)
@@ -251,6 +253,7 @@ func InitMetricsDeclarations() {
 			}
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -295,8 +298,11 @@ func InitMetricsDeclarations() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(readProcessRSS), []JITValueDesc{}, 1)
 			ctx.EnsureDesc(&d0)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -329,6 +335,8 @@ func InitMetricsDeclarations() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
 			var d1 JITValueDesc
 			ctx.EnsureDesc(&d0)
@@ -348,6 +356,7 @@ func InitMetricsDeclarations() {
 			}
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -370,6 +379,8 @@ func InitMetricsDeclarations() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			lbl0 := ctx.W.ReserveLabel()
+			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
 			var d1 JITValueDesc
 			ctx.EnsureDesc(&d0)
@@ -389,6 +400,7 @@ func InitMetricsDeclarations() {
 			}
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
