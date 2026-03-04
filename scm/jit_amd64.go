@@ -350,7 +350,7 @@ func jitIsNilBorrowed(ctx *JITContext, v *JITValueDesc) JITValueDesc {
 	}
 	tagReg := ctx.AllocReg()
 	ctx.W.emitGetTagRegs(tagReg, tmp.Reg, tmp.Reg2)
-	ctx.W.EmitCmpRegImm8(tagReg, uint8(tagNil))
+	ctx.W.EmitCmpRegImm8(tagReg, tagNil)
 	ctx.W.EmitSetcc(tagReg, CcE)
 	ctx.FreeDesc(&tmp)
 	return JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
@@ -1915,7 +1915,7 @@ func (ctx *JITContext) EmitGetTagDesc(src *JITValueDesc, result JITValueDesc) JI
 
 // EmitTagEquals checks if a Scmer's type tag equals a constant.
 // Equivalent to GetTag(src) == tag. Consumes src.
-func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITValueDesc) JITValueDesc {
+func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint8, result JITValueDesc) JITValueDesc {
 	if src.Loc == LocImm {
 		r := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(src.Imm.GetTag() == tag)}
 		if result.Loc == LocAny {
@@ -1939,7 +1939,7 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 	tagReg := ctx.AllocReg()
 	ctx.W.emitGetTagRegs(tagReg, src.Reg, src.Reg2)
 	ctx.FreeDesc(src)
-	ctx.W.EmitCmpRegImm8(tagReg, uint8(tag))
+	ctx.W.EmitCmpRegImm8(tagReg, tag)
 	ctx.W.EmitSetcc(tagReg, CcE)
 	r := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
 	if result.Loc == LocAny {
@@ -1953,7 +1953,7 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 // EmitTagEqualsBorrowed checks if a Scmer's tag equals a constant without
 // consuming/clobbering the source descriptor. This is required when the same
 // SSA value is used both for a type predicate and later value extraction.
-func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint16, result JITValueDesc) JITValueDesc {
+func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint8, result JITValueDesc) JITValueDesc {
 	emitOut := func(v JITValueDesc) JITValueDesc {
 		if result.Loc == LocAny {
 			return v
@@ -1987,7 +1987,7 @@ func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint16, resu
 		ctx.UnprotectReg(src.Reg2)
 		ctx.UnprotectReg(src.Reg)
 		ctx.W.emitGetTagRegs(tagReg, src.Reg, src.Reg2)
-		ctx.W.EmitCmpRegImm8(tagReg, uint8(tag))
+		ctx.W.EmitCmpRegImm8(tagReg, tag)
 		ctx.W.EmitSetcc(tagReg, CcE)
 		return emitOut(JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg})
 	}
