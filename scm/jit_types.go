@@ -747,15 +747,61 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	var liveRegsArr [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
 
-	// Fast path: no live registers to preserve. Emit only argument setup + call.
-	if len(liveRegs) == 0 {
-		for i := len(argWords) - 1; i >= 0; i-- {
+	emitArgSetup := func(stackArgBaseDisp int32) {
+		type regMove struct {
+			dst Reg
+			src Reg
+		}
+		moves := make([]regMove, 0, len(argWords))
+		for i := range argWords {
+			target := GoABIIntRegs[i]
+			if argWords[i].loc == LocReg && argWords[i].reg != target {
+				moves = append(moves, regMove{dst: target, src: argWords[i].reg})
+			}
+		}
+		for len(moves) > 0 {
+			emitIdx := -1
+			for i := range moves {
+				dstIsPendingSrc := false
+				for j := range moves {
+					if i == j {
+						continue
+					}
+					if moves[j].src == moves[i].dst {
+						dstIsPendingSrc = true
+						break
+					}
+				}
+				if !dstIsPendingSrc {
+					emitIdx = i
+					break
+				}
+			}
+			if emitIdx == -1 {
+				// Break a cycle via reserved scratch register R14.
+				cycleDst := moves[0].dst
+				if cycleDst != RegR14 {
+					ctx.W.emitMovRegReg(RegR14, cycleDst)
+				}
+				for i := range moves {
+					if moves[i].src == cycleDst {
+						moves[i].src = RegR14
+					}
+				}
+				continue
+			}
+			mv := moves[emitIdx]
+			if mv.dst != mv.src {
+				ctx.W.emitMovRegReg(mv.dst, mv.src)
+			}
+			moves = append(moves[:emitIdx], moves[emitIdx+1:]...)
+		}
+
+		for i := range argWords {
 			target := GoABIIntRegs[i]
 			switch argWords[i].loc {
 			case LocReg:
-				if argWords[i].reg != target {
-					ctx.W.emitMovRegReg(target, argWords[i].reg)
-				}
+				// Already handled by move planner (including no-op src==target).
 			case LocImm:
 				ctx.W.EmitMovRegImm64(target, argWords[i].imm)
 			case LocStack:
@@ -763,12 +809,17 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 					ctx.W.EmitMovRegImm64(RegR11, uint64(argWords[i].memPtr))
 					ctx.W.EmitMovRegMem(target, RegR11, argWords[i].stackOff)
 				} else {
-					ctx.W.EmitMovRegMem(target, RegRSP, argWords[i].stackOff)
+					ctx.W.EmitMovRegMem(target, RegRSP, stackArgBaseDisp+argWords[i].stackOff)
 				}
 			default:
 				panic("jit: unsupported Go-call arg location")
 			}
 		}
+	}
+
+	// Fast path: no live registers to preserve. Emit only argument setup + call.
+	if len(liveRegs) == 0 {
+		emitArgSetup(0)
 		ctx.W.EmitCallIndirect(funcAddr)
 		for i := 0; i < numResultWords; i++ {
 			r := ctx.AllocReg()
@@ -803,32 +854,12 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		ctx.W.EmitPushReg(RegRAX) // dummy padding
 	}
 
-	// Move argument words into Go ABI registers.
-	// Process in reverse to avoid clobbering sources.
+	// Move argument words into Go ABI registers (clobber-safe planner).
 	stackArgBaseDisp := int32(resultBytes + len(liveRegs)*8)
 	if padded {
 		stackArgBaseDisp += 8
 	}
-	for i := len(argWords) - 1; i >= 0; i-- {
-		target := GoABIIntRegs[i]
-		switch argWords[i].loc {
-		case LocReg:
-			if argWords[i].reg != target {
-				ctx.W.emitMovRegReg(target, argWords[i].reg)
-			}
-		case LocImm:
-			ctx.W.EmitMovRegImm64(target, argWords[i].imm)
-		case LocStack:
-			if argWords[i].memPtr != 0 {
-				ctx.W.EmitMovRegImm64(RegR11, uint64(argWords[i].memPtr))
-				ctx.W.EmitMovRegMem(target, RegR11, argWords[i].stackOff)
-			} else {
-				ctx.W.EmitMovRegMem(target, RegRSP, stackArgBaseDisp+argWords[i].stackOff)
-			}
-		default:
-			panic("jit: unsupported Go-call arg location")
-		}
-	}
+	emitArgSetup(stackArgBaseDisp)
 
 	// CALL
 	ctx.W.EmitCallIndirect(funcAddr)

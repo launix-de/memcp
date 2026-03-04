@@ -1279,7 +1279,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 	// and reserve an end label for the shared epilogue.
 	if g.multiBlock {
 		g.emit("if result.Loc == LocAny {")
-		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("}")
 		g.endLabel = g.allocLabel()
 		g.emit("%s := ctx.W.ReserveLabel()", g.endLabel)
@@ -1407,7 +1407,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 
 	if g.multiBlock {
 		g.emit("if result.Loc == LocAny {")
-		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("}")
 		// Register-based return phi for multi-block storage emitters.
 		g.returnPhiReg = g.allocReg()
@@ -1956,18 +1956,21 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("if %s.Loc == LocImm {", src.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(!%s.Imm.Bool())}", dv, src.goVar)
 			g.emit("} else {")
-			g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
 			g.emit("\tnegReg := ctx.AllocReg()")
 			g.emit("\tif %s.Loc == LocRegPair {", src.goVar)
-			g.emit("\t\tctx.W.EmitCmpRegImm32(%s.Reg2, 0)", src.goVar)
+			g.emit("\t\tctx.W.EmitMovRegReg(negReg, %s.Reg2)", src.goVar)
+			g.emit("\t\tctx.W.EmitAndRegImm32(negReg, 1)")
+			g.emit("\t\tctx.W.EmitCmpRegImm32(negReg, 0)")
 			g.emit("\t\tctx.W.EmitSetcc(negReg, CcE)")
 			g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: negReg}", dv)
 			g.emit("\t} else if %s.Loc == LocReg {", src.goVar)
-			g.emit("\t\tctx.W.EmitCmpRegImm32(%s.Reg, 0)", src.goVar)
+			g.emit("\t\tctx.W.EmitMovRegReg(negReg, %s.Reg)", src.goVar)
+			g.emit("\t\tctx.W.EmitAndRegImm32(negReg, 1)")
+			g.emit("\t\tctx.W.EmitCmpRegImm32(negReg, 0)")
 			g.emit("\t\tctx.W.EmitSetcc(negReg, CcE)")
 			g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: negReg}", dv)
 			g.emit("\t} else {")
-			g.emit("\t\tpanic(\"UnOp ! on non-register descriptor\")")
+			g.emit("\t\tpanic(\"UnOp ! unsupported source location\")")
 			g.emit("\t}")
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
@@ -2872,6 +2875,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "Floor":
+			fallthrough
 		case "archFloor":
 			// math arch helper for floor(float64) float64
 			arg := g.resolveValue(v.Call.Args[0])
@@ -2896,6 +2901,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "Ceil":
+			fallthrough
 		case "archCeil":
 			// math arch helper for ceil(float64) float64
 			arg := g.resolveValue(v.Call.Args[0])
@@ -4345,7 +4352,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 	switch res.marker {
 	case "_newbool":
 		g.emit("if result.Loc == LocAny {")
-		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("}")
 		g.emit("if %s.Loc == LocImm {", res.goVar)
 		g.emit("\tctx.W.EmitMakeBool(result, %s)", res.goVar)
@@ -4356,7 +4363,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("return result")
 	case "_newint":
 		g.emit("if result.Loc == LocAny {")
-		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("}")
 		g.emit("if %s.Loc == LocImm {", res.goVar)
 		g.emit("\tctx.W.EmitMakeInt(result, %s)", res.goVar)
@@ -4367,7 +4374,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("return result")
 	case "_newfloat":
 		g.emit("if result.Loc == LocAny {")
-		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("}")
 		g.emit("if %s.Loc == LocImm {", res.goVar)
 		g.emit("\tctx.W.EmitMakeFloat(result, %s)", res.goVar)
@@ -4378,7 +4385,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("return result")
 	case "_newnil":
 		g.emit("if result.Loc == LocAny {")
-		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("}")
 		g.emit("ctx.W.EmitMakeNil(result)")
 		g.emit("return result")
@@ -4392,7 +4399,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 	default:
 		if res.isDesc {
 			g.emit("if result.Loc == LocAny {")
-			g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+			g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 			g.emit("}")
 			g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 			g.emit("if %s.Loc == LocRegPair {", res.goVar)

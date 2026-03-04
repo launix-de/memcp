@@ -303,6 +303,18 @@ func (w *JITWriter) EmitDivFloat64(dst, src Reg) {
 // EmitCmpFloat64Setcc compares two float64 bit-patterns from GPRs and writes
 // 0/1 into dst using SETcc on the floating-point flags.
 func (w *JITWriter) EmitCmpFloat64Setcc(dst, left, right Reg, cc byte) {
+	// UCOMISD sets CF/ZF/PF semantics; map signed integer CCs used by generic
+	// lowering to their unordered/unsigned floating-point equivalents.
+	switch cc {
+	case CcL:
+		cc = CcB
+	case CcLE:
+		cc = CcBE
+	case CcG:
+		cc = CcA
+	case CcGE:
+		cc = CcAE
+	}
 	w.emitMovqGprToXmm(RegX0, left)
 	w.emitMovqGprToXmm(RegX1, right)
 	// UCOMISD XMM0, XMM1
