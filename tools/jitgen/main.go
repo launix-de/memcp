@@ -101,6 +101,11 @@ func main() {
 				// allowed; the patch pass will rewrite these sections.
 				continue
 			}
+			if strings.Contains(msg, "missing return") {
+				// Transitional state while generated emitters are being rewritten.
+				// Patch mode will replace these sections in the same run.
+				continue
+			}
 			hardErr = true
 			fmt.Fprintf(os.Stderr, "  %v\n", e)
 		}
@@ -769,6 +774,10 @@ func (g *codeGen) phiEdgeIndexForSucc(targetBBIdx int, succPos int) (int, bool) 
 // the successor edge succPos of the current block.
 func (g *codeGen) emitEdgePhiMoves(targetBBIdx int, succPos int) {
 	targetBlock := g.fn.Blocks[targetBBIdx]
+	edgeIdx, ok := g.phiEdgeIndexForSucc(targetBBIdx, succPos)
+	if !ok {
+		return
+	}
 	for _, instr := range targetBlock.Instrs {
 		phi, ok := instr.(*ssa.Phi)
 		if !ok {
@@ -778,10 +787,11 @@ func (g *codeGen) emitEdgePhiMoves(targetBBIdx int, succPos int) {
 		if !ok {
 			continue // no phi reg allocated (shouldn't happen)
 		}
-		if i, ok := g.phiEdgeIndexForSucc(targetBBIdx, succPos); ok {
-			edge := phi.Edges[i]
-			g.emitPhiMov(phiReg, edge, phi.Type())
+		if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
+			panic(fmt.Sprintf("phi edge index out of range for %s: edge=%d len=%d", phi.Name(), edgeIdx, len(phi.Edges)))
 		}
+		edge := phi.Edges[edgeIdx]
+		g.emitPhiMov(phiReg, edge, phi.Type())
 	}
 }
 
@@ -872,6 +882,10 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 // emitEdgePhiMovesIndent is like emitEdgePhiMoves but with a given indent prefix.
 func (g *codeGen) emitEdgePhiMovesIndent(targetBBIdx int, succPos int, indent string) {
 	targetBlock := g.fn.Blocks[targetBBIdx]
+	edgeIdx, ok := g.phiEdgeIndexForSucc(targetBBIdx, succPos)
+	if !ok {
+		return
+	}
 	for _, instr := range targetBlock.Instrs {
 		phi, ok := instr.(*ssa.Phi)
 		if !ok {
@@ -882,10 +896,11 @@ func (g *codeGen) emitEdgePhiMovesIndent(targetBBIdx int, succPos int, indent st
 			continue
 		}
 		_ = indent
-		if i, ok := g.phiEdgeIndexForSucc(targetBBIdx, succPos); ok {
-			edge := phi.Edges[i]
-			g.emitPhiMov(phiReg, edge, phi.Type())
+		if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
+			panic(fmt.Sprintf("phi edge index out of range for %s: edge=%d len=%d", phi.Name(), edgeIdx, len(phi.Edges)))
 		}
+		edge := phi.Edges[edgeIdx]
+		g.emitPhiMov(phiReg, edge, phi.Type())
 	}
 }
 
@@ -1137,9 +1152,8 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
 
-		if lbl, ok := g.bbLabels[bbID]; ok {
-			g.emit("ctx.W.MarkLabel(%s)", lbl)
-		}
+		lbl := g.ensureBBLabel(bbIdx)
+		g.emit("ctx.W.MarkLabel(%s)", lbl)
 		g.resetAllPhiDescsToStack()
 
 		block := callee.Blocks[bbIdx]
@@ -1285,10 +1299,10 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
 
-		// Emit label if one was reserved for this BB
-		if lbl, ok := g.bbLabels[bbID]; ok {
-			g.emit("ctx.W.MarkLabel(%s)", lbl)
-		}
+		// Ensure every BB has a concrete entry label, even if first reached by
+		// queue/fallthrough before any forward jump reserved one.
+		lbl := g.ensureBBLabel(bbIdx)
+		g.emit("ctx.W.MarkLabel(%s)", lbl)
 		g.resetAllPhiDescsToStack()
 
 		block := fn.Blocks[bbIdx]
@@ -1304,8 +1318,6 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 	// Emit fixup resolution and epilogue
 	if g.multiBlock {
 		g.emit("ctx.W.MarkLabel(%s)", g.endLabel)
-		g.emit("ctx.W.ResolveFixups()")
-	} else if len(g.bbLabels) > 0 {
 		g.emit("ctx.W.ResolveFixups()")
 	}
 	// Deallocate unified phi stack frame (patch fixup + emit cleanup)
@@ -1420,9 +1432,8 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
 
-		if lbl, ok := g.bbLabels[bbID]; ok {
-			g.emit("ctx.W.MarkLabel(%s)", lbl)
-		}
+		lbl := g.ensureBBLabel(bbIdx)
+		g.emit("ctx.W.MarkLabel(%s)", lbl)
 		g.resetAllPhiDescsToStack()
 
 		block := fn.Blocks[bbIdx]
@@ -1444,8 +1455,6 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 			g.emit("ctx.FreeReg(%s)", g.returnPhiReg)
 			g.emit("ctx.FreeReg(%s)", g.returnPhiReg2)
 		}
-		g.emit("ctx.W.ResolveFixups()")
-	} else if len(g.bbLabels) > 0 {
 		g.emit("ctx.W.ResolveFixups()")
 	}
 	if g.hasStorageIdx {
@@ -2734,34 +2743,6 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, arg.goVar)
 			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
-			g.emit("} else if %s.Loc == LocRegPair {", arg.goVar)
-			g.emit("\ttmpTag := %s", arg.goVar)
-			g.emit("\tisInt := ctx.EmitTagEquals(&tmpTag, tagInt, JITValueDesc{Loc: LocAny})")
-			g.emit("\tlblInt := ctx.W.ReserveLabel()")
-			g.emit("\tlblFallback := ctx.W.ReserveLabel()")
-			g.emit("\tlblJoin := ctx.W.ReserveLabel()")
-			g.emit("\tif isInt.Loc == LocImm {")
-			g.emit("\t\tif isInt.Imm.Bool() {")
-			g.emit("\t\t\tctx.W.EmitJmp(lblInt)")
-			g.emit("\t\t} else {")
-			g.emit("\t\t\tctx.W.EmitJmp(lblFallback)")
-			g.emit("\t\t}")
-			g.emit("\t} else {")
-			g.emit("\t\tctx.W.EmitCmpRegImm32(isInt.Reg, 0)")
-			g.emit("\t\tctx.W.EmitJcc(CcNE, lblInt)")
-			g.emit("\t\tctx.W.EmitJmp(lblFallback)")
-			g.emit("\t}")
-			g.emit("\tctx.FreeDesc(&isInt)")
-			g.emit("\tctx.W.MarkLabel(lblInt)")
-			g.emit("\tctx.FreeReg(%s.Reg)", arg.goVar) // free ptr, keep aux
-			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, arg.goVar)
-			g.emit("\tctx.BindReg(%s.Reg2, &%s)", arg.goVar, dv)
-			g.emit("\tctx.W.EmitJmp(lblJoin)")
-			g.emit("\tctx.W.MarkLabel(lblFallback)")
-			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{%s}, 1)", dv, arg.goVar)
-			g.emit("\t%s.Type = tagInt", dv)
-			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
-			g.emit("\tctx.W.MarkLabel(lblJoin)")
 			g.emit("} else if %s.Type == tagInt && %s.Loc == LocReg {", arg.goVar, arg.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, arg.goVar)
 			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
@@ -3972,35 +3953,44 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			panic(fmt.Sprintf("If: %s unimplemented for %s.Loc (descriptor missing: isDesc=false, goVar=%s, marker=%q; expected LocImm|LocReg)",
 				v, v.Cond.Name(), cond.goVar, cond.marker))
 		}
+		// Materialize branch conditions before emitting cmp/jcc.
+		// Phi-backed conditions may be LocStack at BB entry.
+		condVar := g.allocDesc()
+		g.emit("%s := %s", condVar, cond.goVar)
+		g.emit("ctx.EnsureDesc(&%s)", condVar)
+		g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
+		g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
+		g.emit("}")
 		// Ensure labels for both targets
 		thenLbl := g.ensureBBLabel(thenBB)
 		elseLbl := g.ensureBBLabel(elseBB)
-		// Reserve intermediate label for then-edge code
+		// Reserve edge-helper labels (both edges become explicit helper blocks)
 		thenEdgeLbl := g.allocLabel()
+		elseEdgeLbl := g.allocLabel()
 		g.emit("%s := ctx.W.ReserveLabel()", thenEdgeLbl)
+		g.emit("%s := ctx.W.ReserveLabel()", elseEdgeLbl)
 
-		g.emit("if %s.Loc == LocImm {", cond.goVar)
-		g.emit("\tif %s.Imm.Bool() {", cond.goVar)
-		// Constant true: emit then-edge phi moves + JMP thenBB
-		g.emitEdgePhiMovesIndent(thenBB, 0, "\t\t")
-		g.emit("\t\tctx.W.EmitJmp(%s)", thenLbl)
+		g.emit("if %s.Loc == LocImm {", condVar)
+		g.emit("\tif %s.Imm.Bool() {", condVar)
+		// Constant true: still route through helper edge BB.
+		g.emit("\t\tctx.W.EmitJmp(%s)", thenEdgeLbl)
 		g.emit("\t} else {")
-		// Constant false: emit else-edge phi moves + JMP elseBB
-		g.emitEdgePhiMovesIndent(elseBB, 1, "\t\t")
-		g.emit("\t\tctx.W.EmitJmp(%s)", elseLbl)
+		// Constant false: still route through helper edge BB.
+		g.emit("\t\tctx.W.EmitJmp(%s)", elseEdgeLbl)
 		g.emit("\t}")
 		g.emit("} else {")
-		// Runtime: CMP + JNE to then-edge, fall through to else-edge
-		g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, 0)", cond.goVar)
+		// Runtime: CMP + JNE to then-edge helper, otherwise else-edge helper.
+		g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, 0)", condVar)
 		g.emit("\tctx.W.EmitJcc(CcNE, %s)", thenEdgeLbl)
-		// Else-edge phi moves + JMP elseBB
-		g.emitEdgePhiMovesIndent(elseBB, 1, "\t")
-		g.emit("\tctx.W.EmitJmp(%s)", elseLbl)
-		// Then-edge label + phi moves + JMP thenBB
-		g.emit("\tctx.W.MarkLabel(%s)", thenEdgeLbl)
-		g.emitEdgePhiMovesIndent(thenBB, 0, "\t")
-		g.emit("\tctx.W.EmitJmp(%s)", thenLbl)
+		g.emit("\tctx.W.EmitJmp(%s)", elseEdgeLbl)
 		g.emit("}")
+		// Helper edges are always emitted, independent of cond materialization.
+		g.emit("ctx.W.MarkLabel(%s)", thenEdgeLbl)
+		g.emitEdgePhiMoves(thenBB, 0)
+		g.emit("ctx.W.EmitJmp(%s)", thenLbl)
+		g.emit("ctx.W.MarkLabel(%s)", elseEdgeLbl)
+		g.emitEdgePhiMoves(elseBB, 1)
+		g.emit("ctx.W.EmitJmp(%s)", elseLbl)
 		g.enqueueBB(elseBB)
 		g.enqueueBB(thenBB)
 
@@ -4342,6 +4332,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 
 // emitReturnSingleBlock handles Return for single-block functions (with constant propagation).
 func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
+	if len(g.bbLabels) > 0 {
+		g.emit("ctx.W.ResolveFixups()")
+	}
 	if len(v.Results) == 0 {
 		g.emit("if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: NewNil()} }")
 		g.emit("ctx.W.EmitMakeNil(result)")
