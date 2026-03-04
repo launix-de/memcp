@@ -221,7 +221,6 @@ type JITContext struct {
 	spillFreeLen       int
 	ProtectedRegs      uint64  // bitmask of registers that must not be spilled
 	ProtectedRegCounts [16]int // per-register protection refcount (supports nested protection)
-	AllocCursor        uint8   // round-robin cursor for free-register allocation
 	nextDescID         uint32
 	descOwners         map[uint32]*JITValueDesc
 	descSpills         map[uint32]descSpillMeta
@@ -245,7 +244,6 @@ type jitAllocStateSnapshot struct {
 	freeRegs           uint64
 	protectedRegs      uint64
 	protectedRegCounts [16]int
-	allocCursor        uint8
 	regOwners          [16]*JITValueDesc
 	spillStack         [16]spillEntry
 	spillStackLen      int
@@ -260,7 +258,6 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		freeRegs:           ctx.FreeRegs,
 		protectedRegs:      ctx.ProtectedRegs,
 		protectedRegCounts: ctx.ProtectedRegCounts,
-		allocCursor:        ctx.AllocCursor,
 		regOwners:          ctx.RegOwners,
 		spillStack:         ctx.spillStack,
 		spillStackLen:      ctx.spillStackLen,
@@ -281,7 +278,6 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	ctx.FreeRegs = s.freeRegs
 	ctx.ProtectedRegs = s.protectedRegs
 	ctx.ProtectedRegCounts = s.protectedRegCounts
-	ctx.AllocCursor = s.allocCursor
 	ctx.RegOwners = s.regOwners
 	ctx.spillStack = s.spillStack
 	ctx.spillStackLen = s.spillStackLen
@@ -363,35 +359,11 @@ func (ctx *JITContext) UnprotectReg(r Reg) {
 // tracked owner descriptor. This is used at BB boundaries in closure emitters
 // to prevent stale temporary allocations from exhausting the allocator.
 func (ctx *JITContext) ReclaimUntrackedRegs() {
-	for rr := Reg(0); rr <= RegR15; rr++ {
-		bit := uint64(1 << uint(rr))
-		if (ctx.AllRegs & bit) == 0 {
-			continue
-		}
-		if (ctx.FreeRegs & bit) != 0 {
-			continue
-		}
-		owner := ctx.RegOwners[rr]
-		if owner == nil {
-			if ctx.ProtectedRegCounts[rr] == 0 {
-				ctx.FreeRegs |= bit
-			}
-			continue
-		}
-		valid := false
-		switch owner.Loc {
-		case LocReg:
-			valid = owner.Reg == rr
-		case LocRegPair:
-			valid = owner.Reg == rr || owner.Reg2 == rr
-		}
-		if !valid {
-			ctx.RegOwners[rr] = nil
-			if ctx.ProtectedRegCounts[rr] == 0 {
-				ctx.FreeRegs |= bit
-			}
-		}
-	}
+	// TODO: temporary conservative mode while auditing overlay-owner consistency.
+	// Reclaiming ownerless registers at BB boundaries is only safe when every
+	// live overlay descriptor has been rebound in RegOwners. Until that
+	// invariant is enforced everywhere, avoid aggressive reclamation to prevent
+	// live-value clobbering across specialized/general BB transitions.
 }
 
 // AllocReg picks a free register from the bitmap and marks it used.
@@ -406,11 +378,6 @@ func (ctx *JITContext) AllocReg() Reg {
 		}
 		owner := ctx.RegOwners[rr]
 		if owner == nil {
-			// Register has no tracked owner; treat it as reclaimable unless it is
-			// explicitly protected.
-			if ctx.ProtectedRegCounts[rr] == 0 {
-				ctx.FreeRegs |= 1 << uint(rr)
-			}
 			continue
 		}
 		valid := false
@@ -429,28 +396,13 @@ func (ctx *JITContext) AllocReg() Reg {
 	// Exclude protected registers from allocation, not just from eviction.
 	available := ctx.FreeRegs &^ ctx.ProtectedRegs
 	if available != 0 {
-		// Normal path: round-robin over the allocatable register bank.
-		start := int(ctx.AllocCursor) & 15
-		for i := 0; i < 16; i++ {
-			r := Reg((start + i) & 15)
-			bit := uint64(1 << uint(r))
-			if available&bit == 0 {
-				continue
-			}
-			ctx.FreeRegs &^= bit
-			ctx.RegOwners[r] = nil
-			ctx.AllocCursor = uint8((int(r) + 1) & 15)
-			return r
-		}
-		// Fallback (should be unreachable): pick lowest free bit.
+		// Normal path: pick lowest free bit, but skip protected ones
 		bit := available & (-available)
 		ctx.FreeRegs &^= bit
 		r := Reg(0)
 		for b := bit; b > 1; b >>= 1 {
 			r++
 		}
-		ctx.RegOwners[r] = nil
-		ctx.AllocCursor = uint8((int(r) + 1) & 15)
 		return r
 	}
 	// Spill path: spill tracked descriptors (LocReg / LocRegPair).
@@ -510,7 +462,6 @@ func (ctx *JITContext) AllocReg() Reg {
 	}
 
 	owner := ctx.RegOwners[r]
-	ctx.AllocCursor = uint8((int(r) + 1) & 15)
 	if pairSpill {
 		slot := ctx.SpillTop
 		if slot+1 >= len(ctx.SpillBuf) {
@@ -564,37 +515,6 @@ func (ctx *JITContext) AllocReg() Reg {
 
 // EnsureDesc restores a descriptor from stack/spill locations to registers.
 func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
-	if desc.ID != 0 && ctx.descOwners != nil {
-		if owner := ctx.descOwners[desc.ID]; owner != nil {
-			switch owner.Loc {
-			case LocReg:
-				if owner.Reg <= RegR15 {
-					ro := ctx.RegOwners[owner.Reg]
-					if ro != nil && ro.ID == owner.ID && ro.Loc == LocReg {
-						desc.Loc = LocReg
-						desc.Reg = owner.Reg
-						desc.Reg2 = 0
-						desc.MemPtr = 0
-						desc.StackOff = 0
-						return
-					}
-				}
-			case LocRegPair:
-				if owner.Reg <= RegR15 && owner.Reg2 <= RegR15 {
-					ro1 := ctx.RegOwners[owner.Reg]
-					ro2 := ctx.RegOwners[owner.Reg2]
-					if ro1 != nil && ro2 != nil && ro1.ID == owner.ID && ro2.ID == owner.ID && ro1.Loc == LocRegPair && ro2.Loc == LocRegPair {
-						desc.Loc = LocRegPair
-						desc.Reg = owner.Reg
-						desc.Reg2 = owner.Reg2
-						desc.MemPtr = 0
-						desc.StackOff = 0
-						return
-					}
-				}
-			}
-		}
-	}
 	if desc.Loc == LocReg && desc.ID != 0 && ctx.descSpills != nil {
 		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStack {
 			desc.Loc = LocStack

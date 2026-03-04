@@ -60,6 +60,17 @@ func init_jit() {
 		jitCompile,
 		false, false, nil, nil, // not pure because it allocates executable memory
 	})
+	Declare(&Globalenv, &Declaration{
+		"jit?", "tells whether a value is a JIT-compiled function descriptor",
+		1, 1,
+		[]DeclarationParameter{
+			{"value", "any", "value to inspect", nil},
+		}, "bool",
+		func(a ...Scmer) Scmer {
+			return NewBool(a[0].GetTag() == tagJIT)
+		},
+		true, false, nil, nil,
+	})
 }
 
 // jitCompile compiles a Proc to a native function (tagFunc)
@@ -114,14 +125,8 @@ func jitCompile(a ...Scmer) Scmer {
 		if JITLog {
 			fmt.Println("<fallback>")
 		}
-		// fallback: keep a serializable/executable JIT descriptor instead of
-		// returning an unserializable native closure.
-		fn := OptimizeProcToSerialFunction(v)
-		return NewJIT(&JITEntryPoint{
-			Native: fn,
-			Proc:   *proc,
-			Arch:   runtime.GOARCH,
-		})
+		// Fallback returns the original lambda/procedure unchanged.
+		return v
 
 	default:
 		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))
