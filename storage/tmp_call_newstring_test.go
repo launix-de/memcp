@@ -13,7 +13,9 @@ import (
 )
 
 func TestTmpJITCallNewStringBridge(t *testing.T) {
-	if runtime.GOARCH != "amd64" { t.Skip("amd64") }
+	if runtime.GOARCH != "amd64" {
+		t.Skip("amd64")
+	}
 	in := "hello"
 	inPtr := uintptr(unsafe.Pointer(unsafe.StringData(in)))
 	inLen := len(in)
@@ -39,9 +41,13 @@ func TestTmpJITCallNewStringBridge(t *testing.T) {
 	pageSize := syscall.Getpagesize()
 	n := (len(code) + pageSize - 1) &^ (pageSize - 1)
 	b, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	copy(b, code)
-	if err := syscall.Mprotect(b, syscall.PROT_READ|syscall.PROT_EXEC); err != nil { t.Fatal(err) }
+	if err := syscall.Mprotect(b, syscall.PROT_READ|syscall.PROT_EXEC); err != nil {
+		t.Fatal(err)
+	}
 	defer syscall.Munmap(b)
 	type fh struct{ fnptr *byte }
 	h := &fh{fnptr: &b[0]}

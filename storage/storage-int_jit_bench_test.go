@@ -137,11 +137,16 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 	}
 
 	// PUSH R14 (save Go's g pointer)
-	w.EmitByte(0x41); w.EmitByte(0x56)
+	w.EmitByte(0x41)
+	w.EmitByte(0x56)
 	// XOR R15, R15 (zero loop counter)
-	w.EmitByte(0x4D); w.EmitByte(0x31); w.EmitByte(0xFF)
+	w.EmitByte(0x4D)
+	w.EmitByte(0x31)
+	w.EmitByte(0xFF)
 	// XOR R14, R14 (zero accumulator)
-	w.EmitByte(0x4D); w.EmitByte(0x31); w.EmitByte(0xF6)
+	w.EmitByte(0x4D)
+	w.EmitByte(0x31)
+	w.EmitByte(0xF6)
 
 	lblTop := w.ReserveLabel()
 	w.MarkLabel(lblTop)
@@ -162,7 +167,9 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 	ctx.FreeDesc(&desc)
 
 	// INC R15
-	w.EmitByte(0x49); w.EmitByte(0xFF); w.EmitByte(0xC7)
+	w.EmitByte(0x49)
+	w.EmitByte(0xFF)
+	w.EmitByte(0xC7)
 
 	// CMP R15, count
 	w.EmitCmpRegImm32(scm.RegR15, int32(count))
@@ -171,9 +178,12 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 	w.EmitJcc(scm.CcL, lblTop)
 
 	// MOV RAX, R14 (return accumulator)
-	w.EmitByte(0x4C); w.EmitByte(0x89); w.EmitByte(0xF0)
+	w.EmitByte(0x4C)
+	w.EmitByte(0x89)
+	w.EmitByte(0xF0)
 	// POP R14 (restore Go's g pointer)
-	w.EmitByte(0x41); w.EmitByte(0x5E)
+	w.EmitByte(0x41)
+	w.EmitByte(0x5E)
 	// RET
 	w.EmitByte(0xC3)
 
