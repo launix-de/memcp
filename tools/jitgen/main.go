@@ -1933,7 +1933,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 		topLevelPkgPath: fn.Pkg.Pkg.Path(),
 		valueRewriter:   rewrite,
 	}
-	fmt.Fprintf(&g.w, "\t\t%s\n", generatedBanner)
+	fmt.Fprintf(&g.w, "\t\t\t%s\n", generatedBanner)
 	if len(fn.Params) > 0 {
 		g.paramName = fn.Params[0].Name()
 	}
