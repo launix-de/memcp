@@ -256,6 +256,9 @@ func jitCondToBoolBorrowed(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
 			ctx.W.EmitMovRegImm64(mask, 0x7fffffffffffffff)
 			ctx.W.EmitAndInt64(dst, mask)
 			ctx.FreeReg(mask)
+		} else if cond.Type == tagBool {
+			// Bool payload uses bit 0; strip marker bits before truth test.
+			ctx.W.EmitAndRegImm32(dst, 1)
 		}
 		ctx.W.EmitCmpRegImm32(dst, 0)
 		ctx.W.EmitSetcc(dst, CcNE)

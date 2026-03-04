@@ -768,6 +768,24 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// Owner-aware liveness with conservative fallback.
 	var liveRegsArr [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+	// Preserve the argument slice base register across helper calls as well.
+	// It is not part of the allocator pool but can still be needed by
+	// subsequent argument loads in the same emitted function.
+	switch ctx.SliceBase {
+	case RegRSP, RegRBP, RegR11, RegR14:
+		// never preserved here
+	default:
+		found := false
+		for _, r := range liveRegs {
+			if r == ctx.SliceBase {
+				found = true
+				break
+			}
+		}
+		if !found {
+			liveRegs = append(liveRegs, ctx.SliceBase)
+		}
+	}
 	emitArgSetup := func(stackArgBaseDisp int32) {
 		type regMove struct {
 			dst Reg
