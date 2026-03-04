@@ -459,8 +459,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.MarkLabel(lbl2)
 				ctx.W.ResolveFixups()
 			}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -571,6 +571,10 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ps14.OverlayValues[12] = d12
 				return bbs[3].RenderPS(ps14)
 			}
+			if !ps.General {
+				ps.General = true
+				return bbs[1].RenderPS(ps)
+			}
 			lbl9 := ctx.W.ReserveLabel()
 			lbl10 := ctx.W.ReserveLabel()
 			ctx.W.EmitCmpRegImm32(d12.Reg, 0)
@@ -639,8 +643,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.MarkLabel(lbl3)
 				ctx.W.ResolveFixups()
 			}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -704,8 +708,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.MarkLabel(lbl4)
 				ctx.W.ResolveFixups()
 			}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -1785,6 +1789,10 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ps66.OverlayValues[64] = d64
 				return bbs[5].RenderPS(ps66)
 			}
+			if !ps.General {
+				ps.General = true
+				return bbs[3].RenderPS(ps)
+			}
 			lbl19 := ctx.W.ReserveLabel()
 			lbl20 := ctx.W.ReserveLabel()
 			ctx.W.EmitCmpRegImm32(d64.Reg, 0)
@@ -2599,6 +2607,10 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ps78.OverlayValues[76] = d76
 				return bbs[7].RenderPS(ps78)
 			}
+			if !ps.General {
+				ps.General = true
+				return bbs[5].RenderPS(ps)
+			}
 			lbl21 := ctx.W.ReserveLabel()
 			lbl22 := ctx.W.ReserveLabel()
 			ctx.W.EmitCmpRegImm32(d76.Reg, 0)
@@ -3120,8 +3132,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.MarkLabel(lbl8)
 				ctx.W.ResolveFixups()
 			}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}

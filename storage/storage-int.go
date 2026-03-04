@@ -1129,6 +1129,10 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ps41.OverlayValues[39] = d39
 				return bbs[2].RenderPS(ps41)
 			}
+			if !ps.General {
+				ps.General = true
+				return bbs[0].RenderPS(ps)
+			}
 			lbl13 := ctx.W.ReserveLabel()
 			lbl14 := ctx.W.ReserveLabel()
 			ctx.W.EmitCmpRegImm32(d39.Reg, 0)
@@ -1919,6 +1923,10 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ps55.OverlayValues[52] = d52
 			ps55.OverlayValues[53] = d53
 				return bbs[2].RenderPS(ps55)
+			}
+			if !ps.General {
+				ps.General = true
+				return bbs[3].RenderPS(ps)
 			}
 			lbl15 := ctx.W.ReserveLabel()
 			lbl16 := ctx.W.ReserveLabel()

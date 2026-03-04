@@ -284,7 +284,7 @@ func InitMetricsDeclarations() {
 			return result
 			return result
 			}
-			ps2 := PhiState{General: false}
+			ps2 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps2)
 			return result
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
@@ -365,7 +365,7 @@ func InitMetricsDeclarations() {
 			return result
 			return result
 			}
-			ps1 := PhiState{General: false}
+			ps1 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps1)
 			return result
 		}, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
@@ -453,7 +453,7 @@ func InitMetricsDeclarations() {
 			return result
 			return result
 			}
-			ps2 := PhiState{General: false}
+			ps2 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps2)
 			return result
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
@@ -531,7 +531,7 @@ func InitMetricsDeclarations() {
 			return result
 			return result
 			}
-			ps2 := PhiState{General: false}
+			ps2 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps2)
 			return result
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */

@@ -1134,6 +1134,10 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ps41.OverlayValues[39] = d39
 				return bbs[2].RenderPS(ps41)
 			}
+			if !ps.General {
+				ps.General = true
+				return bbs[0].RenderPS(ps)
+			}
 			lbl15 := ctx.W.ReserveLabel()
 			lbl16 := ctx.W.ReserveLabel()
 			ctx.W.EmitCmpRegImm32(d39.Reg, 0)
@@ -1735,6 +1739,10 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ps54.OverlayValues[52] = d52
 				return bbs[5].RenderPS(ps54)
 			}
+			if !ps.General {
+				ps.General = true
+				return bbs[2].RenderPS(ps)
+			}
 			lbl17 := ctx.W.ReserveLabel()
 			lbl18 := ctx.W.ReserveLabel()
 			ctx.W.EmitCmpRegImm32(d52.Reg, 0)
@@ -2179,6 +2187,10 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ps63.OverlayValues[60] = d60
 			ps63.OverlayValues[61] = d61
 				return bbs[2].RenderPS(ps63)
+			}
+			if !ps.General {
+				ps.General = true
+				return bbs[3].RenderPS(ps)
 			}
 			lbl19 := ctx.W.ReserveLabel()
 			lbl20 := ctx.W.ReserveLabel()
