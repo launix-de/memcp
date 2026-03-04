@@ -1022,6 +1022,45 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 	return result
 }
 
+// EmitTagEqualsBorrowed checks if a Scmer's tag equals a constant without
+// consuming/clobbering the source descriptor. This is required when the same
+// SSA value is used both for a type predicate and later value extraction.
+func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint16, result JITValueDesc) JITValueDesc {
+	var protected []Reg
+	switch src.Loc {
+	case LocRegPair:
+		ctx.ProtectReg(src.Reg)
+		ctx.ProtectReg(src.Reg2)
+		protected = append(protected, src.Reg, src.Reg2)
+	case LocReg:
+		ctx.ProtectReg(src.Reg)
+		protected = append(protected, src.Reg)
+	}
+	defer func() {
+		for _, r := range protected {
+			ctx.UnprotectReg(r)
+		}
+	}()
+
+	tmp := *src
+	switch src.Loc {
+	case LocRegPair:
+		r0 := ctx.AllocRegExcept(src.Reg, src.Reg2)
+		r1 := ctx.AllocRegExcept(src.Reg, src.Reg2, r0)
+		ctx.W.emitMovRegReg(r0, src.Reg)
+		ctx.W.emitMovRegReg(r1, src.Reg2)
+		tmp = JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: r0, Reg2: r1}
+	case LocReg:
+		r0 := ctx.AllocRegExcept(src.Reg)
+		ctx.W.emitMovRegReg(r0, src.Reg)
+		tmp = JITValueDesc{Loc: LocReg, Type: src.Type, Reg: r0}
+	default:
+		// Stack/mem/imm forms are safe to pass by value-copy.
+	}
+	tmp.ID = 0
+	return ctx.EmitTagEquals(&tmp, tag, result)
+}
+
 // EmitBoolDesc evaluates Scmer truthiness equivalent to (Scmer).Bool().
 // It consumes src and returns a bool descriptor (LocImm or LocReg).
 // Fast paths are emitted for compile-time constants and known primitive types;
@@ -1051,6 +1090,9 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 	// Known primitive types can be lowered directly without helper calls.
 	if src.Type == tagBool || src.Type == tagInt || src.Type == tagFloat {
 		ctx.EnsureDesc(src)
+		srcLoc := src.Loc
+		srcReg := src.Reg
+		srcReg2 := src.Reg2
 		var valReg Reg
 		switch src.Loc {
 		case LocReg:
@@ -1080,7 +1122,26 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 		}
 		ctx.W.EmitCmpRegImm32(dst, 0)
 		ctx.W.EmitSetcc(dst, CcNE)
-		ctx.FreeDesc(src)
+
+		// Keep the register that now carries the boolean result alive.
+		// FreeDesc on an aliased source would otherwise free dst.
+		switch srcLoc {
+		case LocReg:
+			if dst != srcReg {
+				ctx.FreeReg(srcReg)
+			}
+		case LocRegPair:
+			if dst == srcReg {
+				ctx.FreeReg(srcReg2)
+			} else if dst == srcReg2 {
+				ctx.FreeReg(srcReg)
+			} else {
+				ctx.FreeReg(srcReg)
+				ctx.FreeReg(srcReg2)
+			}
+		default:
+			ctx.FreeDesc(src)
+		}
 		return emitResult(JITValueDesc{Loc: LocReg, Type: tagBool, Reg: dst})
 	}
 
