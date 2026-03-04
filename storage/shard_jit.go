@@ -84,11 +84,6 @@ func compileFusedMainLoop(mainCols []ColumnStorage, isUpdate []bool, mapScmer sc
 	}
 
 	codeBuf := make([]byte, 65536)
-	w := &scm.JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-	}
 
 	// Free registers: exclude RAX/RBX (arg/result pair), RSP, RBP,
 	// R11 (scratch for emit helpers), R12 (inline proc SliceBase), R14 (Go "g").
@@ -98,7 +93,9 @@ func compileFusedMainLoop(mainCols []ColumnStorage, isUpdate []bool, mapScmer sc
 			(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 			(1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
 	ctx := &scm.JITContext{
-		W:         w,
+		Ptr:       unsafe.Pointer(&codeBuf[0]),
+		Start:     unsafe.Pointer(&codeBuf[0]),
+		End:       unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs:  freeRegs,
 		AllRegs:   freeRegs,
 		SliceBase: scm.RegR12,
@@ -108,14 +105,14 @@ func compileFusedMainLoop(mainCols []ColumnStorage, isUpdate []bool, mapScmer sc
 	var compileErr interface{}
 	func() {
 		defer func() { compileErr = recover() }()
-		emitFusedLoop(ctx, w, mainCols, mapProc, reduceProc)
+		emitFusedLoop(ctx, mainCols, mapProc, reduceProc)
 	}()
 	if compileErr != nil {
 		return nil, nil
 	}
 
-	w.ResolveFixupsFinal()
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	ctx.ResolveFixupsFinal()
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 
 	pageSize := syscall.Getpagesize()
@@ -171,7 +168,7 @@ func compileFusedMainLoop(mainCols []ColumnStorage, isUpdate []bool, mapScmer sc
 //	[RSP+40] = padding
 //
 // Panics on any un-emittable sub-expression; caught in compileFusedMainLoop.
-func emitFusedLoop(ctx *scm.JITContext, w *scm.JITWriter, mainCols []ColumnStorage, mapProc, reduceProc *scm.Proc) {
+func emitFusedLoop(ctx *scm.JITContext, mainCols []ColumnStorage, mapProc, reduceProc *scm.Proc) {
 	const stackSize = int32(48)
 	const offIdx = int32(0)
 	const offAccPtr = int32(8)
@@ -180,42 +177,42 @@ func emitFusedLoop(ctx *scm.JITContext, w *scm.JITWriter, mainCols []ColumnStora
 	const offIdsLen = int32(32)
 
 	// Prologue: allocate phi stack and save entry registers.
-	spFixup := w.EmitSubRSP32Fixup()
+	spFixup := ctx.EmitSubRSP32Fixup()
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(0)}, offIdx)
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegRAX}, offAccPtr)
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegRBX}, offAccAux)
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegRCX}, offIdsPtr)
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegRDI}, offIdsLen)
 
-	lblTop := w.ReserveLabel()
-	lblEnd := w.ReserveLabel()
-	w.MarkLabel(lblTop)
+	lblTop := ctx.ReserveLabel()
+	lblEnd := ctx.ReserveLabel()
+	ctx.MarkLabel(lblTop)
 
 	// Loop guard: if idx >= ids.len, exit.
 	idxChk := ctx.AllocReg()
 	lenChk := ctx.AllocReg()
 	ctx.EmitLoadFromStack(idxChk, offIdx)
 	ctx.EmitLoadFromStack(lenChk, offIdsLen)
-	w.EmitCmpInt64(idxChk, lenChk)
+	ctx.EmitCmpInt64(idxChk, lenChk)
 	ctx.FreeReg(lenChk)
 	ctx.FreeReg(idxChk)
-	w.EmitJcc(scm.CcGE, lblEnd)
+	ctx.EmitJcc(scm.CcGE, lblEnd)
 
 	// Compute address of ids[idx]: R11 = ids.ptr + idx*4 (no SIB helper available).
 	idxReg := ctx.AllocReg()
 	idsPtrReg := ctx.AllocReg()
 	ctx.EmitLoadFromStack(idxReg, offIdx)
 	ctx.EmitLoadFromStack(idsPtrReg, offIdsPtr)
-	w.EmitMovRegReg(scm.RegR11, idxReg)
-	w.EmitAddInt64(scm.RegR11, scm.RegR11) // *2
-	w.EmitAddInt64(scm.RegR11, scm.RegR11) // *4
-	w.EmitAddInt64(scm.RegR11, idsPtrReg)
+	ctx.EmitMovRegReg(scm.RegR11, idxReg)
+	ctx.EmitAddInt64(scm.RegR11, scm.RegR11) // *2
+	ctx.EmitAddInt64(scm.RegR11, scm.RegR11) // *4
+	ctx.EmitAddInt64(scm.RegR11, idsPtrReg)
 	ctx.FreeReg(idxReg)
 	ctx.FreeReg(idsPtrReg)
 
 	// Load recid = ids[idx] as uint32 (zero-extended to 64 bits).
 	recidReg := ctx.AllocReg()
-	w.EmitMovRegMemL(recidReg, scm.RegR11, 0)
+	ctx.EmitMovRegMemL(recidReg, scm.RegR11, 0)
 
 	// Emit column reads: for each column, make a fresh copy of recid and call JITEmit.
 	// ProtectReg prevents the allocator from evicting recidReg across N JITEmit calls.
@@ -224,7 +221,7 @@ func emitFusedLoop(ctx *scm.JITContext, w *scm.JITWriter, mainCols []ColumnStora
 	for i, col := range mainCols {
 		thisptr := scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(extractColDataPtr(col))}
 		idxCopy := ctx.AllocReg()
-		w.EmitMovRegReg(idxCopy, recidReg)
+		ctx.EmitMovRegReg(idxCopy, recidReg)
 		idxDesc := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxCopy}
 		colDescs[i] = col.JITEmit(ctx, thisptr, idxDesc, scm.JITValueDesc{Loc: scm.LocAny})
 	}
@@ -261,20 +258,20 @@ func emitFusedLoop(ctx *scm.JITContext, w *scm.JITWriter, mainCols []ColumnStora
 	// idx++
 	idxInc := ctx.AllocReg()
 	ctx.EmitLoadFromStack(idxInc, offIdx)
-	w.EmitMovRegImm64(scm.RegR11, 1)
-	w.EmitAddInt64(idxInc, scm.RegR11)
+	ctx.EmitMovRegImm64(scm.RegR11, 1)
+	ctx.EmitAddInt64(idxInc, scm.RegR11)
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocReg, Reg: idxInc}, offIdx)
 	ctx.FreeReg(idxInc)
 
-	w.EmitJmp(lblTop)
-	w.MarkLabel(lblEnd)
+	ctx.EmitJmp(lblTop)
+	ctx.MarkLabel(lblEnd)
 
 	// Epilogue: return acc from phi slots into RAX/RBX.
 	ctx.EmitLoadFromStack(scm.RegRAX, offAccPtr)
 	ctx.EmitLoadFromStack(scm.RegRBX, offAccAux)
-	w.PatchInt32(spFixup, stackSize)
-	w.EmitAddRSP32(stackSize)
-	w.EmitByte(0xC3) // RET
+	ctx.PatchInt32(spFixup, stackSize)
+	ctx.EmitAddRSP32(stackSize)
+	ctx.EmitByte(0xC3) // RET
 }
 
 // emitProcInlineWithStackArgs materializes proc arguments as a contiguous
@@ -290,8 +287,8 @@ func emitProcInlineWithStackArgs(ctx *scm.JITContext, proc *scm.Proc, args []scm
 	}
 
 	argBytes := int32(len(args) * 16)
-	spFixup := ctx.W.EmitSubRSP32Fixup()
-	ctx.W.PatchInt32(spFixup, argBytes)
+	spFixup := ctx.EmitSubRSP32Fixup()
+	ctx.PatchInt32(spFixup, argBytes)
 	for i := range args {
 		switch args[i].Loc {
 		case scm.LocRegPair, scm.LocImm:
@@ -300,11 +297,11 @@ func emitProcInlineWithStackArgs(ctx *scm.JITContext, proc *scm.Proc, args []scm
 			panic("jit: inline proc arg materialization requires LocRegPair/LocImm")
 		}
 	}
-	ctx.W.EmitMovRegReg(scm.RegR12, scm.RegRSP)
+	ctx.EmitMovRegReg(scm.RegR12, scm.RegRSP)
 	oldBase := ctx.SliceBase
 	ctx.SliceBase = scm.RegR12
 	out := scm.JITEmitProcInline(ctx, proc, args, scm.RegR12, result)
 	ctx.SliceBase = oldBase
-	ctx.W.EmitAddRSP32(argBytes)
+	ctx.EmitAddRSP32(argBytes)
 	return out
 }

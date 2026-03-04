@@ -239,11 +239,11 @@ func init_sync() {
 			_ = d1
 			var d2 JITValueDesc
 			_ = d2
-		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
-			lbl0 := ctx.W.ReserveLabel()
+			lbl0 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
 				if bbs[0].VisitCount >= 2 {
@@ -254,14 +254,14 @@ func init_sync() {
 			bbs[0].VisitCount++
 			if ps.General {
 				if bbs[0].Rendered {
-					ctx.W.EmitJmp(lbl0)
+					ctx.EmitJmp(lbl0)
 					return result
 				}
 				bbs[0].Rendered = true
-				bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				bbpos_0_0 = bbs[0].Address
-				ctx.W.MarkLabel(lbl0)
-				ctx.W.ResolveFixups()
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
 			}
 			ctx.ReclaimUntrackedRegs()
 			d0 = args[0]
@@ -273,28 +273,28 @@ func init_sync() {
 			if d0.Loc == LocImm {
 				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d0.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 				if d0.Imm.GetTag() == tagBool {
-					ctx.W.EmitMakeBool(tmpPair, d0)
+					ctx.EmitMakeBool(tmpPair, d0)
 				} else if d0.Imm.GetTag() == tagInt {
-					ctx.W.EmitMakeInt(tmpPair, d0)
+					ctx.EmitMakeInt(tmpPair, d0)
 				} else if d0.Imm.GetTag() == tagFloat {
-					ctx.W.EmitMakeFloat(tmpPair, d0)
+					ctx.EmitMakeFloat(tmpPair, d0)
 				} else if d0.Imm.GetTag() == tagNil {
-					ctx.W.EmitMakeNil(tmpPair)
+					ctx.EmitMakeNil(tmpPair)
 				} else {
 					ptrWord, auxWord := d0.Imm.RawWords()
-					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
 				}
 				d0 = tmpPair
 			} else if d0.Loc == LocReg {
 				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d0.Type, Reg: ctx.AllocRegExcept(d0.Reg), Reg2: ctx.AllocRegExcept(d0.Reg)}
 				switch d0.Type {
 				case tagBool:
-					ctx.W.EmitMakeBool(tmpPair, d0)
+					ctx.EmitMakeBool(tmpPair, d0)
 				case tagInt:
-					ctx.W.EmitMakeInt(tmpPair, d0)
+					ctx.EmitMakeInt(tmpPair, d0)
 				case tagFloat:
-					ctx.W.EmitMakeFloat(tmpPair, d0)
+					ctx.EmitMakeFloat(tmpPair, d0)
 				default:
 					panic("jit: generic call arg scalar type unknown for 2-word value")
 				}
@@ -309,28 +309,28 @@ func init_sync() {
 			if d1.Loc == LocImm {
 				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 				if d1.Imm.GetTag() == tagBool {
-					ctx.W.EmitMakeBool(tmpPair, d1)
+					ctx.EmitMakeBool(tmpPair, d1)
 				} else if d1.Imm.GetTag() == tagInt {
-					ctx.W.EmitMakeInt(tmpPair, d1)
+					ctx.EmitMakeInt(tmpPair, d1)
 				} else if d1.Imm.GetTag() == tagFloat {
-					ctx.W.EmitMakeFloat(tmpPair, d1)
+					ctx.EmitMakeFloat(tmpPair, d1)
 				} else if d1.Imm.GetTag() == tagNil {
-					ctx.W.EmitMakeNil(tmpPair)
+					ctx.EmitMakeNil(tmpPair)
 				} else {
 					ptrWord, auxWord := d1.Imm.RawWords()
-					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
 				}
 				d1 = tmpPair
 			} else if d1.Loc == LocReg {
 				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
 				switch d1.Type {
 				case tagBool:
-					ctx.W.EmitMakeBool(tmpPair, d1)
+					ctx.EmitMakeBool(tmpPair, d1)
 				case tagInt:
-					ctx.W.EmitMakeInt(tmpPair, d1)
+					ctx.EmitMakeInt(tmpPair, d1)
 				case tagFloat:
-					ctx.W.EmitMakeFloat(tmpPair, d1)
+					ctx.EmitMakeFloat(tmpPair, d1)
 				default:
 					panic("jit: generic call arg scalar type unknown for 2-word value")
 				}
@@ -343,7 +343,7 @@ func init_sync() {
 			d2 = ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d0, d1}, 2)
 			ctx.FreeDesc(&d0)
 			ctx.FreeDesc(&d1)
-			ctx.W.ResolveFixups()
+			ctx.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 				ctx.BindReg(result.Reg, &result)
@@ -356,16 +356,16 @@ func init_sync() {
 			} else {
 				switch d2.Type {
 				case tagBool:
-					ctx.W.EmitMakeBool(result, d2)
+					ctx.EmitMakeBool(result, d2)
 					result.Type = tagBool
 				case tagInt:
-					ctx.W.EmitMakeInt(result, d2)
+					ctx.EmitMakeInt(result, d2)
 					result.Type = tagInt
 				case tagFloat:
-					ctx.W.EmitMakeFloat(result, d2)
+					ctx.EmitMakeFloat(result, d2)
 					result.Type = tagFloat
 				case tagNil:
-					ctx.W.EmitMakeNil(result)
+					ctx.EmitMakeNil(result)
 					result.Type = tagNil
 				default:
 					panic("jit: single-block scalar return with unknown type")
@@ -403,7 +403,7 @@ func init_sync() {
 				return NewBool(true)
 			}
 		}, false, false, nil,
-		nil /* TODO: dynamic call: invoke t0.Done() */, /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
+		nil /* TODO: dynamic call: invoke t0.Done() */, /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
 	})
 	Declare(&Globalenv, &Declaration{
 		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
@@ -421,7 +421,7 @@ func init_sync() {
 				return once()
 			})
 		}, false, false, nil,
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 	Declare(&Globalenv, &Declaration{
 		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
@@ -444,7 +444,7 @@ func init_sync() {
 				return Apply(a[0])
 			})
 		}, false, false, nil,
-		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
+		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
 	})
 	Declare(&Globalenv, &Declaration{
 		"numcpu", "Returns the number of logical CPUs available for parallel execution",
@@ -458,11 +458,11 @@ func init_sync() {
 			_ = d0
 			var d1 JITValueDesc
 			_ = d1
-		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
-			lbl0 := ctx.W.ReserveLabel()
+			lbl0 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
 				if bbs[0].VisitCount >= 2 {
@@ -473,30 +473,30 @@ func init_sync() {
 			bbs[0].VisitCount++
 			if ps.General {
 				if bbs[0].Rendered {
-					ctx.W.EmitJmp(lbl0)
+					ctx.EmitJmp(lbl0)
 					return result
 				}
 				bbs[0].Rendered = true
-				bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				bbpos_0_0 = bbs[0].Address
-				ctx.W.MarkLabel(lbl0)
-				ctx.W.ResolveFixups()
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
 			}
 			ctx.ReclaimUntrackedRegs()
 			d0 = ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
-			ctx.W.ResolveFixups()
+			ctx.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 				ctx.BindReg(result.Reg, &result)
 				ctx.BindReg(result.Reg2, &result)
 			}
 			if d0.Loc == LocImm {
-				ctx.W.EmitMakeInt(result, d0)
+				ctx.EmitMakeInt(result, d0)
 			} else {
-				ctx.W.EmitMakeInt(result, d0)
+				ctx.EmitMakeInt(result, d0)
 				ctx.FreeReg(d0.Reg)
 			}
 			result.Type = tagInt
@@ -522,6 +522,6 @@ func init_sync() {
 			fd.Set(NewString("heap_sys"), NewInt(int64(m.HeapSys)), nil)
 			return NewFastDict(fd)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */
 	})
 }

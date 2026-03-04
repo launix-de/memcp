@@ -108,14 +108,14 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			} else {
 				ctx.EnsureDesc(&idxInt)
 				if idxInt.Loc != scm.LocReg { panic("jit: idxInt not in register") }
-				ctx.W.EmitShlRegImm8(idxInt.Reg, 32)
-				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
+				ctx.EmitShlRegImm8(idxInt.Reg, 32)
+				ctx.EmitShrRegImm8(idxInt.Reg, 32)
 				ctx.BindReg(idxInt.Reg, &idxInt)
 			}
 			var bbs [1]scm.BBDescriptor
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
-			lbl0 := ctx.W.ReserveLabel()
+			lbl0 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
 				if bbs[0].VisitCount >= 2 {
@@ -126,14 +126,14 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			bbs[0].VisitCount++
 			if ps.General {
 				if bbs[0].Rendered {
-					ctx.W.EmitJmp(lbl0)
+					ctx.EmitJmp(lbl0)
 					return result
 				}
 				bbs[0].Rendered = true
-				bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 				bbpos_0_0 = bbs[0].Address
-				ctx.W.MarkLabel(lbl0)
-				ctx.W.ResolveFixups()
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
 			}
 			ctx.ReclaimUntrackedRegs()
 			var d0 scm.JITValueDesc
@@ -141,8 +141,8 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSCMER)(nil).values)
 				r0 := ctx.AllocReg()
 				r1 := ctx.AllocReg()
-				ctx.W.EmitMovRegMem64(r0, fieldAddr)
-				ctx.W.EmitMovRegMem64(r1, fieldAddr+8)
+				ctx.EmitMovRegMem64(r0, fieldAddr)
+				ctx.EmitMovRegMem64(r1, fieldAddr+8)
 				d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
 				ctx.BindReg(r0, &d0)
 				ctx.BindReg(r1, &d0)
@@ -150,8 +150,8 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				off := int32(unsafe.Offsetof((*StorageSCMER)(nil).values))
 				r2 := ctx.AllocReg()
 				r3 := ctx.AllocReg()
-				ctx.W.EmitMovRegMem(r2, thisptr.Reg, off)
-				ctx.W.EmitMovRegMem(r3, thisptr.Reg, off+8)
+				ctx.EmitMovRegMem(r2, thisptr.Reg, off)
+				ctx.EmitMovRegMem(r3, thisptr.Reg, off+8)
 				d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r2, Reg2: r3}
 				ctx.BindReg(r2, &d0)
 				ctx.BindReg(r3, &d0)
@@ -161,27 +161,27 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.EnsureDesc(&idxInt)
 			ctx.EnsureDesc(&d0)
 			if idxInt.Loc == scm.LocImm {
-				ctx.W.EmitMovRegImm64(r4, uint64(idxInt.Imm.Int()) * 16)
+				ctx.EmitMovRegImm64(r4, uint64(idxInt.Imm.Int()) * 16)
 			} else {
-				ctx.W.EmitMovRegReg(r4, idxInt.Reg)
-				ctx.W.EmitShlRegImm8(r4, 4)
+				ctx.EmitMovRegReg(r4, idxInt.Reg)
+				ctx.EmitShlRegImm8(r4, 4)
 			}
 			if d0.Loc == scm.LocImm {
-				ctx.W.EmitMovRegImm64(scm.RegR11, uint64(d0.Imm.Int()))
-				ctx.W.EmitAddInt64(r4, scm.RegR11)
+				ctx.EmitMovRegImm64(scm.RegR11, uint64(d0.Imm.Int()))
+				ctx.EmitAddInt64(r4, scm.RegR11)
 			} else {
-				ctx.W.EmitAddInt64(r4, d0.Reg)
+				ctx.EmitAddInt64(r4, d0.Reg)
 			}
 			r5 := ctx.AllocRegExcept(r4)
 			r6 := ctx.AllocRegExcept(r4, r5)
-			ctx.W.EmitMovRegMem(r5, r4, 0)
-			ctx.W.EmitMovRegMem(r6, r4, 8)
+			ctx.EmitMovRegMem(r5, r4, 0)
+			ctx.EmitMovRegMem(r6, r4, 8)
 			ctx.FreeReg(r4)
 			d1 = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r5, Reg2: r6}
 			ctx.BindReg(r5, &d1)
 			ctx.BindReg(r6, &d1)
 			ctx.FreeDesc(&idxInt)
-			ctx.W.ResolveFixups()
+			ctx.ResolveFixups()
 			if result.Loc == scm.LocAny {
 				result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 				ctx.BindReg(result.Reg, &result)
@@ -194,16 +194,16 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			} else {
 				switch d1.Type {
 				case scm.TagBool:
-					ctx.W.EmitMakeBool(result, d1)
+					ctx.EmitMakeBool(result, d1)
 					result.Type = scm.TagBool
 				case scm.TagInt:
-					ctx.W.EmitMakeInt(result, d1)
+					ctx.EmitMakeInt(result, d1)
 					result.Type = scm.TagInt
 				case scm.TagFloat:
-					ctx.W.EmitMakeFloat(result, d1)
+					ctx.EmitMakeFloat(result, d1)
 					result.Type = scm.TagFloat
 				case scm.TagNil:
-					ctx.W.EmitMakeNil(result)
+					ctx.EmitMakeNil(result)
 					result.Type = scm.TagNil
 				default:
 					panic("jit: single-block scalar return with unknown type")

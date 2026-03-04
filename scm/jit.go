@@ -39,7 +39,7 @@ caller and emitter is as follows.
 Emiter rules
 -------------
  - The emiter must be a recursive 1-pass compiler that continuously writes into the JIT buffer
- - each emitter takes input args ([]JITValueDesc), result JITValueDesc with placement info for the result (e.g. store to stack, store into rax or "any" if we don't care) and returns a JITValueDesc with the actual result placement
+ - each emitter takes input args ([]JITValueDesc), result JITValueDesc with placement info for the result (e.g. store to stack, store into rax or "any" if we don't care) and returns a JITValueDesc with the actual result placement - some emitters, especially basic emitters can also deviate from this signature but the idea must stay the same
  - There following types of emitters exist:
   * basic emitters (defined in scm/jit_[ARCH].go) that produce actual machine code like arithmetic, move or jump instructions
   * hardcoded emiters for inlining Go-functions like IsString, String, NewString for extra speed and full semantics control
@@ -50,7 +50,7 @@ Emiter rules
  - Complex emiters can have BBs (basic blocks -> jump-free blocks with a [conditional] jump at the end)
  - Only reachable BBs must be rendered -> if an "if" instruction has a constant condition, only render one additional BB
  - Emiters are chainable (inline function calls): A complex emiter calls another emiter.
- - BBs are not allowed to "return", only a jump to the last BB so emiters stay chainable
+ - BBs are not allowed to print return (0xC3), only a jump to the last BB so emiters stay chainable
  - Each BB is declared as a BBDescriptor on the stack of the emiter function
  - the BB chain is started by firstbb.render(). Each bb render function can tail-call other bb render functions in order to "enqueue" them -> jumps tail-call ONE sucessor BB, conditional jumps tail-call up to TWO successor BBs, so we have a DFS traversal of all reachable BBs
  - a BB can either be rendered as the general block (phi inputs are on stack) or a specialized block (phi inputs can be either on stack or overwritten with other JITValueDesc like immediate-values or type-annotated)
@@ -225,11 +225,22 @@ type descSpillMeta struct {
 
 // JITContext is the central structure for descriptor-based JIT compilation.
 type JITContext struct {
+	Ptr     unsafe.Pointer // current write pointer (into mmap memory)
+	End     unsafe.Pointer // page end minus reserve
+	Start   unsafe.Pointer // page start for position calculation
+	Pages   []*JITPage
+	Current *JITPage
+
+	Labels    [256]int32
+	LabelNext uint8
+
+	Fixups    [512]JITFixup
+	FixupNext uint8
+
 	Env       *JITEnv
 	FreeRegs  uint64
 	AllRegs   uint64 // original set of all allocatable registers (for spilling)
-	W         *JITWriter
-	SliceBase Reg // register holding the args slice pointer (for variable-index access)
+	SliceBase Reg    // register holding the args slice pointer (for variable-index access)
 	// SliceBaseTracksRSP indicates that SliceBase is a mirror of RSP and must be
 	// refreshed after helper calls (Go may grow/move the goroutine stack).
 	SliceBaseTracksRSP bool
@@ -488,9 +499,9 @@ func (ctx *JITContext) AllocReg() Reg {
 		}
 		ctx.SpillTop += 2
 		spillAddrPtr := uintptr(unsafe.Pointer(&ctx.SpillBuf[slot]))
-		ctx.W.EmitMovRegImm64(RegR11, uint64(spillAddrPtr))
-		ctx.W.EmitStoreRegMem(pairR1, RegR11, 0)
-		ctx.W.EmitStoreRegMem(pairR2, RegR11, 8)
+		ctx.EmitMovRegImm64(RegR11, uint64(spillAddrPtr))
+		ctx.EmitStoreRegMem(pairR1, RegR11, 0)
+		ctx.EmitStoreRegMem(pairR2, RegR11, 8)
 
 		owner.Loc = LocStackPair
 		owner.MemPtr = spillAddrPtr
@@ -515,8 +526,8 @@ func (ctx *JITContext) AllocReg() Reg {
 	}
 	ctx.SpillTop++
 	spillAddrPtr := uintptr(unsafe.Pointer(&ctx.SpillBuf[slot]))
-	ctx.W.EmitMovRegImm64(RegR11, uint64(spillAddrPtr))
-	ctx.W.EmitStoreRegMem(r, RegR11, 0) // MOV [R11], reg
+	ctx.EmitMovRegImm64(RegR11, uint64(spillAddrPtr))
+	ctx.EmitStoreRegMem(r, RegR11, 0) // MOV [R11], reg
 
 	owner.Loc = LocStack
 	owner.MemPtr = spillAddrPtr
@@ -559,13 +570,13 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 		r2 := ctx.AllocRegExcept(r1)
 		if desc.MemPtr != 0 {
 			// Spill-buffer backed pair.
-			ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
-			ctx.W.EmitMovRegMem(r1, RegR11, 0)
-			ctx.W.EmitMovRegMem(r2, RegR11, 8)
+			ctx.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
+			ctx.EmitMovRegMem(r1, RegR11, 0)
+			ctx.EmitMovRegMem(r2, RegR11, 8)
 		} else {
 			// Regular frame-backed pair.
-			ctx.W.EmitMovRegMem(r1, RegRSP, desc.StackOff)
-			ctx.W.EmitMovRegMem(r2, RegRSP, desc.StackOff+8)
+			ctx.EmitMovRegMem(r1, RegRSP, desc.StackOff)
+			ctx.EmitMovRegMem(r2, RegRSP, desc.StackOff+8)
 		}
 		desc.Loc = LocRegPair
 		desc.Reg = r1
@@ -677,11 +688,11 @@ func (ctx *JITContext) EnsureReg(desc *JITValueDesc) {
 	r := ctx.AllocReg()
 	if desc.MemPtr != 0 {
 		// Load from spill buffer using absolute address recorded in MemPtr.
-		ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
-		ctx.W.EmitMovRegMem(r, RegR11, 0)
+		ctx.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
+		ctx.EmitMovRegMem(r, RegR11, 0)
 	} else {
 		// Generic LocStack value (non-spill): load from [RSP+StackOff].
-		ctx.W.EmitMovRegMem(r, RegRSP, desc.StackOff)
+		ctx.EmitMovRegMem(r, RegRSP, desc.StackOff)
 	}
 	desc.Loc = LocReg
 	desc.Reg = r
@@ -906,7 +917,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 				// Break a cycle via reserved scratch register R14.
 				cycleDst := moves[0].dst
 				if cycleDst != RegR14 {
-					ctx.W.emitMovRegReg(RegR14, cycleDst)
+					ctx.emitMovRegReg(RegR14, cycleDst)
 				}
 				for i := range moves {
 					if moves[i].src == cycleDst {
@@ -917,7 +928,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			}
 			mv := moves[emitIdx]
 			if mv.dst != mv.src {
-				ctx.W.emitMovRegReg(mv.dst, mv.src)
+				ctx.emitMovRegReg(mv.dst, mv.src)
 			}
 			moves = append(moves[:emitIdx], moves[emitIdx+1:]...)
 		}
@@ -928,13 +939,13 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			case LocReg:
 				// Already handled by move planner (including no-op src==target).
 			case LocImm:
-				ctx.W.EmitMovRegImm64(target, argWords[i].imm)
+				ctx.EmitMovRegImm64(target, argWords[i].imm)
 			case LocStack:
 				if argWords[i].memPtr != 0 {
-					ctx.W.EmitMovRegImm64(RegR11, uint64(argWords[i].memPtr))
-					ctx.W.EmitMovRegMem(target, RegR11, argWords[i].stackOff)
+					ctx.EmitMovRegImm64(RegR11, uint64(argWords[i].memPtr))
+					ctx.EmitMovRegMem(target, RegR11, argWords[i].stackOff)
 				} else {
-					ctx.W.EmitMovRegMem(target, RegRSP, stackArgBaseDisp+argWords[i].stackOff)
+					ctx.EmitMovRegMem(target, RegRSP, stackArgBaseDisp+argWords[i].stackOff)
 				}
 			default:
 				panic("jit: unsupported Go-call arg location")
@@ -945,14 +956,14 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// Fast path: no live registers to preserve. Emit only argument setup + call.
 	if len(liveRegs) == 0 {
 		emitArgSetup(0)
-		ctx.W.EmitCallIndirect(funcAddr)
+		ctx.EmitCallIndirect(funcAddr)
 		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
-			ctx.W.emitMovRegReg(ctx.SliceBase, RegRSP)
+			ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
 		}
 		for i := 0; i < numResultWords; i++ {
 			r := ctx.AllocReg()
 			if r != GoABIIntRegs[i] {
-				ctx.W.emitMovRegReg(r, GoABIIntRegs[i])
+				ctx.emitMovRegReg(r, GoABIIntRegs[i])
 			}
 			resultsBuf[i] = r
 		}
@@ -973,13 +984,13 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 
 	// Save live registers (PUSH)
 	for _, r := range liveRegs {
-		ctx.W.EmitPushReg(r)
+		ctx.EmitPushReg(r)
 	}
 	// Align stack to 16 bytes if needed (odd total items)
 	totalItems := numResultWords + len(liveRegs)
 	padded := totalItems%2 == 1
 	if padded {
-		ctx.W.EmitPushReg(RegRAX) // dummy padding
+		ctx.EmitPushReg(RegRAX) // dummy padding
 	}
 
 	// Move argument words into Go ABI registers (clobber-safe planner).
@@ -990,7 +1001,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	emitArgSetup(stackArgBaseDisp)
 
 	// CALL
-	ctx.W.EmitCallIndirect(funcAddr)
+	ctx.EmitCallIndirect(funcAddr)
 
 	// Store results to reserved stack slots (above saved regs + padding)
 	paddingSize := 0
@@ -999,25 +1010,25 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	}
 	for i := 0; i < numResultWords; i++ {
 		offset := int32(paddingSize + len(liveRegs)*8 + i*8)
-		ctx.W.EmitStoreRegMem(GoABIIntRegs[i], RegRSP, offset)
+		ctx.EmitStoreRegMem(GoABIIntRegs[i], RegRSP, offset)
 	}
 
 	// Restore (POP in reverse)
 	if padded {
-		ctx.W.EmitPopReg(RegRAX)
+		ctx.EmitPopReg(RegRAX)
 	}
 	for i := len(liveRegs) - 1; i >= 0; i-- {
-		ctx.W.EmitPopReg(liveRegs[i])
+		ctx.EmitPopReg(liveRegs[i])
 	}
 
 	// Pop results from reserved slots into freshly allocated registers
 	for i := 0; i < numResultWords; i++ {
 		r := ctx.AllocReg()
-		ctx.W.EmitPopReg(r)
+		ctx.EmitPopReg(r)
 		resultsBuf[i] = r
 	}
 	if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
-		ctx.W.emitMovRegReg(ctx.SliceBase, RegRSP)
+		ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
 	}
 	return resultsBuf[:numResultWords]
 }
@@ -1108,10 +1119,10 @@ func (ctx *JITContext) EmitGoCallScalar(funcAddr uint64, args []JITValueDesc, nu
 // EmitMovPairToResult moves a LocRegPair value into the result descriptor registers.
 func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc) {
 	if src.Reg != dst.Reg {
-		ctx.W.emitMovRegReg(dst.Reg, src.Reg)
+		ctx.emitMovRegReg(dst.Reg, src.Reg)
 	}
 	if src.Reg2 != dst.Reg2 {
-		ctx.W.emitMovRegReg(dst.Reg2, src.Reg2)
+		ctx.emitMovRegReg(dst.Reg2, src.Reg2)
 	}
 }
 
@@ -1132,99 +1143,83 @@ type JITPage struct {
 	Next   *JITPage
 }
 
-// JITWriter is the platform-independent code emitter scaffold.
-// Architecture-specific emit methods are defined in jit_<arch>.go files.
-type JITWriter struct {
-	Ptr     unsafe.Pointer // current write pointer (into mmap memory)
-	End     unsafe.Pointer // page end minus reserve
-	Start   unsafe.Pointer // page start for position calculation
-	Pages   []*JITPage
-	Current *JITPage
-
-	Labels    [256]int32
-	LabelNext uint8
-
-	Fixups    [512]JITFixup
-	FixupNext uint8
-}
-
 // ReserveLabel allocates a label ID for later placement via MarkLabel.
-func (w *JITWriter) ReserveLabel() uint8 {
-	id := w.LabelNext
-	w.LabelNext++
-	w.Labels[id] = -1 // undefined until MarkLabel
+func (ctx *JITContext) ReserveLabel() uint8 {
+	id := ctx.LabelNext
+	ctx.LabelNext++
+	ctx.Labels[id] = -1 // undefined until MarkLabel
 	return id
 }
 
 // MarkLabel sets the position of a previously reserved label.
-func (w *JITWriter) MarkLabel(id uint8) {
-	w.Labels[id] = int32(uintptr(w.Ptr) - uintptr(w.Start))
+func (ctx *JITContext) MarkLabel(id uint8) {
+	ctx.Labels[id] = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 }
 
 // AddFixup records a forward reference to be patched by ResolveFixups.
-func (w *JITWriter) AddFixup(labelID uint8, size uint8, relative bool) {
-	w.Fixups[w.FixupNext] = JITFixup{
-		CodePos:  int32(uintptr(w.Ptr) - uintptr(w.Start)),
+func (ctx *JITContext) AddFixup(labelID uint8, size uint8, relative bool) {
+	ctx.Fixups[ctx.FixupNext] = JITFixup{
+		CodePos:  int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
 		LabelID:  labelID,
 		Size:     size,
 		Relative: relative,
 	}
-	w.FixupNext++
+	ctx.FixupNext++
 }
 
 // ResolveFixups patches recorded forward references whose labels are defined.
 // Fixups referencing still-undefined labels are kept for a later call.
-func (w *JITWriter) ResolveFixups() {
+func (ctx *JITContext) ResolveFixups() {
 	j := uint8(0)
-	for i := uint8(0); i < w.FixupNext; i++ {
-		f := &w.Fixups[i]
-		targetPos := w.Labels[f.LabelID]
+	for i := uint8(0); i < ctx.FixupNext; i++ {
+		f := &ctx.Fixups[i]
+		targetPos := ctx.Labels[f.LabelID]
 		if targetPos < 0 {
 			// label not yet defined — keep for later
-			w.Fixups[j] = w.Fixups[i]
+			ctx.Fixups[j] = ctx.Fixups[i]
 			j++
 			continue
 		}
-		patchAddr := unsafe.Add(w.Start, int(f.CodePos))
+		patchAddr := unsafe.Add(ctx.Start, int(f.CodePos))
 		if f.Relative {
 			offset := targetPos - (f.CodePos + int32(f.Size))
 			*(*int32)(patchAddr) = offset
-			w.tryRewriteTrailingJmpToNop(f, offset)
+			ctx.tryRewriteTrailingJmpToNop(f, offset)
 		} else {
 			*(*int32)(patchAddr) = targetPos
 		}
 	}
-	w.FixupNext = j
+	ctx.FixupNext = j
 }
 
 // ResolveFixupsFinal patches all remaining fixups, panicking on undefined labels.
-func (w *JITWriter) ResolveFixupsFinal() {
-	for i := uint8(0); i < w.FixupNext; i++ {
-		f := &w.Fixups[i]
-		targetPos := w.Labels[f.LabelID]
+func (ctx *JITContext) ResolveFixupsFinal() {
+	for i := uint8(0); i < ctx.FixupNext; i++ {
+		f := &ctx.Fixups[i]
+		targetPos := ctx.Labels[f.LabelID]
 		if targetPos < 0 {
 			panic("jit: undefined label")
 		}
-		patchAddr := unsafe.Add(w.Start, int(f.CodePos))
+		patchAddr := unsafe.Add(ctx.Start, int(f.CodePos))
 		if f.Relative {
 			offset := targetPos - (f.CodePos + int32(f.Size))
 			*(*int32)(patchAddr) = offset
-			w.tryRewriteTrailingJmpToNop(f, offset)
+			ctx.tryRewriteTrailingJmpToNop(f, offset)
 		} else {
 			*(*int32)(patchAddr) = targetPos
 		}
 	}
-	w.FixupNext = 0
+	ctx.FixupNext = 0
 }
 
 // tryRewriteTrailingJmpToNop turns a resolved "jmp +0" (jump-to-next-ip) into
 // five NOP bytes. This keeps one-pass forward emission simple while removing
 // redundant trailing jumps after relocation.
-func (w *JITWriter) tryRewriteTrailingJmpToNop(f *JITFixup, offset int32) {
+func (ctx *JITContext) tryRewriteTrailingJmpToNop(f *JITFixup, offset int32) {
 	if offset != 0 || f.Size != 4 || f.CodePos <= 0 {
 		return
 	}
-	opAddr := unsafe.Add(w.Start, int(f.CodePos)-1)
+	opAddr := unsafe.Add(ctx.Start, int(f.CodePos)-1)
 	if *(*byte)(opAddr) != 0xE9 { // JMP rel32 opcode
 		return
 	}
@@ -1299,59 +1294,59 @@ func init_jit() {
 			var bbs [1]BBDescriptor
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
-			lbl0 := ctx.W.ReserveLabel()
+			lbl0 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
-				if !ps.General {
-					if bbs[0].VisitCount >= 2 {
-						ps.General = true
-						return bbs[0].RenderPS(ps)
-					}
+			if !ps.General {
+				if bbs[0].VisitCount >= 2 {
+					ps.General = true
+					return bbs[0].RenderPS(ps)
 				}
-				bbs[0].VisitCount++
-				if ps.General {
-					if bbs[0].Rendered {
-						ctx.W.EmitJmp(lbl0)
-						return result
-					}
-					bbs[0].Rendered = true
-					bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
-					bbpos_0_0 = bbs[0].Address
-					ctx.W.MarkLabel(lbl0)
-					ctx.W.ResolveFixups()
+			}
+			bbs[0].VisitCount++
+			if ps.General {
+				if bbs[0].Rendered {
+					ctx.EmitJmp(lbl0)
+					return result
 				}
-				ctx.ReclaimUntrackedRegs()
-				d0 = args[0]
-				d0.ID = 0
-				d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
-				ctx.FreeDesc(&d0)
-				ctx.EnsureDesc(&d1)
-				var d2 JITValueDesc
-				if d1.Loc == LocImm {
-					d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(100))}
-				} else {
-					r0 := ctx.AllocReg()
-					ctx.W.EmitCmpRegImm32(d1.Reg, 100)
-					ctx.W.EmitSetcc(r0, CcE)
-					d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
-					ctx.BindReg(r0, &d2)
-				}
-				ctx.FreeDesc(&d1)
-				ctx.EnsureDesc(&d2)
-				ctx.W.ResolveFixups()
-				if result.Loc == LocAny {
-					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-					ctx.BindReg(result.Reg, &result)
-					ctx.BindReg(result.Reg2, &result)
-				}
-				if d2.Loc == LocImm {
-					ctx.W.EmitMakeBool(result, d2)
-				} else {
-					ctx.W.EmitMakeBool(result, d2)
-					ctx.FreeReg(d2.Reg)
-				}
-				result.Type = tagBool
-				return result
-				return result
+				bbs[0].Rendered = true
+				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				bbpos_0_0 = bbs[0].Address
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+			}
+			ctx.ReclaimUntrackedRegs()
+			d0 = args[0]
+			d0.ID = 0
+			d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d0)
+			ctx.EnsureDesc(&d1)
+			var d2 JITValueDesc
+			if d1.Loc == LocImm {
+				d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(11))}
+			} else {
+				r0 := ctx.AllocReg()
+				ctx.EmitCmpRegImm32(d1.Reg, 11)
+				ctx.EmitSetcc(r0, CcE)
+				d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+				ctx.BindReg(r0, &d2)
+			}
+			ctx.FreeDesc(&d1)
+			ctx.EnsureDesc(&d2)
+			ctx.ResolveFixups()
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
+			}
+			if d2.Loc == LocImm {
+				ctx.EmitMakeBool(result, d2)
+			} else {
+				ctx.EmitMakeBool(result, d2)
+				ctx.FreeReg(d2.Reg)
+			}
+			result.Type = tagBool
+			return result
+			return result
 			}
 			ps3 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps3)

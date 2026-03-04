@@ -31,18 +31,14 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 	}
 
 	codeBuf := make([]byte, 65536)
-	w := &scm.JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-	}
-
 	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
 	ctx := &scm.JITContext{
-		W:        w,
+		Ptr:      unsafe.Pointer(&codeBuf[0]),
+		Start:    unsafe.Pointer(&codeBuf[0]),
+		End:      unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs: freeRegs,
 		AllRegs:  freeRegs,
 	}
@@ -50,7 +46,7 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 	// Entry: Go ABI — RAX = int64 index argument
 	// Move index to a free register so RAX is available for result
 	idxReg := ctx.AllocReg()
-	w.EmitMovRegReg(idxReg, scm.RegRAX)
+	ctx.EmitMovRegReg(idxReg, scm.RegRAX)
 	idx := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxReg}
 
 	var thisptr scm.JITValueDesc
@@ -58,16 +54,16 @@ func jitBuildRawFunc(tb testing.TB, s *StorageInt, constThisptr bool) (fn func(i
 		thisptr = scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s))))}
 	} else {
 		ptrReg := ctx.AllocReg()
-		w.EmitMovRegImm64(ptrReg, uint64(uintptr(unsafe.Pointer(s))))
+		ctx.EmitMovRegImm64(ptrReg, uint64(uintptr(unsafe.Pointer(s))))
 		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: ptrReg}
 	}
 
 	result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
 	desc := s.JITEmit(ctx, thisptr, idx, result)
 	ctx.EmitMovPairToResult(&desc, &result)
-	w.EmitByte(0xC3) // RET
+	ctx.EmitByte(0xC3) // RET
 
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 
 	// Allocate executable memory
@@ -108,12 +104,6 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 	}
 
 	codeBuf := make([]byte, 65536)
-	w := &scm.JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-	}
-
 	// R15 = loop counter, R14 = accumulator (SUM), R12 = slice base (unused but reserved)
 	// R13 = thisptr for LocReg case
 	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
@@ -122,7 +112,9 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)))
 	// R11 = scratch, R14 = accumulator, R15 = loop counter — all reserved
 	ctx := &scm.JITContext{
-		W:        w,
+		Ptr:      unsafe.Pointer(&codeBuf[0]),
+		Start:    unsafe.Pointer(&codeBuf[0]),
+		End:      unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs: freeRegs,
 		AllRegs:  freeRegs,
 	}
@@ -132,28 +124,28 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 		thisptr = scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(int64(uintptr(unsafe.Pointer(s))))}
 	} else {
 		ctx.FreeRegs &^= 1 << uint(scm.RegR13)
-		w.EmitMovRegImm64(scm.RegR13, uint64(uintptr(unsafe.Pointer(s))))
+		ctx.EmitMovRegImm64(scm.RegR13, uint64(uintptr(unsafe.Pointer(s))))
 		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegR13}
 	}
 
 	// PUSH R14 (save Go's g pointer)
-	w.EmitByte(0x41)
-	w.EmitByte(0x56)
+	ctx.EmitByte(0x41)
+	ctx.EmitByte(0x56)
 	// XOR R15, R15 (zero loop counter)
-	w.EmitByte(0x4D)
-	w.EmitByte(0x31)
-	w.EmitByte(0xFF)
+	ctx.EmitByte(0x4D)
+	ctx.EmitByte(0x31)
+	ctx.EmitByte(0xFF)
 	// XOR R14, R14 (zero accumulator)
-	w.EmitByte(0x4D)
-	w.EmitByte(0x31)
-	w.EmitByte(0xF6)
+	ctx.EmitByte(0x4D)
+	ctx.EmitByte(0x31)
+	ctx.EmitByte(0xF6)
 
-	lblTop := w.ReserveLabel()
-	w.MarkLabel(lblTop)
+	lblTop := ctx.ReserveLabel()
+	ctx.MarkLabel(lblTop)
 
 	// Copy R15 to scratch for body consumption
 	idxReg := ctx.AllocReg()
-	w.EmitMovRegReg(idxReg, scm.RegR15)
+	ctx.EmitMovRegReg(idxReg, scm.RegR15)
 	idx := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxReg}
 
 	// Emit JITEmit body — result goes wherever JITEmit chooses
@@ -163,33 +155,33 @@ func jitBuildSumFunc(tb testing.TB, s *StorageInt, count int64, constThisptr boo
 	// Scmer LocRegPair: Reg=sentinel ptr, Reg2=int value (aux field).
 	// For null: EmitMakeNil zeroes both, so adding Reg2=0 is correct for SUM.
 	// ADD R14, desc.Reg2
-	w.EmitAddInt64(scm.RegR14, desc.Reg2)
+	ctx.EmitAddInt64(scm.RegR14, desc.Reg2)
 	ctx.FreeDesc(&desc)
 
 	// INC R15
-	w.EmitByte(0x49)
-	w.EmitByte(0xFF)
-	w.EmitByte(0xC7)
+	ctx.EmitByte(0x49)
+	ctx.EmitByte(0xFF)
+	ctx.EmitByte(0xC7)
 
 	// CMP R15, count
-	w.EmitCmpRegImm32(scm.RegR15, int32(count))
+	ctx.EmitCmpRegImm32(scm.RegR15, int32(count))
 
 	// JL loopTop
-	w.EmitJcc(scm.CcL, lblTop)
+	ctx.EmitJcc(scm.CcL, lblTop)
 
 	// MOV RAX, R14 (return accumulator)
-	w.EmitByte(0x4C)
-	w.EmitByte(0x89)
-	w.EmitByte(0xF0)
+	ctx.EmitByte(0x4C)
+	ctx.EmitByte(0x89)
+	ctx.EmitByte(0xF0)
 	// POP R14 (restore Go's g pointer)
-	w.EmitByte(0x41)
-	w.EmitByte(0x5E)
+	ctx.EmitByte(0x41)
+	ctx.EmitByte(0x5E)
 	// RET
-	w.EmitByte(0xC3)
+	ctx.EmitByte(0xC3)
 
-	w.ResolveFixups()
+	ctx.ResolveFixups()
 
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 
 	pageSize := syscall.Getpagesize()
