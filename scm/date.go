@@ -114,7 +114,7 @@ func init_date() {
 			return NewNil()
 		},
 		true, false, nil,
-		nil /* TODO: IndexAddr on non-parameter: &t0[t3] (x=t0 marker="" isDesc=true goVar=d19) */, /* TODO: IndexAddr on non-parameter: &t0[t3] (x=t0 marker="" isDesc=true goVar=d19) */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */
+		nil /* TODO: IndexAddr on non-parameter: &t0[t3] (x=t0 marker="" isDesc=true goVar=d20) */, /* TODO: IndexAddr on non-parameter: &t0[t3] (x=t0 marker="" isDesc=true goVar=d19) */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t0.ptr [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"format_date", "formats a unix timestamp, date, or datetime string into a date string",

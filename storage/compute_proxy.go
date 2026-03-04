@@ -28,8 +28,8 @@ import "github.com/launix-de/NonLockingReadMap"
 // Values are computed on demand via a computor lambda and cached in a delta map
 // until Compress() materializes them into a compressed main storage.
 type StorageComputeProxy struct {
-	main       ColumnStorage                      // after Compress() — typically StorageSCMER or compressed type
-	delta      map[uint32]scm.Scmer               // sparse overwrites (lazy-computed values before Compress)
+	main       ColumnStorage                       // after Compress() — typically StorageSCMER or compressed type
+	delta      map[uint32]scm.Scmer                // sparse overwrites (lazy-computed values before Compress)
 	validMask  NonLockingReadMap.NonBlockingBitMap // 1=valid, 0=needs compute
 	compressed bool                                // true after Compress() → skip validMask, read from main
 	computor   scm.Scmer                           // computation lambda
@@ -275,7 +275,7 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	// main storage or delta
 	if p.compressed && p.main != nil {
 		binary.Write(f, binary.LittleEndian, uint8(1)) // has main
-		p.main.Serialize(f)                             // nested — includes its own magic byte
+		p.main.Serialize(f)                            // nested — includes its own magic byte
 	} else {
 		binary.Write(f, binary.LittleEndian, uint8(0)) // no main
 		// write delta

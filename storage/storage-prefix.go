@@ -5682,30 +5682,85 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.BindReg(r297, &d293)
 			ctx.BindReg(r298, &d293)
 			ctx.FreeDesc(&d285)
-			if d237.Loc != scm.LocImm && d237.Type == scm.JITTypeUnknown {
-				panic("jit: scm.Scmer.String on unknown dynamic type")
+			d295 := d237
+			ctx.EnsureDesc(&d295)
+			if d295.Loc == scm.LocImm {
+				tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				tag := d295.Imm.GetTag()
+				switch tag {
+				case scm.TagBool:
+					ctx.W.EmitMakeBool(tmpPair, d295)
+				case scm.TagInt:
+					ctx.W.EmitMakeInt(tmpPair, d295)
+				case scm.TagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d295)
+				case scm.TagNil:
+					ctx.W.EmitMakeNil(tmpPair)
+				default:
+					ptrWord, auxWord := d295.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d295 = tmpPair
+			} else if d295.Loc == scm.LocReg {
+				tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocRegExcept(d295.Reg), Reg2: ctx.AllocRegExcept(d295.Reg)}
+				switch d295.Type {
+				case scm.TagBool:
+					ctx.W.EmitMakeBool(tmpPair, d295)
+				case scm.TagInt:
+					ctx.W.EmitMakeInt(tmpPair, d295)
+				case scm.TagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d295)
+				default:
+					panic("jit: scm.Scmer.String requires scm.Scmer pair receiver")
+				}
+				ctx.FreeDesc(&d295)
+				d295 = tmpPair
+			} else if d295.Loc == scm.LocMem {
+				tmpScalar := scm.JITValueDesc{Loc: scm.LocReg, Type: d295.Type, Reg: ctx.AllocReg()}
+				scratch := ctx.AllocRegExcept(tmpScalar.Reg)
+				ctx.W.EmitMovRegImm64(scratch, uint64(d295.MemPtr))
+				ctx.W.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
+				ctx.FreeReg(scratch)
+				ctx.BindReg(tmpScalar.Reg, &tmpScalar)
+				tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocRegExcept(tmpScalar.Reg), Reg2: ctx.AllocRegExcept(tmpScalar.Reg)}
+				switch tmpScalar.Type {
+				case scm.TagBool:
+					ctx.W.EmitMakeBool(tmpPair, tmpScalar)
+				case scm.TagInt:
+					ctx.W.EmitMakeInt(tmpPair, tmpScalar)
+				case scm.TagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, tmpScalar)
+				default:
+					panic("jit: scm.Scmer.String requires scm.Scmer pair receiver")
+				}
+				ctx.FreeDesc(&tmpScalar)
+				d295 = tmpPair
 			}
-			d294 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.Scmer.String), []scm.JITValueDesc{d237}, 2)
+			if d295.Loc != scm.LocRegPair && d295.Loc != scm.LocStackPair {
+				panic("jit: scm.Scmer.String receiver not materialized as pair")
+			}
+			d294 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.Scmer.String), []scm.JITValueDesc{d295}, 2)
 			ctx.FreeDesc(&d237)
 			ctx.EnsureDesc(&d293)
 			ctx.EnsureDesc(&d294)
-			d295 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.ConcatStrings), []scm.JITValueDesc{d293, d294}, 2)
+			d296 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.ConcatStrings), []scm.JITValueDesc{d293, d294}, 2)
 			ctx.FreeDesc(&d293)
-			d296 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-			ctx.BindReg(r0, &d296)
-			ctx.BindReg(r1, &d296)
-			d297 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.NewString), []scm.JITValueDesc{d295}, 2)
-			ctx.EmitMovPairToResult(&d297, &d296)
+			d297 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+			ctx.BindReg(r0, &d297)
+			ctx.BindReg(r1, &d297)
+			d298 := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.NewString), []scm.JITValueDesc{d296}, 2)
+			ctx.EmitMovPairToResult(&d298, &d297)
 			ctx.W.EmitJmp(lbl0)
 			bbpos_0_5 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl1)
 			ctx.W.ResolveFixups()
 			ctx.W.EmitByte(0xCC)
 			ctx.W.MarkLabel(lbl0)
-			d298 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-			ctx.BindReg(r0, &d298)
-			ctx.BindReg(r1, &d298)
-			ctx.EmitMovPairToResult(&d298, &result)
+			d299 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+			ctx.BindReg(r0, &d299)
+			ctx.BindReg(r1, &d299)
+			ctx.EmitMovPairToResult(&d299, &result)
 			ctx.FreeReg(r0)
 			ctx.FreeReg(r1)
 			ctx.W.ResolveFixups()

@@ -36,10 +36,10 @@ type ColumnReader interface {
 // THE basic storage pattern
 type ColumnStorage interface {
 	// info
-	GetValue(uint32) scm.Scmer     // read function (concurrent-safe, no mutable state)
+	GetValue(uint32) scm.Scmer                                                                                             // read function (concurrent-safe, no mutable state)
 	JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc // JIT-compile GetValue: emit code that reads column value for thisptr + record idx
-	GetCachedReader() ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
-	String() string                // self-description
+	GetCachedReader() ColumnReader                                                                                         // returns a per-goroutine cached reader for O(1) sequential access
+	String() string                                                                                                        // self-description
 	scm.Sizable
 
 	// buildup functions 1) prepare 2) scan, 3) proposeCompression(), if != nil repeat at 1, 4) init, 5) build; all values are passed through twice
@@ -894,9 +894,13 @@ func Init(en scm.Env) {
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
-			if db == nil { return scm.NewBool(false) }
+			if db == nil {
+				return scm.NewBool(false)
+			}
 			t := db.GetTable(scm.String(a[1]))
-			if t == nil { return scm.NewBool(false) }
+			if t == nil {
+				return scm.NewBool(false)
+			}
 			colName := scm.String(a[2])
 			for _, s := range t.ActiveShards() {
 				s.mu.RLock()
