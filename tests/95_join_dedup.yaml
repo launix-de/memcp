@@ -1,0 +1,148 @@
+# Scalar subquery deduplication (join-merge optimization)
+# When two or more scalar subqueries reference the same table with the same
+# condition and field, the inner scan should be performed only once per outer row.
+# When condition is the same but fields differ, each subquery still scans independently
+# (Phase 2 optimization, not yet implemented).
+
+metadata:
+  version: "1.0"
+  description: "Deduplicate scalar subqueries on the same table with same condition+field"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS jd_item"
+  - sql: "DROP TABLE IF EXISTS jd_ref"
+  - sql: |
+      CREATE TABLE jd_item (id INT, ref_id INT)
+  - sql: |
+      INSERT INTO jd_item (id, ref_id) VALUES (1, 10), (2, 20), (3, 10), (4, NULL)
+  - sql: |
+      CREATE TABLE jd_ref (id INT, label VARCHAR(40), score INT)
+  - sql: |
+      INSERT INTO jd_ref (id, label, score) VALUES (10, 'Alpha', 100), (20, 'Beta', 200)
+
+test_cases:
+
+  # Identical scalar subquery repeated in SELECT list: both should return same value
+  - name: "Two identical scalar subqueries return same result"
+    sql: |
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2
+      FROM jd_item
+      ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          c1: Alpha
+          c2: Alpha
+        - id: 2
+          c1: Beta
+          c2: Beta
+        - id: 3
+          c1: Alpha
+          c2: Alpha
+        - id: 4
+          c1: null
+          c2: null
+
+  # Three identical subqueries: all three must match
+  - name: "Three identical scalar subqueries all agree"
+    sql: |
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c3
+      FROM jd_item
+      WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          c1: Alpha
+          c2: Alpha
+          c3: Alpha
+
+  # Same table, same condition, but different fields: each column independently correct
+  - name: "Same table same condition different fields both correct"
+    sql: |
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS lbl,
+        (SELECT score FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS sc
+      FROM jd_item
+      ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          lbl: Alpha
+          sc: 100
+        - id: 2
+          lbl: Beta
+          sc: 200
+        - id: 3
+          lbl: Alpha
+          sc: 100
+        - id: 4
+          lbl: null
+          sc: null
+
+  # Mix of identical + different-field subqueries
+  - name: "Mixed identical and different-field subqueries"
+    sql: |
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2,
+        (SELECT score FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS sc
+      FROM jd_item
+      WHERE id = 2
+    expect:
+      rows: 1
+      data:
+        - id: 2
+          c1: Beta
+          c2: Beta
+          sc: 200
+
+  # Non-correlated duplicate subquery (no outer ref): also should deduplicate
+  - name: "Non-correlated identical scalar subqueries"
+    sql: |
+      SELECT id,
+        (SELECT COUNT(*) FROM jd_ref) AS total1,
+        (SELECT COUNT(*) FROM jd_ref) AS total2
+      FROM jd_item
+      WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          total1: 2
+          total2: 2
+
+  # Error: multiple rows for identical subquery still errors (semantics preserved)
+  - name: "Multiple rows still errors even for deduplicated subquery"
+    sql: |
+      SELECT
+        (SELECT id FROM jd_item WHERE jd_item.ref_id = 10) AS c1,
+        (SELECT id FROM jd_item WHERE jd_item.ref_id = 10) AS c2
+    expect:
+      error: true
+
+  # NULL outer ref: both identical subqueries return NULL
+  - name: "NULL outer ref produces NULL in all identical subqueries"
+    sql: |
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c1,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS c2
+      FROM jd_item
+      WHERE id = 4
+    expect:
+      rows: 1
+      data:
+        - id: 4
+          c1: null
+          c2: null
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS jd_item"
+  - sql: "DROP TABLE IF EXISTS jd_ref"
