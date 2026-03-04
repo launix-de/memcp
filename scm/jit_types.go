@@ -225,6 +225,16 @@ type JITContext struct {
 	rootSet    map[unsafe.Pointer]struct{}
 }
 
+// BBDescriptor stores per-basic-block emitter state.
+// Phase 1 starts with single-block closure usage; relocation fields are
+// prepared for follow-up BB-descriptor-based control-flow lowering.
+type BBDescriptor struct {
+	Render   func() JITValueDesc
+	Rendered bool
+	Address  int32
+	Pending  []JITFixup
+}
+
 // TrackImm records a LocImm constant's pointer payload as a GC root when needed.
 func (ctx *JITContext) TrackImm(v Scmer) {
 	if ctx == nil {

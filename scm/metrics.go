@@ -221,6 +221,8 @@ func InitMetricsDeclarations() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
@@ -253,6 +255,8 @@ func InitMetricsDeclarations() {
 				ctx.FreeReg(d1.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
 
@@ -287,6 +291,8 @@ func InitMetricsDeclarations() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(readProcessRSS), []JITValueDesc{}, 1)
@@ -302,6 +308,8 @@ func InitMetricsDeclarations() {
 				ctx.FreeReg(d0.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
 
@@ -324,6 +332,8 @@ func InitMetricsDeclarations() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
@@ -356,6 +366,8 @@ func InitMetricsDeclarations() {
 				ctx.FreeReg(d1.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
 
@@ -368,6 +380,8 @@ func InitMetricsDeclarations() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(loadSnapshot), []JITValueDesc{}, 1)
@@ -400,6 +414,8 @@ func InitMetricsDeclarations() {
 				ctx.FreeReg(d1.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
 

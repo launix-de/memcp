@@ -139,6 +139,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -157,6 +159,8 @@ func init_strings() {
 				ctx.FreeReg(d1.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1162,6 +1166,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1198,6 +1204,8 @@ func init_strings() {
 				}
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1211,6 +1219,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1250,6 +1260,8 @@ func init_strings() {
 				ctx.FreeReg(d2.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1492,6 +1504,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1529,6 +1543,8 @@ func init_strings() {
 				ctx.FreeReg(d4.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1542,6 +1558,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1561,6 +1579,8 @@ func init_strings() {
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1574,6 +1594,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1593,6 +1615,8 @@ func init_strings() {
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1608,6 +1632,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1649,6 +1675,8 @@ func init_strings() {
 			if result.Loc == LocAny { return d7 }
 			ctx.EmitMovPairToResult(&d7, &result)
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1662,6 +1690,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1681,6 +1711,8 @@ func init_strings() {
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1694,6 +1726,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1718,6 +1752,8 @@ func init_strings() {
 			if result.Loc == LocAny { return d4 }
 			ctx.EmitMovPairToResult(&d4, &result)
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1731,6 +1767,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1755,6 +1793,8 @@ func init_strings() {
 			if result.Loc == LocAny { return d4 }
 			ctx.EmitMovPairToResult(&d4, &result)
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
@@ -2350,6 +2390,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -2369,6 +2411,8 @@ func init_strings() {
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2382,6 +2426,8 @@ func init_strings() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -2401,6 +2447,8 @@ func init_strings() {
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
 	})
 	Declare(&Globalenv, &Declaration{
