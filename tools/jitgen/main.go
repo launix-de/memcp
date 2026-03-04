@@ -2120,6 +2120,7 @@ func addScmPrefix(code string) string {
 		"NewInt": true, "NewFloat": true, "NewBool": true, "NewNil": true, "NewString": true,
 		"NewFastDict": true, "NewFastDictValue": true,
 		"Scmer": true, "GoFuncAddr": true, "JITBuildMergeClosure": true,
+		"JITPanic":                     true,
 		"EnsureDesc":                   true,
 		"ConcatStrings":                true,
 		"OptimizeProcToSerialFunction": true,
@@ -4946,13 +4947,55 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.vals[name] = genVal{goVar: dv, isDesc: true}
 
 	case *ssa.MakeInterface:
-		// MakeInterface is typically before panic — we can't JIT this but it's dead code
-		// in guarded paths. Store a dummy.
-		g.vals[name] = genVal{marker: "_interface"}
+		// Keep the wrapped SSA value so panic lowering can forward it to jitPanic.
+		inner := g.resolveValue(v.X)
+		g.vals[name] = inner
 
 	case *ssa.Panic:
-		// Panic: emit a trap/unreachable instruction (INT3 on amd64)
-		g.emit("ctx.EmitByte(0xCC)") // INT3
+		panicVal := g.resolveValue(v.X)
+		if !panicVal.isDesc {
+			panic(fmt.Sprintf("unsupported Panic payload: %s", v))
+		}
+		g.emit("ctx.EnsureDesc(&%s)", panicVal.goVar)
+		g.emit("if %s.Loc == LocImm {", panicVal.goVar)
+		g.emit("\ttmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
+		g.emit("\tif %s.Imm.GetTag() == tagBool {", panicVal.goVar)
+		g.emit("\t\tctx.EmitMakeBool(tmpPair, %s)", panicVal.goVar)
+		g.emit("\t} else if %s.Imm.GetTag() == tagInt {", panicVal.goVar)
+		g.emit("\t\tctx.EmitMakeInt(tmpPair, %s)", panicVal.goVar)
+		g.emit("\t} else if %s.Imm.GetTag() == tagFloat {", panicVal.goVar)
+		g.emit("\t\tctx.EmitMakeFloat(tmpPair, %s)", panicVal.goVar)
+		g.emit("\t} else if %s.Imm.GetTag() == tagNil {", panicVal.goVar)
+		g.emit("\t\tctx.EmitMakeNil(tmpPair)")
+		g.emit("\t} else {")
+		g.emit("\t\tptrWord, auxWord := %s.Imm.RawWords()", panicVal.goVar)
+		g.emit("\t\tctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))")
+		g.emit("\t\tctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)")
+		g.emit("\t}")
+		g.emit("\t%s = tmpPair", panicVal.goVar)
+		g.emit("} else if %s.Loc == LocReg {", panicVal.goVar)
+		g.emit("\ttmpPair := JITValueDesc{Loc: LocRegPair, Type: %s.Type, Reg: ctx.AllocRegExcept(%s.Reg), Reg2: ctx.AllocRegExcept(%s.Reg)}", panicVal.goVar, panicVal.goVar, panicVal.goVar)
+		g.emit("\tswitch %s.Type {", panicVal.goVar)
+		g.emit("\tcase tagBool:")
+		g.emit("\t\tctx.EmitMakeBool(tmpPair, %s)", panicVal.goVar)
+		g.emit("\tcase tagInt:")
+		g.emit("\t\tctx.EmitMakeInt(tmpPair, %s)", panicVal.goVar)
+		g.emit("\tcase tagFloat:")
+		g.emit("\t\tctx.EmitMakeFloat(tmpPair, %s)", panicVal.goVar)
+		g.emit("\tdefault:")
+		g.emit("\t\tpanic(\"jit: panic arg scalar type unknown for Scmer pair\")")
+		g.emit("\t}")
+		g.emit("\tctx.FreeDesc(&%s)", panicVal.goVar)
+		g.emit("\t%s = tmpPair", panicVal.goVar)
+		g.emit("}")
+		g.emit("if %s.Loc != LocRegPair && %s.Loc != LocStackPair {", panicVal.goVar, panicVal.goVar)
+		g.emit("\tpanic(\"jit: panic arg expects Scmer pair\")")
+		g.emit("}")
+		if g.storageMode {
+			g.emit("ctx.EmitGoCallVoid(GoFuncAddr(JITPanic), []JITValueDesc{%s})", panicVal.goVar)
+		} else {
+			g.emit("ctx.EmitGoCallVoid(GoFuncAddr(jitPanic), []JITValueDesc{%s})", panicVal.goVar)
+		}
 
 	case *ssa.Slice:
 		if g.storageMode {

@@ -796,6 +796,16 @@ func JITIntRem(a, b int64) int64 {
 	return a % b
 }
 
+// jitPanic forwards a JIT panic payload into Go panic handling.
+func jitPanic(v Scmer) {
+	panic(v)
+}
+
+// JITPanic forwards panic payloads from cross-package JIT emitters.
+func JITPanic(v Scmer) {
+	jitPanic(v)
+}
+
 // GoABIIntRegs lists integer argument/result registers in Go internal ABI order.
 var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, RegR10, RegR11}
 
