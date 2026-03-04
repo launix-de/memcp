@@ -36,6 +36,30 @@ Each Declaration may provide a JITEmit callback:
 This callback emits machine code for the operation. The contract between
 caller and emitter is as follows.
 
+Emiter rules
+-------------
+ - The emiter must be a recursive 1-pass compiler that continuously writes into the JIT buffer
+ - each emitter takes input args ([]JITValueDesc), result JITValueDesc with placement info for the result (e.g. store to stack, store into rax or "any" if we don't care) and returns a JITValueDesc with the actual result placement
+ - There following types of emitters exist:
+  * basic emitters (defined in scm/jit_[ARCH].go) that produce actual machine code like arithmetic, move or jump instructions
+  * hardcoded emiters for inlining Go-functions like IsString, String, NewString for extra speed and full semantics control
+  * generated emiters produced by tools/jitgen for inlining scm functions. Jitgen takes in a Go function via Go compiler, analyzes the SSA and produce go code that is patched into go files like scm/alu.go
+  * Scm JIT compiler which mimics the structure scm.Eval() function and produces a function call frame in order to turn a scm.Proc into func(...Scmer)Scmer
+ - Emiters use the JITContext to request free registers or write bytes into the JIT buffer
+ - All registers acquired by an emiter must be freed after leaving the emiter function
+ - Complex emiters can have BBs (basic blocks -> jump-free blocks with a [conditional] jump at the end)
+ - Only reachable BBs must be rendered -> if an "if" instruction has a constant condition, only render one additional BB
+ - Emiters are chainable (inline function calls): A complex emiter calls another emiter.
+ - BBs are not allowed to "return", only a jump to the last BB so emiters stay chainable
+ - Each BB is declared as a BBDescriptor on the stack of the emiter function
+ - the BB chain is started by firstbb.render(). Each bb render function can tail-call other bb render functions in order to "enqueue" them -> jumps tail-call ONE sucessor BB, conditional jumps tail-call up to TWO successor BBs, so we have a DFS traversal of all reachable BBs
+ - a BB can either be rendered as the general block (phi inputs are on stack) or a specialized block (phi inputs can be either on stack or overwritten with other JITValueDesc like immediate-values or type-annotated)
+ - general BBs must be rendered at-most once, if the BB already exists, jump to it instead
+ - specialized (non-gerneral) BBs can be rendered more than once but must be limited (e.g. 2 instances at most). If the limit is exceeded, the general block must be used instead.
+ - specialized BBs can be used if some of the phi inputs are known-typed (tag != unknown) or even constant (locImm) to enable loop unrolling with specialized values (e.g. index 0 -> reads from args[0] -> args[0] is constant)
+ - a BB render function calls the arch-specific instruction emitters that write into the JIT buffer aswell as other emitters to inline the functions
+ - each
+
 Input arguments (args):
 
   Each args[i] describes where the i-th operand lives at the point of the
