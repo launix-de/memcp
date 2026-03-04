@@ -254,7 +254,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* Test for int? (requires int64-producing builtin like size/now) */
 	(assert (int? (size "abc")) true "size returns an int")
-	(assert (int? 42) false "literal 42 is not an int (parsed as number)")
+	(assert (int? 42) true "literal 42 is parsed as int")
+	(assert (int? 42.0) false "literal 42.0 is parsed as float")
 
 	/* Test for + */
 	(assert (+ 1 2) 3 "1 + 2 should be 3")
@@ -869,6 +870,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* Two parameters */
 	(assert ((jit (lambda (a b) (+ a b))) 3 4) 7 "jit: a + b")
+	(assert ((jit (lambda (a b c) (+ a b c))) (strlen "a") (strlen "bb") (strlen "ccc")) 6 "jit: a + b + c (3 args int path)")
+	(assert (int? ((jit (lambda (a b c) (+ a b c))) (strlen "a") (strlen "bb") (strlen "ccc"))) true "jit: 3-arg + stays int")
+	(assert ((jit (lambda (a b c d e) (+ a b c d e))) (strlen "a") (strlen "bb") (strlen "ccc") (strlen "dddd") (strlen "eeeee")) 15 "jit: a + b + c + d + e (5 args int path)")
+	(assert (int? ((jit (lambda (a b c d e) (+ a b c d e))) (strlen "a") (strlen "bb") (strlen "ccc") (strlen "dddd") (strlen "eeeee"))) true "jit: 5-arg + stays int")
+	(assert ((jit (lambda (x) (+ (strlen "ab") x))) (strlen "abc")) 5 "jit: 2 + x int source fast path")
+	(assert (int? ((jit (lambda (x) (+ (strlen "ab") x))) (strlen "abc"))) true "jit: 2 + x result stays int")
 	(assert ((jit (lambda (a b) (* a b))) 3 4) 12 "jit: a * b")
 	(assert ((jit (lambda (a b) (- a b))) 10 3) 7 "jit: a - b")
 
