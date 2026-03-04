@@ -21,10 +21,13 @@ package scm
 import (
 	"fmt"
 	"math"
+	"syscall"
 	"unsafe"
 )
 
 // TODO: create this file for other architectures, too
+
+var jitCodeOverflowPanic = &struct{}{}
 
 // jitCompileProc compiles a Proc body to amd64 machine code or returns nil.
 func jitCompileProc(proc *Proc) []byte {
@@ -35,33 +38,51 @@ func jitCompileProc(proc *Proc) []byte {
 // jitCompileProcWithRoots compiles a Proc body to amd64 machine code and
 // returns GC roots for pointer constants embedded into immediates.
 func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
+	const defaultCodeBufSize = 16 * 1024
+	buf, err := allocExec(defaultCodeBufSize)
+	if err != nil {
+		return nil, nil
+	}
+	defer syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
+	codeLen, roots, _ := jitCompileProcToExec(proc, buf)
+	if codeLen == 0 {
+		return nil, nil
+	}
+	code := make([]byte, codeLen)
+	copy(code, (*[1 << 30]byte)(buf.ptr)[:codeLen:codeLen])
+	return code, roots
+}
+
+// jitCompileProcToExec compiles a Proc body directly into writable executable memory.
+// Returns code length, GC roots and an overflow flag.
+func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		body = body.SourceInfo().value
 	}
-	return jitCompileExprBody(proc, body, proc.NumVars)
+	return jitCompileExprBodyToExec(proc, body, proc.NumVars, buf)
 }
 
-// jitCompileExprBody compiles a Scheme expression body to machine code
-// using Declaration.JITEmit callbacks. Returns nil if any sub-expression
-// is not JIT-compilable.
-func jitCompileExprBody(proc *Proc, body Scmer, numVars int) (code []byte, roots []unsafe.Pointer) {
+// jitCompileExprBodyToExec compiles a Scheme expression body into a writable
+// executable buffer using Declaration.JITEmit callbacks.
+func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf) (codeLen int, roots []unsafe.Pointer, overflow bool) {
 	defer func() {
 		if r := recover(); r != nil {
+			if r == jitCodeOverflowPanic {
+				overflow = true
+			}
 			if JITLog {
 				fmt.Println("JIT panic", r)
 			}
-			code = nil
+			codeLen = 0
 			roots = nil
 		}
 	}()
 
-	// Allocate temp buffer for code emission
-	codeBuf := make([]byte, 16384)
 	w := &JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
+		Ptr:   buf.ptr,
+		Start: buf.ptr,
+		End:   unsafe.Add(buf.ptr, buf.n),
 	}
 
 	// Free registers: all GPRs except RAX (result ptr), RBX (result aux),
@@ -107,7 +128,17 @@ func jitCompileExprBody(proc *Proc, body Scmer, numVars int) (code []byte, roots
 	// Map lambda parameters to local stack slots so symbol lookup remains correct
 	// even when the optimizer did not rewrite body symbols to NthLocalVar.
 	if proc != nil {
-		vars := make(map[Symbol]JITValueDesc, numVars)
+		var vars map[Symbol]JITValueDesc
+		putVar := func(sym Symbol, off int32) {
+			if vars == nil {
+				vars = make(map[Symbol]JITValueDesc, numVars)
+			}
+			vars[sym] = JITValueDesc{
+				Loc:      LocStackPair,
+				Type:     JITTypeUnknown,
+				StackOff: off,
+			}
+		}
 		switch proc.Params.GetTag() {
 		case tagSlice:
 			params := proc.Params.Slice()
@@ -115,19 +146,11 @@ func jitCompileExprBody(proc *Proc, body Scmer, numVars int) (code []byte, roots
 				if params[i].GetTag() != tagSymbol {
 					continue
 				}
-				vars[params[i].Symbol()] = JITValueDesc{
-					Loc:      LocStackPair,
-					Type:     JITTypeUnknown,
-					StackOff: int32(i * 16),
-				}
+				putVar(params[i].Symbol(), int32(i*16))
 			}
 		case tagSymbol:
 			if numVars > 0 {
-				vars[proc.Params.Symbol()] = JITValueDesc{
-					Loc:      LocStackPair,
-					Type:     JITTypeUnknown,
-					StackOff: 0,
-				}
+				putVar(proc.Params.Symbol(), 0)
 			}
 		}
 		if len(vars) > 0 {
@@ -151,7 +174,7 @@ func jitCompileExprBody(proc *Proc, body Scmer, numVars int) (code []byte, roots
 		case tagNil:
 			w.EmitMakeNil(result)
 		default:
-			return nil, nil
+			return 0, nil, false
 		}
 		if frameBytes > 0 {
 			w.EmitAddRSP32(int32(frameBytes))
@@ -178,10 +201,10 @@ func jitCompileExprBody(proc *Proc, body Scmer, numVars int) (code []byte, roots
 			case tagFloat:
 				w.EmitMakeFloat(ret, desc)
 			default:
-				return nil, nil
+				return 0, nil, false
 			}
 		default:
-			return nil, nil
+			return 0, nil, false
 		}
 		if frameBytes > 0 {
 			w.EmitAddRSP32(int32(frameBytes))
@@ -190,8 +213,8 @@ func jitCompileExprBody(proc *Proc, body Scmer, numVars int) (code []byte, roots
 	}
 
 	w.ResolveFixupsFinal()
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
-	return codeBuf[:codeLen], ctx.ConstRoots
+	codeLen = int(uintptr(w.Ptr) - uintptr(w.Start))
+	return codeLen, ctx.ConstRoots, false
 }
 
 func jitEnsureResultPair(ctx *JITContext, result JITValueDesc) JITValueDesc {
@@ -369,27 +392,6 @@ func jitBuildIfTail(tail []Scmer) Scmer {
 	return NewSlice(parts)
 }
 
-func jitChildContext(parent *JITContext) *JITContext {
-	return &JITContext{
-		Env:         parent.Env,
-		FreeRegs:    parent.FreeRegs,
-		AllRegs:     parent.AllRegs,
-		W:           parent.W,
-		StackOffset: parent.StackOffset,
-		SliceBase:   parent.SliceBase,
-		ConstRoots:  parent.ConstRoots,
-		rootSet:     parent.rootSet,
-	}
-}
-
-func jitMergeChildRoots(parent *JITContext, child *JITContext) {
-	if child == nil {
-		return
-	}
-	parent.ConstRoots = child.ConstRoots
-	parent.rootSet = child.rootSet
-}
-
 // jitEmitCondJump emits branch code equivalent to Eval(...).Bool():
 // jumps to trueLbl when expr is truthy, otherwise to falseLbl.
 // It short-circuits nested (and ...)/(or ...)/(if ...) directly without
@@ -470,7 +472,7 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 // jitCompileExpr recursively compiles a Scheme expression to machine code.
 // sliceBase is the GPR holding the variadic args slice pointer.
 // result tells the emitter where to place the output.
-// Panics on unsupported expressions (caught by jitCompileExprBody).
+// Panics on unsupported expressions (caught by jitCompileExprBodyToExec).
 func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	if expr.GetTag() == tagSourceInfo {
 		expr = expr.SourceInfo().value
@@ -970,13 +972,21 @@ const (
 )
 
 // emitByte appends a single byte to the writer.
+func (w *JITWriter) ensureSpace(n uintptr) {
+	if uintptr(w.Ptr)+n > uintptr(w.End) {
+		panic(jitCodeOverflowPanic)
+	}
+}
+
 func (w *JITWriter) emitByte(b byte) {
+	w.ensureSpace(1)
 	*(*byte)(w.Ptr) = b
 	w.Ptr = unsafe.Add(w.Ptr, 1)
 }
 
 // emitBytes appends raw bytes to the writer.
 func (w *JITWriter) emitBytes(bs ...byte) {
+	w.ensureSpace(uintptr(len(bs)))
 	for _, b := range bs {
 		*(*byte)(w.Ptr) = b
 		w.Ptr = unsafe.Add(w.Ptr, 1)
@@ -985,14 +995,32 @@ func (w *JITWriter) emitBytes(bs ...byte) {
 
 // emitU32 appends a little-endian uint32.
 func (w *JITWriter) emitU32(v uint32) {
+	w.ensureSpace(4)
 	*(*uint32)(w.Ptr) = v
 	w.Ptr = unsafe.Add(w.Ptr, 4)
 }
 
 // emitU64 appends a little-endian uint64.
 func (w *JITWriter) emitU64(v uint64) {
+	w.ensureSpace(8)
 	*(*uint64)(w.Ptr) = v
 	w.Ptr = unsafe.Add(w.Ptr, 8)
+}
+
+func (ctx *JITContext) emitByte(b byte) {
+	ctx.W.emitByte(b)
+}
+
+func (ctx *JITContext) emitBytes(bs ...byte) {
+	ctx.W.emitBytes(bs...)
+}
+
+func (ctx *JITContext) emitU32(v uint32) {
+	ctx.W.emitU32(v)
+}
+
+func (ctx *JITContext) emitU64(v uint64) {
+	ctx.W.emitU64(v)
 }
 
 // --- Return emitters ---
@@ -2263,7 +2291,8 @@ func (w *JITWriter) EmitAddRSP(n uint8) {
 // EmitSubRSP32Fixup emits SUB RSP, imm32 with a zero placeholder and returns
 // a pointer to the 4-byte immediate so it can be patched later via PatchInt32.
 func (w *JITWriter) EmitSubRSP32Fixup() unsafe.Pointer {
-	w.emitBytes(0x48, 0x81, 0xEC, 0x00, 0x00, 0x00, 0x00)
+	w.emitBytes(0x48, 0x81, 0xEC)
+	w.emitU32(0)
 	return unsafe.Add(w.Ptr, -4)
 }
 
@@ -2275,9 +2304,7 @@ func (w *JITWriter) PatchInt32(pos unsafe.Pointer, val int32) {
 // EmitAddRSP32 emits ADD RSP, imm32.
 func (w *JITWriter) EmitAddRSP32(val int32) {
 	w.emitBytes(0x48, 0x81, 0xC4)
-	p := w.Ptr
-	*(*int32)(p) = val
-	w.Ptr = unsafe.Add(p, 4)
+	w.emitU32(uint32(val))
 }
 
 // EmitStoreToStack stores a JITValueDesc value to a stack slot at [RSP+disp].

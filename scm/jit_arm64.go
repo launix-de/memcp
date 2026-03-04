@@ -1,7 +1,7 @@
 //go:build arm64
 
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -55,6 +55,11 @@ func jitCompileProc(proc *Proc) []byte {
 // jitCompileProcWithRoots is a stub for arm64 — native compilation not yet implemented.
 func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	return nil, nil
+}
+
+// jitCompileProcToExec is a stub for arm64 — native compilation not yet implemented.
+func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool) {
+	return 0, nil, false
 }
 
 /* TODO: peephole optimizer:
