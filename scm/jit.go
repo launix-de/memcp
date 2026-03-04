@@ -71,11 +71,14 @@ Input arguments (args):
   - LocReg:     unboxed primitive in args[i].Reg.
   - LocRegPair: boxed Scmer in args[i].Reg (ptr) + args[i].Reg2 (aux).
   - LocStack:   value on the stack at args[i].StackOff.
+  - LocStackPair:
+                two-word value at args[i].StackOff / args[i].StackOff+8
+                (or spill-backed via MemPtr when applicable).
   - LocMem:     value at fixed memory address args[i].MemPtr.
 
   The emitter takes ownership of input registers: it MUST call
   ctx.FreeDesc(&args[i]) for every register-located input it consumes.
-  Inputs in LocImm/LocStack/LocMem need no freeing.
+  Inputs in LocImm/LocStack/LocStackPair/LocMem need no freeing.
 
 Result placement (result):
 
@@ -87,6 +90,9 @@ Result placement (result):
   - LocReg:     result MUST be placed into result.Reg.
   - LocRegPair: result MUST be placed into result.Reg + result.Reg2.
   - LocStack:   result MUST be written to result.StackOff.
+  - LocStackPair:
+                result MUST be written as two words starting at
+                result.StackOff (or spill-backed MemPtr location).
   - LocMem:     result MUST be written to result.MemPtr.
 
   The emitter returns a JITValueDesc describing where the result actually
