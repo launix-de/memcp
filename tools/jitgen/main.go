@@ -2573,18 +2573,18 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 							// Legacy LocImm slice path stores length in StackOff.
 							g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(%s.StackOff))}", dv, src.goVar)
 						}
-							g.emit("} else {")
-							g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
-							g.emit("\tif %s.Loc == LocRegPair {", src.goVar)
-							g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, src.goVar)
-							g.emit("\t\tctx.BindReg(%s.Reg2, &%s)", src.goVar, dv)
-							g.emit("\t} else if %s.Loc == LocReg {", src.goVar)
-							g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, src.goVar)
-							g.emit("\t\tctx.BindReg(%s.Reg, &%s)", src.goVar, dv)
-							g.emit("\t} else {")
-							g.emit("\t\tpanic(\"len on unsupported descriptor location\")")
-							g.emit("\t}")
-							g.emit("}")
+						g.emit("} else {")
+						g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
+						g.emit("\tif %s.Loc == LocRegPair {", src.goVar)
+						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, src.goVar)
+						g.emit("\t\tctx.BindReg(%s.Reg2, &%s)", src.goVar, dv)
+						g.emit("\t} else if %s.Loc == LocReg {", src.goVar)
+						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, src.goVar)
+						g.emit("\t\tctx.BindReg(%s.Reg, &%s)", src.goVar, dv)
+						g.emit("\t} else {")
+						g.emit("\t\tpanic(\"len on unsupported descriptor location\")")
+						g.emit("\t}")
+						g.emit("}")
 						g.vals[name] = genVal{goVar: dv, isDesc: true}
 					} else {
 						panic(fmt.Sprintf("len on non-parameter: %s", v))
@@ -2785,16 +2785,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.BindReg(%s.Reg, &%s)", dv, dv)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
-			case "String":
-				// (Scmer).String() string — extract Go string from Scmer
-				// arg: Scmer (2 words), result: Go string (2 words: ptr+len)
-				arg := g.vals[v.Call.Args[0].Name()]
-				dv := g.allocDesc()
-				g.emit("if %s.Loc != LocImm && %s.Type == JITTypeUnknown {", arg.goVar, arg.goVar)
-				g.emit("\tpanic(\"jit: Scmer.String on unknown dynamic type\")")
-				g.emit("}")
-				g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{%s}, 2)", dv, arg.goVar)
-				g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring"}
+		case "String":
+			// (Scmer).String() string — extract Go string from Scmer
+			// arg: Scmer (2 words), result: Go string (2 words: ptr+len)
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("if %s.Loc != LocImm && %s.Type == JITTypeUnknown {", arg.goVar, arg.goVar)
+			g.emit("\tpanic(\"jit: Scmer.String on unknown dynamic type\")")
+			g.emit("}")
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{%s}, 2)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring"}
 		case "NewBool":
 			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
@@ -3949,18 +3949,21 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// SSA-constant condition: emit only taken edge and enqueue exactly one BB.
 		if c, ok := v.Cond.(*ssa.Const); ok && c.Value != nil && c.Value.Kind() == constant.Bool {
 			takenBB := elseBB
+			takenSuccPos := 1
 			if constant.BoolVal(c.Value) {
 				takenBB = thenBB
+				takenSuccPos = 0
 			}
 			_ = g.ensureBBLabel(takenBB)
-			if takenBB == thenBB {
-				g.emitEdgePhiMoves(takenBB, 0)
+			g.emitEdgePhiMoves(takenBB, takenSuccPos)
+			// Phase 2 pruning: only render the reachable branch.
+			// If the target BB is not rendered yet, enqueue it next and fall through
+			// without emitting an unconditional jump.
+			// For already-rendered targets (backedge/cross-edge), emit a direct jump.
+			if g.bbDone[g.scopedBBID(takenBB)] {
+				lbl := g.ensureBBLabel(takenBB)
+				g.emit("ctx.W.EmitJmp(%s)", lbl)
 			} else {
-				g.emitEdgePhiMoves(takenBB, 1)
-			}
-			lbl := g.ensureBBLabel(takenBB)
-			g.emit("ctx.W.EmitJmp(%s)", lbl)
-			if !g.bbDone[g.scopedBBID(takenBB)] {
 				g.enqueueBBFront(takenBB)
 			}
 			break
@@ -4015,9 +4018,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		targetBB := v.Block().Succs[0].Index
 		_ = g.ensureBBLabel(targetBB)
 		g.emitEdgePhiMoves(targetBB, 0)
-		lbl := g.ensureBBLabel(targetBB)
-		g.emit("ctx.W.EmitJmp(%s)", lbl)
-		if !g.bbDone[g.scopedBBID(targetBB)] {
+		// Phase 2 pruning: for forward/unrendered targets, render target next and
+		// fall through without emitting an unconditional jump.
+		// If target is already rendered (backedge/cross-edge), emit a direct jump.
+		if g.bbDone[g.scopedBBID(targetBB)] {
+			lbl := g.ensureBBLabel(targetBB)
+			g.emit("ctx.W.EmitJmp(%s)", lbl)
+		} else {
 			g.enqueueBBFront(targetBB)
 		}
 
