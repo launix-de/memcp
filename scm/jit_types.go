@@ -151,6 +151,16 @@ type JITFixup struct {
 	Relative bool  // true for PC-relative jumps
 }
 
+// PhiState carries incoming phi overlays for recursive BB renderers.
+// General=true means canonical BB emission mode (stack-backed phis / relocatable label target).
+// General=false allows specialized overlays for bounded unrolling.
+type PhiState struct {
+	General            bool
+	OverlayValues      []JITValueDesc
+	PhiValues          []JITValueDesc
+	SpecializationHash uint64
+}
+
 // JITEnv manages variable descriptors during JIT compilation (like Env
 // but for compile-time tracking of types and locations).
 type JITEnv struct {
@@ -196,6 +206,9 @@ type JITContext struct {
 	W           *JITWriter
 	StackOffset int32
 	SliceBase   Reg // register holding the args slice pointer (for variable-index access)
+	// SliceBaseTracksRSP indicates that SliceBase is a mirror of RSP and must be
+	// refreshed after helper calls (Go may grow/move the goroutine stack).
+	SliceBaseTracksRSP bool
 	// Register spilling: when all registers are occupied, we save the
 	// register to a pre-allocated spill buffer (not the stack).
 	// This avoids modifying RSP, which would break phi stack offsets.
@@ -225,16 +238,77 @@ type JITContext struct {
 	rootSet    map[unsafe.Pointer]struct{}
 }
 
+// jitAllocStateSnapshot captures allocator/spill bookkeeping so emitter
+// generation can render sibling BBs from identical allocator state.
+type jitAllocStateSnapshot struct {
+	freeRegs           uint64
+	protectedRegs      uint64
+	protectedRegCounts [16]int
+	regOwners          [16]*JITValueDesc
+	spillStack         [16]spillEntry
+	spillStackLen      int
+	spillTop           int
+	spillFreeArr       [16]int
+	spillFreeLen       int
+	descSpills         map[uint32]descSpillMeta
+}
+
+func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
+	s := jitAllocStateSnapshot{
+		freeRegs:           ctx.FreeRegs,
+		protectedRegs:      ctx.ProtectedRegs,
+		protectedRegCounts: ctx.ProtectedRegCounts,
+		regOwners:          ctx.RegOwners,
+		spillStack:         ctx.spillStack,
+		spillStackLen:      ctx.spillStackLen,
+		spillTop:           ctx.SpillTop,
+		spillFreeArr:       ctx.spillFreeArr,
+		spillFreeLen:       ctx.spillFreeLen,
+	}
+	if len(ctx.descSpills) != 0 {
+		s.descSpills = make(map[uint32]descSpillMeta, len(ctx.descSpills))
+		for k, v := range ctx.descSpills {
+			s.descSpills[k] = v
+		}
+	}
+	return s
+}
+
+func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
+	ctx.FreeRegs = s.freeRegs
+	ctx.ProtectedRegs = s.protectedRegs
+	ctx.ProtectedRegCounts = s.protectedRegCounts
+	ctx.RegOwners = s.regOwners
+	ctx.spillStack = s.spillStack
+	ctx.spillStackLen = s.spillStackLen
+	ctx.SpillTop = s.spillTop
+	ctx.spillFreeArr = s.spillFreeArr
+	ctx.spillFreeLen = s.spillFreeLen
+	if s.descSpills == nil {
+		ctx.descSpills = nil
+	} else {
+		ctx.descSpills = make(map[uint32]descSpillMeta, len(s.descSpills))
+		for k, v := range s.descSpills {
+			ctx.descSpills[k] = v
+		}
+	}
+}
+
 // BBDescriptor stores per-basic-block emitter state.
 // Phase 1 starts with single-block closure usage; relocation fields are
 // prepared for follow-up BB-descriptor-based control-flow lowering.
 type BBDescriptor struct {
-	Render   func() JITValueDesc
+	// Render is kept for compatibility with older generated emitters.
+	Render func() JITValueDesc
+	// RenderPS is the PhiState-aware recursive BB renderer.
+	RenderPS func(ps PhiState) JITValueDesc
 	Rendered bool
 	Address  int32
 	Pending  []JITFixup
-	// RenderCount tracks how often this BB descriptor has been entered.
-	// Unroll/specialization limits must be derived from this per-BB state.
+	// VisitCount tracks how often this BB descriptor has been entered.
+	// Unroll/specialization limits are derived from this per-BB state.
+	VisitCount uint16
+	// RenderCount is kept for compatibility with older generated emitters.
 	RenderCount uint16
 }
 
@@ -279,6 +353,17 @@ func (ctx *JITContext) UnprotectReg(r Reg) {
 			ctx.ProtectedRegs &^= 1 << uint(r)
 		}
 	}
+}
+
+// ReclaimUntrackedRegs marks allocatable registers as free when they have no
+// tracked owner descriptor. This is used at BB boundaries in closure emitters
+// to prevent stale temporary allocations from exhausting the allocator.
+func (ctx *JITContext) ReclaimUntrackedRegs() {
+	// TODO: temporary conservative mode while auditing overlay-owner consistency.
+	// Reclaiming ownerless registers at BB boundaries is only safe when every
+	// live overlay descriptor has been rebound in RegOwners. Until that
+	// invariant is enforced everywhere, avoid aggressive reclamation to prevent
+	// live-value clobbering across specialized/general BB transitions.
 }
 
 // AllocReg picks a free register from the bitmap and marks it used.
@@ -863,6 +948,9 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	if len(liveRegs) == 0 {
 		emitArgSetup(0)
 		ctx.W.EmitCallIndirect(funcAddr)
+		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+			ctx.W.emitMovRegReg(ctx.SliceBase, RegRSP)
+		}
 		for i := 0; i < numResultWords; i++ {
 			r := ctx.AllocReg()
 			if r != GoABIIntRegs[i] {
@@ -930,6 +1018,9 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		ctx.W.EmitPopReg(r)
 		resultsBuf[i] = r
 	}
+	if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+		ctx.W.emitMovRegReg(ctx.SliceBase, RegRSP)
+	}
 	return resultsBuf[:numResultWords]
 }
 
@@ -949,15 +1040,45 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
 			n++
 		case LocStack:
-			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: a.StackOff}
+			off := a.StackOff
+			if a.MemPtr != 0 {
+				// MemPtr-backed values already point at the concrete spill slot.
+				// StackOff is a logical slot id there, not an additional byte offset.
+				off = 0
+			}
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: off}
 			n++
 		case LocStackPair:
-			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: a.StackOff}
+			off0 := a.StackOff
+			off1 := a.StackOff + 8
+			if a.MemPtr != 0 {
+				// MemPtr-backed pair points to element 0 directly.
+				off0 = 0
+				off1 = 8
+			}
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: off0}
 			n++
-			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: a.StackOff + 8}
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: off1}
 			n++
 		case LocImm:
-			buf[n] = goCallArgWord{loc: LocImm, imm: uint64(a.Imm.Int())}
+			var immWord uint64
+			switch a.Type {
+			case tagInt:
+				immWord = uint64(a.Imm.Int())
+			case tagBool:
+				if a.Imm.Bool() {
+					immWord = 1
+				} else {
+					immWord = 0
+				}
+			case tagFloat:
+				immWord = math.Float64bits(a.Imm.Float())
+			case tagNil:
+				immWord = 0
+			default:
+				panic(fmt.Sprintf("jit: LocImm scalar Go-call arg requires explicit materialization (type=%d, tag=%d)", a.Type, a.Imm.GetTag()))
+			}
+			buf[n] = goCallArgWord{loc: LocImm, imm: immWord}
 			n++
 		case LocNone:
 			buf[n] = goCallArgWord{loc: LocImm, imm: 0}
