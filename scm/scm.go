@@ -411,18 +411,34 @@ restart:
 				env, body := prepareProcCall(&jep.Proc, operands, en)
 				return Eval(body, env)
 			}
-			if n := len(operands); n <= 4 {
-				var buf [4]Scmer
-				for i := 0; i < n; i++ {
-					buf[i] = Eval(operands[i], en)
+			switch len(operands) {
+			case 0:
+				return jep.Native()
+			case 1:
+				a0 := Eval(operands[0], en)
+				return jep.Native(a0)
+			case 2:
+				a0 := Eval(operands[0], en)
+				a1 := Eval(operands[1], en)
+				return jep.Native(a0, a1)
+			case 3:
+				a0 := Eval(operands[0], en)
+				a1 := Eval(operands[1], en)
+				a2 := Eval(operands[2], en)
+				return jep.Native(a0, a1, a2)
+			case 4:
+				a0 := Eval(operands[0], en)
+				a1 := Eval(operands[1], en)
+				a2 := Eval(operands[2], en)
+				a3 := Eval(operands[3], en)
+				return jep.Native(a0, a1, a2, a3)
+			default:
+				args := make([]Scmer, len(operands))
+				for i, x := range operands {
+					args[i] = Eval(x, en)
 				}
-				return jep.Native(buf[:n]...)
+				return jep.Native(args...)
 			}
-			args := make([]Scmer, len(operands))
-			for i, x := range operands {
-				args[i] = Eval(x, en)
-			}
-			return jep.Native(args...)
 		default:
 			panic("Unknown function: " + list[0].String())
 		}
@@ -604,7 +620,20 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 	case tagJIT:
 		jep := procedure.JIT()
 		if jep.Native != nil {
-			return jep.Native(args...)
+			switch len(args) {
+			case 0:
+				return jep.Native()
+			case 1:
+				return jep.Native(args[0])
+			case 2:
+				return jep.Native(args[0], args[1])
+			case 3:
+				return jep.Native(args[0], args[1], args[2])
+			case 4:
+				return jep.Native(args[0], args[1], args[2], args[3])
+			default:
+				return jep.Native(args...)
+			}
 		}
 		env, body := prepareProcCallWithArgs(&jep.Proc, args)
 		return Eval(body, env)
@@ -769,7 +798,7 @@ func init() {
 		}, "any", func(a ...Scmer) Scmer {
 			return Optimize(a[0], &Globalenv)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
 	})
 	Declare(&Globalenv, &Declaration{
 		"time", "measures the time it takes to compute the first argument",
@@ -859,7 +888,7 @@ func init() {
 				panic(b.String())
 			}
 		}, false, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &b.addr [#0] */, /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &b.addr [#0] */, /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
@@ -878,7 +907,7 @@ func init() {
 			result = Apply(a[0])
 			return
 		}, true, false, nil,
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply", "runs the function with its arguments",
@@ -890,7 +919,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return Apply(a[0], asSlice(a[1], "apply")...)
 		}, true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
@@ -902,7 +931,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
 		}, true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
@@ -988,7 +1017,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("for_mut")},
-		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
+		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"for_mut", "in-place for loop (optimizer-only, skips defensive state copy)",
@@ -1012,7 +1041,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
@@ -1115,7 +1144,7 @@ Patterns can be any of:
 				a[3],
 			})
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.source [#0] */, /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &t0.source [#0] */, /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"scheme", "parses a scheme expression into a list",
@@ -1257,7 +1286,7 @@ Patterns can be any of:
 		func(a ...Scmer) Scmer {
 			return NewString(SerializeToString(a[0], &Globalenv))
 		}, false, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
 	})
 
 	init_alu()

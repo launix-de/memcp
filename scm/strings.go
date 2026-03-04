@@ -1020,8 +1020,8 @@ func init_strings() {
 			ctx.EmitStoreToStack(d36, 8)
 			ctx.W.EmitJmp(lbl19)
 			ctx.W.MarkLabel(lbl23)
-			d13 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d32 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d13 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d13)
 			ctx.EnsureDesc(&d32)
 			ctx.EnsureDesc(&d13)

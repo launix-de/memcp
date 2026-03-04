@@ -1350,7 +1350,6 @@ func init_list() {
 			if d18.Loc == LocNone { panic("jit: phi source has no location") }
 			ctx.EnsureDesc(&d18)
 			ctx.EmitStoreToStack(d18, 8)
-			ctx.W.EmitJmp(lbl14)
 			ctx.W.MarkLabel(lbl14)
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d19 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
@@ -1397,8 +1396,8 @@ func init_list() {
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl11)
-			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d23 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
 			d24 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d23}, 1)
 			d25 := d24
@@ -1476,7 +1475,6 @@ func init_list() {
 			ctx.FreeDesc(&d30)
 			lbl15 := ctx.W.ReserveLabel()
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 16)
-			ctx.W.EmitJmp(lbl15)
 			ctx.W.MarkLabel(lbl15)
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}

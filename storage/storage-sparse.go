@@ -187,7 +187,6 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.W.EmitShrRegImm8(d3.Reg, 32)
 			}
 			ctx.EmitStoreToStack(d3, 8)
-			ctx.W.EmitJmp(lbl2)
 			ctx.W.MarkLabel(lbl2)
 			d4 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d5 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
@@ -1158,8 +1157,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.W.EmitJmp(lbl17)
 			ctx.FreeDesc(&d50)
 			ctx.W.MarkLabel(lbl3)
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			d52 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r1, Reg2: r2}
 			ctx.BindReg(r1, &d52)
 			ctx.BindReg(r2, &d52)
@@ -1244,8 +1243,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.W.EmitJmp(lbl21)
 			ctx.FreeDesc(&d54)
 			ctx.W.MarkLabel(lbl16)
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
 			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(8)}
 			var d56 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSparse)(nil).values)
