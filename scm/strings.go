@@ -177,7 +177,7 @@ func init_strings() {
 			}
 			return NewString(sb.String())
 		}, true, false, nil,
-		nil /* TODO: ChangeType: changetype Symbol <- string (t25) */, /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */
+		nil /* TODO: ChangeType: changetype Symbol <- string (t25) */, /* TODO: ChangeType: changetype Symbol <- string (t25) */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */ /* TODO: unsupported compare const kind: 0:float64 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"substr", "returns a substring (0-based index)",
@@ -212,8 +212,39 @@ func init_strings() {
 			d2 := args[1]
 			ctx.EnsureDesc(&d2)
 			ctx.EnsureDesc(&d2)
+			if d2.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d2.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d2.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d2 = tmpPair
+			} else if d2.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocRegExcept(d2.Reg), Reg2: ctx.AllocRegExcept(d2.Reg)}
+				switch d2.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d2)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d2)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d2)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d2)
+				d2 = tmpPair
+			}
 			if d2.Loc != LocRegPair && d2.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d2}, 1)
 			ctx.FreeDesc(&d2)
@@ -334,8 +365,39 @@ func init_strings() {
 			d13 := args[2]
 			ctx.EnsureDesc(&d13)
 			ctx.EnsureDesc(&d13)
+			if d13.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d13.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d13.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d13)
+				} else if d13.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d13)
+				} else if d13.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d13)
+				} else if d13.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d13.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d13 = tmpPair
+			} else if d13.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d13.Type, Reg: ctx.AllocRegExcept(d13.Reg), Reg2: ctx.AllocRegExcept(d13.Reg)}
+				switch d13.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d13)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d13)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d13)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d13)
+				d13 = tmpPair
+			}
 			if d13.Loc != LocRegPair && d13.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d14 := ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d13}, 1)
 			ctx.FreeDesc(&d13)
@@ -557,8 +619,39 @@ func init_strings() {
 			d7 := args[1]
 			ctx.EnsureDesc(&d7)
 			ctx.EnsureDesc(&d7)
+			if d7.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d7.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d7.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d7)
+				} else if d7.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d7)
+				} else if d7.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d7)
+				} else if d7.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d7.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d7 = tmpPair
+			} else if d7.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d7.Type, Reg: ctx.AllocRegExcept(d7.Reg), Reg2: ctx.AllocRegExcept(d7.Reg)}
+				switch d7.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d7)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d7)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d7)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d7)
+				d7 = tmpPair
+			}
 			if d7.Loc != LocRegPair && d7.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d8 := ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d7}, 1)
 			ctx.FreeDesc(&d7)
@@ -815,8 +908,39 @@ func init_strings() {
 			d26 := args[2]
 			ctx.EnsureDesc(&d26)
 			ctx.EnsureDesc(&d26)
+			if d26.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d26.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d26.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d26)
+				} else if d26.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d26)
+				} else if d26.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d26)
+				} else if d26.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d26.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d26 = tmpPair
+			} else if d26.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d26.Type, Reg: ctx.AllocRegExcept(d26.Reg), Reg2: ctx.AllocRegExcept(d26.Reg)}
+				switch d26.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d26)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d26)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d26)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d26)
+				d26 = tmpPair
+			}
 			if d26.Loc != LocRegPair && d26.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d27 := ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d26}, 1)
 			ctx.FreeDesc(&d26)
@@ -1020,8 +1144,8 @@ func init_strings() {
 			ctx.EmitStoreToStack(d36, 8)
 			ctx.W.EmitJmp(lbl19)
 			ctx.W.MarkLabel(lbl23)
-			d32 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d13 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d32 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			ctx.EnsureDesc(&d13)
 			ctx.EnsureDesc(&d32)
 			ctx.EnsureDesc(&d13)
@@ -1175,8 +1299,39 @@ func init_strings() {
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (Simplify arg0)")
 			}
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(Simplify), []JITValueDesc{d1}, 2)
 			ctx.W.ResolveFixups()
@@ -1346,13 +1501,75 @@ func init_strings() {
 			d7 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d7)
 			ctx.EnsureDesc(&d7)
+			if d7.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d7.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d7.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d7)
+				} else if d7.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d7)
+				} else if d7.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d7)
+				} else if d7.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d7.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d7 = tmpPair
+			} else if d7.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d7.Type, Reg: ctx.AllocRegExcept(d7.Reg), Reg2: ctx.AllocRegExcept(d7.Reg)}
+				switch d7.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d7)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d7)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d7)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d7)
+				d7 = tmpPair
+			}
 			if d7.Loc != LocRegPair && d7.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.Contains arg0)")
 			}
 			d8 := JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("_ci")}
 			ctx.EnsureDesc(&d8)
+			if d8.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d8.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d8.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d8)
+				} else if d8.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d8)
+				} else if d8.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d8)
+				} else if d8.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d8.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d8 = tmpPair
+			} else if d8.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d8.Type, Reg: ctx.AllocRegExcept(d8.Reg), Reg2: ctx.AllocRegExcept(d8.Reg)}
+				switch d8.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d8)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d8)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d8)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d8)
+				d8 = tmpPair
+			}
 			if d8.Loc != LocRegPair && d8.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.Contains arg1)")
 			}
 			d9 := ctx.EmitGoCallScalar(GoFuncAddr(strings.Contains), []JITValueDesc{d7, d8}, 1)
 			ctx.FreeDesc(&d7)
@@ -1409,8 +1626,39 @@ func init_strings() {
 			ctx.FreeDesc(&d13)
 			ctx.EnsureDesc(&d14)
 			ctx.EnsureDesc(&d14)
+			if d14.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d14.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d14.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d14)
+				} else if d14.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d14)
+				} else if d14.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d14)
+				} else if d14.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d14.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d14 = tmpPair
+			} else if d14.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d14.Type, Reg: ctx.AllocRegExcept(d14.Reg), Reg2: ctx.AllocRegExcept(d14.Reg)}
+				switch d14.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d14)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d14)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d14)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d14)
+				d14 = tmpPair
+			}
 			if d14.Loc != LocRegPair && d14.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 			}
 			d15 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d14}, 2)
 			d16 := d15
@@ -1429,13 +1677,75 @@ func init_strings() {
 			d18 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
 			ctx.EnsureDesc(&d17)
 			ctx.EnsureDesc(&d17)
+			if d17.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d17.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d17.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d17)
+				} else if d17.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d17)
+				} else if d17.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d17)
+				} else if d17.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d17.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d17 = tmpPair
+			} else if d17.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d17.Type, Reg: ctx.AllocRegExcept(d17.Reg), Reg2: ctx.AllocRegExcept(d17.Reg)}
+				switch d17.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d17)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d17)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d17)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d17)
+				d17 = tmpPair
+			}
 			if d17.Loc != LocRegPair && d17.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (StrLike arg0)")
 			}
 			ctx.EnsureDesc(&d18)
 			ctx.EnsureDesc(&d18)
+			if d18.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d18.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d18.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d18)
+				} else if d18.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d18)
+				} else if d18.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d18)
+				} else if d18.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d18.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d18 = tmpPair
+			} else if d18.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d18.Type, Reg: ctx.AllocRegExcept(d18.Reg), Reg2: ctx.AllocRegExcept(d18.Reg)}
+				switch d18.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d18)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d18)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d18)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d18)
+				d18 = tmpPair
+			}
 			if d18.Loc != LocRegPair && d18.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (StrLike arg1)")
 			}
 			d19 := ctx.EmitGoCallScalar(GoFuncAddr(StrLike), []JITValueDesc{d17, d18}, 1)
 			ctx.FreeDesc(&d17)
@@ -1452,14 +1762,76 @@ func init_strings() {
 			d18 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 			}
 			d20 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d1}, 2)
 			ctx.EnsureDesc(&d3)
 			ctx.EnsureDesc(&d3)
+			if d3.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d3.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d3.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d3 = tmpPair
+			} else if d3.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocRegExcept(d3.Reg), Reg2: ctx.AllocRegExcept(d3.Reg)}
+				switch d3.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d3)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d3)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d3)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d3)
+				d3 = tmpPair
+			}
 			if d3.Loc != LocRegPair && d3.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 			}
 			d21 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d3}, 2)
 			d22 := d20
@@ -1519,13 +1891,75 @@ func init_strings() {
 			ctx.FreeDesc(&d2)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (StrLike arg0)")
 			}
 			ctx.EnsureDesc(&d3)
 			ctx.EnsureDesc(&d3)
+			if d3.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d3.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d3.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d3 = tmpPair
+			} else if d3.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocRegExcept(d3.Reg), Reg2: ctx.AllocRegExcept(d3.Reg)}
+				switch d3.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d3)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d3)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d3)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d3)
+				d3 = tmpPair
+			}
 			if d3.Loc != LocRegPair && d3.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (StrLike arg1)")
 			}
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(StrLike), []JITValueDesc{d1, d3}, 1)
 			ctx.EnsureDesc(&d4)
@@ -1567,8 +2001,39 @@ func init_strings() {
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 			}
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d1}, 2)
 			ctx.W.ResolveFixups()
@@ -1603,8 +2068,39 @@ func init_strings() {
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.ToUpper arg0)")
 			}
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ToUpper), []JITValueDesc{d1}, 2)
 			ctx.W.ResolveFixups()
@@ -1653,18 +2149,111 @@ func init_strings() {
 			ctx.FreeDesc(&d4)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.ReplaceAll arg0)")
 			}
 			ctx.EnsureDesc(&d3)
 			ctx.EnsureDesc(&d3)
+			if d3.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d3.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d3)
+				} else if d3.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d3.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d3 = tmpPair
+			} else if d3.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocRegExcept(d3.Reg), Reg2: ctx.AllocRegExcept(d3.Reg)}
+				switch d3.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d3)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d3)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d3)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d3)
+				d3 = tmpPair
+			}
 			if d3.Loc != LocRegPair && d3.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.ReplaceAll arg1)")
 			}
 			ctx.EnsureDesc(&d5)
 			ctx.EnsureDesc(&d5)
+			if d5.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d5.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d5.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d5 = tmpPair
+			} else if d5.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocRegExcept(d5.Reg), Reg2: ctx.AllocRegExcept(d5.Reg)}
+				switch d5.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d5)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d5)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d5)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d5)
+				d5 = tmpPair
+			}
 			if d5.Loc != LocRegPair && d5.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.ReplaceAll arg2)")
 			}
 			d6 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ReplaceAll), []JITValueDesc{d1, d3, d5}, 2)
 			ctx.W.ResolveFixups()
@@ -1699,8 +2288,39 @@ func init_strings() {
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimSpace arg0)")
 			}
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimSpace), []JITValueDesc{d1}, 2)
 			ctx.W.ResolveFixups()
@@ -1735,13 +2355,75 @@ func init_strings() {
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimLeft arg0)")
 			}
 			d2 := JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(" \t\n\r")}
 			ctx.EnsureDesc(&d2)
+			if d2.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d2.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d2.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d2 = tmpPair
+			} else if d2.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocRegExcept(d2.Reg), Reg2: ctx.AllocRegExcept(d2.Reg)}
+				switch d2.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d2)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d2)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d2)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d2)
+				d2 = tmpPair
+			}
 			if d2.Loc != LocRegPair && d2.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimLeft arg1)")
 			}
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimLeft), []JITValueDesc{d1, d2}, 2)
 			ctx.W.ResolveFixups()
@@ -1776,13 +2458,75 @@ func init_strings() {
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimRight arg0)")
 			}
 			d2 := JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(" \t\n\r")}
 			ctx.EnsureDesc(&d2)
+			if d2.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d2.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d2.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d2 = tmpPair
+			} else if d2.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocRegExcept(d2.Reg), Reg2: ctx.AllocRegExcept(d2.Reg)}
+				switch d2.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d2)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d2)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d2)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d2)
+				d2 = tmpPair
+			}
 			if d2.Loc != LocRegPair && d2.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimRight arg1)")
 			}
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimRight), []JITValueDesc{d1, d2}, 2)
 			ctx.W.ResolveFixups()
@@ -1853,8 +2597,39 @@ func init_strings() {
 			ctx.FreeDesc(&d4)
 			ctx.EnsureDesc(&d5)
 			ctx.EnsureDesc(&d5)
+			if d5.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d5.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d5.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d5 = tmpPair
+			} else if d5.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocRegExcept(d5.Reg), Reg2: ctx.AllocRegExcept(d5.Reg)}
+				switch d5.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d5)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d5)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d5)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d5)
+				d5 = tmpPair
+			}
 			if d5.Loc != LocRegPair && d5.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimSpace arg0)")
 			}
 			d6 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimSpace), []JITValueDesc{d5}, 2)
 			d7 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d6}, 2)
@@ -1928,13 +2703,75 @@ func init_strings() {
 			ctx.FreeDesc(&d4)
 			ctx.EnsureDesc(&d5)
 			ctx.EnsureDesc(&d5)
+			if d5.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d5.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d5.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d5 = tmpPair
+			} else if d5.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocRegExcept(d5.Reg), Reg2: ctx.AllocRegExcept(d5.Reg)}
+				switch d5.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d5)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d5)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d5)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d5)
+				d5 = tmpPair
+			}
 			if d5.Loc != LocRegPair && d5.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimLeft arg0)")
 			}
 			d6 := JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(" \t\n\r")}
 			ctx.EnsureDesc(&d6)
+			if d6.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d6.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d6.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d6)
+				} else if d6.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d6)
+				} else if d6.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d6)
+				} else if d6.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d6.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d6 = tmpPair
+			} else if d6.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d6.Type, Reg: ctx.AllocRegExcept(d6.Reg), Reg2: ctx.AllocRegExcept(d6.Reg)}
+				switch d6.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d6)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d6)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d6)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d6)
+				d6 = tmpPair
+			}
 			if d6.Loc != LocRegPair && d6.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimLeft arg1)")
 			}
 			d7 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimLeft), []JITValueDesc{d5, d6}, 2)
 			d8 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d7}, 2)
@@ -2008,13 +2845,75 @@ func init_strings() {
 			ctx.FreeDesc(&d4)
 			ctx.EnsureDesc(&d5)
 			ctx.EnsureDesc(&d5)
+			if d5.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d5.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d5)
+				} else if d5.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d5.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d5 = tmpPair
+			} else if d5.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocRegExcept(d5.Reg), Reg2: ctx.AllocRegExcept(d5.Reg)}
+				switch d5.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d5)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d5)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d5)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d5)
+				d5 = tmpPair
+			}
 			if d5.Loc != LocRegPair && d5.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimRight arg0)")
 			}
 			d6 := JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString(" \t\n\r")}
 			ctx.EnsureDesc(&d6)
+			if d6.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d6.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d6.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d6)
+				} else if d6.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d6)
+				} else if d6.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d6)
+				} else if d6.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d6.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d6 = tmpPair
+			} else if d6.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d6.Type, Reg: ctx.AllocRegExcept(d6.Reg), Reg2: ctx.AllocRegExcept(d6.Reg)}
+				switch d6.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d6)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d6)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d6)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d6)
+				d6 = tmpPair
+			}
 			if d6.Loc != LocRegPair && d6.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.TrimRight arg1)")
 			}
 			d7 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimRight), []JITValueDesc{d5, d6}, 2)
 			d8 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d7}, 2)
@@ -2049,7 +2948,7 @@ func init_strings() {
 			}
 			return NewSlice(result)
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []string t2 t2 */, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
+		nil /* TODO: MakeSlice: make []string t2 t2 */, /* TODO: MakeSlice: make []string t2 t2 */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -2110,8 +3009,39 @@ func init_strings() {
 			d4 := args[1]
 			ctx.EnsureDesc(&d4)
 			ctx.EnsureDesc(&d4)
+			if d4.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d4.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d4.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d4)
+				} else if d4.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d4)
+				} else if d4.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d4)
+				} else if d4.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d4.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d4 = tmpPair
+			} else if d4.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d4.Type, Reg: ctx.AllocRegExcept(d4.Reg), Reg2: ctx.AllocRegExcept(d4.Reg)}
+				switch d4.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d4)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d4)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d4)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d4)
+				d4 = tmpPair
+			}
 			if d4.Loc != LocRegPair && d4.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d5 := ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d4}, 1)
 			ctx.FreeDesc(&d4)
@@ -2164,8 +3094,39 @@ func init_strings() {
 			ctx.FreeDesc(&d8)
 			ctx.EnsureDesc(&d9)
 			ctx.EnsureDesc(&d9)
+			if d9.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d9.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d9.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d9)
+				} else if d9.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d9)
+				} else if d9.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d9)
+				} else if d9.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d9.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d9 = tmpPair
+			} else if d9.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d9.Type, Reg: ctx.AllocRegExcept(d9.Reg), Reg2: ctx.AllocRegExcept(d9.Reg)}
+				switch d9.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d9)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d9)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d9)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d9)
+				d9 = tmpPair
+			}
 			if d9.Loc != LocRegPair && d9.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (strings.Repeat arg0)")
 			}
 			ctx.EnsureDesc(&d5)
 			if d5.Loc == LocRegPair || d5.Loc == LocStackPair {
@@ -2372,7 +3333,7 @@ func init_strings() {
 				return NewFunc(LessScm)
 			}
 		}, true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t0[:0:int] */, /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */
+		nil /* TODO: Slice on non-desc: slice t0[:0:int] */, /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */ /* TODO: FieldAddr on non-receiver: &re.prog [#1] */
 	})
 
 	/* escaping functions similar to PHP */
@@ -2399,8 +3360,39 @@ func init_strings() {
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (html.EscapeString arg0)")
 			}
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(html.EscapeString), []JITValueDesc{d1}, 2)
 			ctx.W.ResolveFixups()
@@ -2435,8 +3427,39 @@ func init_strings() {
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.W.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.W.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.W.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.W.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.W.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.W.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
-				panic("jit: generic call arg expects 2-word value")
+				panic("jit: generic call arg expects 2-word value (url.QueryEscape arg0)")
 			}
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(url.QueryEscape), []JITValueDesc{d1}, 2)
 			ctx.W.ResolveFixups()
@@ -2461,7 +3484,7 @@ func init_strings() {
 			}
 			return NewString(result)
 		}, true, false, nil,
-		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
+		nil /* TODO: Index: s[t2] */, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode", "encodes a value in JSON, treats lists as lists",
@@ -2476,7 +3499,7 @@ func init_strings() {
 			}
 			return NewString(string(b))
 		}, true, false, nil,
-		nil /* TODO: Defer: defer (*sync.Pool).Put(encodeStatePool, t3) */, /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */
+		nil /* TODO: Defer: defer (*sync.Pool).Put(encodeStatePool, t3) */, /* TODO: Defer: defer (*sync.Pool).Put(encodeStatePool, t3) */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */ /* TODO: unresolved SSA value: encoding/json.encodeStatePool */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_encode_assoc", "encodes a value in JSON, treats lists as associative arrays",
@@ -2517,7 +3540,7 @@ func init_strings() {
 			}
 			return NewString(string(b))
 		}, true, false, nil,
-		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
+		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
 	})
 	Declare(&Globalenv, &Declaration{
 		"json_decode", "parses JSON into a map",
@@ -2533,7 +3556,7 @@ func init_strings() {
 			}
 			return TransformFromJSON(result)
 		}, true, false, nil,
-		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
+		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -2545,7 +3568,7 @@ func init_strings() {
 		func(a ...Scmer) Scmer {
 			return NewString(base64.StdEncoding.EncodeToString([]byte(String(a[0]))))
 		}, true, false, nil,
-		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
+		nil /* TODO: unsupported Convert string → []byte */, /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */ /* TODO: unsupported Convert string → []byte */
 	})
 	Declare(&Globalenv, &Declaration{
 		"base64_decode", "decodes a Base64 string (standard encoding)",
@@ -2560,7 +3583,7 @@ func init_strings() {
 			}
 			return NewString(string(decoded))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t1 t1 */, /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */
+		nil /* TODO: MakeSlice: make []byte t1 t1 */, /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */ /* TODO: FieldAddr on non-receiver: &enc.padChar [#2] */
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
 	Declare(&Globalenv, &Declaration{
@@ -2590,7 +3613,7 @@ func init_strings() {
 			})
 			return NewString(out)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$48$1 */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$48$1 */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$48$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.init_strings$33$1 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"bin2hex", "turns binary data into hex with lowercase letters",
@@ -2608,7 +3631,7 @@ func init_strings() {
 			}
 			return NewString(string(result))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t4 t4 */, /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */
+		nil /* TODO: MakeSlice: make []byte t4 t4 */, /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */ /* TODO: MakeSlice: make []byte t4 t4 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"hex2bin", "decodes a hex string into binary data",
@@ -2623,7 +3646,7 @@ func init_strings() {
 			}
 			return NewString(string(decoded))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t1 t1 */, /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */
+		nil /* TODO: MakeSlice: make []byte t1 t1 */, /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */ /* TODO: MakeSlice: make []byte t1 t1 */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -2645,7 +3668,7 @@ func init_strings() {
 			}
 			return NewString(string(buf))
 		}, true, false, nil,
-		nil /* TODO: MakeSlice: make []byte t2 t2 */, /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */
+		nil /* TODO: MakeSlice: make []byte t2 t2 */, /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */ /* TODO: MakeSlice: make []byte t2 t2 */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -2666,7 +3689,7 @@ func init_strings() {
 			}
 			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
 		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpReplace},
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -2686,7 +3709,7 @@ func init_strings() {
 			}
 			return NewBool(re.MatchString(String(a[0])))
 		}, true, false, &TypeDescriptor{Optimize: optimizeRegexpTest},
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 
 }
