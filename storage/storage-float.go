@@ -101,8 +101,13 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			r0 := ctx.AllocReg()
 			r1 := ctx.AllocRegExcept(r0)
 			lbl0 := ctx.W.ReserveLabel()
-			lbl1 := ctx.W.ReserveLabel()
-			ctx.W.MarkLabel(lbl1)
+			bbpos_0_0 := int32(-1)
+			_ = bbpos_0_0
+			bbpos_0_1 := int32(-1)
+			_ = bbpos_0_1
+			bbpos_0_2 := int32(-1)
+			_ = bbpos_0_2
+			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			var d0 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageFloat)(nil).values)
@@ -155,29 +160,31 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			if d3.Loc != scm.LocImm && d3.Loc != scm.LocReg {
 				panic("jit: If condition is neither scm.LocImm nor scm.LocReg")
 			}
+			lbl1 := ctx.W.ReserveLabel()
 			lbl2 := ctx.W.ReserveLabel()
 			lbl3 := ctx.W.ReserveLabel()
 			lbl4 := ctx.W.ReserveLabel()
-			lbl5 := ctx.W.ReserveLabel()
 			if d3.Loc == scm.LocImm {
 				if d3.Imm.Bool() {
+					ctx.W.MarkLabel(lbl3)
+					ctx.W.EmitJmp(lbl1)
+				} else {
 					ctx.W.MarkLabel(lbl4)
 					ctx.W.EmitJmp(lbl2)
-				} else {
-					ctx.W.MarkLabel(lbl5)
-					ctx.W.EmitJmp(lbl3)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d3.Reg, 0)
-				ctx.W.EmitJcc(scm.CcNE, lbl4)
-				ctx.W.EmitJmp(lbl5)
+				ctx.W.EmitJcc(scm.CcNE, lbl3)
+				ctx.W.EmitJmp(lbl4)
+				ctx.W.MarkLabel(lbl3)
+				ctx.W.EmitJmp(lbl1)
 				ctx.W.MarkLabel(lbl4)
 				ctx.W.EmitJmp(lbl2)
-				ctx.W.MarkLabel(lbl5)
-				ctx.W.EmitJmp(lbl3)
 			}
 			ctx.FreeDesc(&d2)
-			ctx.W.MarkLabel(lbl3)
+			bbpos_0_2 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl2)
+			ctx.W.ResolveFixups()
 			ctx.EnsureDesc(&idxInt)
 			r8 := ctx.AllocReg()
 			ctx.EnsureDesc(&idxInt)
@@ -208,7 +215,9 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.W.EmitMakeFloat(d5, d4)
 			if d4.Loc == scm.LocReg { ctx.FreeReg(d4.Reg) }
 			ctx.W.EmitJmp(lbl0)
-			ctx.W.MarkLabel(lbl2)
+			bbpos_0_1 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl1)
+			ctx.W.ResolveFixups()
 			d6 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
 			ctx.BindReg(r0, &d6)
 			ctx.BindReg(r1, &d6)

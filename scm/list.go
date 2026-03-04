@@ -118,8 +118,17 @@ func init_list() {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			lbl0 := ctx.W.ReserveLabel()
-			lbl1 := ctx.W.ReserveLabel()
-			ctx.W.MarkLabel(lbl1)
+			bbpos_0_0 := int32(-1)
+			_ = bbpos_0_0
+			bbpos_0_1 := int32(-1)
+			_ = bbpos_0_1
+			bbpos_0_2 := int32(-1)
+			_ = bbpos_0_2
+			bbpos_0_3 := int32(-1)
+			_ = bbpos_0_3
+			bbpos_0_4 := int32(-1)
+			_ = bbpos_0_4
+			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			d0 := args[0]
 			d1 := ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
@@ -140,29 +149,31 @@ func init_list() {
 			if d3.Loc != LocImm && d3.Loc != LocReg {
 				panic("jit: If condition is neither LocImm nor LocReg")
 			}
+			lbl1 := ctx.W.ReserveLabel()
 			lbl2 := ctx.W.ReserveLabel()
 			lbl3 := ctx.W.ReserveLabel()
 			lbl4 := ctx.W.ReserveLabel()
-			lbl5 := ctx.W.ReserveLabel()
 			if d3.Loc == LocImm {
 				if d3.Imm.Bool() {
+					ctx.W.MarkLabel(lbl3)
+					ctx.W.EmitJmp(lbl1)
+				} else {
 					ctx.W.MarkLabel(lbl4)
 					ctx.W.EmitJmp(lbl2)
-				} else {
-					ctx.W.MarkLabel(lbl5)
-					ctx.W.EmitJmp(lbl3)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d3.Reg, 0)
-				ctx.W.EmitJcc(CcNE, lbl4)
-				ctx.W.EmitJmp(lbl5)
+				ctx.W.EmitJcc(CcNE, lbl3)
+				ctx.W.EmitJmp(lbl4)
+				ctx.W.MarkLabel(lbl3)
+				ctx.W.EmitJmp(lbl1)
 				ctx.W.MarkLabel(lbl4)
 				ctx.W.EmitJmp(lbl2)
-				ctx.W.MarkLabel(lbl5)
-				ctx.W.EmitJmp(lbl3)
 			}
 			ctx.FreeDesc(&d2)
-			ctx.W.MarkLabel(lbl3)
+			bbpos_0_2 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl2)
+			ctx.W.ResolveFixups()
 			d4 := args[0]
 			d5 := ctx.EmitGetTagDesc(&d4, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d4)
@@ -183,29 +194,35 @@ func init_list() {
 			if d7.Loc != LocImm && d7.Loc != LocReg {
 				panic("jit: If condition is neither LocImm nor LocReg")
 			}
+			lbl5 := ctx.W.ReserveLabel()
 			lbl6 := ctx.W.ReserveLabel()
 			lbl7 := ctx.W.ReserveLabel()
 			lbl8 := ctx.W.ReserveLabel()
-			lbl9 := ctx.W.ReserveLabel()
 			if d7.Loc == LocImm {
 				if d7.Imm.Bool() {
+					ctx.W.MarkLabel(lbl7)
+					ctx.W.EmitJmp(lbl5)
+				} else {
 					ctx.W.MarkLabel(lbl8)
 					ctx.W.EmitJmp(lbl6)
-				} else {
-					ctx.W.MarkLabel(lbl9)
-					ctx.W.EmitJmp(lbl7)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d7.Reg, 0)
-				ctx.W.EmitJcc(CcNE, lbl8)
-				ctx.W.EmitJmp(lbl9)
+				ctx.W.EmitJcc(CcNE, lbl7)
+				ctx.W.EmitJmp(lbl8)
+				ctx.W.MarkLabel(lbl7)
+				ctx.W.EmitJmp(lbl5)
 				ctx.W.MarkLabel(lbl8)
 				ctx.W.EmitJmp(lbl6)
-				ctx.W.MarkLabel(lbl9)
-				ctx.W.EmitJmp(lbl7)
 			}
 			ctx.FreeDesc(&d6)
-			ctx.W.MarkLabel(lbl2)
+			bbpos_0_4 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl6)
+			ctx.W.ResolveFixups()
+			ctx.W.EmitByte(0xCC)
+			bbpos_0_1 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl1)
+			ctx.W.ResolveFixups()
 			d8 := args[0]
 			var d9 JITValueDesc
 			if d8.Loc == LocImm {
@@ -247,9 +264,9 @@ func init_list() {
 			if d10.Loc == LocReg { ctx.FreeReg(d10.Reg) }
 			result.Type = tagInt
 			ctx.W.EmitJmp(lbl0)
-			ctx.W.MarkLabel(lbl7)
-			ctx.W.EmitByte(0xCC)
-			ctx.W.MarkLabel(lbl6)
+			bbpos_0_3 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl5)
+			ctx.W.ResolveFixups()
 			d12 := args[0]
 			var d13 JITValueDesc
 			if d12.Loc == LocImm {
@@ -329,7 +346,7 @@ func init_list() {
 			return list[idx]
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"slice", "extract a sublist from start (inclusive) to end (exclusive).\n(slice list start end) returns elements list[start..end).",
@@ -357,7 +374,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
@@ -372,7 +389,7 @@ func init_list() {
 			return NewSlice(base)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_mut")},
-		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
+		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
@@ -396,7 +413,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_unique_mut")},
-		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
+		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"cons", "constructs a list from a head and a tail list",
@@ -413,7 +430,7 @@ func init_list() {
 			return NewSlice([]Scmer{car, a[1]})
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: IndexAddr on non-parameter: &t14[0:int] (x=t14 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t14[0:int] (x=t14 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */
+		nil /* TODO: IndexAddr on non-parameter: &t14[0:int] (x=t14 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t14[0:int] (x=t14 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t14[0:int] (x=t14 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */ /* TODO: IndexAddr on non-parameter: &t14[0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"car", "extracts the head of a list",
@@ -429,7 +446,7 @@ func init_list() {
 			return list[0]
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"cdr", "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
@@ -445,7 +462,7 @@ func init_list() {
 			return NewSlice(list[1:])
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"cadr", "extracts the second element of a list.\nEquivalent to (car (cdr x)).",
@@ -461,7 +478,7 @@ func init_list() {
 			return list[1]
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
@@ -494,7 +511,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: phi edge references unknown value: parameter a : []Scmer */, /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */
+		nil /* TODO: phi edge references unknown value: parameter a : []Scmer */, /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge", "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
@@ -518,7 +535,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: phi edge references unknown value: parameter a : []Scmer */, /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */
+		nil /* TODO: phi edge references unknown value: parameter a : []Scmer */, /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge_unique", "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
@@ -553,7 +570,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: phi edge references unknown value: parameter a : []Scmer */, /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */
+		nil /* TODO: phi edge references unknown value: parameter a : []Scmer */, /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */ /* TODO: phi edge references unknown value: parameter a : []Scmer */
 	})
 	Declare(&Globalenv, &Declaration{
 		"has?", "checks if a list has a certain item (equal?)",
@@ -572,7 +589,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"filter", "returns a list that only contains elements that pass the filter function",
@@ -593,7 +610,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_mut")},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"map", "returns a list that contains the results of a map function that is applied to the list",
@@ -612,7 +629,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeMap},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
@@ -631,7 +648,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("mapIndex_mut")},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce", "returns a list that contains the result of a map function",
@@ -659,7 +676,7 @@ func init_list() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -682,7 +699,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t0[:0:int] */, /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */
+		nil /* TODO: Slice on non-desc: slice t0[:0:int] */, /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */ /* TODO: Slice on non-desc: slice t0[:0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"produceN", "returns a list with numbers from 0..n-1, optionally mapped through a function",
@@ -711,7 +728,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: MakeSlice: make []Scmer t5 t5 */, /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */
+		nil /* TODO: MakeSlice: make []Scmer t5 t5 */, /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */ /* TODO: MakeSlice: make []Scmer t5 t5 */
 	})
 	Declare(&Globalenv, &Declaration{
 		"list?", "checks if a value is a list",
@@ -727,15 +744,15 @@ func init_list() {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
 			bbs[0].Render = func() JITValueDesc {
-			lbl0 := ctx.W.ReserveLabel()
-			ctx.W.MarkLabel(lbl0)
+			bbpos_0_0 := int32(-1)
+			_ = bbpos_0_0
+			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			d0 := args[0]
 			d2 := d0
 			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagSlice, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
-			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -768,7 +785,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 
 	// dictionary functions
@@ -801,7 +818,7 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_assoc_mut")},
-		nil /* TODO: Slice on non-desc: slice t1[:0:int] */, /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */
+		nil /* TODO: Slice on non-desc: slice t1[:0:int] */, /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */ /* TODO: Slice on non-desc: slice t1[:0:int] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"map_assoc", "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
@@ -834,7 +851,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("map_assoc_mut")},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"reduce_assoc", "reduces a dictionary according to a reduce function",
@@ -857,7 +874,7 @@ func init_list() {
 			return result
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"has_assoc?", "checks if a dictionary has a key present",
@@ -881,7 +898,7 @@ func init_list() {
 			return NewBool(false)
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"get_assoc", "gets a value from a dictionary by key, returns nil if not found",
@@ -910,7 +927,7 @@ func init_list() {
 			return NewNil()
 		},
 		true, false, nil,
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"extract_assoc", "applies a function (key value) on the dictionary and returns the results as a flat list",
@@ -942,7 +959,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("extract_assoc_mut")},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"set_assoc", "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
@@ -989,7 +1006,7 @@ func init_list() {
 			}
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("set_assoc_mut")},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"merge_assoc", "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
@@ -1020,7 +1037,7 @@ func init_list() {
 			return dst
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("merge_assoc_mut")},
-		nil /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */, /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */, /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */
 	})
 
 	// _mut variants: optimizer-only, forbidden from .scm code
@@ -1042,7 +1059,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported builtin: SliceData */, /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */
+		nil /* TODO: unsupported builtin: SliceData */, /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1061,7 +1078,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported builtin: SliceData */, /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */
+		nil /* TODO: unsupported builtin: SliceData */, /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1094,7 +1111,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 
 	// Tier 2: shrinking, write-cursor
@@ -1119,7 +1136,7 @@ func init_list() {
 			return NewSlice(input[:w])
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: unsupported builtin: SliceData */, /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */
+		nil /* TODO: unsupported builtin: SliceData */, /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */ /* TODO: unsupported builtin: SliceData */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1153,7 +1170,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1182,7 +1199,7 @@ func init_list() {
 			}
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t7[0:int] (x=t7 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1224,8 +1241,30 @@ func init_list() {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			lbl0 := ctx.W.ReserveLabel()
+			bbpos_0_0 := int32(-1)
+			_ = bbpos_0_0
+			bbpos_0_1 := int32(-1)
+			_ = bbpos_0_1
+			bbpos_0_2 := int32(-1)
+			_ = bbpos_0_2
+			bbpos_0_3 := int32(-1)
+			_ = bbpos_0_3
+			bbpos_0_4 := int32(-1)
+			_ = bbpos_0_4
+			bbpos_0_5 := int32(-1)
+			_ = bbpos_0_5
+			bbpos_0_6 := int32(-1)
+			_ = bbpos_0_6
+			bbpos_0_7 := int32(-1)
+			_ = bbpos_0_7
+			bbpos_0_8 := int32(-1)
+			_ = bbpos_0_8
+			bbpos_0_9 := int32(-1)
+			_ = bbpos_0_9
 			lbl1 := ctx.W.ReserveLabel()
-			ctx.W.MarkLabel(lbl1)
+			lbl2 := ctx.W.ReserveLabel()
+			lbl3 := ctx.W.ReserveLabel()
+			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			d0 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 			ctx.EnsureDesc(&d0)
 			var d1 JITValueDesc
@@ -1244,31 +1283,32 @@ func init_list() {
 			if d2.Loc != LocImm && d2.Loc != LocReg {
 				panic("jit: If condition is neither LocImm nor LocReg")
 			}
-			lbl2 := ctx.W.ReserveLabel()
-			lbl3 := ctx.W.ReserveLabel()
 			lbl4 := ctx.W.ReserveLabel()
 			lbl5 := ctx.W.ReserveLabel()
+			lbl6 := ctx.W.ReserveLabel()
 			if d2.Loc == LocImm {
 				if d2.Imm.Bool() {
-					ctx.W.MarkLabel(lbl4)
-					ctx.W.EmitJmp(lbl2)
-				} else {
 					ctx.W.MarkLabel(lbl5)
+					ctx.W.EmitJmp(lbl4)
+				} else {
+					ctx.W.MarkLabel(lbl6)
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 0)
-					ctx.W.EmitJmp(lbl3)
+					ctx.W.EmitJmp(lbl1)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d2.Reg, 0)
-				ctx.W.EmitJcc(CcNE, lbl4)
-				ctx.W.EmitJmp(lbl5)
-				ctx.W.MarkLabel(lbl4)
-				ctx.W.EmitJmp(lbl2)
+				ctx.W.EmitJcc(CcNE, lbl5)
+				ctx.W.EmitJmp(lbl6)
 				ctx.W.MarkLabel(lbl5)
+				ctx.W.EmitJmp(lbl4)
+				ctx.W.MarkLabel(lbl6)
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 0)
-				ctx.W.EmitJmp(lbl3)
+				ctx.W.EmitJmp(lbl1)
 			}
 			ctx.FreeDesc(&d1)
-			ctx.W.MarkLabel(lbl3)
+			bbpos_0_2 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl1)
+			ctx.W.ResolveFixups()
 			d3 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d4 := args[0]
 			d6 := d4
@@ -1280,149 +1320,161 @@ func init_list() {
 			if d7.Loc != LocImm && d7.Loc != LocReg {
 				panic("jit: If condition is neither LocImm nor LocReg")
 			}
-			lbl6 := ctx.W.ReserveLabel()
 			lbl7 := ctx.W.ReserveLabel()
 			lbl8 := ctx.W.ReserveLabel()
 			lbl9 := ctx.W.ReserveLabel()
+			lbl10 := ctx.W.ReserveLabel()
 			if d7.Loc == LocImm {
 				if d7.Imm.Bool() {
-					ctx.W.MarkLabel(lbl8)
-					ctx.W.EmitJmp(lbl6)
-				} else {
 					ctx.W.MarkLabel(lbl9)
 					ctx.W.EmitJmp(lbl7)
+				} else {
+					ctx.W.MarkLabel(lbl10)
+					ctx.W.EmitJmp(lbl8)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d7.Reg, 0)
-				ctx.W.EmitJcc(CcNE, lbl8)
-				ctx.W.EmitJmp(lbl9)
-				ctx.W.MarkLabel(lbl8)
-				ctx.W.EmitJmp(lbl6)
+				ctx.W.EmitJcc(CcNE, lbl9)
+				ctx.W.EmitJmp(lbl10)
 				ctx.W.MarkLabel(lbl9)
 				ctx.W.EmitJmp(lbl7)
+				ctx.W.MarkLabel(lbl10)
+				ctx.W.EmitJmp(lbl8)
 			}
 			ctx.FreeDesc(&d5)
-			ctx.W.MarkLabel(lbl2)
+			bbpos_0_5 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl8)
+			ctx.W.ResolveFixups()
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d8 := args[3]
-			d9 := ctx.EmitGoCallScalar(GoFuncAddr(OptimizeProcToSerialFunction), []JITValueDesc{d8}, 1)
+			d8 := args[0]
+			d10 := d8
+			d10.ID = 0
+			d9 := ctx.EmitTagEquals(&d10, tagSlice, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d8)
-			ctx.FreeDesc(&d9)
-			d10 := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildMergeClosure), []JITValueDesc{d9}, 1)
-			d11 := d10
-			if d11.Loc == LocNone { panic("jit: phi source has no location") }
+			d11 := d9
 			ctx.EnsureDesc(&d11)
-			ctx.EmitStoreToStack(d11, 0)
-			ctx.W.EmitJmp(lbl3)
-			ctx.W.MarkLabel(lbl7)
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d12 := args[0]
-			d14 := d12
-			d14.ID = 0
-			d13 := ctx.EmitTagEquals(&d14, tagSlice, JITValueDesc{Loc: LocAny})
-			ctx.FreeDesc(&d12)
-			d15 := d13
-			ctx.EnsureDesc(&d15)
-			if d15.Loc != LocImm && d15.Loc != LocReg {
+			if d11.Loc != LocImm && d11.Loc != LocReg {
 				panic("jit: If condition is neither LocImm nor LocReg")
 			}
-			lbl10 := ctx.W.ReserveLabel()
 			lbl11 := ctx.W.ReserveLabel()
 			lbl12 := ctx.W.ReserveLabel()
 			lbl13 := ctx.W.ReserveLabel()
-			if d15.Loc == LocImm {
-				if d15.Imm.Bool() {
-					ctx.W.MarkLabel(lbl12)
-					ctx.W.EmitJmp(lbl10)
-				} else {
+			lbl14 := ctx.W.ReserveLabel()
+			if d11.Loc == LocImm {
+				if d11.Imm.Bool() {
 					ctx.W.MarkLabel(lbl13)
 					ctx.W.EmitJmp(lbl11)
+				} else {
+					ctx.W.MarkLabel(lbl14)
+					ctx.W.EmitJmp(lbl12)
 				}
 			} else {
-				ctx.W.EmitCmpRegImm32(d15.Reg, 0)
-				ctx.W.EmitJcc(CcNE, lbl12)
-				ctx.W.EmitJmp(lbl13)
-				ctx.W.MarkLabel(lbl12)
-				ctx.W.EmitJmp(lbl10)
+				ctx.W.EmitCmpRegImm32(d11.Reg, 0)
+				ctx.W.EmitJcc(CcNE, lbl13)
+				ctx.W.EmitJmp(lbl14)
 				ctx.W.MarkLabel(lbl13)
 				ctx.W.EmitJmp(lbl11)
+				ctx.W.MarkLabel(lbl14)
+				ctx.W.EmitJmp(lbl12)
 			}
-			ctx.FreeDesc(&d13)
-			ctx.W.MarkLabel(lbl6)
+			ctx.FreeDesc(&d9)
+			bbpos_0_7 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl12)
+			ctx.W.ResolveFixups()
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d16 := args[0]
-			var d17 JITValueDesc
-			if d16.Loc == LocImm {
-				panic("FastDict: LocImm not expected at JIT compile time")
-			} else {
-				ctx.FreeReg(d16.Reg2)
-				d17 = JITValueDesc{Loc: LocReg, Reg: d16.Reg}
-				ctx.BindReg(d16.Reg, &d17)
-			}
-			ctx.FreeDesc(&d16)
-			lbl14 := ctx.W.ReserveLabel()
-			d18 := d17
-			if d18.Loc == LocNone { panic("jit: phi source has no location") }
-			ctx.EnsureDesc(&d18)
-			ctx.EmitStoreToStack(d18, 8)
-			ctx.W.MarkLabel(lbl14)
+			d12 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
+			d13 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d12}, 1)
+			d14 := d13
+			if d14.Loc == LocNone { panic("jit: phi source has no location") }
+			ctx.EnsureDesc(&d14)
+			ctx.EmitStoreToStack(d14, 8)
+			bbpos_0_4 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl2)
+			ctx.W.ResolveFixups()
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d19 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			d20 := args[1]
-			d21 := args[2]
+			d15 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d16 := args[1]
+			d17 := args[2]
 			ctx.EnsureDesc(&d3)
-			ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{d19, d20, d21, d3})
-			ctx.FreeDesc(&d20)
-			ctx.FreeDesc(&d21)
+			ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{d15, d16, d17, d3})
+			ctx.FreeDesc(&d16)
+			ctx.FreeDesc(&d17)
 			ctx.FreeDesc(&d3)
-			var d22 JITValueDesc
-			if d19.Loc == LocImm {
+			var d18 JITValueDesc
+			if d15.Loc == LocImm {
 				panic("NewFastDict: LocImm not expected at JIT compile time")
 			} else {
 				r2 := ctx.AllocReg()
 				ctx.W.EmitMovRegImm64(r2, uint64(tagFastDict) << 48)
-				d22 = JITValueDesc{Loc: LocRegPair, Type: tagFastDict, Reg: d19.Reg, Reg2: r2}
-				ctx.BindReg(d19.Reg, &d22)
-				ctx.BindReg(r2, &d22)
+				d18 = JITValueDesc{Loc: LocRegPair, Type: tagFastDict, Reg: d15.Reg, Reg2: r2}
+				ctx.BindReg(d15.Reg, &d18)
+				ctx.BindReg(r2, &d18)
 			}
-			ctx.FreeDesc(&d19)
-			ctx.EnsureDesc(&d22)
-			if d22.Loc == LocRegPair {
-				ctx.EmitMovPairToResult(&d22, &result)
-				result.Type = d22.Type
+			ctx.FreeDesc(&d15)
+			ctx.EnsureDesc(&d18)
+			if d18.Loc == LocRegPair {
+				ctx.EmitMovPairToResult(&d18, &result)
+				result.Type = d18.Type
 			} else {
-				switch d22.Type {
+				switch d18.Type {
 				case tagBool:
-					ctx.W.EmitMakeBool(result, d22)
+					ctx.W.EmitMakeBool(result, d18)
 					result.Type = tagBool
 				case tagInt:
-					ctx.W.EmitMakeInt(result, d22)
+					ctx.W.EmitMakeInt(result, d18)
 					result.Type = tagInt
 				case tagFloat:
-					ctx.W.EmitMakeFloat(result, d22)
+					ctx.W.EmitMakeFloat(result, d18)
 					result.Type = tagFloat
 				case tagNil:
 					ctx.W.EmitMakeNil(result)
 					result.Type = tagNil
 				default:
-					ctx.EmitMovPairToResult(&d22, &result)
-					result.Type = d22.Type
+					ctx.EmitMovPairToResult(&d18, &result)
+					result.Type = d18.Type
 				}
 			}
 			ctx.W.EmitJmp(lbl0)
-			ctx.W.MarkLabel(lbl11)
+			bbpos_0_1 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl4)
+			ctx.W.ResolveFixups()
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			d23 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
-			d24 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d23}, 1)
+			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d19 := args[3]
+			d20 := ctx.EmitGoCallScalar(GoFuncAddr(OptimizeProcToSerialFunction), []JITValueDesc{d19}, 1)
+			ctx.FreeDesc(&d19)
+			ctx.FreeDesc(&d20)
+			d21 := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildMergeClosure), []JITValueDesc{d20}, 1)
+			d22 := d21
+			if d22.Loc == LocNone { panic("jit: phi source has no location") }
+			ctx.EnsureDesc(&d22)
+			ctx.EmitStoreToStack(d22, 0)
+			ctx.W.EmitJmp(lbl1)
+			bbpos_0_3 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl7)
+			ctx.W.ResolveFixups()
+			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d23 := args[0]
+			var d24 JITValueDesc
+			if d23.Loc == LocImm {
+				panic("FastDict: LocImm not expected at JIT compile time")
+			} else {
+				ctx.FreeReg(d23.Reg2)
+				d24 = JITValueDesc{Loc: LocReg, Reg: d23.Reg}
+				ctx.BindReg(d23.Reg, &d24)
+			}
+			ctx.FreeDesc(&d23)
 			d25 := d24
 			if d25.Loc == LocNone { panic("jit: phi source has no location") }
 			ctx.EnsureDesc(&d25)
 			ctx.EmitStoreToStack(d25, 8)
-			ctx.W.EmitJmp(lbl14)
-			ctx.W.MarkLabel(lbl10)
+			ctx.W.EmitJmp(lbl2)
+			bbpos_0_6 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl11)
+			ctx.W.ResolveFixups()
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 := args[0]
 			var d27 JITValueDesc
 			if d26.Loc == LocImm {
@@ -1488,11 +1540,12 @@ func init_list() {
 			ctx.EnsureDesc(&d30)
 			d31 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d30}, 1)
 			ctx.FreeDesc(&d30)
-			lbl15 := ctx.W.ReserveLabel()
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 16)
-			ctx.W.MarkLabel(lbl15)
+			bbpos_0_8 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl3)
+			ctx.W.ResolveFixups()
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d32 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d32)
 			ctx.EnsureDesc(&d32)
@@ -1568,38 +1621,40 @@ func init_list() {
 			if d36.Loc != LocImm && d36.Loc != LocReg {
 				panic("jit: If condition is neither LocImm nor LocReg")
 			}
+			lbl15 := ctx.W.ReserveLabel()
 			lbl16 := ctx.W.ReserveLabel()
 			lbl17 := ctx.W.ReserveLabel()
-			lbl18 := ctx.W.ReserveLabel()
 			if d36.Loc == LocImm {
 				if d36.Imm.Bool() {
-					ctx.W.MarkLabel(lbl17)
-					ctx.W.EmitJmp(lbl16)
+					ctx.W.MarkLabel(lbl16)
+					ctx.W.EmitJmp(lbl15)
 				} else {
-					ctx.W.MarkLabel(lbl18)
+					ctx.W.MarkLabel(lbl17)
 			d37 := d31
 			if d37.Loc == LocNone { panic("jit: phi source has no location") }
 			ctx.EnsureDesc(&d37)
 			ctx.EmitStoreToStack(d37, 8)
-					ctx.W.EmitJmp(lbl14)
+					ctx.W.EmitJmp(lbl2)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d36.Reg, 0)
-				ctx.W.EmitJcc(CcNE, lbl17)
-				ctx.W.EmitJmp(lbl18)
+				ctx.W.EmitJcc(CcNE, lbl16)
+				ctx.W.EmitJmp(lbl17)
+				ctx.W.MarkLabel(lbl16)
+				ctx.W.EmitJmp(lbl15)
 				ctx.W.MarkLabel(lbl17)
-				ctx.W.EmitJmp(lbl16)
-				ctx.W.MarkLabel(lbl18)
 			d38 := d31
 			if d38.Loc == LocNone { panic("jit: phi source has no location") }
 			ctx.EnsureDesc(&d38)
 			ctx.EmitStoreToStack(d38, 8)
-				ctx.W.EmitJmp(lbl14)
+				ctx.W.EmitJmp(lbl2)
 			}
 			ctx.FreeDesc(&d35)
-			ctx.W.MarkLabel(lbl16)
+			bbpos_0_9 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl15)
+			ctx.W.ResolveFixups()
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d32 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d32)
 			r7 := ctx.AllocReg()
@@ -1689,7 +1744,7 @@ func init_list() {
 			if d44.Loc == LocNone { panic("jit: phi source has no location") }
 			ctx.EnsureDesc(&d44)
 			ctx.EmitStoreToStack(d44, 16)
-			ctx.W.EmitJmp(lbl15)
+			ctx.W.EmitJmp(lbl3)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
 			ctx.W.PatchInt32(r0, int32(24))
@@ -1713,7 +1768,7 @@ func init_list() {
 			return NewSlice(base)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1737,7 +1792,7 @@ func init_list() {
 			return NewSlice(list)
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: Slice on non-desc: slice t1[:] */, /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1769,6 +1824,6 @@ func init_list() {
 			return dst
 		},
 		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */, /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */, /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */ /* TODO: FieldAddr on non-receiver: &Globalenv.Vars [#0] */
 	})
 }

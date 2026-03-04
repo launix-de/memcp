@@ -24,14 +24,14 @@ import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
 
 type StorageInt struct {
-	chunk      []uint64 `jit:"immutable-after-finish"`
-	bitsize    uint8    `jit:"immutable-after-finish"`
-	crossWord  bool     `jit:"immutable-after-finish"` // true when 64 % bitsize != 0 (cross-word spanning possible)
-	offset     int64    `jit:"immutable-after-finish"`
-	max        int64    // only of statistic use
-	count      uint64   // only stored for serialization purposes
-	hasNull    bool     `jit:"immutable-after-finish"`
-	null       uint64   `jit:"immutable-after-finish"`
+	chunk     []uint64 `jit:"immutable-after-finish"`
+	bitsize   uint8    `jit:"immutable-after-finish"`
+	crossWord bool     `jit:"immutable-after-finish"` // true when 64 % bitsize != 0 (cross-word spanning possible)
+	offset    int64    `jit:"immutable-after-finish"`
+	max       int64    // only of statistic use
+	count     uint64   // only stored for serialization purposes
+	hasNull   bool     `jit:"immutable-after-finish"`
+	null      uint64   `jit:"immutable-after-finish"`
 }
 
 func (s *StorageInt) Serialize(f io.Writer) {
@@ -136,8 +136,17 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			r0 := ctx.AllocReg()
 			r1 := ctx.AllocRegExcept(r0)
 			lbl0 := ctx.W.ReserveLabel()
+			bbpos_0_0 := int32(-1)
+			_ = bbpos_0_0
+			bbpos_0_1 := int32(-1)
+			_ = bbpos_0_1
+			bbpos_0_2 := int32(-1)
+			_ = bbpos_0_2
+			bbpos_0_3 := int32(-1)
+			_ = bbpos_0_3
 			lbl1 := ctx.W.ReserveLabel()
-			ctx.W.MarkLabel(lbl1)
+			lbl2 := ctx.W.ReserveLabel()
+			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.EnsureDesc(&thisptr)
 			ctx.EnsureDesc(&idxInt)
 			d0 := idxInt
@@ -149,9 +158,16 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			r5 := idxInt.Reg
 			if r4 { ctx.ProtectReg(r5) }
 			r6 := ctx.W.EmitSubRSP32Fixup()
-			lbl2 := ctx.W.ReserveLabel()
 			lbl3 := ctx.W.ReserveLabel()
-			ctx.W.MarkLabel(lbl3)
+			bbpos_1_0 := int32(-1)
+			_ = bbpos_1_0
+			bbpos_1_1 := int32(-1)
+			_ = bbpos_1_1
+			bbpos_1_2 := int32(-1)
+			_ = bbpos_1_2
+			bbpos_1_3 := int32(-1)
+			_ = bbpos_1_3
+			bbpos_1_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
 			var d1 scm.JITValueDesc
@@ -383,7 +399,9 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.W.EmitJmp(lbl5)
 			}
 			ctx.FreeDesc(&d10)
+			bbpos_1_2 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl5)
+			ctx.W.ResolveFixups()
 			d14 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			var d15 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
@@ -500,8 +518,10 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			} else {
 				ctx.EmitMovToReg(r25, d19)
 			}
-			ctx.W.EmitJmp(lbl2)
+			ctx.W.EmitJmp(lbl3)
+			bbpos_1_3 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl4)
+			ctx.W.ResolveFixups()
 			d14 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d4)
 			var d20 scm.JITValueDesc
@@ -637,7 +657,9 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.W.EmitJmp(lbl5)
 			}
 			ctx.FreeDesc(&d24)
+			bbpos_1_1 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl8)
+			ctx.W.ResolveFixups()
 			d14 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d4)
 			var d28 scm.JITValueDesc
@@ -837,7 +859,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d36)
 			ctx.EmitStoreToStack(d36, 0)
 			ctx.W.EmitJmp(lbl5)
-			ctx.W.MarkLabel(lbl2)
+			ctx.W.MarkLabel(lbl3)
 			d37 := scm.JITValueDesc{Loc: scm.LocReg, Reg: r25}
 			ctx.BindReg(r25, &d37)
 			ctx.BindReg(r25, &d37)
@@ -864,26 +886,27 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			lbl11 := ctx.W.ReserveLabel()
 			lbl12 := ctx.W.ReserveLabel()
 			lbl13 := ctx.W.ReserveLabel()
-			lbl14 := ctx.W.ReserveLabel()
 			if d39.Loc == scm.LocImm {
 				if d39.Imm.Bool() {
-					ctx.W.MarkLabel(lbl13)
+					ctx.W.MarkLabel(lbl12)
 					ctx.W.EmitJmp(lbl11)
 				} else {
-					ctx.W.MarkLabel(lbl14)
-					ctx.W.EmitJmp(lbl12)
+					ctx.W.MarkLabel(lbl13)
+					ctx.W.EmitJmp(lbl2)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d39.Reg, 0)
-				ctx.W.EmitJcc(scm.CcNE, lbl13)
-				ctx.W.EmitJmp(lbl14)
-				ctx.W.MarkLabel(lbl13)
+				ctx.W.EmitJcc(scm.CcNE, lbl12)
+				ctx.W.EmitJmp(lbl13)
+				ctx.W.MarkLabel(lbl12)
 				ctx.W.EmitJmp(lbl11)
-				ctx.W.MarkLabel(lbl14)
-				ctx.W.EmitJmp(lbl12)
+				ctx.W.MarkLabel(lbl13)
+				ctx.W.EmitJmp(lbl2)
 			}
 			ctx.FreeDesc(&d38)
-			ctx.W.MarkLabel(lbl12)
+			bbpos_0_2 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl2)
+			ctx.W.ResolveFixups()
 			ctx.EnsureDesc(&d37)
 			ctx.EnsureDesc(&d37)
 			var d40 scm.JITValueDesc
@@ -962,7 +985,9 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.W.EmitMakeInt(d43, d42)
 			if d42.Loc == scm.LocReg { ctx.FreeReg(d42.Reg) }
 			ctx.W.EmitJmp(lbl0)
+			bbpos_0_3 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl11)
+			ctx.W.ResolveFixups()
 			var d44 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageInt)(nil).null)
@@ -1016,28 +1041,29 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			if d46.Loc != scm.LocImm && d46.Loc != scm.LocReg {
 				panic("jit: If condition is neither scm.LocImm nor scm.LocReg")
 			}
+			lbl14 := ctx.W.ReserveLabel()
 			lbl15 := ctx.W.ReserveLabel()
-			lbl16 := ctx.W.ReserveLabel()
-			lbl17 := ctx.W.ReserveLabel()
 			if d46.Loc == scm.LocImm {
 				if d46.Imm.Bool() {
-					ctx.W.MarkLabel(lbl16)
-					ctx.W.EmitJmp(lbl15)
+					ctx.W.MarkLabel(lbl14)
+					ctx.W.EmitJmp(lbl1)
 				} else {
-					ctx.W.MarkLabel(lbl17)
-					ctx.W.EmitJmp(lbl12)
+					ctx.W.MarkLabel(lbl15)
+					ctx.W.EmitJmp(lbl2)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d46.Reg, 0)
-				ctx.W.EmitJcc(scm.CcNE, lbl16)
-				ctx.W.EmitJmp(lbl17)
-				ctx.W.MarkLabel(lbl16)
+				ctx.W.EmitJcc(scm.CcNE, lbl14)
 				ctx.W.EmitJmp(lbl15)
-				ctx.W.MarkLabel(lbl17)
-				ctx.W.EmitJmp(lbl12)
+				ctx.W.MarkLabel(lbl14)
+				ctx.W.EmitJmp(lbl1)
+				ctx.W.MarkLabel(lbl15)
+				ctx.W.EmitJmp(lbl2)
 			}
 			ctx.FreeDesc(&d45)
-			ctx.W.MarkLabel(lbl15)
+			bbpos_0_1 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+			ctx.W.MarkLabel(lbl1)
+			ctx.W.ResolveFixups()
 			d47 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
 			ctx.BindReg(r0, &d47)
 			ctx.BindReg(r1, &d47)
