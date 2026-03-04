@@ -849,7 +849,7 @@ func init() {
 			return result
 			return result
 			}
-			ps3 := PhiState{General: false}
+			ps3 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps3)
 			return result
 		}, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */
@@ -1170,7 +1170,7 @@ func init() {
 			return result
 			return result
 			}
-			ps4 := PhiState{General: false}
+			ps4 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps4)
 			return result
 		}, /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */
@@ -1345,7 +1345,7 @@ func init() {
 			return result
 			return result
 			}
-			ps4 := PhiState{General: false}
+			ps4 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps4)
 			return result
 		},
@@ -1551,6 +1551,10 @@ Patterns can be any of:
 			d6 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}
 			ps5.PhiValues[0] = d6
 				return bbs[2].RenderPS(ps5)
+			}
+			if !ps.General {
+				ps.General = true
+				return bbs[0].RenderPS(ps)
 			}
 			lbl4 := ctx.W.ReserveLabel()
 			lbl5 := ctx.W.ReserveLabel()
@@ -1950,7 +1954,7 @@ Patterns can be any of:
 			ctx.W.EmitJmp(lbl0)
 			return result
 			}
-			ps22 := PhiState{General: false}
+			ps22 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps22)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()

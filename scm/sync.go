@@ -374,7 +374,7 @@ func init_sync() {
 			return result
 			return result
 			}
-			ps3 := PhiState{General: false}
+			ps3 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps3)
 			return result
 		}, /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
@@ -503,7 +503,7 @@ func init_sync() {
 			return result
 			return result
 			}
-			ps2 := PhiState{General: false}
+			ps2 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps2)
 			return result
 		},

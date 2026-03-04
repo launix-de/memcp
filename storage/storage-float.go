@@ -217,6 +217,10 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ps5.OverlayValues[3] = d3
 				return bbs[2].RenderPS(ps5)
 			}
+			if !ps.General {
+				ps.General = true
+				return bbs[0].RenderPS(ps)
+			}
 			lbl4 := ctx.W.ReserveLabel()
 			lbl5 := ctx.W.ReserveLabel()
 			ctx.W.EmitCmpRegImm32(d3.Reg, 0)

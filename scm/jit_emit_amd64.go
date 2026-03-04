@@ -1039,37 +1039,46 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 // consuming/clobbering the source descriptor. This is required when the same
 // SSA value is used both for a type predicate and later value extraction.
 func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint16, result JITValueDesc) JITValueDesc {
-	var protected []Reg
-	switch src.Loc {
-	case LocRegPair:
+	emitOut := func(v JITValueDesc) JITValueDesc {
+		if result.Loc == LocAny {
+			return v
+		}
+		ctx.W.EmitMakeBool(result, v)
+		ctx.FreeDesc(&v)
+		return result
+	}
+
+	// Immediate and known-typed values can be folded without touching source regs.
+	if src.Loc == LocImm {
+		return emitOut(JITValueDesc{
+			Loc:  LocImm,
+			Type: tagBool,
+			Imm:  NewBool(src.Imm.GetTag() == tag),
+		})
+	}
+	if src.Type != JITTypeUnknown {
+		return emitOut(JITValueDesc{
+			Loc:  LocImm,
+			Type: tagBool,
+			Imm:  NewBool(src.Type == tag),
+		})
+	}
+
+	// Borrowed fast path: read tag directly from pair registers without cloning.
+	if src.Loc == LocRegPair {
 		ctx.ProtectReg(src.Reg)
 		ctx.ProtectReg(src.Reg2)
-		protected = append(protected, src.Reg, src.Reg2)
-	case LocReg:
-		ctx.ProtectReg(src.Reg)
-		protected = append(protected, src.Reg)
+		tagReg := ctx.AllocRegExcept(src.Reg, src.Reg2)
+		ctx.UnprotectReg(src.Reg2)
+		ctx.UnprotectReg(src.Reg)
+		ctx.W.emitGetTagRegs(tagReg, src.Reg, src.Reg2)
+		ctx.W.EmitCmpRegImm8(tagReg, uint8(tag))
+		ctx.W.EmitSetcc(tagReg, CcE)
+		return emitOut(JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg})
 	}
-	defer func() {
-		for _, r := range protected {
-			ctx.UnprotectReg(r)
-		}
-	}()
 
+	// Other borrowed forms: detached copy so EmitTagEquals may consume it safely.
 	tmp := *src
-	switch src.Loc {
-	case LocRegPair:
-		r0 := ctx.AllocRegExcept(src.Reg, src.Reg2)
-		r1 := ctx.AllocRegExcept(src.Reg, src.Reg2, r0)
-		ctx.W.emitMovRegReg(r0, src.Reg)
-		ctx.W.emitMovRegReg(r1, src.Reg2)
-		tmp = JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: r0, Reg2: r1}
-	case LocReg:
-		r0 := ctx.AllocRegExcept(src.Reg)
-		ctx.W.emitMovRegReg(r0, src.Reg)
-		tmp = JITValueDesc{Loc: LocReg, Type: src.Type, Reg: r0}
-	default:
-		// Stack/mem/imm forms are safe to pass by value-copy.
-	}
 	tmp.ID = 0
 	return ctx.EmitTagEquals(&tmp, tag, result)
 }

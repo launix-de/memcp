@@ -706,6 +706,10 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ps3.OverlayValues[1] = d1
 				return bbs[2].RenderPS(ps3)
 			}
+			if !ps.General {
+				ps.General = true
+				return bbs[0].RenderPS(ps)
+			}
 			lbl10 := ctx.W.ReserveLabel()
 			lbl11 := ctx.W.ReserveLabel()
 			ctx.W.EmitCmpRegImm32(d1.Reg, 0)
@@ -1678,6 +1682,10 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ps52.OverlayValues[49] = d49
 			ps52.OverlayValues[50] = d50
 				return bbs[4].RenderPS(ps52)
+			}
+			if !ps.General {
+				ps.General = true
+				return bbs[1].RenderPS(ps)
 			}
 			lbl20 := ctx.W.ReserveLabel()
 			lbl21 := ctx.W.ReserveLabel()
@@ -2961,6 +2969,10 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ps102.OverlayValues[99] = d99
 			ps102.OverlayValues[100] = d100
 				return bbs[7].RenderPS(ps102)
+			}
+			if !ps.General {
+				ps.General = true
+				return bbs[2].RenderPS(ps)
 			}
 			lbl30 := ctx.W.ReserveLabel()
 			lbl31 := ctx.W.ReserveLabel()
@@ -5491,6 +5503,10 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ps161.OverlayValues[158] = d158
 			ps161.OverlayValues[159] = d159
 				return bbs[4].RenderPS(ps161)
+			}
+			if !ps.General {
+				ps.General = true
+				return bbs[5].RenderPS(ps)
 			}
 			lbl40 := ctx.W.ReserveLabel()
 			lbl41 := ctx.W.ReserveLabel()
@@ -9652,6 +9668,10 @@ func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ps259.OverlayValues[256] = d256
 			ps259.OverlayValues[257] = d257
 				return bbs[7].RenderPS(ps259)
+			}
+			if !ps.General {
+				ps.General = true
+				return bbs[8].RenderPS(ps)
 			}
 			lbl58 := ctx.W.ReserveLabel()
 			lbl59 := ctx.W.ReserveLabel()

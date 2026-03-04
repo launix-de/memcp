@@ -1229,6 +1229,15 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	g.emit("\treturn bbs[%d].RenderPS(%s)", elseBB, elsePS)
 	g.emit("}")
 
+	// Dynamic condition in a specialized BB can otherwise poison successor
+	// general renderers with edge-local specialized overlays. Canonicalize by
+	// switching this BB to general first; successor rendering then sees stable
+	// locations from the generalized predecessor state.
+	g.emit("if !ps.General {")
+	g.emit("\tps.General = true")
+	g.emit("\treturn bbs[%d].RenderPS(ps)", g.curBlock)
+	g.emit("}")
+
 	// Dynamic branch: emit edge helpers with runtime condition and render both
 	// successors in general mode.
 	thenLbl := g.ensureBBLabel(thenBB)
@@ -1949,7 +1958,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 
 	g.emitRecursiveBBRenderers()
 	entryPS := g.allocTemp("ps")
-	g.emit("%s := PhiState{General: false}", entryPS)
+	g.emit("%s := PhiState{General: true}", entryPS)
 	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
 
 	// Emit fixup resolution and epilogue

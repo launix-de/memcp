@@ -359,11 +359,31 @@ func (ctx *JITContext) UnprotectReg(r Reg) {
 // tracked owner descriptor. This is used at BB boundaries in closure emitters
 // to prevent stale temporary allocations from exhausting the allocator.
 func (ctx *JITContext) ReclaimUntrackedRegs() {
-	// TODO: temporary conservative mode while auditing overlay-owner consistency.
-	// Reclaiming ownerless registers at BB boundaries is only safe when every
-	// live overlay descriptor has been rebound in RegOwners. Until that
-	// invariant is enforced everywhere, avoid aggressive reclamation to prevent
-	// live-value clobbering across specialized/general BB transitions.
+	for rr := Reg(0); rr <= RegR15; rr++ {
+		bit := uint64(1 << uint(rr))
+		if (ctx.AllRegs & bit) == 0 {
+			continue
+		}
+		if (ctx.ProtectedRegs & bit) != 0 {
+			continue
+		}
+		owner := ctx.RegOwners[rr]
+		if owner == nil {
+			ctx.FreeRegs |= bit
+			continue
+		}
+		valid := false
+		switch owner.Loc {
+		case LocReg:
+			valid = owner.Reg == rr
+		case LocRegPair:
+			valid = owner.Reg == rr || owner.Reg2 == rr
+		}
+		if !valid {
+			ctx.RegOwners[rr] = nil
+			ctx.FreeRegs |= bit
+		}
+	}
 }
 
 // AllocReg picks a free register from the bitmap and marks it used.

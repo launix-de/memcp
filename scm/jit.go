@@ -69,7 +69,75 @@ func init_jit() {
 		func(a ...Scmer) Scmer {
 			return NewBool(a[0].GetTag() == tagJIT)
 		},
-		true, false, nil, nil,
+		true, false, nil, func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			var d0 JITValueDesc
+			_ = d0
+			var d1 JITValueDesc
+			_ = d1
+			var d2 JITValueDesc
+			_ = d2
+		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbpos_0_0 := int32(-1)
+			_ = bbpos_0_0
+			lbl0 := ctx.W.ReserveLabel()
+			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
+			if !ps.General {
+				if bbs[0].VisitCount >= 2 {
+					ps.General = true
+					return bbs[0].RenderPS(ps)
+				}
+			}
+			bbs[0].VisitCount++
+			if ps.General {
+				if bbs[0].Rendered {
+					ctx.W.EmitJmp(lbl0)
+					return result
+				}
+				bbs[0].Rendered = true
+				bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+				bbpos_0_0 = bbs[0].Address
+				ctx.W.MarkLabel(lbl0)
+				ctx.W.ResolveFixups()
+			}
+			ctx.ReclaimUntrackedRegs()
+			d0 = args[0]
+			d0.ID = 0
+			d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d0)
+			ctx.EnsureDesc(&d1)
+			var d2 JITValueDesc
+			if d1.Loc == LocImm {
+				d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(100))}
+			} else {
+				r0 := ctx.AllocReg()
+				ctx.W.EmitCmpRegImm32(d1.Reg, 100)
+				ctx.W.EmitSetcc(r0, CcE)
+				d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+				ctx.BindReg(r0, &d2)
+			}
+			ctx.FreeDesc(&d1)
+			ctx.EnsureDesc(&d2)
+			ctx.W.ResolveFixups()
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
+			}
+			if d2.Loc == LocImm {
+				ctx.W.EmitMakeBool(result, d2)
+			} else {
+				ctx.W.EmitMakeBool(result, d2)
+				ctx.FreeReg(d2.Reg)
+			}
+			result.Type = tagBool
+			return result
+			return result
+			}
+			ps3 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps3)
+			return result
+		},
 	})
 }
 
