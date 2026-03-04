@@ -923,6 +923,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (s) (strlen s))) "hello") 5 "jit: strlen")
 	(assert ((jit (lambda (s) (strlen s))) "") 0 "jit: strlen empty")
 	(assert ((jit (lambda (s) (strlen s))) "äöü") 6 "jit: strlen utf8 bytes")
+	(assert ((jit (lambda (a) (+ (strlen a) 1))) "hello") 6 "jit: + (strlen a) 1")
 	(assert ((jit (lambda (s) (string? s))) "hello") true "jit: string? true")
 	(assert ((jit (lambda (s) (string? s))) 123) false "jit: string? false")
 	(assert ((jit (lambda (a b) (concat a b))) "foo" "bar") "foobar" "jit: concat")

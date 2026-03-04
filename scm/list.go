@@ -721,6 +721,8 @@ func init_list() {
 		true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -739,6 +741,8 @@ func init_list() {
 				ctx.FreeReg(d1.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1393,8 +1397,8 @@ func init_list() {
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl11)
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d23 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
 			d24 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d23}, 1)
 			d25 := d24
@@ -1474,8 +1478,8 @@ func init_list() {
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 16)
 			ctx.W.EmitJmp(lbl15)
 			ctx.W.MarkLabel(lbl15)
-			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d32 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d32)
 			ctx.EnsureDesc(&d32)
@@ -1575,9 +1579,9 @@ func init_list() {
 			ctx.W.EmitJmp(lbl14)
 			ctx.FreeDesc(&d35)
 			ctx.W.MarkLabel(lbl16)
-			d32 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d32 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d32)
 			r7 := ctx.AllocReg()
 			ctx.EnsureDesc(&d32)

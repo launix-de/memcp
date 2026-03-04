@@ -721,6 +721,8 @@ func init() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -755,6 +757,8 @@ func init() {
 				ctx.FreeReg(d2.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -911,6 +915,8 @@ func init() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -947,6 +953,8 @@ func init() {
 				}
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1017,6 +1025,8 @@ func init() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -1030,6 +1040,8 @@ func init() {
 			if result.Loc == LocAny { return d2 }
 			ctx.EmitMovPairToResult(&d2, &result)
 			return result
+			}
+			return bbs[0].Render()
 		},
 	})
 	Declare(&Globalenv, &Declaration{

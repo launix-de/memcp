@@ -234,6 +234,8 @@ func init_sync() {
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
@@ -273,6 +275,8 @@ func init_sync() {
 				}
 			}
 			return result
+			}
+			return bbs[0].Render()
 		}, /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -351,6 +355,8 @@ func init_sync() {
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [1]BBDescriptor
+			bbs[0].Render = func() JITValueDesc {
 			lbl0 := ctx.W.ReserveLabel()
 			ctx.W.MarkLabel(lbl0)
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
@@ -368,6 +374,8 @@ func init_sync() {
 				ctx.FreeReg(d0.Reg)
 			}
 			return result
+			}
+			return bbs[0].Render()
 		},
 	})
 	Declare(&Globalenv, &Declaration{
