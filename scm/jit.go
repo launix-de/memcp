@@ -130,174 +130,6 @@ type JITValueDesc struct {
 	Imm      Scmer   // compile-time constant (if Loc == LocImm); Imm.GetTag() carries type info
 }
 
-// ---- merged from scm/jit_interface.go ----
-
-// JITTagMask is a bitset of possible runtime tags for a value.
-// A single set bit means "known tag", multiple bits mean union of possibilities.
-type JITTagMask uint32
-
-const (
-	JITTagMaskNil JITTagMask = 1 << iota
-	JITTagMaskBool
-	JITTagMaskInt
-	JITTagMaskFloat
-	JITTagMaskString
-	JITTagMaskSlice
-	JITTagMaskFastDict
-)
-
-const JITTagMaskAny = JITTagMaskNil | JITTagMaskBool | JITTagMaskInt |
-	JITTagMaskFloat | JITTagMaskString | JITTagMaskSlice | JITTagMaskFastDict
-
-// JITTypeFacts tracks compile-time knowledge for a value.
-// More knowledge should allow emitters to generate less machine code.
-type JITTypeFacts struct {
-	// Possible is the current tag set. JITTagMaskAny means fully unknown.
-	Possible JITTagMask
-	// When HasConst is true, Const holds an exact compile-time value.
-	HasConst bool
-	Const    Scmer
-}
-
-// JITValueKind describes how a value currently exists in the backend pipeline.
-type JITValueKind uint8
-
-const (
-	JITValueImm JITValueKind = iota
-	JITValueVirtual
-	JITValueMaterialized
-)
-
-// JITValueRef is an opaque value handle owned by the backend.
-type JITValueRef struct {
-	ID    uint32
-	Kind  JITValueKind
-	Facts JITTypeFacts
-}
-
-// JITRegRef is an abstract register handle used by architecture backends.
-type JITRegRef uint16
-
-// JITPlaceKind describes concrete placement requirements for materialization.
-type JITPlaceKind uint8
-
-const (
-	JITPlaceAny JITPlaceKind = iota
-	JITPlaceReg
-	JITPlacePair
-	JITPlaceStack
-	JITPlaceMem
-	JITPlaceImm
-)
-
-// JITPlace describes a concrete destination or source location.
-type JITPlace struct {
-	Kind JITPlaceKind
-	Reg  JITRegRef
-	Reg2 JITRegRef
-	Slot int32
-	Mem  uintptr
-}
-
-// JITRegClass defines logical register classes.
-type JITRegClass uint8
-
-const (
-	JITRegClassGPR JITRegClass = iota
-	JITRegClassFPR
-	JITRegClassPair
-)
-
-// JITPinToken is a stable protection handle independent of mutable descriptors.
-type JITPinToken struct {
-	ID uint32
-}
-
-// JITAllocScope is a temporary-allocation scope.
-type JITAllocScope interface {
-	Release()
-}
-
-// JITAllocator owns virtual->physical mapping, spill decisions, and liveness.
-// Frontends should never reason about physical registers directly.
-type JITAllocator interface {
-	Scope() JITAllocScope
-	Temp(class JITRegClass, except ...JITRegRef) (JITRegRef, error)
-	Ensure(v JITValueRef, class JITRegClass, except ...JITRegRef) (JITRegRef, error)
-	Pin(v JITValueRef) (JITPinToken, error)
-	Unpin(tok JITPinToken) error
-	Kill(v JITValueRef) error
-	Validate() error
-}
-
-// JITBlockLabel is an architecture-neutral label token.
-type JITBlockLabel uint32
-
-// JITIntOp are integer ALU operations.
-type JITIntOp uint8
-
-const (
-	JITIntAdd JITIntOp = iota
-	JITIntSub
-	JITIntMul
-	JITIntOr
-	JITIntAnd
-)
-
-// JITCmpPred are integer compare predicates.
-type JITCmpPred uint8
-
-const (
-	JITCmpEQ JITCmpPred = iota
-	JITCmpNE
-	JITCmpLT
-	JITCmpLE
-	JITCmpGT
-	JITCmpGE
-)
-
-// JITShiftDir describes logical shift direction.
-type JITShiftDir uint8
-
-const (
-	JITShiftLeft JITShiftDir = iota
-	JITShiftRight
-)
-
-// JITDivRemKind selects quotient or remainder result.
-type JITDivRemKind uint8
-
-const (
-	JITDivResult JITDivRemKind = iota
-	JITRemResult
-)
-
-// JITArchEmitter lowers semantic operations to target machine code.
-// All register movement details stay backend-internal.
-type JITArchEmitter interface {
-	Allocator() JITAllocator
-
-	BeginFunction(name string) error
-	EndFunction() error
-
-	NewLabel() JITBlockLabel
-	MarkLabel(label JITBlockLabel) error
-	EmitJump(label JITBlockLabel) error
-	EmitBranch(cond JITValueRef, thenLabel, elseLabel JITBlockLabel) error
-
-	EmitConst(v Scmer) (JITValueRef, error)
-	EmitMove(dst JITPlace, src JITValueRef) (JITValueRef, error)
-	EmitLoad(base JITValueRef, offset int32, class JITRegClass) (JITValueRef, error)
-	EmitStore(base JITValueRef, offset int32, src JITValueRef) error
-
-	EmitIntBinOp(op JITIntOp, x, y JITValueRef) (JITValueRef, error)
-	EmitIntCmp(pred JITCmpPred, x, y JITValueRef) (JITValueRef, error)
-	EmitIntShift(dir JITShiftDir, x, amount JITValueRef) (JITValueRef, error)
-	EmitIntDivRem(kind JITDivRemKind, x, y JITValueRef) (JITValueRef, error)
-
-	EmitMakeScmer(tag uint8, payload JITValueRef, dst JITPlace) (JITValueRef, error)
-}
-
 // ---- merged from scm/jit_types.go ----
 
 // Reg represents a hardware register index. The actual register constants
@@ -336,10 +168,9 @@ type JITFixup struct {
 // General=true means canonical BB emission mode (stack-backed phis / relocatable label target).
 // General=false allows specialized overlays for bounded unrolling.
 type PhiState struct {
-	General            bool
-	OverlayValues      []JITValueDesc
-	PhiValues          []JITValueDesc
-	SpecializationHash uint64
+	General       bool
+	OverlayValues []JITValueDesc
+	PhiValues     []JITValueDesc
 }
 
 // JITEnv manages variable descriptors during JIT compilation (like Env
@@ -362,17 +193,6 @@ func (env *JITEnv) Lookup(sym Symbol) (JITValueDesc, bool) {
 	return JITValueDesc{}, false
 }
 
-// Set stores a variable descriptor in the current scope.
-func (env *JITEnv) Set(sym Symbol, desc JITValueDesc) {
-	env.Vars[sym] = desc
-}
-
-// spillEntry records a register that was evicted to the spill buffer.
-type spillEntry struct {
-	reg  Reg // which register was saved
-	slot int // index in SpillBuf
-}
-
 type descSpillMeta struct {
 	loc      JITLoc
 	memPtr   uintptr
@@ -381,36 +201,22 @@ type descSpillMeta struct {
 
 // JITContext is the central structure for descriptor-based JIT compilation.
 type JITContext struct {
-	Env         *JITEnv
-	FreeRegs    uint64
-	AllRegs     uint64 // original set of all allocatable registers (for spilling)
-	W           *JITWriter
-	StackOffset int32
-	SliceBase   Reg // register holding the args slice pointer (for variable-index access)
+	Env       *JITEnv
+	FreeRegs  uint64
+	AllRegs   uint64 // original set of all allocatable registers (for spilling)
+	W         *JITWriter
+	SliceBase Reg // register holding the args slice pointer (for variable-index access)
 	// SliceBaseTracksRSP indicates that SliceBase is a mirror of RSP and must be
 	// refreshed after helper calls (Go may grow/move the goroutine stack).
 	SliceBaseTracksRSP bool
-	// Register spilling: when all registers are occupied, we save the
-	// register to a pre-allocated spill buffer (not the stack).
-	// This avoids modifying RSP, which would break phi stack offsets.
-	spillStack         [16]spillEntry // fixed-size: at most 16 hardware registers can be live
-	spillStackLen      int
 	RegOwners          [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 	SpillBuf           [4096]int64       // pre-allocated spill buffer (heap-stable, not on stack)
 	SpillTop           int               // high-water mark in SpillBuf (next fresh slot)
-	spillFreeArr       [16]int           // recycled SpillBuf slot indices
-	spillFreeLen       int
-	ProtectedRegs      uint64  // bitmask of registers that must not be spilled
-	ProtectedRegCounts [16]int // per-register protection refcount (supports nested protection)
+	ProtectedRegs      uint64            // bitmask of registers that must not be spilled
+	ProtectedRegCounts [16]int           // per-register protection refcount (supports nested protection)
 	nextDescID         uint32
 	descOwners         map[uint32]*JITValueDesc
 	descSpills         map[uint32]descSpillMeta
-	// EvictedCounts tracks how many times each register was evicted by AllocReg.
-	// When AllocReg spills register R and returns R as a fresh register, both the
-	// old holder and the new holder think they own R. EvictedCounts[R] counts the
-	// pending "burns": FreeReg(R) decrements the count without adding to FreeRegs,
-	// ensuring only the final FreeReg call (from the real live holder) returns R.
-	EvictedCounts [16]int
 	// ConstRoots holds pointer payloads from LocImm Scmer values that were
 	// materialized into machine code immediates. Keeping these pointers in a
 	// Go heap object reachable from JITEntryPoint prevents GC from reclaiming
@@ -426,11 +232,7 @@ type jitAllocStateSnapshot struct {
 	protectedRegs      uint64
 	protectedRegCounts [16]int
 	regOwners          [16]*JITValueDesc
-	spillStack         [16]spillEntry
-	spillStackLen      int
 	spillTop           int
-	spillFreeArr       [16]int
-	spillFreeLen       int
 	descSpills         map[uint32]descSpillMeta
 }
 
@@ -440,11 +242,7 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		protectedRegs:      ctx.ProtectedRegs,
 		protectedRegCounts: ctx.ProtectedRegCounts,
 		regOwners:          ctx.RegOwners,
-		spillStack:         ctx.spillStack,
-		spillStackLen:      ctx.spillStackLen,
 		spillTop:           ctx.SpillTop,
-		spillFreeArr:       ctx.spillFreeArr,
-		spillFreeLen:       ctx.spillFreeLen,
 	}
 	if len(ctx.descSpills) != 0 {
 		s.descSpills = make(map[uint32]descSpillMeta, len(ctx.descSpills))
@@ -460,11 +258,7 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	ctx.ProtectedRegs = s.protectedRegs
 	ctx.ProtectedRegCounts = s.protectedRegCounts
 	ctx.RegOwners = s.regOwners
-	ctx.spillStack = s.spillStack
-	ctx.spillStackLen = s.spillStackLen
 	ctx.SpillTop = s.spillTop
-	ctx.spillFreeArr = s.spillFreeArr
-	ctx.spillFreeLen = s.spillFreeLen
 	if s.descSpills == nil {
 		ctx.descSpills = nil
 	} else {
@@ -760,10 +554,6 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 }
 
 // FreeReg returns a register to the free pool.
-// If the register was evicted by AllocReg (EvictedCounts[r] > 0), this call
-// "burns" one eviction token and reclaims the spill slot. The register stays
-// live in the new holder. Only the final FreeReg call (EvictedCounts[r] == 0)
-// actually releases the register back to FreeRegs.
 func (ctx *JITContext) FreeReg(r Reg) {
 	owner := ctx.RegOwners[r]
 	if owner != nil {
@@ -1150,10 +940,10 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	resultBytes := numResultWords * 8
 	if resultBytes > 0 {
 		if resultBytes < 128 {
-			ctx.W.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, imm8
+			ctx.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, imm8
 		} else {
-			ctx.W.emitBytes(0x48, 0x81, 0xEC)
-			ctx.W.emitU32(uint32(resultBytes)) // SUB RSP, imm32
+			ctx.emitBytes(0x48, 0x81, 0xEC)
+			ctx.emitU32(uint32(resultBytes)) // SUB RSP, imm32
 		}
 	}
 
@@ -1427,123 +1217,6 @@ func (w *JITWriter) tryRewriteTrailingJmpToNop(f *JITFixup, offset int32) {
 type ShardJITPool struct {
 }
 
-// ---- merged from scm/jit_typefacts.go ----
-
-// JITFactsUnknown returns fully unknown type facts.
-func JITFactsUnknown() JITTypeFacts {
-	return JITTypeFacts{Possible: JITTagMaskAny}
-}
-
-// JITFactsKnownTag returns facts for a value with a known single tag.
-func JITFactsKnownTag(tag uint8) JITTypeFacts {
-	mask := jitTagToMask(tag)
-	if mask == 0 {
-		return JITFactsUnknown()
-	}
-	return JITTypeFacts{Possible: mask}
-}
-
-// JITFactsConst returns exact facts for a compile-time constant Scmer.
-func JITFactsConst(v Scmer) JITTypeFacts {
-	return JITTypeFacts{
-		Possible: jitTagToMask(v.GetTag()),
-		HasConst: true,
-		Const:    v,
-	}
-}
-
-// IsSingleTag reports whether exactly one tag is possible.
-func (f JITTypeFacts) IsSingleTag() bool {
-	if f.Possible == 0 {
-		return false
-	}
-	return (f.Possible & (f.Possible - 1)) == 0
-}
-
-// MayBeTag reports whether the given tag is still possible.
-func (f JITTypeFacts) MayBeTag(tag uint8) bool {
-	mask := jitTagToMask(tag)
-	if mask == 0 {
-		return false
-	}
-	return (f.Possible & mask) != 0
-}
-
-// RefineToTag intersects facts with a known tag branch.
-func (f JITTypeFacts) RefineToTag(tag uint8) JITTypeFacts {
-	mask := jitTagToMask(tag)
-	if mask == 0 {
-		return JITFactsUnknown()
-	}
-	refined := f
-	refined.Possible &= mask
-	if refined.Possible == 0 {
-		refined.Possible = mask
-	}
-	if refined.HasConst && refined.Const.GetTag() != tag {
-		refined.HasConst = false
-		refined.Const = Scmer{}
-	}
-	return refined
-}
-
-// RefineNotTag intersects facts with the negative branch (tag != X).
-func (f JITTypeFacts) RefineNotTag(tag uint8) JITTypeFacts {
-	mask := jitTagToMask(tag)
-	if mask == 0 {
-		return f
-	}
-	refined := f
-	refined.Possible &^= mask
-	if refined.Possible == 0 {
-		refined.Possible = JITTagMaskAny &^ mask
-		if refined.Possible == 0 {
-			refined.Possible = JITTagMaskAny
-		}
-	}
-	if refined.HasConst && refined.Const.GetTag() == tag {
-		refined.HasConst = false
-		refined.Const = Scmer{}
-	}
-	return refined
-}
-
-// Join merges branch facts at a CFG join point.
-func (f JITTypeFacts) Join(other JITTypeFacts) JITTypeFacts {
-	out := JITTypeFacts{
-		Possible: f.Possible | other.Possible,
-	}
-	if out.Possible == 0 {
-		out.Possible = JITTagMaskAny
-	}
-	if f.HasConst && other.HasConst && f.Const == other.Const {
-		out.HasConst = true
-		out.Const = f.Const
-	}
-	return out
-}
-
-func jitTagToMask(tag uint8) JITTagMask {
-	switch tag {
-	case tagNil:
-		return JITTagMaskNil
-	case tagBool:
-		return JITTagMaskBool
-	case tagInt:
-		return JITTagMaskInt
-	case tagFloat:
-		return JITTagMaskFloat
-	case tagString:
-		return JITTagMaskString
-	case tagSlice:
-		return JITTagMaskSlice
-	case tagFastDict:
-		return JITTagMaskFastDict
-	default:
-		return 0
-	}
-}
-
 // ---- merged from scm/jit.go ----
 
 var JITLog bool
@@ -1691,16 +1364,19 @@ func jitCompile(a ...Scmer) Scmer {
 	case tagProc:
 		// Lambda/procedure - attempt native compilation first
 		proc := v.Proc()
-		if code, roots := jitCompileProcWithRoots(proc); code != nil {
-			if JITLog {
-				fmt.Printf("%X\n", code)
+		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
+			buf, err := allocExec(codeCap)
+			if err != nil {
+				break
 			}
-			buf, err := allocExec(len(code))
-			if err == nil {
-				dst := (*[1 << 30]byte)(buf.ptr)[:len(code):len(code)]
-				copy(dst, code)
+			codeLen, roots, overflow := jitCompileProcToExec(proc, buf)
+			if codeLen > 0 {
+				code := (*[1 << 30]byte)(buf.ptr)[:codeLen:codeLen]
+				if JITLog {
+					fmt.Printf("%X\n", code)
+				}
 				if err2 := buf.makeRX(); err2 == nil {
-					fn2 := unsafe.Pointer(&struct{ *byte }{&dst[0]})
+					fn2 := unsafe.Pointer(&struct{ *byte }{&code[0]})
 					nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
 					return NewJIT(&JITEntryPoint{
 						Native:     nativeFn,
@@ -1708,7 +1384,10 @@ func jitCompile(a ...Scmer) Scmer {
 						Proc:       *proc,
 					})
 				}
-				syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
+			}
+			syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
+			if !overflow {
+				break
 			}
 		}
 		if JITLog {
