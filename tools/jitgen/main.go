@@ -417,6 +417,7 @@ type codeGen struct {
 	nextLabel      int
 	fn             *ssa.Function
 	bbLabels       map[uint64]string // scoped BB id → label var name
+	bbPosVars      map[uint64]string // scoped BB id → int32 machine code position var
 	bbDone         map[uint64]bool   // scoped BB id → already generated
 	bbQueued       map[uint64]bool   // scoped BB id → queued for future generation
 	bbQueue        []int             // queue of BB indices to generate
@@ -733,6 +734,36 @@ func (g *codeGen) ensureBBLabel(bbIdx int) string {
 	return lbl
 }
 
+func (g *codeGen) ensureBBPosVar(bbIdx int) string {
+	bbID := g.scopedBBID(bbIdx)
+	if v, ok := g.bbPosVars[bbID]; ok {
+		return v
+	}
+	v := fmt.Sprintf("bbpos_%d_%d", g.bbScope, bbIdx)
+	g.bbPosVars[bbID] = v
+	g.emit("%s := int32(-1)", v)
+	g.emit("_ = %s", v)
+	return v
+}
+
+// isGeneralBB reports BBs that should always get a label because they may be
+// branch targets outside pure linear one-pass fallthrough.
+func (g *codeGen) isGeneralBB(bbIdx int) bool {
+	if bbIdx < 0 || bbIdx >= len(g.fn.Blocks) {
+		return false
+	}
+	bb := g.fn.Blocks[bbIdx]
+	if len(bb.Preds) > 1 {
+		return true
+	}
+	for _, p := range bb.Preds {
+		if p.Index >= bbIdx {
+			return true
+		}
+	}
+	return false
+}
+
 // enqueueBB adds a BB to the processing queue if not already done/queued.
 func (g *codeGen) enqueueBB(bbIdx int) {
 	bbID := g.scopedBBID(bbIdx)
@@ -799,6 +830,55 @@ func (g *codeGen) phiEdgeIndexForSucc(targetBBIdx int, succPos int) (int, bool) 
 		}
 	}
 	return 0, false
+}
+
+func isScmerType(t types.Type) bool {
+	named, ok := t.(*types.Named)
+	return ok && named.Obj() != nil && named.Obj().Name() == "Scmer"
+}
+
+// phiEdgeSpecializationScore estimates how specific an incoming edge is for
+// target BB phis. Higher scores are preferred for immediate fallthrough.
+func (g *codeGen) phiEdgeSpecializationScore(targetBBIdx int, succPos int) int {
+	targetBlock := g.fn.Blocks[targetBBIdx]
+	edgeIdx, ok := g.phiEdgeIndexForSucc(targetBBIdx, succPos)
+	if !ok {
+		return 0
+	}
+	score := 0
+	for _, instr := range targetBlock.Instrs {
+		phi, ok := instr.(*ssa.Phi)
+		if !ok {
+			break
+		}
+		if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
+			continue
+		}
+		edge := phi.Edges[edgeIdx]
+		if _, ok := edge.(*ssa.Const); ok {
+			score += 4
+		}
+		if edge.Type() != nil {
+			if isScmerType(edge.Type()) {
+				score++
+			} else {
+				score += 2
+			}
+		}
+	}
+	return score
+}
+
+func (g *codeGen) preferredIfFallthrough(thenBB, elseBB int) int {
+	thenScore := g.phiEdgeSpecializationScore(thenBB, 0)
+	elseScore := g.phiEdgeSpecializationScore(elseBB, 1)
+	if thenScore > elseScore {
+		return thenBB
+	}
+	if elseScore > thenScore {
+		return elseBB
+	}
+	return elseBB
 }
 
 // emitEdgePhiMoves emits machine-code-level MOVs for phi edges to targetBB from
@@ -1029,6 +1109,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	savedBBDone := g.bbDone
 	savedBBQueued := g.bbQueued
 	savedBBLabels := g.bbLabels
+	savedBBPosVars := g.bbPosVars
 	savedBBScope := g.bbScope
 	savedCurBlock := g.curBlock
 	savedPhiRegs := g.phiRegs
@@ -1067,6 +1148,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.bbDone = map[uint64]bool{}
 	g.bbQueued = map[uint64]bool{}
 	g.bbLabels = map[uint64]string{}
+	g.bbPosVars = map[uint64]string{}
 	// Allocate a globally unique namespace for each inline call.
 	g.nextBBScope++
 	g.bbScope = g.nextBBScope
@@ -1170,6 +1252,9 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 
 	// Process callee blocks
 	var singleBlockResult genVal
+	for i := range callee.Blocks {
+		g.ensureBBPosVar(i)
+	}
 	g.bbQueue = []int{0}
 	g.bbQueued[g.scopedBBID(0)] = true
 	for len(g.bbQueue) > 0 {
@@ -1183,8 +1268,13 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
 
-		lbl := g.ensureBBLabel(bbIdx)
-		g.emit("ctx.W.MarkLabel(%s)", lbl)
+		if posVar, ok := g.bbPosVars[bbID]; ok {
+			g.emit("%s = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))", posVar)
+		}
+		if lbl, ok := g.bbLabels[bbID]; ok {
+			g.emit("ctx.W.MarkLabel(%s)", lbl)
+			g.emit("ctx.W.ResolveFixups()")
+		}
 		g.resetAllPhiDescsToStack()
 
 		block := callee.Blocks[bbIdx]
@@ -1246,6 +1336,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.bbDone = savedBBDone
 	g.bbQueued = savedBBQueued
 	g.bbLabels = savedBBLabels
+	g.bbPosVars = savedBBPosVars
 	g.bbScope = savedBBScope
 	g.curBlock = savedCurBlock
 	g.phiRegs = savedPhiRegs
@@ -1286,6 +1377,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		vals:            map[string]genVal{},
 		fn:              fn,
 		bbLabels:        map[uint64]string{},
+		bbPosVars:       map[uint64]string{},
 		bbDone:          map[uint64]bool{},
 		bbQueued:        map[uint64]bool{},
 		inlineCallSeq:   map[uint64]uint32{},
@@ -1322,6 +1414,14 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 	}
 
 	// Process BBs via queue, starting from BB0
+	for i := range fn.Blocks {
+		g.ensureBBPosVar(i)
+	}
+	for i := range fn.Blocks {
+		if g.isGeneralBB(i) {
+			g.ensureBBLabel(i)
+		}
+	}
 	g.bbQueue = []int{0}
 	g.bbQueued[g.scopedBBID(0)] = true
 	for len(g.bbQueue) > 0 {
@@ -1335,10 +1435,15 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
 
-		// Ensure every BB has a concrete entry label, even if first reached by
-		// queue/fallthrough before any forward jump reserved one.
-		lbl := g.ensureBBLabel(bbIdx)
-		g.emit("ctx.W.MarkLabel(%s)", lbl)
+		if posVar, ok := g.bbPosVars[bbID]; ok {
+			g.emit("%s = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))", posVar)
+		}
+		// Only mark labels for BBs that are actual jump targets.
+		// Linear fallthrough BBs stay unlabeled.
+		if lbl, ok := g.bbLabels[bbID]; ok {
+			g.emit("ctx.W.MarkLabel(%s)", lbl)
+			g.emit("ctx.W.ResolveFixups()")
+		}
 		g.resetAllPhiDescsToStack()
 
 		block := fn.Blocks[bbIdx]
@@ -1390,6 +1495,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		vals:            map[string]genVal{},
 		fn:              fn,
 		bbLabels:        map[uint64]string{},
+		bbPosVars:       map[uint64]string{},
 		bbDone:          map[uint64]bool{},
 		bbQueued:        map[uint64]bool{},
 		inlineCallSeq:   map[uint64]uint32{},
@@ -1460,6 +1566,14 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 	}
 
 	// Process BBs via queue, starting from BB0
+	for i := range fn.Blocks {
+		g.ensureBBPosVar(i)
+	}
+	for i := range fn.Blocks {
+		if g.isGeneralBB(i) {
+			g.ensureBBLabel(i)
+		}
+	}
 	g.bbQueue = []int{0}
 	g.bbQueued[g.scopedBBID(0)] = true
 	for len(g.bbQueue) > 0 {
@@ -1473,8 +1587,15 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
 
-		lbl := g.ensureBBLabel(bbIdx)
-		g.emit("ctx.W.MarkLabel(%s)", lbl)
+		if posVar, ok := g.bbPosVars[bbID]; ok {
+			g.emit("%s = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))", posVar)
+		}
+		// Only mark labels for BBs that are actual jump targets.
+		// Linear fallthrough BBs stay unlabeled.
+		if lbl, ok := g.bbLabels[bbID]; ok {
+			g.emit("ctx.W.MarkLabel(%s)", lbl)
+			g.emit("ctx.W.ResolveFixups()")
+		}
 		g.resetAllPhiDescsToStack()
 
 		block := fn.Blocks[bbIdx]
@@ -3985,15 +4106,19 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				takenBB = thenBB
 				takenSuccPos = 0
 			}
-			_ = g.ensureBBLabel(takenBB)
 			g.emitEdgePhiMoves(takenBB, takenSuccPos)
 			// Phase 2 pruning: only render the reachable branch.
 			// If the target BB is not rendered yet, enqueue it next and fall through
 			// without emitting an unconditional jump.
 			// For already-rendered targets (backedge/cross-edge), emit a direct jump.
 			if g.bbDone[g.scopedBBID(takenBB)] {
-				lbl := g.ensureBBLabel(takenBB)
-				g.emit("ctx.W.EmitJmp(%s)", lbl)
+				if lbl, ok := g.bbLabels[g.scopedBBID(takenBB)]; ok {
+					g.emit("ctx.W.EmitJmp(%s)", lbl)
+				} else if posVar, ok := g.bbPosVars[g.scopedBBID(takenBB)]; ok {
+					g.emit("ctx.W.EmitJmpToPos(%s)", posVar)
+				} else {
+					panic(fmt.Sprintf("jitgen: rendered BB%d requires jump label", takenBB))
+				}
 			} else {
 				g.enqueueBBFront(takenBB)
 			}
@@ -4012,65 +4137,75 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
 		g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
 		g.emit("}")
-			// Ensure labels for both targets
-			thenLbl := g.ensureBBLabel(thenBB)
-			elseLbl := g.ensureBBLabel(elseBB)
-			// Reserve edge-helper labels (both edges become explicit helper blocks)
-			thenEdgeLbl := g.allocLabel()
-			elseEdgeLbl := g.allocLabel()
-			g.emit("%s := ctx.W.ReserveLabel()", thenEdgeLbl)
-			g.emit("%s := ctx.W.ReserveLabel()", elseEdgeLbl)
+		// Ensure labels for both targets
+		thenLbl := g.ensureBBLabel(thenBB)
+		elseLbl := g.ensureBBLabel(elseBB)
+		// Reserve edge-helper labels (both edges become explicit helper blocks)
+		thenEdgeLbl := g.allocLabel()
+		elseEdgeLbl := g.allocLabel()
+		g.emit("%s := ctx.W.ReserveLabel()", thenEdgeLbl)
+		g.emit("%s := ctx.W.ReserveLabel()", elseEdgeLbl)
 
-			// Phase 3 step: JIT-time constant If pruning.
-			// When condVar is LocImm during emitter execution, emit only the taken
-			// edge helper and enqueue only one successor BB.
-			g.emit("if %s.Loc == LocImm {", condVar)
-			g.emit("\tif %s.Imm.Bool() {", condVar)
-			g.emit("\t\tctx.W.MarkLabel(%s)", thenEdgeLbl)
-			g.emitEdgePhiMoves(thenBB, 0)
-			g.emit("\t\tctx.W.EmitJmp(%s)", thenLbl)
-			g.emit("\t} else {")
-			g.emit("\t\tctx.W.MarkLabel(%s)", elseEdgeLbl)
-			g.emitEdgePhiMoves(elseBB, 1)
-			g.emit("\t\tctx.W.EmitJmp(%s)", elseLbl)
-			g.emit("\t}")
-			g.emit("} else {")
-			// Runtime: CMP + JNE to then-edge helper, otherwise else-edge helper.
-			g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, 0)", condVar)
-			g.emit("\tctx.W.EmitJcc(CcNE, %s)", thenEdgeLbl)
-			g.emit("\tctx.W.EmitJmp(%s)", elseEdgeLbl)
-			// Dynamic condition: both helper edges are reachable.
-			g.emit("\tctx.W.MarkLabel(%s)", thenEdgeLbl)
-			g.emitEdgePhiMoves(thenBB, 0)
-			g.emit("\tctx.W.EmitJmp(%s)", thenLbl)
-			g.emit("\tctx.W.MarkLabel(%s)", elseEdgeLbl)
-			g.emitEdgePhiMoves(elseBB, 1)
-			g.emit("\tctx.W.EmitJmp(%s)", elseLbl)
-			g.emit("}")
-			// Generator scheduling mirrors the emitted pruning above.
-			// For LocImm-only execution paths we enqueue a single successor; for
-			// dynamic conditions we must keep both successors reachable.
-			if immCond, ok := v.Cond.(*ssa.Const); ok && immCond.Value != nil && immCond.Value.Kind() == constant.Bool {
-				if constant.BoolVal(immCond.Value) {
-					g.enqueueBBFront(thenBB)
-				} else {
-					g.enqueueBBFront(elseBB)
-				}
+		// Phase 3 step: JIT-time constant If pruning.
+		// When condVar is LocImm during emitter execution, emit only the taken
+		// edge helper and enqueue only one successor BB.
+		g.emit("if %s.Loc == LocImm {", condVar)
+		g.emit("\tif %s.Imm.Bool() {", condVar)
+		g.emit("\t\tctx.W.MarkLabel(%s)", thenEdgeLbl)
+		g.emitEdgePhiMoves(thenBB, 0)
+		g.emit("\t\tctx.W.EmitJmp(%s)", thenLbl)
+		g.emit("\t} else {")
+		g.emit("\t\tctx.W.MarkLabel(%s)", elseEdgeLbl)
+		g.emitEdgePhiMoves(elseBB, 1)
+		g.emit("\t\tctx.W.EmitJmp(%s)", elseLbl)
+		g.emit("\t}")
+		g.emit("} else {")
+		// Runtime: CMP + JNE to then-edge helper, otherwise else-edge helper.
+		g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, 0)", condVar)
+		g.emit("\tctx.W.EmitJcc(CcNE, %s)", thenEdgeLbl)
+		g.emit("\tctx.W.EmitJmp(%s)", elseEdgeLbl)
+		// Dynamic condition: both helper edges are reachable.
+		g.emit("\tctx.W.MarkLabel(%s)", thenEdgeLbl)
+		g.emitEdgePhiMoves(thenBB, 0)
+		g.emit("\tctx.W.EmitJmp(%s)", thenLbl)
+		g.emit("\tctx.W.MarkLabel(%s)", elseEdgeLbl)
+		g.emitEdgePhiMoves(elseBB, 1)
+		g.emit("\tctx.W.EmitJmp(%s)", elseLbl)
+		g.emit("}")
+		// Generator scheduling mirrors the emitted pruning above.
+		// For LocImm-only execution paths we enqueue a single successor; for
+		// dynamic conditions we must keep both successors reachable while
+		// preferring the more specialized successor as immediate fallthrough.
+		if immCond, ok := v.Cond.(*ssa.Const); ok && immCond.Value != nil && immCond.Value.Kind() == constant.Bool {
+			if constant.BoolVal(immCond.Value) {
+				g.enqueueBBFront(thenBB)
 			} else {
-				g.enqueueBB(elseBB)
-				g.enqueueBB(thenBB)
+				g.enqueueBBFront(elseBB)
 			}
+		} else {
+			if g.preferredIfFallthrough(thenBB, elseBB) == thenBB {
+				g.enqueueBB(elseBB)
+				g.enqueueBBFront(thenBB)
+			} else {
+				g.enqueueBB(thenBB)
+				g.enqueueBBFront(elseBB)
+			}
+		}
 
 	case *ssa.Jump:
 		targetBB := v.Block().Succs[0].Index
-		_ = g.ensureBBLabel(targetBB)
 		g.emitEdgePhiMoves(targetBB, 0)
 		// Phase 2 pruning: for forward/unrendered targets, render target next and
 		// fall through without emitting an unconditional jump.
 		// If target is already rendered (backedge/cross-edge), emit a direct jump.
 		if g.bbDone[g.scopedBBID(targetBB)] {
-			lbl := g.ensureBBLabel(targetBB)
-			g.emit("ctx.W.EmitJmp(%s)", lbl)
+			if lbl, ok := g.bbLabels[g.scopedBBID(targetBB)]; ok {
+				g.emit("ctx.W.EmitJmp(%s)", lbl)
+			} else if posVar, ok := g.bbPosVars[g.scopedBBID(targetBB)]; ok {
+				g.emit("ctx.W.EmitJmpToPos(%s)", posVar)
+			} else {
+				panic(fmt.Sprintf("jitgen: rendered BB%d requires jump label", targetBB))
+			}
 		} else {
 			g.enqueueBBFront(targetBB)
 		}

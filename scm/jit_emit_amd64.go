@@ -426,6 +426,14 @@ func (w *JITWriter) EmitJmp(labelID uint8) {
 	w.emitU32(0) // placeholder
 }
 
+// EmitJmpToPos emits an unconditional JMP rel32 to an already-known code position.
+func (w *JITWriter) EmitJmpToPos(targetPos int32) {
+	curPos := int32(uintptr(w.Ptr)-uintptr(w.Start)) + 5
+	off := targetPos - curPos
+	w.emitByte(0xE9) // JMP rel32
+	w.emitU32(uint32(off))
+}
+
 // Condition code constants for EmitJcc
 const (
 	CcE  byte = 0x04 // JE  / JZ  (ZF=1)
