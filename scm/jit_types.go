@@ -406,6 +406,11 @@ func (ctx *JITContext) AllocReg() Reg {
 		}
 		owner := ctx.RegOwners[rr]
 		if owner == nil {
+			// Register has no tracked owner; treat it as reclaimable unless it is
+			// explicitly protected.
+			if ctx.ProtectedRegCounts[rr] == 0 {
+				ctx.FreeRegs |= 1 << uint(rr)
+			}
 			continue
 		}
 		valid := false
