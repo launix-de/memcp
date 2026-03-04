@@ -978,7 +978,7 @@ func (ctx *JITContext) EmitGetTagDesc(src *JITValueDesc, result JITValueDesc) JI
 }
 
 // EmitTagEquals checks if a Scmer's type tag equals a constant.
-// Equivalent to GetTag(src) == tag. Consumes src, produces a bool.
+// Equivalent to GetTag(src) == tag. Consumes src.
 func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITValueDesc) JITValueDesc {
 	if src.Loc == LocImm {
 		r := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(src.Imm.GetTag() == tag)}

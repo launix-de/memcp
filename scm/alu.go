@@ -389,8 +389,8 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl8)
 			ctx.FreeDesc(&d6)
 			ctx.W.MarkLabel(lbl3)
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			ctx.EnsureDesc(&d1)
 			var d8 JITValueDesc
 			if d1.Loc == LocImm {
@@ -432,6 +432,7 @@ func init_alu() {
 				r7 := ctx.AllocReg()
 				r8 := ctx.AllocRegExcept(r7)
 				lbl11 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d1.Reg, int32(i))
@@ -441,6 +442,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r7, ai.Reg)
 						ctx.W.EmitMovRegReg(r8, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -449,6 +451,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r7, tmp.Reg)
 						ctx.W.EmitMovRegReg(r8, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r7, Reg2: r8}
@@ -476,6 +479,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r7, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r8, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -487,11 +491,12 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d8 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r7, Reg2: r8}
+				d8 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r7, Reg2: r8}
 				ctx.BindReg(r7, &d8)
 				ctx.BindReg(r8, &d8)
 			}
 			d10 := d8
+			d10.ID = 0
 			d9 := ctx.EmitTagEquals(&d10, tagInt, JITValueDesc{Loc: LocAny})
 			d11 := d9
 			ctx.EnsureDesc(&d11)
@@ -606,10 +611,10 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl17)
 			ctx.FreeDesc(&d18)
 			ctx.W.MarkLabel(lbl7)
-			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
+			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
 			ctx.W.EmitMakeInt(result, d0)
@@ -617,10 +622,10 @@ func init_alu() {
 			result.Type = tagInt
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl12)
-			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			var d20 JITValueDesc
 			if d8.Loc == LocImm {
 				d20 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d8.Imm.Int())}
@@ -767,6 +772,7 @@ func init_alu() {
 				r14 := ctx.AllocReg()
 				r15 := ctx.AllocRegExcept(r14)
 				lbl20 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d15.Reg, int32(i))
@@ -776,6 +782,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r14, ai.Reg)
 						ctx.W.EmitMovRegReg(r15, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -784,6 +791,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r14, tmp.Reg)
 						ctx.W.EmitMovRegReg(r15, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r14, Reg2: r15}
@@ -811,6 +819,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r14, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r15, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -822,11 +831,12 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d25 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r14, Reg2: r15}
+				d25 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r14, Reg2: r15}
 				ctx.BindReg(r14, &d25)
 				ctx.BindReg(r15, &d25)
 			}
 			d27 := d25
+			d27.ID = 0
 			d26 := ctx.EmitTagEquals(&d27, tagNil, JITValueDesc{Loc: LocAny})
 			d28 := d26
 			ctx.EnsureDesc(&d28)
@@ -854,10 +864,10 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl22)
 			ctx.FreeDesc(&d26)
 			ctx.W.MarkLabel(lbl22)
-			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			var d29 JITValueDesc
 			if d25.Loc == LocImm {
 				d29 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d25.Imm.Float())}
@@ -936,10 +946,10 @@ func init_alu() {
 			ctx.EmitStoreToStack(d33, 24)
 			ctx.W.EmitJmp(lbl15)
 			ctx.W.MarkLabel(lbl21)
-			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d16 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			ctx.W.EmitMakeNil(result)
 			result.Type = tagNil
 			ctx.W.EmitJmp(lbl0)
@@ -1081,6 +1091,7 @@ func init_alu() {
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d5 := args[0]
 			d7 := d5
+			d7.ID = 0
 			d6 := ctx.EmitTagEquals(&d7, tagInt, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d5)
 			d8 := d6
@@ -1151,6 +1162,7 @@ func init_alu() {
 				r4 := ctx.AllocReg()
 				r5 := ctx.AllocRegExcept(r4)
 				lbl11 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d2.Reg, int32(i))
@@ -1160,6 +1172,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r4, ai.Reg)
 						ctx.W.EmitMovRegReg(r5, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -1168,6 +1181,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r4, tmp.Reg)
 						ctx.W.EmitMovRegReg(r5, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r4, Reg2: r5}
@@ -1195,6 +1209,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r4, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r5, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -1206,11 +1221,12 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d9 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r4, Reg2: r5}
+				d9 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r4, Reg2: r5}
 				ctx.BindReg(r4, &d9)
 				ctx.BindReg(r5, &d9)
 			}
 			d11 := d9
+			d11.ID = 0
 			d10 := ctx.EmitTagEquals(&d11, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d9)
 			d12 := d10
@@ -1334,9 +1350,9 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl17)
 			ctx.FreeDesc(&d20)
 			ctx.W.MarkLabel(lbl7)
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d22 := args[0]
 			var d23 JITValueDesc
 			if d22.Loc == LocImm {
@@ -1363,9 +1379,9 @@ func init_alu() {
 			ctx.EmitStoreToStack(d24, 8)
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(1)}, 16)
 			ctx.W.MarkLabel(lbl20)
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d27 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
@@ -1430,20 +1446,20 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl22)
 			ctx.FreeDesc(&d28)
 			ctx.W.MarkLabel(lbl12)
+			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			ctx.W.EmitMakeNil(result)
 			result.Type = tagNil
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl17)
+			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d17)
 			ctx.EnsureDesc(&d17)
 			ctx.W.EmitMakeFloat(result, d17)
@@ -1497,6 +1513,7 @@ func init_alu() {
 				r12 := ctx.AllocReg()
 				r13 := ctx.AllocRegExcept(r12)
 				lbl25 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d18.Reg, int32(i))
@@ -1506,6 +1523,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r12, ai.Reg)
 						ctx.W.EmitMovRegReg(r13, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -1514,6 +1532,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r12, tmp.Reg)
 						ctx.W.EmitMovRegReg(r13, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r12, Reg2: r13}
@@ -1541,6 +1560,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r12, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r13, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -1552,7 +1572,7 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d30 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r12, Reg2: r13}
+				d30 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r12, Reg2: r13}
 				ctx.BindReg(r12, &d30)
 				ctx.BindReg(r13, &d30)
 			}
@@ -1634,11 +1654,11 @@ func init_alu() {
 			ctx.EmitStoreToStack(d35, 48)
 			ctx.W.EmitJmp(lbl15)
 			ctx.W.MarkLabel(lbl22)
-			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d36 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 			ctx.EnsureDesc(&d26)
 			ctx.EnsureDesc(&d36)
@@ -1701,11 +1721,11 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl27)
 			ctx.FreeDesc(&d37)
 			ctx.W.MarkLabel(lbl21)
+			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			ctx.EnsureDesc(&d26)
 			var d39 JITValueDesc
 			if d26.Loc == LocImm {
@@ -1747,6 +1767,7 @@ func init_alu() {
 				r18 := ctx.AllocReg()
 				r19 := ctx.AllocRegExcept(r18)
 				lbl30 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d26.Reg, int32(i))
@@ -1756,6 +1777,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r18, ai.Reg)
 						ctx.W.EmitMovRegReg(r19, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -1764,6 +1786,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r18, tmp.Reg)
 						ctx.W.EmitMovRegReg(r19, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r18, Reg2: r19}
@@ -1791,6 +1814,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r18, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r19, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -1802,11 +1826,12 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d39 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r18, Reg2: r19}
+				d39 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r18, Reg2: r19}
 				ctx.BindReg(r18, &d39)
 				ctx.BindReg(r19, &d39)
 			}
 			d41 := d39
+			d41.ID = 0
 			d40 := ctx.EmitTagEquals(&d41, tagInt, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d39)
 			d42 := d40
@@ -1834,11 +1859,11 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl22)
 			ctx.FreeDesc(&d40)
 			ctx.W.MarkLabel(lbl27)
+			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			ctx.EnsureDesc(&d25)
 			ctx.EnsureDesc(&d25)
 			var d43 JITValueDesc
@@ -1859,11 +1884,11 @@ func init_alu() {
 			ctx.EnsureDesc(&d45)
 			ctx.EmitStoreToStack(d45, 32)
 			ctx.W.MarkLabel(lbl34)
+			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d46 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d47 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d48 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
@@ -1928,13 +1953,13 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl36)
 			ctx.FreeDesc(&d49)
 			ctx.W.MarkLabel(lbl26)
-			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d46 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d47 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d25)
 			ctx.EnsureDesc(&d25)
 			ctx.W.EmitMakeInt(result, d25)
@@ -1942,13 +1967,13 @@ func init_alu() {
 			result.Type = tagInt
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl31)
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d46 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d47 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d26)
 			var d51 JITValueDesc
 			if d26.Loc == LocImm {
@@ -1990,6 +2015,7 @@ func init_alu() {
 				r23 := ctx.AllocReg()
 				r24 := ctx.AllocRegExcept(r23)
 				lbl39 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d26.Reg, int32(i))
@@ -1999,6 +2025,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r23, ai.Reg)
 						ctx.W.EmitMovRegReg(r24, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -2007,6 +2034,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r23, tmp.Reg)
 						ctx.W.EmitMovRegReg(r24, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r23, Reg2: r24}
@@ -2034,6 +2062,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r23, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r24, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -2045,7 +2074,7 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d51 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r23, Reg2: r24}
+				d51 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r23, Reg2: r24}
 				ctx.BindReg(r23, &d51)
 				ctx.BindReg(r24, &d51)
 			}
@@ -2136,13 +2165,13 @@ func init_alu() {
 			ctx.EmitStoreToStack(d56, 16)
 			ctx.W.EmitJmp(lbl20)
 			ctx.W.MarkLabel(lbl36)
-			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d46 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d47 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d47)
 			ctx.EnsureDesc(&d47)
 			ctx.W.EmitMakeFloat(result, d47)
@@ -2150,13 +2179,13 @@ func init_alu() {
 			result.Type = tagFloat
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl35)
-			d46 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
-			d47 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
-			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d18 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(48)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d46 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
+			d47 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
+			d17 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			ctx.EnsureDesc(&d46)
 			var d57 JITValueDesc
 			if d46.Loc == LocImm {
@@ -2198,6 +2227,7 @@ func init_alu() {
 				r27 := ctx.AllocReg()
 				r28 := ctx.AllocRegExcept(r27)
 				lbl40 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d46.Reg, int32(i))
@@ -2207,6 +2237,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r27, ai.Reg)
 						ctx.W.EmitMovRegReg(r28, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -2215,6 +2246,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r27, tmp.Reg)
 						ctx.W.EmitMovRegReg(r28, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r27, Reg2: r28}
@@ -2242,6 +2274,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r27, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r28, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -2253,7 +2286,7 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d57 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r27, Reg2: r28}
+				d57 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r27, Reg2: r28}
 				ctx.BindReg(r27, &d57)
 				ctx.BindReg(r28, &d57)
 			}
@@ -2587,6 +2620,7 @@ func init_alu() {
 				r7 := ctx.AllocReg()
 				r8 := ctx.AllocRegExcept(r7)
 				lbl12 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d2.Reg, int32(i))
@@ -2596,6 +2630,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r7, ai.Reg)
 						ctx.W.EmitMovRegReg(r8, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -2604,6 +2639,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r7, tmp.Reg)
 						ctx.W.EmitMovRegReg(r8, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r7, Reg2: r8}
@@ -2631,6 +2667,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r7, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r8, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -2642,11 +2679,12 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d10 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r7, Reg2: r8}
+				d10 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r7, Reg2: r8}
 				ctx.BindReg(r7, &d10)
 				ctx.BindReg(r8, &d10)
 			}
 			d12 := d10
+			d12.ID = 0
 			d11 := ctx.EmitTagEquals(&d12, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d10)
 			d13 := d11
@@ -2787,6 +2825,7 @@ func init_alu() {
 				r12 := ctx.AllocReg()
 				r13 := ctx.AllocRegExcept(r12)
 				lbl20 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d6.Reg, int32(i))
@@ -2796,6 +2835,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r12, ai.Reg)
 						ctx.W.EmitMovRegReg(r13, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -2804,6 +2844,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r12, tmp.Reg)
 						ctx.W.EmitMovRegReg(r13, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r12, Reg2: r13}
@@ -2831,6 +2872,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r12, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r13, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -2842,11 +2884,12 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d18 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r12, Reg2: r13}
+				d18 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r12, Reg2: r13}
 				ctx.BindReg(r12, &d18)
 				ctx.BindReg(r13, &d18)
 			}
 			d20 := d18
+			d20.ID = 0
 			d19 := ctx.EmitTagEquals(&d20, tagInt, JITValueDesc{Loc: LocAny})
 			d21 := d19
 			ctx.EnsureDesc(&d21)
@@ -2904,9 +2947,9 @@ func init_alu() {
 			ctx.EnsureDesc(&d24)
 			ctx.EmitStoreToStack(d24, 40)
 			ctx.W.MarkLabel(lbl25)
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d6 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d25 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d26 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d27 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
@@ -2971,11 +3014,11 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl27)
 			ctx.FreeDesc(&d28)
 			ctx.W.MarkLabel(lbl16)
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d6 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d5)
 			ctx.EnsureDesc(&d5)
 			ctx.W.EmitMakeInt(result, d5)
@@ -2983,12 +3026,13 @@ func init_alu() {
 			result.Type = tagInt
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl22)
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
-			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d6 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d31 := d18
+			d31.ID = 0
 			d30 := ctx.EmitTagEquals(&d31, tagFloat, JITValueDesc{Loc: LocAny})
 			d32 := d30
 			ctx.EnsureDesc(&d32)
@@ -3015,11 +3059,11 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl9)
 			ctx.FreeDesc(&d30)
 			ctx.W.MarkLabel(lbl21)
+			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d6 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
-			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			var d33 JITValueDesc
 			if d18.Loc == LocImm {
 				d33 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d18.Imm.Int())}
@@ -3113,12 +3157,12 @@ func init_alu() {
 			ctx.EmitStoreToStack(d39, 16)
 			ctx.W.EmitJmp(lbl7)
 			ctx.W.MarkLabel(lbl27)
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d6 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d36 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
 			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
 			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d26)
 			ctx.EnsureDesc(&d26)
 			ctx.W.EmitMakeFloat(result, d26)
@@ -3126,12 +3170,12 @@ func init_alu() {
 			result.Type = tagFloat
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl26)
-			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
-			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d5 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d6 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d36 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(24)}
+			d25 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(32)}
+			d26 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(40)}
 			ctx.EnsureDesc(&d25)
 			var d40 JITValueDesc
 			if d25.Loc == LocImm {
@@ -3173,6 +3217,7 @@ func init_alu() {
 				r18 := ctx.AllocReg()
 				r19 := ctx.AllocRegExcept(r18)
 				lbl34 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d25.Reg, int32(i))
@@ -3182,6 +3227,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r18, ai.Reg)
 						ctx.W.EmitMovRegReg(r19, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -3190,6 +3236,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r18, tmp.Reg)
 						ctx.W.EmitMovRegReg(r19, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r18, Reg2: r19}
@@ -3217,6 +3264,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r18, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r19, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -3228,7 +3276,7 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d40 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r18, Reg2: r19}
+				d40 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r18, Reg2: r19}
 				ctx.BindReg(r18, &d40)
 				ctx.BindReg(r19, &d40)
 			}
@@ -4275,6 +4323,7 @@ func init_alu() {
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitBoolDesc(&d2, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
@@ -4336,6 +4385,7 @@ func init_alu() {
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitBoolDesc(&d2, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
@@ -4397,6 +4447,7 @@ func init_alu() {
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
@@ -4596,6 +4647,7 @@ func init_alu() {
 				r4 := ctx.AllocReg()
 				r5 := ctx.AllocRegExcept(r4)
 				lbl7 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d3.Reg, int32(i))
@@ -4605,6 +4657,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r4, ai.Reg)
 						ctx.W.EmitMovRegReg(r5, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -4613,6 +4666,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r4, tmp.Reg)
 						ctx.W.EmitMovRegReg(r5, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r4, Reg2: r5}
@@ -4640,6 +4694,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r4, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r5, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -4651,11 +4706,12 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d6 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r4, Reg2: r5}
+				d6 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r4, Reg2: r5}
 				ctx.BindReg(r4, &d6)
 				ctx.BindReg(r5, &d6)
 			}
 			d8 := d1
+			d8.ID = 0
 			d7 := ctx.EmitTagEquals(&d8, tagNil, JITValueDesc{Loc: LocAny})
 			d9 := d7
 			ctx.EnsureDesc(&d9)
@@ -4686,6 +4742,7 @@ func init_alu() {
 			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d11 := d6
+			d11.ID = 0
 			d10 := ctx.EmitTagEquals(&d11, tagNil, JITValueDesc{Loc: LocAny})
 			d12 := d10
 			ctx.EnsureDesc(&d12)
@@ -4989,8 +5046,8 @@ func init_alu() {
 			ctx.W.EmitJmp(lbl4)
 			ctx.FreeDesc(&d4)
 			ctx.W.MarkLabel(lbl4)
-			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d1)
 			if d1.Loc == LocRegPair {
 				ctx.EmitMovPairToResult(&d1, &result)
@@ -5016,8 +5073,8 @@ func init_alu() {
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl3)
-			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d3)
 			var d6 JITValueDesc
 			if d3.Loc == LocImm {
@@ -5059,6 +5116,7 @@ func init_alu() {
 				r4 := ctx.AllocReg()
 				r5 := ctx.AllocRegExcept(r4)
 				lbl7 := ctx.W.ReserveLabel()
+				typ := uint16(JITTypeUnknown)
 				for i := 0; i < len(args); i++ {
 					nextLbl := ctx.W.ReserveLabel()
 					ctx.W.EmitCmpRegImm32(d3.Reg, int32(i))
@@ -5068,6 +5126,7 @@ func init_alu() {
 					case LocRegPair:
 						ctx.W.EmitMovRegReg(r4, ai.Reg)
 						ctx.W.EmitMovRegReg(r5, ai.Reg2)
+						typ = ai.Type
 					case LocStackPair:
 						tmp := ai
 						ctx.EnsureDesc(&tmp)
@@ -5076,6 +5135,7 @@ func init_alu() {
 						}
 						ctx.W.EmitMovRegReg(r4, tmp.Reg)
 						ctx.W.EmitMovRegReg(r5, tmp.Reg2)
+						typ = tmp.Type
 						ctx.FreeDesc(&tmp)
 					case LocImm:
 						pair := JITValueDesc{Loc: LocRegPair, Reg: r4, Reg2: r5}
@@ -5103,6 +5163,7 @@ func init_alu() {
 							ctx.W.EmitMovRegImm64(r4, uint64(ptrWord))
 							ctx.W.EmitMovRegImm64(r5, auxWord)
 						}
+						typ = ai.Imm.GetTag()
 					default:
 						panic("jitgen: emitter args index expected Scmer pair")
 					}
@@ -5114,11 +5175,12 @@ func init_alu() {
 				for _, r := range protected {
 					ctx.UnprotectReg(r)
 				}
-				d6 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r4, Reg2: r5}
+				d6 = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: r4, Reg2: r5}
 				ctx.BindReg(r4, &d6)
 				ctx.BindReg(r5, &d6)
 			}
 			d8 := d1
+			d8.ID = 0
 			d7 := ctx.EmitTagEquals(&d8, tagNil, JITValueDesc{Loc: LocAny})
 			d9 := d7
 			ctx.EnsureDesc(&d9)
@@ -5149,6 +5211,7 @@ func init_alu() {
 			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d11 := d6
+			d11.ID = 0
 			d10 := ctx.EmitTagEquals(&d11, tagNil, JITValueDesc{Loc: LocAny})
 			d12 := d10
 			ctx.EnsureDesc(&d12)
@@ -5205,8 +5268,8 @@ func init_alu() {
 			ctx.EmitStoreToStack(d16, 16)
 			ctx.W.EmitJmp(lbl2)
 			ctx.W.MarkLabel(lbl12)
-			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
 			if d1.Loc == LocImm {
@@ -5576,6 +5639,7 @@ func init_alu() {
 			ctx.W.MarkLabel(lbl1)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			d3 := d1
@@ -5944,6 +6008,7 @@ func init_alu() {
 			ctx.W.MarkLabel(lbl1)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			d3 := d1

@@ -727,6 +727,7 @@ func init_list() {
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagSlice, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
@@ -1263,6 +1264,7 @@ func init_list() {
 			d3 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d4 := args[0]
 			d6 := d4
+			d6.ID = 0
 			d5 := ctx.EmitTagEquals(&d6, tagFastDict, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d4)
 			d7 := d5
@@ -1306,6 +1308,7 @@ func init_list() {
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d12 := args[0]
 			d14 := d12
+			d14.ID = 0
 			d13 := ctx.EmitTagEquals(&d14, tagSlice, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d12)
 			d15 := d13
@@ -1396,8 +1399,8 @@ func init_list() {
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl11)
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d23 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
 			d24 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d23}, 1)
 			d25 := d24
@@ -1577,9 +1580,9 @@ func init_list() {
 			ctx.W.EmitJmp(lbl14)
 			ctx.FreeDesc(&d35)
 			ctx.W.MarkLabel(lbl16)
-			d32 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d32 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d32)
 			r7 := ctx.AllocReg()
 			ctx.EnsureDesc(&d32)

@@ -4469,6 +4469,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.BindReg(r187, &d227)
 			if r2 { ctx.UnprotectReg(r3) }
 			d229 := d227
+			d229.ID = 0
 			d228 := ctx.EmitTagEquals(&d229, scm.TagNil, scm.JITValueDesc{Loc: scm.LocAny})
 			d230 := d228
 			ctx.EnsureDesc(&d230)
@@ -4497,6 +4498,7 @@ func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			ctx.FreeDesc(&d228)
 			ctx.W.MarkLabel(lbl68)
 			d232 := d227
+			d232.ID = 0
 			d231 := ctx.EmitTagEquals(&d232, scm.TagString, scm.JITValueDesc{Loc: scm.LocAny})
 			d233 := d231
 			ctx.EnsureDesc(&d233)
