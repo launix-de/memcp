@@ -161,19 +161,21 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			lbl5 := ctx.W.ReserveLabel()
 			if d3.Loc == scm.LocImm {
 				if d3.Imm.Bool() {
-					ctx.W.EmitJmp(lbl4)
+					ctx.W.MarkLabel(lbl4)
+					ctx.W.EmitJmp(lbl2)
 				} else {
-					ctx.W.EmitJmp(lbl5)
+					ctx.W.MarkLabel(lbl5)
+					ctx.W.EmitJmp(lbl3)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d3.Reg, 0)
 				ctx.W.EmitJcc(scm.CcNE, lbl4)
 				ctx.W.EmitJmp(lbl5)
+				ctx.W.MarkLabel(lbl4)
+				ctx.W.EmitJmp(lbl2)
+				ctx.W.MarkLabel(lbl5)
+				ctx.W.EmitJmp(lbl3)
 			}
-			ctx.W.MarkLabel(lbl4)
-			ctx.W.EmitJmp(lbl2)
-			ctx.W.MarkLabel(lbl5)
-			ctx.W.EmitJmp(lbl3)
 			ctx.FreeDesc(&d2)
 			ctx.W.MarkLabel(lbl3)
 			ctx.EnsureDesc(&idxInt)

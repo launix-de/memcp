@@ -4012,38 +4012,54 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("if %s.Loc != LocImm && %s.Loc != LocReg {", condVar, condVar)
 		g.emit("\tpanic(\"jit: If condition is neither LocImm nor LocReg\")")
 		g.emit("}")
-		// Ensure labels for both targets
-		thenLbl := g.ensureBBLabel(thenBB)
-		elseLbl := g.ensureBBLabel(elseBB)
-		// Reserve edge-helper labels (both edges become explicit helper blocks)
-		thenEdgeLbl := g.allocLabel()
-		elseEdgeLbl := g.allocLabel()
-		g.emit("%s := ctx.W.ReserveLabel()", thenEdgeLbl)
-		g.emit("%s := ctx.W.ReserveLabel()", elseEdgeLbl)
+			// Ensure labels for both targets
+			thenLbl := g.ensureBBLabel(thenBB)
+			elseLbl := g.ensureBBLabel(elseBB)
+			// Reserve edge-helper labels (both edges become explicit helper blocks)
+			thenEdgeLbl := g.allocLabel()
+			elseEdgeLbl := g.allocLabel()
+			g.emit("%s := ctx.W.ReserveLabel()", thenEdgeLbl)
+			g.emit("%s := ctx.W.ReserveLabel()", elseEdgeLbl)
 
-		g.emit("if %s.Loc == LocImm {", condVar)
-		g.emit("\tif %s.Imm.Bool() {", condVar)
-		// Constant true: still route through helper edge BB.
-		g.emit("\t\tctx.W.EmitJmp(%s)", thenEdgeLbl)
-		g.emit("\t} else {")
-		// Constant false: still route through helper edge BB.
-		g.emit("\t\tctx.W.EmitJmp(%s)", elseEdgeLbl)
-		g.emit("\t}")
-		g.emit("} else {")
-		// Runtime: CMP + JNE to then-edge helper, otherwise else-edge helper.
-		g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, 0)", condVar)
-		g.emit("\tctx.W.EmitJcc(CcNE, %s)", thenEdgeLbl)
-		g.emit("\tctx.W.EmitJmp(%s)", elseEdgeLbl)
-		g.emit("}")
-		// Helper edges are always emitted, independent of cond materialization.
-		g.emit("ctx.W.MarkLabel(%s)", thenEdgeLbl)
-		g.emitEdgePhiMoves(thenBB, 0)
-		g.emit("ctx.W.EmitJmp(%s)", thenLbl)
-		g.emit("ctx.W.MarkLabel(%s)", elseEdgeLbl)
-		g.emitEdgePhiMoves(elseBB, 1)
-		g.emit("ctx.W.EmitJmp(%s)", elseLbl)
-		g.enqueueBB(elseBB)
-		g.enqueueBB(thenBB)
+			// Phase 3 step: JIT-time constant If pruning.
+			// When condVar is LocImm during emitter execution, emit only the taken
+			// edge helper and enqueue only one successor BB.
+			g.emit("if %s.Loc == LocImm {", condVar)
+			g.emit("\tif %s.Imm.Bool() {", condVar)
+			g.emit("\t\tctx.W.MarkLabel(%s)", thenEdgeLbl)
+			g.emitEdgePhiMoves(thenBB, 0)
+			g.emit("\t\tctx.W.EmitJmp(%s)", thenLbl)
+			g.emit("\t} else {")
+			g.emit("\t\tctx.W.MarkLabel(%s)", elseEdgeLbl)
+			g.emitEdgePhiMoves(elseBB, 1)
+			g.emit("\t\tctx.W.EmitJmp(%s)", elseLbl)
+			g.emit("\t}")
+			g.emit("} else {")
+			// Runtime: CMP + JNE to then-edge helper, otherwise else-edge helper.
+			g.emit("\tctx.W.EmitCmpRegImm32(%s.Reg, 0)", condVar)
+			g.emit("\tctx.W.EmitJcc(CcNE, %s)", thenEdgeLbl)
+			g.emit("\tctx.W.EmitJmp(%s)", elseEdgeLbl)
+			// Dynamic condition: both helper edges are reachable.
+			g.emit("\tctx.W.MarkLabel(%s)", thenEdgeLbl)
+			g.emitEdgePhiMoves(thenBB, 0)
+			g.emit("\tctx.W.EmitJmp(%s)", thenLbl)
+			g.emit("\tctx.W.MarkLabel(%s)", elseEdgeLbl)
+			g.emitEdgePhiMoves(elseBB, 1)
+			g.emit("\tctx.W.EmitJmp(%s)", elseLbl)
+			g.emit("}")
+			// Generator scheduling mirrors the emitted pruning above.
+			// For LocImm-only execution paths we enqueue a single successor; for
+			// dynamic conditions we must keep both successors reachable.
+			if immCond, ok := v.Cond.(*ssa.Const); ok && immCond.Value != nil && immCond.Value.Kind() == constant.Bool {
+				if constant.BoolVal(immCond.Value) {
+					g.enqueueBBFront(thenBB)
+				} else {
+					g.enqueueBBFront(elseBB)
+				}
+			} else {
+				g.enqueueBB(elseBB)
+				g.enqueueBB(thenBB)
+			}
 
 	case *ssa.Jump:
 		targetBB := v.Block().Succs[0].Index

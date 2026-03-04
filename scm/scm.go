@@ -1262,20 +1262,23 @@ Patterns can be any of:
 			lbl5 := ctx.W.ReserveLabel()
 			if d2.Loc == LocImm {
 				if d2.Imm.Bool() {
-					ctx.W.EmitJmp(lbl4)
+					ctx.W.MarkLabel(lbl4)
+					ctx.W.EmitJmp(lbl2)
 				} else {
-					ctx.W.EmitJmp(lbl5)
+					ctx.W.MarkLabel(lbl5)
+			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, 0)
+					ctx.W.EmitJmp(lbl3)
 				}
 			} else {
 				ctx.W.EmitCmpRegImm32(d2.Reg, 0)
 				ctx.W.EmitJcc(CcNE, lbl4)
 				ctx.W.EmitJmp(lbl5)
-			}
-			ctx.W.MarkLabel(lbl4)
-			ctx.W.EmitJmp(lbl2)
-			ctx.W.MarkLabel(lbl5)
+				ctx.W.MarkLabel(lbl4)
+				ctx.W.EmitJmp(lbl2)
+				ctx.W.MarkLabel(lbl5)
 			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, 0)
-			ctx.W.EmitJmp(lbl3)
+				ctx.W.EmitJmp(lbl3)
+			}
 			ctx.FreeDesc(&d1)
 			ctx.W.MarkLabel(lbl3)
 			d3 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
