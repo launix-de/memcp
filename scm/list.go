@@ -741,6 +741,7 @@ func init_list() {
 				ctx.W.EmitMakeBool(result, d1)
 				ctx.FreeReg(d1.Reg)
 			}
+			result.Type = tagBool
 			return result
 			}
 			return bbs[0].Render()
@@ -1399,8 +1400,8 @@ func init_list() {
 			}
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl11)
-			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d23 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
 			d24 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d23}, 1)
 			d25 := d24
@@ -1479,8 +1480,8 @@ func init_list() {
 			lbl15 := ctx.W.ReserveLabel()
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 16)
 			ctx.W.MarkLabel(lbl15)
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d19 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d32 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			ctx.EnsureDesc(&d32)
 			ctx.EnsureDesc(&d32)

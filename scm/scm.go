@@ -816,6 +816,7 @@ func init() {
 				ctx.W.EmitMakeInt(result, d2)
 				ctx.FreeReg(d2.Reg)
 			}
+			result.Type = tagInt
 			return result
 			}
 			return bbs[0].Render()
@@ -1029,16 +1030,21 @@ func init() {
 			ctx.EnsureDesc(&d2)
 			if d2.Loc == LocRegPair {
 				ctx.EmitMovPairToResult(&d2, &result)
+				result.Type = d2.Type
 			} else {
 				switch d2.Type {
 				case tagBool:
 					ctx.W.EmitMakeBool(result, d2)
+					result.Type = tagBool
 				case tagInt:
 					ctx.W.EmitMakeInt(result, d2)
+					result.Type = tagInt
 				case tagFloat:
 					ctx.W.EmitMakeFloat(result, d2)
+					result.Type = tagFloat
 				case tagNil:
 					ctx.W.EmitMakeNil(result)
+					result.Type = tagNil
 				default:
 					panic("jit: single-block scalar return with unknown type")
 				}
@@ -1130,6 +1136,7 @@ func init() {
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d1}, 2)
 			if result.Loc == LocAny { return d2 }
 			ctx.EmitMovPairToResult(&d2, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()

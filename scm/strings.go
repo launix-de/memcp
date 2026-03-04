@@ -156,6 +156,7 @@ func init_strings() {
 				ctx.W.EmitMakeBool(result, d1)
 				ctx.FreeReg(d1.Reg)
 			}
+			result.Type = tagBool
 			return result
 			}
 			return bbs[0].Render()
@@ -1343,16 +1344,21 @@ func init_strings() {
 			ctx.EnsureDesc(&d2)
 			if d2.Loc == LocRegPair {
 				ctx.EmitMovPairToResult(&d2, &result)
+				result.Type = d2.Type
 			} else {
 				switch d2.Type {
 				case tagBool:
 					ctx.W.EmitMakeBool(result, d2)
+					result.Type = tagBool
 				case tagInt:
 					ctx.W.EmitMakeInt(result, d2)
+					result.Type = tagInt
 				case tagFloat:
 					ctx.W.EmitMakeFloat(result, d2)
+					result.Type = tagFloat
 				case tagNil:
 					ctx.W.EmitMakeNil(result)
+					result.Type = tagNil
 				default:
 					panic("jit: single-block scalar return with unknown type")
 				}
@@ -1413,6 +1419,7 @@ func init_strings() {
 				ctx.W.EmitMakeInt(result, d2)
 				ctx.FreeReg(d2.Reg)
 			}
+			result.Type = tagInt
 			return result
 			}
 			return bbs[0].Render()
@@ -1759,9 +1766,9 @@ func init_strings() {
 			result.Type = tagBool
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl6)
+			d7 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d17 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(16)}
 			d18 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
-			d7 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
 			if d1.Loc == LocImm {
@@ -1975,6 +1982,7 @@ func init_strings() {
 				ctx.W.EmitMakeBool(result, d4)
 				ctx.FreeReg(d4.Reg)
 			}
+			result.Type = tagBool
 			return result
 			}
 			return bbs[0].Render()
@@ -2042,6 +2050,7 @@ func init_strings() {
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d2}, 2)
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()
@@ -2109,6 +2118,7 @@ func init_strings() {
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d2}, 2)
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()
@@ -2262,6 +2272,7 @@ func init_strings() {
 			d7 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d6}, 2)
 			if result.Loc == LocAny { return d7 }
 			ctx.EmitMovPairToResult(&d7, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()
@@ -2329,6 +2340,7 @@ func init_strings() {
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d2}, 2)
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()
@@ -2432,6 +2444,7 @@ func init_strings() {
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d3}, 2)
 			if result.Loc == LocAny { return d4 }
 			ctx.EmitMovPairToResult(&d4, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()
@@ -2535,6 +2548,7 @@ func init_strings() {
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d3}, 2)
 			if result.Loc == LocAny { return d4 }
 			ctx.EmitMovPairToResult(&d4, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()
@@ -3405,6 +3419,7 @@ func init_strings() {
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d2}, 2)
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()
@@ -3472,6 +3487,7 @@ func init_strings() {
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d2}, 2)
 			if result.Loc == LocAny { return d3 }
 			ctx.EmitMovPairToResult(&d3, &result)
+			result.Type = tagString
 			return result
 			}
 			return bbs[0].Render()

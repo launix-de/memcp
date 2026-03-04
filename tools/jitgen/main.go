@@ -4393,6 +4393,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 	if len(v.Results) == 0 {
 		g.emit("if result.Loc == LocAny { return JITValueDesc{Loc: LocImm, Imm: NewNil()} }")
 		g.emit("ctx.W.EmitMakeNil(result)")
+		g.emit("result.Type = tagNil")
 		g.emit("return result")
 		return
 	}
@@ -4408,6 +4409,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("\tctx.W.EmitMakeBool(result, %s)", res.goVar)
 		g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
 		g.emit("}")
+		g.emit("result.Type = tagBool")
 		g.emit("return result")
 	case "_newint":
 		g.emit("if result.Loc == LocAny {")
@@ -4419,6 +4421,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("\tctx.W.EmitMakeInt(result, %s)", res.goVar)
 		g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
 		g.emit("}")
+		g.emit("result.Type = tagInt")
 		g.emit("return result")
 	case "_newfloat":
 		g.emit("if result.Loc == LocAny {")
@@ -4430,12 +4433,14 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("\tctx.W.EmitMakeFloat(result, %s)", res.goVar)
 		g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
 		g.emit("}")
+		g.emit("result.Type = tagFloat")
 		g.emit("return result")
 	case "_newnil":
 		g.emit("if result.Loc == LocAny {")
 		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("}")
 		g.emit("ctx.W.EmitMakeNil(result)")
+		g.emit("result.Type = tagNil")
 		g.emit("return result")
 	case "_newstring":
 		// NewString(s string) Scmer — arg is Go string {ptr, len} (2 words), result is Scmer (2 words)
@@ -4443,6 +4448,7 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{%s}, 2)", dv, res.goVar)
 		g.emit("if result.Loc == LocAny { return %s }", dv)
 		g.emit("ctx.EmitMovPairToResult(&%s, &result)", dv)
+		g.emit("result.Type = tagString")
 		g.emit("return result")
 	default:
 		if res.isDesc {
@@ -4452,16 +4458,21 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 			g.emit("ctx.EnsureDesc(&%s)", res.goVar)
 			g.emit("if %s.Loc == LocRegPair {", res.goVar)
 			g.emit("\tctx.EmitMovPairToResult(&%s, &result)", res.goVar)
+			g.emit("\tresult.Type = %s.Type", res.goVar)
 			g.emit("} else {")
 			g.emit("\tswitch %s.Type {", res.goVar)
 			g.emit("\tcase tagBool:")
 			g.emit("\t\tctx.W.EmitMakeBool(result, %s)", res.goVar)
+			g.emit("\t\tresult.Type = tagBool")
 			g.emit("\tcase tagInt:")
 			g.emit("\t\tctx.W.EmitMakeInt(result, %s)", res.goVar)
+			g.emit("\t\tresult.Type = tagInt")
 			g.emit("\tcase tagFloat:")
 			g.emit("\t\tctx.W.EmitMakeFloat(result, %s)", res.goVar)
+			g.emit("\t\tresult.Type = tagFloat")
 			g.emit("\tcase tagNil:")
 			g.emit("\t\tctx.W.EmitMakeNil(result)")
+			g.emit("\t\tresult.Type = tagNil")
 			g.emit("\tdefault:")
 			g.emit("\t\tpanic(\"jit: single-block scalar return with unknown type\")")
 			g.emit("\t}")

@@ -265,6 +265,7 @@ func InitMetricsDeclarations() {
 				ctx.W.EmitMakeFloat(result, d1)
 				ctx.FreeReg(d1.Reg)
 			}
+			result.Type = tagFloat
 			return result
 			}
 			return bbs[0].Render()
@@ -318,6 +319,7 @@ func InitMetricsDeclarations() {
 				ctx.W.EmitMakeInt(result, d0)
 				ctx.FreeReg(d0.Reg)
 			}
+			result.Type = tagInt
 			return result
 			}
 			return bbs[0].Render()
@@ -376,6 +378,7 @@ func InitMetricsDeclarations() {
 				ctx.W.EmitMakeInt(result, d1)
 				ctx.FreeReg(d1.Reg)
 			}
+			result.Type = tagInt
 			return result
 			}
 			return bbs[0].Render()
@@ -424,6 +427,7 @@ func InitMetricsDeclarations() {
 				ctx.W.EmitMakeFloat(result, d1)
 				ctx.FreeReg(d1.Reg)
 			}
+			result.Type = tagFloat
 			return result
 			}
 			return bbs[0].Render()

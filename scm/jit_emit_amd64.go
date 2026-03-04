@@ -1066,6 +1066,9 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 			ctx.W.EmitMovRegImm64(mask, 0x7fffffffffffffff)
 			ctx.W.EmitAndInt64(dst, mask)
 			ctx.FreeReg(mask)
+		} else if src.Type == tagBool {
+			// Bool payload is stored in bit 0; ignore tag marker bits.
+			ctx.W.EmitAndRegImm32(dst, 1)
 		}
 		ctx.W.EmitCmpRegImm32(dst, 0)
 		ctx.W.EmitSetcc(dst, CcNE)
