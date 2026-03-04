@@ -54,4 +54,4 @@ replace github.com/launix-de/NonLockingReadMap => ./third_party/NonLockingReadMa
 
 replace github.com/launix-de/go-mysqlstack => ./third_party/go-mysqlstack
 
-replace golang.org/x/text => github.com/carli2/text v0.34.1-0.20260304015300-c71dedc200f1
+replace golang.org/x/text => github.com/carli2/text v0.34.1-0.20260304020722-25ccbeffaf74
