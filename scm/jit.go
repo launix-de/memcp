@@ -19,10 +19,15 @@ package scm
 
 import (
 	"fmt"
+	"math"
+	"reflect"
 	"runtime"
 	"syscall"
+	"testing"
 	"unsafe"
 )
+
+// ---- merged from scm/jit.go ----
 
 var JITLog bool
 
@@ -76,63 +81,63 @@ func init_jit() {
 			_ = d1
 			var d2 JITValueDesc
 			_ = d2
-		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
 			lbl0 := ctx.W.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
-			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
-					ps.General = true
-					return bbs[0].RenderPS(ps)
+				if !ps.General {
+					if bbs[0].VisitCount >= 2 {
+						ps.General = true
+						return bbs[0].RenderPS(ps)
+					}
 				}
-			}
-			bbs[0].VisitCount++
-			if ps.General {
-				if bbs[0].Rendered {
-					ctx.W.EmitJmp(lbl0)
-					return result
+				bbs[0].VisitCount++
+				if ps.General {
+					if bbs[0].Rendered {
+						ctx.W.EmitJmp(lbl0)
+						return result
+					}
+					bbs[0].Rendered = true
+					bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+					bbpos_0_0 = bbs[0].Address
+					ctx.W.MarkLabel(lbl0)
+					ctx.W.ResolveFixups()
 				}
-				bbs[0].Rendered = true
-				bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
-				bbpos_0_0 = bbs[0].Address
-				ctx.W.MarkLabel(lbl0)
+				ctx.ReclaimUntrackedRegs()
+				d0 = args[0]
+				d0.ID = 0
+				d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
+				ctx.FreeDesc(&d0)
+				ctx.EnsureDesc(&d1)
+				var d2 JITValueDesc
+				if d1.Loc == LocImm {
+					d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(100))}
+				} else {
+					r0 := ctx.AllocReg()
+					ctx.W.EmitCmpRegImm32(d1.Reg, 100)
+					ctx.W.EmitSetcc(r0, CcE)
+					d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+					ctx.BindReg(r0, &d2)
+				}
+				ctx.FreeDesc(&d1)
+				ctx.EnsureDesc(&d2)
 				ctx.W.ResolveFixups()
-			}
-			ctx.ReclaimUntrackedRegs()
-			d0 = args[0]
-			d0.ID = 0
-			d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
-			ctx.FreeDesc(&d0)
-			ctx.EnsureDesc(&d1)
-			var d2 JITValueDesc
-			if d1.Loc == LocImm {
-				d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(100))}
-			} else {
-				r0 := ctx.AllocReg()
-				ctx.W.EmitCmpRegImm32(d1.Reg, 100)
-				ctx.W.EmitSetcc(r0, CcE)
-				d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
-				ctx.BindReg(r0, &d2)
-			}
-			ctx.FreeDesc(&d1)
-			ctx.EnsureDesc(&d2)
-			ctx.W.ResolveFixups()
-			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				ctx.BindReg(result.Reg, &result)
-				ctx.BindReg(result.Reg2, &result)
-			}
-			if d2.Loc == LocImm {
-				ctx.W.EmitMakeBool(result, d2)
-			} else {
-				ctx.W.EmitMakeBool(result, d2)
-				ctx.FreeReg(d2.Reg)
-			}
-			result.Type = tagBool
-			return result
-			return result
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				if d2.Loc == LocImm {
+					ctx.W.EmitMakeBool(result, d2)
+				} else {
+					ctx.W.EmitMakeBool(result, d2)
+					ctx.FreeReg(d2.Reg)
+				}
+				result.Type = tagBool
+				return result
+				return result
 			}
 			ps3 := PhiState{General: true}
 			_ = bbs[0].RenderPS(ps3)
@@ -198,5 +203,1833 @@ func jitCompile(a ...Scmer) Scmer {
 
 	default:
 		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))
+	}
+}
+
+// ---- merged from scm/jit_entry.go ----
+
+// ShardJITPool manages mmap'd page allocation per shard. Defined here as
+// a placeholder; the full implementation will be added when the page
+// allocator is built.
+type ShardJITPool struct {
+}
+
+// JITEntryPoint holds a JIT-compiled function alongside its original
+// Scheme representation for serialization and fallback.
+type JITEntryPoint struct {
+	Native     func(...Scmer) Scmer // compiled native function pointer
+	Pages      []*JITPage           // mmap'd pages holding machine code
+	Pool       *ShardJITPool        // pool for returning pages
+	ConstRoots []unsafe.Pointer     // GC roots for constants embedded into machine code
+	Proc       Proc                 // original Proc for serialization
+	Arch       string               // runtime.GOARCH at compile time
+	BodyHash   uint64               // hash of Proc.Body for cache invalidation
+}
+
+// tagJIT is the first custom tag slot for JIT-compiled functions.
+const tagJIT = 100
+
+// NewJIT wraps a JITEntryPoint as a Scmer value.
+func NewJIT(jep *JITEntryPoint) Scmer {
+	return NewCustom(tagJIT, unsafe.Pointer(jep))
+}
+
+// IsJIT reports whether the value is a JIT-compiled function.
+func (s Scmer) IsJIT() bool {
+	return s.IsCustom(tagJIT)
+}
+
+// JIT returns the JITEntryPoint for a JIT-compiled value.
+func (s Scmer) JIT() *JITEntryPoint {
+	return (*JITEntryPoint)(s.Custom(tagJIT))
+}
+
+// ---- merged from scm/jit_interface.go ----
+
+// JITTagMask is a bitset of possible runtime tags for a value.
+// A single set bit means "known tag", multiple bits mean union of possibilities.
+type JITTagMask uint32
+
+const (
+	JITTagMaskNil JITTagMask = 1 << iota
+	JITTagMaskBool
+	JITTagMaskInt
+	JITTagMaskFloat
+	JITTagMaskString
+	JITTagMaskSlice
+	JITTagMaskFastDict
+)
+
+const JITTagMaskAny = JITTagMaskNil | JITTagMaskBool | JITTagMaskInt |
+	JITTagMaskFloat | JITTagMaskString | JITTagMaskSlice | JITTagMaskFastDict
+
+// JITTypeFacts tracks compile-time knowledge for a value.
+// More knowledge should allow emitters to generate less machine code.
+type JITTypeFacts struct {
+	// Possible is the current tag set. JITTagMaskAny means fully unknown.
+	Possible JITTagMask
+	// When HasConst is true, Const holds an exact compile-time value.
+	HasConst bool
+	Const    Scmer
+}
+
+// JITValueKind describes how a value currently exists in the backend pipeline.
+type JITValueKind uint8
+
+const (
+	JITValueImm JITValueKind = iota
+	JITValueVirtual
+	JITValueMaterialized
+)
+
+// JITValueRef is an opaque value handle owned by the backend.
+type JITValueRef struct {
+	ID    uint32
+	Kind  JITValueKind
+	Facts JITTypeFacts
+}
+
+// JITRegRef is an abstract register handle used by architecture backends.
+type JITRegRef uint16
+
+// JITPlaceKind describes concrete placement requirements for materialization.
+type JITPlaceKind uint8
+
+const (
+	JITPlaceAny JITPlaceKind = iota
+	JITPlaceReg
+	JITPlacePair
+	JITPlaceStack
+	JITPlaceMem
+	JITPlaceImm
+)
+
+// JITPlace describes a concrete destination or source location.
+type JITPlace struct {
+	Kind JITPlaceKind
+	Reg  JITRegRef
+	Reg2 JITRegRef
+	Slot int32
+	Mem  uintptr
+}
+
+// JITRegClass defines logical register classes.
+type JITRegClass uint8
+
+const (
+	JITRegClassGPR JITRegClass = iota
+	JITRegClassFPR
+	JITRegClassPair
+)
+
+// JITPinToken is a stable protection handle independent of mutable descriptors.
+type JITPinToken struct {
+	ID uint32
+}
+
+// JITAllocScope is a temporary-allocation scope.
+type JITAllocScope interface {
+	Release()
+}
+
+// JITAllocator owns virtual->physical mapping, spill decisions, and liveness.
+// Frontends should never reason about physical registers directly.
+type JITAllocator interface {
+	Scope() JITAllocScope
+	Temp(class JITRegClass, except ...JITRegRef) (JITRegRef, error)
+	Ensure(v JITValueRef, class JITRegClass, except ...JITRegRef) (JITRegRef, error)
+	Pin(v JITValueRef) (JITPinToken, error)
+	Unpin(tok JITPinToken) error
+	Kill(v JITValueRef) error
+	Validate() error
+}
+
+// JITBlockLabel is an architecture-neutral label token.
+type JITBlockLabel uint32
+
+// JITIntOp are integer ALU operations.
+type JITIntOp uint8
+
+const (
+	JITIntAdd JITIntOp = iota
+	JITIntSub
+	JITIntMul
+	JITIntOr
+	JITIntAnd
+)
+
+// JITCmpPred are integer compare predicates.
+type JITCmpPred uint8
+
+const (
+	JITCmpEQ JITCmpPred = iota
+	JITCmpNE
+	JITCmpLT
+	JITCmpLE
+	JITCmpGT
+	JITCmpGE
+)
+
+// JITShiftDir describes logical shift direction.
+type JITShiftDir uint8
+
+const (
+	JITShiftLeft JITShiftDir = iota
+	JITShiftRight
+)
+
+// JITDivRemKind selects quotient or remainder result.
+type JITDivRemKind uint8
+
+const (
+	JITDivResult JITDivRemKind = iota
+	JITRemResult
+)
+
+// JITArchEmitter lowers semantic operations to target machine code.
+// All register movement details stay backend-internal.
+type JITArchEmitter interface {
+	Allocator() JITAllocator
+
+	BeginFunction(name string) error
+	EndFunction() error
+
+	NewLabel() JITBlockLabel
+	MarkLabel(label JITBlockLabel) error
+	EmitJump(label JITBlockLabel) error
+	EmitBranch(cond JITValueRef, thenLabel, elseLabel JITBlockLabel) error
+
+	EmitConst(v Scmer) (JITValueRef, error)
+	EmitMove(dst JITPlace, src JITValueRef) (JITValueRef, error)
+	EmitLoad(base JITValueRef, offset int32, class JITRegClass) (JITValueRef, error)
+	EmitStore(base JITValueRef, offset int32, src JITValueRef) error
+
+	EmitIntBinOp(op JITIntOp, x, y JITValueRef) (JITValueRef, error)
+	EmitIntCmp(pred JITCmpPred, x, y JITValueRef) (JITValueRef, error)
+	EmitIntShift(dir JITShiftDir, x, amount JITValueRef) (JITValueRef, error)
+	EmitIntDivRem(kind JITDivRemKind, x, y JITValueRef) (JITValueRef, error)
+
+	EmitMakeScmer(tag uint16, payload JITValueRef, dst JITPlace) (JITValueRef, error)
+}
+
+// ---- merged from scm/jit_typefacts.go ----
+
+// JITFactsUnknown returns fully unknown type facts.
+func JITFactsUnknown() JITTypeFacts {
+	return JITTypeFacts{Possible: JITTagMaskAny}
+}
+
+// JITFactsKnownTag returns facts for a value with a known single tag.
+func JITFactsKnownTag(tag uint16) JITTypeFacts {
+	mask := jitTagToMask(tag)
+	if mask == 0 {
+		return JITFactsUnknown()
+	}
+	return JITTypeFacts{Possible: mask}
+}
+
+// JITFactsConst returns exact facts for a compile-time constant Scmer.
+func JITFactsConst(v Scmer) JITTypeFacts {
+	return JITTypeFacts{
+		Possible: jitTagToMask(v.GetTag()),
+		HasConst: true,
+		Const:    v,
+	}
+}
+
+// IsSingleTag reports whether exactly one tag is possible.
+func (f JITTypeFacts) IsSingleTag() bool {
+	if f.Possible == 0 {
+		return false
+	}
+	return (f.Possible & (f.Possible - 1)) == 0
+}
+
+// MayBeTag reports whether the given tag is still possible.
+func (f JITTypeFacts) MayBeTag(tag uint16) bool {
+	mask := jitTagToMask(tag)
+	if mask == 0 {
+		return false
+	}
+	return (f.Possible & mask) != 0
+}
+
+// RefineToTag intersects facts with a known tag branch.
+func (f JITTypeFacts) RefineToTag(tag uint16) JITTypeFacts {
+	mask := jitTagToMask(tag)
+	if mask == 0 {
+		return JITFactsUnknown()
+	}
+	refined := f
+	refined.Possible &= mask
+	if refined.Possible == 0 {
+		refined.Possible = mask
+	}
+	if refined.HasConst && refined.Const.GetTag() != tag {
+		refined.HasConst = false
+		refined.Const = Scmer{}
+	}
+	return refined
+}
+
+// RefineNotTag intersects facts with the negative branch (tag != X).
+func (f JITTypeFacts) RefineNotTag(tag uint16) JITTypeFacts {
+	mask := jitTagToMask(tag)
+	if mask == 0 {
+		return f
+	}
+	refined := f
+	refined.Possible &^= mask
+	if refined.Possible == 0 {
+		refined.Possible = JITTagMaskAny &^ mask
+		if refined.Possible == 0 {
+			refined.Possible = JITTagMaskAny
+		}
+	}
+	if refined.HasConst && refined.Const.GetTag() == tag {
+		refined.HasConst = false
+		refined.Const = Scmer{}
+	}
+	return refined
+}
+
+// Join merges branch facts at a CFG join point.
+func (f JITTypeFacts) Join(other JITTypeFacts) JITTypeFacts {
+	out := JITTypeFacts{
+		Possible: f.Possible | other.Possible,
+	}
+	if out.Possible == 0 {
+		out.Possible = JITTagMaskAny
+	}
+	if f.HasConst && other.HasConst && f.Const == other.Const {
+		out.HasConst = true
+		out.Const = f.Const
+	}
+	return out
+}
+
+func jitTagToMask(tag uint16) JITTagMask {
+	switch tag {
+	case tagNil:
+		return JITTagMaskNil
+	case tagBool:
+		return JITTagMaskBool
+	case tagInt:
+		return JITTagMaskInt
+	case tagFloat:
+		return JITTagMaskFloat
+	case tagString:
+		return JITTagMaskString
+	case tagSlice:
+		return JITTagMaskSlice
+	case tagFastDict:
+		return JITTagMaskFastDict
+	default:
+		return 0
+	}
+}
+
+// ---- merged from scm/jit_types.go ----
+
+/*
+JIT Emitter Contract
+====================
+
+Each Declaration may provide a JITEmit callback:
+
+	func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc
+
+This callback emits machine code for the operation. The contract between
+caller and emitter is as follows.
+
+Input arguments (args):
+
+  Each args[i] describes where the i-th operand lives at the point of the
+  call. The emitter must handle all location modes:
+
+  - LocImm:     compile-time constant. args[i].Imm holds a Scmer value;
+                Imm.GetTag() carries the type. No register is allocated.
+                The emitter SHOULD constant-fold when all inputs are LocImm.
+  - LocReg:     unboxed primitive in args[i].Reg.
+  - LocRegPair: boxed Scmer in args[i].Reg (ptr) + args[i].Reg2 (aux).
+  - LocStack:   value on the stack at args[i].StackOff.
+  - LocMem:     value at fixed memory address args[i].MemPtr.
+
+  The emitter takes ownership of input registers: it MUST call
+  ctx.FreeDesc(&args[i]) for every register-located input it consumes.
+  Inputs in LocImm/LocStack/LocMem need no freeing.
+
+Result placement (result):
+
+  The result parameter tells the emitter WHERE to put its output.
+
+  - LocAny:     emitter chooses freely. May return LocImm (best: zero code
+                emitted), LocReg, or anything else. Use this when the caller
+                will immediately pass the result into another emitter.
+  - LocReg:     result MUST be placed into result.Reg.
+  - LocRegPair: result MUST be placed into result.Reg + result.Reg2.
+  - LocStack:   result MUST be written to result.StackOff.
+  - LocMem:     result MUST be written to result.MemPtr.
+
+  The emitter returns a JITValueDesc describing where the result actually
+  ended up. When result.Loc != LocAny, the returned desc must match.
+
+Constant propagation:
+
+  When all inputs are LocImm, emitters SHOULD compute the result at
+  compile time and return JITValueDesc{Loc: LocImm, Imm: <result>}
+  without emitting any machine code. This enables chains of operations
+  on constants to collapse to a single LocImm value.
+
+  When result.Loc == LocAny, returning LocImm is always valid and
+  preferred. When result.Loc demands a specific register or memory
+  location, the emitter must still materialize the constant there
+  (e.g. via EmitMakeBool/EmitMakeInt with the LocImm source).
+
+Register discipline:
+
+  - Allocate registers with ctx.AllocReg(), free with ctx.FreeReg(r).
+  - Free consumed input registers via ctx.FreeDesc(&args[i]).
+  - Never hold more registers than necessary between operations.
+  - Scratch registers (R11) are reserved for internal use by emit helpers.
+
+Generated emitters (tools/jitgen):
+
+  The jitgen tool reads Go SSA for Declaration function bodies and
+  generates JITEmit closures that follow this contract automatically.
+  Run: go run ./tools/jitgen/ -patch scm/alu.go
+*/
+
+// Reg represents a hardware register index. The actual register constants
+// (RAX, R8, X0, etc.) are defined in architecture-specific files.
+type Reg uint8
+
+// JITTypeUnknown means the Scmer type is not known at compile time.
+// All other type values are tag constants (tagInt, tagFloat, tagBool, etc.)
+// so GetTag can be constant-folded when Type != JITTypeUnknown.
+const JITTypeUnknown uint16 = 0xFFFF
+
+// JITLoc describes where a value resides during JIT compilation.
+type JITLoc uint8
+
+const (
+	LocNone      JITLoc = iota // Not yet assigned
+	LocReg                     // In a register (Reg) — for primitive types
+	LocRegPair                 // In two registers (Reg=ptr, Reg2=aux) — for Scmer
+	LocStack                   // On the stack (StackOff)
+	LocStackPair               // Two-word value spilled to stack-like spill buffer (MemPtr, MemPtr+8)
+	LocMem                     // At a fixed memory address (MemPtr)
+	LocImm                     // Compile-time constant (Imm)
+	LocAny                     // "I don't care" — result may be constant, register, or memory
+)
+
+// JITValueDesc describes a value during JIT compilation: its type and
+// storage location. Flows through expression compilation for type
+// propagation — analogous to optimizerMetainfo in the optimizer.
+//
+// Type uses the tag constants (tagInt, tagFloat, tagBool, ...) directly,
+// or JITTypeUnknown (0xFFFF) when the type is not known at compile time.
+// This means GetTag can be constant-folded: if Type != JITTypeUnknown,
+// the tag IS Type — no machine code needed.
+//
+// Type resolution (fixed vs flexible):
+//
+//	LocImm:     ALWAYS fixed. Imm.GetTag() == Type. Constant-fold everything.
+//	LocReg:     ALWAYS fixed. Unboxed primitive in a register. Type says what.
+//	LocRegPair: Fixed if Type != JITTypeUnknown, flexible otherwise.
+//	LocAny:     Result placement hint only ("I don't care where you put it").
+type JITValueDesc struct {
+	ID       uint32
+	Type     uint16 // tag constant (tagInt, tagFloat, ...) or JITTypeUnknown
+	Nullable bool
+	Loc      JITLoc
+	Reg      Reg
+	Reg2     Reg     // second register (for Scmer: ptr+aux)
+	StackOff int32   // stack offset (if Loc == LocStack)
+	MemPtr   uintptr // memory address (if Loc == LocMem)
+	Imm      Scmer   // compile-time constant (if Loc == LocImm); Imm.GetTag() carries type info
+}
+
+// JITFixup records a forward reference that must be patched after all
+// labels are placed.
+type JITFixup struct {
+	CodePos  int32 // position in code
+	LabelID  uint8 // target label
+	Size     uint8 // 1=rel8, 4=rel32
+	Relative bool  // true for PC-relative jumps
+}
+
+// PhiState carries incoming phi overlays for recursive BB renderers.
+// General=true means canonical BB emission mode (stack-backed phis / relocatable label target).
+// General=false allows specialized overlays for bounded unrolling.
+type PhiState struct {
+	General            bool
+	OverlayValues      []JITValueDesc
+	PhiValues          []JITValueDesc
+	SpecializationHash uint64
+}
+
+// JITEnv manages variable descriptors during JIT compilation (like Env
+// but for compile-time tracking of types and locations).
+type JITEnv struct {
+	Vars      map[Symbol]JITValueDesc
+	Numbered  []JITValueDesc
+	Outer     *JITEnv
+	StackBase int32
+}
+
+// Lookup resolves a symbol through the scope chain.
+func (env *JITEnv) Lookup(sym Symbol) (JITValueDesc, bool) {
+	if desc, ok := env.Vars[sym]; ok {
+		return desc, true
+	}
+	if env.Outer != nil {
+		return env.Outer.Lookup(sym)
+	}
+	return JITValueDesc{}, false
+}
+
+// Set stores a variable descriptor in the current scope.
+func (env *JITEnv) Set(sym Symbol, desc JITValueDesc) {
+	env.Vars[sym] = desc
+}
+
+// spillEntry records a register that was evicted to the spill buffer.
+type spillEntry struct {
+	reg  Reg // which register was saved
+	slot int // index in SpillBuf
+}
+
+type descSpillMeta struct {
+	loc      JITLoc
+	memPtr   uintptr
+	stackOff int32
+}
+
+// JITContext is the central structure for descriptor-based JIT compilation.
+type JITContext struct {
+	Env         *JITEnv
+	FreeRegs    uint64
+	AllRegs     uint64 // original set of all allocatable registers (for spilling)
+	W           *JITWriter
+	StackOffset int32
+	SliceBase   Reg // register holding the args slice pointer (for variable-index access)
+	// SliceBaseTracksRSP indicates that SliceBase is a mirror of RSP and must be
+	// refreshed after helper calls (Go may grow/move the goroutine stack).
+	SliceBaseTracksRSP bool
+	// Register spilling: when all registers are occupied, we save the
+	// register to a pre-allocated spill buffer (not the stack).
+	// This avoids modifying RSP, which would break phi stack offsets.
+	spillStack         [16]spillEntry // fixed-size: at most 16 hardware registers can be live
+	spillStackLen      int
+	RegOwners          [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	SpillBuf           [4096]int64       // pre-allocated spill buffer (heap-stable, not on stack)
+	SpillTop           int               // high-water mark in SpillBuf (next fresh slot)
+	spillFreeArr       [16]int           // recycled SpillBuf slot indices
+	spillFreeLen       int
+	ProtectedRegs      uint64  // bitmask of registers that must not be spilled
+	ProtectedRegCounts [16]int // per-register protection refcount (supports nested protection)
+	nextDescID         uint32
+	descOwners         map[uint32]*JITValueDesc
+	descSpills         map[uint32]descSpillMeta
+	// EvictedCounts tracks how many times each register was evicted by AllocReg.
+	// When AllocReg spills register R and returns R as a fresh register, both the
+	// old holder and the new holder think they own R. EvictedCounts[R] counts the
+	// pending "burns": FreeReg(R) decrements the count without adding to FreeRegs,
+	// ensuring only the final FreeReg call (from the real live holder) returns R.
+	EvictedCounts [16]int
+	// ConstRoots holds pointer payloads from LocImm Scmer values that were
+	// materialized into machine code immediates. Keeping these pointers in a
+	// Go heap object reachable from JITEntryPoint prevents GC from reclaiming
+	// referenced heap data while JIT code may still dereference it.
+	ConstRoots []unsafe.Pointer
+	rootSet    map[unsafe.Pointer]struct{}
+}
+
+// jitAllocStateSnapshot captures allocator/spill bookkeeping so emitter
+// generation can render sibling BBs from identical allocator state.
+type jitAllocStateSnapshot struct {
+	freeRegs           uint64
+	protectedRegs      uint64
+	protectedRegCounts [16]int
+	regOwners          [16]*JITValueDesc
+	spillStack         [16]spillEntry
+	spillStackLen      int
+	spillTop           int
+	spillFreeArr       [16]int
+	spillFreeLen       int
+	descSpills         map[uint32]descSpillMeta
+}
+
+func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
+	s := jitAllocStateSnapshot{
+		freeRegs:           ctx.FreeRegs,
+		protectedRegs:      ctx.ProtectedRegs,
+		protectedRegCounts: ctx.ProtectedRegCounts,
+		regOwners:          ctx.RegOwners,
+		spillStack:         ctx.spillStack,
+		spillStackLen:      ctx.spillStackLen,
+		spillTop:           ctx.SpillTop,
+		spillFreeArr:       ctx.spillFreeArr,
+		spillFreeLen:       ctx.spillFreeLen,
+	}
+	if len(ctx.descSpills) != 0 {
+		s.descSpills = make(map[uint32]descSpillMeta, len(ctx.descSpills))
+		for k, v := range ctx.descSpills {
+			s.descSpills[k] = v
+		}
+	}
+	return s
+}
+
+func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
+	ctx.FreeRegs = s.freeRegs
+	ctx.ProtectedRegs = s.protectedRegs
+	ctx.ProtectedRegCounts = s.protectedRegCounts
+	ctx.RegOwners = s.regOwners
+	ctx.spillStack = s.spillStack
+	ctx.spillStackLen = s.spillStackLen
+	ctx.SpillTop = s.spillTop
+	ctx.spillFreeArr = s.spillFreeArr
+	ctx.spillFreeLen = s.spillFreeLen
+	if s.descSpills == nil {
+		ctx.descSpills = nil
+	} else {
+		ctx.descSpills = make(map[uint32]descSpillMeta, len(s.descSpills))
+		for k, v := range s.descSpills {
+			ctx.descSpills[k] = v
+		}
+	}
+}
+
+// BBDescriptor stores per-basic-block emitter state.
+// Phase 1 starts with single-block closure usage; relocation fields are
+// prepared for follow-up BB-descriptor-based control-flow lowering.
+type BBDescriptor struct {
+	// Render is kept for compatibility with older generated emitters.
+	Render func() JITValueDesc
+	// RenderPS is the PhiState-aware recursive BB renderer.
+	RenderPS func(ps PhiState) JITValueDesc
+	Rendered bool
+	Address  int32
+	Pending  []JITFixup
+	// VisitCount tracks how often this BB descriptor has been entered.
+	// Unroll/specialization limits are derived from this per-BB state.
+	VisitCount uint16
+	// RenderCount is kept for compatibility with older generated emitters.
+	RenderCount uint16
+}
+
+// TrackImm records a LocImm constant's pointer payload as a GC root when needed.
+func (ctx *JITContext) TrackImm(v Scmer) {
+	if ctx == nil {
+		return
+	}
+	ptr, _ := v.RawWords()
+	if ptr == 0 {
+		return
+	}
+	p := unsafe.Pointer(ptr)
+	// Sentinel pointers are static globals and don't need GC rooting.
+	if p == unsafe.Pointer(&scmerIntSentinel) || p == unsafe.Pointer(&scmerFloatSentinel) {
+		return
+	}
+	if ctx.rootSet == nil {
+		ctx.rootSet = make(map[unsafe.Pointer]struct{}, 16)
+	}
+	if _, exists := ctx.rootSet[p]; exists {
+		return
+	}
+	ctx.rootSet[p] = struct{}{}
+	ctx.ConstRoots = append(ctx.ConstRoots, p)
+}
+
+// ProtectReg marks a register as non-spillable by AllocReg.
+// Multiple callers can protect the same register; it becomes spillable
+// again only when all protections are removed via UnprotectReg.
+func (ctx *JITContext) ProtectReg(r Reg) {
+	ctx.ProtectedRegCounts[r]++
+	ctx.ProtectedRegs |= 1 << uint(r)
+}
+
+// UnprotectReg removes one protection from a register. When the last
+// protection is removed, the register becomes spillable again.
+func (ctx *JITContext) UnprotectReg(r Reg) {
+	if ctx.ProtectedRegCounts[r] > 0 {
+		ctx.ProtectedRegCounts[r]--
+		if ctx.ProtectedRegCounts[r] == 0 {
+			ctx.ProtectedRegs &^= 1 << uint(r)
+		}
+	}
+}
+
+// ReclaimUntrackedRegs marks allocatable registers as free when they have no
+// tracked owner descriptor. This is used at BB boundaries in closure emitters
+// to prevent stale temporary allocations from exhausting the allocator.
+func (ctx *JITContext) ReclaimUntrackedRegs() {
+	for rr := Reg(0); rr <= RegR15; rr++ {
+		bit := uint64(1 << uint(rr))
+		if (ctx.AllRegs & bit) == 0 {
+			continue
+		}
+		if (ctx.ProtectedRegs & bit) != 0 {
+			continue
+		}
+		owner := ctx.RegOwners[rr]
+		if owner == nil {
+			ctx.FreeRegs |= bit
+			continue
+		}
+		valid := false
+		switch owner.Loc {
+		case LocReg:
+			valid = owner.Reg == rr
+		case LocRegPair:
+			valid = owner.Reg == rr || owner.Reg2 == rr
+		}
+		if !valid {
+			ctx.RegOwners[rr] = nil
+			ctx.FreeRegs |= bit
+		}
+	}
+}
+
+// AllocReg picks a free register from the bitmap and marks it used.
+// If no registers are free, spills the highest-numbered in-use register
+// to a pre-allocated buffer and returns it.
+func (ctx *JITContext) AllocReg() Reg {
+	// Sanitize stale owner links: if an owner descriptor no longer claims this
+	// hardware register, drop the stale owner edge and mark the register free.
+	for rr := Reg(0); rr <= RegR15; rr++ {
+		if (ctx.AllRegs & (1 << uint(rr))) == 0 {
+			continue
+		}
+		owner := ctx.RegOwners[rr]
+		if owner == nil {
+			continue
+		}
+		valid := false
+		switch owner.Loc {
+		case LocReg:
+			valid = owner.Reg == rr
+		case LocRegPair:
+			valid = owner.Reg == rr || owner.Reg2 == rr
+		}
+		if !valid {
+			ctx.RegOwners[rr] = nil
+			ctx.FreeRegs |= 1 << uint(rr)
+		}
+	}
+
+	// Exclude protected registers from allocation, not just from eviction.
+	available := ctx.FreeRegs &^ ctx.ProtectedRegs
+	if available != 0 {
+		// Normal path: pick lowest free bit, but skip protected ones
+		bit := available & (-available)
+		ctx.FreeRegs &^= bit
+		r := Reg(0)
+		for b := bit; b > 1; b >>= 1 {
+			r++
+		}
+		return r
+	}
+	// Spill path: spill tracked descriptors (LocReg / LocRegPair).
+	// Note: completely untracked in-use registers must NOT be reused here,
+	// as they may still be referenced by emitted code paths.
+	spillable := ctx.AllRegs &^ ctx.FreeRegs &^ ctx.ProtectedRegs
+	var r Reg = 0xFF
+	pairSpill := false
+	var pairR1, pairR2 Reg
+	for bit := int(RegR15); bit >= 0; bit-- {
+		rbit := Reg(bit)
+		if spillable&(1<<uint(rbit)) == 0 {
+			continue
+		}
+		owner := ctx.RegOwners[rbit]
+		if owner == nil {
+			continue
+		}
+		switch owner.Loc {
+		case LocReg:
+			if owner.Reg != rbit {
+				// Stale ownership metadata: do not reclaim implicitly.
+				continue
+			}
+			r = rbit
+		case LocRegPair:
+			if owner.Reg != rbit && owner.Reg2 != rbit {
+				// Stale ownership metadata: do not reclaim implicitly.
+				continue
+			}
+			pairR1 = owner.Reg
+			pairR2 = owner.Reg2
+			// Pair spill must evict both registers atomically; if either register
+			// is currently protected, try another candidate.
+			if (ctx.ProtectedRegs&(1<<uint(pairR1))) != 0 || (ctx.ProtectedRegs&(1<<uint(pairR2))) != 0 {
+				continue
+			}
+			r = rbit
+			pairSpill = true
+		default:
+			// Unknown owner location: do not reclaim implicitly.
+			continue
+		}
+		break
+	}
+	if r == 0xFF {
+		ownerMask := uint64(0)
+		ownerDump := ""
+		for rr := Reg(0); rr <= RegR15; rr++ {
+			if ctx.RegOwners[rr] != nil {
+				ownerMask |= 1 << uint(rr)
+				o := ctx.RegOwners[rr]
+				ownerDump += fmt.Sprintf(" r%d(loc=%d reg=%d reg2=%d)", rr, o.Loc, o.Reg, o.Reg2)
+			}
+		}
+		panic(fmt.Sprintf("jit: register spill required (fallback) free=%#x all=%#x prot=%#x owners=%#x%s", ctx.FreeRegs, ctx.AllRegs, ctx.ProtectedRegs, ownerMask, ownerDump))
+	}
+
+	owner := ctx.RegOwners[r]
+	if pairSpill {
+		slot := ctx.SpillTop
+		if slot+1 >= len(ctx.SpillBuf) {
+			panic("jit: spill buffer overflow")
+		}
+		ctx.SpillTop += 2
+		spillAddrPtr := uintptr(unsafe.Pointer(&ctx.SpillBuf[slot]))
+		ctx.W.EmitMovRegImm64(RegR11, uint64(spillAddrPtr))
+		ctx.W.EmitStoreRegMem(pairR1, RegR11, 0)
+		ctx.W.EmitStoreRegMem(pairR2, RegR11, 8)
+
+		owner.Loc = LocStackPair
+		owner.MemPtr = spillAddrPtr
+		owner.StackOff = int32(slot)
+		owner.Reg = 0
+		owner.Reg2 = 0
+		if owner.ID != 0 {
+			if ctx.descSpills == nil {
+				ctx.descSpills = make(map[uint32]descSpillMeta)
+			}
+			ctx.descSpills[owner.ID] = descSpillMeta{loc: LocStackPair, memPtr: spillAddrPtr, stackOff: int32(slot)}
+		}
+		ctx.RegOwners[pairR1] = nil
+		ctx.RegOwners[pairR2] = nil
+		return r
+	}
+
+	// Scalar spill: monotonic slot allocation (no recycle during emission).
+	slot := ctx.SpillTop
+	if slot >= len(ctx.SpillBuf) {
+		panic("jit: spill buffer overflow")
+	}
+	ctx.SpillTop++
+	spillAddrPtr := uintptr(unsafe.Pointer(&ctx.SpillBuf[slot]))
+	ctx.W.EmitMovRegImm64(RegR11, uint64(spillAddrPtr))
+	ctx.W.EmitStoreRegMem(r, RegR11, 0) // MOV [R11], reg
+
+	owner.Loc = LocStack
+	owner.MemPtr = spillAddrPtr
+	owner.StackOff = int32(slot) // spill slot id for recycling
+	owner.Reg = 0
+	if owner.ID != 0 {
+		if ctx.descSpills == nil {
+			ctx.descSpills = make(map[uint32]descSpillMeta)
+		}
+		ctx.descSpills[owner.ID] = descSpillMeta{loc: LocStack, memPtr: spillAddrPtr, stackOff: int32(slot)}
+	}
+	ctx.RegOwners[r] = nil
+	return r
+}
+
+// EnsureDesc restores a descriptor from stack/spill locations to registers.
+func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
+	if desc.Loc == LocReg && desc.ID != 0 && ctx.descSpills != nil {
+		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStack {
+			desc.Loc = LocStack
+			desc.MemPtr = meta.memPtr
+			desc.StackOff = meta.stackOff
+			desc.Reg = 0
+		}
+	}
+	if desc.Loc == LocRegPair && desc.ID != 0 && ctx.descSpills != nil {
+		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStackPair {
+			desc.Loc = LocStackPair
+			desc.MemPtr = meta.memPtr
+			desc.StackOff = meta.stackOff
+			desc.Reg = 0
+			desc.Reg2 = 0
+		}
+	}
+	switch desc.Loc {
+	case LocStack:
+		ctx.EnsureReg(desc)
+	case LocStackPair:
+		r1 := ctx.AllocReg()
+		r2 := ctx.AllocRegExcept(r1)
+		if desc.MemPtr != 0 {
+			// Spill-buffer backed pair.
+			ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
+			ctx.W.EmitMovRegMem(r1, RegR11, 0)
+			ctx.W.EmitMovRegMem(r2, RegR11, 8)
+		} else {
+			// Regular frame-backed pair.
+			ctx.W.EmitMovRegMem(r1, RegRSP, desc.StackOff)
+			ctx.W.EmitMovRegMem(r2, RegRSP, desc.StackOff+8)
+		}
+		desc.Loc = LocRegPair
+		desc.Reg = r1
+		desc.Reg2 = r2
+		desc.MemPtr = 0
+		desc.StackOff = 0
+		ctx.BindReg(r1, desc)
+		ctx.BindReg(r2, desc)
+	}
+}
+
+// FreeReg returns a register to the free pool.
+// If the register was evicted by AllocReg (EvictedCounts[r] > 0), this call
+// "burns" one eviction token and reclaims the spill slot. The register stays
+// live in the new holder. Only the final FreeReg call (EvictedCounts[r] == 0)
+// actually releases the register back to FreeRegs.
+func (ctx *JITContext) FreeReg(r Reg) {
+	owner := ctx.RegOwners[r]
+	if owner != nil {
+		switch owner.Loc {
+		case LocReg:
+			if owner.Reg == r {
+				owner.Loc = LocNone
+				owner.Reg = 0
+			}
+		case LocRegPair:
+			// Freeing a single half of a pair means the original pair descriptor
+			// is no longer reliable. Invalidate it and drop tracking for the other
+			// half; callers that want to keep one word must re-bind explicitly.
+			if owner.Reg == r || owner.Reg2 == r {
+				other := owner.Reg
+				if other == r {
+					other = owner.Reg2
+				}
+				if other <= RegR15 {
+					ctx.RegOwners[other] = nil
+				}
+				owner.Loc = LocNone
+				owner.Reg = 0
+				owner.Reg2 = 0
+			}
+		}
+	}
+	ctx.FreeRegs |= 1 << uint(r)
+	ctx.RegOwners[r] = nil
+}
+
+// BindReg associates a register with a JITValueDesc owner for spill tracking.
+// Call this after placing a value in a register so AllocReg can evict it.
+func (ctx *JITContext) BindReg(r Reg, desc *JITValueDesc) {
+	if desc.ID == 0 {
+		ctx.nextDescID++
+		desc.ID = ctx.nextDescID
+	}
+	if ctx.descOwners == nil {
+		ctx.descOwners = make(map[uint32]*JITValueDesc)
+	}
+	owner := ctx.descOwners[desc.ID]
+	if owner == nil {
+		owner = &JITValueDesc{}
+		ctx.descOwners[desc.ID] = owner
+	}
+	*owner = *desc
+	// A bound register is live and must not be treated as free.
+	ctx.FreeRegs &^= 1 << uint(r)
+	ctx.RegOwners[r] = owner
+	if desc.ID != 0 && ctx.descSpills != nil {
+		delete(ctx.descSpills, desc.ID)
+	}
+}
+
+// TransferReg is called by the generated alias check when the result descriptor
+// reuses the same hardware register as an input descriptor (which will be set to
+// LocNone). If AllocReg had to evict that register to produce this fresh copy,
+// burn one eviction token so the final FreeReg from the new holder correctly
+// returns the register to the free pool.
+func (ctx *JITContext) TransferReg(r Reg) {
+	_ = r
+}
+
+// AllocRegExcept allocates a fresh register guaranteed not to be any of the
+// excluded registers. Use this when the new register will immediately receive
+// a copy FROM one of the excluded registers — without this guard, AllocReg()
+// might evict an excluded register and return it, making the subsequent copy
+// a no-op self-move (and letting any ALU op on the result destroy the source).
+//
+// Architecture-agnostic: works equally for amd64 (16 regs), arm64 (31 regs),
+// riscv64 (32 regs), etc. The protect/unprotect dance is an implementation
+// detail hidden from callers.
+func (ctx *JITContext) AllocRegExcept(excluded ...Reg) Reg {
+	for _, r := range excluded {
+		ctx.ProtectReg(r)
+	}
+	r := ctx.AllocReg()
+	for _, ex := range excluded {
+		if r == ex {
+			panic("jit: AllocRegExcept returned excluded register")
+		}
+	}
+	for _, r := range excluded {
+		ctx.UnprotectReg(r)
+	}
+	return r
+}
+
+// EnsureReg checks if a descriptor was spilled and restores it.
+// If the value is still in a register, this is a no-op.
+// If spilled, allocates a new register, emits a load, and updates the desc.
+func (ctx *JITContext) EnsureReg(desc *JITValueDesc) {
+	if desc.Loc != LocStack {
+		return
+	}
+	r := ctx.AllocReg()
+	if desc.MemPtr != 0 {
+		// Load from spill buffer using absolute address recorded in MemPtr.
+		ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
+		ctx.W.EmitMovRegMem(r, RegR11, 0)
+	} else {
+		// Generic LocStack value (non-spill): load from [RSP+StackOff].
+		ctx.W.EmitMovRegMem(r, RegRSP, desc.StackOff)
+	}
+	desc.Loc = LocReg
+	desc.Reg = r
+	desc.MemPtr = 0
+	desc.StackOff = 0
+	ctx.BindReg(r, desc)
+	if desc.ID != 0 && ctx.descSpills != nil {
+		delete(ctx.descSpills, desc.ID)
+	}
+}
+
+// RestoreSpills restores all spilled registers from the spill buffer in reverse order.
+// Since spills use a pre-allocated buffer (not RSP), this doesn't modify the stack pointer.
+func (ctx *JITContext) RestoreSpills() {
+	for i := ctx.spillStackLen - 1; i >= 0; i-- {
+		slot := ctx.spillStack[i].slot
+		spillAddr := uint64(uintptr(unsafe.Pointer(&ctx.SpillBuf[slot])))
+		ctx.W.EmitMovRegImm64(RegR11, spillAddr)
+		ctx.W.EmitMovRegMem(ctx.spillStack[i].reg, RegR11, 0)
+	}
+	ctx.spillStackLen = 0
+	ctx.SpillTop = 0
+}
+
+// FreeDesc releases any registers held by a value descriptor.
+func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
+	// Non-owning descriptors (ID==0), e.g. copied call arguments, must not
+	// mutate placement/free registers from the original source descriptor.
+	if desc.ID == 0 {
+		return
+	}
+	switch desc.Loc {
+	case LocReg:
+		if desc.Reg <= RegR15 {
+			owner := ctx.RegOwners[desc.Reg]
+			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
+				ctx.FreeReg(desc.Reg)
+			}
+		}
+	case LocRegPair:
+		if desc.Reg <= RegR15 {
+			owner := ctx.RegOwners[desc.Reg]
+			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
+				ctx.FreeReg(desc.Reg)
+			}
+		}
+		if desc.Reg2 <= RegR15 {
+			owner := ctx.RegOwners[desc.Reg2]
+			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
+				ctx.FreeReg(desc.Reg2)
+			}
+		}
+	case LocStack:
+	case LocStackPair:
+	}
+	desc.Loc = LocNone
+	desc.MemPtr = 0
+	if desc.ID != 0 && ctx.descSpills != nil {
+		delete(ctx.descSpills, desc.ID)
+	}
+}
+
+// JITBuildMergeClosure wraps a func(...Scmer) Scmer into func(Scmer, Scmer) Scmer.
+// Called from JIT code at runtime.
+func JITBuildMergeClosure(mfn func(...Scmer) Scmer) func(Scmer, Scmer) Scmer {
+	return func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
+}
+
+// GoFuncAddr returns the entry point address of a Go function value.
+func GoFuncAddr(fn interface{}) uint64 {
+	return uint64(reflect.ValueOf(fn).Pointer())
+}
+
+// ConcatStrings concatenates two Go strings. Used as a JIT helper for string + string.
+func ConcatStrings(a, b string) string {
+	return a + b
+}
+
+// JITScmerToFloatBits converts a Scmer to float64 and returns the raw IEEE bits
+// in a GPR-friendly integer return value for JIT helper calls.
+func JITScmerToFloatBits(v Scmer) uint64 {
+	return math.Float64bits(v.Float())
+}
+
+func JITFloorBits(v uint64) uint64 {
+	return math.Float64bits(math.Floor(math.Float64frombits(v)))
+}
+
+func JITCeilBits(v uint64) uint64 {
+	return math.Float64bits(math.Ceil(math.Float64frombits(v)))
+}
+
+func JITTruncBits(v uint64) uint64 {
+	return math.Float64bits(math.Trunc(math.Float64frombits(v)))
+}
+
+func JITSqrtBits(v uint64) uint64 {
+	return math.Float64bits(math.Sqrt(math.Float64frombits(v)))
+}
+
+func JITAbsBits(v uint64) uint64 {
+	return math.Float64bits(math.Abs(math.Float64frombits(v)))
+}
+
+// JITIntDiv performs int64 division for JIT fallback lowering paths.
+func JITIntDiv(a, b int64) int64 {
+	return a / b
+}
+
+// JITIntRem performs int64 modulo for JIT fallback lowering paths.
+func JITIntRem(a, b int64) int64 {
+	return a % b
+}
+
+// GoABIIntRegs lists integer argument/result registers in Go internal ABI order.
+var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, RegR10, RegR11}
+
+type goCallArgWord struct {
+	loc      JITLoc
+	reg      Reg
+	imm      uint64
+	memPtr   uintptr
+	stackOff int32
+}
+
+func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
+	allocatedMask := (^ctx.FreeRegs) & 0xFFFF // track all GPRs, incl. reserved non-alloc regs
+	for r := Reg(0); r <= RegR15; r++ {
+		if ctx.RegOwners[r] != nil && (ctx.FreeRegs&(1<<uint(r))) != 0 {
+			panic("jit: internal reg state mismatch (owner set but register marked free)")
+		}
+	}
+	liveCount := 0
+	unknownCount := 0
+	for r := Reg(0); r <= RegR15; r++ {
+		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
+			continue
+		}
+		if allocatedMask&(1<<uint(r)) == 0 {
+			continue
+		}
+		if ctx.RegOwners[r] == nil {
+			unknownCount++
+			continue
+		}
+		buf[liveCount] = r
+		liveCount++
+	}
+
+	// Conservative fallback: if we have untracked allocated registers, keep the
+	// old semantics and treat all allocated registers as live.
+	if unknownCount > 0 {
+		liveCount = 0
+		for r := Reg(0); r <= RegR15; r++ {
+			if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
+				continue
+			}
+			if allocatedMask&(1<<uint(r)) == 0 {
+				continue
+			}
+			buf[liveCount] = r
+			liveCount++
+		}
+	}
+	return buf[:liveCount]
+}
+
+// EmitGoCall emits a call to a Go function from JIT code.
+// argWords: registers holding argument words in Go ABI order.
+// numResultWords: how many result words to capture.
+// Returns registers holding the result words.
+// All live JIT registers are saved/restored around the call.
+// EmitGoCall emits a call to a Go function from JIT code.
+// argWords: registers holding argument words in Go ABI order.
+// numResultWords: how many result words to capture.
+// resultsBuf: caller-provided [16]Reg buffer for results (no heap alloc).
+// Returns a slice into resultsBuf holding the result registers.
+// All live JIT registers are saved/restored around the call.
+func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg) []Reg {
+	if len(argWords) > len(GoABIIntRegs) {
+		panic("jit: too many argument words for Go ABI")
+	}
+	if numResultWords > len(GoABIIntRegs) {
+		panic("jit: too many result words for Go ABI")
+	}
+
+	// Owner-aware liveness with conservative fallback.
+	var liveRegsArr [16]Reg
+	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+	// Preserve the argument slice base register across helper calls as well.
+	// It is not part of the allocator pool but can still be needed by
+	// subsequent argument loads in the same emitted function.
+	switch ctx.SliceBase {
+	case RegRSP, RegRBP, RegR11, RegR14:
+		// never preserved here
+	default:
+		found := false
+		for _, r := range liveRegs {
+			if r == ctx.SliceBase {
+				found = true
+				break
+			}
+		}
+		if !found {
+			liveRegs = append(liveRegs, ctx.SliceBase)
+		}
+	}
+	emitArgSetup := func(stackArgBaseDisp int32) {
+		type regMove struct {
+			dst Reg
+			src Reg
+		}
+		moves := make([]regMove, 0, len(argWords))
+		for i := range argWords {
+			target := GoABIIntRegs[i]
+			if argWords[i].loc == LocReg && argWords[i].reg != target {
+				moves = append(moves, regMove{dst: target, src: argWords[i].reg})
+			}
+		}
+		for len(moves) > 0 {
+			emitIdx := -1
+			for i := range moves {
+				dstIsPendingSrc := false
+				for j := range moves {
+					if i == j {
+						continue
+					}
+					if moves[j].src == moves[i].dst {
+						dstIsPendingSrc = true
+						break
+					}
+				}
+				if !dstIsPendingSrc {
+					emitIdx = i
+					break
+				}
+			}
+			if emitIdx == -1 {
+				// Break a cycle via reserved scratch register R14.
+				cycleDst := moves[0].dst
+				if cycleDst != RegR14 {
+					ctx.W.emitMovRegReg(RegR14, cycleDst)
+				}
+				for i := range moves {
+					if moves[i].src == cycleDst {
+						moves[i].src = RegR14
+					}
+				}
+				continue
+			}
+			mv := moves[emitIdx]
+			if mv.dst != mv.src {
+				ctx.W.emitMovRegReg(mv.dst, mv.src)
+			}
+			moves = append(moves[:emitIdx], moves[emitIdx+1:]...)
+		}
+
+		for i := range argWords {
+			target := GoABIIntRegs[i]
+			switch argWords[i].loc {
+			case LocReg:
+				// Already handled by move planner (including no-op src==target).
+			case LocImm:
+				ctx.W.EmitMovRegImm64(target, argWords[i].imm)
+			case LocStack:
+				if argWords[i].memPtr != 0 {
+					ctx.W.EmitMovRegImm64(RegR11, uint64(argWords[i].memPtr))
+					ctx.W.EmitMovRegMem(target, RegR11, argWords[i].stackOff)
+				} else {
+					ctx.W.EmitMovRegMem(target, RegRSP, stackArgBaseDisp+argWords[i].stackOff)
+				}
+			default:
+				panic("jit: unsupported Go-call arg location")
+			}
+		}
+	}
+
+	// Fast path: no live registers to preserve. Emit only argument setup + call.
+	if len(liveRegs) == 0 {
+		emitArgSetup(0)
+		ctx.W.EmitCallIndirect(funcAddr)
+		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+			ctx.W.emitMovRegReg(ctx.SliceBase, RegRSP)
+		}
+		for i := 0; i < numResultWords; i++ {
+			r := ctx.AllocReg()
+			if r != GoABIIntRegs[i] {
+				ctx.W.emitMovRegReg(r, GoABIIntRegs[i])
+			}
+			resultsBuf[i] = r
+		}
+		return resultsBuf[:numResultWords]
+	}
+
+	// Reserve stack space for result words (above saved registers).
+	// After restoring saved regs, these slots will be at [RSP+0..].
+	resultBytes := numResultWords * 8
+	if resultBytes > 0 {
+		if resultBytes < 128 {
+			ctx.W.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, imm8
+		} else {
+			ctx.W.emitBytes(0x48, 0x81, 0xEC)
+			ctx.W.emitU32(uint32(resultBytes)) // SUB RSP, imm32
+		}
+	}
+
+	// Save live registers (PUSH)
+	for _, r := range liveRegs {
+		ctx.W.EmitPushReg(r)
+	}
+	// Align stack to 16 bytes if needed (odd total items)
+	totalItems := numResultWords + len(liveRegs)
+	padded := totalItems%2 == 1
+	if padded {
+		ctx.W.EmitPushReg(RegRAX) // dummy padding
+	}
+
+	// Move argument words into Go ABI registers (clobber-safe planner).
+	stackArgBaseDisp := int32(resultBytes + len(liveRegs)*8)
+	if padded {
+		stackArgBaseDisp += 8
+	}
+	emitArgSetup(stackArgBaseDisp)
+
+	// CALL
+	ctx.W.EmitCallIndirect(funcAddr)
+
+	// Store results to reserved stack slots (above saved regs + padding)
+	paddingSize := 0
+	if padded {
+		paddingSize = 8
+	}
+	for i := 0; i < numResultWords; i++ {
+		offset := int32(paddingSize + len(liveRegs)*8 + i*8)
+		ctx.W.EmitStoreRegMem(GoABIIntRegs[i], RegRSP, offset)
+	}
+
+	// Restore (POP in reverse)
+	if padded {
+		ctx.W.EmitPopReg(RegRAX)
+	}
+	for i := len(liveRegs) - 1; i >= 0; i-- {
+		ctx.W.EmitPopReg(liveRegs[i])
+	}
+
+	// Pop results from reserved slots into freshly allocated registers
+	for i := 0; i < numResultWords; i++ {
+		r := ctx.AllocReg()
+		ctx.W.EmitPopReg(r)
+		resultsBuf[i] = r
+	}
+	if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+		ctx.W.emitMovRegReg(ctx.SliceBase, RegRSP)
+	}
+	return resultsBuf[:numResultWords]
+}
+
+// flattenArgs converts JITValueDesc arguments to ABI words.
+// LocRegPair → 2 words (Reg, Reg2), LocReg → 1 word, LocImm → deferred imm.
+// buf is a caller-provided [16]goCallArgWord scratch buffer; returns a slice into it.
+func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) []goCallArgWord {
+	n := 0
+	for _, a := range args {
+		switch a.Loc {
+		case LocRegPair:
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
+			n++
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg2}
+			n++
+		case LocReg:
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
+			n++
+		case LocStack:
+			off := a.StackOff
+			if a.MemPtr != 0 {
+				// MemPtr-backed values already point at the concrete spill slot.
+				// StackOff is a logical slot id there, not an additional byte offset.
+				off = 0
+			}
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: off}
+			n++
+		case LocStackPair:
+			off0 := a.StackOff
+			off1 := a.StackOff + 8
+			if a.MemPtr != 0 {
+				// MemPtr-backed pair points to element 0 directly.
+				off0 = 0
+				off1 = 8
+			}
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: off0}
+			n++
+			buf[n] = goCallArgWord{loc: LocStack, memPtr: a.MemPtr, stackOff: off1}
+			n++
+		case LocImm:
+			var immWord uint64
+			switch a.Type {
+			case tagInt:
+				immWord = uint64(a.Imm.Int())
+			case tagBool:
+				if a.Imm.Bool() {
+					immWord = 1
+				} else {
+					immWord = 0
+				}
+			case tagFloat:
+				immWord = math.Float64bits(a.Imm.Float())
+			case tagNil:
+				immWord = 0
+			default:
+				panic(fmt.Sprintf("jit: LocImm scalar Go-call arg requires explicit materialization (type=%d, tag=%d)", a.Type, a.Imm.GetTag()))
+			}
+			buf[n] = goCallArgWord{loc: LocImm, imm: immWord}
+			n++
+		case LocNone:
+			buf[n] = goCallArgWord{loc: LocImm, imm: 0}
+			n++
+		default:
+			panic(fmt.Sprintf("jit: unsupported arg desc location in flattenArgs: %d", a.Loc))
+		}
+	}
+	return buf[:n]
+}
+
+// EmitGoCallScalar calls a Go function and returns a single-word result as JITValueDesc.
+func (ctx *JITContext) EmitGoCallScalar(funcAddr uint64, args []JITValueDesc, numResultWords int) JITValueDesc {
+	var wordsBuf [16]goCallArgWord
+	var resultsBuf [16]Reg
+	words := ctx.flattenArgs(args, &wordsBuf)
+	results := ctx.EmitGoCall(funcAddr, words, numResultWords, &resultsBuf)
+	if numResultWords == 1 {
+		d := JITValueDesc{Loc: LocReg, Reg: results[0]}
+		ctx.BindReg(results[0], &d)
+		return d
+	}
+	d := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
+	ctx.BindReg(results[0], &d)
+	ctx.BindReg(results[1], &d)
+	return d
+}
+
+// EmitMovPairToResult moves a LocRegPair value into the result descriptor registers.
+func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc) {
+	if src.Reg != dst.Reg {
+		ctx.W.emitMovRegReg(dst.Reg, src.Reg)
+	}
+	if src.Reg2 != dst.Reg2 {
+		ctx.W.emitMovRegReg(dst.Reg2, src.Reg2)
+	}
+}
+
+// EmitGoCallVoid calls a Go function with no return value.
+func (ctx *JITContext) EmitGoCallVoid(funcAddr uint64, args []JITValueDesc) {
+	var wordsBuf [16]goCallArgWord
+	var resultsBuf [16]Reg
+	words := ctx.flattenArgs(args, &wordsBuf)
+	ctx.EmitGoCall(funcAddr, words, 0, &resultsBuf)
+}
+
+// ---- merged from scm/jit_writer.go ----
+
+// JITPage represents one page of mmap'd executable memory.
+type JITPage struct {
+	RwBase unsafe.Pointer // writable mapping
+	RxBase unsafe.Pointer // executable mapping
+	Next   *JITPage
+}
+
+// JITWriter is the platform-independent code emitter scaffold.
+// Architecture-specific emit methods are defined in jit_<arch>.go files.
+type JITWriter struct {
+	Ptr     unsafe.Pointer // current write pointer (into mmap memory)
+	End     unsafe.Pointer // page end minus reserve
+	Start   unsafe.Pointer // page start for position calculation
+	Pages   []*JITPage
+	Current *JITPage
+
+	Labels    [256]int32
+	LabelNext uint8
+
+	Fixups    [512]JITFixup
+	FixupNext uint8
+}
+
+// DefineLabel allocates a new label at the current write position.
+func (w *JITWriter) DefineLabel() uint8 {
+	id := w.LabelNext
+	w.LabelNext++
+	w.Labels[id] = int32(uintptr(w.Ptr) - uintptr(w.Start))
+	return id
+}
+
+// ReserveLabel allocates a label ID for later placement via MarkLabel.
+func (w *JITWriter) ReserveLabel() uint8 {
+	id := w.LabelNext
+	w.LabelNext++
+	w.Labels[id] = -1 // undefined until MarkLabel
+	return id
+}
+
+// MarkLabel sets the position of a previously reserved label.
+func (w *JITWriter) MarkLabel(id uint8) {
+	w.Labels[id] = int32(uintptr(w.Ptr) - uintptr(w.Start))
+}
+
+// AddFixup records a forward reference to be patched by ResolveFixups.
+func (w *JITWriter) AddFixup(labelID uint8, size uint8, relative bool) {
+	w.Fixups[w.FixupNext] = JITFixup{
+		CodePos:  int32(uintptr(w.Ptr) - uintptr(w.Start)),
+		LabelID:  labelID,
+		Size:     size,
+		Relative: relative,
+	}
+	w.FixupNext++
+}
+
+// ResolveFixups patches recorded forward references whose labels are defined.
+// Fixups referencing still-undefined labels are kept for a later call.
+func (w *JITWriter) ResolveFixups() {
+	j := uint8(0)
+	for i := uint8(0); i < w.FixupNext; i++ {
+		f := &w.Fixups[i]
+		targetPos := w.Labels[f.LabelID]
+		if targetPos < 0 {
+			// label not yet defined — keep for later
+			w.Fixups[j] = w.Fixups[i]
+			j++
+			continue
+		}
+		patchAddr := unsafe.Add(w.Start, int(f.CodePos))
+		if f.Relative {
+			offset := targetPos - (f.CodePos + int32(f.Size))
+			*(*int32)(patchAddr) = offset
+			w.tryRewriteTrailingJmpToNop(f, offset)
+		} else {
+			*(*int32)(patchAddr) = targetPos
+		}
+	}
+	w.FixupNext = j
+}
+
+// ResolveFixupsFinal patches all remaining fixups, panicking on undefined labels.
+func (w *JITWriter) ResolveFixupsFinal() {
+	for i := uint8(0); i < w.FixupNext; i++ {
+		f := &w.Fixups[i]
+		targetPos := w.Labels[f.LabelID]
+		if targetPos < 0 {
+			panic("jit: undefined label")
+		}
+		patchAddr := unsafe.Add(w.Start, int(f.CodePos))
+		if f.Relative {
+			offset := targetPos - (f.CodePos + int32(f.Size))
+			*(*int32)(patchAddr) = offset
+			w.tryRewriteTrailingJmpToNop(f, offset)
+		} else {
+			*(*int32)(patchAddr) = targetPos
+		}
+	}
+	w.FixupNext = 0
+}
+
+// tryRewriteTrailingJmpToNop turns a resolved "jmp +0" (jump-to-next-ip) into
+// five NOP bytes. This keeps one-pass forward emission simple while removing
+// redundant trailing jumps after relocation.
+func (w *JITWriter) tryRewriteTrailingJmpToNop(f *JITFixup, offset int32) {
+	if offset != 0 || f.Size != 4 || f.CodePos <= 0 {
+		return
+	}
+	opAddr := unsafe.Add(w.Start, int(f.CodePos)-1)
+	if *(*byte)(opAddr) != 0xE9 { // JMP rel32 opcode
+		return
+	}
+	for i := 0; i < 5; i++ {
+		*(*byte)(unsafe.Add(opAddr, i)) = 0x90 // NOP
+	}
+}
+
+// ---- merged from scm/jit_typefacts_test.go ----
+
+func TestJITTypeFactsConst(t *testing.T) {
+	f := JITFactsConst(NewInt(42))
+	if !f.HasConst {
+		t.Fatalf("expected constant facts")
+	}
+	if !f.IsSingleTag() {
+		t.Fatalf("expected single tag for constant")
+	}
+	if !f.MayBeTag(tagInt) {
+		t.Fatalf("expected int tag")
+	}
+	if f.MayBeTag(tagString) {
+		t.Fatalf("did not expect string tag")
+	}
+}
+
+func TestJITTypeFactsRefineBranches(t *testing.T) {
+	base := JITFactsUnknown()
+	intOnly := base.RefineToTag(tagInt)
+	if !intOnly.IsSingleTag() || !intOnly.MayBeTag(tagInt) {
+		t.Fatalf("expected int-only facts after positive refine: %+v", intOnly)
+	}
+	notInt := base.RefineNotTag(tagInt)
+	if notInt.MayBeTag(tagInt) {
+		t.Fatalf("expected int to be removed from negative branch: %+v", notInt)
+	}
+}
+
+func TestJITTypeFactsJoin(t *testing.T) {
+	left := JITFactsKnownTag(tagInt)
+	right := JITFactsKnownTag(tagFloat)
+	join := left.Join(right)
+	if !join.MayBeTag(tagInt) || !join.MayBeTag(tagFloat) {
+		t.Fatalf("expected int|float after join: %+v", join)
+	}
+	if join.IsSingleTag() {
+		t.Fatalf("expected non-single tag after join")
+	}
+}
+
+// ---- merged from scm/jit_handwritten_loop_test.go ----
+
+func jitExecInt64Unary(tb testing.TB, code []byte) func(int64) int64 {
+	tb.Helper()
+
+	pageSize := syscall.Getpagesize()
+	n := (len(code) + pageSize - 1) &^ (pageSize - 1)
+	mem, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
+	if err != nil {
+		tb.Fatalf("mmap failed: %v", err)
+	}
+	copy(mem, code)
+	if err := syscall.Mprotect(mem, syscall.PROT_READ|syscall.PROT_EXEC); err != nil {
+		_ = syscall.Munmap(mem)
+		tb.Fatalf("mprotect failed: %v", err)
+	}
+	tb.Cleanup(func() { _ = syscall.Munmap(mem) })
+
+	type fnHeader struct{ fnptr *byte }
+	h := &fnHeader{fnptr: &mem[0]}
+	hp := unsafe.Pointer(h)
+	fn := *(*func(int64) int64)(unsafe.Pointer(&hp))
+	runtime.KeepAlive(h)
+	return fn
+}
+
+func emitFibIterativeJIT(tb testing.TB) []byte {
+	tb.Helper()
+
+	codeBuf := make([]byte, 512)
+	w := &JITWriter{
+		Ptr:   unsafe.Pointer(&codeBuf[0]),
+		Start: unsafe.Pointer(&codeBuf[0]),
+		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-16),
+	}
+
+	// Input n in RAX, output in RAX.
+	// if n <= 1 return n
+	doneInput := w.ReserveLabel()
+	doneFib := w.ReserveLabel()
+	loop := w.ReserveLabel()
+
+	w.EmitCmpRegImm32(RegRAX, 1)
+	w.EmitJcc(CcLE, doneInput)
+
+	// a=0, b=1, i=2
+	w.EmitMovRegImm64(RegRBX, 0)
+	w.EmitMovRegImm64(RegRCX, 1)
+	w.EmitMovRegImm64(RegRDX, 2)
+
+	w.MarkLabel(loop)
+	// if i > n: return b
+	w.EmitCmpInt64(RegRDX, RegRAX)
+	w.EmitJcc(CcG, doneFib)
+
+	// t = a + b; a = b; b = t; i++
+	w.EmitMovRegReg(RegR8, RegRBX)
+	w.EmitAddInt64(RegR8, RegRCX)
+	w.EmitMovRegReg(RegRBX, RegRCX)
+	w.EmitMovRegReg(RegRCX, RegR8)
+	w.EmitAddRegImm32(RegRDX, 1)
+	w.EmitJmp(loop)
+
+	w.MarkLabel(doneFib)
+	w.EmitMovRegReg(RegRAX, RegRCX)
+	w.EmitByte(0xC3)
+
+	w.MarkLabel(doneInput)
+	w.EmitByte(0xC3)
+
+	w.ResolveFixupsFinal()
+	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	return codeBuf[:codeLen]
+}
+
+func fibGo(n int64) int64 {
+	if n <= 1 {
+		return n
+	}
+	a, b := int64(0), int64(1)
+	for i := int64(2); i <= n; i++ {
+		a, b = b, a+b
+	}
+	return b
+}
+
+func TestJITHandwrittenFibonacciIterative(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("amd64 only")
+	}
+
+	code := emitFibIterativeJIT(t)
+	if len(code) == 0 {
+		t.Fatal("empty code")
+	}
+	jitFib := jitExecInt64Unary(t, code)
+
+	for n := int64(0); n <= 40; n++ {
+		got := jitFib(n)
+		want := fibGo(n)
+		if got != want {
+			t.Fatalf("fib(%d): got %d, want %d", n, got, want)
+		}
+	}
+}
+
+func jitExecPtrUnary(tb testing.TB, code []byte) func(uintptr) {
+	tb.Helper()
+
+	pageSize := syscall.Getpagesize()
+	n := (len(code) + pageSize - 1) &^ (pageSize - 1)
+	mem, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
+	if err != nil {
+		tb.Fatalf("mmap failed: %v", err)
+	}
+	copy(mem, code)
+	if err := syscall.Mprotect(mem, syscall.PROT_READ|syscall.PROT_EXEC); err != nil {
+		_ = syscall.Munmap(mem)
+		tb.Fatalf("mprotect failed: %v", err)
+	}
+	tb.Cleanup(func() { _ = syscall.Munmap(mem) })
+
+	type fnHeader struct{ fnptr *byte }
+	h := &fnHeader{fnptr: &mem[0]}
+	hp := unsafe.Pointer(h)
+	fn := *(*func(uintptr))(unsafe.Pointer(&hp))
+	runtime.KeepAlive(h)
+	return fn
+}
+
+// emitFibInlineFromN emits a straight-line inlined Fibonacci implementation.
+// Input: n in nReg, Output: fib(n) in nReg.
+func emitFibInlineFromN(w *JITWriter, nReg Reg) {
+	doneInput := w.ReserveLabel()
+	doneFib := w.ReserveLabel()
+	loop := w.ReserveLabel()
+
+	w.EmitCmpRegImm32(nReg, 1)
+	w.EmitJcc(CcLE, doneInput)
+
+	// a=0, b=1, j=2
+	w.EmitMovRegImm64(RegRDX, 0)
+	w.EmitMovRegImm64(RegR8, 1)
+	w.EmitMovRegImm64(RegR9, 2)
+
+	w.MarkLabel(loop)
+	w.EmitCmpInt64(RegR9, nReg)
+	w.EmitJcc(CcG, doneFib)
+	w.EmitMovRegReg(RegR10, RegRDX)
+	w.EmitAddInt64(RegR10, RegR8)
+	w.EmitMovRegReg(RegRDX, RegR8)
+	w.EmitMovRegReg(RegR8, RegR10)
+	w.EmitAddRegImm32(RegR9, 1)
+	w.EmitJmp(loop)
+
+	w.MarkLabel(doneFib)
+	w.EmitMovRegReg(nReg, RegR8)
+	w.MarkLabel(doneInput)
+}
+
+func emitFibArrayFillJIT(tb testing.TB) []byte {
+	tb.Helper()
+
+	codeBuf := make([]byte, 1024)
+	w := &JITWriter{
+		Ptr:   unsafe.Pointer(&codeBuf[0]),
+		Start: unsafe.Pointer(&codeBuf[0]),
+		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-16),
+	}
+
+	// Signature: func(base uintptr), base in RAX.
+	// Outer phi-like loop over i in RBX: for i=0..9 { out[i] = float64(fib(i)) }
+	w.EmitMovRegImm64(RegRBX, 0) // i = 0
+	outerLoop := w.ReserveLabel()
+	done := w.ReserveLabel()
+	w.MarkLabel(outerLoop)
+	w.EmitCmpRegImm32(RegRBX, 10)
+	w.EmitJcc(CcGE, done)
+
+	// "Inline call" Fibonacci: n=i in RCX, result also in RCX.
+	w.EmitMovRegReg(RegRCX, RegRBX)
+	emitFibInlineFromN(w, RegRCX)
+
+	// Convert int64 fib result to float64 bits in RCX.
+	w.EmitCvtInt64ToFloat64(RegX1, RegRCX)
+
+	// Address calc: addr = base + i*8 in RDX; store float bits.
+	w.EmitMovRegReg(RegRDX, RegRBX)
+	w.EmitShlRegImm8(RegRDX, 3)
+	w.EmitAddInt64(RegRDX, RegRAX)
+	w.EmitStoreRegMem(RegRCX, RegRDX, 0)
+
+	w.EmitAddRegImm32(RegRBX, 1)
+	w.EmitJmp(outerLoop)
+
+	w.MarkLabel(done)
+	w.EmitByte(0xC3)
+	w.ResolveFixupsFinal()
+	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	return codeBuf[:codeLen]
+}
+
+func TestJITHandwrittenFibOuterLoopInlineStoresFloatArray(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("amd64 only")
+	}
+
+	code := emitFibArrayFillJIT(t)
+	fill := jitExecPtrUnary(t, code)
+
+	var out [10]float64
+	fill(uintptr(unsafe.Pointer(&out[0])))
+
+	for i := 0; i < len(out); i++ {
+		want := float64(fibGo(int64(i)))
+		if out[i] != want {
+			t.Fatalf("out[%d]=%v want %v", i, out[i], want)
+		}
 	}
 }
