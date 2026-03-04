@@ -237,7 +237,7 @@ class SQLTestRunner:
         else:
             self.failed_critical += 1
         time_info = f" ({elapsed_ms:.1f}ms / {threshold_ms:.0f}ms)" if elapsed_ms is not None else ""
-        print(f"❌ {name}{' (noncritical)' if is_noncritical else ''}{time_info}")
+        print(f"{'⚠️' if is_noncritical else '❌'} {name}{' (noncritical)' if is_noncritical else ''}{time_info}")
         print(f"    Reason: {reason}")
         if query:
             print(f"    Query: {query[:200]}{'...' if len(query) > 200 else ''}")
@@ -697,7 +697,7 @@ class SQLTestRunner:
             print("❌ Failed:")
             for name, is_noncrit in self.failed_tests:
                 suffix = " (noncritical)" if is_noncrit else ""
-                print(f"   - {name}{suffix}")
+                print(f"   {'⚠️' if is_noncrit else '❌'} {name}{suffix}")
         else:
             print("🎉 All tests passed!")
         print("="*60)
