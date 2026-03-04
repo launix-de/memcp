@@ -746,7 +746,7 @@ func init() {
 			ctx.EnsureDesc(&d2)
 			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			if d2.Loc == LocImm {
 				ctx.W.EmitMakeInt(result, d2)
@@ -927,7 +927,7 @@ func init() {
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d1}, 2)
 			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			ctx.EnsureDesc(&d2)
 			if d2.Loc == LocRegPair {
@@ -1123,7 +1123,7 @@ Patterns can be any of:
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			r0 := ctx.W.EmitSubRSP32Fixup()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			lbl0 := ctx.W.ReserveLabel()
 			lbl1 := ctx.W.ReserveLabel()

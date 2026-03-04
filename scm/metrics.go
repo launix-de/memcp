@@ -255,7 +255,7 @@ func InitMetricsDeclarations() {
 			ctx.EnsureDesc(&d1)
 			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			if d1.Loc == LocImm {
 				ctx.W.EmitMakeFloat(result, d1)
@@ -304,7 +304,7 @@ func InitMetricsDeclarations() {
 			ctx.EnsureDesc(&d0)
 			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			if d0.Loc == LocImm {
 				ctx.W.EmitMakeInt(result, d0)
@@ -358,7 +358,7 @@ func InitMetricsDeclarations() {
 			ctx.EnsureDesc(&d1)
 			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			if d1.Loc == LocImm {
 				ctx.W.EmitMakeInt(result, d1)
@@ -402,7 +402,7 @@ func InitMetricsDeclarations() {
 			ctx.EnsureDesc(&d1)
 			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			if d1.Loc == LocImm {
 				ctx.W.EmitMakeFloat(result, d1)

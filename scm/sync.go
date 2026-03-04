@@ -253,7 +253,7 @@ func init_sync() {
 			ctx.FreeDesc(&d1)
 			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			ctx.EnsureDesc(&d2)
 			if d2.Loc == LocRegPair {
@@ -359,7 +359,7 @@ func init_sync() {
 			ctx.EnsureDesc(&d0)
 			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			if d0.Loc == LocImm {
 				ctx.W.EmitMakeInt(result, d0)

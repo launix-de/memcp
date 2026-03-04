@@ -157,7 +157,7 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.FreeDesc(&idxInt)
 			ctx.W.ResolveFixups()
 			if result.Loc == scm.LocAny {
-				result = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
 			ctx.EnsureDesc(&d1)
 			if d1.Loc == scm.LocRegPair {
