@@ -434,6 +434,11 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		return JITValueDesc{Loc: LocImm, Type: tagString, Imm: expr}
 	case tagSymbol:
 		sym := expr.Symbol()
+		if string(sym) == "nil" {
+			imm := NewNil()
+			ctx.TrackImm(imm)
+			return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+		}
 		if ctx.Env != nil {
 			if desc, ok := ctx.Env.Lookup(sym); ok {
 				if desc.Loc == LocImm {
