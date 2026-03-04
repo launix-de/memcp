@@ -22,23 +22,22 @@ func TestStorageStringJITDebugDisasm(t *testing.T) {
 	t.Logf("nodict=%v dict_len=%d", s.nodict, len(s.dictionary))
 
 	codeBuf := make([]byte, 65536)
-	w := &scm.JITWriter{Ptr: unsafe.Pointer(&codeBuf[0]), Start: unsafe.Pointer(&codeBuf[0]), End: unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256)}
 	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) | (1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) | (1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) | (1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) | (1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
-	ctx := &scm.JITContext{W: w, FreeRegs: freeRegs, AllRegs: freeRegs}
+	ctx := &scm.JITContext{Ptr: unsafe.Pointer(&codeBuf[0]), Start: unsafe.Pointer(&codeBuf[0]), End: unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256), FreeRegs: freeRegs, AllRegs: freeRegs}
 	ctx.FreeRegs &^= 1 << uint(scm.RegR15)
 	ctx.AllRegs &^= 1 << uint(scm.RegR15)
 	ctx.FreeRegs &^= 1 << uint(scm.RegR12)
 	ctx.AllRegs &^= 1 << uint(scm.RegR12)
 	idxReg := ctx.AllocReg()
-	w.EmitMovRegReg(idxReg, scm.RegRAX)
+	ctx.EmitMovRegReg(idxReg, scm.RegRAX)
 	idx := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxReg}
 	thisptr := scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(extractDataPtr(s))}
 	result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
 	desc := s.JITEmit(ctx, thisptr, idx, result)
 	ctx.EmitMovPairToResult(&desc, &result)
-	w.EmitByte(0xC3)
-	w.ResolveFixupsFinal()
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	ctx.EmitByte(0xC3)
+	ctx.ResolveFixupsFinal()
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 	_ = os.WriteFile("/tmp/jit_string.bin", code, 0644)
 

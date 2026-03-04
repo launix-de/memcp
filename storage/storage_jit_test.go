@@ -41,12 +41,6 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 	}
 
 	codeBuf := make([]byte, 65536)
-	w := &scm.JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-	}
-
 	// Free registers: exclude RAX (arg/return), RBX (return aux), RSP, RBP,
 	// R11 (scratch for emit helpers), R14 (Go "g" pointer)
 	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) |
@@ -55,7 +49,9 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
 	ctx := &scm.JITContext{
-		W:        w,
+		Ptr:      unsafe.Pointer(&codeBuf[0]),
+		Start:    unsafe.Pointer(&codeBuf[0]),
+		End:      unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs: freeRegs,
 		AllRegs:  freeRegs,
 	}
@@ -64,7 +60,7 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 
 	// Entry: Go ABI — RAX = int64 index argument
 	idxReg := ctx.AllocReg()
-	w.EmitMovRegReg(idxReg, scm.RegRAX)
+	ctx.EmitMovRegReg(idxReg, scm.RegRAX)
 	idx := scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idxReg}
 
 	var thisptr scm.JITValueDesc
@@ -72,7 +68,7 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 		thisptr = scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(extractDataPtr(s))}
 	} else {
 		ptrReg := ctx.AllocReg()
-		w.EmitMovRegImm64(ptrReg, uint64(extractDataPtr(s)))
+		ctx.EmitMovRegImm64(ptrReg, uint64(extractDataPtr(s)))
 		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: ptrReg}
 	}
 
@@ -83,15 +79,15 @@ func jitBuildGetValueFunc(tb testing.TB, s jitEmitter, constThisptr bool) (fn fu
 		result := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
 		desc := s.JITEmit(ctx, thisptr, idx, result)
 		ctx.EmitMovPairToResult(&desc, &result)
-		w.EmitByte(0xC3) // RET
-		w.ResolveFixupsFinal()
+		ctx.EmitByte(0xC3) // RET
+		ctx.ResolveFixupsFinal()
 	}()
 	if emitErr != nil {
 		tb.Skipf("JIT emit failed: %v", emitErr)
 		return nil, func() {}
 	}
 
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 
 	pageSize := syscall.Getpagesize()
@@ -161,19 +157,15 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 	}
 
 	codeBuf := make([]byte, 65536)
-	w := &scm.JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-	}
-
 	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) |
 		(1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 		(1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
 	ctx := &scm.JITContext{
-		W:        w,
+		Ptr:      unsafe.Pointer(&codeBuf[0]),
+		Start:    unsafe.Pointer(&codeBuf[0]),
+		End:      unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs: freeRegs,
 		AllRegs:  freeRegs,
 	}
@@ -184,27 +176,27 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 	} else {
 		ctx.FreeRegs &^= 1 << uint(scm.RegR13)
 		ctx.AllRegs &^= 1 << uint(scm.RegR13)
-		w.EmitMovRegImm64(scm.RegR13, uint64(extractDataPtr(s)))
+		ctx.EmitMovRegImm64(scm.RegR13, uint64(extractDataPtr(s)))
 		thisptr = scm.JITValueDesc{Loc: scm.LocReg, Reg: scm.RegR13}
 	}
 
 	// Loop phis on stack:
 	//   [RSP+0] = idx
 	//   [RSP+8] = sum
-	spFixup := w.EmitSubRSP32Fixup()
+	spFixup := ctx.EmitSubRSP32Fixup()
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(0)}, 0)
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocImm, Imm: scm.NewInt(0)}, 8)
 
-	lblTop := w.ReserveLabel()
-	lblEnd := w.ReserveLabel()
-	w.MarkLabel(lblTop)
+	lblTop := ctx.ReserveLabel()
+	lblEnd := ctx.ReserveLabel()
+	ctx.MarkLabel(lblTop)
 
 	// if idx >= count: break
 	idxCmpReg := ctx.AllocReg()
 	ctx.EmitLoadFromStack(idxCmpReg, 0)
-	w.EmitCmpRegImm32(idxCmpReg, int32(count))
+	ctx.EmitCmpRegImm32(idxCmpReg, int32(count))
 	ctx.FreeReg(idxCmpReg)
-	w.EmitJcc(scm.CcGE, lblEnd)
+	ctx.EmitJcc(scm.CcGE, lblEnd)
 
 	// Load loop index again for the body, so emitter-side register reuse does
 	// not affect the loop-carried value in the phi slot.
@@ -241,60 +233,60 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 	ctx.EmitLoadFromStack(sumReg, 8)
 	switch desc.Loc {
 	case scm.LocImm:
-		w.EmitMovRegImm64(scm.RegR11, uint64(desc.Imm.Int()))
-		w.EmitAddInt64(sumReg, scm.RegR11)
+		ctx.EmitMovRegImm64(scm.RegR11, uint64(desc.Imm.Int()))
+		ctx.EmitAddInt64(sumReg, scm.RegR11)
 	case scm.LocReg:
 		if desc.Type != scm.TagInt {
 			panic("jit sum: unsupported LocReg non-int result")
 		}
-		w.EmitAddInt64(sumReg, desc.Reg)
+		ctx.EmitAddInt64(sumReg, desc.Reg)
 	case scm.LocRegPair:
 		switch desc.Type {
 		case scm.TagInt:
-			w.EmitAddInt64(sumReg, desc.Reg2)
+			ctx.EmitAddInt64(sumReg, desc.Reg2)
 		case scm.TagFloat:
 			floatIntReg := ctx.AllocReg()
-			w.EmitCvtFloatBitsToInt64(floatIntReg, desc.Reg2)
-			w.EmitAddInt64(sumReg, floatIntReg)
+			ctx.EmitCvtFloatBitsToInt64(floatIntReg, desc.Reg2)
+			ctx.EmitAddInt64(sumReg, floatIntReg)
 			ctx.FreeReg(floatIntReg)
 		case scm.TagNil:
 			// nil contributes 0
 		default:
 			tagPtrReg := ctx.AllocReg()
 			tagAuxReg := ctx.AllocReg()
-			w.EmitMovRegReg(tagPtrReg, desc.Reg)
-			w.EmitMovRegReg(tagAuxReg, desc.Reg2)
+			ctx.EmitMovRegReg(tagPtrReg, desc.Reg)
+			ctx.EmitMovRegReg(tagAuxReg, desc.Reg2)
 			tagSrc := scm.JITValueDesc{Loc: scm.LocRegPair, Type: desc.Type, Reg: tagPtrReg, Reg2: tagAuxReg}
 			tagDesc := ctx.EmitGetTagDesc(&tagSrc, scm.JITValueDesc{Loc: scm.LocAny})
 			switch tagDesc.Loc {
 			case scm.LocImm:
 				switch tagDesc.Imm.Int() {
 				case int64(scm.TagInt):
-					w.EmitAddInt64(sumReg, desc.Reg2)
+					ctx.EmitAddInt64(sumReg, desc.Reg2)
 				case int64(scm.TagFloat):
 					floatIntReg := ctx.AllocReg()
-					w.EmitCvtFloatBitsToInt64(floatIntReg, desc.Reg2)
-					w.EmitAddInt64(sumReg, floatIntReg)
+					ctx.EmitCvtFloatBitsToInt64(floatIntReg, desc.Reg2)
+					ctx.EmitAddInt64(sumReg, floatIntReg)
 					ctx.FreeReg(floatIntReg)
 				}
 			case scm.LocReg:
-				lblAddInt := w.ReserveLabel()
-				lblAddFloat := w.ReserveLabel()
-				lblDone := w.ReserveLabel()
-				w.EmitCmpRegImm32(tagDesc.Reg, int32(scm.TagInt))
-				w.EmitJcc(scm.CcE, lblAddInt)
-				w.EmitCmpRegImm32(tagDesc.Reg, int32(scm.TagFloat))
-				w.EmitJcc(scm.CcE, lblAddFloat)
-				w.EmitJmp(lblDone)
-				w.MarkLabel(lblAddInt)
-				w.EmitAddInt64(sumReg, desc.Reg2)
-				w.EmitJmp(lblDone)
-				w.MarkLabel(lblAddFloat)
+				lblAddInt := ctx.ReserveLabel()
+				lblAddFloat := ctx.ReserveLabel()
+				lblDone := ctx.ReserveLabel()
+				ctx.EmitCmpRegImm32(tagDesc.Reg, int32(scm.TagInt))
+				ctx.EmitJcc(scm.CcE, lblAddInt)
+				ctx.EmitCmpRegImm32(tagDesc.Reg, int32(scm.TagFloat))
+				ctx.EmitJcc(scm.CcE, lblAddFloat)
+				ctx.EmitJmp(lblDone)
+				ctx.MarkLabel(lblAddInt)
+				ctx.EmitAddInt64(sumReg, desc.Reg2)
+				ctx.EmitJmp(lblDone)
+				ctx.MarkLabel(lblAddFloat)
 				floatIntReg := ctx.AllocReg()
-				w.EmitCvtFloatBitsToInt64(floatIntReg, desc.Reg2)
-				w.EmitAddInt64(sumReg, floatIntReg)
+				ctx.EmitCvtFloatBitsToInt64(floatIntReg, desc.Reg2)
+				ctx.EmitAddInt64(sumReg, floatIntReg)
 				ctx.FreeReg(floatIntReg)
-				w.MarkLabel(lblDone)
+				ctx.MarkLabel(lblDone)
 				ctx.FreeReg(tagDesc.Reg)
 			default:
 				panic("jit sum: unsupported tag descriptor location")
@@ -310,30 +302,30 @@ func jitBuildSumFuncGeneric(tb testing.TB, s jitEmitter, count int64, constThisp
 	// idx++
 	idxReg := ctx.AllocReg()
 	ctx.EmitLoadFromStack(idxReg, 0)
-	w.EmitMovRegImm64(scm.RegR11, 1)
-	w.EmitAddInt64(idxReg, scm.RegR11)
+	ctx.EmitMovRegImm64(scm.RegR11, 1)
+	ctx.EmitAddInt64(idxReg, scm.RegR11)
 	ctx.EmitStoreToStack(scm.JITValueDesc{Loc: scm.LocReg, Reg: idxReg}, 0)
 	ctx.FreeReg(idxReg)
 
-	w.EmitJmp(lblTop)
-	w.MarkLabel(lblEnd)
+	ctx.EmitJmp(lblTop)
+	ctx.MarkLabel(lblEnd)
 
 	// return sum
 	retReg := ctx.AllocReg()
 	ctx.EmitLoadFromStack(retReg, 8)
 	if retReg != scm.RegRAX {
-		w.EmitMovRegReg(scm.RegRAX, retReg)
+		ctx.EmitMovRegReg(scm.RegRAX, retReg)
 	}
 	ctx.FreeReg(retReg)
 
-	w.PatchInt32(spFixup, 16)
-	w.EmitAddRSP32(16)
+	ctx.PatchInt32(spFixup, 16)
+	ctx.EmitAddRSP32(16)
 	// RET
-	w.EmitByte(0xC3)
+	ctx.EmitByte(0xC3)
 
-	w.ResolveFixupsFinal()
+	ctx.ResolveFixupsFinal()
 
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 
 	pageSize := syscall.Getpagesize()

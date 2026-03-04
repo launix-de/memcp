@@ -21,22 +21,21 @@ func TestTmpJITCallNewStringBridge(t *testing.T) {
 	inLen := len(in)
 
 	codeBuf := make([]byte, 4096)
-	w := &scm.JITWriter{Ptr: unsafe.Pointer(&codeBuf[0]), Start: unsafe.Pointer(&codeBuf[0]), End: unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-128)}
 	freeRegs := uint64((1 << uint(scm.RegRAX)) | (1 << uint(scm.RegRBX)) | (1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) | (1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) | (1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) | (1 << uint(scm.RegR12)) | (1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
-	ctx := &scm.JITContext{W: w, FreeRegs: freeRegs, AllRegs: freeRegs}
+	ctx := &scm.JITContext{Ptr: unsafe.Pointer(&codeBuf[0]), Start: unsafe.Pointer(&codeBuf[0]), End: unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-128), FreeRegs: freeRegs, AllRegs: freeRegs}
 
 	rPtr := ctx.AllocReg()
-	ctx.W.EmitMovRegImm64(rPtr, uint64(inPtr))
+	ctx.EmitMovRegImm64(rPtr, uint64(inPtr))
 	rLen := ctx.AllocRegExcept(rPtr)
-	ctx.W.EmitMovRegImm64(rLen, uint64(inLen))
+	ctx.EmitMovRegImm64(rLen, uint64(inLen))
 	arg := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: rPtr, Reg2: rLen}
 	res := ctx.EmitGoCallScalar(scm.GoFuncAddr(scm.NewString), []scm.JITValueDesc{arg}, 2)
 	out := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: scm.RegRAX, Reg2: scm.RegRBX}
 	ctx.EmitMovPairToResult(&res, &out)
-	w.EmitByte(0xC3)
-	w.ResolveFixupsFinal()
+	ctx.EmitByte(0xC3)
+	ctx.ResolveFixupsFinal()
 
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 	pageSize := syscall.Getpagesize()
 	n := (len(code) + pageSize - 1) &^ (pageSize - 1)

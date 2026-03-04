@@ -117,18 +117,14 @@ func TestTmpDisasmDeclPlusConstStrings(t *testing.T) {
 	}
 
 	codeBuf := make([]byte, 4096)
-	w := &JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-	}
-
 	freeRegs := uint64((1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
 		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
 		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
 		(1 << uint(RegR13)) | (1 << uint(RegR15)))
 	ctx := &JITContext{
-		W:         w,
+		Ptr:       unsafe.Pointer(&codeBuf[0]),
+		Start:     unsafe.Pointer(&codeBuf[0]),
+		End:       unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs:  freeRegs,
 		AllRegs:   freeRegs,
 		SliceBase: RegR12,
@@ -140,22 +136,22 @@ func TestTmpDisasmDeclPlusConstStrings(t *testing.T) {
 		{Loc: LocImm, Type: tagString, Imm: NewString("b")},
 	}
 
-	start := uintptr(w.Ptr)
+	start := uintptr(ctx.Ptr)
 	desc := decl.JITEmit(ctx, args, result)
-	emitted := uintptr(w.Ptr) - start
+	emitted := uintptr(ctx.Ptr) - start
 	t.Logf("decl emitter emitted %d bytes before return materialization", emitted)
 
 	if desc.Loc == LocImm {
 		ptr, aux := desc.Imm.RawWords()
-		w.EmitMovRegImm64(RegRAX, uint64(ptr))
-		w.EmitMovRegImm64(RegRBX, aux)
+		ctx.EmitMovRegImm64(RegRAX, uint64(ptr))
+		ctx.EmitMovRegImm64(RegRBX, aux)
 	} else {
 		ctx.EmitMovPairToResult(&desc, &result)
 	}
-	w.EmitByte(0xC3)
-	w.ResolveFixupsFinal()
+	ctx.EmitByte(0xC3)
+	ctx.ResolveFixupsFinal()
 
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 	out := "/tmp/jit_decl_plus_const_strings.bin"
 	if err := os.WriteFile(out, code, 0o644); err != nil {
@@ -210,18 +206,14 @@ func TestTmpDisasmDeclStringQKnownTypeUnknownValue(t *testing.T) {
 	}
 
 	codeBuf := make([]byte, 4096)
-	w := &JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-	}
-
 	freeRegs := uint64((1 << uint(RegRCX)) | (1 << uint(RegRDX)) |
 		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
 		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
 		(1 << uint(RegR13)) | (1 << uint(RegR15)))
 	ctx := &JITContext{
-		W:         w,
+		Ptr:       unsafe.Pointer(&codeBuf[0]),
+		Start:     unsafe.Pointer(&codeBuf[0]),
+		End:       unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs:  freeRegs,
 		AllRegs:   freeRegs,
 		SliceBase: RegR12,
@@ -232,10 +224,10 @@ func TestTmpDisasmDeclStringQKnownTypeUnknownValue(t *testing.T) {
 	result := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
 	desc := decl.JITEmit(ctx, []JITValueDesc{arg}, result)
 	ctx.EmitMovPairToResult(&desc, &result)
-	w.EmitByte(0xC3)
-	w.ResolveFixupsFinal()
+	ctx.EmitByte(0xC3)
+	ctx.ResolveFixupsFinal()
 
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 	out := "/tmp/jit_stringq_known_type_unknown_value.bin"
 	if err := os.WriteFile(out, code, 0o644); err != nil {

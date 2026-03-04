@@ -18,19 +18,15 @@ func jitExecStorageInt(t *testing.T, s *StorageInt) func(...scm.Scmer) scm.Scmer
 	}
 
 	codeBuf := make([]byte, 65536)
-	w := &scm.JITWriter{
-		Ptr:   unsafe.Pointer(&codeBuf[0]),
-		Start: unsafe.Pointer(&codeBuf[0]),
-		End:   unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
-	}
-
 	// Same register setup as jitCompileExprBody (R11 reserved as scratch)
 	freeRegs := uint64((1 << uint(scm.RegRCX)) | (1 << uint(scm.RegRDX)) |
 		(1 << uint(scm.RegRSI)) | (1 << uint(scm.RegRDI)) |
 		(1 << uint(scm.RegR8)) | (1 << uint(scm.RegR9)) | (1 << uint(scm.RegR10)) |
 		(1 << uint(scm.RegR13)) | (1 << uint(scm.RegR15)))
 	ctx := &scm.JITContext{
-		W:         w,
+		Ptr:       unsafe.Pointer(&codeBuf[0]),
+		Start:     unsafe.Pointer(&codeBuf[0]),
+		End:       unsafe.Add(unsafe.Pointer(&codeBuf[0]), len(codeBuf)-256),
 		FreeRegs:  freeRegs,
 		AllRegs:   freeRegs,
 		SliceBase: scm.RegR12,
@@ -39,12 +35,12 @@ func jitExecStorageInt(t *testing.T, s *StorageInt) func(...scm.Scmer) scm.Scmer
 	// Entry: func(...Scmer) Scmer calling convention
 	// RAX = pointer to args slice data (*Scmer base), RBX = len, RCX = cap
 	// Save slice base in R12
-	w.EmitMovRegReg(scm.RegR12, scm.RegRAX)
+	ctx.EmitMovRegReg(scm.RegR12, scm.RegRAX)
 
 	// Load args[0] as Scmer pair (the index)
 	idxReg := ctx.AllocReg()
 	idxReg2 := ctx.AllocReg()
-	w.EmitLoadArgPair(idxReg, idxReg2, scm.RegR12, 0)
+	ctx.EmitLoadArgPair(idxReg, idxReg2, scm.RegR12, 0)
 	idx := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: idxReg, Reg2: idxReg2}
 
 	// thisptr is compile-time known (the *StorageInt pointer as LocImm)
@@ -58,9 +54,9 @@ func jitExecStorageInt(t *testing.T, s *StorageInt) func(...scm.Scmer) scm.Scmer
 	ctx.EmitMovPairToResult(&desc, &result)
 
 	// RET
-	w.EmitByte(0xC3)
+	ctx.EmitByte(0xC3)
 
-	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
+	codeLen := int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	code := codeBuf[:codeLen]
 
 	// Allocate executable memory
