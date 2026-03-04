@@ -145,6 +145,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl0)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagString, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d1)
@@ -568,6 +569,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl1)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			d3 := d1
@@ -1760,9 +1762,9 @@ func init_strings() {
 			result.Type = tagBool
 			ctx.W.EmitJmp(lbl0)
 			ctx.W.MarkLabel(lbl6)
-			d7 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d17 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(16)}
 			d18 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
+			d7 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
 			if d1.Loc == LocImm {
@@ -2564,6 +2566,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl1)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			d3 := d1
@@ -2670,6 +2673,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl1)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			d3 := d1
@@ -2812,6 +2816,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl1)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			d3 := d1
@@ -2981,6 +2986,7 @@ func init_strings() {
 			ctx.W.MarkLabel(lbl1)
 			d0 := args[0]
 			d2 := d0
+			d2.ID = 0
 			d1 := ctx.EmitTagEquals(&d2, tagNil, JITValueDesc{Loc: LocAny})
 			ctx.FreeDesc(&d0)
 			d3 := d1

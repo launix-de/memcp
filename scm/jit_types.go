@@ -450,9 +450,16 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 	case LocStackPair:
 		r1 := ctx.AllocReg()
 		r2 := ctx.AllocRegExcept(r1)
-		ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
-		ctx.W.EmitMovRegMem(r1, RegR11, 0)
-		ctx.W.EmitMovRegMem(r2, RegR11, 8)
+		if desc.MemPtr != 0 {
+			// Spill-buffer backed pair.
+			ctx.W.EmitMovRegImm64(RegR11, uint64(desc.MemPtr))
+			ctx.W.EmitMovRegMem(r1, RegR11, 0)
+			ctx.W.EmitMovRegMem(r2, RegR11, 8)
+		} else {
+			// Regular frame-backed pair.
+			ctx.W.EmitMovRegMem(r1, RegRSP, desc.StackOff)
+			ctx.W.EmitMovRegMem(r2, RegRSP, desc.StackOff+8)
+		}
 		desc.Loc = LocRegPair
 		desc.Reg = r1
 		desc.Reg2 = r2
@@ -761,25 +768,6 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// Owner-aware liveness with conservative fallback.
 	var liveRegsArr [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
-	// SliceBase carries the variadic args frame pointer for NthLocalVar loads.
-	// It is not always part of allocatable register tracking, so keep it live
-	// explicitly across helper calls.
-	if ctx.SliceBase <= RegR15 && ctx.SliceBase != RegRSP && ctx.SliceBase != RegRBP {
-		seen := false
-		for _, r := range liveRegs {
-			if r == ctx.SliceBase {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			if len(liveRegs) >= len(liveRegsArr) {
-				panic("jit: live register set overflow")
-			}
-			liveRegs = append(liveRegs, ctx.SliceBase)
-		}
-	}
-
 	emitArgSetup := func(stackArgBaseDisp int32) {
 		type regMove struct {
 			dst Reg

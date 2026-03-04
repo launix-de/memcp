@@ -2516,6 +2516,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t%s := ctx.AllocReg()", ptrReg)
 				g.emit("\t%s := ctx.AllocRegExcept(%s)", auxReg, ptrReg)
 				g.emit("\t%s := ctx.W.ReserveLabel()", doneLbl)
+				g.emit("\ttyp := uint16(JITTypeUnknown)")
 				g.emit("\tfor i := 0; i < len(args); i++ {")
 				g.emit("\t\tnextLbl := ctx.W.ReserveLabel()")
 				g.emit("\t\tctx.W.EmitCmpRegImm32(%s.Reg, int32(i))", idxDescVar)
@@ -2525,6 +2526,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t\tcase LocRegPair:")
 				g.emit("\t\t\tctx.W.EmitMovRegReg(%s, ai.Reg)", ptrReg)
 				g.emit("\t\t\tctx.W.EmitMovRegReg(%s, ai.Reg2)", auxReg)
+				g.emit("\t\t\ttyp = ai.Type")
 				g.emit("\t\tcase LocStackPair:")
 				g.emit("\t\t\ttmp := ai")
 				g.emit("\t\t\tctx.EnsureDesc(&tmp)")
@@ -2533,6 +2535,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t\t\t}")
 				g.emit("\t\t\tctx.W.EmitMovRegReg(%s, tmp.Reg)", ptrReg)
 				g.emit("\t\t\tctx.W.EmitMovRegReg(%s, tmp.Reg2)", auxReg)
+				g.emit("\t\t\ttyp = tmp.Type")
 				g.emit("\t\t\tctx.FreeDesc(&tmp)")
 				g.emit("\t\tcase LocImm:")
 				g.emit("\t\t\tpair := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", ptrReg, auxReg)
@@ -2558,6 +2561,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t\t\t\tctx.W.EmitMovRegImm64(%s, uint64(ptrWord))", ptrReg)
 				g.emit("\t\t\t\tctx.W.EmitMovRegImm64(%s, auxWord)", auxReg)
 				g.emit("\t\t\t}")
+				g.emit("\t\t\ttyp = ai.Imm.GetTag()")
 				g.emit("\t\tdefault:")
 				g.emit("\t\t\tpanic(\"jitgen: emitter args index expected Scmer pair\")")
 				g.emit("\t\t}")
@@ -2569,7 +2573,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\tfor _, r := range protected {")
 				g.emit("\t\tctx.UnprotectReg(r)")
 				g.emit("\t}")
-				g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: %s, Reg2: %s}", dv, ptrReg, auxReg)
+				g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: typ, Reg: %s, Reg2: %s}", dv, ptrReg, auxReg)
 				g.emit("}")
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
 			} else {
@@ -2710,6 +2714,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s.ID = 0", tmp)
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagNil, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsInt":
@@ -2717,6 +2722,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s.ID = 0", tmp)
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagInt, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsFloat":
@@ -2724,6 +2730,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s.ID = 0", tmp)
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagFloat, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsBool":
@@ -2731,6 +2738,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s.ID = 0", tmp)
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagBool, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsString":
@@ -2738,6 +2746,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s.ID = 0", tmp)
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagString, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsSlice":
@@ -2745,6 +2754,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s.ID = 0", tmp)
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagSlice, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "IsFastDict":
@@ -2752,6 +2762,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s.ID = 0", tmp)
 			g.emit("%s := ctx.EmitTagEquals(&%s, tagFastDict, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Bool":
@@ -2760,6 +2771,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			tmp := g.allocDesc()
 			g.emit("%s := %s", tmp, arg.goVar)
+			g.emit("%s.ID = 0", tmp)
 			g.emit("%s := ctx.EmitBoolDesc(&%s, JITValueDesc{Loc: LocAny})", dv, tmp)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Int":
