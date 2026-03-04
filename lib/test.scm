@@ -895,6 +895,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda () (if true 1 2)))) 1 "jit: true?1:2")
 	(assert ((jit (lambda () (or false true)))) true "jit: (or false true)")
 	(assert ((jit (lambda () (and true true)))) true "jit: (and true true)")
+	(assert (nil? ((jit (lambda () (coalesce))))) true "jit: coalesce empty -> nil")
+	(assert ((jit (lambda () (coalesce nil false 0 "")))) "" "jit: coalesce all falsy -> last")
+	(assert ((jit (lambda () (coalesce nil false 5 9)))) 5 "jit: coalesce first truthy")
+	(assert ((jit (lambda (x) (coalesce nil x 7))) 0) 7 "jit: coalesce dynamic falsy -> fallback arg")
+	(assert ((jit (lambda (x) (coalesce nil x 7))) 3) 3 "jit: coalesce dynamic truthy -> x")
+	(assert (nil? ((jit (lambda () (coalesceNil))))) true "jit: coalesceNil empty -> nil")
+	(assert ((jit (lambda () (coalesceNil nil nil "" 0)))) "" "jit: coalesceNil first non-nil (falsy allowed)")
+	(assert ((jit (lambda (x) (coalesceNil nil x 7))) nil) 7 "jit: coalesceNil nil -> fallback arg")
+	(assert ((jit (lambda (x) (coalesceNil nil x 7))) 0) 0 "jit: coalesceNil non-nil falsy kept")
 
 	/* Constants */
 	(assert ((jit (lambda () 42))) 42 "jit: constant return")
