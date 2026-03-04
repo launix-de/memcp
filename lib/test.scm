@@ -892,6 +892,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* Conditionals */
 	(assert ((jit (lambda (x) (if (< x 5) 1 0))) 3) 1 "jit: if x<5 then 1 else 0 (true)")
 	(assert ((jit (lambda (x) (if (< x 5) 1 0))) 7) 0 "jit: if x<5 then 1 else 0 (false)")
+	(assert ((jit (lambda () (if true 1 2)))) 1 "jit: true?1:2")
+	(assert ((jit (lambda () (or false true)))) true "jit: (or false true)")
+	(assert ((jit (lambda () (and true true)))) true "jit: (and true true)")
 
 	/* Constants */
 	(assert ((jit (lambda () 42))) 42 "jit: constant return")

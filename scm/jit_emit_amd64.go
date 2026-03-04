@@ -1014,6 +1014,78 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 	return result
 }
 
+// EmitBoolDesc evaluates Scmer truthiness equivalent to (Scmer).Bool().
+// It consumes src and returns a bool descriptor (LocImm or LocReg).
+// Fast paths are emitted for compile-time constants and known primitive types;
+// dynamic/complex cases fall back to calling Scmer.Bool.
+func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITValueDesc {
+	emitResult := func(v JITValueDesc) JITValueDesc {
+		if result.Loc == LocAny {
+			return v
+		}
+		ctx.W.EmitMakeBool(result, v)
+		ctx.FreeDesc(&v)
+		return result
+	}
+
+	if src.Loc == LocImm {
+		return emitResult(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(src.Imm.Bool())})
+	}
+	if src.Type == tagNil {
+		ctx.FreeDesc(src)
+		return emitResult(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)})
+	}
+	if src.Type == tagDate {
+		ctx.FreeDesc(src)
+		return emitResult(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)})
+	}
+
+	// Known primitive types can be lowered directly without helper calls.
+	if src.Type == tagBool || src.Type == tagInt || src.Type == tagFloat {
+		ctx.EnsureDesc(src)
+		var valReg Reg
+		switch src.Loc {
+		case LocReg:
+			valReg = src.Reg
+		case LocRegPair:
+			valReg = src.Reg2 // aux payload contains bool/int/float bits
+		default:
+			// EnsureDesc should have materialized stack/mem forms.
+			panic("jit: EmitBoolDesc primitive type not in register location")
+		}
+
+		dst := ctx.AllocReg()
+		if valReg != dst {
+			ctx.W.emitMovRegReg(dst, valReg)
+		}
+
+		if src.Type == tagFloat {
+			// Float truthiness is float64(bits) != 0.0. Mask sign bit so -0.0
+			// becomes zero, then compare against zero.
+			mask := ctx.AllocReg()
+			ctx.W.EmitMovRegImm64(mask, 0x7fffffffffffffff)
+			ctx.W.EmitAndInt64(dst, mask)
+			ctx.FreeReg(mask)
+		}
+		ctx.W.EmitCmpRegImm32(dst, 0)
+		ctx.W.EmitSetcc(dst, CcNE)
+		ctx.FreeDesc(src)
+		return emitResult(JITValueDesc{Loc: LocReg, Type: tagBool, Reg: dst})
+	}
+
+	// Unknown or complex known types (string/symbol/slice/vector/fastdict/default):
+	// materialize a Scmer pair and reuse the canonical runtime helper.
+	pair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+	pair = jitPlaceIntoPair(ctx, src, pair)
+	out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Bool), []JITValueDesc{pair}, 1)
+	// Go bool returns may leave upper bits undefined; normalize to 0|1.
+	ctx.W.EmitAndRegImm32(out.Reg, 1)
+	out.Type = tagBool
+	ctx.FreeDesc(&pair)
+	ctx.FreeDesc(src)
+	return emitResult(out)
+}
+
 // EmitMovToReg moves a JITValueDesc value into a specific GPR register.
 // Handles LocImm (materializes constant) and LocReg (register-to-register move).
 func (ctx *JITContext) EmitMovToReg(dst Reg, src JITValueDesc) {

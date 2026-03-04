@@ -149,8 +149,260 @@ func jitCompileExprBody(body Scmer) (code []byte, roots []unsafe.Pointer) {
 		w.emitByte(0xC3) // RET
 	}
 
+	w.ResolveFixupsFinal()
 	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
 	return codeBuf[:codeLen], ctx.ConstRoots
+}
+
+func jitEnsureResultPair(ctx *JITContext, result JITValueDesc) JITValueDesc {
+	if result.Loc == LocRegPair {
+		return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: result.Reg, Reg2: result.Reg2}
+	}
+	return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+}
+
+func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) JITValueDesc {
+	if target.Loc != LocRegPair {
+		panic("jit: jitPlaceIntoPair requires LocRegPair target")
+	}
+	// Keep descriptor location in sync with spill metadata before we read Reg/Reg2.
+	if src.Loc != LocImm {
+		ctx.EnsureDesc(src)
+	}
+	switch src.Loc {
+	case LocImm:
+		switch src.Imm.GetTag() {
+		case tagBool:
+			ctx.W.EmitMakeBool(target, *src)
+		case tagInt:
+			ctx.W.EmitMakeInt(target, *src)
+		case tagFloat:
+			ctx.W.EmitMakeFloat(target, *src)
+		case tagNil:
+			ctx.W.EmitMakeNil(target)
+		default:
+			ptr, aux := src.Imm.RawWords()
+			ctx.W.EmitMovRegImm64(target.Reg, uint64(ptr))
+			ctx.W.EmitMovRegImm64(target.Reg2, aux)
+		}
+		return target
+	case LocStack, LocStackPair:
+		ctx.EnsureDesc(src)
+		return jitPlaceIntoPair(ctx, src, target)
+	case LocRegPair:
+		if src.Reg != target.Reg {
+			ctx.W.emitMovRegReg(target.Reg, src.Reg)
+		}
+		if src.Reg2 != target.Reg2 {
+			ctx.W.emitMovRegReg(target.Reg2, src.Reg2)
+		}
+		if src.Reg != target.Reg && src.Reg2 != target.Reg2 {
+			ctx.FreeDesc(src)
+		}
+		return target
+	case LocReg:
+		switch src.Type {
+		case tagBool:
+			ctx.W.EmitMakeBool(target, *src)
+		case tagInt:
+			ctx.W.EmitMakeInt(target, *src)
+		case tagFloat:
+			ctx.W.EmitMakeFloat(target, *src)
+		default:
+			panic("jit: cannot materialize LocReg with unknown type into Scmer pair")
+		}
+		ctx.FreeDesc(src)
+		return target
+	default:
+		panic("jit: unsupported source location for pair materialization")
+	}
+}
+
+func jitCondToBool(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
+	return ctx.EmitBoolDesc(cond, JITValueDesc{Loc: LocAny})
+}
+
+// jitCondToBoolBorrowed evaluates truthiness without consuming cond.
+func jitCondToBoolBorrowed(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
+	if cond.Loc == LocImm {
+		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(cond.Imm.Bool())}
+	}
+	if cond.Type == tagNil {
+		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+	}
+	if cond.Type == tagDate {
+		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+	}
+
+	// Known primitive truthiness without consuming the original value.
+	if cond.Type == tagBool || cond.Type == tagInt || cond.Type == tagFloat {
+		tmp := *cond
+		ctx.EnsureDesc(&tmp)
+		var valReg Reg
+		switch tmp.Loc {
+		case LocReg:
+			valReg = tmp.Reg
+		case LocRegPair:
+			valReg = tmp.Reg2
+		default:
+			panic("jit: borrowed bool test needs register value")
+		}
+		dst := ctx.AllocReg()
+		if dst != valReg {
+			ctx.W.emitMovRegReg(dst, valReg)
+		}
+		if cond.Type == tagFloat {
+			mask := ctx.AllocReg()
+			ctx.W.EmitMovRegImm64(mask, 0x7fffffffffffffff)
+			ctx.W.EmitAndInt64(dst, mask)
+			ctx.FreeReg(mask)
+		}
+		ctx.W.EmitCmpRegImm32(dst, 0)
+		ctx.W.EmitSetcc(dst, CcNE)
+		ctx.FreeDesc(&tmp)
+		return JITValueDesc{Loc: LocReg, Type: tagBool, Reg: dst}
+	}
+
+	out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Bool), []JITValueDesc{*cond}, 1)
+	ctx.W.EmitAndRegImm32(out.Reg, 1)
+	out.Type = tagBool
+	return out
+}
+
+// jitIsNilBorrowed checks nil-ness without consuming v.
+func jitIsNilBorrowed(ctx *JITContext, v *JITValueDesc) JITValueDesc {
+	if v.Loc == LocImm {
+		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(v.Imm.IsNil())}
+	}
+	if v.Type != JITTypeUnknown {
+		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(v.Type == tagNil)}
+	}
+	tmp := *v
+	ctx.EnsureDesc(&tmp)
+	if tmp.Loc != LocRegPair {
+		ctx.FreeDesc(&tmp)
+		out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.IsNil), []JITValueDesc{*v}, 1)
+		ctx.W.EmitAndRegImm32(out.Reg, 1)
+		out.Type = tagBool
+		return out
+	}
+	tagReg := ctx.AllocReg()
+	ctx.W.emitGetTagRegs(tagReg, tmp.Reg, tmp.Reg2)
+	ctx.W.EmitCmpRegImm32(tagReg, int32(tagNil))
+	ctx.W.EmitSetcc(tagReg, CcE)
+	ctx.FreeDesc(&tmp)
+	return JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
+}
+
+func jitBuildIfTail(tail []Scmer) Scmer {
+	if len(tail) == 0 {
+		return NewNil()
+	}
+	if len(tail) == 1 {
+		return tail[0]
+	}
+	parts := make([]Scmer, 0, len(tail)+1)
+	parts = append(parts, NewSymbol("if"))
+	parts = append(parts, tail...)
+	return NewSlice(parts)
+}
+
+func jitChildContext(parent *JITContext) *JITContext {
+	return &JITContext{
+		Env:         parent.Env,
+		FreeRegs:    parent.FreeRegs,
+		AllRegs:     parent.AllRegs,
+		W:           parent.W,
+		StackOffset: parent.StackOffset,
+		SliceBase:   parent.SliceBase,
+		ConstRoots:  parent.ConstRoots,
+		rootSet:     parent.rootSet,
+	}
+}
+
+func jitMergeChildRoots(parent *JITContext, child *JITContext) {
+	if child == nil {
+		return
+	}
+	parent.ConstRoots = child.ConstRoots
+	parent.rootSet = child.rootSet
+}
+
+// jitEmitCondJump emits branch code equivalent to Eval(...).Bool():
+// jumps to trueLbl when expr is truthy, otherwise to falseLbl.
+// It short-circuits nested (and ...)/(or ...)/(if ...) directly without
+// forcing intermediate boolean materialization.
+func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseLbl uint8) {
+	if expr.GetTag() == tagSourceInfo {
+		expr = expr.SourceInfo().value
+	}
+	if expr.GetTag() == tagSlice {
+		list := expr.Slice()
+		if len(list) > 0 && list[0].IsSymbol() {
+			switch string(list[0].Symbol()) {
+			case "and":
+				// Eval semantics: (and) => true
+				if len(list) <= 1 {
+					ctx.W.EmitJmp(trueLbl)
+					return
+				}
+				for i := 1; i < len(list)-1; i++ {
+					nextLbl := ctx.W.ReserveLabel()
+					jitEmitCondJump(ctx, list[i], sliceBase, nextLbl, falseLbl)
+					ctx.W.MarkLabel(nextLbl)
+				}
+				jitEmitCondJump(ctx, list[len(list)-1], sliceBase, trueLbl, falseLbl)
+				return
+			case "or":
+				// Eval semantics: (or) => false
+				if len(list) <= 1 {
+					ctx.W.EmitJmp(falseLbl)
+					return
+				}
+				for i := 1; i < len(list)-1; i++ {
+					nextLbl := ctx.W.ReserveLabel()
+					jitEmitCondJump(ctx, list[i], sliceBase, trueLbl, nextLbl)
+					ctx.W.MarkLabel(nextLbl)
+				}
+				jitEmitCondJump(ctx, list[len(list)-1], sliceBase, trueLbl, falseLbl)
+				return
+			case "if":
+				// Eval semantics: chain of condition/value pairs plus optional else.
+				i := 1
+				for i+1 < len(list) {
+					thenCondLbl := ctx.W.ReserveLabel()
+					nextCondLbl := ctx.W.ReserveLabel()
+					jitEmitCondJump(ctx, list[i], sliceBase, thenCondLbl, nextCondLbl)
+					ctx.W.MarkLabel(thenCondLbl)
+					jitEmitCondJump(ctx, list[i+1], sliceBase, trueLbl, falseLbl)
+					ctx.W.MarkLabel(nextCondLbl)
+					i += 2
+				}
+				if i < len(list) {
+					jitEmitCondJump(ctx, list[i], sliceBase, trueLbl, falseLbl)
+				} else {
+					// No else branch => nil => false
+					ctx.W.EmitJmp(falseLbl)
+				}
+				return
+			}
+		}
+	}
+
+	cond := jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
+	b := jitCondToBool(ctx, &cond)
+	if b.Loc == LocImm {
+		if b.Imm.Bool() {
+			ctx.W.EmitJmp(trueLbl)
+		} else {
+			ctx.W.EmitJmp(falseLbl)
+		}
+		return
+	}
+	ctx.W.EmitCmpRegImm32(b.Reg, 0)
+	ctx.W.EmitJcc(CcNE, trueLbl)
+	ctx.W.EmitJmp(falseLbl)
+	ctx.FreeDesc(&b)
 }
 
 // jitCompileExpr recursively compiles a Scheme expression to machine code.
@@ -177,6 +429,21 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	case tagString:
 		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: tagString, Imm: expr}
+	case tagSymbol:
+		sym := expr.Symbol()
+		if ctx.Env != nil {
+			if desc, ok := ctx.Env.Lookup(sym); ok {
+				if desc.Loc == LocImm {
+					ctx.TrackImm(desc.Imm)
+				}
+				return desc
+			}
+		}
+		if v, ok := Globalenv.Vars[sym]; ok {
+			ctx.TrackImm(v)
+			return JITValueDesc{Loc: LocImm, Type: v.GetTag(), Imm: v}
+		}
+		panic("jit: unresolved symbol " + string(sym))
 	case tagNthLocalVar:
 		// Load parameter: check inline env first (JITEmitProcInline places args here).
 		idx := int(expr.NthLocalVar())
@@ -257,6 +524,187 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			panic("jit: non-symbol in call position")
 		}
 		name := string(list[0].Symbol())
+		switch name {
+		case "if":
+			if len(list) < 3 {
+				imm := NewNil()
+				ctx.TrackImm(imm)
+				return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+			}
+			target := jitEnsureResultPair(ctx, result)
+			endLbl := ctx.W.ReserveLabel()
+			i := 1
+			for i+1 < len(list) {
+				thenLbl := ctx.W.ReserveLabel()
+				nextCondLbl := ctx.W.ReserveLabel()
+				jitEmitCondJump(ctx, list[i], sliceBase, thenLbl, nextCondLbl)
+				ctx.W.MarkLabel(thenLbl)
+				thenVal := jitCompileExpr(ctx, list[i+1], sliceBase, target)
+				_ = jitPlaceIntoPair(ctx, &thenVal, target)
+				ctx.W.EmitJmp(endLbl)
+				ctx.W.MarkLabel(nextCondLbl)
+				i += 2
+			}
+			if i < len(list) {
+				elseVal := jitCompileExpr(ctx, list[i], sliceBase, target)
+				_ = jitPlaceIntoPair(ctx, &elseVal, target)
+			} else {
+				nilDesc := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+				_ = jitPlaceIntoPair(ctx, &nilDesc, target)
+			}
+			ctx.W.MarkLabel(endLbl)
+			ctx.BindReg(target.Reg, &target)
+			ctx.BindReg(target.Reg2, &target)
+			return target
+		case "and":
+			if len(list) <= 1 {
+				imm := NewBool(true)
+				ctx.TrackImm(imm)
+				return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
+			}
+			target := jitEnsureResultPair(ctx, result)
+			falseLbl := ctx.W.ReserveLabel()
+			allTrueLbl := ctx.W.ReserveLabel()
+			endLbl := ctx.W.ReserveLabel()
+			for i := 1; i < len(list)-1; i++ {
+				nextLbl := ctx.W.ReserveLabel()
+				jitEmitCondJump(ctx, list[i], sliceBase, nextLbl, falseLbl)
+				ctx.W.MarkLabel(nextLbl)
+			}
+			jitEmitCondJump(ctx, list[len(list)-1], sliceBase, allTrueLbl, falseLbl)
+			ctx.W.MarkLabel(allTrueLbl)
+			trueDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+			_ = jitPlaceIntoPair(ctx, &trueDesc, target)
+			ctx.W.EmitJmp(endLbl)
+			ctx.W.MarkLabel(falseLbl)
+			falseDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+			_ = jitPlaceIntoPair(ctx, &falseDesc, target)
+			ctx.W.MarkLabel(endLbl)
+			ctx.BindReg(target.Reg, &target)
+			ctx.BindReg(target.Reg2, &target)
+			return target
+		case "or":
+			if len(list) <= 1 {
+				imm := NewBool(false)
+				ctx.TrackImm(imm)
+				return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
+			}
+			target := jitEnsureResultPair(ctx, result)
+			trueLbl := ctx.W.ReserveLabel()
+			allFalseLbl := ctx.W.ReserveLabel()
+			endLbl := ctx.W.ReserveLabel()
+			for i := 1; i < len(list)-1; i++ {
+				nextLbl := ctx.W.ReserveLabel()
+				jitEmitCondJump(ctx, list[i], sliceBase, trueLbl, nextLbl)
+				ctx.W.MarkLabel(nextLbl)
+			}
+			jitEmitCondJump(ctx, list[len(list)-1], sliceBase, trueLbl, allFalseLbl)
+			ctx.W.MarkLabel(allFalseLbl)
+			falseDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+			_ = jitPlaceIntoPair(ctx, &falseDesc, target)
+			ctx.W.EmitJmp(endLbl)
+			ctx.W.MarkLabel(trueLbl)
+			trueDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+			_ = jitPlaceIntoPair(ctx, &trueDesc, target)
+			ctx.W.MarkLabel(endLbl)
+			ctx.BindReg(target.Reg, &target)
+			ctx.BindReg(target.Reg2, &target)
+			return target
+		case "coalesce":
+			// Eval semantics:
+			// return first truthy value; if none truthy, return last value; empty => nil.
+			if len(list) <= 1 {
+				imm := NewNil()
+				ctx.TrackImm(imm)
+				return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+			}
+			target := jitEnsureResultPair(ctx, result)
+			endLbl := ctx.W.ReserveLabel()
+			for i := 1; i < len(list); i++ {
+				v := jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+				if i == len(list)-1 {
+					_ = jitPlaceIntoPair(ctx, &v, target)
+					break
+				}
+				if v.Loc == LocImm {
+					if v.Imm.Bool() {
+						_ = jitPlaceIntoPair(ctx, &v, target)
+						ctx.W.EmitJmp(endLbl)
+						break
+					}
+					continue
+				}
+				b := jitCondToBoolBorrowed(ctx, &v)
+				if b.Loc == LocImm {
+					if b.Imm.Bool() {
+						_ = jitPlaceIntoPair(ctx, &v, target)
+						ctx.W.EmitJmp(endLbl)
+					}
+					ctx.FreeDesc(&v)
+					continue
+				}
+				takeLbl := ctx.W.ReserveLabel()
+				nextLbl := ctx.W.ReserveLabel()
+				ctx.W.EmitCmpRegImm32(b.Reg, 0)
+				ctx.W.EmitJcc(CcNE, takeLbl)
+				ctx.W.EmitJmp(nextLbl)
+				ctx.W.MarkLabel(takeLbl)
+				_ = jitPlaceIntoPair(ctx, &v, target)
+				ctx.W.EmitJmp(endLbl)
+				ctx.W.MarkLabel(nextLbl)
+				ctx.FreeDesc(&b)
+				ctx.FreeDesc(&v)
+			}
+			ctx.W.MarkLabel(endLbl)
+			ctx.BindReg(target.Reg, &target)
+			ctx.BindReg(target.Reg2, &target)
+			return target
+		case "coalesceNil":
+			// Eval semantics:
+			// return first non-nil value among args; empty => nil.
+			if len(list) <= 1 {
+				imm := NewNil()
+				ctx.TrackImm(imm)
+				return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+			}
+			target := jitEnsureResultPair(ctx, result)
+			endLbl := ctx.W.ReserveLabel()
+			for i := 1; i < len(list); i++ {
+				v := jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+				if v.Loc == LocImm {
+					if !v.Imm.IsNil() {
+						_ = jitPlaceIntoPair(ctx, &v, target)
+						ctx.W.EmitJmp(endLbl)
+						break
+					}
+					continue
+				}
+				isNil := jitIsNilBorrowed(ctx, &v)
+				if isNil.Loc == LocImm {
+					if !isNil.Imm.Bool() {
+						_ = jitPlaceIntoPair(ctx, &v, target)
+						ctx.W.EmitJmp(endLbl)
+					}
+					ctx.FreeDesc(&v)
+					continue
+				}
+				takeLbl := ctx.W.ReserveLabel()
+				nextLbl := ctx.W.ReserveLabel()
+				ctx.W.EmitCmpRegImm32(isNil.Reg, 0)
+				ctx.W.EmitJcc(CcE, takeLbl) // isNil == 0 => take value
+				ctx.W.EmitJmp(nextLbl)
+				ctx.W.MarkLabel(takeLbl)
+				_ = jitPlaceIntoPair(ctx, &v, target)
+				ctx.W.EmitJmp(endLbl)
+				ctx.W.MarkLabel(nextLbl)
+				ctx.FreeDesc(&isNil)
+				ctx.FreeDesc(&v)
+			}
+			ctx.W.MarkLabel(endLbl)
+			ctx.BindReg(target.Reg, &target)
+			ctx.BindReg(target.Reg2, &target)
+			return target
+		}
 		decl, ok := declarations[name]
 		if !ok || decl.JITEmit == nil {
 			panic("jit: no JITEmit for " + name)
@@ -299,7 +747,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		}
 		return out
 	default:
-		panic("jit: unsupported expression tag")
+		panic(fmt.Sprintf("jit: unsupported expression tag=%d expr=%s", expr.GetTag(), SerializeToString(expr, &Globalenv)))
 	}
 }
 

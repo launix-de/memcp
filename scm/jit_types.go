@@ -598,6 +598,11 @@ func (ctx *JITContext) RestoreSpills() {
 
 // FreeDesc releases any registers held by a value descriptor.
 func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
+	// Non-owning descriptors (ID==0), e.g. copied call arguments, must not
+	// mutate placement/free registers from the original source descriptor.
+	if desc.ID == 0 {
+		return
+	}
 	switch desc.Loc {
 	case LocReg:
 		if desc.Reg <= RegR15 {
@@ -756,6 +761,24 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// Owner-aware liveness with conservative fallback.
 	var liveRegsArr [16]Reg
 	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+	// SliceBase carries the variadic args frame pointer for NthLocalVar loads.
+	// It is not always part of allocatable register tracking, so keep it live
+	// explicitly across helper calls.
+	if ctx.SliceBase <= RegR15 && ctx.SliceBase != RegRSP && ctx.SliceBase != RegRBP {
+		seen := false
+		for _, r := range liveRegs {
+			if r == ctx.SliceBase {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			if len(liveRegs) >= len(liveRegsArr) {
+				panic("jit: live register set overflow")
+			}
+			liveRegs = append(liveRegs, ctx.SliceBase)
+		}
+	}
 
 	emitArgSetup := func(stackArgBaseDisp int32) {
 		type regMove struct {
