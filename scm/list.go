@@ -351,8 +351,7 @@ func init_list() {
 			} else {
 				r1 := ctx.AllocReg()
 				ctx.W.EmitMovRegReg(r1, d9.Reg2)
-				ctx.W.EmitShlRegImm8(r1, 16)
-				ctx.W.EmitShrRegImm8(r1, 16)
+				ctx.W.EmitShrRegImm8(r1, 8)
 				ctx.FreeReg(d9.Reg2)
 				d10 = JITValueDesc{Loc: LocRegPair, Reg: d9.Reg, Reg2: r1}
 				ctx.BindReg(d9.Reg, &d10)
@@ -725,7 +724,7 @@ func init_list() {
 			ctx.W.EmitByte(0xCC)
 			return result
 			}
-			ps27 := PhiState{General: true}
+			ps27 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps27)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
@@ -1197,7 +1196,7 @@ func init_list() {
 			return result
 			return result
 			}
-			ps3 := PhiState{General: true}
+			ps3 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps3)
 			return result
 		}, /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */ /* TODO: unresolved SSA value: false:bool */
@@ -2230,9 +2229,9 @@ func init_list() {
 				ctx.W.MarkLabel(lbl4)
 				ctx.W.ResolveFixups()
 			}
+			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
-			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -2450,7 +2449,7 @@ func init_list() {
 				panic("NewFastDict: LocImm not expected at JIT compile time")
 			} else {
 				r2 := ctx.AllocReg()
-				ctx.W.EmitMovRegImm64(r2, uint64(tagFastDict) << 48)
+				ctx.W.EmitMovRegImm64(r2, makeAux(tagFastDict, 0))
 				d37 = JITValueDesc{Loc: LocRegPair, Type: tagFastDict, Reg: d1.Reg, Reg2: r2}
 				ctx.BindReg(d1.Reg, &d37)
 				ctx.BindReg(r2, &d37)
@@ -2871,8 +2870,7 @@ func init_list() {
 			} else {
 				r3 := ctx.AllocReg()
 				ctx.W.EmitMovRegReg(r3, d47.Reg2)
-				ctx.W.EmitShlRegImm8(r3, 16)
-				ctx.W.EmitShrRegImm8(r3, 16)
+				ctx.W.EmitShrRegImm8(r3, 8)
 				ctx.FreeReg(d47.Reg2)
 				d48 = JITValueDesc{Loc: LocRegPair, Reg: d47.Reg, Reg2: r3}
 				ctx.BindReg(d47.Reg, &d48)
@@ -2998,9 +2996,9 @@ func init_list() {
 				ctx.W.MarkLabel(lbl8)
 				ctx.W.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -3195,9 +3193,9 @@ func init_list() {
 				ctx.W.MarkLabel(lbl9)
 				ctx.W.ResolveFixups()
 			}
+			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
-			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -3667,9 +3665,9 @@ func init_list() {
 				ctx.W.MarkLabel(lbl10)
 				ctx.W.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d2 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(16)}
+			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -3979,7 +3977,7 @@ func init_list() {
 			return bbs[8].RenderPS(ps83)
 			return result
 			}
-			ps85 := PhiState{General: true}
+			ps85 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps85)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()

@@ -173,27 +173,6 @@ func TagDateEncodeVal(unix int64, zoneID int) uint64 {
 	return (uint64(zoneID)&tagDateZoneMask)<<tagDateUnixBits | (uint64(unix) & tagDateUnixMask)
 }
 
-// TagDateDecodeUnix extracts the unix timestamp (signed, seconds since epoch) from a tagDate val.
-func TagDateDecodeUnix(val uint64) int64 {
-	raw := val & tagDateUnixMask
-	// sign-extend from bit 44
-	return int64(raw<<(64-tagDateUnixBits)) >> (64 - tagDateUnixBits)
-}
-
-// TagDateDecodeZone extracts the zone_id from a tagDate val.
-func TagDateDecodeZone(val uint64) int {
-	return int((val >> tagDateUnixBits) & tagDateZoneMask)
-}
-
-func NewDate(unixts int64) Scmer {
-	return Scmer{nil, makeAux(tagDate, TagDateEncodeVal(unixts, 0))}
-}
-
-// NewDateWithZone creates a tagDate value with an explicit zone_id (1..2047 = index in system.timezones).
-func NewDateWithZone(unixts int64, zoneID int) Scmer {
-	return Scmer{nil, makeAux(tagDate, TagDateEncodeVal(unixts, zoneID))}
-}
-
 // signExtend56 sign-extends a 56-bit two's complement value to int64.
 func signExtend56(v uint64) int64 {
 	v &= (1 << 56) - 1
@@ -559,7 +538,7 @@ func (s Scmer) Int() int64 {
 		}
 		return v
 	case tagDate:
-		return TagDateDecodeUnix(auxVal(s.aux))
+		return signExtend56(auxVal(s.aux))
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1
@@ -588,7 +567,7 @@ func (s Scmer) Float() float64 {
 		}
 		return v
 	case tagDate:
-		return float64(TagDateDecodeUnix(auxVal(s.aux)))
+		return float64(signExtend56(auxVal(s.aux)))
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1.0
@@ -646,7 +625,7 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		}
 		return "false", dst
 	case tagDate:
-		return DateToDisplay(s, GetCurrentSessionLocation()), dst
+		return time.Unix(signExtend56(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05")
 	case tagNil:
 		return "nil", dst
 	case tagFunc:
@@ -902,7 +881,7 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagFloat:
 			return v.Float()
 		case tagDate:
-			return DateToDisplay(v, GetCurrentSessionLocation())
+			return time.Unix(signExtend56(auxVal(v.aux)), 0).UTC().Format("2006-01-02 15:04:05")
 		case tagString:
 			s := v.String()
 			if !utf8.ValidString(s) {
@@ -1002,7 +981,7 @@ func (s *Scmer) Write(w io.Writer) {
 		b := strconv.AppendFloat(buf[:0], f, 'g', -1, 64)
 		w.Write(b)
 	case tagDate:
-		io.WriteString(w, DateToDisplay(*s, GetCurrentSessionLocation()))
+		io.WriteString(w, time.Unix(signExtend56(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"))
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
 	case tagFunc:

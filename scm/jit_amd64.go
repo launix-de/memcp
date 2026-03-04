@@ -56,10 +56,10 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	}
 	// Expression compilation via JITEmit
 	if body.GetTag() == tagSlice {
-		return jitCompileExprBody(body)
+		return jitCompileExprBody(proc, body, proc.NumVars)
 	}
 	if body.GetTag() == tagNthLocalVar {
-		return jitCompileExprBody(body)
+		return jitCompileExprBody(proc, body, proc.NumVars)
 	}
 	return nil, nil
 }
@@ -67,7 +67,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 // jitCompileExprBody compiles a Scheme expression body to machine code
 // using Declaration.JITEmit callbacks. Returns nil if any sub-expression
 // is not JIT-compilable.
-func jitCompileExprBody(body Scmer) (code []byte, roots []unsafe.Pointer) {
+func jitCompileExprBody(proc *Proc, body Scmer, numVars int) (code []byte, roots []unsafe.Pointer) {
 	defer func() {
 		if r := recover(); r != nil {
 			if JITLog {
@@ -101,6 +101,61 @@ func jitCompileExprBody(body Scmer) (code []byte, roots []unsafe.Pointer) {
 
 	// Emit: MOV R12, RAX (save slice base pointer)
 	w.emitMovRegReg(RegR12, RegRAX)
+	// Copy incoming variadic arguments into an emitter-local stack frame.
+	// Go helper calls use PUSH/POP heavily and may overlap caller-provided
+	// argument memory; reading NthLocalVar from a private copy is stable.
+	frameBytes := 0
+	if numVars > 0 {
+		slots := numVars
+		frameBytes = slots * 16
+		if frameBytes < 128 {
+			w.EmitSubRSP(uint8(frameBytes))
+		} else {
+			w.emitBytes(0x48, 0x81, 0xEC)
+			w.emitU32(uint32(frameBytes))
+		}
+		for i := 0; i < slots; i++ {
+			srcOff := int32(i * 16)
+			dstOff := int32(i * 16)
+			w.EmitMovRegMem(RegR11, RegR12, srcOff)
+			w.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+			w.EmitMovRegMem(RegR11, RegR12, srcOff+8)
+			w.EmitStoreRegMem(RegR11, RegRSP, dstOff+8)
+		}
+		w.emitMovRegReg(RegR12, RegRSP)
+		ctx.SliceBaseTracksRSP = true
+	}
+
+	// Map lambda parameters to local stack slots so symbol lookup remains correct
+	// even when the optimizer did not rewrite body symbols to NthLocalVar.
+	if proc != nil {
+		vars := make(map[Symbol]JITValueDesc, numVars)
+		switch proc.Params.GetTag() {
+		case tagSlice:
+			params := proc.Params.Slice()
+			for i := 0; i < len(params) && i < numVars; i++ {
+				if params[i].GetTag() != tagSymbol {
+					continue
+				}
+				vars[params[i].Symbol()] = JITValueDesc{
+					Loc:      LocStackPair,
+					Type:     JITTypeUnknown,
+					StackOff: int32(i * 16),
+				}
+			}
+		case tagSymbol:
+			if numVars > 0 {
+				vars[proc.Params.Symbol()] = JITValueDesc{
+					Loc:      LocStackPair,
+					Type:     JITTypeUnknown,
+					StackOff: 0,
+				}
+			}
+		}
+		if len(vars) > 0 {
+			ctx.Env = &JITEnv{Vars: vars}
+		}
+	}
 
 	// Compile body, place result into RAX+RBX (Scmer return registers)
 	result := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
@@ -110,16 +165,20 @@ func jitCompileExprBody(body Scmer) (code []byte, roots []unsafe.Pointer) {
 	if desc.Loc == LocImm {
 		switch desc.Imm.GetTag() {
 		case tagBool:
-			w.EmitReturnBool(desc)
+			w.EmitMakeBool(result, desc)
 		case tagInt:
-			w.EmitReturnInt(desc)
+			w.EmitMakeInt(result, desc)
 		case tagFloat:
-			w.EmitReturnFloat(desc)
+			w.EmitMakeFloat(result, desc)
 		case tagNil:
-			w.EmitReturnNil()
+			w.EmitMakeNil(result)
 		default:
 			return nil, nil
 		}
+		if frameBytes > 0 {
+			w.EmitAddRSP32(int32(frameBytes))
+		}
+		w.emitByte(0xC3) // RET
 	} else {
 		// Ensure non-immediate results are in ABI return registers.
 		ctx.EnsureDesc(&desc)
@@ -145,6 +204,9 @@ func jitCompileExprBody(body Scmer) (code []byte, roots []unsafe.Pointer) {
 			}
 		default:
 			return nil, nil
+		}
+		if frameBytes > 0 {
+			w.EmitAddRSP32(int32(frameBytes))
 		}
 		w.emitByte(0xC3) // RET
 	}
@@ -238,6 +300,9 @@ func jitCondToBoolBorrowed(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
 	if cond.Type == tagBool || cond.Type == tagInt || cond.Type == tagFloat {
 		tmp := *cond
 		ctx.EnsureDesc(&tmp)
+		tmpLoc := tmp.Loc
+		tmpReg := tmp.Reg
+		tmpReg2 := tmp.Reg2
 		var valReg Reg
 		switch tmp.Loc {
 		case LocReg:
@@ -257,12 +322,28 @@ func jitCondToBoolBorrowed(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
 			ctx.W.EmitAndInt64(dst, mask)
 			ctx.FreeReg(mask)
 		} else if cond.Type == tagBool {
-			// Bool payload uses bit 0; strip marker bits before truth test.
-			ctx.W.EmitAndRegImm32(dst, 1)
+			// Bool payload is auxVal in bits [63:8]; low 8 bits hold the tag.
+			ctx.W.EmitShrRegImm8(dst, 8)
 		}
 		ctx.W.EmitCmpRegImm32(dst, 0)
 		ctx.W.EmitSetcc(dst, CcNE)
-		ctx.FreeDesc(&tmp)
+		switch tmpLoc {
+		case LocReg:
+			if dst != tmpReg {
+				ctx.FreeReg(tmpReg)
+			}
+		case LocRegPair:
+			if dst == tmpReg {
+				ctx.FreeReg(tmpReg2)
+			} else if dst == tmpReg2 {
+				ctx.FreeReg(tmpReg)
+			} else {
+				ctx.FreeReg(tmpReg)
+				ctx.FreeReg(tmpReg2)
+			}
+		default:
+			ctx.FreeDesc(&tmp)
+		}
 		return JITValueDesc{Loc: LocReg, Type: tagBool, Reg: dst}
 	}
 
@@ -291,7 +372,7 @@ func jitIsNilBorrowed(ctx *JITContext, v *JITValueDesc) JITValueDesc {
 	}
 	tagReg := ctx.AllocReg()
 	ctx.W.emitGetTagRegs(tagReg, tmp.Reg, tmp.Reg2)
-	ctx.W.EmitCmpRegImm32(tagReg, int32(tagNil))
+	ctx.W.EmitCmpRegImm8(tagReg, uint8(tagNil))
 	ctx.W.EmitSetcc(tagReg, CcE)
 	ctx.FreeDesc(&tmp)
 	return JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
@@ -540,13 +621,34 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
 			}
 			target := jitEnsureResultPair(ctx, result)
-			endLbl := ctx.W.ReserveLabel()
+			var endLbl uint8
+			hasDynamic := false
 			i := 1
 			for i+1 < len(list) {
-				thenLbl := ctx.W.ReserveLabel()
+				cond := jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+				b := jitCondToBool(ctx, &cond)
+				if b.Loc == LocImm {
+					if b.Imm.Bool() {
+						thenVal := jitCompileExpr(ctx, list[i+1], sliceBase, target)
+						_ = jitPlaceIntoPair(ctx, &thenVal, target)
+						if hasDynamic {
+							ctx.W.MarkLabel(endLbl)
+						}
+						ctx.BindReg(target.Reg, &target)
+						ctx.BindReg(target.Reg2, &target)
+						return target
+					}
+					i += 2
+					continue
+				}
+				if !hasDynamic {
+					endLbl = ctx.W.ReserveLabel()
+					hasDynamic = true
+				}
 				nextCondLbl := ctx.W.ReserveLabel()
-				jitEmitCondJump(ctx, list[i], sliceBase, thenLbl, nextCondLbl)
-				ctx.W.MarkLabel(thenLbl)
+				ctx.W.EmitCmpRegImm32(b.Reg, 0)
+				ctx.W.EmitJcc(CcE, nextCondLbl)
+				ctx.FreeDesc(&b)
 				thenVal := jitCompileExpr(ctx, list[i+1], sliceBase, target)
 				_ = jitPlaceIntoPair(ctx, &thenVal, target)
 				ctx.W.EmitJmp(endLbl)
@@ -560,7 +662,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				nilDesc := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 				_ = jitPlaceIntoPair(ctx, &nilDesc, target)
 			}
-			ctx.W.MarkLabel(endLbl)
+			if hasDynamic {
+				ctx.W.MarkLabel(endLbl)
+			}
 			ctx.BindReg(target.Reg, &target)
 			ctx.BindReg(target.Reg2, &target)
 			return target
@@ -571,8 +675,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
 			}
 			target := jitEnsureResultPair(ctx, result)
-			falseLbl := ctx.W.ReserveLabel()
-			endLbl := ctx.W.ReserveLabel()
+			var falseLbl uint8
+			var endLbl uint8
+			hasDynamic := false
 			compileTimeFalse := false
 			for i := 1; i < len(list); i++ {
 				c := jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
@@ -584,13 +689,28 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					}
 					continue
 				}
+				if !hasDynamic {
+					falseLbl = ctx.W.ReserveLabel()
+					endLbl = ctx.W.ReserveLabel()
+					hasDynamic = true
+				}
 				ctx.W.EmitCmpRegImm32(b.Reg, 0)
 				ctx.W.EmitJcc(CcE, falseLbl)
 				ctx.FreeDesc(&b)
 			}
 			if compileTimeFalse {
+				if hasDynamic {
+					ctx.W.MarkLabel(falseLbl)
+				}
 				falseDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
 				_ = jitPlaceIntoPair(ctx, &falseDesc, target)
+				ctx.BindReg(target.Reg, &target)
+				ctx.BindReg(target.Reg2, &target)
+				return target
+			}
+			if !hasDynamic {
+				trueDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+				_ = jitPlaceIntoPair(ctx, &trueDesc, target)
 				ctx.BindReg(target.Reg, &target)
 				ctx.BindReg(target.Reg2, &target)
 				return target
@@ -612,8 +732,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
 			}
 			target := jitEnsureResultPair(ctx, result)
-			trueLbl := ctx.W.ReserveLabel()
-			endLbl := ctx.W.ReserveLabel()
+			var trueLbl uint8
+			var endLbl uint8
+			hasDynamic := false
 			compileTimeTrue := false
 			for i := 1; i < len(list); i++ {
 				c := jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
@@ -625,13 +746,28 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					}
 					continue
 				}
+				if !hasDynamic {
+					trueLbl = ctx.W.ReserveLabel()
+					endLbl = ctx.W.ReserveLabel()
+					hasDynamic = true
+				}
 				ctx.W.EmitCmpRegImm32(b.Reg, 0)
 				ctx.W.EmitJcc(CcNE, trueLbl)
 				ctx.FreeDesc(&b)
 			}
 			if compileTimeTrue {
+				if hasDynamic {
+					ctx.W.MarkLabel(trueLbl)
+				}
 				trueDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
 				_ = jitPlaceIntoPair(ctx, &trueDesc, target)
+				ctx.BindReg(target.Reg, &target)
+				ctx.BindReg(target.Reg2, &target)
+				return target
+			}
+			if !hasDynamic {
+				falseDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+				_ = jitPlaceIntoPair(ctx, &falseDesc, target)
 				ctx.BindReg(target.Reg, &target)
 				ctx.BindReg(target.Reg2, &target)
 				return target
@@ -756,6 +892,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		} else {
 			args = make([]JITValueDesc, n)
 		}
+		protectedRegs := make([]Reg, 0, len(list)*2)
 		for i := 1; i < len(list); i++ {
 			args[i-1] = jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
 			// Keep argument descriptors tracked while compiling later args and
@@ -765,44 +902,23 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			switch args[i-1].Loc {
 			case LocReg:
 				ctx.BindReg(args[i-1].Reg, &args[i-1])
+				ctx.ProtectReg(args[i-1].Reg)
+				protectedRegs = append(protectedRegs, args[i-1].Reg)
 			case LocRegPair:
 				ctx.BindReg(args[i-1].Reg, &args[i-1])
 				ctx.BindReg(args[i-1].Reg2, &args[i-1])
+				ctx.ProtectReg(args[i-1].Reg)
+				ctx.ProtectReg(args[i-1].Reg2)
+				protectedRegs = append(protectedRegs, args[i-1].Reg, args[i-1].Reg2)
 			}
 		}
-		// Stabilize arguments into dedicated spill-buffer slots before entering
-		// the callee emitter. This avoids later register allocator activity from
-		// invalidating call-argument descriptors (especially for variadic loops
-		// that index args multiple times across BBs).
-		for i := range args {
-			v := args[i]
-			pair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-			pair = jitPlaceIntoPair(ctx, &v, pair)
-			slot := ctx.SpillTop
-			if slot+1 >= len(ctx.SpillBuf) {
-				panic("jit: spill buffer overflow while stabilizing call args")
+		// Keep call arguments out of compile-time spill slots (MemPtr-backed
+		// descriptors), because such addresses would be baked into emitted code.
+		defer func() {
+			for _, r := range protectedRegs {
+				ctx.UnprotectReg(r)
 			}
-			ctx.SpillTop += 2
-			mem := uintptr(unsafe.Pointer(&ctx.SpillBuf[slot]))
-			ctx.W.EmitMovRegImm64(RegR11, uint64(mem))
-			ctx.W.EmitStoreRegMem(pair.Reg, RegR11, 0)
-			ctx.W.EmitStoreRegMem(pair.Reg2, RegR11, 8)
-			ctx.FreeReg(pair.Reg)
-			ctx.FreeReg(pair.Reg2)
-			args[i] = JITValueDesc{
-				Loc:      LocStackPair,
-				Type:     pair.Type,
-				MemPtr:   mem,
-				StackOff: int32(slot),
-			}
-		}
-		// Arguments can be referenced multiple times inside jitgen-generated CFGs.
-		// Keep them as non-owning source descriptors so FreeDesc on temporary
-		// copies does not release the shared source placement prematurely.
-		for i := range args {
-			args[i].ID = 0
-		}
-		// Call the JITEmit callback
+		}()
 		out := decl.JITEmit(ctx, args, result)
 		if out.Loc == LocImm {
 			ctx.TrackImm(out.Imm)

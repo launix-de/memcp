@@ -142,15 +142,16 @@ func (w *JITWriter) EmitReturnBool(src JITValueDesc) {
 		w.emitBytes(0x48, 0xBB) // MOV RBX, imm64
 		w.emitU64(aux)
 	case LocReg:
-		// MOVZX EBX, src.Reg (low byte); then OR with tagBool<<48
-		// For simplicity: SHL + OR approach
-		// First zero-extend the bool into RBX
+		// Build aux = (bool&1)<<8 | tagBool.
+		// Keep it branchless so callers can feed arbitrary integer predicates.
+		// First zero-extend the bool into RBX.
 		w.emitMovRegReg(RegRBX, src.Reg)
 		w.emitBytes(0x48, 0x81, 0xE3) // AND RBX, 0x01
 		w.emitU32(1)
-		// MOV RCX, tagBool<<48
+		w.EmitShlRegImm8(RegRBX, 8)
+		// MOV RCX, tagBool
 		w.emitBytes(0x48, 0xB9) // MOV RCX, imm64
-		w.emitU64(uint64(tagBool) << 48)
+		w.emitU64(uint64(tagBool))
 		// OR RBX, RCX
 		w.emitBytes(0x48, 0x09, 0xCB)
 	}
@@ -173,12 +174,13 @@ func (w *JITWriter) EmitMakeBool(dst JITValueDesc, src JITValueDesc) {
 		aux := makeAux(tagBool, bval)
 		w.EmitMovRegImm64(dst.Reg2, aux)
 	case LocReg:
-		// dst.Reg2 = tagBool<<48 | (src.Reg & 1)
+		// dst.Reg2 = ((src.Reg & 1) << 8) | tagBool
 		if dst.Reg2 != src.Reg {
 			w.emitMovRegReg(dst.Reg2, src.Reg)
 		}
 		w.emitAndRegImm32(dst.Reg2, 1)
-		w.EmitMovRegImm64(RegR11, uint64(tagBool)<<48)
+		w.EmitShlRegImm8(dst.Reg2, 8)
+		w.EmitMovRegImm64(RegR11, uint64(tagBool))
 		w.emitOrRegReg(dst.Reg2, RegR11)
 	}
 }
@@ -808,6 +810,17 @@ func (w *JITWriter) EmitCmpRegImm32(dst Reg, imm int32) {
 	w.emitU32(uint32(imm))
 }
 
+// EmitCmpRegImm8 emits CMP r8, imm8 on the low byte of the register.
+// This is used for compact Scmer tag checks where tags live in aux[7:0].
+func (w *JITWriter) EmitCmpRegImm8(dst Reg, imm uint8) {
+	rex := byte(0x40) // force low-byte register encoding (incl. SIL/DIL/BPL/SPL)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xF8) | byte(dst&7) // /7 = CMP, mod=11, r/m=dst
+	w.emitBytes(rex, 0x80, modrm, imm)
+}
+
 // EmitAddRegImm32 emits ADD r64, sign-extended imm32.
 func (w *JITWriter) EmitAddRegImm32(dst Reg, imm int32) {
 	rex := byte(0x48)
@@ -1011,7 +1024,7 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 	tagReg := ctx.AllocReg()
 	ctx.W.emitGetTagRegs(tagReg, src.Reg, src.Reg2)
 	ctx.FreeDesc(src)
-	ctx.W.EmitCmpRegImm32(tagReg, int32(tag))
+	ctx.W.EmitCmpRegImm8(tagReg, uint8(tag))
 	ctx.W.EmitSetcc(tagReg, CcE)
 	r := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
 	if result.Loc == LocAny {
@@ -1117,8 +1130,8 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 			ctx.W.EmitAndInt64(dst, mask)
 			ctx.FreeReg(mask)
 		} else if src.Type == tagBool {
-			// Bool payload is stored in bit 0; ignore tag marker bits.
-			ctx.W.EmitAndRegImm32(dst, 1)
+			// Bool payload is auxVal in bits [63:8]; low 8 bits hold the tag.
+			ctx.W.EmitShrRegImm8(dst, 8)
 		}
 		ctx.W.EmitCmpRegImm32(dst, 0)
 		ctx.W.EmitSetcc(dst, CcNE)
@@ -1177,7 +1190,7 @@ func (ctx *JITContext) EmitMovToReg(dst Reg, src JITValueDesc) {
 // Logic: if ptr == &scmerIntSentinel → tagInt (4)
 //
 //	if ptr == &scmerFloatSentinel → tagFloat (3)
-//	else → aux >> 48
+//	else → aux & 0xFF
 func (w *JITWriter) emitGetTagRegs(dst, ptrReg, auxReg Reg) {
 	// CMP ptrReg, &scmerIntSentinel (via R11 as scratch)
 	w.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
@@ -1195,11 +1208,11 @@ func (w *JITWriter) emitGetTagRegs(dst, ptrReg, auxReg Reg) {
 	isFloatFixup := w.Ptr
 	w.emitU32(0)
 
-	// Default: dst = aux >> 48
+	// Default: dst = aux & 0xFF
 	if dst != auxReg {
 		w.emitMovRegReg(dst, auxReg)
 	}
-	w.EmitShrRegImm8(dst, 48)
+	w.EmitAndRegImm32(dst, 0xFF)
 	// JMP .done
 	w.emitByte(0xE9) // JMP rel32
 	doneFixup := w.Ptr

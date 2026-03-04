@@ -192,7 +192,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps3 := PhiState{General: true}
+			ps3 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps3)
 			return result
 		},
@@ -846,7 +846,7 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			return result
 			}
-			ps29 := PhiState{General: true}
+			ps29 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps29)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
@@ -1063,8 +1063,8 @@ func init_strings() {
 				ctx.W.MarkLabel(lbl1)
 				ctx.W.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -3116,8 +3116,8 @@ func init_strings() {
 				ctx.W.MarkLabel(lbl11)
 				ctx.W.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			d0 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -3959,7 +3959,7 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			return result
 			}
-			ps91 := PhiState{General: true}
+			ps91 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps91)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
@@ -4142,7 +4142,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps4 := PhiState{General: true}
+			ps4 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps4)
 			return result
 		}, /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */ /* TODO: Index: s[0:int] */
@@ -4290,7 +4290,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps5 := PhiState{General: true}
+			ps5 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps5)
 			return result
 		},
@@ -4440,9 +4440,9 @@ func init_strings() {
 				ctx.W.MarkLabel(lbl1)
 				ctx.W.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
+			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -4707,9 +4707,9 @@ func init_strings() {
 				ctx.W.MarkLabel(lbl2)
 				ctx.W.ResolveFixups()
 			}
+			d2 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
 			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(16)}
-			d2 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5763,7 +5763,7 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			return result
 			}
-			ps55 := PhiState{General: true}
+			ps55 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps55)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
@@ -6037,7 +6037,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps7 := PhiState{General: true}
+			ps7 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps7)
 			return result
 		}, /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */ /* TODO: Index: t1[0:int] */
@@ -6194,7 +6194,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps5 := PhiState{General: true}
+			ps5 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps5)
 			return result
 		}, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
@@ -6351,7 +6351,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps5 := PhiState{General: true}
+			ps5 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps5)
 			return result
 		}, /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */ /* TODO: Index: s[t1] */
@@ -6718,7 +6718,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps11 := PhiState{General: true}
+			ps11 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps11)
 			return result
 		}, /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */ /* TODO: Range: range s */
@@ -6875,7 +6875,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps5 := PhiState{General: true}
+			ps5 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps5)
 			return result
 		}, /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */ /* TODO: Index: s[t3] */
@@ -7070,7 +7070,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps6 := PhiState{General: true}
+			ps6 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps6)
 			return result
 		}, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
@@ -7265,7 +7265,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps6 := PhiState{General: true}
+			ps6 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps6)
 			return result
 		}, /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */ /* TODO: unsupported compare const kind: "":string */
@@ -7575,7 +7575,7 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			return result
 			}
-			ps14 := PhiState{General: true}
+			ps14 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps14)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
@@ -7924,7 +7924,7 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			return result
 			}
-			ps15 := PhiState{General: true}
+			ps15 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps15)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
@@ -8273,7 +8273,7 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			return result
 			}
-			ps15 := PhiState{General: true}
+			ps15 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps15)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
@@ -8852,7 +8852,7 @@ func init_strings() {
 			ctx.W.EmitJmp(lbl0)
 			return result
 			}
-			ps24 := PhiState{General: true}
+			ps24 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps24)
 			ctx.W.MarkLabel(lbl0)
 			ctx.W.ResolveFixups()
@@ -9200,7 +9200,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps5 := PhiState{General: true}
+			ps5 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps5)
 			return result
 		}, /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */ /* TODO: FieldAddr on non-receiver: &r.once [#0] */
@@ -9357,7 +9357,7 @@ func init_strings() {
 			return result
 			return result
 			}
-			ps5 := PhiState{General: true}
+			ps5 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps5)
 			return result
 		}, /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */ /* TODO: Index: s[t2] */
