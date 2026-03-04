@@ -90,7 +90,7 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 }
 func (p *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: ChangeType: changetype *Pointer[T] <- *Pointer[[]uint64] (x) */
+	/* TODO: dynamic call: invoke t3.GetValue(idx) */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 

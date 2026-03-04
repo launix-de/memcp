@@ -34,10 +34,10 @@ type JITWriter struct {
 	Pages   []*JITPage
 	Current *JITPage
 
-	Labels    [64]int32
+	Labels    [256]int32
 	LabelNext uint8
 
-	Fixups    [128]JITFixup
+	Fixups    [512]JITFixup
 	FixupNext uint8
 }
 

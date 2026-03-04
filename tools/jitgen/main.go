@@ -1949,7 +1949,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 
 	g.emitRecursiveBBRenderers()
 	entryPS := g.allocTemp("ps")
-	g.emit("%s := PhiState{General: true}", entryPS)
+	g.emit("%s := PhiState{General: false}", entryPS)
 	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
 
 	// Emit fixup resolution and epilogue
@@ -2061,7 +2061,7 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 
 	g.emitRecursiveBBRenderers()
 	entryPS := g.allocTemp("ps")
-	g.emit("%s := PhiState{General: true}", entryPS)
+	g.emit("%s := PhiState{General: false}", entryPS)
 	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
 
 	if g.multiBlock {
@@ -3553,7 +3553,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("} else {")
 			auxReg := g.allocReg()
 			g.emit("\t%s := ctx.AllocReg()", auxReg)
-			g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(tagFastDict) << 48)", auxReg)
+			g.emit("\tctx.W.EmitMovRegImm64(%s, makeAux(tagFastDict, 0))", auxReg)
 			g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: tagFastDict, Reg: %s.Reg, Reg2: %s}", dv, src.goVar, auxReg)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
@@ -3718,18 +3718,17 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// (Scmer).Slice() []Scmer — extract data ptr and length from Scmer
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			// ptr field = data pointer (Reg), aux lower 48 bits = length
+			// ptr field = data pointer (Reg), aux stores (len<<8)|tag.
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("if %s.Loc == LocImm {", arg.goVar)
 			g.emit("\tslice := %s.Imm.Slice()", arg.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagSlice, Imm: NewInt(int64(len(slice)))}", dv)
 			g.emit("} else {")
-			// Extract length from aux: AND with mask, SHR not needed (auxVal = aux & ((1<<48)-1))
+			// Extract length payload from aux (auxVal = aux >> 8).
 			lenReg := g.allocReg()
 			g.emit("\t%s := ctx.AllocReg()", lenReg)
 			g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg2)", lenReg, arg.goVar)
-			g.emit("\tctx.W.EmitShlRegImm8(%s, 16)", lenReg) // clear top 16 bits (tag)
-			g.emit("\tctx.W.EmitShrRegImm8(%s, 16)", lenReg)
+			g.emit("\tctx.W.EmitShrRegImm8(%s, 8)", lenReg)
 			g.emit("\tctx.FreeReg(%s.Reg2)", arg.goVar) // free aux
 			g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s.Reg, Reg2: %s}", dv, arg.goVar, lenReg)
 			g.emit("}")

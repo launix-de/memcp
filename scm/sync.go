@@ -233,16 +233,41 @@ func init_sync() {
 			return WithSession(a[0], a[1])
 		}, false, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			var d0 JITValueDesc
+			_ = d0
+			var d1 JITValueDesc
+			_ = d1
+			var d2 JITValueDesc
+			_ = d2
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
-			bbs[0].Render = func() JITValueDesc {
-			bbs[0].RenderCount++
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
-			bbs[0].RenderCount++
-			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
-			d0 := args[0]
-			d1 := args[1]
+			lbl0 := ctx.W.ReserveLabel()
+			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
+			if !ps.General {
+				if bbs[0].VisitCount >= 2 {
+					ps.General = true
+					return bbs[0].RenderPS(ps)
+				}
+			}
+			bbs[0].VisitCount++
+			if ps.General {
+				if bbs[0].Rendered {
+					ctx.W.EmitJmp(lbl0)
+					return result
+				}
+				bbs[0].Rendered = true
+				bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+				bbpos_0_0 = bbs[0].Address
+				ctx.W.MarkLabel(lbl0)
+				ctx.W.ResolveFixups()
+			}
+			ctx.ReclaimUntrackedRegs()
+			d0 = args[0]
+			d0.ID = 0
+			d1 = args[1]
+			d1.ID = 0
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
 			if d0.Loc == LocImm {
@@ -315,11 +340,14 @@ func init_sync() {
 			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
 				panic("jit: generic call arg expects 2-word value (WithSession arg1)")
 			}
-			d2 := ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d0, d1}, 2)
+			d2 = ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d0, d1}, 2)
 			ctx.FreeDesc(&d0)
 			ctx.FreeDesc(&d1)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
 			}
 			ctx.EnsureDesc(&d2)
 			if d2.Loc == LocRegPair {
@@ -344,8 +372,11 @@ func init_sync() {
 				}
 			}
 			return result
+			return result
 			}
-			return bbs[0].Render()
+			ps3 := PhiState{General: false}
+			_ = bbs[0].RenderPS(ps3)
+			return result
 		}, /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
 	})
 	Declare(&Globalenv, &Declaration{
@@ -372,7 +403,7 @@ func init_sync() {
 				return NewBool(true)
 			}
 		}, false, false, nil,
-		nil /* TODO: dynamic call: invoke t0.Done() */, /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
+		nil /* TODO: dynamic call: invoke t0.Done() */, /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
 	})
 	Declare(&Globalenv, &Declaration{
 		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
@@ -390,7 +421,7 @@ func init_sync() {
 				return once()
 			})
 		}, false, false, nil,
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 	Declare(&Globalenv, &Declaration{
 		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
@@ -413,7 +444,7 @@ func init_sync() {
 				return Apply(a[0])
 			})
 		}, false, false, nil,
-		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
+		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
 	})
 	Declare(&Globalenv, &Declaration{
 		"numcpu", "Returns the number of logical CPUs available for parallel execution",
@@ -423,20 +454,44 @@ func init_sync() {
 			return NewInt(int64(runtime.NumCPU()))
 		}, true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			var d0 JITValueDesc
+			_ = d0
+			var d1 JITValueDesc
+			_ = d1
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
-			bbs[0].Render = func() JITValueDesc {
-			bbs[0].RenderCount++
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
-			bbs[0].RenderCount++
-			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
-			d0 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
+			lbl0 := ctx.W.ReserveLabel()
+			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
+			if !ps.General {
+				if bbs[0].VisitCount >= 2 {
+					ps.General = true
+					return bbs[0].RenderPS(ps)
+				}
+			}
+			bbs[0].VisitCount++
+			if ps.General {
+				if bbs[0].Rendered {
+					ctx.W.EmitJmp(lbl0)
+					return result
+				}
+				bbs[0].Rendered = true
+				bbs[0].Address = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
+				bbpos_0_0 = bbs[0].Address
+				ctx.W.MarkLabel(lbl0)
+				ctx.W.ResolveFixups()
+			}
+			ctx.ReclaimUntrackedRegs()
+			d0 = ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
+			ctx.W.ResolveFixups()
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
 			}
 			if d0.Loc == LocImm {
 				ctx.W.EmitMakeInt(result, d0)
@@ -446,8 +501,11 @@ func init_sync() {
 			}
 			result.Type = tagInt
 			return result
+			return result
 			}
-			return bbs[0].Render()
+			ps2 := PhiState{General: false}
+			_ = bbs[0].RenderPS(ps2)
+			return result
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -464,6 +522,6 @@ func init_sync() {
 			fd.Set(NewString("heap_sys"), NewInt(int64(m.HeapSys)), nil)
 			return NewFastDict(fd)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */
 	})
 }
