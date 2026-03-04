@@ -858,10 +858,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (a b c) c)) 1 2 9) 9 "jit: return 3rd param native")
 	(assert ((jit (lambda (a b) a)) 3 4) 3 "jit: return 1st of 2 params native")
 	(assert ((jit (lambda (a b c) b)) 1 8 3) 8 "jit: return 2nd of 3 params native")
+	(define jit_id_desc (jit (lambda (x) x)))
+	(assert (jit? jit_id_desc) true "jit?: identity lambda reports true")
+	(assert (jit? (jit (lambda () 42))) true "jit?: constant lambda reports true")
 	(define jit_add_desc (jit (lambda (a b) (+ a b))))
 	(assert (strlike (serialize jit_add_desc) "(lambda %") true "jit descriptor serializes as lambda")
 	(assert (equal? (eval (list jit_add_desc 2 5)) 7) true "jit descriptor executable via eval")
 	(assert (equal? (apply jit_add_desc '(2 5)) 7) true "jit descriptor executable via apply")
+	(assert (jit? (lambda (a b) (+ a b))) false "jit?: plain lambda reports false")
+	(define jit_fallback_desc (jit (lambda () (now))))
+	(assert (jit? jit_fallback_desc) false "jit fallback returns plain lambda")
+	(assert (number? (jit_fallback_desc)) true "jit fallback lambda remains executable")
 
 	/* Basic arithmetic with single parameter */
 	(assert ((jit (lambda (x) (+ x 1))) 4) 5 "jit: x + 1")

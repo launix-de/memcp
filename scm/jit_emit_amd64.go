@@ -1040,7 +1040,6 @@ func (ctx *JITContext) EmitTagEquals(src *JITValueDesc, tag uint16, result JITVa
 // SSA value is used both for a type predicate and later value extraction.
 func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint16, result JITValueDesc) JITValueDesc {
 	var protected []Reg
-	var tempRegs []Reg
 	switch src.Loc {
 	case LocRegPair:
 		ctx.ProtectReg(src.Reg)
@@ -1057,7 +1056,6 @@ func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint16, resu
 	}()
 
 	tmp := *src
-	keepID := true
 	switch src.Loc {
 	case LocRegPair:
 		r0 := ctx.AllocRegExcept(src.Reg, src.Reg2)
@@ -1065,31 +1063,15 @@ func (ctx *JITContext) EmitTagEqualsBorrowed(src *JITValueDesc, tag uint16, resu
 		ctx.W.emitMovRegReg(r0, src.Reg)
 		ctx.W.emitMovRegReg(r1, src.Reg2)
 		tmp = JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: r0, Reg2: r1}
-		tempRegs = append(tempRegs, r0, r1)
-		keepID = false
 	case LocReg:
 		r0 := ctx.AllocRegExcept(src.Reg)
 		ctx.W.emitMovRegReg(r0, src.Reg)
 		tmp = JITValueDesc{Loc: LocReg, Type: src.Type, Reg: r0}
-		tempRegs = append(tempRegs, r0)
-		keepID = false
 	default:
 		// Stack/mem/imm forms are safe to pass by value-copy.
 	}
-	if !keepID {
-		tmp.ID = 0
-	}
-	out := ctx.EmitTagEquals(&tmp, tag, result)
-	for _, r := range tempRegs {
-		if out.Loc == LocReg && out.Reg == r {
-			continue
-		}
-		if out.Loc == LocRegPair && (out.Reg == r || out.Reg2 == r) {
-			continue
-		}
-		ctx.FreeReg(r)
-	}
-	return out
+	tmp.ID = 0
+	return ctx.EmitTagEquals(&tmp, tag, result)
 }
 
 // EmitBoolDesc evaluates Scmer truthiness equivalent to (Scmer).Bool().
