@@ -114,6 +114,7 @@ func init_list() {
 		true, false, nil,
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [5]BBDescriptor
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -128,6 +129,7 @@ func init_list() {
 			_ = bbpos_0_3
 			bbpos_0_4 := int32(-1)
 			_ = bbpos_0_4
+			bbs[0].RenderCount++
 			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			d0 := args[0]
 			d1 := ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
@@ -171,6 +173,7 @@ func init_list() {
 				ctx.W.EmitJmp(lbl2)
 			}
 			ctx.FreeDesc(&d2)
+			bbs[2].RenderCount++
 			bbpos_0_2 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl2)
 			ctx.W.ResolveFixups()
@@ -216,10 +219,12 @@ func init_list() {
 				ctx.W.EmitJmp(lbl6)
 			}
 			ctx.FreeDesc(&d6)
+			bbs[4].RenderCount++
 			bbpos_0_4 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl6)
 			ctx.W.ResolveFixups()
 			ctx.W.EmitByte(0xCC)
+			bbs[1].RenderCount++
 			bbpos_0_1 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl1)
 			ctx.W.ResolveFixups()
@@ -264,6 +269,7 @@ func init_list() {
 			if d10.Loc == LocReg { ctx.FreeReg(d10.Reg) }
 			result.Type = tagInt
 			ctx.W.EmitJmp(lbl0)
+			bbs[3].RenderCount++
 			bbpos_0_3 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl5)
 			ctx.W.ResolveFixups()
@@ -744,8 +750,10 @@ func init_list() {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
 			bbs[0].Render = func() JITValueDesc {
+			bbs[0].RenderCount++
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
+			bbs[0].RenderCount++
 			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			d0 := args[0]
 			d2 := d0
@@ -1237,6 +1245,7 @@ func init_list() {
 		func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			r0 := ctx.W.EmitSubRSP32Fixup()
+			var bbs [10]BBDescriptor
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -1264,6 +1273,7 @@ func init_list() {
 			lbl1 := ctx.W.ReserveLabel()
 			lbl2 := ctx.W.ReserveLabel()
 			lbl3 := ctx.W.ReserveLabel()
+			bbs[0].RenderCount++
 			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			d0 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 			ctx.EnsureDesc(&d0)
@@ -1306,6 +1316,7 @@ func init_list() {
 				ctx.W.EmitJmp(lbl1)
 			}
 			ctx.FreeDesc(&d1)
+			bbs[2].RenderCount++
 			bbpos_0_2 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl1)
 			ctx.W.ResolveFixups()
@@ -1342,6 +1353,7 @@ func init_list() {
 				ctx.W.EmitJmp(lbl8)
 			}
 			ctx.FreeDesc(&d5)
+			bbs[5].RenderCount++
 			bbpos_0_5 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl8)
 			ctx.W.ResolveFixups()
@@ -1378,6 +1390,7 @@ func init_list() {
 				ctx.W.EmitJmp(lbl12)
 			}
 			ctx.FreeDesc(&d9)
+			bbs[7].RenderCount++
 			bbpos_0_7 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl12)
 			ctx.W.ResolveFixups()
@@ -1388,6 +1401,7 @@ func init_list() {
 			if d14.Loc == LocNone { panic("jit: phi source has no location") }
 			ctx.EnsureDesc(&d14)
 			ctx.EmitStoreToStack(d14, 8)
+			bbs[4].RenderCount++
 			bbpos_0_4 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl2)
 			ctx.W.ResolveFixups()
@@ -1435,11 +1449,12 @@ func init_list() {
 				}
 			}
 			ctx.W.EmitJmp(lbl0)
+			bbs[1].RenderCount++
 			bbpos_0_1 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl4)
 			ctx.W.ResolveFixups()
-			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d15 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(8)}
+			d3 = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(0)}
 			d19 := args[3]
 			d20 := ctx.EmitGoCallScalar(GoFuncAddr(OptimizeProcToSerialFunction), []JITValueDesc{d19}, 1)
 			ctx.FreeDesc(&d19)
@@ -1450,6 +1465,7 @@ func init_list() {
 			ctx.EnsureDesc(&d22)
 			ctx.EmitStoreToStack(d22, 0)
 			ctx.W.EmitJmp(lbl1)
+			bbs[3].RenderCount++
 			bbpos_0_3 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl7)
 			ctx.W.ResolveFixups()
@@ -1470,6 +1486,7 @@ func init_list() {
 			ctx.EnsureDesc(&d25)
 			ctx.EmitStoreToStack(d25, 8)
 			ctx.W.EmitJmp(lbl2)
+			bbs[6].RenderCount++
 			bbpos_0_6 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl11)
 			ctx.W.ResolveFixups()
@@ -1528,9 +1545,11 @@ func init_list() {
 			if d29.Loc == LocImm {
 				d30 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d29.Imm.Int() + 4)}
 			} else {
-				ctx.W.EmitAddRegImm32(d29.Reg, int32(4))
-				d30 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d29.Reg}
-				ctx.BindReg(d29.Reg, &d30)
+				scratch := ctx.AllocRegExcept(d29.Reg)
+				ctx.W.EmitMovRegReg(scratch, d29.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(4))
+				d30 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
+				ctx.BindReg(scratch, &d30)
 			}
 			if d30.Loc == LocReg && d29.Loc == LocReg && d30.Reg == d29.Reg {
 				ctx.TransferReg(d29.Reg)
@@ -1541,6 +1560,7 @@ func init_list() {
 			d31 := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{d30}, 1)
 			ctx.FreeDesc(&d30)
 			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, 16)
+			bbs[8].RenderCount++
 			bbpos_0_8 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl3)
 			ctx.W.ResolveFixups()
@@ -1650,6 +1670,7 @@ func init_list() {
 				ctx.W.EmitJmp(lbl2)
 			}
 			ctx.FreeDesc(&d35)
+			bbs[9].RenderCount++
 			bbpos_0_9 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl15)
 			ctx.W.ResolveFixups()
@@ -1731,9 +1752,11 @@ func init_list() {
 			if d32.Loc == LocImm {
 				d43 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d32.Imm.Int() + 2)}
 			} else {
-				ctx.W.EmitAddRegImm32(d32.Reg, int32(2))
-				d43 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d32.Reg}
-				ctx.BindReg(d32.Reg, &d43)
+				scratch := ctx.AllocRegExcept(d32.Reg)
+				ctx.W.EmitMovRegReg(scratch, d32.Reg)
+				ctx.W.EmitAddRegImm32(scratch, int32(2))
+				d43 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
+				ctx.BindReg(scratch, &d43)
 			}
 			if d43.Loc == LocReg && d32.Loc == LocReg && d43.Reg == d32.Reg {
 				ctx.TransferReg(d32.Reg)

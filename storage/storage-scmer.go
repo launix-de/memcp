@@ -108,8 +108,10 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				ctx.W.EmitShrRegImm8(idxInt.Reg, 32)
 				ctx.BindReg(idxInt.Reg, &idxInt)
 			}
+			var bbs [1]scm.BBDescriptor
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
+			bbs[0].RenderCount++
 			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			var d0 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {

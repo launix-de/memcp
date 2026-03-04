@@ -236,8 +236,10 @@ func init_sync() {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
 			bbs[0].Render = func() JITValueDesc {
+			bbs[0].RenderCount++
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
+			bbs[0].RenderCount++
 			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			d0 := args[0]
 			d1 := args[1]
@@ -424,8 +426,10 @@ func init_sync() {
 		/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var bbs [1]BBDescriptor
 			bbs[0].Render = func() JITValueDesc {
+			bbs[0].RenderCount++
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
+			bbs[0].RenderCount++
 			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			d0 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
 			ctx.EnsureDesc(&d0)

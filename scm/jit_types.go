@@ -233,6 +233,9 @@ type BBDescriptor struct {
 	Rendered bool
 	Address  int32
 	Pending  []JITFixup
+	// RenderCount tracks how often this BB descriptor has been entered.
+	// Unroll/specialization limits must be derived from this per-BB state.
+	RenderCount uint16
 }
 
 // TrackImm records a LocImm constant's pointer payload as a GC root when needed.

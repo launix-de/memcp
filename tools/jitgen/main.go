@@ -416,25 +416,26 @@ type codeGen struct {
 	nextReg        int
 	nextLabel      int
 	fn             *ssa.Function
-	bbLabels       map[uint64]string // scoped BB id → label var name
-	bbPosVars      map[uint64]string // scoped BB id → int32 machine code position var
-	bbDone         map[uint64]bool   // scoped BB id → already generated
-	bbQueued       map[uint64]bool   // scoped BB id → queued for future generation
-	bbQueue        []int             // queue of BB indices to generate
-	bbScope        uint32            // current BB namespace id
-	nextBBScope    uint32            // monotonically increasing fallback namespace id
-	inlineCallSeq  map[uint64]uint32 // caller scoped-BB id -> inline call ordinal
-	phiRegs        map[string]string // SSA phi name → stack offset string (e.g. "0", "8", "16")
-	phiPair        map[string]bool   // SSA phi name → true if value occupies 2 words (16 bytes)
-	phiStackSize   int               // total bytes reserved on stack for phi nodes (local to current function/inline)
-	globalPhiSize  int               // total bytes across ALL phi slots (outer + inlined)
-	phiFrameFixup  string            // Go var name for fixup pointer (set by outer allocPhiRegs)
-	phiFrameActive bool              // true if an outer phi frame fixup is active (inline should NOT emit SUB RSP)
-	curBlock       int               // current BB index being generated
-	multiBlock     bool              // true if function has >1 block
-	endLabel       string            // label for shared epilogue (multi-block)
-	storageMode    bool              // true for ColumnStorage.GetValue pattern (vs Declare pattern)
-	typeName       string            // struct type name for FieldAddr (e.g. "StorageInt")
+	bbLabels       map[uint64]string         // scoped BB id → label var name
+	bbPosVars      map[uint64]string         // scoped BB id → int32 machine code position var
+	bbDone         map[uint64]bool           // scoped BB id → already generated
+	bbQueued       map[uint64]bool           // scoped BB id → queued for future generation
+	bbQueue        []int                     // queue of BB indices to generate
+	bbOverlay      map[int]map[string]genVal // target BB idx -> incoming SSA overlay (single-pred BBs)
+	bbScope        uint32                    // current BB namespace id
+	nextBBScope    uint32                    // monotonically increasing fallback namespace id
+	inlineCallSeq  map[uint64]uint32         // caller scoped-BB id -> inline call ordinal
+	phiRegs        map[string]string         // SSA phi name → stack offset string (e.g. "0", "8", "16")
+	phiPair        map[string]bool           // SSA phi name → true if value occupies 2 words (16 bytes)
+	phiStackSize   int                       // total bytes reserved on stack for phi nodes (local to current function/inline)
+	globalPhiSize  int                       // total bytes across ALL phi slots (outer + inlined)
+	phiFrameFixup  string                    // Go var name for fixup pointer (set by outer allocPhiRegs)
+	phiFrameActive bool                      // true if an outer phi frame fixup is active (inline should NOT emit SUB RSP)
+	curBlock       int                       // current BB index being generated
+	multiBlock     bool                      // true if function has >1 block
+	endLabel       string                    // label for shared epilogue (multi-block)
+	storageMode    bool                      // true for ColumnStorage.GetValue pattern (vs Declare pattern)
+	typeName       string                    // struct type name for FieldAddr (e.g. "StorageInt")
 
 	// Inline call state (non-empty when processing an inlined function)
 	inlineReturnReg  string // register var to MOV result into (multi-block inline)
@@ -463,6 +464,19 @@ type codeGen struct {
 	// Phi register protection: tracks registers protected during phi loads
 	// at a block header. Cleared when the first non-Phi instruction is emitted.
 	phiProtectedRegVars []string
+}
+
+// overlayDescVar returns the currently active descriptor variable for an SSA value.
+// Deferred emit patterns must not keep stale Go variable snapshots across BB
+// boundaries; they should rebind to the latest SSA descriptor mapping.
+func (g *codeGen) overlayDescVar(fallback, ssaName string) string {
+	if ssaName == "" {
+		return fallback
+	}
+	if cur, ok := g.vals[ssaName]; ok && cur.isDesc && cur.goVar != "" {
+		return cur.goVar
+	}
+	return fallback
 }
 
 func (g *codeGen) allocDesc() string {
@@ -799,6 +813,41 @@ func (g *codeGen) enqueueBBFront(bbIdx int) {
 	g.bbQueued[bbID] = true
 }
 
+// snapshotEdgeOverlay records current-block SSA values as incoming overlay for
+// single-predecessor successor BBs. This keeps non-phi SSA edge values (e.g.
+// values defined in BB1 and consumed in BB4) stable when BB emission order is
+// not strictly linear.
+func (g *codeGen) snapshotEdgeOverlay(targetBBIdx int) {
+	if targetBBIdx < 0 || targetBBIdx >= len(g.fn.Blocks) {
+		return
+	}
+	target := g.fn.Blocks[targetBBIdx]
+	if len(target.Preds) != 1 {
+		return
+	}
+	if g.curBlock < 0 || g.curBlock >= len(g.fn.Blocks) {
+		return
+	}
+	cur := g.fn.Blocks[g.curBlock]
+	overlay := make(map[string]genVal)
+	for _, instr := range cur.Instrs {
+		v, ok := instr.(ssa.Value)
+		if !ok {
+			continue
+		}
+		name := v.Name()
+		if name == "" {
+			continue
+		}
+		if gv, ok := g.vals[name]; ok {
+			overlay[name] = gv
+		}
+	}
+	if len(overlay) > 0 {
+		g.bbOverlay[targetBBIdx] = overlay
+	}
+}
+
 // phiEdgeIndexForSucc resolves the phi edge index in targetBB for the
 // outgoing edge at succPos of the current block. This handles duplicated
 // successor blocks (then/else targeting the same BB).
@@ -1108,6 +1157,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	savedBBQueue := g.bbQueue
 	savedBBDone := g.bbDone
 	savedBBQueued := g.bbQueued
+	savedBBOverlay := g.bbOverlay
 	savedBBLabels := g.bbLabels
 	savedBBPosVars := g.bbPosVars
 	savedBBScope := g.bbScope
@@ -1147,6 +1197,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.bbQueue = nil
 	g.bbDone = map[uint64]bool{}
 	g.bbQueued = map[uint64]bool{}
+	g.bbOverlay = map[int]map[string]genVal{}
 	g.bbLabels = map[uint64]string{}
 	g.bbPosVars = map[uint64]string{}
 	// Allocate a globally unique namespace for each inline call.
@@ -1276,6 +1327,11 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 			g.emit("ctx.W.ResolveFixups()")
 		}
 		g.resetAllPhiDescsToStack()
+		if ov, ok := g.bbOverlay[bbIdx]; ok && len(callee.Blocks[bbIdx].Preds) == 1 {
+			for k, v := range ov {
+				g.vals[k] = v
+			}
+		}
 
 		block := callee.Blocks[bbIdx]
 		for _, instr := range block.Instrs {
@@ -1335,6 +1391,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.bbQueue = savedBBQueue
 	g.bbDone = savedBBDone
 	g.bbQueued = savedBBQueued
+	g.bbOverlay = savedBBOverlay
 	g.bbLabels = savedBBLabels
 	g.bbPosVars = savedBBPosVars
 	g.bbScope = savedBBScope
@@ -1380,6 +1437,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		bbPosVars:       map[uint64]string{},
 		bbDone:          map[uint64]bool{},
 		bbQueued:        map[uint64]bool{},
+		bbOverlay:       map[int]map[string]genVal{},
 		inlineCallSeq:   map[uint64]uint32{},
 		phiRegs:         map[string]string{},
 		phiPair:         map[string]bool{},
@@ -1397,6 +1455,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 
 	// Pre-allocate registers for all phi nodes
 	g.allocPhiRegs()
+	g.emit("var bbs [%d]BBDescriptor", len(fn.Blocks))
 
 	// For multi-block functions: ensure result has a concrete location,
 	// and reserve an end label for the shared epilogue.
@@ -1409,8 +1468,8 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 	} else {
 		// Phase 1 bootstrap: trivial BBDescriptor closure convention for
 		// single-block emitters (e.g. strlen), without changing BB scheduling.
-		g.emit("var bbs [1]BBDescriptor")
 		g.emit("bbs[0].Render = func() JITValueDesc {")
+		g.emit("bbs[0].RenderCount++")
 	}
 
 	// Process BBs via queue, starting from BB0
@@ -1434,6 +1493,7 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 		}
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
+		g.emit("bbs[%d].RenderCount++", bbIdx)
 
 		if posVar, ok := g.bbPosVars[bbID]; ok {
 			g.emit("%s = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))", posVar)
@@ -1445,6 +1505,11 @@ func generateClosure(opName string, fn *ssa.Function) (code string, errMsg strin
 			g.emit("ctx.W.ResolveFixups()")
 		}
 		g.resetAllPhiDescsToStack()
+		if ov, ok := g.bbOverlay[bbIdx]; ok && len(fn.Blocks[bbIdx].Preds) == 1 {
+			for k, v := range ov {
+				g.vals[k] = v
+			}
+		}
 
 		block := fn.Blocks[bbIdx]
 		for _, instr := range block.Instrs {
@@ -1498,6 +1563,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		bbPosVars:       map[uint64]string{},
 		bbDone:          map[uint64]bool{},
 		bbQueued:        map[uint64]bool{},
+		bbOverlay:       map[int]map[string]genVal{},
 		inlineCallSeq:   map[uint64]uint32{},
 		phiRegs:         map[string]string{},
 		phiPair:         map[string]bool{},
@@ -1551,6 +1617,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 
 	// Pre-allocate registers for all phi nodes
 	g.allocPhiRegs()
+	g.emit("var bbs [%d]scm.BBDescriptor", len(fn.Blocks))
 
 	if g.multiBlock {
 		g.emit("if result.Loc == LocAny {")
@@ -1586,6 +1653,7 @@ func generateStorageBody(typeName string, fn *ssa.Function) (code string, errMsg
 		}
 		g.bbDone[bbID] = true
 		g.curBlock = bbIdx
+		g.emit("bbs[%d].RenderCount++", bbIdx)
 
 		if posVar, ok := g.bbPosVars[bbID]; ok {
 			g.emit("%s = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))", posVar)
@@ -1651,7 +1719,8 @@ func addScmPrefix(code string) string {
 	// Words that need the scm. prefix — these are exported identifiers from the scm package
 	scmIdents := map[string]bool{
 		"JITValueDesc": true, "JITTypeUnknown": true, "JITContext": true,
-		"LocNone": true, "LocReg": true, "LocRegPair": true,
+		"BBDescriptor": true,
+		"LocNone":      true, "LocReg": true, "LocRegPair": true,
 		"LocStack": true, "LocStackPair": true, "LocMem": true, "LocImm": true, "LocAny": true,
 		"NewInt": true, "NewFloat": true, "NewBool": true, "NewNil": true, "NewString": true,
 		"NewFastDict": true, "NewFastDictValue": true,
@@ -2473,25 +2542,27 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				parts := strings.SplitN(src.marker, ":", 3)
 				elemSize := parts[1]
 				sliceDescVar := parts[2]
+				sliceDescVar = g.overlayDescVar(sliceDescVar, src.deferredBaseSSA)
+				idxDescVar := g.overlayDescVar(src.argIdxVar, src.deferredIndexSSA)
 				dv := g.allocDesc()
 				scratch := g.allocReg()
 				g.emit("%s := ctx.AllocReg()", scratch)
 				// Both index and base descriptor can be spilled between SSA steps.
 				// Always materialize before touching .Reg.
-				g.emit("ctx.EnsureDesc(&%s)", src.argIdxVar)
+				g.emit("ctx.EnsureDesc(&%s)", idxDescVar)
 				g.emit("ctx.EnsureDesc(&%s)", sliceDescVar)
 				// Compute byte offset: idx * elemSize
-				g.emit("if %s.Loc == LocImm {", src.argIdxVar)
+				g.emit("if %s.Loc == LocImm {", idxDescVar)
 				switch elemSize {
 				case "8":
-					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()) * 8)", scratch, src.argIdxVar)
+					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()) * 8)", scratch, idxDescVar)
 				case "16":
-					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()) * 16)", scratch, src.argIdxVar)
+					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()) * 16)", scratch, idxDescVar)
 				default:
-					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()) * %s)", scratch, src.argIdxVar, elemSize)
+					g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()) * %s)", scratch, idxDescVar, elemSize)
 				}
 				g.emit("} else {")
-				g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", scratch, src.argIdxVar)
+				g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", scratch, idxDescVar)
 				switch elemSize {
 				case "8":
 					g.emit("\tctx.W.EmitShlRegImm8(%s, 3)", scratch) // *8
@@ -2548,16 +2619,17 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				globalName := parts[2]
 				dv := g.allocDesc()
 				scratch := g.allocReg()
+				idxDescVar := g.overlayDescVar(src.argIdxVar, src.deferredIndexSSA)
 				g.emit("%s := ctx.AllocReg()", scratch)
 				// Load base address of global array at compile time
 				g.emit("ctx.W.EmitMovRegImm64(%s, uint64(uintptr(unsafe.Pointer(&%s[0]))))", scratch, globalName)
 				// Compute byte offset: idx * elemSize, add to base
 				idxReg := g.allocReg()
 				g.emit("%s := ctx.AllocReg()", idxReg)
-				g.emit("if %s.Loc == LocImm {", src.argIdxVar)
-				g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()) * %s)", idxReg, src.argIdxVar, elemSize)
+				g.emit("if %s.Loc == LocImm {", idxDescVar)
+				g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()) * %s)", idxReg, idxDescVar, elemSize)
 				g.emit("} else {")
-				g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", idxReg, src.argIdxVar)
+				g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", idxReg, idxDescVar)
 				switch elemSize {
 				case "8":
 					g.emit("\tctx.W.EmitShlRegImm8(%s, 3)", idxReg) // *8
@@ -2593,7 +2665,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				// If the index is known at emit-time, reuse args[idx] directly.
 				// Otherwise, emit runtime selection across the fixed args list.
 				dv := g.allocDesc()
-				idxDescVar := src.argIdxVar
+				idxDescVar := g.overlayDescVar(src.argIdxVar, src.deferredIndexSSA)
 				ptrReg := g.allocReg()
 				auxReg := g.allocReg()
 				doneLbl := g.allocLabel()
@@ -3308,9 +3380,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		if _, isConst := v.X.(*ssa.Const); !isConst {
 			xMultiUse = g.ssaValueUsesRemaining(v.X.Name()) > 1
 		}
-		if v.Op == token.SUB {
-			// Conservative for subtraction: avoid destructive updates on x to
-			// prevent alias/overwrite corner cases in complex SSA blocks.
+		if v.Op == token.SUB || v.Op == token.ADD {
+			// Conservative for + and -: avoid destructive updates on x to prevent
+			// alias/overwrite corner cases when SSA values are reused later.
 			xMultiUse = true
 		}
 		if g.usedByOutgoingPhi(v.X.Name()) {
@@ -4163,6 +4235,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				takenSuccPos = 0
 			}
 			g.emitEdgePhiMoves(takenBB, takenSuccPos)
+			g.snapshotEdgeOverlay(takenBB)
 			// Phase 2 pruning: only render the reachable branch.
 			// If the target BB is not rendered yet, enqueue it next and fall through
 			// without emitting an unconditional jump.
@@ -4228,6 +4301,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emitEdgePhiMoves(elseBB, 1)
 		g.emit("\tctx.W.EmitJmp(%s)", elseLbl)
 		g.emit("}")
+		g.snapshotEdgeOverlay(thenBB)
+		g.snapshotEdgeOverlay(elseBB)
 		// Generator scheduling mirrors the emitted pruning above.
 		// For LocImm-only execution paths we enqueue a single successor; for
 		// dynamic conditions we must keep both successors reachable while
@@ -4251,6 +4326,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 	case *ssa.Jump:
 		targetBB := v.Block().Succs[0].Index
 		g.emitEdgePhiMoves(targetBB, 0)
+		g.snapshotEdgeOverlay(targetBB)
 		// Phase 2 pruning: for forward/unrendered targets, render target next and
 		// fall through without emitting an unconditional jump.
 		// If target is already rendered (backedge/cross-edge), emit a direct jump.
@@ -4561,29 +4637,25 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// Combine into LocRegPair {ptr, len} — same layout as Go string header
 		dv2 := g.allocDesc()
 		g.emit("var %s JITValueDesc", dv2)
-		g.emit("if %s.Loc == LocImm && %s.Loc == LocImm {", ptrDesc, lenDesc)
-		g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewInt(%s.Imm.Int())}", dv2, ptrDesc)
-		g.emit("\t_ = %s", lenDesc) // length carried in separate LocImm
-		g.emit("} else {")
-		// Materialize both into registers
+		// Always materialize string/slice headers as register pairs. A single
+		// LocImm Scmer cannot represent Go string header (ptr+len) correctly.
 		finalPtr := g.allocReg()
 		finalLen := g.allocReg()
-		g.emit("\t%s := ctx.AllocReg()", finalPtr)
-		g.emit("\t%s := ctx.AllocReg()", finalLen)
-		g.emit("\tif %s.Loc == LocImm {", ptrDesc)
-		g.emit("\t\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", finalPtr, ptrDesc)
-		g.emit("\t} else {")
-		g.emit("\t\tctx.W.EmitMovRegReg(%s, %s.Reg)", finalPtr, ptrDesc)
-		g.emit("\t\tctx.FreeReg(%s.Reg)", ptrDesc)
-		g.emit("\t}")
-		g.emit("\tif %s.Loc == LocImm {", lenDesc)
-		g.emit("\t\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", finalLen, lenDesc)
-		g.emit("\t} else {")
-		g.emit("\t\tctx.W.EmitMovRegReg(%s, %s.Reg)", finalLen, lenDesc)
-		g.emit("\t\tctx.FreeReg(%s.Reg)", lenDesc)
-		g.emit("\t}")
-		g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv2, finalPtr, finalLen)
+		g.emit("%s := ctx.AllocReg()", finalPtr)
+		g.emit("%s := ctx.AllocReg()", finalLen)
+		g.emit("if %s.Loc == LocImm {", ptrDesc)
+		g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", finalPtr, ptrDesc)
+		g.emit("} else {")
+		g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", finalPtr, ptrDesc)
+		g.emit("\tctx.FreeReg(%s.Reg)", ptrDesc)
 		g.emit("}")
+		g.emit("if %s.Loc == LocImm {", lenDesc)
+		g.emit("\tctx.W.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", finalLen, lenDesc)
+		g.emit("} else {")
+		g.emit("\tctx.W.EmitMovRegReg(%s, %s.Reg)", finalLen, lenDesc)
+		g.emit("\tctx.FreeReg(%s.Reg)", lenDesc)
+		g.emit("}")
+		g.emit("%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv2, finalPtr, finalLen)
 		_ = dv
 		g.vals[name] = genVal{goVar: dv2, isDesc: true, marker: "_gostring"}
 

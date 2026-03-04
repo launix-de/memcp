@@ -130,6 +130,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			idxPinned := idxInt.Loc == scm.LocReg
 			idxPinnedReg := idxInt.Reg
 			if idxPinned { ctx.ProtectReg(idxPinnedReg) }
+			var bbs [4]scm.BBDescriptor
 			if result.Loc == scm.LocAny {
 				result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 			}
@@ -146,6 +147,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			_ = bbpos_0_3
 			lbl1 := ctx.W.ReserveLabel()
 			lbl2 := ctx.W.ReserveLabel()
+			bbs[0].RenderCount++
 			bbpos_0_0 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.EnsureDesc(&thisptr)
 			ctx.EnsureDesc(&idxInt)
@@ -904,6 +906,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.W.EmitJmp(lbl2)
 			}
 			ctx.FreeDesc(&d38)
+			bbs[2].RenderCount++
 			bbpos_0_2 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl2)
 			ctx.W.ResolveFixups()
@@ -985,6 +988,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.W.EmitMakeInt(d43, d42)
 			if d42.Loc == scm.LocReg { ctx.FreeReg(d42.Reg) }
 			ctx.W.EmitJmp(lbl0)
+			bbs[3].RenderCount++
 			bbpos_0_3 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl11)
 			ctx.W.ResolveFixups()
@@ -1061,6 +1065,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.W.EmitJmp(lbl2)
 			}
 			ctx.FreeDesc(&d45)
+			bbs[1].RenderCount++
 			bbpos_0_1 = int32(uintptr(ctx.W.Ptr) - uintptr(ctx.W.Start))
 			ctx.W.MarkLabel(lbl1)
 			ctx.W.ResolveFixups()

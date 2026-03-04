@@ -572,15 +572,29 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			target := jitEnsureResultPair(ctx, result)
 			falseLbl := ctx.W.ReserveLabel()
-			allTrueLbl := ctx.W.ReserveLabel()
 			endLbl := ctx.W.ReserveLabel()
-			for i := 1; i < len(list)-1; i++ {
-				nextLbl := ctx.W.ReserveLabel()
-				jitEmitCondJump(ctx, list[i], sliceBase, nextLbl, falseLbl)
-				ctx.W.MarkLabel(nextLbl)
+			compileTimeFalse := false
+			for i := 1; i < len(list); i++ {
+				c := jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+				b := jitCondToBool(ctx, &c)
+				if b.Loc == LocImm {
+					if !b.Imm.Bool() {
+						compileTimeFalse = true
+						break
+					}
+					continue
+				}
+				ctx.W.EmitCmpRegImm32(b.Reg, 0)
+				ctx.W.EmitJcc(CcE, falseLbl)
+				ctx.FreeDesc(&b)
 			}
-			jitEmitCondJump(ctx, list[len(list)-1], sliceBase, allTrueLbl, falseLbl)
-			ctx.W.MarkLabel(allTrueLbl)
+			if compileTimeFalse {
+				falseDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+				_ = jitPlaceIntoPair(ctx, &falseDesc, target)
+				ctx.BindReg(target.Reg, &target)
+				ctx.BindReg(target.Reg2, &target)
+				return target
+			}
 			trueDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
 			_ = jitPlaceIntoPair(ctx, &trueDesc, target)
 			ctx.W.EmitJmp(endLbl)
@@ -599,15 +613,29 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			target := jitEnsureResultPair(ctx, result)
 			trueLbl := ctx.W.ReserveLabel()
-			allFalseLbl := ctx.W.ReserveLabel()
 			endLbl := ctx.W.ReserveLabel()
-			for i := 1; i < len(list)-1; i++ {
-				nextLbl := ctx.W.ReserveLabel()
-				jitEmitCondJump(ctx, list[i], sliceBase, trueLbl, nextLbl)
-				ctx.W.MarkLabel(nextLbl)
+			compileTimeTrue := false
+			for i := 1; i < len(list); i++ {
+				c := jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+				b := jitCondToBool(ctx, &c)
+				if b.Loc == LocImm {
+					if b.Imm.Bool() {
+						compileTimeTrue = true
+						break
+					}
+					continue
+				}
+				ctx.W.EmitCmpRegImm32(b.Reg, 0)
+				ctx.W.EmitJcc(CcNE, trueLbl)
+				ctx.FreeDesc(&b)
 			}
-			jitEmitCondJump(ctx, list[len(list)-1], sliceBase, trueLbl, allFalseLbl)
-			ctx.W.MarkLabel(allFalseLbl)
+			if compileTimeTrue {
+				trueDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+				_ = jitPlaceIntoPair(ctx, &trueDesc, target)
+				ctx.BindReg(target.Reg, &target)
+				ctx.BindReg(target.Reg2, &target)
+				return target
+			}
 			falseDesc := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
 			_ = jitPlaceIntoPair(ctx, &falseDesc, target)
 			ctx.W.EmitJmp(endLbl)
@@ -740,6 +768,32 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			case LocRegPair:
 				ctx.BindReg(args[i-1].Reg, &args[i-1])
 				ctx.BindReg(args[i-1].Reg2, &args[i-1])
+			}
+		}
+		// Stabilize arguments into dedicated spill-buffer slots before entering
+		// the callee emitter. This avoids later register allocator activity from
+		// invalidating call-argument descriptors (especially for variadic loops
+		// that index args multiple times across BBs).
+		for i := range args {
+			v := args[i]
+			pair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			pair = jitPlaceIntoPair(ctx, &v, pair)
+			slot := ctx.SpillTop
+			if slot+1 >= len(ctx.SpillBuf) {
+				panic("jit: spill buffer overflow while stabilizing call args")
+			}
+			ctx.SpillTop += 2
+			mem := uintptr(unsafe.Pointer(&ctx.SpillBuf[slot]))
+			ctx.W.EmitMovRegImm64(RegR11, uint64(mem))
+			ctx.W.EmitStoreRegMem(pair.Reg, RegR11, 0)
+			ctx.W.EmitStoreRegMem(pair.Reg2, RegR11, 8)
+			ctx.FreeReg(pair.Reg)
+			ctx.FreeReg(pair.Reg2)
+			args[i] = JITValueDesc{
+				Loc:      LocStackPair,
+				Type:     pair.Type,
+				MemPtr:   mem,
+				StackOff: int32(slot),
 			}
 		}
 		// Arguments can be referenced multiple times inside jitgen-generated CFGs.
