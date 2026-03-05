@@ -854,8 +854,8 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			return target
 		}
 		decl, ok := declarations[name]
-		if !ok || decl.JITEmit == nil {
-			panic("jit: no JITEmit for " + name)
+		if !ok {
+			panic("jit: unknown callable " + name)
 		}
 		// Compile arguments (intermediate results use LocAny).
 		// Use a stack-allocated buffer for the common case of ≤8 args;
@@ -895,9 +895,78 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				ctx.UnprotectReg(r)
 			}
 		}()
-		out := decl.JITEmit(ctx, args, result)
-		if out.Loc == LocImm {
-			ctx.TrackImm(out.Imm)
+
+		if decl.JITEmit != nil {
+			out := decl.JITEmit(ctx, args, result)
+			if out.Loc == LocImm {
+				ctx.TrackImm(out.Imm)
+			}
+			return out
+		}
+		if decl.Fn == nil {
+			panic("jit: no JITEmit/Fn for " + name)
+		}
+
+		argc := len(args)
+		var argsSlice JITValueDesc
+		stackBytes := int32(argc * 16)
+		if argc > 0 {
+			// Compute future args base (RSP - stackBytes) in a protected register,
+			// while source descriptors still reference the current RSP frame.
+			dataPtrReg := ctx.AllocReg()
+			ctx.ProtectReg(dataPtrReg)
+			ctx.EmitMovRegReg(dataPtrReg, RegRSP)
+			ctx.EmitSubRegImm32(dataPtrReg, stackBytes)
+
+			// Fill contiguous Scmer array at dataPtrReg + i*16.
+			for i := 0; i < argc; i++ {
+				pair := JITValueDesc{
+					Loc:  LocRegPair,
+					Type: JITTypeUnknown,
+					Reg:  ctx.AllocRegExcept(dataPtrReg),
+					Reg2: ctx.AllocRegExcept(dataPtrReg),
+				}
+				_ = jitPlaceIntoPair(ctx, &args[i], pair)
+				ctx.EmitStoreRegMem(pair.Reg, dataPtrReg, int32(i*16))
+				ctx.EmitStoreRegMem(pair.Reg2, dataPtrReg, int32(i*16+8))
+				ctx.FreeDesc(&pair)
+			}
+
+			// Materialize array as top-of-stack for call lifetime.
+			ctx.EmitSubRSP32(stackBytes)
+			if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+				ctx.EmitMovRegReg(ctx.SliceBase, RegRSP)
+			}
+			argsSlice = JITValueDesc{
+				Loc:  LocRegPair,
+				Type: JITTypeUnknown,
+				Reg:  dataPtrReg,
+				Reg2: ctx.AllocRegExcept(dataPtrReg),
+			}
+			ctx.EmitMovRegImm64(argsSlice.Reg2, uint64(argc))
+			ctx.BindReg(argsSlice.Reg, &argsSlice)
+			ctx.BindReg(argsSlice.Reg2, &argsSlice)
+			ctx.UnprotectReg(dataPtrReg)
+		} else {
+			argsSlice = JITValueDesc{
+				Loc:  LocRegPair,
+				Type: JITTypeUnknown,
+				Reg:  ctx.AllocReg(),
+				Reg2: ctx.AllocReg(),
+			}
+			ctx.EmitMovRegImm64(argsSlice.Reg, 0)
+			ctx.EmitMovRegImm64(argsSlice.Reg2, 0)
+			ctx.BindReg(argsSlice.Reg, &argsSlice)
+			ctx.BindReg(argsSlice.Reg2, &argsSlice)
+		}
+
+		out := ctx.EmitGoCallVariadic(decl.Fn, argsSlice, result)
+		ctx.FreeDesc(&argsSlice)
+		if stackBytes != 0 {
+			ctx.EmitAddRSP32(stackBytes)
+			if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+				ctx.EmitMovRegReg(ctx.SliceBase, RegRSP)
+			}
 		}
 		return out
 	default:
@@ -2263,6 +2332,114 @@ func (ctx *JITContext) EmitCallIndirect(addr uint64) {
 	ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
 }
 
+// EmitGoCallVariadic emits a direct call to a func(...Scmer) Scmer function value.
+//
+// amd64 regabi function-value call:
+//   - RDX = funcval pointer (payload/closure pointer)
+//   - RAX = slice.data, RBX = slice.len, RCX = slice.cap
+//   - CALL [RDX] (fnptr)
+//
+// argslice must describe a pair (ptr,len). The backing array is expected to be
+// materialized and kept alive by caller-managed stack memory.
+func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITValueDesc, result JITValueDesc) JITValueDesc {
+	fnData := *(*uintptr)(unsafe.Pointer(&f))
+	if fnData == 0 {
+		panic("jit: nil variadic function value")
+	}
+
+	arg := argslice
+	if arg.Loc == LocStackPair {
+		ctx.EnsureDesc(&arg)
+	}
+	if arg.Loc == LocImm {
+		if !arg.Imm.IsNil() {
+			panic("jit: variadic argslice LocImm must be nil")
+		}
+		arg = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		ctx.EmitMovRegImm64(arg.Reg, 0)
+		ctx.EmitMovRegImm64(arg.Reg2, 0)
+		ctx.BindReg(arg.Reg, &arg)
+		ctx.BindReg(arg.Reg2, &arg)
+	}
+	if arg.Loc != LocRegPair {
+		panic(fmt.Sprintf("jit: variadic argslice must be LocRegPair/LocStackPair (got %d)", arg.Loc))
+	}
+
+	target := result
+	if target.Loc != LocRegPair {
+		target = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+	}
+	target.Type = JITTypeUnknown
+
+	var liveRegsArr [16]Reg
+	liveRegs := ctx.collectLiveRegsForCall(&liveRegsArr)
+	switch ctx.SliceBase {
+	case RegRSP, RegRBP, RegR11, RegR14:
+	default:
+		found := false
+		for _, r := range liveRegs {
+			if r == ctx.SliceBase {
+				found = true
+				break
+			}
+		}
+		if !found {
+			liveRegs = append(liveRegs, ctx.SliceBase)
+		}
+	}
+
+	const resultBytes = 16                             // 2 result words (Scmer ptr+aux)
+	ctx.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, 16
+
+	for _, r := range liveRegs {
+		ctx.EmitPushReg(r)
+	}
+
+	totalItems := 2 + len(liveRegs) // result reserve + pushed live regs
+	padded := totalItems%2 == 1
+	if padded {
+		ctx.EmitPushReg(RegRAX)
+	}
+
+	// Stage argslice into scratch regs, then set call registers.
+	if arg.Reg != RegR10 {
+		ctx.EmitMovRegReg(RegR10, arg.Reg)
+	}
+	if arg.Reg2 != RegR11 {
+		ctx.EmitMovRegReg(RegR11, arg.Reg2)
+	}
+	ctx.EmitMovRegReg(RegRAX, RegR10) // data
+	ctx.EmitMovRegReg(RegRBX, RegR11) // len
+	ctx.EmitMovRegReg(RegRCX, RegR11) // cap = len
+	ctx.EmitMovRegImm64(RegRDX, uint64(fnData))
+	ctx.EmitMovRegMem(RegR11, RegRDX, 0) // fnptr := [funcval]
+	ctx.emitBytes(0x41, 0xFF, 0xD3)      // CALL R11
+
+	paddingSize := 0
+	if padded {
+		paddingSize = 8
+	}
+	ctx.EmitStoreRegMem(RegRAX, RegRSP, int32(paddingSize+len(liveRegs)*8))
+	ctx.EmitStoreRegMem(RegRBX, RegRSP, int32(paddingSize+len(liveRegs)*8+8))
+
+	if padded {
+		ctx.EmitPopReg(RegRAX)
+	}
+	for i := len(liveRegs) - 1; i >= 0; i-- {
+		ctx.EmitPopReg(liveRegs[i])
+	}
+
+	ctx.EmitPopReg(target.Reg)
+	ctx.EmitPopReg(target.Reg2)
+	ctx.BindReg(target.Reg, &target)
+	ctx.BindReg(target.Reg2, &target)
+
+	if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+		ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
+	}
+	return target
+}
+
 // emitStoreRegMem emits MOV [base + disp], src (store 64-bit register to memory)
 func (ctx *JITContext) emitStoreRegMem(src, base Reg, disp int32) {
 	rex := byte(0x48)
@@ -2348,6 +2525,12 @@ func (ctx *JITContext) PatchInt32(pos unsafe.Pointer, val int32) {
 // EmitAddRSP32 emits ADD RSP, imm32.
 func (ctx *JITContext) EmitAddRSP32(val int32) {
 	ctx.emitBytes(0x48, 0x81, 0xC4)
+	ctx.emitU32(uint32(val))
+}
+
+// EmitSubRSP32 emits SUB RSP, imm32.
+func (ctx *JITContext) EmitSubRSP32(val int32) {
+	ctx.emitBytes(0x48, 0x81, 0xEC)
 	ctx.emitU32(uint32(val))
 }
 
