@@ -388,6 +388,70 @@ func jitBuildIfTail(tail []Scmer) Scmer {
 	return NewSlice(parts)
 }
 
+func jitEmitGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, argExprs []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	argc := len(argExprs)
+	var argsSlice JITValueDesc
+	stackBytes := int32(argc * 16)
+	if argc > 0 {
+		// Reserve one contiguous frame for all variadic Scmer arguments.
+		ctx.EmitSubRSP32(stackBytes)
+		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+			ctx.EmitMovRegReg(ctx.SliceBase, RegRSP)
+		}
+		// Compile each argument directly towards its final stack slot.
+		for i := 0; i < len(argExprs); i++ {
+			slotOff := int32(i * 16)
+			slot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: slotOff}
+			v := jitCompileExpr(ctx, argExprs[i], sliceBase, slot)
+			if !(v.Loc == LocStackPair && v.MemPtr == 0 && v.StackOff == slotOff) {
+				tmp := JITValueDesc{
+					Loc:  LocRegPair,
+					Type: JITTypeUnknown,
+					Reg:  ctx.AllocReg(),
+					Reg2: ctx.AllocReg(),
+				}
+				_ = jitPlaceIntoPair(ctx, &v, tmp)
+				ctx.EmitStoreRegMem(tmp.Reg, RegRSP, slotOff)
+				ctx.EmitStoreRegMem(tmp.Reg2, RegRSP, slotOff+8)
+				ctx.FreeDesc(&tmp)
+			}
+			ctx.FreeDesc(&v)
+		}
+		// argslice: ptr + len (cap = len inside EmitGoCallVariadic).
+		argsSlice = JITValueDesc{
+			Loc:  LocRegPair,
+			Type: JITTypeUnknown,
+			Reg:  ctx.AllocReg(),
+			Reg2: ctx.AllocReg(),
+		}
+		ctx.EmitMovRegReg(argsSlice.Reg, RegRSP)
+		ctx.EmitMovRegImm64(argsSlice.Reg2, uint64(argc))
+		ctx.BindReg(argsSlice.Reg, &argsSlice)
+		ctx.BindReg(argsSlice.Reg2, &argsSlice)
+	} else {
+		argsSlice = JITValueDesc{
+			Loc:  LocRegPair,
+			Type: JITTypeUnknown,
+			Reg:  ctx.AllocReg(),
+			Reg2: ctx.AllocReg(),
+		}
+		ctx.EmitMovRegImm64(argsSlice.Reg, 0)
+		ctx.EmitMovRegImm64(argsSlice.Reg2, 0)
+		ctx.BindReg(argsSlice.Reg, &argsSlice)
+		ctx.BindReg(argsSlice.Reg2, &argsSlice)
+	}
+
+	out := ctx.EmitGoCallVariadic(fn, argsSlice, result)
+	ctx.FreeDesc(&argsSlice)
+	if stackBytes != 0 {
+		ctx.EmitAddRSP32(stackBytes)
+		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+			ctx.EmitMovRegReg(ctx.SliceBase, RegRSP)
+		}
+	}
+	return out
+}
+
 // jitEmitCondJump emits branch code equivalent to Eval(...).Bool():
 // jumps to trueLbl when expr is truthy, otherwise to falseLbl.
 // It short-circuits nested (and ...)/(or ...)/(if ...) directly without
@@ -590,6 +654,18 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		}
 		name := string(list[0].Symbol())
 		switch name {
+		case "quote":
+			if len(list) < 2 {
+				imm := NewNil()
+				ctx.TrackImm(imm)
+				return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+			}
+			q := list[1]
+			if q.GetTag() == tagSourceInfo {
+				q = q.SourceInfo().value
+			}
+			ctx.TrackImm(q)
+			return JITValueDesc{Loc: LocImm, Type: q.GetTag(), Imm: q}
 		case "if":
 			if len(list) < 3 {
 				imm := NewNil()
@@ -852,6 +928,53 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			ctx.BindReg(target.Reg, &target)
 			ctx.BindReg(target.Reg2, &target)
 			return target
+		case "lambda":
+			if len(list) < 3 {
+				panic("jit: lambda expects params and body")
+			}
+			params := list[1]
+			if params.IsSourceInfo() {
+				params = params.SourceInfo().value
+			}
+			body := list[2]
+			numVars := 0
+			if len(list) > 3 {
+				numVars = int(ToInt(list[3]))
+			}
+
+			// Build variadic builder args:
+			// [params, body, numVars, key1, val1, ...]
+			// keys are quoted Symbol or quoted NthLocalVar.
+			argExprs := make([]Scmer, 0, 16)
+			argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), params}))
+			argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), body}))
+			argExprs = append(argExprs, NewInt(int64(numVars)))
+
+			// Capture non-global free symbol variables from current lexical scope.
+			for _, sym := range jitLambdaFreeSymbols(params, body) {
+				if ctx.Env != nil {
+					if d, ok := ctx.Env.Lookup(sym); ok {
+						_ = d
+						argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(sym))}))
+						argExprs = append(argExprs, NewSymbol(string(sym)))
+						continue
+					}
+				}
+				// Globals are resolved through closure Outer env.
+				if _, ok := Globalenv.Vars[sym]; ok {
+					continue
+				}
+				// Leave unresolved symbols late-bound via closure Outer env.
+			}
+
+			// Capture optimized outer(var i) references as numbered captures.
+			for _, idx := range jitLambdaOuterVarIndices(body) {
+				key := NewNthLocalVar(idx)
+				argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), key}))
+				argExprs = append(argExprs, key)
+			}
+
+			return jitEmitGoVariadicCallFromExprs(ctx, jitBuildLambdaClosure, argExprs, sliceBase, result)
 		}
 		decl, ok := declarations[name]
 		if !ok {

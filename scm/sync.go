@@ -374,8 +374,33 @@ func init_sync() {
 			return result
 			return result
 			}
-			ps3 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps3)
+			argPinned3 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned3 = append(argPinned3, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned3 = append(argPinned3, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned3 = append(argPinned3, ai.Reg2)
+					}
+				}
+			}
+			ps4 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps4)
+			for _, r := range argPinned3 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		}, /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
 	})
@@ -403,7 +428,7 @@ func init_sync() {
 				return NewBool(true)
 			}
 		}, false, false, nil,
-		nil /* TODO: dynamic call: invoke t0.Done() */, /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
+		nil /* TODO: dynamic call: invoke t0.Done() */, /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: dynamic call: invoke t0.Done() */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */ /* TODO: unsupported compare const kind: nil:*github.com/jtolds/gls.ContextManager */
 	})
 	Declare(&Globalenv, &Declaration{
 		"once", "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
@@ -421,7 +446,7 @@ func init_sync() {
 				return once()
 			})
 		}, false, false, nil,
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 	Declare(&Globalenv, &Declaration{
 		"mutex", "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
@@ -444,7 +469,7 @@ func init_sync() {
 				return Apply(a[0])
 			})
 		}, false, false, nil,
-		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
+		nil /* TODO: MakeClosure binding not an alloc-stored value */, /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */ /* TODO: MakeClosure binding not an alloc-stored value */
 	})
 	Declare(&Globalenv, &Declaration{
 		"numcpu", "Returns the number of logical CPUs available for parallel execution",
@@ -503,8 +528,33 @@ func init_sync() {
 			return result
 			return result
 			}
-			ps2 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps2)
+			argPinned2 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned2 = append(argPinned2, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned2 = append(argPinned2, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned2 = append(argPinned2, ai.Reg2)
+					}
+				}
+			}
+			ps3 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps3)
+			for _, r := range argPinned2 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		},
 	})
@@ -522,6 +572,6 @@ func init_sync() {
 			fd.Set(NewString("heap_sys"), NewInt(int64(m.HeapSys)), nil)
 			return NewFastDict(fd)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.cachedStatsMu */
 	})
 }

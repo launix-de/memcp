@@ -849,8 +849,33 @@ func init() {
 			return result
 			return result
 			}
-			ps3 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps3)
+			argPinned3 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned3 = append(argPinned3, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned3 = append(argPinned3, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned3 = append(argPinned3, ai.Reg2)
+					}
+				}
+			}
+			ps4 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps4)
+			for _, r := range argPinned3 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		}, /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */ /* TODO: unsupported compare const kind: nil:*github.com/launix-de/memcp/scm.Proc */
 	})
@@ -862,7 +887,7 @@ func init() {
 		}, "any", func(a ...Scmer) Scmer {
 			return Optimize(a[0], &Globalenv)
 		}, true, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
 	})
 	Declare(&Globalenv, &Declaration{
 		"time", "measures the time it takes to compute the first argument",
@@ -952,7 +977,7 @@ func init() {
 				panic(b.String())
 			}
 		}, false, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &b.addr [#0] */, /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &b.addr [#0] */, /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */ /* TODO: FieldAddr on non-receiver: &b.addr [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
@@ -971,7 +996,7 @@ func init() {
 			result = Apply(a[0])
 			return
 		}, true, false, nil,
-		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
+		nil /* TODO: MakeClosure with 2 bindings */, /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */ /* TODO: MakeClosure with 2 bindings */
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply", "runs the function with its arguments",
@@ -983,7 +1008,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return Apply(a[0], asSlice(a[1], "apply")...)
 		}, true, false, nil,
-		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
@@ -995,7 +1020,7 @@ func init() {
 		func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
 		}, true, false, nil,
-		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"symbol", "returns a symbol built from that string",
@@ -1170,8 +1195,33 @@ func init() {
 			return result
 			return result
 			}
-			ps4 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps4)
+			argPinned4 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned4 = append(argPinned4, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned4 = append(argPinned4, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned4 = append(argPinned4, ai.Reg2)
+					}
+				}
+			}
+			ps5 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps5)
+			for _, r := range argPinned4 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		}, /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */ /* TODO: FieldAddr on non-receiver: &t7.ptr [#0] */
 	})
@@ -1206,7 +1256,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("for_mut")},
-		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
+		nil /* TODO: Slice on non-desc: slice t0[:] */, /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */ /* TODO: Slice on non-desc: slice t0[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"for_mut", "in-place for loop (optimizer-only, skips defensive state copy)",
@@ -1230,7 +1280,7 @@ func init() {
 			}
 			return NewSlice(state)
 		}, true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
+		nil /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */, /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: IndexAddr on non-parameter: &t6[0:int] (x=t6 marker="_alloc" isDesc=false goVar=) */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */ /* TODO: Slice on non-desc: slice t1[:] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"string", "converts the given value into string",
@@ -1345,8 +1395,33 @@ func init() {
 			return result
 			return result
 			}
-			ps4 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps4)
+			argPinned4 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned4 = append(argPinned4, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned4 = append(argPinned4, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned4 = append(argPinned4, ai.Reg2)
+					}
+				}
+			}
+			ps5 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps5)
+			for _, r := range argPinned4 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		},
 	})
@@ -1421,7 +1496,7 @@ Patterns can be any of:
 				a[3],
 			})
 		}, true, false, nil,
-		nil /* TODO: FieldAddr on non-receiver: &t0.source [#0] */, /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */
+		nil /* TODO: FieldAddr on non-receiver: &t0.source [#0] */, /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */ /* TODO: FieldAddr on non-receiver: &t0.source [#0] */
 	})
 	Declare(&Globalenv, &Declaration{
 		"scheme", "parses a scheme expression into a list",
@@ -1448,16 +1523,6 @@ Patterns can be any of:
 			_ = d6
 			var d9 JITValueDesc
 			_ = d9
-			var d11 JITValueDesc
-			_ = d11
-			var d12 JITValueDesc
-			_ = d12
-			var d13 JITValueDesc
-			_ = d13
-			var d14 JITValueDesc
-			_ = d14
-			var d16 JITValueDesc
-			_ = d16
 			var d17 JITValueDesc
 			_ = d17
 			var d18 JITValueDesc
@@ -1466,13 +1531,25 @@ Patterns can be any of:
 			_ = d19
 			var d20 JITValueDesc
 			_ = d20
-			var d21 JITValueDesc
-			_ = d21
+			var d22 JITValueDesc
+			_ = d22
+			var d23 JITValueDesc
+			_ = d23
+			var d24 JITValueDesc
+			_ = d24
+			var d25 JITValueDesc
+			_ = d25
+			var d26 JITValueDesc
+			_ = d26
+			var d27 JITValueDesc
+			_ = d27
 			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			r0 := ctx.EmitSubRSP32Fixup()
 			_ = r0
-			d0 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d0 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			var bbs [3]BBDescriptor
+			bbs[2].PhiBase = int32(0)
+			bbs[2].PhiCount = uint16(1)
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 				ctx.BindReg(result.Reg, &result)
@@ -1507,7 +1584,7 @@ Patterns can be any of:
 				ctx.MarkLabel(lbl1)
 				ctx.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d0 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -1540,7 +1617,7 @@ Patterns can be any of:
 			ps4.OverlayValues[3] = d3
 					return bbs[1].RenderPS(ps4)
 				}
-			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, 0)
+			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, int32(bbs[2].PhiBase)+int32(0))
 			ps5 := PhiState{General: ps.General}
 			ps5.OverlayValues = make([]JITValueDesc, 4)
 			ps5.OverlayValues[0] = d0
@@ -1564,7 +1641,7 @@ Patterns can be any of:
 			ctx.MarkLabel(lbl4)
 			ctx.EmitJmp(lbl2)
 			ctx.MarkLabel(lbl5)
-			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, 0)
+			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}, int32(bbs[2].PhiBase)+int32(0))
 			ctx.EmitJmp(lbl3)
 			ps7 := PhiState{General: true}
 			ps7.OverlayValues = make([]JITValueDesc, 7)
@@ -1583,11 +1660,23 @@ Patterns can be any of:
 			ps8.PhiValues = make([]JITValueDesc, 1)
 			d9 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("eval")}
 			ps8.PhiValues[0] = d9
-			alloc10 := ctx.SnapshotAllocState()
+			snap10 := d0
+			snap11 := d1
+			snap12 := d2
+			snap13 := d3
+			snap14 := d6
+			snap15 := d9
+			alloc16 := ctx.SnapshotAllocState()
 			if !bbs[2].Rendered {
 				bbs[2].RenderPS(ps8)
 			}
-			ctx.RestoreAllocState(alloc10)
+			ctx.RestoreAllocState(alloc16)
+			d0 = snap10
+			d1 = snap11
+			d2 = snap12
+			d3 = snap13
+			d6 = snap14
+			d9 = snap15
 			if !bbs[1].Rendered {
 				return bbs[1].RenderPS(ps7)
 			}
@@ -1614,7 +1703,7 @@ Patterns can be any of:
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d0 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -1634,46 +1723,46 @@ Patterns can be any of:
 				d9 = ps.OverlayValues[9]
 			}
 			ctx.ReclaimUntrackedRegs()
-			d11 = args[1]
-			d11.ID = 0
-			d13 = d11
-			ctx.EnsureDesc(&d13)
-			if d13.Loc == LocImm {
+			d17 = args[1]
+			d17.ID = 0
+			d19 = d17
+			ctx.EnsureDesc(&d19)
+			if d19.Loc == LocImm {
 				tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				tag := d13.Imm.GetTag()
+				tag := d19.Imm.GetTag()
 				switch tag {
 				case tagBool:
-					ctx.EmitMakeBool(tmpPair, d13)
+					ctx.EmitMakeBool(tmpPair, d19)
 				case tagInt:
-					ctx.EmitMakeInt(tmpPair, d13)
+					ctx.EmitMakeInt(tmpPair, d19)
 				case tagFloat:
-					ctx.EmitMakeFloat(tmpPair, d13)
+					ctx.EmitMakeFloat(tmpPair, d19)
 				case tagNil:
 					ctx.EmitMakeNil(tmpPair)
 				default:
-					ptrWord, auxWord := d13.Imm.RawWords()
+					ptrWord, auxWord := d19.Imm.RawWords()
 					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
 					ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
 				}
-				d13 = tmpPair
-			} else if d13.Loc == LocReg {
-				tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(d13.Reg), Reg2: ctx.AllocRegExcept(d13.Reg)}
-				switch d13.Type {
+				d19 = tmpPair
+			} else if d19.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(d19.Reg), Reg2: ctx.AllocRegExcept(d19.Reg)}
+				switch d19.Type {
 				case tagBool:
-					ctx.EmitMakeBool(tmpPair, d13)
+					ctx.EmitMakeBool(tmpPair, d19)
 				case tagInt:
-					ctx.EmitMakeInt(tmpPair, d13)
+					ctx.EmitMakeInt(tmpPair, d19)
 				case tagFloat:
-					ctx.EmitMakeFloat(tmpPair, d13)
+					ctx.EmitMakeFloat(tmpPair, d19)
 				default:
 					panic("jit: Scmer.String requires Scmer pair receiver")
 				}
-				ctx.FreeDesc(&d13)
-				d13 = tmpPair
-			} else if d13.Loc == LocMem {
-				tmpScalar := JITValueDesc{Loc: LocReg, Type: d13.Type, Reg: ctx.AllocReg()}
+				ctx.FreeDesc(&d19)
+				d19 = tmpPair
+			} else if d19.Loc == LocMem {
+				tmpScalar := JITValueDesc{Loc: LocReg, Type: d19.Type, Reg: ctx.AllocReg()}
 				scratch := ctx.AllocRegExcept(tmpScalar.Reg)
-				ctx.EmitMovRegImm64(scratch, uint64(d13.MemPtr))
+				ctx.EmitMovRegImm64(scratch, uint64(d19.MemPtr))
 				ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
 				ctx.FreeReg(scratch)
 				ctx.BindReg(tmpScalar.Reg, &tmpScalar)
@@ -1689,52 +1778,65 @@ Patterns can be any of:
 					panic("jit: Scmer.String requires Scmer pair receiver")
 				}
 				ctx.FreeDesc(&tmpScalar)
-				d13 = tmpPair
+				d19 = tmpPair
 			}
-			if d13.Loc != LocRegPair && d13.Loc != LocStackPair {
+			if d19.Loc != LocRegPair && d19.Loc != LocStackPair {
 				panic("jit: Scmer.String receiver not materialized as pair")
 			}
-			d12 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d13}, 2)
-			ctx.FreeDesc(&d11)
-			d14 = d12
-			if d14.Loc == LocNone { panic("jit: phi source has no location") }
-			ctx.EnsureDesc(&d14)
-			if d14.Loc == LocRegPair || d14.Loc == LocImm {
-				ctx.EmitStoreScmerToStack(d14, 0)
-			} else {
-				ctx.EmitStoreToStack(d14, 0)
-				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (0)+8)
+			d18 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d19}, 2)
+			ctx.FreeDesc(&d17)
+			ctx.EnsureDesc(&d18)
+			if d18.Loc == LocReg {
+				ctx.ProtectReg(d18.Reg)
+			} else if d18.Loc == LocRegPair {
+				ctx.ProtectReg(d18.Reg)
+				ctx.ProtectReg(d18.Reg2)
 			}
-			ps15 := PhiState{General: ps.General}
-			ps15.OverlayValues = make([]JITValueDesc, 15)
-			ps15.OverlayValues[0] = d0
-			ps15.OverlayValues[1] = d1
-			ps15.OverlayValues[2] = d2
-			ps15.OverlayValues[3] = d3
-			ps15.OverlayValues[6] = d6
-			ps15.OverlayValues[9] = d9
-			ps15.OverlayValues[11] = d11
-			ps15.OverlayValues[12] = d12
-			ps15.OverlayValues[13] = d13
-			ps15.OverlayValues[14] = d14
-			ps15.PhiValues = make([]JITValueDesc, 1)
-			d16 = d12
-			ps15.PhiValues[0] = d16
-			if ps15.General && bbs[2].Rendered {
+			d20 = d18
+			if d20.Loc == LocNone { panic("jit: phi source has no location") }
+			ctx.EnsureDesc(&d20)
+			if d20.Loc == LocRegPair || d20.Loc == LocImm {
+				ctx.EmitStoreScmerToStack(d20, int32(bbs[2].PhiBase)+int32(0))
+			} else {
+				ctx.EmitStoreToStack(d20, int32(bbs[2].PhiBase)+int32(0))
+				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, (int32(bbs[2].PhiBase)+int32(0))+8)
+			}
+			if d18.Loc == LocReg {
+				ctx.UnprotectReg(d18.Reg)
+			} else if d18.Loc == LocRegPair {
+				ctx.UnprotectReg(d18.Reg)
+				ctx.UnprotectReg(d18.Reg2)
+			}
+			ps21 := PhiState{General: ps.General}
+			ps21.OverlayValues = make([]JITValueDesc, 21)
+			ps21.OverlayValues[0] = d0
+			ps21.OverlayValues[1] = d1
+			ps21.OverlayValues[2] = d2
+			ps21.OverlayValues[3] = d3
+			ps21.OverlayValues[6] = d6
+			ps21.OverlayValues[9] = d9
+			ps21.OverlayValues[17] = d17
+			ps21.OverlayValues[18] = d18
+			ps21.OverlayValues[19] = d19
+			ps21.OverlayValues[20] = d20
+			ps21.PhiValues = make([]JITValueDesc, 1)
+			d22 = d18
+			ps21.PhiValues[0] = d22
+			if ps21.General && bbs[2].Rendered {
 				ctx.EmitJmp(lbl3)
 				return result
 			}
-			return bbs[2].RenderPS(ps15)
+			return bbs[2].RenderPS(ps21)
 			return result
 			}
 			bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
+				if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
+					d23 := ps.PhiValues[0]
+					ctx.EnsureDesc(&d23)
+					ctx.EmitStoreScmerToStack(d23, int32(bbs[2].PhiBase)+int32(0))
+				}
 				if bbs[2].VisitCount >= 2 {
-					if len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
-						d17 := ps.PhiValues[0]
-						ctx.EnsureDesc(&d17)
-						ctx.EmitStoreScmerToStack(d17, 0)
-					}
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -1751,7 +1853,7 @@ Patterns can be any of:
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d0 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -1770,68 +1872,68 @@ Patterns can be any of:
 			if len(ps.OverlayValues) > 9 && ps.OverlayValues[9].Loc != LocNone {
 				d9 = ps.OverlayValues[9]
 			}
-			if len(ps.OverlayValues) > 11 && ps.OverlayValues[11].Loc != LocNone {
-				d11 = ps.OverlayValues[11]
-			}
-			if len(ps.OverlayValues) > 12 && ps.OverlayValues[12].Loc != LocNone {
-				d12 = ps.OverlayValues[12]
-			}
-			if len(ps.OverlayValues) > 13 && ps.OverlayValues[13].Loc != LocNone {
-				d13 = ps.OverlayValues[13]
-			}
-			if len(ps.OverlayValues) > 14 && ps.OverlayValues[14].Loc != LocNone {
-				d14 = ps.OverlayValues[14]
-			}
-			if len(ps.OverlayValues) > 16 && ps.OverlayValues[16].Loc != LocNone {
-				d16 = ps.OverlayValues[16]
-			}
 			if len(ps.OverlayValues) > 17 && ps.OverlayValues[17].Loc != LocNone {
 				d17 = ps.OverlayValues[17]
+			}
+			if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != LocNone {
+				d18 = ps.OverlayValues[18]
+			}
+			if len(ps.OverlayValues) > 19 && ps.OverlayValues[19].Loc != LocNone {
+				d19 = ps.OverlayValues[19]
+			}
+			if len(ps.OverlayValues) > 20 && ps.OverlayValues[20].Loc != LocNone {
+				d20 = ps.OverlayValues[20]
+			}
+			if len(ps.OverlayValues) > 22 && ps.OverlayValues[22].Loc != LocNone {
+				d22 = ps.OverlayValues[22]
+			}
+			if len(ps.OverlayValues) > 23 && ps.OverlayValues[23].Loc != LocNone {
+				d23 = ps.OverlayValues[23]
 			}
 			if !ps.General && len(ps.PhiValues) > 0 && ps.PhiValues[0].Loc != LocNone {
 				d0 = ps.PhiValues[0]
 			}
 			ctx.ReclaimUntrackedRegs()
-			d18 = args[0]
-			d18.ID = 0
-			d20 = d18
-			ctx.EnsureDesc(&d20)
-			if d20.Loc == LocImm {
+			d24 = args[0]
+			d24.ID = 0
+			d26 = d24
+			ctx.EnsureDesc(&d26)
+			if d26.Loc == LocImm {
 				tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				tag := d20.Imm.GetTag()
+				tag := d26.Imm.GetTag()
 				switch tag {
 				case tagBool:
-					ctx.EmitMakeBool(tmpPair, d20)
+					ctx.EmitMakeBool(tmpPair, d26)
 				case tagInt:
-					ctx.EmitMakeInt(tmpPair, d20)
+					ctx.EmitMakeInt(tmpPair, d26)
 				case tagFloat:
-					ctx.EmitMakeFloat(tmpPair, d20)
+					ctx.EmitMakeFloat(tmpPair, d26)
 				case tagNil:
 					ctx.EmitMakeNil(tmpPair)
 				default:
-					ptrWord, auxWord := d20.Imm.RawWords()
+					ptrWord, auxWord := d26.Imm.RawWords()
 					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
 					ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
 				}
-				d20 = tmpPair
-			} else if d20.Loc == LocReg {
-				tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(d20.Reg), Reg2: ctx.AllocRegExcept(d20.Reg)}
-				switch d20.Type {
+				d26 = tmpPair
+			} else if d26.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(d26.Reg), Reg2: ctx.AllocRegExcept(d26.Reg)}
+				switch d26.Type {
 				case tagBool:
-					ctx.EmitMakeBool(tmpPair, d20)
+					ctx.EmitMakeBool(tmpPair, d26)
 				case tagInt:
-					ctx.EmitMakeInt(tmpPair, d20)
+					ctx.EmitMakeInt(tmpPair, d26)
 				case tagFloat:
-					ctx.EmitMakeFloat(tmpPair, d20)
+					ctx.EmitMakeFloat(tmpPair, d26)
 				default:
 					panic("jit: Scmer.String requires Scmer pair receiver")
 				}
-				ctx.FreeDesc(&d20)
-				d20 = tmpPair
-			} else if d20.Loc == LocMem {
-				tmpScalar := JITValueDesc{Loc: LocReg, Type: d20.Type, Reg: ctx.AllocReg()}
+				ctx.FreeDesc(&d26)
+				d26 = tmpPair
+			} else if d26.Loc == LocMem {
+				tmpScalar := JITValueDesc{Loc: LocReg, Type: d26.Type, Reg: ctx.AllocReg()}
 				scratch := ctx.AllocRegExcept(tmpScalar.Reg)
-				ctx.EmitMovRegImm64(scratch, uint64(d20.MemPtr))
+				ctx.EmitMovRegImm64(scratch, uint64(d26.MemPtr))
 				ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
 				ctx.FreeReg(scratch)
 				ctx.BindReg(tmpScalar.Reg, &tmpScalar)
@@ -1847,13 +1949,13 @@ Patterns can be any of:
 					panic("jit: Scmer.String requires Scmer pair receiver")
 				}
 				ctx.FreeDesc(&tmpScalar)
-				d20 = tmpPair
+				d26 = tmpPair
 			}
-			if d20.Loc != LocRegPair && d20.Loc != LocStackPair {
+			if d26.Loc != LocRegPair && d26.Loc != LocStackPair {
 				panic("jit: Scmer.String receiver not materialized as pair")
 			}
-			d19 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d20}, 2)
-			ctx.FreeDesc(&d18)
+			d25 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d26}, 2)
+			ctx.FreeDesc(&d24)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d0)
 			if d0.Loc == LocImm {
@@ -1890,76 +1992,101 @@ Patterns can be any of:
 			if d0.Loc != LocRegPair && d0.Loc != LocStackPair {
 				panic("jit: generic call arg expects 2-word value (Read arg0)")
 			}
-			ctx.EnsureDesc(&d19)
-			ctx.EnsureDesc(&d19)
-			if d19.Loc == LocImm {
-				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d19.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				if d19.Imm.GetTag() == tagBool {
-					ctx.EmitMakeBool(tmpPair, d19)
-				} else if d19.Imm.GetTag() == tagInt {
-					ctx.EmitMakeInt(tmpPair, d19)
-				} else if d19.Imm.GetTag() == tagFloat {
-					ctx.EmitMakeFloat(tmpPair, d19)
-				} else if d19.Imm.GetTag() == tagNil {
+			ctx.EnsureDesc(&d25)
+			ctx.EnsureDesc(&d25)
+			if d25.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d25.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d25.Imm.GetTag() == tagBool {
+					ctx.EmitMakeBool(tmpPair, d25)
+				} else if d25.Imm.GetTag() == tagInt {
+					ctx.EmitMakeInt(tmpPair, d25)
+				} else if d25.Imm.GetTag() == tagFloat {
+					ctx.EmitMakeFloat(tmpPair, d25)
+				} else if d25.Imm.GetTag() == tagNil {
 					ctx.EmitMakeNil(tmpPair)
 				} else {
-					ptrWord, auxWord := d19.Imm.RawWords()
+					ptrWord, auxWord := d25.Imm.RawWords()
 					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
 					ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
 				}
-				d19 = tmpPair
-			} else if d19.Loc == LocReg {
-				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d19.Type, Reg: ctx.AllocRegExcept(d19.Reg), Reg2: ctx.AllocRegExcept(d19.Reg)}
-				switch d19.Type {
+				d25 = tmpPair
+			} else if d25.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d25.Type, Reg: ctx.AllocRegExcept(d25.Reg), Reg2: ctx.AllocRegExcept(d25.Reg)}
+				switch d25.Type {
 				case tagBool:
-					ctx.EmitMakeBool(tmpPair, d19)
+					ctx.EmitMakeBool(tmpPair, d25)
 				case tagInt:
-					ctx.EmitMakeInt(tmpPair, d19)
+					ctx.EmitMakeInt(tmpPair, d25)
 				case tagFloat:
-					ctx.EmitMakeFloat(tmpPair, d19)
+					ctx.EmitMakeFloat(tmpPair, d25)
 				default:
 					panic("jit: generic call arg scalar type unknown for 2-word value")
 				}
-				ctx.FreeDesc(&d19)
-				d19 = tmpPair
+				ctx.FreeDesc(&d25)
+				d25 = tmpPair
 			}
-			if d19.Loc != LocRegPair && d19.Loc != LocStackPair {
+			if d25.Loc != LocRegPair && d25.Loc != LocStackPair {
 				panic("jit: generic call arg expects 2-word value (Read arg1)")
 			}
-			d21 = ctx.EmitGoCallScalar(GoFuncAddr(Read), []JITValueDesc{d0, d19}, 2)
+			d27 = ctx.EmitGoCallScalar(GoFuncAddr(Read), []JITValueDesc{d0, d25}, 2)
 			ctx.FreeDesc(&d0)
-			ctx.EnsureDesc(&d21)
-			if d21.Loc == LocRegPair {
-				ctx.EmitMovPairToResult(&d21, &result)
-				result.Type = d21.Type
+			ctx.EnsureDesc(&d27)
+			if d27.Loc == LocRegPair {
+				ctx.EmitMovPairToResult(&d27, &result)
+				result.Type = d27.Type
 			} else {
-				switch d21.Type {
+				switch d27.Type {
 				case tagBool:
-					ctx.EmitMakeBool(result, d21)
+					ctx.EmitMakeBool(result, d27)
 					result.Type = tagBool
 				case tagInt:
-					ctx.EmitMakeInt(result, d21)
+					ctx.EmitMakeInt(result, d27)
 					result.Type = tagInt
 				case tagFloat:
-					ctx.EmitMakeFloat(result, d21)
+					ctx.EmitMakeFloat(result, d27)
 					result.Type = tagFloat
 				case tagNil:
 					ctx.EmitMakeNil(result)
 					result.Type = tagNil
 				default:
-					ctx.EmitMovPairToResult(&d21, &result)
-					result.Type = d21.Type
+					ctx.EmitMovPairToResult(&d27, &result)
+					result.Type = d27.Type
 				}
 			}
 			ctx.EmitJmp(lbl0)
 			return result
 			}
-			ps22 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps22)
+			argPinned28 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned28 = append(argPinned28, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned28 = append(argPinned28, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned28 = append(argPinned28, ai.Reg2)
+					}
+				}
+			}
+			ps29 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps29)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()
 			ctx.PatchInt32(r0, int32(16))
 			ctx.EmitAddRSP32(int32(16))
+			for _, r := range argPinned28 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		}, /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */ /* TODO: IndexAddr on non-parameter: &t0[0:int] */
 	})
@@ -1972,7 +2099,7 @@ Patterns can be any of:
 		func(a ...Scmer) Scmer {
 			return NewString(SerializeToString(a[0], &Globalenv))
 		}, false, false, nil,
-		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
+		nil /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */, /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */ /* TODO: unresolved SSA value: github.com/launix-de/memcp/scm.Globalenv */
 	})
 
 	init_alu()

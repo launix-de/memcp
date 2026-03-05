@@ -295,8 +295,33 @@ func InitMetricsDeclarations() {
 			return result
 			return result
 			}
-			ps2 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps2)
+			argPinned2 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned2 = append(argPinned2, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned2 = append(argPinned2, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned2 = append(argPinned2, ai.Reg2)
+					}
+				}
+			}
+			ps3 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps3)
+			for _, r := range argPinned2 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
@@ -309,7 +334,7 @@ func InitMetricsDeclarations() {
 			_, avail := readMemInfo()
 			return NewInt(avail)
 		}, false, false, nil,
-		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
+		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -320,7 +345,7 @@ func InitMetricsDeclarations() {
 			total, _ := readMemInfo()
 			return NewInt(total)
 		}, false, false, nil,
-		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
+		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -376,8 +401,33 @@ func InitMetricsDeclarations() {
 			return result
 			return result
 			}
-			ps1 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps1)
+			argPinned1 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned1 = append(argPinned1, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned1 = append(argPinned1, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned1 = append(argPinned1, ai.Reg2)
+					}
+				}
+			}
+			ps2 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps2)
+			for _, r := range argPinned1 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		}, /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
@@ -389,7 +439,7 @@ func InitMetricsDeclarations() {
 		func(a ...Scmer) Scmer {
 			return NewInt(atomic.LoadInt64(&ActiveHTTPConnections))
 		}, false, false, nil,
-		nil /* TODO: LoadInt64 arg is not a field address: marker="" */, /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */
+		nil /* TODO: LoadInt64 arg is not a field address: marker="" */, /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */ /* TODO: LoadInt64 arg is not a field address: marker="" */
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -464,8 +514,33 @@ func InitMetricsDeclarations() {
 			return result
 			return result
 			}
-			ps2 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps2)
+			argPinned2 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned2 = append(argPinned2, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned2 = append(argPinned2, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned2 = append(argPinned2, ai.Reg2)
+					}
+				}
+			}
+			ps3 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps3)
+			for _, r := range argPinned2 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
@@ -542,8 +617,33 @@ func InitMetricsDeclarations() {
 			return result
 			return result
 			}
-			ps2 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps2)
+			argPinned2 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned2 = append(argPinned2, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned2 = append(argPinned2, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned2 = append(argPinned2, ai.Reg2)
+					}
+				}
+			}
+			ps3 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps3)
+			for _, r := range argPinned2 {
+				ctx.UnprotectReg(r)
+			}
 			return result
 		}, /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */ /* TODO: unsupported call: sync/atomic.LoadPointer(currentSnapshot) */
 	})
@@ -562,6 +662,6 @@ func InitMetricsDeclarations() {
 			}
 			return NewString(string(data))
 		}, false, false, nil,
-		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
+		nil /* TODO: MakeClosure with 6 bindings */, /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: MakeClosure with 6 bindings */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */ /* TODO: unresolved SSA value: internal/testlog.logger */
 	})
 }

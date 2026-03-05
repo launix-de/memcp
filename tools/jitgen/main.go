@@ -50,6 +50,8 @@ var doWipe bool
 var verbose bool
 
 const generatedBanner = "/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */"
+const phiSlotBytes = 16
+const phiStoreChunkSize = 3
 
 func main() {
 	var files []string
@@ -439,6 +441,9 @@ type codeGen struct {
 	inlineCallSeq  map[uint64]uint32 // caller scoped-BB id -> inline call ordinal
 	phiRegs        map[string]string // SSA phi name → stack offset string (e.g. "0", "8", "16")
 	phiPair        map[string]bool   // SSA phi name → true if value occupies 2 words (16 bytes)
+	phiTypeTag     map[string]string // SSA phi name → static JIT tag constant (or JITTypeUnknown)
+	bbPhiBase      map[int]int       // BB index → phi base stack offset (bytes)
+	bbPhiCount     map[int]int       // BB index → number of phi slots
 	phiStackSize   int               // total bytes reserved on stack for phi nodes (local to current function/inline)
 	globalPhiSize  int               // total bytes across ALL phi slots (outer + inlined)
 	phiFrameFixup  string            // Go var name for fixup pointer (set by outer allocPhiRegs)
@@ -642,8 +647,9 @@ func (g *codeGen) neededDescVarsForBlock(bbIdx int) []string {
 	if bbIdx < 0 || bbIdx >= len(g.fn.Blocks) {
 		return nil
 	}
+	block := g.fn.Blocks[bbIdx]
 	var names []string
-	for _, instr := range g.fn.Blocks[bbIdx].Instrs {
+	for _, instr := range block.Instrs {
 		for _, op := range instr.Operands(nil) {
 			if *op == nil {
 				continue
@@ -652,6 +658,40 @@ func (g *codeGen) neededDescVarsForBlock(bbIdx int) []string {
 				continue
 			}
 			name := (*op).Name()
+			if alias, ok := g.ssaAliases[name]; ok {
+				name = alias
+			}
+			gv, ok := g.vals[name]
+			if !ok || !gv.isDesc || gv.goVar == "" {
+				continue
+			}
+			names = append(names, gv.goVar)
+		}
+	}
+	// Include successor-phi edge inputs as well: these values are consumed by
+	// emitEdgePhiMoves when rendering this block's outgoing branches, but they
+	// are often not direct operands of this block's own instructions.
+	for succPos, succ := range block.Succs {
+		edgeIdx, ok := g.phiEdgeIndexForSucc(succ.Index, succPos)
+		if !ok {
+			continue
+		}
+		for _, instr := range succ.Instrs {
+			phi, ok := instr.(*ssa.Phi)
+			if !ok {
+				break
+			}
+			if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
+				continue
+			}
+			edge := phi.Edges[edgeIdx]
+			if edge == nil {
+				continue
+			}
+			if _, isConst := edge.(*ssa.Const); isConst {
+				continue
+			}
+			name := edge.Name()
 			if alias, ok := g.ssaAliases[name]; ok {
 				name = alias
 			}
@@ -686,6 +726,45 @@ func (g *codeGen) emitRestoreClosureDescState(snaps []descSnapshot) {
 	for _, s := range snaps {
 		g.emit("%s = %s", s.desc, s.snap)
 	}
+}
+
+func (g *codeGen) emitProtectIncomingArgRegs() string {
+	if g.storageMode {
+		return ""
+	}
+	pinned := g.allocTemp("argPinned")
+	g.emit("%s := make([]Reg, 0, len(args)*2)", pinned)
+	g.emit("seenArgRegs := make(map[Reg]bool)")
+	g.emit("for _, ai := range args {")
+	g.emit("\tif ai.Loc == LocReg {")
+	g.emit("\t\tif !seenArgRegs[ai.Reg] {")
+	g.emit("\t\t\tctx.ProtectReg(ai.Reg)")
+	g.emit("\t\t\tseenArgRegs[ai.Reg] = true")
+	g.emit("\t\t\t%s = append(%s, ai.Reg)", pinned, pinned)
+	g.emit("\t\t}")
+	g.emit("\t} else if ai.Loc == LocRegPair {")
+	g.emit("\t\tif !seenArgRegs[ai.Reg] {")
+	g.emit("\t\t\tctx.ProtectReg(ai.Reg)")
+	g.emit("\t\t\tseenArgRegs[ai.Reg] = true")
+	g.emit("\t\t\t%s = append(%s, ai.Reg)", pinned, pinned)
+	g.emit("\t\t}")
+	g.emit("\t\tif !seenArgRegs[ai.Reg2] {")
+	g.emit("\t\t\tctx.ProtectReg(ai.Reg2)")
+	g.emit("\t\t\tseenArgRegs[ai.Reg2] = true")
+	g.emit("\t\t\t%s = append(%s, ai.Reg2)", pinned, pinned)
+	g.emit("\t\t}")
+	g.emit("\t}")
+	g.emit("}")
+	return pinned
+}
+
+func (g *codeGen) emitUnprotectIncomingArgRegs(pinned string) {
+	if pinned == "" {
+		return
+	}
+	g.emit("for _, r := range %s {", pinned)
+	g.emit("\tctx.UnprotectReg(r)")
+	g.emit("}")
 }
 
 func (g *codeGen) scopedBBID(bbIdx int) uint64 {
@@ -1034,6 +1113,22 @@ func (g *codeGen) blockPhis(bbIdx int) []*ssa.Phi {
 	return out
 }
 
+func (g *codeGen) phiSlotOffExpr(bbIdx int, phiIdx int) string {
+	return fmt.Sprintf("int32(bbs[%d].PhiBase)+int32(%d)", bbIdx, phiIdx*phiSlotBytes)
+}
+
+func (g *codeGen) emitBBPhiLayout() {
+	for bbIdx := range g.fn.Blocks {
+		base, ok := g.bbPhiBase[bbIdx]
+		if !ok {
+			continue
+		}
+		count := g.bbPhiCount[bbIdx]
+		g.emit("bbs[%d].PhiBase = int32(%d)", bbIdx, base)
+		g.emit("bbs[%d].PhiCount = uint16(%d)", bbIdx, count)
+	}
+}
+
 func (g *codeGen) emitConstDescForSSAConst(c *ssa.Const) genVal {
 	dv := g.allocDesc()
 	if c.Value == nil {
@@ -1151,6 +1246,26 @@ func isScmerType(t types.Type) bool {
 	return ok && named.Obj() != nil && named.Obj().Name() == "Scmer"
 }
 
+func jitTagForSSAType(t types.Type) string {
+	if t == nil {
+		return "JITTypeUnknown"
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		switch {
+		case u.Info()&types.IsBoolean != 0:
+			return "tagBool"
+		case u.Info()&types.IsInteger != 0:
+			return "tagInt"
+		case u.Info()&types.IsFloat != 0:
+			return "tagFloat"
+		case u.Kind() == types.String:
+			return "tagString"
+		}
+	}
+	return "JITTypeUnknown"
+}
+
 // phiEdgeSpecializationScore estimates how specific an incoming edge is for
 // target BB phis. Higher scores are preferred for immediate fallthrough.
 func (g *codeGen) phiEdgeSpecializationScore(targetBBIdx int, succPos int) int {
@@ -1195,6 +1310,29 @@ func (g *codeGen) preferredIfFallthrough(thenBB, elseBB int) int {
 	return elseBB
 }
 
+func (g *codeGen) emitProtectDescVars(descVars []string) {
+	for _, dv := range descVars {
+		g.emit("ctx.EnsureDesc(&%s)", dv)
+		g.emit("if %s.Loc == LocReg {", dv)
+		g.emit("\tctx.ProtectReg(%s.Reg)", dv)
+		g.emit("} else if %s.Loc == LocRegPair {", dv)
+		g.emit("\tctx.ProtectReg(%s.Reg)", dv)
+		g.emit("\tctx.ProtectReg(%s.Reg2)", dv)
+		g.emit("}")
+	}
+}
+
+func (g *codeGen) emitUnprotectDescVars(descVars []string) {
+	for _, dv := range descVars {
+		g.emit("if %s.Loc == LocReg {", dv)
+		g.emit("\tctx.UnprotectReg(%s.Reg)", dv)
+		g.emit("} else if %s.Loc == LocRegPair {", dv)
+		g.emit("\tctx.UnprotectReg(%s.Reg)", dv)
+		g.emit("\tctx.UnprotectReg(%s.Reg2)", dv)
+		g.emit("}")
+	}
+}
+
 func (g *codeGen) emitIfClosure(v *ssa.If) {
 	thenBB := v.Block().Succs[0].Index
 	elseBB := v.Block().Succs[1].Index
@@ -1230,6 +1368,7 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	// switching this BB to general first; successor rendering then sees stable
 	// locations from the generalized predecessor state.
 	g.emit("if !ps.General {")
+	g.emitSpecializedPhiStackWrites(g.curBlock, "ps", "\t")
 	g.emit("\tps.General = true")
 	g.emit("\treturn bbs[%d].RenderPS(ps)", g.curBlock)
 	g.emit("}")
@@ -1260,7 +1399,7 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	g.emitBuildPhiStateForEdge(elsePSGeneral, elseBB, 1, "true")
 
 	if g.preferredIfFallthrough(thenBB, elseBB) == thenBB {
-		snaps := g.emitSaveClosureDescState(g.neededDescVarsForBlock(elseBB))
+		snaps := g.emitSaveClosureDescState(g.allClosureDescVars())
 		allocSnap := g.allocTemp("alloc")
 		g.emit("%s := ctx.SnapshotAllocState()", allocSnap)
 		g.emit("if !bbs[%d].Rendered {", thenBB)
@@ -1272,7 +1411,7 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 		g.emit("\treturn bbs[%d].RenderPS(%s)", elseBB, elsePSGeneral)
 		g.emit("}")
 	} else {
-		snaps := g.emitSaveClosureDescState(g.neededDescVarsForBlock(thenBB))
+		snaps := g.emitSaveClosureDescState(g.allClosureDescVars())
 		allocSnap := g.allocTemp("alloc")
 		g.emit("%s := ctx.SnapshotAllocState()", allocSnap)
 		g.emit("if !bbs[%d].Rendered {", elseBB)
@@ -1306,26 +1445,124 @@ func (g *codeGen) emitJumpClosure(v *ssa.Jump) {
 // emitEdgePhiMoves emits machine-code-level MOVs for phi edges to targetBB from
 // the successor edge succPos of the current block.
 func (g *codeGen) emitEdgePhiMoves(targetBBIdx int, succPos int) {
+	moves := g.collectEdgePhiMoves(targetBBIdx, succPos)
+	if len(moves) == 0 {
+		return
+	}
+	if g.phiMovesRequireSingleChunk(moves) {
+		deps := g.phiMoveDepsForRange(moves, 0, len(moves))
+		g.emitProtectDescVars(deps)
+		for i := 0; i < len(moves); i++ {
+			m := moves[i]
+			g.emitPhiMov(m.phiOff, m.edge, m.phiType)
+		}
+		g.emitUnprotectDescVars(deps)
+		return
+	}
+	for start := 0; start < len(moves); start += phiStoreChunkSize {
+		end := start + phiStoreChunkSize
+		if end > len(moves) {
+			end = len(moves)
+		}
+		deps := g.phiMoveDepsForRange(moves, start, end)
+		g.emitProtectDescVars(deps)
+		for i := start; i < end; i++ {
+			m := moves[i]
+			g.emitPhiMov(m.phiOff, m.edge, m.phiType)
+		}
+		g.emitUnprotectDescVars(deps)
+	}
+}
+
+type phiEdgeMove struct {
+	phiOff  string
+	edge    ssa.Value
+	phiType types.Type
+}
+
+func (g *codeGen) collectEdgePhiMoves(targetBBIdx int, succPos int) []phiEdgeMove {
 	targetBlock := g.fn.Blocks[targetBBIdx]
 	edgeIdx, ok := g.phiEdgeIndexForSucc(targetBBIdx, succPos)
 	if !ok {
-		return
+		return nil
 	}
+	out := make([]phiEdgeMove, 0, len(targetBlock.Instrs))
+	phiIdx := 0
 	for _, instr := range targetBlock.Instrs {
 		phi, ok := instr.(*ssa.Phi)
 		if !ok {
 			break
 		}
-		phiReg, ok := g.phiRegs[phi.Name()]
-		if !ok {
-			continue // no phi reg allocated (shouldn't happen)
-		}
 		if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
 			panic(fmt.Sprintf("phi edge index out of range for %s: edge=%d len=%d", phi.Name(), edgeIdx, len(phi.Edges)))
 		}
 		edge := phi.Edges[edgeIdx]
-		g.emitPhiMov(phiReg, edge, phi.Type())
+		out = append(out, phiEdgeMove{
+			phiOff:  g.phiSlotOffExpr(targetBBIdx, phiIdx),
+			edge:    edge,
+			phiType: phi.Type(),
+		})
+		phiIdx++
 	}
+	return out
+}
+
+func (g *codeGen) phiMoveDepsForRange(moves []phiEdgeMove, start, end int) []string {
+	var out []string
+	for i := start; i < end; i++ {
+		edge := moves[i].edge
+		if edge == nil {
+			continue
+		}
+		if _, isConst := edge.(*ssa.Const); isConst {
+			continue
+		}
+		name := edge.Name()
+		if alias, ok := g.ssaAliases[name]; ok {
+			name = alias
+		}
+		gv, ok := g.vals[name]
+		if !ok || !gv.isDesc || gv.goVar == "" {
+			continue
+		}
+		out = append(out, gv.goVar)
+	}
+	return g.normalizeDescVarList(out)
+}
+
+// phiMovesRequireSingleChunk returns true if phi edge stores for this successor
+// depend on phi values that are themselves stored in one of the destination
+// slots on the same edge. In that case, chunking can clobber stack-backed
+// sources before they are materialized.
+func (g *codeGen) phiMovesRequireSingleChunk(moves []phiEdgeMove) bool {
+	if len(moves) < 2 {
+		return false
+	}
+	writes := make(map[string]struct{}, len(moves))
+	for _, m := range moves {
+		writes[m.phiOff] = struct{}{}
+	}
+	for _, m := range moves {
+		edge := m.edge
+		if edge == nil {
+			continue
+		}
+		if _, isConst := edge.(*ssa.Const); isConst {
+			continue
+		}
+		name := edge.Name()
+		if alias, ok := g.ssaAliases[name]; ok {
+			name = alias
+		}
+		// If a source is a phi value whose slot is also written on this edge,
+		// emit all moves in one protected block to preserve simultaneous semantics.
+		if srcOff, ok := g.phiRegs[name]; ok {
+			if _, exists := writes[srcOff]; exists {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // emitPhiMov emits a machine-code store from an SSA value to a phi stack slot.
@@ -1335,7 +1572,7 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 	phiOffHi := "(" + phiOff + ")+8"
 	if c, ok := v.(*ssa.Const); ok {
 		if c.Value == nil {
-			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOff)
+			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewInt(0)}, %s)", phiOff)
 			if phiPair {
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
 			}
@@ -1349,9 +1586,9 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 		} else if c.Value.Kind() == constant.Bool {
 			bval := constant.BoolVal(c.Value)
 			if bval {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(1)}, %s)", phiOff)
+				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, %s)", phiOff)
 			} else {
-				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOff)
+				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, %s)", phiOff)
 			}
 			if phiPair {
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
@@ -1361,13 +1598,13 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 			if signed, bits, ok := intTypeInfo(phiType); ok {
 				ival = normalizeIntConstForType(ival, signed, bits)
 			}
-			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(%d)}, %s)", ival, phiOff)
+			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%d)}, %s)", ival, phiOff)
 			if phiPair {
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
 			}
 		} else if c.Value.Kind() == constant.Float {
 			fval, _ := constant.Float64Val(c.Value)
-			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewFloat(%v)}, %s)", fval, phiOff)
+			g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%v)}, %s)", fval, phiOff)
 			if phiPair {
 				g.emit("ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Imm: NewInt(0)}, %s)", phiOffHi)
 			}
@@ -1419,21 +1656,19 @@ func (g *codeGen) emitEdgePhiMovesIndent(targetBBIdx int, succPos int, indent st
 	if !ok {
 		return
 	}
+	phiIdx := 0
 	for _, instr := range targetBlock.Instrs {
 		phi, ok := instr.(*ssa.Phi)
 		if !ok {
 			break
-		}
-		phiReg, ok := g.phiRegs[phi.Name()]
-		if !ok {
-			continue
 		}
 		_ = indent
 		if edgeIdx < 0 || edgeIdx >= len(phi.Edges) {
 			panic(fmt.Sprintf("phi edge index out of range for %s: edge=%d len=%d", phi.Name(), edgeIdx, len(phi.Edges)))
 		}
 		edge := phi.Edges[edgeIdx]
-		g.emitPhiMov(phiReg, edge, phi.Type())
+		g.emitPhiMov(g.phiSlotOffExpr(targetBBIdx, phiIdx), edge, phi.Type())
+		phiIdx++
 	}
 }
 
@@ -1472,7 +1707,8 @@ func (g *codeGen) emitPhiMovIndent(phiOff string, v ssa.Value, indent string) {
 	}
 }
 
-// allocPhiRegs pre-scans the function for phis and assigns stack slots.
+// allocPhiRegs pre-scans the function for phis, counts all phi nodes across BBs,
+// and assigns fixed 16-byte stack slots.
 // Phi values live on the stack at [RSP + offset] to avoid register pressure.
 // A temp register is allocated on each read and freed after use.
 //
@@ -1484,20 +1720,19 @@ func (g *codeGen) allocPhiRegs() {
 	offset := g.globalPhiSize // continue from global counter
 	localStart := offset
 	for _, block := range g.fn.Blocks {
-		for _, instr := range block.Instrs {
-			phi, ok := instr.(*ssa.Phi)
-			if !ok {
-				break
-			}
+		phis := g.blockPhis(block.Index)
+		if len(phis) == 0 {
+			continue
+		}
+		g.bbPhiBase[block.Index] = offset
+		g.bbPhiCount[block.Index] = len(phis)
+		for _, phi := range phis {
 			phiName := phi.Name()
 			pair := isPhiPairType(phi.Type())
 			g.phiRegs[phiName] = fmt.Sprintf("%d", offset)
 			g.phiPair[phiName] = pair
-			if pair {
-				offset += 16
-			} else {
-				offset += 8
-			}
+			g.phiTypeTag[phiName] = jitTagForSSAType(phi.Type())
+			offset += phiSlotBytes
 		}
 	}
 	g.phiStackSize = offset - localStart
@@ -1546,11 +1781,15 @@ func (g *codeGen) initAllPhiDescs() {
 			if !ok {
 				continue
 			}
+			phiTag := g.phiTypeTag[name]
+			if phiTag == "" {
+				phiTag = "JITTypeUnknown"
+			}
 			dv := g.allocDesc()
 			if g.phiPair[name] {
-				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)}", dv, phiOff)
+				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: int32(%s)}", dv, phiTag, phiOff)
 			} else {
-				g.emit("%s := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(%s)}", dv, phiOff)
+				g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: int32(%s)}", dv, phiTag, phiOff)
 			}
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		}
@@ -1578,6 +1817,9 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	savedCurBlock := g.curBlock
 	savedPhiRegs := g.phiRegs
 	savedPhiPair := g.phiPair
+	savedPhiTypeTag := g.phiTypeTag
+	savedBBPhiBase := g.bbPhiBase
+	savedBBPhiCount := g.bbPhiCount
 	savedPhiStackSize := g.phiStackSize
 	savedVals := g.vals
 	savedMultiBlock := g.multiBlock
@@ -1619,6 +1861,9 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.bbScope = g.nextBBScope
 	g.phiRegs = map[string]string{}
 	g.phiPair = map[string]bool{}
+	g.phiTypeTag = map[string]string{}
+	g.bbPhiBase = map[int]int{}
+	g.bbPhiCount = map[int]int{}
 	g.vals = map[string]genVal{}
 	g.refCounts = computeRefCounts(callee)
 	g.ssaAliases = map[string]string{}
@@ -1808,6 +2053,9 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.curBlock = savedCurBlock
 	g.phiRegs = savedPhiRegs
 	g.phiPair = savedPhiPair
+	g.phiTypeTag = savedPhiTypeTag
+	g.bbPhiBase = savedBBPhiBase
+	g.bbPhiCount = savedBBPhiCount
 	g.phiStackSize = savedPhiStackSize
 	g.vals = savedVals
 	g.multiBlock = savedMultiBlock
@@ -1828,6 +2076,23 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	return result
 }
 
+func (g *codeGen) emitSpecializedPhiStackWrites(bbIdx int, psVar string, indent string) {
+	phis := g.blockPhis(bbIdx)
+	for phiIdx, phi := range phis {
+		tmp := g.allocDesc()
+		phiOff := g.phiSlotOffExpr(bbIdx, phiIdx)
+		g.emit("%sif len(%s.PhiValues) > %d && %s.PhiValues[%d].Loc != LocNone {", indent, psVar, phiIdx, psVar, phiIdx)
+		g.emit("%s\t%s := %s.PhiValues[%d]", indent, tmp, psVar, phiIdx)
+		g.emit("%s\tctx.EnsureDesc(&%s)", indent, tmp)
+		if isPhiPairType(phi.Type()) {
+			g.emit("%s\tctx.EmitStoreScmerToStack(%s, %s)", indent, tmp, phiOff)
+		} else {
+			g.emit("%s\tctx.EmitStoreToStack(%s, %s)", indent, tmp, phiOff)
+		}
+		g.emit("%s}", indent)
+	}
+}
+
 func (g *codeGen) emitRecursiveBBRenderers() {
 	prevMode := g.bbClosureMode
 	g.bbClosureMode = true
@@ -1845,27 +2110,8 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 
 		g.emit("bbs[%d].RenderPS = func(ps PhiState) JITValueDesc {", bbIdx)
 		g.emit("if !ps.General {")
+		g.emitSpecializedPhiStackWrites(bbIdx, "ps", "\t")
 		g.emit("\tif bbs[%d].VisitCount >= 2 {", bbIdx)
-		// Canonicalize specialized incoming phi values before switching this BB
-		// to general mode. If the general BB was already rendered, recursion will
-		// collapse to a direct jump; those jumps must observe the latest phi
-		// values from the specialized predecessor.
-		for phiIdx, phi := range g.blockPhis(bbIdx) {
-			phiOff, ok := g.phiRegs[phi.Name()]
-			if !ok {
-				continue
-			}
-			tmp := g.allocDesc()
-			g.emit("\t\tif len(ps.PhiValues) > %d && ps.PhiValues[%d].Loc != LocNone {", phiIdx, phiIdx)
-			g.emit("\t\t\t%s := ps.PhiValues[%d]", tmp, phiIdx)
-			g.emit("\t\t\tctx.EnsureDesc(&%s)", tmp)
-			if g.phiPair[phi.Name()] {
-				g.emit("\t\t\tctx.EmitStoreScmerToStack(%s, %s)", tmp, phiOff)
-			} else {
-				g.emit("\t\t\tctx.EmitStoreToStack(%s, %s)", tmp, phiOff)
-			}
-			g.emit("\t\t}")
-		}
 		g.emit("\t\tps.General = true")
 		g.emit("\t\treturn bbs[%d].RenderPS(ps)", bbIdx)
 		g.emit("\t}")
@@ -1923,6 +2169,9 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 		inlineCallSeq:   map[uint64]uint32{},
 		phiRegs:         map[string]string{},
 		phiPair:         map[string]bool{},
+		phiTypeTag:      map[string]string{},
+		bbPhiBase:       map[int]int{},
+		bbPhiCount:      map[int]int{},
 		fieldCache:      map[string]genVal{},
 		refCounts:       computeRefCounts(fn),
 		ssaAliases:      map[string]string{},
@@ -1940,6 +2189,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 	g.allocPhiRegs()
 	g.initAllPhiDescs()
 	g.emit("var bbs [%d]BBDescriptor", len(fn.Blocks))
+	g.emitBBPhiLayout()
 
 	// Ensure result has a concrete location and reserve end label for shared epilogue.
 	if g.multiBlock {
@@ -1953,6 +2203,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 	}
 
 	g.emitRecursiveBBRenderers()
+	pinnedArgRegs := g.emitProtectIncomingArgRegs()
 	entryPS := g.allocTemp("ps")
 	g.emit("%s := PhiState{General: true}", entryPS)
 	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
@@ -1967,6 +2218,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 		g.emit("ctx.PatchInt32(%s, int32(%d))", g.phiFrameFixup, g.globalPhiSize)
 		g.emit("ctx.EmitAddRSP32(int32(%d))", g.globalPhiSize)
 	}
+	g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
 	g.emit("return result")
 
 	result := fmt.Sprintf("func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s\t\t}",
@@ -1995,6 +2247,9 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 		inlineCallSeq:   map[uint64]uint32{},
 		phiRegs:         map[string]string{},
 		phiPair:         map[string]bool{},
+		phiTypeTag:      map[string]string{},
+		bbPhiBase:       map[int]int{},
+		bbPhiCount:      map[int]int{},
 		fieldCache:      map[string]genVal{},
 		refCounts:       computeRefCounts(fn),
 		ssaAliases:      map[string]string{},
@@ -2048,6 +2303,7 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 	g.allocPhiRegs()
 	g.initAllPhiDescs()
 	g.emit("var bbs [%d]scm.BBDescriptor", len(fn.Blocks))
+	g.emitBBPhiLayout()
 
 	if g.multiBlock {
 		g.emit("if result.Loc == LocAny {")
@@ -2065,6 +2321,7 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 	}
 
 	g.emitRecursiveBBRenderers()
+	pinnedArgRegs := g.emitProtectIncomingArgRegs()
 	entryPS := g.allocTemp("ps")
 	g.emit("%s := PhiState{General: false}", entryPS)
 	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
@@ -2093,6 +2350,7 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 		g.emit("ctx.PatchInt32(%s, int32(%d))", g.phiFrameFixup, g.globalPhiSize)
 		g.emit("ctx.EmitAddRSP32(int32(%d))", g.globalPhiSize)
 	}
+	g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
 	if g.multiBlock {
 		g.emit("return result")
 	} else if !g.hasStorageIdx {
@@ -2295,10 +2553,14 @@ func (g *codeGen) resetAllPhiDescsToStack() {
 			// are not materialized on a given path.
 			continue
 		}
+		phiTag := g.phiTypeTag[phiName]
+		if phiTag == "" {
+			phiTag = "JITTypeUnknown"
+		}
 		if g.phiPair[phiName] {
-			g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)}", gv.goVar, phiOff)
+			g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: int32(%s)}", gv.goVar, phiTag, phiOff)
 		} else {
-			g.emit("%s = JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(%s)}", gv.goVar, phiOff)
+			g.emit("%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: int32(%s)}", gv.goVar, phiTag, phiOff)
 		}
 	}
 }
@@ -2331,17 +2593,18 @@ func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
 
 	phis := g.blockPhis(bbIdx)
 	for phiIdx, phi := range phis {
-		phiOff, ok := g.phiRegs[phi.Name()]
-		if !ok {
-			continue
-		}
+		phiOff := g.phiSlotOffExpr(bbIdx, phiIdx)
 		gv, ok := g.vals[phi.Name()]
 		if !ok || !gv.isDesc {
 			dv := g.allocDesc()
+			phiTag := g.phiTypeTag[phi.Name()]
+			if phiTag == "" {
+				phiTag = "JITTypeUnknown"
+			}
 			if g.phiPair[phi.Name()] {
-				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)}", dv, phiOff)
+				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: int32(%s)}", dv, phiTag, phiOff)
 			} else {
-				g.emit("%s := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(%s)}", dv, phiOff)
+				g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: int32(%s)}", dv, phiTag, phiOff)
 			}
 			gv = genVal{goVar: dv, isDesc: true}
 			g.vals[phi.Name()] = gv
