@@ -4236,8 +4236,8 @@ func init_strings() {
 				ctx.MarkLabel(lbl13)
 				ctx.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5077,9 +5077,9 @@ func init_strings() {
 				ctx.MarkLabel(lbl1)
 				ctx.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(32)}
 			d0 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5598,9 +5598,9 @@ func init_strings() {
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
+			d2 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(32)}
 			d0 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(16)}
-			d2 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
