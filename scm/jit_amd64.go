@@ -981,6 +981,71 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			panic("jit: unknown callable " + name)
 		}
 		if decl.JITEmit != nil {
+			// Multiplication has deep internal loops/phis and is sensitive to
+			// mutable register-backed argument descriptors; materialize its args
+			// to stable stack slots first.
+			if name == "*" {
+				n := len(list) - 1
+				args := make([]JITValueDesc, n)
+				rawArgs := make([]JITValueDesc, n)
+				protectedRegs := make([]Reg, 0, len(list)*2)
+				for i := 1; i < len(list); i++ {
+					v := jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+					ctx.EnsureDesc(&v)
+					rawArgs[i-1] = v
+					switch v.Loc {
+					case LocReg:
+						ctx.BindReg(v.Reg, &rawArgs[i-1])
+						ctx.ProtectReg(v.Reg)
+						protectedRegs = append(protectedRegs, v.Reg)
+					case LocRegPair:
+						ctx.BindReg(v.Reg, &rawArgs[i-1])
+						ctx.BindReg(v.Reg2, &rawArgs[i-1])
+						ctx.ProtectReg(v.Reg)
+						ctx.ProtectReg(v.Reg2)
+						protectedRegs = append(protectedRegs, v.Reg, v.Reg2)
+					}
+				}
+				stackBytes := int32(n * 16)
+				if n > 0 {
+					ctx.EmitSubRSP32(stackBytes)
+					for i, v := range rawArgs {
+						slotOff := int32(i * 16)
+						tmp := JITValueDesc{
+							Loc:  LocRegPair,
+							Type: JITTypeUnknown,
+							Reg:  ctx.AllocReg(),
+							Reg2: ctx.AllocReg(),
+						}
+						_ = jitPlaceIntoPair(ctx, &v, tmp)
+						ctx.EmitStoreRegMem(tmp.Reg, RegRSP, slotOff)
+						ctx.EmitStoreRegMem(tmp.Reg2, RegRSP, slotOff+8)
+						ctx.FreeDesc(&tmp)
+						args[i] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: slotOff}
+					}
+				}
+				for _, r := range protectedRegs {
+					ctx.UnprotectReg(r)
+				}
+				for i := range rawArgs {
+					ctx.FreeDesc(&rawArgs[i])
+				}
+				out := decl.JITEmit(ctx, args, result)
+				if n > 0 {
+					if out.MemPtr == 0 && (out.Loc == LocStack || out.Loc == LocStackPair) {
+						ctx.EnsureDesc(&out)
+					}
+					ctx.EmitAddRSP32(stackBytes)
+					if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+						ctx.EmitMovRegReg(ctx.SliceBase, RegRSP)
+					}
+				}
+				if out.Loc == LocImm {
+					ctx.TrackImm(out.Imm)
+				}
+				return out
+			}
+
 			// Compile arguments (intermediate results use LocAny).
 			// Use a stack-allocated buffer for the common case of <=8 args;
 			// fall back to heap allocation for larger expressions.
@@ -995,10 +1060,6 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			protectedRegs := make([]Reg, 0, len(list)*2)
 			for i := 1; i < len(list); i++ {
 				args[i-1] = jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
-				// Keep argument descriptors tracked while compiling later args and
-				// inside the callee JITEmit body. Without rebinding to args[] slots,
-				// register spills/reuse can leave stale copies in args and break
-				// non-commutative operators (e.g. subtraction).
 				switch args[i-1].Loc {
 				case LocReg:
 					ctx.BindReg(args[i-1].Reg, &args[i-1])
@@ -1012,8 +1073,6 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					protectedRegs = append(protectedRegs, args[i-1].Reg, args[i-1].Reg2)
 				}
 			}
-			// Keep call arguments out of compile-time spill slots (MemPtr-backed
-			// descriptors), because such addresses would be baked into emitted code.
 			defer func() {
 				for _, r := range protectedRegs {
 					ctx.UnprotectReg(r)
