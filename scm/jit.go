@@ -20,6 +20,8 @@ package scm
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"syscall"
 	"unsafe"
@@ -272,9 +274,11 @@ type jitAllocStateSnapshot struct {
 	freeRegs           uint64
 	protectedRegs      uint64
 	protectedRegCounts [16]int
-	regOwners          [16]*JITValueDesc
+	regOwnerIDs        [16]uint32
+	ownerValues        map[uint32]JITValueDesc
 	spillTop           int
 	descSpills         map[uint32]descSpillMeta
+	nextDescID         uint32
 }
 
 func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
@@ -282,8 +286,22 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		freeRegs:           ctx.FreeRegs,
 		protectedRegs:      ctx.ProtectedRegs,
 		protectedRegCounts: ctx.ProtectedRegCounts,
-		regOwners:          ctx.RegOwners,
 		spillTop:           ctx.SpillTop,
+		nextDescID:         ctx.nextDescID,
+	}
+	if len(ctx.descOwners) != 0 {
+		s.ownerValues = make(map[uint32]JITValueDesc, len(ctx.descOwners))
+		for id, owner := range ctx.descOwners {
+			if owner == nil {
+				continue
+			}
+			s.ownerValues[id] = *owner
+		}
+	}
+	for r := Reg(0); r <= RegR15; r++ {
+		if owner := ctx.RegOwners[r]; owner != nil {
+			s.regOwnerIDs[r] = owner.ID
+		}
 	}
 	if len(ctx.descSpills) != 0 {
 		s.descSpills = make(map[uint32]descSpillMeta, len(ctx.descSpills))
@@ -298,8 +316,27 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	ctx.FreeRegs = s.freeRegs
 	ctx.ProtectedRegs = s.protectedRegs
 	ctx.ProtectedRegCounts = s.protectedRegCounts
-	ctx.RegOwners = s.regOwners
 	ctx.SpillTop = s.spillTop
+	ctx.nextDescID = s.nextDescID
+
+	if s.ownerValues == nil {
+		ctx.descOwners = nil
+	} else {
+		ctx.descOwners = make(map[uint32]*JITValueDesc, len(s.ownerValues))
+		for id, owner := range s.ownerValues {
+			copyOwner := owner
+			ctx.descOwners[id] = &copyOwner
+		}
+	}
+	for r := Reg(0); r <= RegR15; r++ {
+		id := s.regOwnerIDs[r]
+		if id == 0 || ctx.descOwners == nil {
+			ctx.RegOwners[r] = nil
+			continue
+		}
+		ctx.RegOwners[r] = ctx.descOwners[id]
+	}
+
 	if s.descSpills == nil {
 		ctx.descSpills = nil
 	} else {
@@ -320,6 +357,11 @@ type BBDescriptor struct {
 	RenderPS func(ps PhiState) JITValueDesc
 	Rendered bool
 	Address  int32
+	// PhiBase is the base stack offset (relative to emitter RSP frame) for this
+	// BB's phi slots. Each slot is 16 bytes (pair-aligned) and indexed by phi id.
+	PhiBase int32
+	// PhiCount is the number of phi slots associated with this BB.
+	PhiCount uint16
 	Pending  []JITFixup
 	// VisitCount tracks how often this BB descriptor has been entered.
 	// Unroll/specialization limits are derived from this per-BB state.
@@ -752,6 +794,187 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 // Called from JIT code at runtime.
 func JITBuildMergeClosure(mfn func(...Scmer) Scmer) func(Scmer, Scmer) Scmer {
 	return func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
+}
+
+func jitAddLambdaBoundParams(params Scmer, bound map[Symbol]struct{}) {
+	if params.IsSourceInfo() {
+		params = params.SourceInfo().value
+	}
+	switch params.GetTag() {
+	case tagSlice:
+		for _, p := range params.Slice() {
+			if p.IsSourceInfo() {
+				p = p.SourceInfo().value
+			}
+			if p.GetTag() == tagSymbol {
+				bound[p.Symbol()] = struct{}{}
+			}
+		}
+	case tagSymbol:
+		bound[params.Symbol()] = struct{}{}
+	}
+}
+
+func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map[Symbol]struct{}, out *[]Symbol) {
+	if expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	switch expr.GetTag() {
+	case tagSymbol:
+		sym := expr.Symbol()
+		if sym == Symbol("nil") {
+			return
+		}
+		if _, isBound := bound[sym]; isBound {
+			return
+		}
+		if _, exists := seen[sym]; exists {
+			return
+		}
+		seen[sym] = struct{}{}
+		*out = append(*out, sym)
+	case tagSlice:
+		list := expr.Slice()
+		if len(list) == 0 {
+			return
+		}
+		if list[0].IsSymbol() {
+			switch string(list[0].Symbol()) {
+			case "quote":
+				return
+			case "lambda":
+				if len(list) < 3 {
+					return
+				}
+				innerBound := make(map[Symbol]struct{}, len(bound)+4)
+				for k := range bound {
+					innerBound[k] = struct{}{}
+				}
+				jitAddLambdaBoundParams(list[1], innerBound)
+				jitCollectLambdaFreeSymbols(list[2], innerBound, seen, out)
+				return
+			}
+		}
+		for _, item := range list {
+			jitCollectLambdaFreeSymbols(item, bound, seen, out)
+		}
+	}
+}
+
+func jitLambdaFreeSymbols(params, body Scmer) []Symbol {
+	bound := make(map[Symbol]struct{}, 8)
+	jitAddLambdaBoundParams(params, bound)
+	seen := make(map[Symbol]struct{}, 8)
+	out := make([]Symbol, 0, 8)
+	jitCollectLambdaFreeSymbols(body, bound, seen, &out)
+	return out
+}
+
+func jitCollectLambdaOuterVarIndices(expr Scmer, seen map[NthLocalVar]struct{}, out *[]NthLocalVar) {
+	if expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	if expr.GetTag() != tagSlice {
+		return
+	}
+	list := expr.Slice()
+	if len(list) == 0 {
+		return
+	}
+	if list[0].IsSymbol() {
+		switch string(list[0].Symbol()) {
+		case "quote":
+			return
+		case "outer":
+			if len(list) == 2 {
+				arg := list[1]
+				if arg.IsSourceInfo() {
+					arg = arg.SourceInfo().value
+				}
+				if arg.GetTag() == tagNthLocalVar {
+					idx := arg.NthLocalVar()
+					if _, ok := seen[idx]; !ok {
+						seen[idx] = struct{}{}
+						*out = append(*out, idx)
+					}
+				}
+			}
+		}
+	}
+	for _, item := range list {
+		jitCollectLambdaOuterVarIndices(item, seen, out)
+	}
+}
+
+func jitLambdaOuterVarIndices(body Scmer) []NthLocalVar {
+	seen := make(map[NthLocalVar]struct{}, 4)
+	out := make([]NthLocalVar, 0, 4)
+	jitCollectLambdaOuterVarIndices(body, seen, &out)
+	return out
+}
+
+// jitBuildLambdaClosure constructs a closure Proc from a lambda form plus
+// captured symbol/value pairs:
+//
+//	[params, body, numVars, key1, val1, key2, val2, ...]
+//
+// keyN is either a Symbol (captured named variable) or an NthLocalVar
+// (captured numbered outer variable).
+func jitBuildLambdaClosure(args ...Scmer) Scmer {
+	if len(args) < 3 {
+		panic("jit: lambda builder expects params, body, numVars")
+	}
+	if (len(args)-3)%2 != 0 {
+		panic("jit: lambda builder capture list must be symbol/value pairs")
+	}
+	params := args[0]
+	body := args[1]
+	numVars := int(ToInt(args[2]))
+
+	maxIdx := -1
+	symbolCap := 0
+	for i := 3; i < len(args); i += 2 {
+		key := args[i]
+		if key.GetTag() == tagNthLocalVar {
+			idx := int(key.NthLocalVar())
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+		} else {
+			symbolCap++
+		}
+	}
+
+	var vars Vars
+	if symbolCap > 0 {
+		vars = make(Vars, symbolCap)
+	}
+	var varsNumbered []Scmer
+	if maxIdx >= 0 {
+		varsNumbered = make([]Scmer, maxIdx+1)
+	}
+
+	for i := 3; i < len(args); i += 2 {
+		key := args[i]
+		if key.GetTag() == tagNthLocalVar {
+			varsNumbered[int(key.NthLocalVar())] = args[i+1]
+			continue
+		}
+		sym := mustSymbol(key)
+		vars[sym] = args[i+1]
+	}
+	captureEnv := &Env{
+		Vars:         vars,
+		VarsNumbered: varsNumbered,
+		Outer:        &Globalenv,
+		Nodefine:     false,
+	}
+	return NewProcStruct(Proc{
+		Params:  params,
+		Body:    body,
+		En:      captureEnv,
+		NumVars: numVars,
+	})
 }
 
 // GoFuncAddr returns the entry point address of a Go function value.
@@ -1312,60 +1535,85 @@ func init_jit() {
 			_ = bbpos_0_0
 			lbl0 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
-			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
-					ps.General = true
-					return bbs[0].RenderPS(ps)
+				if !ps.General {
+					if bbs[0].VisitCount >= 2 {
+						ps.General = true
+						return bbs[0].RenderPS(ps)
+					}
 				}
-			}
-			bbs[0].VisitCount++
-			if ps.General {
-				if bbs[0].Rendered {
-					ctx.EmitJmp(lbl0)
-					return result
+				bbs[0].VisitCount++
+				if ps.General {
+					if bbs[0].Rendered {
+						ctx.EmitJmp(lbl0)
+						return result
+					}
+					bbs[0].Rendered = true
+					bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					bbpos_0_0 = bbs[0].Address
+					ctx.MarkLabel(lbl0)
+					ctx.ResolveFixups()
 				}
-				bbs[0].Rendered = true
-				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				bbpos_0_0 = bbs[0].Address
-				ctx.MarkLabel(lbl0)
+				ctx.ReclaimUntrackedRegs()
+				d0 = args[0]
+				d0.ID = 0
+				d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
+				ctx.FreeDesc(&d0)
+				ctx.EnsureDesc(&d1)
+				var d2 JITValueDesc
+				if d1.Loc == LocImm {
+					d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(11))}
+				} else {
+					r0 := ctx.AllocReg()
+					ctx.EmitCmpRegImm32(d1.Reg, 11)
+					ctx.EmitSetcc(r0, CcE)
+					d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+					ctx.BindReg(r0, &d2)
+				}
+				ctx.FreeDesc(&d1)
+				ctx.EnsureDesc(&d2)
 				ctx.ResolveFixups()
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				if d2.Loc == LocImm {
+					ctx.EmitMakeBool(result, d2)
+				} else {
+					ctx.EmitMakeBool(result, d2)
+					ctx.FreeReg(d2.Reg)
+				}
+				result.Type = tagBool
+				return result
+				return result
 			}
-			ctx.ReclaimUntrackedRegs()
-			d0 = args[0]
-			d0.ID = 0
-			d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
-			ctx.FreeDesc(&d0)
-			ctx.EnsureDesc(&d1)
-			var d2 JITValueDesc
-			if d1.Loc == LocImm {
-				d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(11))}
-			} else {
-				r0 := ctx.AllocReg()
-				ctx.EmitCmpRegImm32(d1.Reg, 11)
-				ctx.EmitSetcc(r0, CcE)
-				d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
-				ctx.BindReg(r0, &d2)
+			argPinned3 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned3 = append(argPinned3, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned3 = append(argPinned3, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned3 = append(argPinned3, ai.Reg2)
+					}
+				}
 			}
-			ctx.FreeDesc(&d1)
-			ctx.EnsureDesc(&d2)
-			ctx.ResolveFixups()
-			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				ctx.BindReg(result.Reg, &result)
-				ctx.BindReg(result.Reg2, &result)
+			ps4 := PhiState{General: true}
+			_ = bbs[0].RenderPS(ps4)
+			for _, r := range argPinned3 {
+				ctx.UnprotectReg(r)
 			}
-			if d2.Loc == LocImm {
-				ctx.EmitMakeBool(result, d2)
-			} else {
-				ctx.EmitMakeBool(result, d2)
-				ctx.FreeReg(d2.Reg)
-			}
-			result.Type = tagBool
-			return result
-			return result
-			}
-			ps3 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps3)
 			return result
 		},
 	})
@@ -1410,6 +1658,7 @@ func jitCompile(a ...Scmer) Scmer {
 				if JITLog {
 					fmt.Printf("%X\n", code)
 				}
+				maybeDumpJITCode(buf.ptr, code)
 				if err2 := buf.makeRX(); err2 == nil {
 					fn2 := unsafe.Pointer(&struct{ *byte }{&code[0]})
 					nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
@@ -1434,4 +1683,22 @@ func jitCompile(a ...Scmer) Scmer {
 	default:
 		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))
 	}
+}
+
+func maybeDumpJITCode(base unsafe.Pointer, code []byte) {
+	dir := os.Getenv("MEMCP_JIT_DUMP_DIR")
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fmt.Printf("jitdump: mkdir failed: %v\n", err)
+		return
+	}
+	name := fmt.Sprintf("jit_%016x_len_%d.bin", uintptr(base), len(code))
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, code, 0o644); err != nil {
+		fmt.Printf("jitdump: write failed: %v\n", err)
+		return
+	}
+	fmt.Printf("jitdump: %s\n", path)
 }
