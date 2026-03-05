@@ -2371,9 +2371,35 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 
 	ctx.ReclaimUntrackedRegs()
 	var liveRegsArr [16]Reg
-	liveAll := ctx.collectLiveRegsForCall(&liveRegsArr)
-	liveRegs := liveAll[:0]
-	for _, r := range liveAll {
+	liveCount := 0
+	for r := Reg(0); r <= RegR15; r++ {
+		if r == RegRSP || r == RegRBP || r == RegR11 || r == RegR14 {
+			continue
+		}
+		bit := uint64(1 << uint(r))
+		if (ctx.AllRegs&bit) == 0 || (ctx.FreeRegs&bit) != 0 {
+			continue
+		}
+		owner := ctx.RegOwners[r]
+		if owner == nil {
+			continue
+		}
+		valid := false
+		switch owner.Loc {
+		case LocReg:
+			valid = owner.Reg == r
+		case LocRegPair:
+			valid = owner.Reg == r || owner.Reg2 == r
+		}
+		if !valid {
+			continue
+		}
+		liveRegsArr[liveCount] = r
+		liveCount++
+	}
+	liveRegs := liveRegsArr[:0]
+	for i := 0; i < liveCount; i++ {
+		r := liveRegsArr[i]
 		if r == arg.Reg || r == arg.Reg2 {
 			continue
 		}
@@ -2387,30 +2413,32 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	switch ctx.SliceBase {
 	case RegRSP, RegRBP, RegR11, RegR14:
 	default:
-		found := false
-		for _, r := range liveRegs {
-			if r == ctx.SliceBase {
-				found = true
-				break
+		if !ctx.SliceBaseTracksRSP {
+			found := false
+			for _, r := range liveRegs {
+				if r == ctx.SliceBase {
+					found = true
+					break
+				}
+			}
+			if !found {
+				liveRegs = append(liveRegs, ctx.SliceBase)
 			}
 		}
-		if !found {
-			liveRegs = append(liveRegs, ctx.SliceBase)
-		}
 	}
 
-	// Per-call stack frame (thread-safe): reserve result words, then save live regs.
-	const resultBytes = 16                             // two 64-bit words (Scmer ptr+aux)
-	ctx.emitBytes(0x48, 0x83, 0xEC, byte(resultBytes)) // SUB RSP, 16
-
-	for _, r := range liveRegs {
-		ctx.EmitPushReg(r)
+	// Single per-call frame (thread-safe):
+	// [rsp+0..] = saved live regs
+	frameBytes := int32(len(liveRegs)) * 8
+	if frameBytes%16 != 0 {
+		frameBytes += 8 // keep alignment equivalent to pre-call RSP parity
+	}
+	if frameBytes != 0 {
+		ctx.EmitSubRSP32(frameBytes)
 	}
 
-	totalItems := 2 + len(liveRegs) // result reserve + saved regs
-	padded := totalItems%2 == 1
-	if padded {
-		ctx.EmitPushReg(RegRAX)
+	for i, r := range liveRegs {
+		ctx.EmitStoreRegMem(r, RegRSP, int32(i*8))
 	}
 
 	// Stage argslice into scratch regs, then set call registers.
@@ -2425,28 +2453,22 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	ctx.EmitMovRegMem(RegR11, RegRDX, 0) // fnptr := [funcval]
 	ctx.emitBytes(0x41, 0xFF, 0xD3)      // CALL R11
 
-	// Stash call result words above saved registers/padding.
-	paddingSize := 0
-	if padded {
-		paddingSize = 8
-	}
-	ctx.EmitStoreRegMem(RegRAX, RegRSP, int32(paddingSize+len(liveRegs)*8))
-	ctx.EmitStoreRegMem(RegRBX, RegRSP, int32(paddingSize+len(liveRegs)*8+8))
-
-	if padded {
-		ctx.EmitPopReg(RegRAX) // discard align pad
-	}
-	for i := len(liveRegs) - 1; i >= 0; i-- {
-		ctx.EmitPopReg(liveRegs[i])
-	}
-
-	// Pop result words from reserved frame into target registers.
 	if !targetHasRegs {
 		target = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 		targetHasRegs = true
 	}
-	ctx.EmitPopReg(target.Reg)
-	ctx.EmitPopReg(target.Reg2)
+	if target.Reg != RegRAX {
+		ctx.EmitMovRegReg(target.Reg, RegRAX)
+	}
+	if target.Reg2 != RegRBX {
+		ctx.EmitMovRegReg(target.Reg2, RegRBX)
+	}
+	for i, r := range liveRegs {
+		ctx.EmitMovRegMem(r, RegRSP, int32(i*8))
+	}
+	if frameBytes != 0 {
+		ctx.EmitAddRSP32(frameBytes)
+	}
 	ctx.BindReg(target.Reg, &target)
 	ctx.BindReg(target.Reg2, &target)
 
