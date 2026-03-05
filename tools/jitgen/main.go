@@ -2187,6 +2187,16 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 
 	// Pre-allocate registers for all phi nodes
 	g.allocPhiRegs()
+	if g.globalPhiSize > 0 {
+		g.emit("for i := range args {")
+		g.emit("\tif args[i].MemPtr == 0 && (args[i].Loc == LocStack || args[i].Loc == LocStackPair) {")
+		g.emit("\t\targs[i].StackOff += int32(%d)", g.globalPhiSize)
+		g.emit("\t}")
+		g.emit("}")
+		g.emit("if result.MemPtr == 0 && (result.Loc == LocStack || result.Loc == LocStackPair) {")
+		g.emit("\tresult.StackOff += int32(%d)", g.globalPhiSize)
+		g.emit("}")
+	}
 	g.initAllPhiDescs()
 	g.emit("var bbs [%d]BBDescriptor", len(fn.Blocks))
 	g.emitBBPhiLayout()
@@ -2301,6 +2311,17 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 
 	// Pre-allocate registers for all phi nodes
 	g.allocPhiRegs()
+	if g.globalPhiSize > 0 {
+		g.emit("if thisptr.MemPtr == 0 && (thisptr.Loc == LocStack || thisptr.Loc == LocStackPair) {")
+		g.emit("\tthisptr.StackOff += int32(%d)", g.globalPhiSize)
+		g.emit("}")
+		g.emit("if idxInt.MemPtr == 0 && (idxInt.Loc == LocStack || idxInt.Loc == LocStackPair) {")
+		g.emit("\tidxInt.StackOff += int32(%d)", g.globalPhiSize)
+		g.emit("}")
+		g.emit("if result.MemPtr == 0 && (result.Loc == LocStack || result.Loc == LocStackPair) {")
+		g.emit("\tresult.StackOff += int32(%d)", g.globalPhiSize)
+		g.emit("}")
+	}
 	g.initAllPhiDescs()
 	g.emit("var bbs [%d]scm.BBDescriptor", len(fn.Blocks))
 	g.emitBBPhiLayout()

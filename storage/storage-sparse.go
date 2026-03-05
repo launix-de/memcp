@@ -296,6 +296,15 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 			if idxPinned { ctx.ProtectReg(idxPinnedReg) }
 			r0 := ctx.EmitSubRSP32Fixup()
 			_ = r0
+			if thisptr.MemPtr == 0 && (thisptr.Loc == scm.LocStack || thisptr.Loc == scm.LocStackPair) {
+				thisptr.StackOff += int32(32)
+			}
+			if idxInt.MemPtr == 0 && (idxInt.Loc == scm.LocStack || idxInt.Loc == scm.LocStackPair) {
+				idxInt.StackOff += int32(32)
+			}
+			if result.MemPtr == 0 && (result.Loc == scm.LocStack || result.Loc == scm.LocStackPair) {
+				result.StackOff += int32(32)
+			}
 			d0 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			d1 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			var bbs [8]scm.BBDescriptor
@@ -462,8 +471,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
 			}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -688,8 +697,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -2479,8 +2488,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.MarkLabel(lbl6)
 				ctx.ResolveFixups()
 			}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -3189,8 +3198,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				ctx.MarkLabel(lbl7)
 				ctx.ResolveFixups()
 			}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}

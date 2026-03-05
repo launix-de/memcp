@@ -1546,6 +1546,14 @@ Patterns can be any of:
 			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			r0 := ctx.EmitSubRSP32Fixup()
 			_ = r0
+			for i := range args {
+				if args[i].MemPtr == 0 && (args[i].Loc == LocStack || args[i].Loc == LocStackPair) {
+					args[i].StackOff += int32(16)
+				}
+			}
+			if result.MemPtr == 0 && (result.Loc == LocStack || result.Loc == LocStackPair) {
+				result.StackOff += int32(16)
+			}
 			d0 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			var bbs [3]BBDescriptor
 			bbs[2].PhiBase = int32(0)
