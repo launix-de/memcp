@@ -396,8 +396,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	cols := traverseCondition(p.Body)
 
-	// sort columns: equality conditions first (tighter bounds → better index selectivity),
-	// then alphabetically. Precompute isEq to avoid repeated scm.Equal in comparator.
+	// Sort columns so that equality conditions come first, remainder alphabetically.
+	// This canonical ordering serves two purposes:
+	//   1. Deduplication: queries with the same equality columns in different AST order
+	//      (e.g. "WHERE a=1 AND b=2" vs "WHERE b=2 AND a=1") map to the same column
+	//      sequence and thus reuse the same adaptive index instead of creating duplicates.
+	//   2. Selectivity: placing equality columns as the index key prefix lets the shard
+	//      skip directly to the matching bucket before applying any range bound, which
+	//      reduces both the scan window and memory pressure during index lookup.
+	// Precompute isEq to avoid repeated scm.Equal calls inside the sort comparator.
 	if len(cols) > 1 {
 		isEq := make([]bool, len(cols))
 		for i := range cols {
