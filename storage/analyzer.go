@@ -16,7 +16,6 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "fmt"
 import "sort"
 import "strings"
 import "github.com/launix-de/memcp/scm"
@@ -124,20 +123,19 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		// native Go function - no boundary extraction possible (full scan)
 		return nil
 	}
-	symbolmapping := make(map[scm.Symbol]string)
 	var params []scm.Scmer
 	if p.Params.IsSlice() {
 		params = p.Params.Slice()
-		for i, sym := range params {
-			symbolmapping[mustSymbolValue(sym)] = conditionCols[i]
-		}
 	}
-	// resolveColVar maps a node to a column name: either a symbol in symbolmapping
-	// or an NthLocalVar(i) referring to the i-th filter parameter (bound variable).
+	// resolveColVar maps a node to a column name.
+	// Handles both symbol params (linear scan, no alloc) and NthLocalVar(i).
 	resolveColVar := func(node scm.Scmer) (string, bool) {
 		if node.IsSymbol() {
-			if col, ok := symbolmapping[scm.Symbol(node.String())]; ok {
-				return col, true
+			name := node.String()
+			for i, sym := range params {
+				if sym.IsSymbol() && sym.String() == name {
+					return conditionCols[i], true
+				}
 			}
 		}
 		if node.IsNthLocalVar() {
@@ -162,7 +160,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		}
 		if v.IsSlice() {
 			val := v.Slice()
-			if len(val) > 0 && val[0].IsSymbol() && val[0].String() == "outer" {
+			if len(val) > 0 && val[0].SymbolEquals("outer") {
 				if val[1].IsSymbol() {
 					sym := scm.Symbol(val[1].String())
 					if val2, ok := p.En.Vars[sym]; ok {
@@ -210,16 +208,10 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			}
 			// computed col: (equal? rawDataset independent) or reversed
 			if len(params) > 0 && v[1].IsSlice() {
-				raw1 := isRawDataset(params, v[1])
-				ind2 := isIndependent(params, v[2])
-				fmt.Printf("[BOUNDARY-DBG] equal? v1=%v raw=%v v2=%v ind=%v\n", v[1], raw1, v[2], ind2)
-				if raw1 && ind2 {
-					v2, ok2 := evalIndependentScmer(v[2], p.En)
-					fmt.Printf("[BOUNDARY-DBG] evalIndep v2=%v ok2=%v\n", v2, ok2)
-					if ok2 {
+				if isRawDataset(params, v[1]) && isIndependent(params, v[2]) {
+					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
-						fmt.Printf("[BOUNDARY-DBG] computed boundary canon=%q mapCols=%v mapFn=%v\n", canon, mc, mf)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
@@ -227,16 +219,10 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			if len(params) > 0 && v[2].IsSlice() {
-				raw2 := isRawDataset(params, v[2])
-				ind1 := isIndependent(params, v[1])
-				fmt.Printf("[BOUNDARY-DBG] equal? (rev) v2=%v raw=%v v1=%v ind=%v\n", v[2], raw2, v[1], ind1)
-				if raw2 && ind1 {
-					v2, ok2 := evalIndependentScmer(v[1], p.En)
-					fmt.Printf("[BOUNDARY-DBG] evalIndep (rev) v2=%v ok2=%v\n", v2, ok2)
-					if ok2 {
+				if isRawDataset(params, v[2]) && isIndependent(params, v[1]) {
+					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
-						fmt.Printf("[BOUNDARY-DBG] computed boundary (rev) canon=%q mapCols=%v mapFn=%v\n", canon, mc, mf)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
@@ -331,7 +317,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			if col, ok := resolveColVar(v[2]); ok {
 				if v[1].IsSlice() {
 					items := v[1].Slice()
-					if len(items) > 1 && items[0].IsSymbol() && items[0].String() == "list" {
+					if len(items) > 1 && items[0].SymbolEquals("list") {
 						var lo, hi scm.Scmer
 						found := false
 						for _, item := range items[1:] {
@@ -410,13 +396,20 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	cols := traverseCondition(p.Body)
 
-	// sort columns -> at first, the lower==upper alphabetically; then one lower!=upper according to best selectivity; discard the rest
-	sort.Slice(cols, func(i, j int) bool {
-		if scm.Equal(cols[i].lower, cols[i].upper) && !scm.Equal(cols[j].lower, cols[j].upper) {
-			return true // put equal?-conditions leftmost
+	// sort columns: equality conditions first (tighter bounds → better index selectivity),
+	// then alphabetically. Precompute isEq to avoid repeated scm.Equal in comparator.
+	if len(cols) > 1 {
+		isEq := make([]bool, len(cols))
+		for i := range cols {
+			isEq[i] = scm.Equal(cols[i].lower, cols[i].upper)
 		}
-		return cols[i].col < cols[j].col // otherwise: alphabetically
-	})
+		sort.Slice(cols, func(i, j int) bool {
+			if isEq[i] != isEq[j] {
+				return isEq[i] // equality conditions leftmost
+			}
+			return cols[i].col < cols[j].col // tiebreak alphabetically
+		})
+	}
 
 	return cols
 }
