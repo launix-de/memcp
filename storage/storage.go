@@ -1391,6 +1391,7 @@ func Init(en scm.Env) {
 						partitions = append(partitions, scm.NewSlice([]scm.Scmer{
 							scm.NewString("Column"), scm.NewString(sd.Column),
 							scm.NewString("NumPartitions"), scm.NewInt(int64(sd.NumPartitions)),
+							scm.NewString("Pivots"), scm.NewSlice(sd.Pivots),
 						}))
 					}
 				}
