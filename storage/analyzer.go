@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "sort"
 import "strings"
 import "github.com/launix-de/memcp/scm"
@@ -131,6 +132,22 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			symbolmapping[mustSymbolValue(sym)] = conditionCols[i]
 		}
 	}
+	// resolveColVar maps a node to a column name: either a symbol in symbolmapping
+	// or an NthLocalVar(i) referring to the i-th filter parameter (bound variable).
+	resolveColVar := func(node scm.Scmer) (string, bool) {
+		if node.IsSymbol() {
+			if col, ok := symbolmapping[scm.Symbol(node.String())]; ok {
+				return col, true
+			}
+		}
+		if node.IsNthLocalVar() {
+			idx := int(node.NthLocalVar())
+			if idx < len(conditionCols) {
+				return conditionCols[idx], true
+			}
+		}
+		return "", false
+	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
 		if v.IsInt() || v.IsFloat() || v.IsString() {
@@ -146,10 +163,21 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		if v.IsSlice() {
 			val := v.Slice()
 			if len(val) > 0 && val[0].IsSymbol() && val[0].String() == "outer" {
-				sym := mustSymbolValue(val[1])
-				if val2, ok := p.En.Vars[sym]; ok {
-					if val2.IsInt() || val2.IsFloat() || val2.IsString() {
-						return val2, true
+				if val[1].IsSymbol() {
+					sym := scm.Symbol(val[1].String())
+					if val2, ok := p.En.Vars[sym]; ok {
+						if val2.IsInt() || val2.IsFloat() || val2.IsString() {
+							return val2, true
+						}
+					}
+				} else if val[1].IsNthLocalVar() {
+					// (outer NthLocalVar(i)) — free variable from outer captured environment
+					idx := int(val[1].NthLocalVar())
+					if p.En.VarsNumbered != nil && idx < len(p.En.VarsNumbered) {
+						val2 := p.En.VarsNumbered[idx]
+						if val2.IsInt() || val2.IsFloat() || val2.IsString() {
+							return val2, true
+						}
 					}
 				}
 			}
@@ -169,29 +197,29 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			return nil
 		}
 		if v[0].SymbolEquals("equal?") || v[0].SymbolEquals("equal??") {
-			if v[1].IsSymbol() {
-				sym := scm.Symbol(v[1].String())
-				if col, ok := symbolmapping[sym]; ok {
-					if v2, ok := extractConstant(v[2]); ok {
-						return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
-					}
+			if col, ok := resolveColVar(v[1]); ok {
+				if v2, ok := extractConstant(v[2]); ok {
+					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
 			}
 			// reversed: (equal? const col)
-			if v[2].IsSymbol() {
-				sym := scm.Symbol(v[2].String())
-				if col, ok := symbolmapping[sym]; ok {
-					if v2, ok := extractConstant(v[1]); ok {
-						return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
-					}
+			if col, ok := resolveColVar(v[2]); ok {
+				if v2, ok := extractConstant(v[1]); ok {
+					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
 			}
 			// computed col: (equal? rawDataset independent) or reversed
 			if len(params) > 0 && v[1].IsSlice() {
-				if isRawDataset(params, v[1]) && isIndependent(params, v[2]) {
-					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
+				raw1 := isRawDataset(params, v[1])
+				ind2 := isIndependent(params, v[2])
+				fmt.Printf("[BOUNDARY-DBG] equal? v1=%v raw=%v v2=%v ind=%v\n", v[1], raw1, v[2], ind2)
+				if raw1 && ind2 {
+					v2, ok2 := evalIndependentScmer(v[2], p.En)
+					fmt.Printf("[BOUNDARY-DBG] evalIndep v2=%v ok2=%v\n", v2, ok2)
+					if ok2 {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						fmt.Printf("[BOUNDARY-DBG] computed boundary canon=%q mapCols=%v mapFn=%v\n", canon, mc, mf)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
@@ -199,10 +227,16 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			if len(params) > 0 && v[2].IsSlice() {
-				if isRawDataset(params, v[2]) && isIndependent(params, v[1]) {
-					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
+				raw2 := isRawDataset(params, v[2])
+				ind1 := isIndependent(params, v[1])
+				fmt.Printf("[BOUNDARY-DBG] equal? (rev) v2=%v raw=%v v1=%v ind=%v\n", v[2], raw2, v[1], ind1)
+				if raw2 && ind1 {
+					v2, ok2 := evalIndependentScmer(v[1], p.En)
+					fmt.Printf("[BOUNDARY-DBG] evalIndep (rev) v2=%v ok2=%v\n", v2, ok2)
+					if ok2 {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						fmt.Printf("[BOUNDARY-DBG] computed boundary (rev) canon=%q mapCols=%v mapFn=%v\n", canon, mc, mf)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
@@ -212,21 +246,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			return nil
 		} else if v[0].SymbolEquals("<") || v[0].SymbolEquals("<=") {
 			incl := v[0].SymbolEquals("<=")
-			if v[1].IsSymbol() {
-				sym := scm.Symbol(v[1].String())
-				if col, ok := symbolmapping[sym]; ok {
-					if v2, ok := extractConstant(v[2]); ok {
-						return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
-					}
+			if col, ok := resolveColVar(v[1]); ok {
+				if v2, ok := extractConstant(v[2]); ok {
+					return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
 			}
 			// reversed: (< const col) means col > const, (<= const col) means col >= const
-			if v[2].IsSymbol() {
-				sym := scm.Symbol(v[2].String())
-				if col, ok := symbolmapping[sym]; ok {
-					if v2, ok := extractConstant(v[1]); ok {
-						return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
-					}
+			if col, ok := resolveColVar(v[2]); ok {
+				if v2, ok := extractConstant(v[1]); ok {
+					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
 			}
 			// computed col: rawDataset < independent → rawDataset has upper bound
@@ -256,21 +284,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			return nil
 		} else if v[0].SymbolEquals(">") || v[0].SymbolEquals(">=") {
 			incl := v[0].SymbolEquals(">=")
-			if v[1].IsSymbol() {
-				sym := scm.Symbol(v[1].String())
-				if col, ok := symbolmapping[sym]; ok {
-					if v2, ok := extractConstant(v[2]); ok {
-						return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
-					}
+			if col, ok := resolveColVar(v[1]); ok {
+				if v2, ok := extractConstant(v[2]); ok {
+					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
 			}
 			// reversed: (> const col) means col < const, (>= const col) means col <= const
-			if v[2].IsSymbol() {
-				sym := scm.Symbol(v[2].String())
-				if col, ok := symbolmapping[sym]; ok {
-					if v2, ok := extractConstant(v[1]); ok {
-						return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
-					}
+			if col, ok := resolveColVar(v[2]); ok {
+				if v2, ok := extractConstant(v[1]); ok {
+					return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
 			}
 			// computed col: rawDataset > independent → rawDataset has lower bound
@@ -300,42 +322,36 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			return nil
 		} else if v[0].SymbolEquals("nil?") && len(v) >= 2 {
 			// IS NULL: (nil? col)
-			if v[1].IsSymbol() {
-				sym := scm.Symbol(v[1].String())
-				if col, ok := symbolmapping[sym]; ok {
-					return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
-				}
+			if col, ok := resolveColVar(v[1]); ok {
+				return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
 			}
 			return nil
 		} else if v[0].SymbolEquals("contains?") && len(v) >= 3 {
 			// IN-list: (contains? (list 1 2 3) col) → range [min, max]
-			if v[2].IsSymbol() {
-				sym := scm.Symbol(v[2].String())
-				if col, ok := symbolmapping[sym]; ok {
-					if v[1].IsSlice() {
-						items := v[1].Slice()
-						if len(items) > 1 && items[0].IsSymbol() && items[0].String() == "list" {
-							var lo, hi scm.Scmer
-							found := false
-							for _, item := range items[1:] {
-								if c, ok := extractConstant(item); ok {
-									if !found {
+			if col, ok := resolveColVar(v[2]); ok {
+				if v[1].IsSlice() {
+					items := v[1].Slice()
+					if len(items) > 1 && items[0].IsSymbol() && items[0].String() == "list" {
+						var lo, hi scm.Scmer
+						found := false
+						for _, item := range items[1:] {
+							if c, ok := extractConstant(item); ok {
+								if !found {
+									lo = c
+									hi = c
+									found = true
+								} else {
+									if scm.Less(c, lo) {
 										lo = c
+									}
+									if scm.Less(hi, c) {
 										hi = c
-										found = true
-									} else {
-										if scm.Less(c, lo) {
-											lo = c
-										}
-										if scm.Less(hi, c) {
-											hi = c
-										}
 									}
 								}
 							}
-							if found {
-								return boundaries{columnboundaries{col: col, lower: lo, lowerInclusive: true, upper: hi, upperInclusive: true}}
-							}
+						}
+						if found {
+							return boundaries{columnboundaries{col: col, lower: lo, lowerInclusive: true, upper: hi, upperInclusive: true}}
 						}
 					}
 				}
@@ -343,18 +359,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			return nil
 		} else if v[0].SymbolEquals("strlike") && len(v) >= 3 {
 			// LIKE prefix: (strlike col "foo%" collation) → range [prefix, prefix+1)
-			if v[1].IsSymbol() {
-				sym := scm.Symbol(v[1].String())
-				if col, ok := symbolmapping[sym]; ok {
-					if pat, ok := extractConstant(v[2]); ok && pat.IsString() {
-						pattern := pat.String()
-						idx := strings.IndexAny(pattern, "%_")
-						if idx > 0 {
-							prefix := pattern[:idx]
-							upperBytes := []byte(prefix)
-							upperBytes[len(upperBytes)-1]++
-							return boundaries{columnboundaries{col: col, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
-						}
+			if col, ok := resolveColVar(v[1]); ok {
+				if pat, ok := extractConstant(v[2]); ok && pat.IsString() {
+					pattern := pat.String()
+					idx := strings.IndexAny(pattern, "%_")
+					if idx > 0 {
+						prefix := pattern[:idx]
+						upperBytes := []byte(prefix)
+						upperBytes[len(upperBytes)-1]++
+						return boundaries{columnboundaries{col: col, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
 					}
 				}
 			}
