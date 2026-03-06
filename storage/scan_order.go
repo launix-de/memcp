@@ -137,11 +137,41 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
+	// When all filter conditions are equality, appending sort columns to the
+	// boundaries lets the shard return rows already sorted by ORDER BY — the
+	// index (eq_col..., sort_col...) covers both filtering and ordering, so
+	// the cross-shard merge in globalqueue only has to merge pre-sorted runs
+	// instead of sorting them first. A range filter as second-to-last column
+	// would be stripped by indexFromBoundaries anyway, making the extra col
+	// useless, so we only extend when every filter boundary is a point lookup.
+	if len(boundaries) > 0 {
+		allEq := true
+		for _, b := range boundaries {
+			if !scm.Equal(b.lower, b.upper) {
+				allEq = false
+				break
+			}
+		}
+		if allEq {
+			for _, scol := range sortcols {
+				if !scol.IsString() {
+					continue // TODO: handle lambda sort cols via computed index
+				}
+				col := scol.String()
+				already := false
+				for _, b := range boundaries {
+					if b.col == col {
+						already = true
+						break
+					}
+				}
+				if !already {
+					boundaries = append(boundaries, columnboundaries{col: col, lower: scm.NewNil(), upper: scm.NewNil()})
+				}
+			}
+		}
+	}
 	lower, upperLast := indexFromBoundaries(boundaries)
-	// TODO: append sortcols to boundaries
-
-	// TODO: sortcols that are not just simple columns but complex lambda expressions could be temporarily materialized to trade memory for execution time
-	// --> sortcols can then be rewritten to strings
 
 	// give sharding hints
 	for _, b := range boundaries {
