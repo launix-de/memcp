@@ -154,19 +154,62 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		}
 		if allEq {
 			for _, scol := range sortcols {
-				if !scol.IsString() {
-					continue // TODO: handle lambda sort cols via computed index
+				if scol.IsString() {
+					col := scol.String()
+					already := false
+					for _, b := range boundaries {
+						if b.col == col {
+							already = true
+							break
+						}
+					}
+					if !already {
+						boundaries = append(boundaries, columnboundaries{col: col, lower: scm.NewNil(), upper: scm.NewNil()})
+					}
+					continue
 				}
-				col := scol.String()
+				// Lambda sort col: if it's a pure function of row params (rawDataset),
+				// treat it like a computed index column — same mechanism as in extractBoundaries.
+				proc, ok := scol.Any().(scm.Proc)
+				if !ok && scol.IsProc() {
+					proc = *scol.Proc()
+					ok = true
+				}
+				if !ok {
+					continue
+				}
+				var procParams []scm.Scmer
+				if proc.Params.IsSlice() {
+					procParams = proc.Params.Slice()
+				}
+				if len(procParams) == 0 {
+					continue
+				}
+				sortCondCols := make([]string, len(procParams))
+				for j, param := range procParams {
+					if param.IsSymbol() {
+						sortCondCols[j] = param.String()
+					} else {
+						sortCondCols[j] = scm.String(param)
+					}
+				}
+				if !isRawDataset(procParams, proc.Body) {
+					continue
+				}
+				canon := canonicalColName(proc.Body, procParams, sortCondCols)
+				mc, mf := buildComputedFn(proc.Body, proc.Params, proc.En, sortCondCols)
+				if mf.IsNil() || mc == nil {
+					continue
+				}
 				already := false
 				for _, b := range boundaries {
-					if b.col == col {
+					if b.col == canon {
 						already = true
 						break
 					}
 				}
 				if !already {
-					boundaries = append(boundaries, columnboundaries{col: col, lower: scm.NewNil(), upper: scm.NewNil()})
+					boundaries = append(boundaries, columnboundaries{col: canon, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
 				}
 			}
 		}
