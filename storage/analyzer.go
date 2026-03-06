@@ -148,7 +148,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
-		if v.IsInt() || v.IsFloat() || v.IsString() {
+		if v.IsInt() || v.IsFloat() || v.IsString() || v.IsBool() {
 			return v, true
 		}
 		if v.IsSymbol() {
