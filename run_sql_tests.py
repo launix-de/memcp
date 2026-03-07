@@ -592,25 +592,53 @@ class SQLTestRunner:
         self.current_database = database
         for idx, step in enumerate(setup_steps, start=1):
             self.setup_operations.append(step)
-            create_table = self._extract_create_table_name(step.get('sql'))
-            if create_table and not self._is_create_table_if_not_exists(step.get('sql')):
-                self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}", syntax=self.suite_syntax)
-            resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
             expect_error = self._step_expects_error(step)
-            if resp is None:
-                print(f"❌ Setup step {idx} failed: no response")
-                print(f"    SQL: {step.get('sql','')[:300]}")
-                return False
-            if expect_error:
-                if resp.status_code == 200 and "Error" not in resp.text:
-                    print(f"❌ Setup step {idx} failed: expected error but succeeded")
+            if "sql" in step:
+                create_table = self._extract_create_table_name(step.get('sql'))
+                if create_table and not self._is_create_table_if_not_exists(step.get('sql')):
+                    self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}", syntax=self.suite_syntax)
+                resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
+                if resp is None:
+                    print(f"❌ Setup step {idx} failed: no response")
+                    print(f"    SQL: {step.get('sql','')[:300]}")
+                    return False
+                if expect_error:
+                    if resp.status_code == 200 and "Error" not in resp.text:
+                        print(f"❌ Setup step {idx} failed: expected error but succeeded")
+                        print(f"    SQL: {step.get('sql','')[:300]}")
+                        print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+                        return False
+                elif resp.status_code != 200 or "Error" in resp.text:
+                    print(f"❌ Setup step {idx} failed")
                     print(f"    SQL: {step.get('sql','')[:300]}")
                     print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
                     return False
-            elif resp.status_code != 200 or "Error" in resp.text:
-                print(f"❌ Setup step {idx} failed")
-                print(f"    SQL: {step.get('sql','')[:300]}")
-                print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+            elif "scm" in step:
+                scm_code = step["scm"]
+                try:
+                    url = f"{self.base_url}/scm"
+                    resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=600)
+                except Exception as e:
+                    print(f"❌ Setup step {idx} failed: SCM exception: {e}")
+                    print(f"    SCM: {scm_code[:300]}")
+                    return False
+                if resp is None:
+                    print(f"❌ Setup step {idx} failed: no SCM response")
+                    print(f"    SCM: {scm_code[:300]}")
+                    return False
+                if expect_error:
+                    if resp.status_code == 200 and "Error" not in resp.text:
+                        print(f"❌ Setup step {idx} failed: expected SCM error but succeeded")
+                        print(f"    SCM: {scm_code[:300]}")
+                        print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+                        return False
+                elif resp.status_code != 200 or "Error" in resp.text:
+                    print(f"❌ Setup step {idx} failed")
+                    print(f"    SCM: {scm_code[:300]}")
+                    print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+                    return False
+            else:
+                print(f"❌ Setup step {idx} failed: unknown step type (expected sql or scm)")
                 return False
         return True
 

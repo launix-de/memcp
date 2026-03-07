@@ -9,7 +9,13 @@ setup:
         id INT,
         name VARCHAR(50)
       )
-  - sql: "INSERT INTO coll_t (id, name) VALUES (1, 'a'), (2, 'B'), (3, 'aa'), (4, 'Ä')"
+  - scm: |
+      (insert "memcp-tests" "coll_t" '("id" "name")
+        (list
+          (list 1 "a")
+          (list 2 "B")
+          (list 3 "aa")
+          (list 4 "Ä")))
 
 test_cases:
   - name: "ORDER BY binary default (uppercase before lowercase)"
@@ -48,4 +54,3 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS coll_t"
-
