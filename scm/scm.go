@@ -141,6 +141,14 @@ restart:
 							}
 						}
 					}
+					// Debug: sym not found via Vars
+					shortSym := symStr
+					if len(shortSym) > 60 {
+						shortSym = shortSym[:60]
+					}
+					fmt.Printf("[OUTER-DBG] sym=%q not found in Vars; VarsNumbered=%v\n", shortSym, en.Outer.VarsNumbered)
+				} else if list[1].IsNthLocalVar() {
+				fmt.Printf("[OUTER-DBG] NthLocalVar(%d) VarsNumbered=%v\n", list[1].NthLocalVar(), en.Outer.VarsNumbered)
 				}
 				return Eval(list[1], en.Outer)
 			case "quote":

@@ -66,6 +66,12 @@ func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 				}
 			}
 		}
+		// non-symbol function positions must also be rawDataset
+		// (catches e.g. ((get_column tbl ...) args...) where the function
+		// is itself a table-context read, not a pure param-based expression)
+		if !items[0].IsSymbol() && !isRawDataset(params, items[0]) {
+			return false
+		}
 		// all arguments must be rawDataset
 		for _, item := range items[1:] {
 			if !isRawDataset(params, item) {

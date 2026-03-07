@@ -312,37 +312,6 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
 			}
 			return nil
-		} else if v[0].SymbolEquals("contains?") && len(v) >= 3 {
-			// IN-list: (contains? (list 1 2 3) col) → range [min, max]
-			if col, ok := resolveColVar(v[2]); ok {
-				if v[1].IsSlice() {
-					items := v[1].Slice()
-					if len(items) > 1 && items[0].SymbolEquals("list") {
-						var lo, hi scm.Scmer
-						found := false
-						for _, item := range items[1:] {
-							if c, ok := extractConstant(item); ok {
-								if !found {
-									lo = c
-									hi = c
-									found = true
-								} else {
-									if scm.Less(c, lo) {
-										lo = c
-									}
-									if scm.Less(hi, c) {
-										hi = c
-									}
-								}
-							}
-						}
-						if found {
-							return boundaries{columnboundaries{col: col, lower: lo, lowerInclusive: true, upper: hi, upperInclusive: true}}
-						}
-					}
-				}
-			}
-			return nil
 		} else if v[0].SymbolEquals("strlike") && len(v) >= 3 {
 			// LIKE prefix: (strlike col "foo%" collation) → range [prefix, prefix+1)
 			if col, ok := resolveColVar(v[1]); ok {
@@ -375,6 +344,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			}
 			return result
 		} else if v[0].SymbolEquals("or") {
+			// If the whole OR is a pure row-column expression, index as computed bool col.
+			// This avoids range-merging that would span too wide.
+			if len(params) > 0 && isRawDataset(params, node) {
+				canon := canonicalColName(node, params, conditionCols)
+				mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
+				if !mf.IsNil() && mc != nil {
+					return boundaries{columnboundaries{col: canon, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
+				}
+			}
 			var result boundaries
 			for i := 1; i < len(v); i++ {
 				child := traverseCondition(v[i])
@@ -391,6 +369,16 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			return result
+		}
+		// Fallback: if the whole expression is a pure function of row columns
+		// (no comparison operator matched above), treat it as a computed bool column.
+		// Boundary {true, true} means: only scan rows where the expression is true.
+		if len(params) > 0 && isRawDataset(params, node) {
+			canon := canonicalColName(node, params, conditionCols)
+			mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
+			if !mf.IsNil() && mc != nil {
+				return boundaries{columnboundaries{col: canon, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
+			}
 		}
 		return nil
 	}
