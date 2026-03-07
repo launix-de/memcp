@@ -71,7 +71,7 @@ const (
 	tagDate
 	tagAny
 	tagRegex   // *regexp.Regexp
-	tagCString // compressed string; ptr=first byte (byte-aligned) in StorageString dict, aux=format(bits47-44)+charLen(bits43-0)
+	tagCString // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
 	tagBString // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
 	// custom tags >= 100
 )
@@ -86,16 +86,15 @@ const (
 )
 
 // CStringDecompress is set by the storage package to materialize a compressed string.
-// ptr points to the first byte in the StorageString dictionary (byte-aligned).
-// val is the 48-bit aux value carrying format (bits 47-44) and charLen (bits 43-0).
+// ptr points into the StorageString dictionary; val is the 48-bit aux value carrying
+// format (bits 47-44), nibbleOffset (bit 43), and charLen (bits 42-0).
 var CStringDecompress func(ptr *byte, val uint64) string
 
 // NewCString creates a lazy compressed-string Scmer.
-// ptr points to the first byte in the StorageString dictionary (must stay alive).
-// format: storage.StringFormat value (4 bits); charLen: original character count.
-// Nibble-format strings are byte-aligned: odd charLen is padded with a 0 nibble in the dict.
-func NewCString(ptr *byte, format uint8, charLen int) Scmer {
-	val := uint64(format)<<44 | uint64(charLen)
+// ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
+// format: storage.StringFormat value (4 bits); nibbleOff: 0 or 1; charLen: original char count.
+func NewCString(ptr *byte, format uint8, nibbleOff uint8, charLen int) Scmer {
+	val := uint64(format)<<44 | uint64(nibbleOff)<<43 | uint64(charLen)
 	return Scmer{ptr, makeAux(tagCString, val)}
 }
 

@@ -217,19 +217,18 @@ func chooseBestFormat(valid uint16) StringFormat {
 }
 
 // appendNibbles encodes s into 4-bit nibbles using cs and appends to dst.
-// Always starts at nibble 0 (low nibble of the next byte) and pads with a
-// 0 nibble in the high slot of the last byte when len(s) is odd, ensuring
-// the result is byte-aligned. The caller does not need to track nibble offsets.
-func appendNibbles(dst []byte, s string, cs *nibbleCharset) []byte {
+// compNibble is the absolute nibble position in the buffer (= byte_offset*2 + nibble_within_byte).
+// Returns (new dst, new absolute nibble position = compNibble + len(s)).
+func appendNibbles(dst []byte, s string, cs *nibbleCharset, compNibble int) ([]byte, int) {
 	for i := 0; i < len(s); i++ {
 		nib := byte(cs.dec[s[i]])
-		if i&1 == 0 {
-			dst = append(dst, nib) // low nibble; high nibble implicitly 0 (Go zero-init)
+		if (compNibble+i)%2 == 0 {
+			dst = append(dst, nib) // low nibble of a new byte
 		} else {
-			dst[len(dst)-1] |= nib << 4 // high nibble
+			dst[len(dst)-1] |= nib << 4 // high nibble of last byte
 		}
 	}
-	return dst
+	return dst, compNibble + len(s)
 }
 
 // isNibbleFormat reports whether format uses 4-bit nibble packing.
@@ -309,15 +308,16 @@ func adjustStartsForFormat(starts *StorageInt) {
 }
 
 // readNibbles decodes charLen nibble-encoded characters from ptr.
-// ptr must be byte-aligned (nibbleOff is always 0 after the byte-alignment change).
-func readNibbles(ptr *byte, charLen int, cs *nibbleCharset) string {
+// nibbleOff (0 or 1) is the nibble index within *ptr where decoding starts.
+func readNibbles(ptr *byte, nibbleOff int, charLen int, cs *nibbleCharset) string {
 	if charLen == 0 {
 		return ""
 	}
 	result := make([]byte, charLen)
 	for i := 0; i < charLen; i++ {
-		b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(i>>1)))
-		if i&1 == 0 {
+		absNibble := nibbleOff + i
+		b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(absNibble/2)))
+		if absNibble%2 == 0 {
 			result[i] = cs.enc[b&0x0F]
 		} else {
 			result[i] = cs.enc[(b>>4)&0x0F]
@@ -328,23 +328,24 @@ func readNibbles(ptr *byte, charLen int, cs *nibbleCharset) string {
 
 // cstringDecompress materialises a tagCString Scmer into a plain Go string.
 // ptr is a byte-aligned pointer into the StorageString dictionary.
-// val encodes: bits 47-44 = format, bits 43-0 = charLen.
+// val encodes: bits 47-44 = format, bit 43 = nibbleOff, bits 42-0 = charLen.
 func cstringDecompress(ptr *byte, val uint64) string {
 	format := StringFormat(val >> 44)
-	charLen := int(val & ((1 << 44) - 1))
+	nibbleOff := int((val >> 43) & 1)
+	charLen := int(val & ((1 << 43) - 1))
 	switch format {
 	case FormatHexLower:
-		return readNibbles(ptr, charLen, &hexLowerCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &hexLowerCharset)
 	case FormatHexUpper:
-		return readNibbles(ptr, charLen, &hexUpperCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &hexUpperCharset)
 	case FormatPhone:
-		return readNibbles(ptr, charLen, &phoneCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &phoneCharset)
 	case FormatPhoneDTMF:
-		return readNibbles(ptr, charLen, &phoneDTMFCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &phoneDTMFCharset)
 	case FormatDecimal:
-		return readNibbles(ptr, charLen, &decimalCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &decimalCharset)
 	case FormatDateTime:
-		return readNibbles(ptr, charLen, &dateTimeCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &dateTimeCharset)
 	case FormatUUIDLower:
 		b := unsafe.Slice(ptr, 16)
 		h := hex.EncodeToString(b)
@@ -376,9 +377,10 @@ type StorageString struct {
 	format     StringFormat
 
 	// helpers (scan/build phase only)
-	sb         strings.Builder
-	compBuf    []byte // accumulates compressed bytes during build (nodict) or init (dict)
-	reverseMap map[string][3]uint
+	sb           strings.Builder
+	compBuf      []byte // accumulates compressed bytes during build (nodict) or init (dict)
+	compNibble   int    // current nibble position in compBuf (nodict nibble build / dict nibble init)
+	reverseMap   map[string][3]uint
 	count        uint
 	allsize      int
 	validFormats uint16
@@ -468,9 +470,11 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 		lensVal = uint64(int64(s.lens.GetValueUInt(idx)) + s.lens.offset)
 	}
 
-	// startVal = byte offset into dictionary (all formats, nibble formats byte-aligned).
+	// startVal semantics by format:
+	//   nibble formats: nibble position (byteOff*2 + nibbleOff)
+	//   UUID, Base64, Raw: byte offset into dictionary
 	// lensVal semantics:
-	//   nibble formats: original char count (stored bytes = (charLen+1)/2)
+	//   nibble formats: original char count
 	//   Base64: decoded byte count
 	//   UUID: unused (always 16 bytes / 36 chars)
 	//   Raw: byte count
@@ -481,15 +485,19 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 		return scm.NewString(s.dictionary[byteStart : byteStart+lensVal])
 	case FormatHexLower, FormatHexUpper,
 		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
+		nibblePos := startVal
+		nibbleOff := uint8(nibblePos & 1)
+		byteOff := nibblePos >> 1
 		charLen := int(lensVal)
 		if charLen == 0 {
 			return scm.NewString("")
 		}
-		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal)))
-		return scm.NewCString(ptr, uint8(s.format), charLen)
+		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(byteOff)))
+		return scm.NewCString(ptr, uint8(s.format), nibbleOff, charLen)
 	case FormatUUIDLower, FormatUUIDUpper:
-		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal)))
-		return scm.NewCString(ptr, uint8(s.format), 36)
+		byteOff := startVal
+		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(byteOff)))
+		return scm.NewCString(ptr, uint8(s.format), 0, 36)
 	case FormatBase64Upper, FormatBase64Lower:
 		byteOff := startVal
 		decodedLen := int(lensVal)
@@ -610,15 +618,16 @@ func (s *StorageString) init(i uint32) {
 				s.lens.build(e.idx, scm.NewInt(int64(start[2])))
 			}
 		} else if isNibbleFormat(s.format) {
-			// Nibble packing, byte-aligned: each string starts at nibble 0 of a fresh byte.
-			// Odd charLen gets a 0-padding nibble in the high slot of the last byte.
+			// Dense nibble packing. For ASCII nibble charsets: nibble position = raw byte offset,
+			// so processing in sorted order keeps starts.build values equal to scan values.
 			cs := nibbleCharsetFor(s.format)
 			s.compBuf = s.compBuf[:0]
+			s.compNibble = 0
 			for _, e := range entries {
-				byteOffset := len(s.compBuf)
-				s.starts.build(e.idx, scm.NewInt(int64(byteOffset)))
+				nibblePos := s.compNibble
+				s.starts.build(e.idx, scm.NewInt(int64(nibblePos)))
 				s.lens.build(e.idx, scm.NewInt(int64(len(e.orig))))
-				s.compBuf = appendNibbles(s.compBuf, e.orig, cs)
+				s.compBuf, s.compNibble = appendNibbles(s.compBuf, e.orig, cs, nibblePos)
 			}
 			s.dictionary = string(s.compBuf)
 			s.compBuf = nil
@@ -656,10 +665,10 @@ func (s *StorageString) build(i uint32, value scm.Scmer) {
 	if s.nodict {
 		if isNibbleFormat(s.format) {
 			cs := nibbleCharsetFor(s.format)
-			byteOffset := len(s.compBuf)
-			s.starts.build(i, scm.NewInt(int64(byteOffset)))
+			nibblePos := s.compNibble
+			s.starts.build(i, scm.NewInt(int64(nibblePos)))
 			s.lens.build(i, scm.NewInt(int64(len(v))))
-			s.compBuf = appendNibbles(s.compBuf, v, cs)
+			s.compBuf, s.compNibble = appendNibbles(s.compBuf, v, cs, nibblePos)
 		} else {
 			byteOffset := len(s.compBuf)
 			s.compBuf = compressNonNibble(s.compBuf, v, s.format)
