@@ -1110,7 +1110,11 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 							t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1) // flush
 						}()
 						if flushPanic != nil {
-							uniquelockHeld = false
+							// Only deeper unique-check levels (idx+1 < len(t.Unique)) can
+							// have released our lock. The success callback level does not.
+							if idx+1 < len(t.Unique) {
+								uniquelockHeld = false
+							}
 							panic(flushPanic)
 						}
 					}
@@ -1166,7 +1170,11 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1) // flush the rest
 			}()
 			if flushPanic != nil {
-				uniquelockHeld = false
+				// Same rationale as above: only inner unique-check levels may have
+				// unlocked our lock before panicking.
+				if idx+1 < len(t.Unique) {
+					uniquelockHeld = false
+				}
 				panic(flushPanic)
 			}
 		}
