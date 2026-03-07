@@ -275,12 +275,14 @@ class SQLTestRunner:
         route = "psql" if normalized == "postgresql" else "sql"
         url = f"{self.base_url}/{route}/{encoded_db}"
         headers = dict(auth_header if auth_header is not None else self.auth_header)
+        headers.setdefault("Content-Type", "text/plain; charset=utf-8")
+        body = query.encode("utf-8") if isinstance(query, str) else query
         if session_id:
             headers["X-Session-Id"] = session_id
         # Try request; if connection fails, wait for memcp to be ready and retry a few times
         for attempt in range(5):
             try:
-                return requests.post(url, data=query, headers=headers, timeout=timeout)
+                return requests.post(url, data=body, headers=headers, timeout=timeout)
             except Exception:
                 # parse port from base_url
                 try:
@@ -305,7 +307,11 @@ class SQLTestRunner:
             encoded_db = quote(database, safe='')
             url = f"{self.base_url}/rdf/{encoded_db}"
             headers = auth_header if auth_header is not None else self.auth_header
-            return requests.post(url, data=query, headers=headers, timeout=timeout)
+            if isinstance(headers, dict):
+                headers = dict(headers)
+                headers.setdefault("Content-Type", "text/plain; charset=utf-8")
+            body = query.encode("utf-8") if isinstance(query, str) else query
+            return requests.post(url, data=body, headers=headers, timeout=timeout)
         except Exception as e:
             print(f"Error executing SPARQL: {e}")
             return None
