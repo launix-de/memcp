@@ -72,6 +72,7 @@ const (
 	tagAny
 	tagRegex   // *regexp.Regexp
 	tagCString // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
+	tagBString // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
 	// custom tags >= 100
 )
 
@@ -81,6 +82,7 @@ const (
 	TagSymbol  = tagSymbol
 	TagDate    = tagDate
 	TagCString = tagCString
+	TagBString = tagBString
 )
 
 // CStringDecompress is set by the storage package to materialize a compressed string.
@@ -94,6 +96,17 @@ var CStringDecompress func(ptr *byte, val uint64) string
 func NewCString(ptr *byte, format uint8, nibbleOff uint8, charLen int) Scmer {
 	val := uint64(format)<<44 | uint64(nibbleOff)<<43 | uint64(charLen)
 	return Scmer{ptr, makeAux(tagCString, val)}
+}
+
+// NewBString creates a binary-blob Scmer whose string representation is Base64.
+// ptr points to raw bytes in the StorageString dictionary (must stay alive as long as the Scmer).
+// byteLen is the number of raw bytes. urlSafe selects URL-safe vs standard Base64 on .String().
+func NewBString(ptr *byte, byteLen int, urlSafe bool) Scmer {
+	var flag uint64
+	if urlSafe {
+		flag = 1 << 47
+	}
+	return Scmer{ptr, makeAux(tagBString, flag|uint64(byteLen))}
 }
 
 var scmerIntSentinel byte
@@ -395,7 +408,7 @@ func (s Scmer) IsString() bool {
 		return false
 	}
 	t := auxTag(s.aux)
-	return t == tagString || t == tagCString
+	return t == tagString || t == tagCString || t == tagBString
 }
 
 func (s Scmer) IsCString() bool {
@@ -403,6 +416,13 @@ func (s Scmer) IsCString() bool {
 		return false
 	}
 	return auxTag(s.aux) == tagCString
+}
+
+func (s Scmer) IsBString() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagBString
 }
 
 func (s Scmer) IsSymbol() bool {
@@ -454,7 +474,7 @@ func (s Scmer) Bool() bool {
 		return int64(s.aux) != 0
 	case tagFloat:
 		return math.Float64frombits(s.aux) != 0.0
-	case tagString, tagSymbol, tagCString:
+	case tagString, tagSymbol, tagCString, tagBString:
 		str := s.String()
 		return str != "" && str != "false"
 	case tagSlice:
@@ -559,6 +579,14 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 			return CStringDecompress(s.ptr, auxVal(s.aux)), dst
 		}
 		return "<compressed string>", dst
+	case tagBString:
+		val := auxVal(s.aux)
+		byteLen := int(val & ((1 << 47) - 1))
+		b := unsafe.Slice(s.ptr, byteLen)
+		if val>>47 != 0 {
+			return base64.URLEncoding.EncodeToString(b), dst
+		}
+		return base64.StdEncoding.EncodeToString(b), dst
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return "true", dst

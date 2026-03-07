@@ -127,6 +127,10 @@ func checkFormatBits(s string) uint16 {
 		if !isAlpha && !isDigit && c != '-' && c != '_' && c != '=' {
 			valid &^= 1 << FormatBase64Lower
 		}
+		// '=' is only valid at the last two positions in a base64 string
+		if c == '=' && i < len(s)-2 {
+			valid &^= (1 << FormatBase64Upper) | (1 << FormatBase64Lower)
+		}
 		// early exit once only FormatRaw remains
 		if valid == 1 {
 			return valid
@@ -259,10 +263,16 @@ func nibbleCharsetFor(f StringFormat) *nibbleCharset {
 func compressNonNibble(dst []byte, s string, format StringFormat) []byte {
 	switch format {
 	case FormatBase64Upper:
-		b, _ := base64.StdEncoding.DecodeString(s)
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			panic(fmt.Sprintf("compressNonNibble: invalid standard base64 %q: %v", s, err))
+		}
 		return append(dst, b...)
 	case FormatBase64Lower:
-		b, _ := base64.URLEncoding.DecodeString(s)
+		b, err := base64.URLEncoding.DecodeString(s)
+		if err != nil {
+			panic(fmt.Sprintf("compressNonNibble: invalid URL-safe base64 %q: %v", s, err))
+		}
 		return append(dst, b...)
 	case FormatUUIDLower, FormatUUIDUpper:
 		hexStr := s[0:8] + s[9:13] + s[14:18] + s[19:23] + s[24:36]
@@ -336,12 +346,6 @@ func cstringDecompress(ptr *byte, val uint64) string {
 		return readNibbles(ptr, nibbleOff, charLen, &decimalCharset)
 	case FormatDateTime:
 		return readNibbles(ptr, nibbleOff, charLen, &dateTimeCharset)
-	case FormatBase64Upper:
-		b := unsafe.Slice(ptr, charLen) // charLen = decoded byte count
-		return base64.StdEncoding.EncodeToString(b)
-	case FormatBase64Lower:
-		b := unsafe.Slice(ptr, charLen)
-		return base64.URLEncoding.EncodeToString(b)
 	case FormatUUIDLower:
 		b := unsafe.Slice(ptr, 16)
 		h := hex.EncodeToString(b)
@@ -501,7 +505,7 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 			return scm.NewString("")
 		}
 		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(byteOff)))
-		return scm.NewCString(ptr, uint8(s.format), 0, decodedLen)
+		return scm.NewBString(ptr, decodedLen, s.format == FormatBase64Lower)
 	default:
 		return scm.NewNil()
 	}

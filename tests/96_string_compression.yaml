@@ -11,6 +11,8 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS `sc_decimal`"
       - sql: "DROP TABLE IF EXISTS `sc_datetime`"
       - sql: "DROP TABLE IF EXISTS `sc_raw`"
+      - sql: "DROP TABLE IF EXISTS `sc_b64std`"
+      - sql: "DROP TABLE IF EXISTS `sc_b64url`"
     sql: "SELECT 1"
 
   - name: "Create UUID table"
@@ -30,6 +32,12 @@ test_cases:
 
   - name: "Create raw table"
     sql: "CREATE TABLE `sc_raw` (id INT, val VARCHAR(64))"
+
+  - name: "Create standard base64 table"
+    sql: "CREATE TABLE `sc_b64std` (id INT, val VARCHAR(64))"
+
+  - name: "Create URL-safe base64 table"
+    sql: "CREATE TABLE `sc_b64url` (id INT, val VARCHAR(64))"
 
   - name: "Insert UUID values"
     sql: "INSERT INTO sc_uuid VALUES (1, '550e8400-e29b-41d4-a716-446655440000'), (2, '6ba7b810-9dad-11d1-80b4-00c04fd430c8'), (3, '00000000-0000-0000-0000-000000000000')"
@@ -60,6 +68,16 @@ test_cases:
     sql: "INSERT INTO sc_raw VALUES (1, 'Hello, World!'), (2, 'foo bar baz'), (3, 'mixed 123 content!')"
     expect:
       affected_rows: 3
+
+  - name: "Insert standard base64 values"
+    sql: "INSERT INTO sc_b64std VALUES (1, 'dGVzdA=='), (2, 'AAAA'), (3, '++//')"
+    expect:
+      affected_rows: 3
+
+  - name: "Insert URL-safe base64 values"
+    sql: "INSERT INTO sc_b64url VALUES (1, 'dGVzdA=='), (2, '--__')"
+    expect:
+      affected_rows: 2
 
   - name: "Round-trip UUID values"
     sql: "SELECT val FROM sc_uuid ORDER BY id"
@@ -115,6 +133,37 @@ test_cases:
         - val: "Hello, World!"
         - val: "foo bar baz"
         - val: "mixed 123 content!"
+
+  - name: "Round-trip standard base64 values"
+    sql: "SELECT val FROM sc_b64std ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "dGVzdA=="
+        - val: "AAAA"
+        - val: "++//"
+
+  - name: "Round-trip URL-safe base64 values"
+    sql: "SELECT val FROM sc_b64url ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - val: "dGVzdA=="
+        - val: "--__"
+
+  - name: "WHERE on standard base64 column"
+    sql: "SELECT id FROM sc_b64std WHERE val = 'AAAA'"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "WHERE on URL-safe base64 column"
+    sql: "SELECT id FROM sc_b64url WHERE val = '--__'"
+    expect:
+      rows: 1
+      data:
+        - id: 2
 
   - name: "WHERE on UUID column"
     sql: "SELECT id FROM sc_uuid WHERE val = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'"
@@ -190,6 +239,23 @@ test_cases:
         - val: "foo bar baz"
         - val: "mixed 123 content!"
 
+  - name: "Round-trip standard base64 values after rebuild"
+    sql: "SELECT val FROM sc_b64std ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "dGVzdA=="
+        - val: "AAAA"
+        - val: "++//"
+
+  - name: "Round-trip URL-safe base64 values after rebuild"
+    sql: "SELECT val FROM sc_b64url ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - val: "dGVzdA=="
+        - val: "--__"
+
   - name: "Cleanup"
     cleanup:
       - sql: "DROP TABLE IF EXISTS `sc_uuid`"
@@ -198,4 +264,6 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS `sc_decimal`"
       - sql: "DROP TABLE IF EXISTS `sc_datetime`"
       - sql: "DROP TABLE IF EXISTS `sc_raw`"
+      - sql: "DROP TABLE IF EXISTS `sc_b64std`"
+      - sql: "DROP TABLE IF EXISTS `sc_b64url`"
     sql: "SELECT 1"

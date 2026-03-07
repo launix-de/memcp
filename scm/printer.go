@@ -32,7 +32,7 @@ func String(v Scmer) string {
 		return "nil"
 	case tagBool, tagInt, tagFloat:
 		return v.String()
-	case tagString, tagCString:
+	case tagString, tagCString, tagBString:
 		return v.String()
 	case tagSymbol:
 		return v.String()
@@ -137,7 +137,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagInt, tagFloat:
 		b.WriteString(v.String())
-	case tagString, tagCString:
+	case tagString, tagCString, tagBString:
 		b.WriteByte('"')
 		b.WriteString(strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n").Replace(v.String()))
 		b.WriteByte('"')

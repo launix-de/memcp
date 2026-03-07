@@ -63,8 +63,15 @@ func Equal(a, b Scmer) bool {
 			return a.Int() == b.Int()
 		case tagFloat:
 			return a.Float() == b.Float()
-		case tagString, tagSymbol:
+		case tagString, tagSymbol, tagCString:
 			return a.String() == b.String()
+		case tagBString:
+			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
+			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
+			if aLen != bLen {
+				return false
+			}
+			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
 		case tagSlice:
 			as := a.Slice()
 			bs := b.Slice()
@@ -147,6 +154,18 @@ func Equal(a, b Scmer) bool {
 		}
 		if tb == tagBool {
 			return a.Bool() == b.Bool()
+		}
+		return a.String() == b.String()
+	case tagCString:
+		return a.String() == b.String()
+	case tagBString:
+		if tb == tagBString {
+			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
+			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
+			if aLen != bLen {
+				return false
+			}
+			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
 		}
 		return a.String() == b.String()
 	case tagSlice:
@@ -257,8 +276,15 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(a.Int() == b.Int())
 		case tagFloat:
 			return NewBool(a.Float() == b.Float())
-		case tagString, tagSymbol:
+		case tagString, tagSymbol, tagCString:
 			return NewBool(strings.EqualFold(a.String(), b.String()))
+		case tagBString:
+			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
+			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
+			if aLen != bLen {
+				return NewBool(false)
+			}
+			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
 		case tagSlice:
 			as := a.Slice()
 			bs := b.Slice()
@@ -328,6 +354,18 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(a.Bool() == b.Bool())
 		}
 		return NewBool(strings.EqualFold(a.String(), b.String()))
+	case tagCString:
+		return NewBool(strings.EqualFold(a.String(), b.String()))
+	case tagBString:
+		if tb == tagBString {
+			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
+			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
+			if aLen != bLen {
+				return NewBool(false)
+			}
+			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
+		}
+		return NewBool(strings.EqualFold(a.String(), b.String()))
 	case tagBool:
 		return NewBool(a.Bool() == b.Bool())
 	case tagSlice:
@@ -379,7 +417,7 @@ func Less(a, b Scmer) bool {
 		return float64(a.Int()) < b.Float()
 	case tagFloat:
 		return a.Float() < b.Float()
-	case tagString, tagSymbol:
+	case tagString, tagSymbol, tagCString, tagBString:
 		switch tb {
 		case tagDate:
 			if ts, ok := ParseDateString(a.String()); ok {
@@ -390,7 +428,7 @@ func Less(a, b Scmer) bool {
 			return a.Float() < b.Float()
 		case tagFloat:
 			return a.Float() < b.Float()
-		case tagString, tagSymbol:
+		case tagString, tagSymbol, tagCString, tagBString:
 			return a.String() < b.String()
 		default:
 			// Fallback: compare by string representation to avoid panics on mixed types

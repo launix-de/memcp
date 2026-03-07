@@ -119,6 +119,25 @@ func TestFormatSelection(t *testing.T) {
 			},
 			want: FormatRaw,
 		},
+		{
+			// Standard base64 must contain at least one '+' or '/' to distinguish
+			// from URL-safe; otherwise chooseBestFormat picks FormatBase64Upper first.
+			name: "standard base64 (with + and /)",
+			inputs: []string{
+				"dGVzdA==", // "test"
+				"++//",     // 3 bytes {0xFB,0xEF,0xFF}
+			},
+			want: FormatBase64Upper,
+		},
+		{
+			// URL-safe base64 must contain '-' or '_' to be unambiguous.
+			name: "URL-safe base64 (with - and _)",
+			inputs: []string{
+				"dGVzdA==", // "test" (no special chars, compatible with both)
+				"--__",     // 3 bytes {0xFB,0xEF,0xFF} in URL-safe encoding
+			},
+			want: FormatBase64Lower,
+		},
 	}
 
 	for _, tc := range cases {
@@ -185,6 +204,17 @@ func TestStringRoundTrip(t *testing.T) {
 			"",
 			"こんにちは",
 		},
+		// Standard Base64 (contains +/)
+		{
+			"dGVzdA==", // "test"
+			"AAAA",     // {0,0,0}
+			"++//",     // {0xFB,0xEF,0xFF}
+		},
+		// URL-safe Base64 (contains -_)
+		{
+			"dGVzdA==", // "test"
+			"--__",     // {0xFB,0xEF,0xFF}
+		},
 	}
 
 	for gi, inputs := range groups {
@@ -194,6 +224,48 @@ func TestStringRoundTrip(t *testing.T) {
 			if got != want {
 				t.Errorf("group %d[%d]: got %q, want %q (format=%d)", gi, i, got, want, s.format)
 			}
+		}
+	}
+}
+
+// TestBase64PaddingRejected verifies that '=' at an interior position prevents
+// base64 format selection, falling back to FormatRaw.
+func TestBase64PaddingRejected(t *testing.T) {
+	invalid := []string{
+		"A=AA",     // '=' at position 1 (not last 2)
+		"A===",     // '=' at position 1
+		"AAAA=AAA", // '=' in the middle of an 8-char string
+	}
+	for _, s := range invalid {
+		valid := allFormatsValid
+		valid &= checkFormatBits(s)
+		got := chooseBestFormat(valid)
+		if got == FormatBase64Upper || got == FormatBase64Lower {
+			t.Errorf("checkFormatBits(%q) should reject base64 but chose format %d", s, got)
+		}
+	}
+}
+
+// TestBase64BStringEquality verifies that tagBString equality uses raw byte
+// comparison without allocating intermediate strings.
+func TestBase64BStringEquality(t *testing.T) {
+	// Two columns with the same base64 strings should compare equal via Equal/EqualSQL.
+	inputs := []string{"dGVzdA==", "AAAA", "++//"}
+	a := buildStringColumn(inputs)
+	b := buildStringColumn(inputs)
+	for i, want := range inputs {
+		va := a.GetValue(uint32(i))
+		vb := b.GetValue(uint32(i))
+		if !scm.Equal(va, vb) {
+			t.Errorf("[%d] Equal(%q, %q) = false, want true", i, scm.String(va), scm.String(vb))
+		}
+		if !scm.EqualSQL(va, vb).Bool() {
+			t.Errorf("[%d] EqualSQL(%q, %q) = false, want true", i, scm.String(va), scm.String(vb))
+		}
+		// cross-type: BString vs plain String
+		vs := scm.NewString(want)
+		if !scm.Equal(va, vs) {
+			t.Errorf("[%d] Equal(BString, String(%q)) = false, want true", i, want)
 		}
 	}
 }
