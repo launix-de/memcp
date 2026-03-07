@@ -503,35 +503,55 @@ func (s Scmer) Float() float64 {
 	}
 }
 
-func (s Scmer) String() string {
+// AppendString converts s to its string representation, appending any newly
+// allocated bytes to dst (following Go's Append conventions). For types that
+// already carry their data as a Go string (tagString, tagSymbol) or that
+// return a constant literal (tagBool, tagNil, …), dst is returned unchanged
+// and the returned string points directly into the existing backing memory —
+// zero allocation. For tagInt and tagFloat the digits are written into dst,
+// and the returned string is an unsafe view into those bytes; callers must
+// ensure dst outlives all uses of the returned string. For all other types
+// the representation may allocate regardless of dst.
+//
+// Typical usage for zero-alloc comparison of two values:
+//
+//	var buf [64]byte
+//	sa, buf2 := a.AppendString(buf[:0])
+//	sb, _    := b.AppendString(buf2)
+//	return sa < sb
+func (s Scmer) AppendString(dst []byte) (string, []byte) {
 	switch s.GetTag() {
 	case tagString, tagSymbol:
-		return unsafe.String(s.ptr, int(auxVal(s.aux)))
+		return unsafe.String(s.ptr, int(auxVal(s.aux))), dst
 	case tagInt:
-		return strconv.FormatInt(int64(s.aux), 10)
+		start := len(dst)
+		dst = strconv.AppendInt(dst, int64(s.aux), 10)
+		return unsafe.String(&dst[start], len(dst)-start), dst
 	case tagFloat:
-		return strconv.FormatFloat(math.Float64frombits(s.aux), 'g', -1, 64)
+		start := len(dst)
+		dst = strconv.AppendFloat(dst, math.Float64frombits(s.aux), 'g', -1, 64)
+		return unsafe.String(&dst[start], len(dst)-start), dst
 	case tagBool:
 		if auxVal(s.aux) != 0 {
-			return "true"
+			return "true", dst
 		}
-		return "false"
+		return "false", dst
 	case tagDate:
-		return time.Unix(signExtend48(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05")
+		return time.Unix(signExtend48(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"), dst
 	case tagNil:
-		return "nil"
+		return "nil", dst
 	case tagFunc:
 		decl := DeclarationForValue(s)
 		if decl != nil {
-			return decl.Name
+			return decl.Name, dst
 		}
-		return "[func]"
+		return "[func]", dst
 	case tagFuncEnv:
-		return "[func]"
+		return "[func]", dst
 	case tagSlice:
 		sl := s.Slice()
 		if len(sl) == 0 {
-			return "()"
+			return "()", dst
 		}
 		var sb strings.Builder
 		sb.WriteString("(")
@@ -542,30 +562,34 @@ func (s Scmer) String() string {
 			el.Write(&sb)
 		}
 		sb.WriteString(")")
-		return sb.String()
+		return sb.String(), dst
 	case tagFastDict:
 		fd := s.FastDict()
 		if fd == nil {
-			return "()"
+			return "()", dst
 		}
 		parts := make([]string, len(fd.Pairs))
 		for i, el := range fd.Pairs {
-			parts[i] = el.String()
+			parts[i], _ = el.AppendString(nil)
 		}
-		return "(" + strings.Join(parts, " ") + ")"
+		return "(" + strings.Join(parts, " ") + ")", dst
 	case tagParser:
-		return fmt.Sprint(s.Parser())
-		return "[parser]"
+		return fmt.Sprint(s.Parser()), dst
 	case tagSourceInfo:
-		return s.SourceInfo().String()
+		return s.SourceInfo().value.AppendString(dst)
 	case tagJIT:
-		return "[jit lambda]"
+		return "[jit lambda]", dst
 	default:
 		if s.GetTag() == tagAny {
-			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr)))
+			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr))), dst
 		}
-		return fmt.Sprintf("<custom %d>", s.GetTag())
+		return fmt.Sprintf("<custom %d>", s.GetTag()), dst
 	}
+}
+
+func (s Scmer) String() string {
+	str, _ := s.AppendString(nil)
+	return str
 }
 
 // Stream returns an io.Reader for the value.
