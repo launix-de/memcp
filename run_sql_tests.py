@@ -385,6 +385,15 @@ class SQLTestRunner:
                     if is_perf_test:
                         sql_code = sql_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     resp = self.execute_sql(database, sql_code, syntax=self.suite_syntax)
+                    expect_error = self._step_expects_error(step)
+                    if resp is None:
+                        return self._record_fail(name, "Setup SQL failed: no response", sql_code, None, None, is_noncritical)
+                    if expect_error:
+                        if resp.status_code == 200 and "Error" not in resp.text:
+                            return self._record_fail(name, "Setup SQL expected error but succeeded", sql_code, resp, {"error": True}, is_noncritical)
+                    else:
+                        if resp.status_code != 200 or "Error" in resp.text:
+                            return self._record_fail(name, "Setup SQL failed", sql_code, resp, None, is_noncritical)
                 elif "scm" in step:
                     scm = step["scm"]
                     if is_perf_test:
@@ -581,13 +590,27 @@ class SQLTestRunner:
     def run_setup(self, setup_steps: List[Dict], database: str) -> bool:
         self.setup_operations = []
         self.current_database = database
-        for step in setup_steps:
+        for idx, step in enumerate(setup_steps, start=1):
             self.setup_operations.append(step)
             create_table = self._extract_create_table_name(step.get('sql'))
             if create_table and not self._is_create_table_if_not_exists(step.get('sql')):
                 self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}", syntax=self.suite_syntax)
             resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
-            if resp is None or resp.status_code not in [200, 500]:
+            expect_error = self._step_expects_error(step)
+            if resp is None:
+                print(f"❌ Setup step {idx} failed: no response")
+                print(f"    SQL: {step.get('sql','')[:300]}")
+                return False
+            if expect_error:
+                if resp.status_code == 200 and "Error" not in resp.text:
+                    print(f"❌ Setup step {idx} failed: expected error but succeeded")
+                    print(f"    SQL: {step.get('sql','')[:300]}")
+                    print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+                    return False
+            elif resp.status_code != 200 or "Error" in resp.text:
+                print(f"❌ Setup step {idx} failed")
+                print(f"    SQL: {step.get('sql','')[:300]}")
+                print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
                 return False
         return True
 
@@ -615,6 +638,16 @@ class SQLTestRunner:
         if not isinstance(sql, str):
             return False
         return re.search(r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b", sql, re.IGNORECASE) is not None
+
+    def _step_expects_error(self, step: Any) -> bool:
+        if not isinstance(step, dict):
+            return False
+        if step.get("error_expected") is True:
+            return True
+        expect = step.get("expect")
+        if isinstance(expect, dict) and expect.get("error") is True:
+            return True
+        return False
 
     def _extract_created_tables(self, spec: Dict[str, Any]) -> List[str]:
         # Keep cleanup scoped to tables this suite creates (no global DB cleanup).
