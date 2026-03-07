@@ -102,6 +102,22 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 					io.WriteString(w, "?")
 					return
 				}
+				// Normalize !list optimizer form back to (list ...) for stable canonical names.
+				// (!list NthLocalVar(start) count expr...) encodes (list expr...) but the
+				// storage slot (items[1]) varies per call site, so two identical lists would
+				// get different canonical names. Strip items[1] and items[2] and use "list".
+				if slice[0].IsSymbol() && slice[0].String() == "!list" && len(slice) >= 3 {
+					count := int(scm.ToInt(slice[2]))
+					if count == len(slice)-3 {
+						io.WriteString(w, "(list")
+						for _, item := range slice[3:] {
+							io.WriteString(w, " ")
+							enc(item)
+						}
+						io.WriteString(w, ")")
+						return
+					}
+				}
 			}
 			io.WriteString(w, "(")
 			for i, item := range slice {

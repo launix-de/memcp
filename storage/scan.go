@@ -81,6 +81,14 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
+	if Settings.ScanDebugging {
+		dbg := fmt.Sprintf("[SCAN] %s.%s", t.schema.Name, t.Name)
+		for _, b := range boundaries {
+			dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)
+		}
+		dbg += fmt.Sprintf(" lower=%v upper=%v", lower, upperLast)
+		fmt.Println(dbg)
+	}
 	// give sharding hints
 	for _, b := range boundaries {
 		t.AddPartitioningScore([]string{b.col})

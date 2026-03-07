@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "sort"
 import "time"
 import "strings"
@@ -215,6 +216,14 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		}
 	}
 	lower, upperLast := indexFromBoundaries(boundaries)
+	if Settings.ScanDebugging {
+		dbg := fmt.Sprintf("[SCAN_ORDER] %s.%s", t.schema.Name, t.Name)
+		for _, b := range boundaries {
+			dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)
+		}
+		dbg += fmt.Sprintf(" lower=%v upper=%v", lower, upperLast)
+		fmt.Println(dbg)
+	}
 
 	// give sharding hints
 	for _, b := range boundaries {

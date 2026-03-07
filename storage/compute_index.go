@@ -42,34 +42,34 @@ func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 	if expr.IsNthLocalVar() {
 		return int(expr.NthLocalVar()) >= 0 && int(expr.NthLocalVar()) < len(params)
 	}
-	// function call or list
+	// function call: look up declaration and require Foldable.
+	// DeclarationForValue handles both unoptimized (symbol) and
+	// optimizer-resolved (tagFunc/tagFuncEnv) forms via the same path.
 	if expr.IsSlice() {
 		items := expr.Slice()
 		if len(items) == 0 {
 			return true
 		}
-		// reject forbidden constructs in function position
-		if items[0].IsSymbol() {
-			switch items[0].String() {
-			case "outer", "scan", "scan_order", "scalar_scan", "scalar_scan_order", "lambda":
-				return false
-			}
-		}
 		// calling a param as function is not safe
 		if items[0].IsNthLocalVar() {
 			return false
 		}
-		if items[0].IsSymbol() {
-			for _, p := range params {
-				if p.IsSymbol() && p.String() == items[0].String() {
-					return false // calling a param as function
+		// !list special form: pure alloc-free optimization of (list expr...).
+		// Valid when count == number of value exprs. Check only the value exprs for rawDataset.
+		if items[0].IsSymbol() && items[0].String() == "!list" && len(items) >= 3 {
+			count := int(scm.ToInt(items[2]))
+			if count == len(items)-3 {
+				for _, item := range items[3:] {
+					if !isRawDataset(params, item) {
+						return false
+					}
 				}
+				return true
 			}
 		}
-		// non-symbol function positions must also be rawDataset
-		// (catches e.g. ((get_column tbl ...) args...) where the function
-		// is itself a table-context read, not a pure param-based expression)
-		if !items[0].IsSymbol() && !isRawDataset(params, items[0]) {
+		// the function must have a foldable declaration
+		decl := scm.DeclarationForValue(items[0])
+		if decl == nil || !decl.Foldable {
 			return false
 		}
 		// all arguments must be rawDataset
@@ -79,10 +79,6 @@ func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 			}
 		}
 		return true
-	}
-	// standalone Proc (lambda value) in arg position: not rawDataset
-	if expr.IsProc() {
-		return false
 	}
 	return false
 }
@@ -175,6 +171,23 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 			return scm.NewNil(), false
 		}
 	}
+	// !list special form: (!list NthLocalVar(start) count expr...)
+	// Evaluate items[3:] directly without needing VarsNumbered context.
+	if expr.IsSlice() {
+		items2 := expr.Slice()
+		if len(items2) >= 3 && items2[0].IsSymbol() && items2[0].String() == "!list" {
+			count := int(scm.ToInt(scm.Scmer(items2[2])))
+			vals := make([]scm.Scmer, 0, count)
+			for i := 0; i < count && i+3 < len(items2); i++ {
+				v, ok2 := evalIndependentScmer(items2[i+3], env)
+				if !ok2 {
+					return scm.NewNil(), false
+				}
+				vals = append(vals, v)
+			}
+			return scm.NewSlice(vals), true
+		}
+	}
 	// general case: try Eval (for pure function calls like YEAR(NOW()))
 	defer func() {
 		if r := recover(); r != nil {
@@ -203,6 +216,9 @@ func buildComputedFn(formulaExpr scm.Scmer, origParams scm.Scmer, env *scm.Env, 
 	if !origParams.IsSlice() {
 		return nil, scm.NewNil()
 	}
+	// De-optimize any !list special forms back to plain (list ...) so the lambda
+	// does not depend on VarsNumbered slots beyond its params.
+	formulaExpr = scm.DeoptimizeExpr(formulaExpr)
 	// Build (lambda origParams formulaExpr) in the proc's environment so
 	// outer variable references are preserved.
 	lambdaForm := scm.NewSlice([]scm.Scmer{

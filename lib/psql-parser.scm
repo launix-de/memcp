@@ -512,6 +512,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			)
 	)))
 
+	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
+	(define psql_truncate (parser '(
+		(atom "TRUNCATE" true) (? (atom "TABLE" true))
+		/* schema-qualified */
+		(? (define schema2 psql_identifier) ".") (define tbl psql_identifier)
+	) (begin
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			'((quote scan)
+				(coalesce schema2 schema)
+				tbl
+				'(list)
+				'((quote lambda) '() true)
+				'(list "$update")
+				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+				(quote +)
+				0
+			)
+	)))
+
 	(define psql_insert_into (parser '(
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
@@ -722,6 +741,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		psql_alter_table
 		psql_update
 		psql_delete
+		psql_truncate
 
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username psql_identifier)

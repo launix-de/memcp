@@ -191,10 +191,19 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			return nil
 		}
 		v := node.Slice()
-		if len(v) == 0 || !v[0].IsSymbol() {
+		if len(v) == 0 {
 			return nil
 		}
-		if v[0].SymbolEquals("equal?") || v[0].SymbolEquals("equal??") {
+		// funcIs checks if head represents the named function.
+		// Works for both unoptimized (symbol) and optimizer-resolved (tagFunc) forms.
+		funcIs := func(head scm.Scmer, name string) bool {
+			if head.SymbolEquals(name) {
+				return true
+			}
+			d := scm.DeclarationForValue(head)
+			return d != nil && d.Name == name
+		}
+		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
 					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
@@ -230,7 +239,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			return nil
-		} else if v[0].SymbolEquals("<") || v[0].SymbolEquals("<=") {
+		} else if funcIs(v[0], "<") || funcIs(v[0], "<=") {
 			incl := v[0].SymbolEquals("<=")
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
@@ -268,7 +277,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			return nil
-		} else if v[0].SymbolEquals(">") || v[0].SymbolEquals(">=") {
+		} else if funcIs(v[0], ">") || funcIs(v[0], ">=") {
 			incl := v[0].SymbolEquals(">=")
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
@@ -306,13 +315,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			return nil
-		} else if v[0].SymbolEquals("nil?") && len(v) >= 2 {
+		} else if funcIs(v[0], "nil?") && len(v) >= 2 {
 			// IS NULL: (nil? col)
 			if col, ok := resolveColVar(v[1]); ok {
 				return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
 			}
 			return nil
-		} else if v[0].SymbolEquals("strlike") && len(v) >= 3 {
+		} else if funcIs(v[0], "strlike") && len(v) >= 3 {
 			// LIKE prefix: (strlike col "foo%" collation) → range [prefix, prefix+1)
 			if col, ok := resolveColVar(v[1]); ok {
 				if pat, ok := extractConstant(v[2]); ok && pat.IsString() {

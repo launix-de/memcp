@@ -43,9 +43,10 @@ type SettingsT struct {
 	MetricsTracingInterval int   // interval in seconds (0 = default 60s)
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
 	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
+	ScanDebugging           bool  // when true, log every scan/scan_order: db+table+boundaries+index
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -77,6 +78,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("MetricsTracingInterval"), scm.NewInt(int64(Settings.MetricsTracingInterval)),
 			scm.NewString("ShutdownDrainSeconds"), scm.NewInt(int64(Settings.ShutdownDrainSeconds)),
 			scm.NewString("LogJIT"), scm.NewBool(Settings.LogJIT),
+			scm.NewString("ScanDebugging"), scm.NewBool(Settings.ScanDebugging),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -112,6 +114,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.ShutdownDrainSeconds))
 		case "LogJIT":
 			return scm.NewBool(Settings.LogJIT)
+		case "ScanDebugging":
+			return scm.NewBool(Settings.ScanDebugging)
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -161,6 +165,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		case "LogJIT":
 			Settings.LogJIT = scm.ToBool(a[1])
 			scm.LogJIT = Settings.LogJIT
+		case "ScanDebugging":
+			Settings.ScanDebugging = scm.ToBool(a[1])
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
