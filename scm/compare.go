@@ -21,6 +21,59 @@ import (
 	"unsafe"
 )
 
+// nibbleAt reads the 4-bit nibble at absolute nibble index absIdx from ptr.
+// absIdx = byte_offset*2 + nibble_within_byte (0=low nibble, 1=high nibble).
+func nibbleAt(ptr *byte, absIdx int) byte {
+	b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(absIdx>>1)))
+	if absIdx&1 == 0 {
+		return b & 0x0F
+	}
+	return b >> 4
+}
+
+// cstringIsNibble reports whether the format field of a tagCString aux value
+// uses 4-bit nibble packing (one nibble per character).
+// Must stay in sync with storage.StringFormat constants:
+//
+//	1=Phone, 2=HexLower, 3=HexUpper, 8=Decimal, 9=DateTime, 10=PhoneDTMF
+func cstringIsNibble(format uint8) bool {
+	return format == 1 || format == 2 || format == 3 || format == 8 || format == 9 || format == 10
+}
+
+// cstringEqual compares two tagCString Scmers without materializing strings.
+// Algorithm: len≠len → false; fmt≠fmt → materialize; fmt=fmt → nibble or byte compare.
+func cstringEqual(a, b Scmer) bool {
+	aVal := auxVal(a.aux)
+	bVal := auxVal(b.aux)
+	aCharLen := int(aVal & ((1 << 43) - 1))
+	bCharLen := int(bVal & ((1 << 43) - 1))
+	if aCharLen != bCharLen {
+		return false
+	}
+	aFmt := uint8(aVal >> 44)
+	bFmt := uint8(bVal >> 44)
+	if aFmt != bFmt {
+		return a.String() == b.String() // different formats, materialize
+	}
+	aNibOff := int((aVal >> 43) & 1)
+	bNibOff := int((bVal >> 43) & 1)
+	if cstringIsNibble(aFmt) {
+		// Nibble comparison: O(charLen), zero allocation, format-agnostic
+		// (same nibble index ↔ same character regardless of charset mapping)
+		for i := 0; i < aCharLen; i++ {
+			if nibbleAt(a.ptr, aNibOff+i) != nibbleAt(b.ptr, bNibOff+i) {
+				return false
+			}
+		}
+		return true
+	}
+	// UUID formats (6=UUIDLower, 7=UUIDUpper): stored as 16 raw bytes, nibbleOff always 0
+	if aFmt == 6 || aFmt == 7 {
+		return unsafe.String(a.ptr, 16) == unsafe.String(b.ptr, 16)
+	}
+	return a.String() == b.String() // fallback for unknown/future formats
+}
+
 func EqualScm(a, b Scmer) Scmer { return NewBool(Equal(a, b)) }
 
 func Equal(a, b Scmer) bool {
@@ -63,8 +116,10 @@ func Equal(a, b Scmer) bool {
 			return a.Int() == b.Int()
 		case tagFloat:
 			return a.Float() == b.Float()
-		case tagString, tagSymbol, tagCString:
+		case tagString, tagSymbol:
 			return a.String() == b.String()
+		case tagCString:
+			return cstringEqual(a, b)
 		case tagBString:
 			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
 			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
@@ -276,8 +331,10 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(a.Int() == b.Int())
 		case tagFloat:
 			return NewBool(a.Float() == b.Float())
-		case tagString, tagSymbol, tagCString:
+		case tagString, tagSymbol:
 			return NewBool(strings.EqualFold(a.String(), b.String()))
+		case tagCString:
+			return NewBool(cstringEqual(a, b))
 		case tagBString:
 			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
 			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
