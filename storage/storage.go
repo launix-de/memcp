@@ -953,7 +953,7 @@ func Init(en scm.Env) {
 			}
 			pjSchema := scm.String(a[2])
 			pjTable := scm.String(a[3])
-			for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+			for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete, AfterDropTable, AfterDropColumn} {
 				triggerName := ".prejoin:" + pjTable + "|" + srcTable.Name + "|" + timing.String()
 				exists := false
 				for _, tr := range srcTable.Triggers {

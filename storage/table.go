@@ -668,6 +668,9 @@ func (t *table) DropColumn(name string) bool {
 
 			t.schema.save()
 			t.schema.schemalock.Unlock()
+			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
+			// can invalidate without lock-ordering cycles.
+			t.ExecuteTableLifecycleTriggers(AfterDropColumn)
 			// deregister temp column AFTER releasing schemalock
 			if removedCol.IsTemp {
 				GlobalCache.Remove(removedCol)

@@ -1500,7 +1500,10 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define mat_col_names (map mat_cols car))
 				/* compute prejoin table name and alias */
 				(define pjvar ".pj")
-				(define prejointbl (concat ".prejoin:" (map tables (lambda (t) (match t '(tv _ _ _ _) tv))) ":" mat_col_names "|" condition))
+				/* include source schema/table in the canonical name to avoid alias-only collisions across suites */
+				(define prejointbl (concat ".prejoin:" (map tables (lambda (t)
+					(match t '(tv tschema ttbl _ _)
+						(concat tschema "." ttbl "@" tv)))) ":" mat_col_names "|" condition))
 				/* capture outer schema for temp table operations */
 				(define pj_schema schema)
 				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
@@ -1569,7 +1572,9 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							'(list "engine" "sloppy") true)
 						(list 'if (list 'equal? 0 (list 'scan_estimate pj_schema prejointbl))
 							'('time materialize_plan "materialize")))
-					(map tables (lambda (t) (list 'register_prejoin_invalidation (nth t 1) (nth t 2) pj_schema prejointbl)))
+					(map tables (lambda (t)
+						(match t '(_ src_schema src_tbl _ _)
+							(list 'register_prejoin_invalidation src_schema src_tbl pj_schema prejointbl))))
 					(list grouped_result)))
 			)
 		)
