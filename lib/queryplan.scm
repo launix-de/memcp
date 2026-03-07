@@ -269,9 +269,12 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 	(if (not (nil? fk_result))
 		fk_result
 		(begin
+			(define alias_map (list (list tblvar (concat schema "." tbl))))
+			(define key_names (map keys (lambda (k) (canonical_expr_name k '(list) '(list) alias_map))))
+			(define condition_name (if (nil? condition_suffix) nil (canonical_expr_name condition_suffix '(list) '(list) alias_map)))
 			(define keytable_name (if (nil? condition_suffix)
-				(concat "." tbl ":" keys)
-				(concat "." tbl ":" keys "|" condition_suffix)))
+				(concat "." tbl ":" key_names)
+				(concat "." tbl ":" key_names "|" condition_name)))
 			/* compute column definitions and partition spec at compile time */
 			(define kt_cols (cons
 				'("unique" "group" (map keys (lambda (col) (concat col))))
@@ -1377,7 +1380,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							nil))
 						/* exists column: needed when WHERE condition present (non-global aggregate) */
 						(define needs_exists (and (not (equal? condition true)) (not (equal? stage_group '(1)))))
-						(define exists_col_name (if needs_exists (concat ".exists|" condition) nil))
+						(define exists_col_name (if needs_exists (concat ".exists|" (canonical_expr_name condition '(list) '(list) (list (list tblvar (concat schema "." tbl))))) nil))
 
 						/* AND exists>0 into HAVING so empty/non-matching groups are excluded */
 						(define effective_having (if needs_exists
@@ -1500,10 +1503,16 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define mat_col_names (map mat_cols car))
 				/* compute prejoin table name and alias */
 				(define pjvar ".pj")
-				/* include source schema/table in the canonical name to avoid alias-only collisions across suites */
-				(define prejointbl (concat ".prejoin:" (map tables (lambda (t)
+				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
+				(define prejoin_alias_map (map tables (lambda (t)
 					(match t '(tv tschema ttbl _ _)
-						(concat tschema "." ttbl "@" tv)))) ":" mat_col_names "|" condition))
+						(list tv (concat tschema "." ttbl)))))
+				)
+				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
+				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
+				(define prejointbl (concat ".prejoin:"
+					(map tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
+					) ":" prejoin_col_names "|" prejoin_condition_name))
 				/* capture outer schema for temp table operations */
 				(define pj_schema schema)
 				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
