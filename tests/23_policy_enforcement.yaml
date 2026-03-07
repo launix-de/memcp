@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "Policy checks for all CRUD operations"
+  isolated: true
 
 setup:
   - sql: "DELETE FROM `system`.`access` WHERE username='alice'"

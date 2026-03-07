@@ -15,6 +15,7 @@
 metadata:
   version: "1.0"
   description: "Incremental aggregate correctness: SUM, COUNT, MIN, MAX, AVG after INSERT/UPDATE/DELETE"
+  isolated: true
 
 test_cases:
   # ============================================================

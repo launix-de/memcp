@@ -265,7 +265,7 @@ func (tx *TxContext) RegisterTouchedShard(shard *storageShard) {
 func (tx *TxContext) SyncTouchedShards() {
 	tx.touchedShards.Range(func(key, _ any) bool {
 		shard := key.(*storageShard)
-		if shard.t.PersistencyMode == Safe {
+		if shard.t.PersistencyMode == Safe && shard.logfile != nil {
 			shard.logfile.Sync()
 		}
 		return true

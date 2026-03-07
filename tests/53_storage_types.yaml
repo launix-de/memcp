@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "Storage type selection and compression coverage"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS st_float"

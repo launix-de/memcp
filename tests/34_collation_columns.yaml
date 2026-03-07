@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "Column-level COLLATE in CREATE/ALTER TABLE; verify persistence via SHOW"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS coll_cols"
