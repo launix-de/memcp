@@ -21,16 +21,6 @@ import (
 	"unsafe"
 )
 
-// nibbleAt reads the 4-bit nibble at absolute nibble index absIdx from ptr.
-// absIdx = byte_offset*2 + nibble_within_byte (0=low nibble, 1=high nibble).
-func nibbleAt(ptr *byte, absIdx int) byte {
-	b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(absIdx>>1)))
-	if absIdx&1 == 0 {
-		return b & 0x0F
-	}
-	return b >> 4
-}
-
 // cstringIsNibble reports whether the format field of a tagCString aux value
 // uses 4-bit nibble packing (one nibble per character).
 // Must stay in sync with storage.StringFormat constants:
@@ -41,12 +31,14 @@ func cstringIsNibble(format uint8) bool {
 }
 
 // cstringEqual compares two tagCString Scmers without materializing strings.
-// Algorithm: len≠len → false; fmt≠fmt → materialize; fmt=fmt → nibble or byte compare.
+// Algorithm: len≠len → false; fmt≠fmt → materialize; fmt=fmt → single memcmp.
+// Nibble strings are byte-aligned in the dict (odd charLen padded with a 0 nibble),
+// so comparing (charLen+1)/2 bytes is correct for same-format strings.
 func cstringEqual(a, b Scmer) bool {
 	aVal := auxVal(a.aux)
 	bVal := auxVal(b.aux)
-	aCharLen := int(aVal & ((1 << 43) - 1))
-	bCharLen := int(bVal & ((1 << 43) - 1))
+	aCharLen := int(aVal & ((1 << 44) - 1))
+	bCharLen := int(bVal & ((1 << 44) - 1))
 	if aCharLen != bCharLen {
 		return false
 	}
@@ -55,19 +47,13 @@ func cstringEqual(a, b Scmer) bool {
 	if aFmt != bFmt {
 		return a.String() == b.String() // different formats, materialize
 	}
-	aNibOff := int((aVal >> 43) & 1)
-	bNibOff := int((bVal >> 43) & 1)
 	if cstringIsNibble(aFmt) {
-		// Nibble comparison: O(charLen), zero allocation, format-agnostic
-		// (same nibble index ↔ same character regardless of charset mapping)
-		for i := 0; i < aCharLen; i++ {
-			if nibbleAt(a.ptr, aNibOff+i) != nibbleAt(b.ptr, bNibOff+i) {
-				return false
-			}
-		}
-		return true
+		// Both strings start at byte boundary (nibbleOff always 0).
+		// Odd charLen has a deterministic 0-padding nibble in the high slot of last byte.
+		byteCount := (aCharLen + 1) / 2
+		return unsafe.String(a.ptr, byteCount) == unsafe.String(b.ptr, byteCount)
 	}
-	// UUID formats (6=UUIDLower, 7=UUIDUpper): stored as 16 raw bytes, nibbleOff always 0
+	// UUID formats (6=UUIDLower, 7=UUIDUpper): always 16 raw bytes
 	if aFmt == 6 || aFmt == 7 {
 		return unsafe.String(a.ptr, 16) == unsafe.String(b.ptr, 16)
 	}
