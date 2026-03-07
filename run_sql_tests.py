@@ -482,7 +482,7 @@ class SQLTestRunner:
         else:
             if not is_sparql:
                 create_table = self._extract_create_table_name(query)
-                if create_table:
+                if create_table and not self._is_create_table_if_not_exists(query):
                     self.execute_sql(
                         database,
                         f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}",
@@ -584,7 +584,7 @@ class SQLTestRunner:
         for step in setup_steps:
             self.setup_operations.append(step)
             create_table = self._extract_create_table_name(step.get('sql'))
-            if create_table:
+            if create_table and not self._is_create_table_if_not_exists(step.get('sql')):
                 self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}", syntax=self.suite_syntax)
             resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
             if resp is None or resp.status_code not in [200, 500]:
@@ -610,6 +610,11 @@ class SQLTestRunner:
         if not table:
             return None
         return table
+
+    def _is_create_table_if_not_exists(self, sql: Any) -> bool:
+        if not isinstance(sql, str):
+            return False
+        return re.search(r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b", sql, re.IGNORECASE) is not None
 
     def _extract_created_tables(self, spec: Dict[str, Any]) -> List[str]:
         # Keep cleanup scoped to tables this suite creates (no global DB cleanup).
