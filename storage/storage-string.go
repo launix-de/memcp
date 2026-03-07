@@ -33,93 +33,106 @@ import "github.com/launix-de/memcp/scm"
 type StringFormat uint8
 
 const (
-	FormatRaw           StringFormat = 0 // 8 bit/char, no compression
-	FormatDigitsSymbols StringFormat = 1 // [0-9+\-. ()] 4 bit/char, 16-char charset
-	FormatHexLower      StringFormat = 2 // [0-9a-f] packed nibbles, 4 bit/char
-	FormatHexUpper      StringFormat = 3 // [0-9A-F] packed nibbles, 4 bit/char
-	FormatBase64Lower   StringFormat = 4 // URL-safe base64, stored as decoded binary
-	FormatBase64Upper   StringFormat = 5 // standard base64,  stored as decoded binary
-	FormatUUIDLower     StringFormat = 6 // xxxxxxxx-…-xxxx lowercase, stored as 16 bytes
-	FormatUUIDUpper     StringFormat = 7 // XXXXXXXX-…-XXXX uppercase, stored as 16 bytes
+	FormatRaw         StringFormat = 0  // 8 bit/char, no compression
+	FormatPhone       StringFormat = 1  // [0-9 +\-/()] 4 bit/char — stored phone numbers with space/slash
+	FormatHexLower    StringFormat = 2  // [0-9a-f] packed nibbles, 4 bit/char
+	FormatHexUpper    StringFormat = 3  // [0-9A-F] packed nibbles, 4 bit/char
+	FormatBase64Lower StringFormat = 4  // URL-safe base64, stored as decoded binary
+	FormatBase64Upper StringFormat = 5  // standard base64, stored as decoded binary
+	FormatUUIDLower   StringFormat = 6  // xxxxxxxx-…-xxxx lowercase, stored as 16 bytes
+	FormatUUIDUpper   StringFormat = 7  // XXXXXXXX-…-XXXX uppercase, stored as 16 bytes
+	FormatDecimal     StringFormat = 8  // [0-9+\-.,eE] 4 bit/char — DE+EN numbers, IPv4, scientific
+	FormatDateTime    StringFormat = 9  // [0-9\-:. T] 4 bit/char — ISO 8601 dates and times
+	FormatPhoneDTMF   StringFormat = 10 // [0-9+\-()#*] 4 bit/char — DTMF dialing sequences
 )
 
-// digitsSymbolsEnc maps nibble index (0-15) → character.
-// digitsSymbolsDec maps character byte → nibble index, -1 if not in set.
-var digitsSymbolsEnc = [16]byte{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '-', '.', ' ', '(', ')'}
-var digitsSymbolsDec [256]int8
-
-func init() {
-	for i := range digitsSymbolsDec {
-		digitsSymbolsDec[i] = -1
-	}
-	for i, c := range digitsSymbolsEnc {
-		digitsSymbolsDec[c] = int8(i)
-	}
+// nibbleCharset holds the encode (index→char) and decode (char→index) tables
+// for 4-bit nibble-packed string formats.
+type nibbleCharset struct {
+	enc [16]byte
+	dec [256]int8
 }
+
+func makeNibbleCharset(chars []byte) nibbleCharset {
+	var cs nibbleCharset
+	for i := range cs.dec {
+		cs.dec[i] = -1
+	}
+	for i, c := range chars {
+		cs.enc[i] = c
+		cs.dec[c] = int8(i)
+	}
+	return cs
+}
+
+var (
+	// hexLowerCharset: lowercase hex digits [0-9a-f]
+	hexLowerCharset = makeNibbleCharset([]byte("0123456789abcdef"))
+	// hexUpperCharset: uppercase hex digits [0-9A-F]
+	hexUpperCharset = makeNibbleCharset([]byte("0123456789ABCDEF"))
+	// phoneCharset: space and slash for formatted stored numbers like "+49 30 123-45/6"
+	phoneCharset = makeNibbleCharset([]byte("0123456789 +-/()"))
+	// phoneDTMFCharset: hash and star for dialing sequences like "*100#" or "+49123*"
+	phoneDTMFCharset = makeNibbleCharset([]byte("0123456789+-()#*"))
+	// decimalCharset: both DE (comma) and EN (dot) separators + scientific notation
+	decimalCharset = makeNibbleCharset([]byte("0123456789+-.,eE"))
+	// dateTimeCharset: ISO 8601 (15 chars, index 15 unused)
+	dateTimeCharset = makeNibbleCharset([]byte("0123456789-:. T"))
+)
+
+// allFormatsValid is the initial bitmask with all format bits set.
+const allFormatsValid uint16 = (1 << 11) - 1 // bits 0..10
 
 // checkFormatBits returns which StringFormat bits remain compatible with s.
 // bit i is set iff StringFormat(i) is still a valid encoding for s.
 // FormatRaw (bit 0) is always set.
-func checkFormatBits(s string) uint8 {
+func checkFormatBits(s string) uint16 {
 	if len(s) == 0 {
-		return 0xFF // empty string is compatible with everything
+		return allFormatsValid // empty string is compatible with everything
 	}
-	valid := uint8(0xFF)
+	valid := allFormatsValid
 
-	isHexLower := true
-	isHexUpper := true
-	isDigSym := len(s)%2 == 0 // odd-length strings can't be packed into full nibbles
-	isB64Std := len(s)%4 == 0
-	isB64URL := len(s)%4 == 0
+	// Base64 requires length divisible by 4
+	if len(s)%4 != 0 {
+		valid &^= (1 << FormatBase64Upper) | (1 << FormatBase64Lower)
+	}
 
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		// mask out formats that don't accept c; use nibble dec tables directly
+		if hexLowerCharset.dec[c] < 0 {
+			valid &^= 1 << FormatHexLower
+		}
+		if hexUpperCharset.dec[c] < 0 {
+			valid &^= 1 << FormatHexUpper
+		}
+		if phoneCharset.dec[c] < 0 {
+			valid &^= 1 << FormatPhone
+		}
+		if phoneDTMFCharset.dec[c] < 0 {
+			valid &^= 1 << FormatPhoneDTMF
+		}
+		if decimalCharset.dec[c] < 0 {
+			valid &^= 1 << FormatDecimal
+		}
+		if dateTimeCharset.dec[c] < 0 {
+			valid &^= 1 << FormatDateTime
+		}
+		isAlpha := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 		isDigit := c >= '0' && c <= '9'
-		isLowHex := isDigit || (c >= 'a' && c <= 'f')
-		isUpHex := isDigit || (c >= 'A' && c <= 'F')
-		if !isLowHex {
-			isHexLower = false
+		if !isAlpha && !isDigit && c != '+' && c != '/' && c != '=' {
+			valid &^= 1 << FormatBase64Upper
 		}
-		if !isUpHex {
-			isHexUpper = false
+		if !isAlpha && !isDigit && c != '-' && c != '_' && c != '=' {
+			valid &^= 1 << FormatBase64Lower
 		}
-		if isDigSym && digitsSymbolsDec[c] < 0 {
-			isDigSym = false
-		}
-		// standard base64: A-Za-z0-9+/=
-		if isB64Std {
-			isAlpha := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-			if !isAlpha && !isDigit && c != '+' && c != '/' && c != '=' {
-				isB64Std = false
-			}
-		}
-		// URL-safe base64: A-Za-z0-9-_=
-		if isB64URL {
-			isAlpha := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-			if !isAlpha && !isDigit && c != '-' && c != '_' && c != '=' {
-				isB64URL = false
-			}
+		// early exit once only FormatRaw remains
+		if valid == 1 {
+			return valid
 		}
 	}
 
-	// UUID: exactly 36 chars, pattern xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 	isUUIDLow, isUUIDUp := checkUUID(s)
-
-	if !isHexLower {
-		valid &^= 1 << FormatHexLower
-	}
-	if !isHexUpper {
-		valid &^= 1 << FormatHexUpper
-	}
-	if !isDigSym {
-		valid &^= 1 << FormatDigitsSymbols
-	}
-	if !isB64Std {
-		valid &^= 1 << FormatBase64Upper
-	}
-	if !isB64URL {
-		valid &^= 1 << FormatBase64Lower
-	}
 	if !isUUIDLow {
 		valid &^= 1 << FormatUUIDLower
 	}
@@ -161,24 +174,32 @@ func checkUUID(s string) (lower, upper bool) {
 }
 
 // chooseBestFormat picks the most space-efficient format from validFormats.
-func chooseBestFormat(valid uint8) StringFormat {
-	// UUID: 16 bytes vs 36 chars → ~56% savings (best)
+func chooseBestFormat(valid uint16) StringFormat {
+	// UUID: 16 bytes vs 36 chars → ~56% savings (best for fixed-length UUID columns)
 	if valid&(1<<FormatUUIDLower) != 0 {
 		return FormatUUIDLower
 	}
 	if valid&(1<<FormatUUIDUpper) != 0 {
 		return FormatUUIDUpper
 	}
-	// Hex: 50% savings
+	// Hex/nibble sets: 50% savings
 	if valid&(1<<FormatHexLower) != 0 {
 		return FormatHexLower
 	}
 	if valid&(1<<FormatHexUpper) != 0 {
 		return FormatHexUpper
 	}
-	// DigitsSymbols: 50% savings
-	if valid&(1<<FormatDigitsSymbols) != 0 {
-		return FormatDigitsSymbols
+	if valid&(1<<FormatPhone) != 0 {
+		return FormatPhone
+	}
+	if valid&(1<<FormatPhoneDTMF) != 0 {
+		return FormatPhoneDTMF
+	}
+	if valid&(1<<FormatDecimal) != 0 {
+		return FormatDecimal
+	}
+	if valid&(1<<FormatDateTime) != 0 {
+		return FormatDateTime
 	}
 	// Base64: ~25% savings
 	if valid&(1<<FormatBase64Upper) != 0 {
@@ -190,22 +211,34 @@ func chooseBestFormat(valid uint8) StringFormat {
 	return FormatRaw
 }
 
+// packNibbles encodes s into 4-bit nibbles using cs and appends to dst.
+func packNibbles(dst []byte, s string, cs *nibbleCharset) []byte {
+	for i := 0; i < len(s); i += 2 {
+		lo := cs.dec[s[i]]
+		hi := int8(0)
+		if i+1 < len(s) {
+			hi = cs.dec[s[i+1]]
+		}
+		dst = append(dst, byte(lo)|byte(hi)<<4)
+	}
+	return dst
+}
+
 // compressString encodes s into the chosen format and appends bytes to dst.
 func compressString(dst []byte, s string, format StringFormat) []byte {
 	switch format {
-	case FormatHexLower, FormatHexUpper:
-		b, _ := hex.DecodeString(s)
-		return append(dst, b...)
-	case FormatDigitsSymbols:
-		for i := 0; i < len(s); i += 2 {
-			lo := digitsSymbolsDec[s[i]]
-			hi := int8(0)
-			if i+1 < len(s) {
-				hi = digitsSymbolsDec[s[i+1]]
-			}
-			dst = append(dst, byte(lo)|byte(hi)<<4)
-		}
-		return dst
+	case FormatHexLower:
+		return packNibbles(dst, s, &hexLowerCharset)
+	case FormatHexUpper:
+		return packNibbles(dst, s, &hexUpperCharset)
+	case FormatPhone:
+		return packNibbles(dst, s, &phoneCharset)
+	case FormatPhoneDTMF:
+		return packNibbles(dst, s, &phoneDTMFCharset)
+	case FormatDecimal:
+		return packNibbles(dst, s, &decimalCharset)
+	case FormatDateTime:
+		return packNibbles(dst, s, &dateTimeCharset)
 	case FormatBase64Upper:
 		b, _ := base64.StdEncoding.DecodeString(s)
 		return append(dst, b...)
@@ -224,13 +257,13 @@ func compressString(dst []byte, s string, format StringFormat) []byte {
 // compressedByteLen returns how many bytes compressString produces for a string of charLen chars.
 func compressedByteLen(charLen int, format StringFormat) int {
 	switch format {
-	case FormatHexLower, FormatHexUpper:
-		return charLen / 2
-	case FormatDigitsSymbols:
+	case FormatHexLower, FormatHexUpper,
+		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
 		return (charLen + 1) / 2
 	case FormatBase64Upper, FormatBase64Lower:
-		// DecodedLen is an upper bound; actual might be less due to padding.
-		// We store the exact count in lens, so this is only used during build.
+		// base64.DecodedLen is an upper bound (padding bytes don't produce output).
+		// The struct stores the exact byte count in lens, so this helper is only
+		// used to pre-size buffers during the build phase.
 		return base64.StdEncoding.DecodedLen(charLen)
 	case FormatUUIDLower, FormatUUIDUpper:
 		return 16
@@ -239,21 +272,53 @@ func compressedByteLen(charLen int, format StringFormat) int {
 	}
 }
 
+// adjustLensForFormat corrects StorageInt scan statistics (offset/max) to match
+// the values that build() will actually write, so that init() allocates the right
+// bitsize.  Must be called BEFORE lens.init().
+func adjustLensForFormat(lens *StorageInt, format StringFormat) {
+	switch format {
+	case FormatBase64Upper, FormatBase64Lower:
+		// build() stores decoded byte count; use 0 as safe lower bound to avoid
+		// negative relative values from padding variability
+		lens.offset = 0
+		lens.max = int64(base64.StdEncoding.DecodedLen(int(lens.max)))
+	// All nibble formats (Hex, Phone, PhoneDTMF, Decimal, DateTime): char count == raw len → no adjustment
+	// UUID: lens is never read → no adjustment
+	// Raw: byte count == char count → no adjustment
+	}
+}
+
+// unpackNibbles decodes 4-bit nibble-packed bytes back to a string using cs.
+// charLen is the original character count (may be odd; last nibble of last byte ignored if so).
+func unpackNibbles(b []byte, charLen int, cs *nibbleCharset) string {
+	result := make([]byte, charLen)
+	for i := 0; i < charLen; i++ {
+		packed := b[i/2]
+		if i%2 == 0 {
+			result[i] = cs.enc[packed&0x0F]
+		} else {
+			result[i] = cs.enc[(packed>>4)&0x0F]
+		}
+	}
+	return unsafe.String(&result[0], charLen)
+}
+
 // decompressBytes decodes b back to a string using the given format.
-// byteLen is len(b); the original char count is implied by the format and byteLen.
-func decompressBytes(b []byte, format StringFormat) string {
+// charLen is the original character count (needed for nibble formats with odd length).
+func decompressBytes(b []byte, format StringFormat, charLen int) string {
 	switch format {
 	case FormatHexLower:
-		return hex.EncodeToString(b) // returns lowercase
+		return unpackNibbles(b, charLen, &hexLowerCharset)
 	case FormatHexUpper:
-		return strings.ToUpper(hex.EncodeToString(b))
-	case FormatDigitsSymbols:
-		result := make([]byte, len(b)*2)
-		for i, packed := range b {
-			result[i*2] = digitsSymbolsEnc[packed&0x0F]
-			result[i*2+1] = digitsSymbolsEnc[(packed>>4)&0x0F]
-		}
-		return unsafe.String(&result[0], len(result))
+		return unpackNibbles(b, charLen, &hexUpperCharset)
+	case FormatPhone:
+		return unpackNibbles(b, charLen, &phoneCharset)
+	case FormatPhoneDTMF:
+		return unpackNibbles(b, charLen, &phoneDTMFCharset)
+	case FormatDecimal:
+		return unpackNibbles(b, charLen, &decimalCharset)
+	case FormatDateTime:
+		return unpackNibbles(b, charLen, &dateTimeCharset)
 	case FormatBase64Upper:
 		return base64.StdEncoding.EncodeToString(b)
 	case FormatBase64Lower:
@@ -265,6 +330,9 @@ func decompressBytes(b []byte, format StringFormat) string {
 		h := strings.ToUpper(hex.EncodeToString(b))
 		return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 	default: // FormatRaw
+		if len(b) == 0 {
+			return ""
+		}
 		return unsafe.String(&b[0], len(b))
 	}
 }
@@ -280,12 +348,12 @@ type StorageString struct {
 	format     StringFormat
 
 	// helpers (scan/build phase only)
-	sb          strings.Builder
-	compBuf     []byte // accumulates compressed bytes during build (nodict) or init (dict)
-	reverseMap  map[string][3]uint
-	count       uint
-	allsize     int
-	validFormats uint8
+	sb           strings.Builder
+	compBuf      []byte // accumulates compressed bytes during build (nodict) or init (dict)
+	reverseMap   map[string][3]uint
+	count        uint
+	allsize      int
+	validFormats uint16
 	// prefix statistics
 	prefixstat map[string]int
 	laststr    string
@@ -355,29 +423,57 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 func (s *StorageString) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageString) GetValue(i uint32) scm.Scmer {
-	var byteStart, byteLen uint64
+	var byteStart, lensVal uint64
 	if s.nodict {
 		bs := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
 		if s.starts.hasNull && bs == uint64(s.starts.null) {
 			return scm.NewNil()
 		}
 		byteStart = bs
-		byteLen = uint64(int64(s.lens.GetValueUInt(i)) + s.lens.offset)
+		lensVal = uint64(int64(s.lens.GetValueUInt(i)) + s.lens.offset)
 	} else {
 		idx := uint32(int64(s.values.GetValueUInt(i)) + s.values.offset)
 		if s.values.hasNull && idx == uint32(s.values.null) {
 			return scm.NewNil()
 		}
 		byteStart = uint64(int64(s.starts.GetValueUInt(idx)) + s.starts.offset)
-		byteLen = uint64(int64(s.lens.GetValueUInt(idx)) + s.lens.offset)
+		lensVal = uint64(int64(s.lens.GetValueUInt(idx)) + s.lens.offset)
 	}
 
-	b := []byte(s.dictionary[byteStart : byteStart+byteLen])
-	if s.format == FormatRaw {
+	// lensVal semantics depend on format:
+	//   FormatRaw, FormatHex*, FormatBase64*: byte count
+	//   FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime: char count
+	//   FormatUUID*: lens unused; always 16 bytes
+	switch s.format {
+	case FormatRaw:
 		// zero-alloc: slice the dictionary directly
-		return scm.NewString(s.dictionary[byteStart : byteStart+byteLen])
+		return scm.NewString(s.dictionary[byteStart : byteStart+lensVal])
+	case FormatHexLower, FormatHexUpper,
+		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
+		// lensVal = original char count; byte count = ceil(charLen/2)
+		charLen := int(lensVal)
+		byteLen := uint64((charLen + 1) / 2)
+		b := []byte(s.dictionary[byteStart : byteStart+byteLen])
+		return scm.NewString(decompressBytes(b, s.format, charLen))
+	case FormatUUIDLower, FormatUUIDUpper:
+		// lens unused; UUID is always 16 bytes
+		b := []byte(s.dictionary[byteStart : byteStart+16])
+		return scm.NewString(decompressBytes(b, s.format, 36))
+	case FormatBase64Upper:
+		if lensVal == 0 {
+			return scm.NewString("")
+		}
+		b := []byte(s.dictionary[byteStart : byteStart+lensVal])
+		return scm.NewString(base64.StdEncoding.EncodeToString(b))
+	case FormatBase64Lower:
+		if lensVal == 0 {
+			return scm.NewString("")
+		}
+		b := []byte(s.dictionary[byteStart : byteStart+lensVal])
+		return scm.NewString(base64.URLEncoding.EncodeToString(b))
+	default:
+		return scm.NewNil()
 	}
-	return scm.NewString(decompressBytes(b, s.format))
 }
 
 func (s *StorageString) prepare() {
@@ -386,7 +482,7 @@ func (s *StorageString) prepare() {
 	s.values.prepare()
 	s.reverseMap = make(map[string][3]uint)
 	s.prefixstat = make(map[string]int)
-	s.validFormats = 0xFF // all formats valid until proven otherwise
+	s.validFormats = allFormatsValid
 }
 
 func (s *StorageString) scan(i uint32, value scm.Scmer) {
@@ -454,6 +550,7 @@ func (s *StorageString) init(i uint32) {
 
 	if s.nodict {
 		s.starts.init(i)
+		adjustLensForFormat(&s.lens, s.format)
 		s.lens.init(i)
 	} else {
 		// compress the dictionary collected during scan
@@ -462,6 +559,7 @@ func (s *StorageString) init(i uint32) {
 
 		s.values.init(i)
 		s.starts.init(uint32(s.count))
+		adjustLensForFormat(&s.lens, s.format)
 		s.lens.init(uint32(s.count))
 
 		if s.format == FormatRaw {
@@ -474,12 +572,20 @@ func (s *StorageString) init(i uint32) {
 			// re-encode each unique string in compressed form
 			s.compBuf = s.compBuf[:0]
 			for origStr, start := range s.reverseMap {
-				// origStr is a slice of rawDict
 				byteOffset := len(s.compBuf)
 				s.compBuf = compressString(s.compBuf, origStr, s.format)
 				compLen := len(s.compBuf) - byteOffset
 				s.starts.build(uint32(start[0]), scm.NewInt(int64(byteOffset)))
-				s.lens.build(uint32(start[0]), scm.NewInt(int64(compLen)))
+				switch s.format {
+				case FormatUUIDLower, FormatUUIDUpper:
+					// lens unused for UUID (always 16 bytes)
+				case FormatBase64Upper, FormatBase64Lower:
+					// store decoded byte count
+					s.lens.build(uint32(start[0]), scm.NewInt(int64(compLen)))
+				default:
+					// nibble formats: store original char count
+					s.lens.build(uint32(start[0]), scm.NewInt(int64(len(origStr))))
+				}
 			}
 			s.dictionary = string(s.compBuf)
 			s.compBuf = nil
@@ -502,7 +608,16 @@ func (s *StorageString) build(i uint32, value scm.Scmer) {
 		s.compBuf = compressString(s.compBuf, v, s.format)
 		compLen := len(s.compBuf) - byteOffset
 		s.starts.build(i, scm.NewInt(int64(byteOffset)))
-		s.lens.build(i, scm.NewInt(int64(compLen)))
+		switch s.format {
+		case FormatUUIDLower, FormatUUIDUpper:
+			// lens unused for UUID (always 16 bytes)
+		case FormatBase64Upper, FormatBase64Lower:
+			// store decoded byte count
+			s.lens.build(i, scm.NewInt(int64(compLen)))
+		default:
+			// nibble formats: store original char count
+			s.lens.build(i, scm.NewInt(int64(len(v))))
+		}
 	} else {
 		start := s.reverseMap[v]
 		s.values.build(i, scm.NewInt(int64(start[0])))
