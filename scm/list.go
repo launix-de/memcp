@@ -26,6 +26,8 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import "fmt"
+import "runtime"
+import "sync"
 
 // optimizeMap is the optimizer hook for `map`. It applies default optimization
 // (including FirstParameterMutable swap to map_mut), then fuses
@@ -52,6 +54,52 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		}
 	}
 	return result, td
+}
+
+// optimizeProduceN rewrites (produceN ...) to (produceN_mut ... nil) when the
+// result is unused, so runtime can avoid result allocation.
+func optimizeProduceN(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	if useResult || !result.IsSlice() {
+		return result, td
+	}
+	rv := result.Slice()
+	if len(rv) < 2 {
+		return result, td
+	}
+	if sym, ok := scmerSymbol(rv[0]); !ok || sym != "produceN" {
+		return result, td
+	}
+	out := make([]Scmer, 0, len(rv)+1)
+	out = append(out, NewSymbol("produceN_mut"))
+	out = append(out, rv[1:]...)
+	if len(rv) == 2 {
+		out = append(out, NewNil())
+	}
+	return NewSlice(out), &TypeDescriptor{}
+}
+
+// optimizeParallelN rewrites (parallelN ...) to (parallelN_mut ... nil) when
+// the result is unused, so runtime can avoid result allocation.
+func optimizeParallelN(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	if useResult || !result.IsSlice() {
+		return result, td
+	}
+	rv := result.Slice()
+	if len(rv) < 3 {
+		return result, td
+	}
+	if sym, ok := scmerSymbol(rv[0]); !ok || sym != "parallelN" {
+		return result, td
+	}
+	out := make([]Scmer, 0, len(rv)+1)
+	out = append(out, NewSymbol("parallelN_mut"))
+	out = append(out, rv[1:]...)
+	if len(rv) == 3 {
+		out = append(out, NewNil())
+	}
+	return NewSlice(out), &TypeDescriptor{}
 }
 
 func asSlice(v Scmer, ctx string) []Scmer {
@@ -515,7 +563,208 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc},
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeProduceN},
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"parallelN", "returns a list with numbers from 0..n-1 mapped in parallel through a function",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"n", "number", "number of elements to produce", nil},
+			DeclarationParameter{"fn", "func", "map function applied to each index in parallel", nil},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			n := int(a[0].Int())
+			if n < 0 {
+				n = 0
+			}
+			result := make([]Scmer, n)
+			fn := a[1]
+			needsSerializedCall := fn.GetTag() == tagFunc || fn.GetTag() == tagFuncEnv
+			var fnMu sync.Mutex
+			callFn := func(i int) Scmer {
+				if needsSerializedCall {
+					fnMu.Lock()
+					defer fnMu.Unlock()
+				}
+				return Apply(fn, NewInt(int64(i)))
+			}
+			workers := runtime.NumCPU()
+			if workers < 1 {
+				workers = 1
+			}
+			if workers > n {
+				workers = n
+			}
+			jobs := make(chan int, workers)
+			errs := make(chan any, workers)
+			var wg sync.WaitGroup
+			for w := 0; w < workers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := range jobs {
+						func() {
+							defer func() {
+								if r := recover(); r != nil {
+									errs <- r
+								}
+							}()
+							result[i] = callFn(i)
+						}()
+					}
+				}()
+			}
+			for i := 0; i < n; i++ {
+				jobs <- i
+			}
+			close(jobs)
+			wg.Wait()
+			close(errs)
+			for err := range errs {
+				if err != nil {
+					panic(err)
+				}
+			}
+			return NewSlice(result)
+		},
+		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeParallelN},
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"produceN_mut", "in-place produceN variant (optimizer-only)",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"n", "number", "number of elements to produce", nil},
+			DeclarationParameter{"fn", "func", "map function applied to each index", nil},
+			DeclarationParameter{"target", "list", "(optional) preallocated target list", NoEscape},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			n := int(a[0].Int())
+			if n < 0 {
+				n = 0
+			}
+			fn := OptimizeProcToSerialFunction(a[1])
+			if len(a) < 3 || a[2].IsNil() {
+				for i := 0; i < n; i++ {
+					fn(NewInt(int64(i)))
+				}
+				return NewNil()
+			}
+			result := asSlice(a[2], "produceN_mut target")
+			if len(result) < n {
+				panic("produceN_mut target too small")
+			}
+			result = result[:n]
+			for i := 0; i < n; i++ {
+				result[i] = fn(NewInt(int64(i)))
+			}
+			return NewSlice(result)
+		},
+		true, true, &TypeDescriptor{},
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"parallelN_mut", "in-place parallelN variant (optimizer-only)",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"n", "number", "number of elements to produce", nil},
+			DeclarationParameter{"fn", "func", "map function applied to each index in parallel", nil},
+			DeclarationParameter{"target", "list", "(optional) preallocated target list", NoEscape},
+		}, "list",
+		func(a ...Scmer) Scmer {
+			n := int(a[0].Int())
+			if n < 0 {
+				n = 0
+			}
+			fn := a[1]
+			needsSerializedCall := fn.GetTag() == tagFunc || fn.GetTag() == tagFuncEnv
+			var fnMu sync.Mutex
+			callFn := func(i int) Scmer {
+				if needsSerializedCall {
+					fnMu.Lock()
+					defer fnMu.Unlock()
+				}
+				return Apply(fn, NewInt(int64(i)))
+			}
+			workers := runtime.NumCPU()
+			if workers < 1 {
+				workers = 1
+			}
+			if workers > n {
+				workers = n
+			}
+			if len(a) < 3 || a[2].IsNil() {
+				jobs := make(chan int, workers)
+				errs := make(chan any, workers)
+				var wg sync.WaitGroup
+				for w := 0; w < workers; w++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for i := range jobs {
+							func() {
+								defer func() {
+									if r := recover(); r != nil {
+										errs <- r
+									}
+								}()
+								callFn(i)
+							}()
+						}
+					}()
+				}
+				for i := 0; i < n; i++ {
+					jobs <- i
+				}
+				close(jobs)
+				wg.Wait()
+				close(errs)
+				for err := range errs {
+					if err != nil {
+						panic(err)
+					}
+				}
+				return NewNil()
+			}
+			result := asSlice(a[2], "parallelN_mut target")
+			if len(result) < n {
+				panic("parallelN_mut target too small")
+			}
+			result = result[:n]
+			jobs := make(chan int, workers)
+			errs := make(chan any, workers)
+			var wg sync.WaitGroup
+			for w := 0; w < workers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := range jobs {
+						func() {
+							defer func() {
+								if r := recover(); r != nil {
+									errs <- r
+								}
+							}()
+							result[i] = callFn(i)
+						}()
+					}
+				}()
+			}
+			for i := 0; i < n; i++ {
+				jobs <- i
+			}
+			close(jobs)
+			wg.Wait()
+			close(errs)
+			for err := range errs {
+				if err != nil {
+					panic(err)
+				}
+			}
+			return NewSlice(result)
+		},
+		true, true, &TypeDescriptor{},
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{
