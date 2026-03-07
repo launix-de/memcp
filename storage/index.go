@@ -145,6 +145,13 @@ func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast
 					return false, true
 				}
 			}
+			// lower bound check for last column (needed when Ascend is used for
+			// computed-column btrees, which start from the btree beginning)
+			if len(lower) > i && !lower[i].IsNil() {
+				if scm.Less(v, lower[i]) {
+					return false, false // below lower bound, not in range but don't stop
+				}
+			}
 			continue
 		}
 		if scm.Equal(v, lower[i]) {
@@ -237,6 +244,41 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 					return
 				}
 			}
+		}
+		// Don't create an index for tiny shards — a bisect on N rows costs
+		// more than a full scan, and the 4 heap allocs dominate the scan time.
+		threshold := Settings.IndexThreshold
+		if threshold <= 0 {
+			threshold = 5
+		}
+		if int(t.main_count)+maxInsertIndex < threshold {
+			t.indexMutex.Unlock()
+			// inline full scan (same as the len(lower)==0 path below)
+			bufN := 0
+			for i := uint32(0); i < t.main_count; i++ {
+				buf[bufN] = i
+				bufN++
+				if bufN == len(buf) {
+					if !callback(buf[:bufN]) {
+						return
+					}
+					bufN = 0
+				}
+			}
+			for i := 0; i < maxInsertIndex; i++ {
+				buf[bufN] = t.main_count + uint32(i)
+				bufN++
+				if bufN == len(buf) {
+					if !callback(buf[:bufN]) {
+						return
+					}
+					bufN = 0
+				}
+			}
+			if bufN > 0 {
+				callback(buf[:bufN])
+			}
+			return
 		}
 		index := new(StorageIndex)
 		index.Cols = make([]string, len(lower))

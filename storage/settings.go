@@ -34,6 +34,7 @@ type SettingsT struct {
 	DefaultEngine          string
 	ShardSize              uint
 	AnalyzeMinItems        int
+	IndexThreshold         int   // min shard rows before creating a new adaptive index (0 = default 5)
 	MaxRamPercent          int   // 0 = default (50%), otherwise 1-100; total memory budget
 	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override total budget in bytes
 	MaxPersistPercent      int   // 0 = default (30%), otherwise 1-100; budget for persisted shards+indexes
@@ -44,7 +45,7 @@ type SettingsT struct {
 	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0, false, 0, 0, false}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -67,6 +68,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("DefaultEngine"), scm.NewString(Settings.DefaultEngine),
 			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
 			scm.NewString("AnalyzeMinItems"), scm.NewInt(int64(Settings.AnalyzeMinItems)),
+		scm.NewString("IndexThreshold"), scm.NewInt(int64(Settings.IndexThreshold)),
 			scm.NewString("MaxRamPercent"), scm.NewInt(int64(Settings.MaxRamPercent)),
 			scm.NewString("MaxRamBytes"), scm.NewInt(Settings.MaxRamBytes),
 			scm.NewString("MaxPersistPercent"), scm.NewInt(int64(Settings.MaxPersistPercent)),
@@ -92,6 +94,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.ShardSize))
 		case "AnalyzeMinItems":
 			return scm.NewInt(int64(Settings.AnalyzeMinItems))
+		case "IndexThreshold":
+			return scm.NewInt(int64(Settings.IndexThreshold))
 		case "MaxRamPercent":
 			return scm.NewInt(int64(Settings.MaxRamPercent))
 		case "MaxRamBytes":
@@ -130,6 +134,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.ShardSize = uint(scm.ToInt(a[1]))
 		case "AnalyzeMinItems":
 			Settings.AnalyzeMinItems = scm.ToInt(a[1])
+		case "IndexThreshold":
+			Settings.IndexThreshold = scm.ToInt(a[1])
 		case "MaxRamPercent":
 			Settings.MaxRamPercent = scm.ToInt(a[1])
 			total, persisted := computeMemoryBudgets()

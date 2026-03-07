@@ -502,7 +502,8 @@ var settingsGroups=[
 {key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logging","sloppy","memory"]}
 ]},
 {group:"Query Optimizer",items:[
-{key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"}
+{key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"},
+{key:"IndexThreshold",desc:"Min shard rows before creating an adaptive index (0=5); below this a full scan is cheaper",type:"number"}
 ]},
 {group:"Metrics",items:[
 {key:"MetricsTracing",desc:"Periodically record metrics to system_statistic.perf_metrics",type:"bool"},
