@@ -45,7 +45,7 @@ run_memcp_forever() {
     pkill -f "memcp.*--api-port=$test_port" || true
     sleep 1
     memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
-    ./memcp -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm < "$fifo_path" >> "$memcp_log" 2>&1 &
+    ./memcp --no-repl -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!
     # wait for process to exit; test loop will poll readiness
     wait $memcp_pid
@@ -76,13 +76,6 @@ wait_for_sql_ready() {
 rm -rf /tmp/memcp-pre-commit-tests || true
 echo -n > /tmp/memcp-test.log
 
-# Create FIFO to keep stdin open across restarts
-fifo_path="/tmp/memcp-stdin-$test_port"
-rm -f "$fifo_path" 2>/dev/null || true
-mkfifo "$fifo_path"
-# Keep writer end open for the lifetime of this script
-exec 3<> "$fifo_path"
-
 # Start supervisor loop
 run_memcp_forever &
 supervisor_pid=$!
@@ -112,9 +105,6 @@ cleanup() {
   kill $supervisor_pid 2>/dev/null || true
   # Also kill an active memcp if still running
   pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
-  # Close and remove FIFO
-  exec 3>&-
-  rm -f "$fifo_path" 2>/dev/null || true
   # Remove temp directory if created
   if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
     rm -rf "$tmpdir" 2>/dev/null || true
