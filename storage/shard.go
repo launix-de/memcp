@@ -53,7 +53,7 @@ type storageShard struct {
 
 	// lazy-loading/shared-resource state
 	srState      SharedState
-	lastAccessed time.Time // updated on GetRead/GetExclusive for LRU eviction
+	lastAccessed uint64 // UnixNano, atomic; updated on GetRead/GetExclusive for LRU eviction
 
 	// repartition drain tracking: counts in-flight scans on this shard
 	activeScanners atomic.Int32
@@ -303,13 +303,13 @@ func (s *storageShard) GetRead() func() {
 	if s.srState == COLD {
 		s.srState = SHARED
 	}
-	s.lastAccessed = time.Now()
+	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	return func() {}
 }
 func (s *storageShard) GetExclusive() func() {
 	s.ensureLoaded()
 	s.srState = WRITE
-	s.lastAccessed = time.Now()
+	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	return func() {}
 }
 
@@ -334,7 +334,7 @@ func (s *storageShard) ensureLoaded() {
 		s.srState = SHARED
 	}
 	s.mu.Unlock()
-	s.lastAccessed = time.Now()
+	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	// register with CacheManager (skip temp tables and Memory-engine shards)
 	if s.t.PersistencyMode != Memory && !strings.HasPrefix(s.t.Name, ".") {
 		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
@@ -375,7 +375,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 }
 
 func shardLastUsed(ptr any) time.Time {
-	return ptr.(*storageShard).lastAccessed
+	return time.Unix(0, int64(atomic.LoadUint64(&ptr.(*storageShard).lastAccessed)))
 }
 
 func NewShard(t *table) *storageShard {
@@ -1048,7 +1048,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Build equality boundaries for the index lookup
 	bounds := make(boundaries, len(columns))
 	for i, col := range columns {
-		bounds[i] = columnboundaries{col, values[i], true, values[i], true}
+		bounds[i] = columnboundaries{col: col, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
 	}
 	lower, upperLast := indexFromBoundaries(bounds)
 
@@ -1488,18 +1488,31 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// query after rebuild does not pay a cold-start full-scan penalty.
 		for _, idx := range result.Indexes {
 			if idx.Savings >= 2.0 && !idx.active {
-				idxCols := make([]ColumnStorage, len(idx.Cols))
+				// Verify all required columns exist before building the index.
+				// A column may be absent from this shard if it was added after
+				// the shard was created (e.g. ALTER TABLE ADD COLUMN).
 				allFound := true
 				for i, colName := range idx.Cols {
-					cs, ok := result.columns[colName]
-					if !ok || cs == nil {
-						allFound = false
+					if len(idx.ColMapFn) > i && !idx.ColMapFn[i].IsNil() {
+						// computed column: check that all source columns exist
+						for _, mc := range idx.ColMapCols[i] {
+							if cs, ok := result.columns[mc]; !ok || cs == nil {
+								allFound = false
+								break
+							}
+						}
+					} else {
+						// raw column: check the column itself exists
+						if cs, ok := result.columns[colName]; !ok || cs == nil {
+							allFound = false
+						}
+					}
+					if !allFound {
 						break
 					}
-					idxCols[i] = cs
 				}
 				if allFound {
-					idx.buildIndex(idxCols)
+					idx.buildIndex(idx.buildGetters())
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}
 			}
@@ -1558,7 +1571,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result.mu.Unlock()
 	resultLocked = false
 	// Register the new shard with CacheManager
-	result.lastAccessed = time.Now()
+	atomic.StoreUint64(&result.lastAccessed, uint64(time.Now().UnixNano()))
 	if result.t.PersistencyMode != Memory && !strings.HasPrefix(result.t.Name, ".") {
 		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}

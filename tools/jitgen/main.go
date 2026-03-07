@@ -19,9 +19,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 // operator function bodies, and generates JIT emitter closures.
 //
 // Usage:
-//   go run ./tools/jitgen/ scm/alu.go                    # list operators
-//   go run ./tools/jitgen/ -dump=+ scm/alu.go             # SSA dump for +
-//   go run ./tools/jitgen/ -patch scm/alu.go              # patch source
+//
+//	go run ./tools/jitgen/ scm/alu.go                    # list operators
+//	go run ./tools/jitgen/ -dump=+ scm/alu.go             # SSA dump for +
+//	go run ./tools/jitgen/ -patch scm/alu.go              # patch source
 package main
 
 import (

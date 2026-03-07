@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "sort"
 import "time"
 import "strings"
@@ -137,11 +138,92 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	/* analyze condition query */
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
+	// When all filter conditions are equality, appending sort columns to the
+	// boundaries lets the shard return rows already sorted by ORDER BY — the
+	// index (eq_col..., sort_col...) covers both filtering and ordering, so
+	// the cross-shard merge in globalqueue only has to merge pre-sorted runs
+	// instead of sorting them first. A range filter as second-to-last column
+	// would be stripped by indexFromBoundaries anyway, making the extra col
+	// useless, so we only extend when every filter boundary is a point lookup.
+	if len(boundaries) > 0 {
+		allEq := true
+		for _, b := range boundaries {
+			if !scm.Equal(b.lower, b.upper) {
+				allEq = false
+				break
+			}
+		}
+		if allEq {
+			for _, scol := range sortcols {
+				if scol.IsString() {
+					col := scol.String()
+					already := false
+					for _, b := range boundaries {
+						if b.col == col {
+							already = true
+							break
+						}
+					}
+					if !already {
+						boundaries = append(boundaries, columnboundaries{col: col, lower: scm.NewNil(), upper: scm.NewNil()})
+					}
+					continue
+				}
+				// Lambda sort col: if it's a pure function of row params (rawDataset),
+				// treat it like a computed index column — same mechanism as in extractBoundaries.
+				proc, ok := scol.Any().(scm.Proc)
+				if !ok && scol.IsProc() {
+					proc = *scol.Proc()
+					ok = true
+				}
+				if !ok {
+					continue
+				}
+				var procParams []scm.Scmer
+				if proc.Params.IsSlice() {
+					procParams = proc.Params.Slice()
+				}
+				if len(procParams) == 0 {
+					continue
+				}
+				sortCondCols := make([]string, len(procParams))
+				for j, param := range procParams {
+					if param.IsSymbol() {
+						sortCondCols[j] = param.String()
+					} else {
+						sortCondCols[j] = scm.String(param)
+					}
+				}
+				if !isRawDataset(procParams, proc.Body) {
+					continue
+				}
+				canon := canonicalColName(proc.Body, procParams, sortCondCols)
+				mc, mf := buildComputedFn(proc.Body, proc.Params, proc.En, sortCondCols)
+				if mf.IsNil() || mc == nil {
+					continue
+				}
+				already := false
+				for _, b := range boundaries {
+					if b.col == canon {
+						already = true
+						break
+					}
+				}
+				if !already {
+					boundaries = append(boundaries, columnboundaries{col: canon, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
+				}
+			}
+		}
+	}
 	lower, upperLast := indexFromBoundaries(boundaries)
-	// TODO: append sortcols to boundaries
-
-	// TODO: sortcols that are not just simple columns but complex lambda expressions could be temporarily materialized to trade memory for execution time
-	// --> sortcols can then be rewritten to strings
+	if Settings.ScanDebugging {
+		dbg := fmt.Sprintf("[SCAN_ORDER] %s.%s", t.schema.Name, t.Name)
+		for _, b := range boundaries {
+			dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)
+		}
+		dbg += fmt.Sprintf(" lower=%v upper=%v", lower, upperLast)
+		fmt.Println(dbg)
+	}
 
 	// give sharding hints
 	for _, b := range boundaries {

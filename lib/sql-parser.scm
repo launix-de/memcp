@@ -1132,6 +1132,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			)
 	)))
 
+	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
+	(define sql_truncate (parser '(
+		(atom "TRUNCATE" true) (? (atom "TABLE" true))
+		/* schema-qualified */
+		(? (define schema2 sql_identifier) ".") (define tbl sql_identifier)
+	) (begin
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			'((quote scan)
+				(coalesce schema2 schema)
+				tbl
+				'(list)
+				'((quote lambda) '() true)
+				'(list "$update")
+				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+				(quote +)
+				0
+			)
+	)))
+
 	/* Multi-table DELETE: DELETE t1 FROM t1, t2 WHERE ... or DELETE FROM t1 USING t1, t2 WHERE ... */
 	(define gen_multi_delete (lambda (target all_defs condition) (begin
 		/* Find the target table definition */
@@ -1414,6 +1433,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		sql_update
 		sql_multi_delete
 		sql_delete
+		sql_truncate
 
 		/* CREATE DATABASE name FROM source_db */
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (atom "FROM" true) (define from_db sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil from_db)))

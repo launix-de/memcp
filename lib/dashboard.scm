@@ -96,7 +96,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: join list of JSON strings into a JSON array */
 (define dashboard_json_array (lambda (items)
-	(if (nil? items) "[]" (concat "[" (reduce items (lambda (a b) (concat a "," b))) "]"))
+	(if (or (nil? items) (equal? (count items) 0)) "[]" (concat "[" (reduce items (lambda (a b) (concat a "," b))) "]"))
 ))
 
 /* helper: send JSON response with proper Content-Type */
@@ -268,7 +268,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(define partitions (if (nil? raw_partitions) nil (filter raw_partitions (lambda (p) (not (nil? p))))))
 					(define partition_items (if (or (nil? partitions) (equal? (count partitions) 0)) "[]"
 						(dashboard_json_array (map partitions (lambda (p)
-							(concat "{\"column\":" (json_encode (p "Column")) ",\"n\":" (json_encode (p "NumPartitions")) "}")
+							(concat "{\"column\":" (json_encode (p "Column")) ",\"n\":" (json_encode (p "NumPartitions")) ",\"pivots\":" (json_encode (p "Pivots")) "}")
 						)))
 					))
 					/* triggers */

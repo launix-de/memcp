@@ -1,0 +1,50 @@
+# TRUNCATE TABLE — alias for DELETE FROM without WHERE
+
+metadata:
+  version: "1.0"
+  description: "TRUNCATE TABLE removes all rows like DELETE without WHERE"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS trunc_t"
+  - sql: "CREATE TABLE trunc_t (id INT, val VARCHAR(50))"
+  - sql: "INSERT INTO trunc_t (id, val) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+
+test_cases:
+  - name: "Rows exist before truncate"
+    sql: "SELECT COUNT(*) AS c FROM trunc_t"
+    expect:
+      rows: 1
+      data:
+        - c: 3
+
+  - name: "TRUNCATE TABLE removes all rows"
+    sql: "TRUNCATE TABLE trunc_t;"
+    expect:
+      affected_rows: 3
+
+  - name: "Table is empty after truncate"
+    sql: "SELECT COUNT(*) AS c FROM trunc_t"
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
+  - name: "TRUNCATE without TABLE keyword also works"
+    sql: "INSERT INTO trunc_t (id, val) VALUES (1, 'x');"
+    expect:
+      affected_rows: 1
+
+  - name: "Re-insert and truncate again"
+    sql: "TRUNCATE trunc_t;"
+    expect:
+      affected_rows: 1
+
+  - name: "Empty after second truncate"
+    sql: "SELECT COUNT(*) AS c FROM trunc_t"
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS trunc_t"
