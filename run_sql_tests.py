@@ -481,15 +481,9 @@ class SQLTestRunner:
                 if self._restart_handler is not None:
                     self._restart_handler()
                 else:
-                    # No restart handler (--connect-only): wait for external supervisor to restart
-                    import time as _time
-                    for _i in range(60):
-                        _time.sleep(1)
-                        try:
-                            if requests.get(self.base_url, timeout=2).status_code < 500:
-                                break
-                        except Exception:
-                            pass
+                    # No restart handler (--connect-only): wait until SQL endpoint is actually ready again.
+                    if not wait_for_sql_ready(self.base_url, tc_user, tc_pass, database, timeout=60):
+                        return self._record_fail(name, "Restart timeout: SQL not ready after SHUTDOWN", query, None, None, is_noncritical)
                 self._record_success(name, is_noncritical)
                 return True
 
@@ -810,14 +804,26 @@ class SQLTestRunner:
         # Suite success is determined solely by critical tests
         return failed_crit == 0
 
-def wait_for_memcp(port=4321, timeout=30) -> bool:
+def wait_for_sql_ready(base_url: str, username: str = "root", password: str = "admin", database: str = "memcp-tests", timeout: int = 30) -> bool:
+    auth = b64encode(f"{username}:{password}".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {auth}",
+        "Content-Type": "text/plain; charset=utf-8",
+    }
+    sql_url = f"{base_url}/sql/{quote(database, safe='')}"
     for _ in range(timeout):
         try:
-            requests.get(f"http://localhost:{port}", timeout=2)
-            return True
-        except:
-            time.sleep(1)
+            resp = requests.post(sql_url, data="SELECT 1".encode("utf-8"), headers=headers, timeout=2)
+            if resp is not None and resp.status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
     return False
+
+
+def wait_for_memcp(port=4321, timeout=30) -> bool:
+    return wait_for_sql_ready(f"http://localhost:{port}", timeout=timeout)
 
 def start_memcp_process(port: int) -> subprocess.Popen | None:
     try:
@@ -874,9 +880,7 @@ def main():
 
     memcp_process = None
     if connect_only:
-        try:
-            requests.get(base_url, timeout=2)
-        except:
+        if not wait_for_sql_ready(base_url, timeout=10):
             print(f"❌ Cannot connect to MemCP on port {port}")
             sys.exit(1)
     else:
