@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "ENGINE=MEMORY table and ALTER TABLE ENGINE= transitions"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS mem_t"

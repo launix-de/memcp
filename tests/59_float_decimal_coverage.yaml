@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "Float/Decimal storage paths, NULL handling, aggregation, and coercion"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS fdc_float"

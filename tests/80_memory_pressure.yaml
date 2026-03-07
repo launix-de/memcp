@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "Memory pressure management"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS mp_pressure"
