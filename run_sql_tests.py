@@ -621,7 +621,7 @@ class SQLTestRunner:
     def _extract_create_table_name(self, sql: Any) -> Optional[str]:
         if not isinstance(sql, str):
             return None
-        m = re.search(r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:`[^`]+`|[A-Za-z0-9_.-])+)", sql, re.IGNORECASE)
+        m = re.search(r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:`[^`]+`|[A-Za-z0-9_.-])+)", sql, re.IGNORECASE)
         if not m:
             return None
         raw = m.group(1).strip().strip(";").strip("(")
