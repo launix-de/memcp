@@ -18,6 +18,7 @@ package storage
 
 import "io"
 import "fmt"
+import "sort"
 import "unsafe"
 import "strings"
 import "encoding/hex"
@@ -211,34 +212,52 @@ func chooseBestFormat(valid uint16) StringFormat {
 	return FormatRaw
 }
 
-// packNibbles encodes s into 4-bit nibbles using cs and appends to dst.
-func packNibbles(dst []byte, s string, cs *nibbleCharset) []byte {
-	for i := 0; i < len(s); i += 2 {
-		lo := cs.dec[s[i]]
-		hi := int8(0)
-		if i+1 < len(s) {
-			hi = cs.dec[s[i+1]]
+// appendNibbles encodes s into 4-bit nibbles using cs and appends to dst.
+// compNibble is the absolute nibble position in the buffer (= byte_offset*2 + nibble_within_byte).
+// Returns (new dst, new absolute nibble position = compNibble + len(s)).
+func appendNibbles(dst []byte, s string, cs *nibbleCharset, compNibble int) ([]byte, int) {
+	for i := 0; i < len(s); i++ {
+		nib := byte(cs.dec[s[i]])
+		if (compNibble+i)%2 == 0 {
+			dst = append(dst, nib) // low nibble of a new byte
+		} else {
+			dst[len(dst)-1] |= nib << 4 // high nibble of last byte
 		}
-		dst = append(dst, byte(lo)|byte(hi)<<4)
 	}
-	return dst
+	return dst, compNibble + len(s)
 }
 
-// compressString encodes s into the chosen format and appends bytes to dst.
-func compressString(dst []byte, s string, format StringFormat) []byte {
-	switch format {
+// isNibbleFormat reports whether format uses 4-bit nibble packing.
+func isNibbleFormat(f StringFormat) bool {
+	switch f {
+	case FormatHexLower, FormatHexUpper, FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
+		return true
+	}
+	return false
+}
+
+// nibbleCharsetFor returns the nibble charset for a nibble format, or nil.
+func nibbleCharsetFor(f StringFormat) *nibbleCharset {
+	switch f {
 	case FormatHexLower:
-		return packNibbles(dst, s, &hexLowerCharset)
+		return &hexLowerCharset
 	case FormatHexUpper:
-		return packNibbles(dst, s, &hexUpperCharset)
+		return &hexUpperCharset
 	case FormatPhone:
-		return packNibbles(dst, s, &phoneCharset)
+		return &phoneCharset
 	case FormatPhoneDTMF:
-		return packNibbles(dst, s, &phoneDTMFCharset)
+		return &phoneDTMFCharset
 	case FormatDecimal:
-		return packNibbles(dst, s, &decimalCharset)
+		return &decimalCharset
 	case FormatDateTime:
-		return packNibbles(dst, s, &dateTimeCharset)
+		return &dateTimeCharset
+	}
+	return nil
+}
+
+// compressNonNibble encodes s for UUID, Base64, or Raw formats and appends to dst.
+func compressNonNibble(dst []byte, s string, format StringFormat) []byte {
+	switch format {
 	case FormatBase64Upper:
 		b, _ := base64.StdEncoding.DecodeString(s)
 		return append(dst, b...)
@@ -251,24 +270,6 @@ func compressString(dst []byte, s string, format StringFormat) []byte {
 		return append(dst, b...)
 	default: // FormatRaw
 		return append(dst, s...)
-	}
-}
-
-// compressedByteLen returns how many bytes compressString produces for a string of charLen chars.
-func compressedByteLen(charLen int, format StringFormat) int {
-	switch format {
-	case FormatHexLower, FormatHexUpper,
-		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
-		return (charLen + 1) / 2
-	case FormatBase64Upper, FormatBase64Lower:
-		// base64.DecodedLen is an upper bound (padding bytes don't produce output).
-		// The struct stores the exact byte count in lens, so this helper is only
-		// used to pre-size buffers during the build phase.
-		return base64.StdEncoding.DecodedLen(charLen)
-	case FormatUUIDLower, FormatUUIDUpper:
-		return 16
-	default:
-		return charLen
 	}
 }
 
@@ -288,53 +289,77 @@ func adjustLensForFormat(lens *StorageInt, format StringFormat) {
 	}
 }
 
-// unpackNibbles decodes 4-bit nibble-packed bytes back to a string using cs.
-// charLen is the original character count (may be odd; last nibble of last byte ignored if so).
-func unpackNibbles(b []byte, charLen int, cs *nibbleCharset) string {
+// adjustStartsForFormat resets the starts StorageInt offset to 0 for nodict mode.
+// During scan, starts accumulates END positions (allsize), but build() writes
+// START positions beginning from 0.  Setting offset=0 ensures all build values fit.
+// Must be called BEFORE starts.init() in the nodict path.
+func adjustStartsForFormat(starts *StorageInt) {
+	starts.offset = 0
+}
+
+// readNibbles decodes charLen nibble-encoded characters from ptr.
+// nibbleOff (0 or 1) is the nibble index within *ptr where decoding starts.
+func readNibbles(ptr *byte, nibbleOff int, charLen int, cs *nibbleCharset) string {
+	if charLen == 0 {
+		return ""
+	}
 	result := make([]byte, charLen)
 	for i := 0; i < charLen; i++ {
-		packed := b[i/2]
-		if i%2 == 0 {
-			result[i] = cs.enc[packed&0x0F]
+		absNibble := nibbleOff + i
+		b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(absNibble/2)))
+		if absNibble%2 == 0 {
+			result[i] = cs.enc[b&0x0F]
 		} else {
-			result[i] = cs.enc[(packed>>4)&0x0F]
+			result[i] = cs.enc[(b>>4)&0x0F]
 		}
 	}
 	return unsafe.String(&result[0], charLen)
 }
 
-// decompressBytes decodes b back to a string using the given format.
-// charLen is the original character count (needed for nibble formats with odd length).
-func decompressBytes(b []byte, format StringFormat, charLen int) string {
+// cstringDecompress materialises a tagCString Scmer into a plain Go string.
+// ptr is a byte-aligned pointer into the StorageString dictionary.
+// val encodes: bits 47-44 = format, bit 43 = nibbleOff, bits 42-0 = charLen.
+func cstringDecompress(ptr *byte, val uint64) string {
+	format := StringFormat(val >> 44)
+	nibbleOff := int((val >> 43) & 1)
+	charLen := int(val & ((1 << 43) - 1))
 	switch format {
 	case FormatHexLower:
-		return unpackNibbles(b, charLen, &hexLowerCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &hexLowerCharset)
 	case FormatHexUpper:
-		return unpackNibbles(b, charLen, &hexUpperCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &hexUpperCharset)
 	case FormatPhone:
-		return unpackNibbles(b, charLen, &phoneCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &phoneCharset)
 	case FormatPhoneDTMF:
-		return unpackNibbles(b, charLen, &phoneDTMFCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &phoneDTMFCharset)
 	case FormatDecimal:
-		return unpackNibbles(b, charLen, &decimalCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &decimalCharset)
 	case FormatDateTime:
-		return unpackNibbles(b, charLen, &dateTimeCharset)
+		return readNibbles(ptr, nibbleOff, charLen, &dateTimeCharset)
 	case FormatBase64Upper:
+		b := unsafe.Slice(ptr, charLen) // charLen = decoded byte count
 		return base64.StdEncoding.EncodeToString(b)
 	case FormatBase64Lower:
+		b := unsafe.Slice(ptr, charLen)
 		return base64.URLEncoding.EncodeToString(b)
 	case FormatUUIDLower:
+		b := unsafe.Slice(ptr, 16)
 		h := hex.EncodeToString(b)
 		return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 	case FormatUUIDUpper:
+		b := unsafe.Slice(ptr, 16)
 		h := strings.ToUpper(hex.EncodeToString(b))
 		return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 	default: // FormatRaw
-		if len(b) == 0 {
+		if charLen == 0 {
 			return ""
 		}
-		return unsafe.String(&b[0], len(b))
+		return unsafe.String(ptr, charLen)
 	}
+}
+
+func init() {
+	scm.CStringDecompress = cstringDecompress
 }
 
 type StorageString struct {
@@ -350,6 +375,7 @@ type StorageString struct {
 	// helpers (scan/build phase only)
 	sb           strings.Builder
 	compBuf      []byte // accumulates compressed bytes during build (nodict) or init (dict)
+	compNibble   int    // current nibble position in compBuf (nodict nibble build / dict nibble init)
 	reverseMap   map[string][3]uint
 	count        uint
 	allsize      int
@@ -423,54 +449,59 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 func (s *StorageString) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageString) GetValue(i uint32) scm.Scmer {
-	var byteStart, lensVal uint64
+	var startVal, lensVal uint64
 	if s.nodict {
-		bs := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
-		if s.starts.hasNull && bs == uint64(s.starts.null) {
+		sv := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
+		if s.starts.hasNull && sv == uint64(s.starts.null) {
 			return scm.NewNil()
 		}
-		byteStart = bs
+		startVal = sv
 		lensVal = uint64(int64(s.lens.GetValueUInt(i)) + s.lens.offset)
 	} else {
 		idx := uint32(int64(s.values.GetValueUInt(i)) + s.values.offset)
 		if s.values.hasNull && idx == uint32(s.values.null) {
 			return scm.NewNil()
 		}
-		byteStart = uint64(int64(s.starts.GetValueUInt(idx)) + s.starts.offset)
+		startVal = uint64(int64(s.starts.GetValueUInt(idx)) + s.starts.offset)
 		lensVal = uint64(int64(s.lens.GetValueUInt(idx)) + s.lens.offset)
 	}
 
-	// lensVal semantics depend on format:
-	//   FormatRaw, FormatHex*, FormatBase64*: byte count
-	//   FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime: char count
-	//   FormatUUID*: lens unused; always 16 bytes
+	// startVal semantics by format:
+	//   nibble formats: nibble position (byteOff*2 + nibbleOff)
+	//   UUID, Base64, Raw: byte offset into dictionary
+	// lensVal semantics:
+	//   nibble formats: original char count
+	//   Base64: decoded byte count
+	//   UUID: unused (always 16 bytes / 36 chars)
+	//   Raw: byte count
+	dictBase := unsafe.Pointer(unsafe.StringData(s.dictionary))
 	switch s.format {
 	case FormatRaw:
-		// zero-alloc: slice the dictionary directly
+		byteStart := startVal
 		return scm.NewString(s.dictionary[byteStart : byteStart+lensVal])
 	case FormatHexLower, FormatHexUpper,
 		FormatPhone, FormatPhoneDTMF, FormatDecimal, FormatDateTime:
-		// lensVal = original char count; byte count = ceil(charLen/2)
+		nibblePos := startVal
+		nibbleOff := uint8(nibblePos & 1)
+		byteOff := nibblePos >> 1
 		charLen := int(lensVal)
-		byteLen := uint64((charLen + 1) / 2)
-		b := []byte(s.dictionary[byteStart : byteStart+byteLen])
-		return scm.NewString(decompressBytes(b, s.format, charLen))
+		if charLen == 0 {
+			return scm.NewString("")
+		}
+		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(byteOff)))
+		return scm.NewCString(ptr, uint8(s.format), nibbleOff, charLen)
 	case FormatUUIDLower, FormatUUIDUpper:
-		// lens unused; UUID is always 16 bytes
-		b := []byte(s.dictionary[byteStart : byteStart+16])
-		return scm.NewString(decompressBytes(b, s.format, 36))
-	case FormatBase64Upper:
-		if lensVal == 0 {
+		byteOff := startVal
+		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(byteOff)))
+		return scm.NewCString(ptr, uint8(s.format), 0, 36)
+	case FormatBase64Upper, FormatBase64Lower:
+		byteOff := startVal
+		decodedLen := int(lensVal)
+		if decodedLen == 0 {
 			return scm.NewString("")
 		}
-		b := []byte(s.dictionary[byteStart : byteStart+lensVal])
-		return scm.NewString(base64.StdEncoding.EncodeToString(b))
-	case FormatBase64Lower:
-		if lensVal == 0 {
-			return scm.NewString("")
-		}
-		b := []byte(s.dictionary[byteStart : byteStart+lensVal])
-		return scm.NewString(base64.URLEncoding.EncodeToString(b))
+		ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(byteOff)))
+		return scm.NewCString(ptr, uint8(s.format), 0, decodedLen)
 	default:
 		return scm.NewNil()
 	}
@@ -549,42 +580,66 @@ func (s *StorageString) init(i uint32) {
 	s.format = chooseBestFormat(s.validFormats)
 
 	if s.nodict {
+		adjustStartsForFormat(&s.starts)
 		s.starts.init(i)
 		adjustLensForFormat(&s.lens, s.format)
 		s.lens.init(i)
 	} else {
-		// compress the dictionary collected during scan
-		rawDict := s.sb.String()
-		s.sb.Reset()
+		// Collect unique strings sorted by raw byte offset (= nibble position for nibble formats).
+		// Sorting ensures dense nibble packing produces nibble positions that match scan stats.
+		type dictEntry struct {
+			orig   string
+			idx    uint32
+			rawOff uint
+		}
+		entries := make([]dictEntry, 0, len(s.reverseMap))
+		for orig, start := range s.reverseMap {
+			entries = append(entries, dictEntry{orig, uint32(start[0]), start[1]})
+		}
+		sort.Slice(entries, func(a, b int) bool { return entries[a].rawOff < entries[b].rawOff })
 
 		s.values.init(i)
 		s.starts.init(uint32(s.count))
 		adjustLensForFormat(&s.lens, s.format)
 		s.lens.init(uint32(s.count))
 
+		rawDict := s.sb.String()
+		s.sb.Reset()
+
 		if s.format == FormatRaw {
 			s.dictionary = rawDict
-			for _, start := range s.reverseMap {
-				s.starts.build(uint32(start[0]), scm.NewInt(int64(start[1])))
-				s.lens.build(uint32(start[0]), scm.NewInt(int64(start[2])))
+			for _, e := range entries {
+				s.starts.build(e.idx, scm.NewInt(int64(e.rawOff)))
+				start := s.reverseMap[e.orig]
+				s.lens.build(e.idx, scm.NewInt(int64(start[2])))
 			}
-		} else {
-			// re-encode each unique string in compressed form
+		} else if isNibbleFormat(s.format) {
+			// Dense nibble packing. For ASCII nibble charsets: nibble position = raw byte offset,
+			// so processing in sorted order keeps starts.build values equal to scan values.
+			cs := nibbleCharsetFor(s.format)
 			s.compBuf = s.compBuf[:0]
-			for origStr, start := range s.reverseMap {
+			s.compNibble = 0
+			for _, e := range entries {
+				nibblePos := s.compNibble
+				s.starts.build(e.idx, scm.NewInt(int64(nibblePos)))
+				s.lens.build(e.idx, scm.NewInt(int64(len(e.orig))))
+				s.compBuf, s.compNibble = appendNibbles(s.compBuf, e.orig, cs, nibblePos)
+			}
+			s.dictionary = string(s.compBuf)
+			s.compBuf = nil
+		} else {
+			// UUID and Base64: byte-aligned, no dense packing.
+			s.compBuf = s.compBuf[:0]
+			for _, e := range entries {
 				byteOffset := len(s.compBuf)
-				s.compBuf = compressString(s.compBuf, origStr, s.format)
+				s.compBuf = compressNonNibble(s.compBuf, e.orig, s.format)
 				compLen := len(s.compBuf) - byteOffset
-				s.starts.build(uint32(start[0]), scm.NewInt(int64(byteOffset)))
+				s.starts.build(e.idx, scm.NewInt(int64(byteOffset)))
 				switch s.format {
 				case FormatUUIDLower, FormatUUIDUpper:
 					// lens unused for UUID (always 16 bytes)
 				case FormatBase64Upper, FormatBase64Lower:
-					// store decoded byte count
-					s.lens.build(uint32(start[0]), scm.NewInt(int64(compLen)))
-				default:
-					// nibble formats: store original char count
-					s.lens.build(uint32(start[0]), scm.NewInt(int64(len(origStr))))
+					s.lens.build(e.idx, scm.NewInt(int64(compLen)))
 				}
 			}
 			s.dictionary = string(s.compBuf)
@@ -604,19 +659,25 @@ func (s *StorageString) build(i uint32, value scm.Scmer) {
 	}
 	v := scm.String(value)
 	if s.nodict {
-		byteOffset := len(s.compBuf)
-		s.compBuf = compressString(s.compBuf, v, s.format)
-		compLen := len(s.compBuf) - byteOffset
-		s.starts.build(i, scm.NewInt(int64(byteOffset)))
-		switch s.format {
-		case FormatUUIDLower, FormatUUIDUpper:
-			// lens unused for UUID (always 16 bytes)
-		case FormatBase64Upper, FormatBase64Lower:
-			// store decoded byte count
-			s.lens.build(i, scm.NewInt(int64(compLen)))
-		default:
-			// nibble formats: store original char count
+		if isNibbleFormat(s.format) {
+			cs := nibbleCharsetFor(s.format)
+			nibblePos := s.compNibble
+			s.starts.build(i, scm.NewInt(int64(nibblePos)))
 			s.lens.build(i, scm.NewInt(int64(len(v))))
+			s.compBuf, s.compNibble = appendNibbles(s.compBuf, v, cs, nibblePos)
+		} else {
+			byteOffset := len(s.compBuf)
+			s.compBuf = compressNonNibble(s.compBuf, v, s.format)
+			compLen := len(s.compBuf) - byteOffset
+			s.starts.build(i, scm.NewInt(int64(byteOffset)))
+			switch s.format {
+			case FormatUUIDLower, FormatUUIDUpper:
+				// lens unused for UUID (always 16 bytes)
+			case FormatBase64Upper, FormatBase64Lower:
+				s.lens.build(i, scm.NewInt(int64(compLen)))
+			default: // FormatRaw
+				s.lens.build(i, scm.NewInt(int64(len(v))))
+			}
 		}
 	} else {
 		start := s.reverseMap[v]

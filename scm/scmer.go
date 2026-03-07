@@ -70,16 +70,31 @@ const (
 	tagFastDict
 	tagDate
 	tagAny
-	tagRegex // *regexp.Regexp
+	tagRegex   // *regexp.Regexp
+	tagCString // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
 	// custom tags >= 100
 )
 
 // Exported tag constants for type checking in other packages
 const (
-	TagString = tagString
-	TagSymbol = tagSymbol
-	TagDate   = tagDate
+	TagString  = tagString
+	TagSymbol  = tagSymbol
+	TagDate    = tagDate
+	TagCString = tagCString
 )
+
+// CStringDecompress is set by the storage package to materialize a compressed string.
+// ptr points into the StorageString dictionary; val is the 48-bit aux value carrying
+// format (bits 47-44), nibbleOffset (bit 43), and charLen (bits 42-0).
+var CStringDecompress func(ptr *byte, val uint64) string
+
+// NewCString creates a lazy compressed-string Scmer.
+// ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
+// format: storage.StringFormat value (4 bits); nibbleOff: 0 or 1; charLen: original char count.
+func NewCString(ptr *byte, format uint8, nibbleOff uint8, charLen int) Scmer {
+	val := uint64(format)<<44 | uint64(nibbleOff)<<43 | uint64(charLen)
+	return Scmer{ptr, makeAux(tagCString, val)}
+}
 
 var scmerIntSentinel byte
 var scmerFloatSentinel byte
@@ -379,7 +394,15 @@ func (s Scmer) IsString() bool {
 	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
 		return false
 	}
-	return auxTag(s.aux) == tagString
+	t := auxTag(s.aux)
+	return t == tagString || t == tagCString
+}
+
+func (s Scmer) IsCString() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagCString
 }
 
 func (s Scmer) IsSymbol() bool {
@@ -431,7 +454,7 @@ func (s Scmer) Bool() bool {
 		return int64(s.aux) != 0
 	case tagFloat:
 		return math.Float64frombits(s.aux) != 0.0
-	case tagString, tagSymbol:
+	case tagString, tagSymbol, tagCString:
 		str := s.String()
 		return str != "" && str != "false"
 	case tagSlice:
@@ -531,6 +554,11 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		start := len(dst)
 		dst = strconv.AppendFloat(dst, math.Float64frombits(s.aux), 'g', -1, 64)
 		return unsafe.String(&dst[start], len(dst)-start), dst
+	case tagCString:
+		if CStringDecompress != nil {
+			return CStringDecompress(s.ptr, auxVal(s.aux)), dst
+		}
+		return "<compressed string>", dst
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return "true", dst
