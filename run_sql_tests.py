@@ -35,6 +35,7 @@ import subprocess
 import time
 import threading
 import multiprocessing
+import re
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
@@ -113,12 +114,11 @@ def get_max_rows_for_ram(bytes_per_row: int = 100) -> int:
     return 10_000_000  # fallback: 10M rows
 
 class SQLTestRunner:
-    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", suite_db_cleanup=True):
+    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests"):
         self.base_url = base_url
         self.username = username
         self.password = password
         self.default_database = default_database
-        self.suite_db_cleanup = suite_db_cleanup
         self.auth_header = self._create_auth_header()
         self.test_count = 0
         self.test_passed = 0
@@ -480,6 +480,18 @@ class SQLTestRunner:
 
             response = resp
         else:
+            if not is_sparql:
+                create_table = self._extract_create_table_name(query)
+                if create_table:
+                    self.execute_sql(
+                        database,
+                        f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}",
+                        auth_header,
+                        active_syntax,
+                        session_id=session_id,
+                        timeout=sql_timeout,
+                    )
+
             # Show query plan if PERF_EXPLAIN is enabled
             if is_perf_test and PERF_EXPLAIN and not is_sparql:
                 explain_resp = self.execute_sql(database, f"DESCRIBE {query}", auth_header, active_syntax)
@@ -571,6 +583,9 @@ class SQLTestRunner:
         self.current_database = database
         for step in setup_steps:
             self.setup_operations.append(step)
+            create_table = self._extract_create_table_name(step.get('sql'))
+            if create_table:
+                self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}", syntax=self.suite_syntax)
             resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
             if resp is None or resp.status_code not in [200, 500]:
                 return False
@@ -580,29 +595,42 @@ class SQLTestRunner:
         for step in cleanup_steps:
             self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
 
-    def cleanup_test_database(self, database: str) -> None:
-        try:
-            global is_connect_only_mode
-            if is_connect_only_mode:
-                resp = self.execute_sql(database, "SHOW TABLES")
-                if resp is not None and resp.status_code == 200:
-                    try:
-                        tables = resp.json().get('data', [])
-                        for row in tables:
-                            tbl = list(row.values())[0]
-                            self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(tbl)}")
-                    except:
-                        pass
-                return
-            self.execute_sql("system", f"DROP DATABASE IF EXISTS {self._quote_ident(database)}")
-            # drop ensures next ensure_database will recreate
-            if database in self._ensured_dbs:
-                try:
-                    self._ensured_dbs.remove(database)
-                except KeyError:
-                    pass
-        except:
-            pass
+    def _extract_create_table_name(self, sql: Any) -> Optional[str]:
+        if not isinstance(sql, str):
+            return None
+        m = re.search(r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:`[^`]+`|[A-Za-z0-9_.-])+)", sql, re.IGNORECASE)
+        if not m:
+            return None
+        raw = m.group(1).strip().strip(";").strip("(")
+        if "`.`" in raw:
+            raw = raw.rsplit("`.`", 1)[1]
+        elif "." in raw:
+            raw = raw.rsplit(".", 1)[1]
+        table = raw.strip("`")
+        if not table:
+            return None
+        return table
+
+    def _extract_created_tables(self, spec: Dict[str, Any]) -> List[str]:
+        # Keep cleanup scoped to tables this suite creates (no global DB cleanup).
+        tables = set()
+
+        def add_from_sql(sql: Any):
+            table = self._extract_create_table_name(sql)
+            if table:
+                tables.add(table)
+
+        for step in spec.get("setup", []) or []:
+            if isinstance(step, dict):
+                add_from_sql(step.get("sql"))
+        for tc in spec.get("test_cases", []) or []:
+            if isinstance(tc, dict):
+                add_from_sql(tc.get("sql"))
+        return sorted(tables)
+
+    def _drop_created_tables(self, database: str, tables: List[str]) -> None:
+        for tbl in tables:
+            self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(tbl)}", syntax=self.suite_syntax)
 
     # ----------------------
     # Parallel test groups
@@ -651,13 +679,14 @@ class SQLTestRunner:
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
         print(f"💾 Database: {database}")
 
-        # Optional suite-level DB isolation. In shared-server parallel runs we
-        # disable this to avoid cross-suite DROP/CREATE races.
-        if self.suite_db_cleanup:
-            self.cleanup_test_database(database)
         self.ensure_database(database)
+        created_tables = self._extract_created_tables(spec)
+        if created_tables:
+            self._drop_created_tables(database, created_tables)
 
         if spec.get('setup') and not self.run_setup(spec['setup'], database):
+            if created_tables:
+                self._drop_created_tables(database, created_tables)
             print("❌ Setup failed")
             return False
 
@@ -683,8 +712,8 @@ class SQLTestRunner:
 
         if spec.get('cleanup'):
             self.run_cleanup(spec['cleanup'], database)
-        if self.suite_db_cleanup:
-            self.cleanup_test_database(database)
+        if created_tables:
+            self._drop_created_tables(database, created_tables)
 
         print("="*60)
         total = self.test_count
@@ -754,19 +783,16 @@ def kill_memcp_by_port(port: int) -> None:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only] [--no-db-cleanup]")
+        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only]")
         sys.exit(1)
 
     spec_file = sys.argv[1]
     port = 4321
     connect_only = False
-    suite_db_cleanup = True
 
     for arg in sys.argv[2:]:
         if arg == "--connect-only":
             connect_only = True
-        elif arg == "--no-db-cleanup":
-            suite_db_cleanup = False
         elif arg.isdigit():
             port = int(arg)
 
@@ -790,7 +816,7 @@ def main():
                 print("❌ Failed to start MemCP")
                 sys.exit(1)
 
-    runner = SQLTestRunner(base_url, suite_db_cleanup=suite_db_cleanup)
+    runner = SQLTestRunner(base_url)
     if not connect_only:
         def restart_handler() -> bool:
             nonlocal memcp_process
