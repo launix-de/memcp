@@ -344,8 +344,11 @@ class SQLTestRunner:
     # Test execution
     # ----------------------
     def run_test_case(self, test_case: Dict, database: str) -> bool:
+        name = test_case.get("name", f"Test {self.test_count + 1}")
+        if test_case.get("disabled"):
+            print(f"⏭️  Skipped (disabled): {name}")
+            return True
         self.test_count += 1
-        name = test_case.get("name", f"Test {self.test_count}")
         is_noncritical = bool(test_case.get("noncritical"))
         if is_noncritical:
             self.noncritical_count += 1
