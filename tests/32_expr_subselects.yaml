@@ -168,7 +168,9 @@ test_cases:
         WHERE TRUE
       )
     expect:
-      error: true
+      rows: 1
+      data:
+        - id: 4
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS t4"
