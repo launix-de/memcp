@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "Decimal columns, sanitizer enforcement, type constraints, mixed types"
+  isolated: true
 
 setup:
   - sql: "CREATE TABLE dec_basic (id INT, price DECIMAL(12,2), qty INT)"

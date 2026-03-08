@@ -269,23 +269,34 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 	(if (not (nil? fk_result))
 		fk_result
 		(begin
+			(define alias_map (list (list tblvar (concat schema "." tbl))))
+			(define key_names (map keys (lambda (k) (canonical_expr_name k '(list) '(list) alias_map))))
+			(define condition_name (if (nil? condition_suffix) nil (canonical_expr_name condition_suffix '(list) '(list) alias_map)))
+			(define key_name_at (lambda (i) (nth key_names i)))
+			(define key_at (lambda (i) (nth keys i)))
 			(define keytable_name (if (nil? condition_suffix)
-				(concat "." tbl ":" keys)
-				(concat "." tbl ":" keys "|" condition_suffix)))
+				(concat "." tbl ":" key_names)
+				(concat "." tbl ":" key_names "|" condition_name)))
 			/* compute column definitions and partition spec at compile time */
 			(define kt_cols (cons
-				'("unique" "group" (map keys (lambda (col) (concat col))))
-				(map keys (lambda (col) '("column" (concat col) "any" '() '())))))
-			(define kt_partition (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) '((concat col) (shardcolumn schema tbl scol)) '())))))
+				'("unique" "group" key_names)
+				(map key_names (lambda (colname) '("column" colname "any" '() '())))))
+			(define kt_partition (merge (map (produceN (count keys)) (lambda (i)
+				(match (key_at i)
+					'('get_column (eval tblvar) false scol false) (list (list (key_name_at i) (shardcolumn schema tbl scol)))
+					'())))))
 			/* create at compile time (needed for recursive build_queryplan) */
 			(createtable schema keytable_name kt_cols '("engine" "sloppy") true)
 			(partitiontable schema keytable_name kt_partition)
 			/* build runtime init code to re-create after potential cache eviction (mirrors prejoin pattern) */
 			(define kt_cols_code (cons 'list
 				(cons
-					(cons 'list (cons "unique" (cons "group" (list (cons 'list (map keys (lambda (col) (concat col))))))))
-					(map keys (lambda (col) (list 'list "column" (concat col) "any" '(list) '(list)))))))
-			(define kt_partition_code (cons 'list (merge (map keys (lambda (col) (match col '('get_column (eval tblvar) false scol false) (list (list 'list (concat col) (cons 'list (shardcolumn schema tbl scol)))) '()))))))
+					(cons 'list (cons "unique" (cons "group" (list (cons 'list key_names)))))
+					(map key_names (lambda (colname) (list 'list "column" colname "any" '(list) '(list)))))))
+			(define kt_partition_code (cons 'list (merge (map (produceN (count keys)) (lambda (i)
+				(match (key_at i)
+					'('get_column (eval tblvar) false scol false) (list (list 'list (key_name_at i) (cons 'list (shardcolumn schema tbl scol))))
+					'()))))))
 			(define init_code (list 'begin
 				(list 'createtable schema keytable_name kt_cols_code (list 'list "engine" "sloppy") true)
 				(list 'partitiontable schema keytable_name kt_partition_code)
@@ -297,12 +308,13 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 /* make_col_replacer: create a function that rewrites column/aggregate references to point at a group table
 is_dedup=true: leave aggregates intact (for dedup stages)
 is_dedup=false: replace aggregates with column fetches (for normal group stages) */
-(define make_col_replacer (lambda (grouptbl condition is_dedup) (begin
+(define make_col_replacer (lambda (grouptbl condition is_dedup expr_name) (begin
+	(define colname (lambda (expr) (if (nil? expr_name) (concat expr) (expr_name expr))))
 	(define replacer (lambda (expr) (match expr
 		(cons (symbol aggregate) rest) (if is_dedup
 			expr
-			'('get_column grouptbl false (concat rest "|" condition) false))
-		'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (concat '('get_column tblvar ti col ci)) ci)
+			'('get_column grouptbl false (concat (colname rest) "|" (colname condition)) false))
+		'((symbol get_column) tblvar ti col ci) '('get_column grouptbl ti (colname '('get_column tblvar ti col ci)) ci)
 		(cons sym args) (cons sym (map args replacer))
 		expr
 	)))
@@ -1302,6 +1314,8 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 			/* TODO: outer tables that only join on group */
 			'('(tblvar schema tbl isOuter _)) (begin
 				/* prepare preaggregate */
+				(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
+				(define expr_name (lambda (expr) (canonical_expr_name expr '(list) '(list) canon_alias_map)))
 
 				(define kt_result (make_keytable schema tbl stage_group tblvar (if is_dedup condition nil)))
 				(set grouptbl (car kt_result))
@@ -1339,7 +1353,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									'((quote lambda) '('acc 'sharddict)
 										'('insert
 											schema grouptbl
-											(cons 'list (map stage_group (lambda (col) (concat col))))
+											(cons 'list (map stage_group expr_name))
 											'('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) /* turn keys from assoc into list */
 											'(list) '('lambda '() true) true)
 									)
@@ -1350,7 +1364,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 
 				(if is_dedup (begin
 					/* DEDUP-ONLY stage: no aggregate computation, just collect unique keys and pass through to next stage */
-					(define replace_col_for_dedup (make_col_replacer grouptbl condition true))
+					(define replace_col_for_dedup (make_col_replacer grouptbl condition true expr_name))
 					/* transform rest_groups to reference grouptbl columns instead of source table columns;
 					first resolve nil -> tblvar via replace_find_column, then map tblvar -> grouptbl */
 					(define _dedup_resolve (lambda (e) (replace_col_for_dedup (replace_find_column e))))
@@ -1373,10 +1387,11 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						/* NORMAL group stage: extract aggregates, compute, and continue.
 						replace_agg_with_fetch rewrites (aggregate expr + 0) -> (get_column grouptbl "expr|cond")
 						so ORDER BY SUM(amount) becomes ORDER BY on a keytable column. */
-						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false))
+						(define replace_agg_with_fetch (make_col_replacer grouptbl condition false expr_name))
+						(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition))))
 						(define replace_group_key_or_fetch (lambda (expr) (if
 							(reduce stage_group (lambda (acc group_expr) (or acc (equal? group_expr expr))) false)
-							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (concat expr)) false)
+							'('get_column grouptbl false (if is_fk_reuse fk_pk_col (expr_name expr)) false)
 							(replace_agg_with_fetch expr)
 						)))
 
@@ -1389,9 +1404,11 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(define fk_child_col (if is_fk_reuse
 							(match (car stage_group) '('get_column _ false scol false) scol)
 							nil))
-						/* exists column: needed when WHERE condition present (non-global aggregate) */
-						(define needs_exists (and (not (equal? condition true)) (not (equal? stage_group '(1)))))
-						(define exists_col_name (if needs_exists (concat ".exists|" condition) nil))
+						/* exists column: always enforce non-empty groups for non-global GROUP BY.
+						This prevents stale empty keytable rows (e.g. after bulk key updates) from surfacing
+						as groups with zeroed aggregates. */
+						(define needs_exists (not (equal? stage_group '(1))))
+						(define exists_col_name (if needs_exists (concat "." (expr_name condition)) nil))
 
 						/* AND exists>0 into HAVING so empty/non-matching groups are excluded */
 						(define effective_having (if needs_exists
@@ -1435,26 +1452,26 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 											'+ 0 1 isOuter)))
 								/* Normal keytable: scan source with WHERE + group key equality */
 								'((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
-									(cons list (map stage_group (lambda (col) (concat col))))
-									'((quote lambda) (map stage_group (lambda (col) (symbol (concat col))))
+									(cons list (map stage_group expr_name))
+									'((quote lambda) (map stage_group (lambda (col) (symbol (expr_name col))))
 										(scan_wrapper 'scan schema tbl
 											(cons list (merge tblvar_cols filtercols))
 											'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (c) (symbol (concat tblvar "." c))))
 												(optimize (cons (quote and) (cons (replace_columns_from_expr condition)
-													(map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (concat col))))))))))
+													(map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (expr_name col))))))))))
 											'(list)
 											'((quote lambda) '() 1)
 											'+ 0 1 isOuter))))))
 
 						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 							(set cols (extract_columns_for_tblvar tblvar expr))
-							'((quote createcolumn) schema grouptbl (concat ag "|" condition) "any" '(list) createcol_options
-								(cons list (map stage_group (lambda (col) (if is_fk_reuse fk_pk_col (concat col)))))
-								'((quote lambda) (map stage_group (lambda (col) (symbol (if is_fk_reuse fk_pk_col (concat col)))))
+							'((quote createcolumn) schema grouptbl (agg_col_name ag) "any" '(list) createcol_options
+								(cons list (map stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
+								'((quote lambda) (map stage_group (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
 									(scan_wrapper 'scan schema tbl
 										(cons list (merge tblvar_cols filtercols))
 										/* check group equality AND WHERE-condition */
-										'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (concat col)))))))))))
+										'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))))
 										(cons list cols)
 										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))
 										reduce
@@ -1474,14 +1491,15 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						so correlated subqueries get fresh values per outer row */
 						(define invalidation_plan (if (equal? stage_group '(1))
 							(cons 'begin (map ags (lambda (ag) (match ag '(expr reduce neutral)
-								'('invalidatecolumn schema grouptbl (concat ag "|" condition))))))
+								'('invalidatecolumn schema grouptbl (agg_col_name ag))))))
 							nil))
 
 						/* build key column pairs for keytable cleanup triggers: ((base_col kt_col) ...) */
 						(define key_pairs (map stage_group (lambda (expr)
 							(match expr
-								'('get_column _ _ col _) (list col (concat expr))
-								(list (concat expr) (concat expr))
+								'((symbol get_column) _ _ col _) (list col (expr_name expr))
+								'((quote get_column) _ _ col _) (list col (expr_name expr))
+								(list (expr_name expr) (expr_name expr))
 						))))
 						(define cleanup_plan (if (or is_fk_reuse (equal? stage_group '(1))) nil
 							(list 'register_keytable_cleanup schema tbl schema grouptbl tblvar
@@ -1514,7 +1532,16 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define mat_col_names (map mat_cols car))
 				/* compute prejoin table name and alias */
 				(define pjvar ".pj")
-				(define prejointbl (concat ".prejoin:" (map tables (lambda (t) (match t '(tv _ _ _ _) tv))) ":" mat_col_names "|" condition))
+				/* canonical prejoin key: source tables only (no alias), for maximal reuse across equivalent queries */
+				(define prejoin_alias_map (map tables (lambda (t)
+					(match t '(tv tschema ttbl _ _)
+						(list tv (concat tschema "." ttbl)))))
+				)
+				(define prejoin_col_names (map mat_cols (lambda (mc) (canonical_expr_name (cadr mc) '(list) '(list) prejoin_alias_map))))
+				(define prejoin_condition_name (canonical_expr_name condition '(list) '(list) prejoin_alias_map))
+				(define prejointbl (concat ".prejoin:"
+					(map tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
+					) ":" prejoin_col_names "|" prejoin_condition_name))
 				/* capture outer schema for temp table operations */
 				(define pj_schema schema)
 				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
@@ -1583,7 +1610,9 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							'(list "engine" "sloppy") true)
 						(list 'if (list 'equal? 0 (list 'scan_estimate pj_schema prejointbl))
 							'('time materialize_plan "materialize")))
-					(map tables (lambda (t) (list 'register_prejoin_invalidation (nth t 1) (nth t 2) pj_schema prejointbl)))
+					(map tables (lambda (t)
+						(match t '(_ src_schema src_tbl _ _)
+							(list 'register_prejoin_invalidation src_schema src_tbl pj_schema prejointbl))))
 					(list grouped_result)))
 			)
 		)

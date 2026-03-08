@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "REPEAT function, TEXT/BLOB storage with short and long strings, persistence"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS blob_test"

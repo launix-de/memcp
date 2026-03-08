@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "ALTER TABLE ADD/DROP COLUMN, column metadata, schema changes"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS alt_base"

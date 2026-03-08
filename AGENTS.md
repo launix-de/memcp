@@ -10,13 +10,32 @@
 - `docs/`: generated API/reference docs.
 - if you work on files, update/add the copyright notice's current year
 
+## Development Workflow
+
+Every change — bugfix, feature, refactor — must go through a **branch + PR** cycle. Direct commits to `master` are blocked by GitHub branch protection.
+
+1. **Create a worktree + branch** for your change:
+   ```
+   git worktree add ../memcp-my-feature -b my-feature
+   cd ../memcp-my-feature
+   ```
+2. **Develop and commit** on the branch. The pre-commit hook runs the full test suite before each commit.
+3. **Open a PR** targeting `master`:
+   ```
+   gh pr create --title "Short description" --body "What and why"
+   ```
+4. **CI must be green** (`test` GitHub Actions job) before the PR can be merged.
+5. **Merge the PR** on GitHub (or `gh pr merge`). Delete the branch and worktree afterwards.
+
+`git commit --no-verify` is allowed for intermediate commits on non-`master` branches, after a successful `make test` run in the current worktree/session to save iteration time, or for documentation-only changes (e.g. `README*`, docs, manuals) that do not modify executable code or tests. Before pushing/opening a PR, run the full hook-equivalent test suite (e.g. `make test`) again for any change set that includes code/test changes.
+
 ## Build, Test, and Dev Commands
 - Build: `go build -o memcp` or `make` (default builds).
 - Run: `./memcp --api-port=4321 lib/main.scm` (MySQL off by default in tests).
 - Background run: always use `--no-repl` when running memcp in the background, otherwise closing stdin causes the REPL to exit: `./memcp --no-repl --api-port=4321 lib/main.scm &`
 - Quick test (single file): `python3 run_sql_tests.py tests/01_basic_sql.yaml`.
 - Connect-only (reuse a running instance): `python3 run_sql_tests.py tests/02_functions.yaml 4321 --connect-only`.
-- Pre-commit: `git commit` runs all `tests/[0-9][0-9]_*.yaml` via a single `memcp` instance (port 4400). Bypass only if necessary: `git commit --no-verify -m "..."`.
+- Pre-commit: `git commit` runs all `tests/[0-9][0-9]_*.yaml` via a single `memcp` instance (port 4400). Bypassing with `--no-verify` is permitted for intermediate commits on non-`master` branches, after a successful `make test` run, or for documentation-only changes (README/docs/manuals) without code/test modifications; still run the full suite before pushing whenever code/test changes are part of the branch.
 
 ### Exact Server Invocation (used by test runner)
 The test runner (`run_sql_tests.py`) starts the server exactly like this:

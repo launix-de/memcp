@@ -45,7 +45,7 @@ run_memcp_forever() {
     pkill -f "memcp.*--api-port=$test_port" || true
     sleep 1
     memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
-    ./memcp -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm < "$fifo_path" >> "$memcp_log" 2>&1 &
+    ./memcp --no-repl -data "/tmp/memcp-pre-commit-tests" --api-port=$test_port --mysql-port=$((test_port + 1000)) --disable-mysql lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!
     # wait for process to exit; test loop will poll readiness
     wait $memcp_pid
@@ -76,13 +76,6 @@ wait_for_sql_ready() {
 rm -rf /tmp/memcp-pre-commit-tests || true
 echo -n > /tmp/memcp-test.log
 
-# Create FIFO to keep stdin open across restarts
-fifo_path="/tmp/memcp-stdin-$test_port"
-rm -f "$fifo_path" 2>/dev/null || true
-mkfifo "$fifo_path"
-# Keep writer end open for the lifetime of this script
-exec 3<> "$fifo_path"
-
 # Start supervisor loop
 run_memcp_forever &
 supervisor_pid=$!
@@ -112,9 +105,6 @@ cleanup() {
   kill $supervisor_pid 2>/dev/null || true
   # Also kill an active memcp if still running
   pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
-  # Close and remove FIFO
-  exec 3>&-
-  rm -f "$fifo_path" 2>/dev/null || true
   # Remove temp directory if created
   if [ -n "$tmpdir" ] && [ -d "$tmpdir" ]; then
     rm -rf "$tmpdir" 2>/dev/null || true
@@ -132,29 +122,24 @@ echo "🧪 Running SQL tests using single MemCP instance (parallel where safe)..
 all_passed=true
 failed_files=""
 
-# Split tests: disruptive tests run sequentially; others in parallel.
-# Rebuild-heavy suites and suites that run internal parallel groups can deadlock
-# when executed concurrently against one shared server instance.
+# Split tests: suites marked with metadata `isolated: true` run sequentially.
+# All other suites are worker-parallelized.
 parallel_tests=""
 sequential_tests=""
 for tf in $test_files; do
-  if grep -q "SHUTDOWN" "$tf" || \
-     grep -q "(rebuild)" "$tf" || \
-     grep -qi "repartition" "$tf" || \
-     grep -q "parallel:" "$tf" || \
-     grep -Eqi "CREATE USER|ALTER USER|DROP USER|SET PASSWORD|GRANT |REVOKE |system\\.user|system\\.access" "$tf"; then
+  if grep -Eqi "^[[:space:]]*isolated:[[:space:]]*true([[:space:]]|$)" "$tf"; then
     sequential_tests="$sequential_tests $tf"
   else
     parallel_tests="$parallel_tests $tf"
   fi
 done
 
-# Keep test suites isolated by default; allow opt-in parallelism via MEMCP_TEST_JOBS.
-max_jobs="${MEMCP_TEST_JOBS:-1}"
+# Run worker-parallel by default; override with MEMCP_TEST_JOBS.
+max_jobs="${MEMCP_TEST_JOBS:-4}"
 if ! [[ "$max_jobs" =~ ^[0-9]+$ ]] || [ "$max_jobs" -lt 1 ]; then
-  max_jobs=1
+  max_jobs=4
 fi
-if [ "$max_jobs" -gt 8 ]; then max_jobs=8; fi
+if [ "$max_jobs" -gt 16 ]; then max_jobs=16; fi
 
 tmpdir=$(mktemp -d)
 lockfile="/tmp/memcp-print.lock"
@@ -163,7 +148,6 @@ run_one() {
   local tf="$1"
   local out="$2"
   local statusf="$3"
-  local no_db_cleanup="${4:-0}"
   # Wait for readiness before starting
   if ! wait_for_sql_ready 60 1; then
     echo "FAIL" > "$statusf"
@@ -174,11 +158,7 @@ run_one() {
     } 9>>"$lockfile"
     return
   fi
-  if [ "$no_db_cleanup" = "1" ]; then
-    python3 run_sql_tests.py "$tf" $test_port --connect-only --no-db-cleanup > "$out" 2>&1
-  else
-    python3 run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
-  fi
+  python3 run_sql_tests.py "$tf" $test_port --connect-only > "$out" 2>&1
   rc=$?
   # Determine status by exit code (0 => OK, nonzero => FAIL)
   if [ $rc -eq 0 ]; then echo OK > "$statusf"; else echo FAIL > "$statusf"; fi
@@ -194,7 +174,7 @@ run_one() {
 for tf in $parallel_tests; do
   out="$tmpdir/$(basename "$tf").out"
   statusf="$tmpdir/$(basename "$tf").status"
-  run_one "$tf" "$out" "$statusf" 1 &
+  run_one "$tf" "$out" "$statusf" &
   active_pids+=("$!")
   # Concurrency gate: wait for the oldest test PID when at limit
   while [ ${#active_pids[@]} -ge $max_jobs ]; do
@@ -211,7 +191,7 @@ done
 for tf in $sequential_tests; do
   out="$tmpdir/$(basename "$tf").out"
   statusf="$tmpdir/$(basename "$tf").status"
-  run_one "$tf" "$out" "$statusf" 0
+  run_one "$tf" "$out" "$statusf"
 done
 
 # Stop supervisor and memcp now that all tests are done

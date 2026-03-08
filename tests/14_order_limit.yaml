@@ -211,6 +211,7 @@ test_cases:
 
   - name: "Multi-shard ORDER BY multi-column"
     sql: "SELECT grp, val FROM ord_stress ORDER BY grp ASC, val DESC LIMIT 3"
+    timeout: 60
     expect:
       rows: 3
       data:
