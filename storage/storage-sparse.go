@@ -39,6 +39,20 @@ func (s *StorageSparse) ComputeSize() uint {
 func (s *StorageSparse) String() string {
 	return "SCMER-sparse"
 }
+
+// StorageSparse binary layout (magic byte 2 consumed by shard loader):
+//
+//	[count uint64]         ← total row count (including NULL rows)
+//	[l2 uint64]            ← number of non-NULL (sparse) entries
+//	[entries: l2 pairs of JSON lines: recid\nvalue\n]
+//
+// Version history:
+//
+//	v0 (original, no version byte): layout as above.  This type had no padding
+//	byte in v0.1.0, so there is no safe location for a version byte without
+//	breaking existing data.  If the format must change, register a NEW magic
+//	byte in storages[] (storage.go) for the new layout and keep magic 2 for
+//	reading legacy data forever.
 func (s *StorageSparse) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(2)) // 2 = StorageSparse
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
@@ -49,16 +63,18 @@ func (s *StorageSparse) Serialize(f io.Writer) {
 			panic(err)
 		}
 		f.Write(vbytes)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file
 		vbytes, err = json.Marshal(v)
 		if err != nil {
 			panic(err)
 		}
 		f.Write(vbytes)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file
 	}
 }
 func (s *StorageSparse) Deserialize(f io.Reader) uint {
+	// No version byte: this type had no padding byte in v0.1.0.
+	// Count is read directly.  Format changes require a new magic byte.
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.count = l

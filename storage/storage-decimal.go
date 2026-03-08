@@ -158,6 +158,17 @@ func (s *StorageDecimal) finish() {
 	s.inner.finish()
 }
 
+// StorageDecimal binary layout (magic byte 13 consumed by shard loader):
+//
+//	[scaleExp int8]      ← power-of-ten exponent: real_value = stored_int * 10^scaleExp
+//	[inner StorageInt]   ← with its own magic byte 10
+//
+// Version history:
+//
+//	v0 (original, no version byte): layout as above.  The first byte after the
+//	magic is scaleExp (int8, typically non-zero), so there is no safe location
+//	for an inline version byte.  Format changes require a NEW magic byte in
+//	storages[] (storage.go); keep magic 13 as a legacy reader forever.
 func (s *StorageDecimal) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(13))
 	binary.Write(f, binary.LittleEndian, s.scaleExp)
@@ -165,6 +176,8 @@ func (s *StorageDecimal) Serialize(f io.Writer) {
 }
 
 func (s *StorageDecimal) Deserialize(f io.Reader) uint {
+	// No version byte: the first byte is scaleExp (int8).
+	// Format changes require a new magic byte.
 	binary.Read(f, binary.LittleEndian, &s.scaleExp)
 	return s.inner.DeserializeEx(f, true) // reads magic 10 + data
 }

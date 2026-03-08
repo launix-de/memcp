@@ -231,7 +231,6 @@ func (s *Scheduler) run() {
 }
 
 func init_scheduler() {
-	DeclareTitle("Scheduler")
 	Declare(&Globalenv, &Declaration{
 		"setTimeout", "Schedules a callback to run after the given delay in milliseconds (fractional values allowed for sub-millisecond precision).",
 		2, 1000,

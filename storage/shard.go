@@ -56,7 +56,7 @@ type storageShard struct {
 
 	// lazy-loading/shared-resource state
 	srState      SharedState
-	lastAccessed time.Time // updated on GetRead/GetExclusive for LRU eviction
+	lastAccessed uint64 // UnixNano, atomic; updated on GetRead/GetExclusive for LRU eviction
 
 	// repartition drain tracking: counts in-flight scans on this shard
 	activeScanners atomic.Int32
@@ -312,13 +312,13 @@ func (s *storageShard) GetRead() func() {
 	if s.srState == COLD {
 		s.srState = SHARED
 	}
-	s.lastAccessed = time.Now()
+	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	return func() {}
 }
 func (s *storageShard) GetExclusive() func() {
 	s.ensureLoaded()
 	s.srState = WRITE
-	s.lastAccessed = time.Now()
+	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	return func() {}
 }
 
@@ -343,7 +343,7 @@ func (s *storageShard) ensureLoaded() {
 		s.srState = SHARED
 	}
 	s.mu.Unlock()
-	s.lastAccessed = time.Now()
+	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	// register with CacheManager (skip temp tables and Memory-engine shards)
 	if s.t.PersistencyMode != Memory && !strings.HasPrefix(s.t.Name, ".") {
 		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
@@ -384,7 +384,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 }
 
 func shardLastUsed(ptr any) time.Time {
-	return ptr.(*storageShard).lastAccessed
+	return time.Unix(0, int64(atomic.LoadUint64(&ptr.(*storageShard).lastAccessed)))
 }
 
 func NewShard(t *table) *storageShard {
@@ -526,6 +526,18 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 			var newRecid uint32                      // recid of the newly inserted row (for tx undo)
 			var dualWriteCols []string               // captured for dual-write forwarding
 			var dualWriteRow [][]scm.Scmer           // captured for dual-write forwarding
+			// Build a row in schema-column order from a delta-ordered row buffer.
+			schemaRowFromDelta := func(deltaRow dataset) dataset {
+				row := make(dataset, len(t.t.Columns))
+				for i, colDesc := range t.t.Columns {
+					if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(deltaRow) {
+						row[i] = deltaRow[colidx]
+					} else {
+						row[i] = scm.NewNil()
+					}
+				}
+				return row
+			}
 			func() {
 				if !alreadyLocked {
 					t.mu.Lock()         // write lock
@@ -612,10 +624,10 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					return pCols, pRow
 				}
 				// now d2 contains the old row values
-				oldRow := append(dataset{}, d2...)
+				oldDeltaRow := append(dataset{}, d2...)
 				// copy slice for triggers before modifying (scheme values are immutable, but Go slice is modified)
 				if withTrigger && len(t.t.Triggers) > 0 {
-					triggerOldRow = append(dataset{}, d2...)
+					triggerOldRow = schemaRowFromDelta(d2)
 				}
 				for j := 0; j < len(changes); j += 2 {
 					colidx, ok := t.deltaColumns[scm.String(changes[j])]
@@ -641,12 +653,19 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 
 				// Execute BEFORE UPDATE triggers (can modify d2)
 				if withTrigger && triggerOldRow != nil {
+					newSchemaRow := schemaRowFromDelta(d2)
 					if alreadyLocked {
 						t.mu.Unlock()
-						d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
+						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow)
 						t.mu.Lock()
 					} else {
-						d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
+						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow)
+					}
+					// Write trigger-mutated schema values back to delta row layout.
+					for i, colDesc := range t.t.Columns {
+						if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(d2) && i < len(newSchemaRow) {
+							d2[colidx] = newSchemaRow[i]
+						}
 					}
 					// BEFORE triggers may change typed/NOT NULL columns; sanitize again.
 					for _, colDesc := range t.t.Columns {
@@ -660,10 +679,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					// Recheck if anything changed after trigger modifications
 					result = false
 					for i, v := range d2 {
-						if !scm.Equal(triggerOldRow[i], v) {
+						if i < len(oldDeltaRow) && !scm.Equal(oldDeltaRow[i], v) {
 							result = true
 							break
 						}
+					}
+					if !result && len(d2) != len(oldDeltaRow) {
+						result = true
 					}
 				}
 
@@ -681,7 +703,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					for _, uk := range t.t.Unique {
 						for _, ucol := range uk.Cols {
 							colidx, ok := t.deltaColumns[ucol]
-							if ok && colidx < len(oldRow) && colidx < len(d2) && !scm.Equal(oldRow[colidx], d2[colidx]) {
+							if ok && colidx < len(oldDeltaRow) && colidx < len(d2) && !scm.Equal(oldDeltaRow[colidx], d2[colidx]) {
 								uniqueColsChanged = true
 								break
 							}
@@ -694,7 +716,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 
 				// save new row for triggers (d2 now contains new values)
 				if withTrigger && len(t.t.Triggers) > 0 {
-					triggerNewRow = d2 // no copy needed, d2 won't be modified after this
+					triggerNewRow = schemaRowFromDelta(d2)
 				}
 
 				currentTx := CurrentTx()
@@ -1190,7 +1212,23 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
 	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
+	var triggerInsertRows []dataset
 	t.insertDataset(columns, values, onFirstInsertId)
+	if len(t.t.Triggers) > 0 {
+		newRows := t.inserts[firstNewInsertIdx:]
+		triggerInsertRows = make([]dataset, len(newRows))
+		for i, deltaRow := range newRows {
+			row := make(dataset, len(t.t.Columns))
+			for j, colDesc := range t.t.Columns {
+				if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(deltaRow) {
+					row[j] = deltaRow[colidx]
+				} else {
+					row[j] = scm.NewNil()
+				}
+			}
+			triggerInsertRows[i] = row
+		}
+	}
 	if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 		// Log the actual inserted rows (not the original columns/values) so that
 		// auto-incremented IDs and column defaults are preserved across restarts.
@@ -1239,7 +1277,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	}
 	// execute AFTER INSERT triggers
 	if len(t.t.Triggers) > 0 {
-		for _, row := range values {
+		for _, row := range triggerInsertRows {
 			t.t.ExecuteTriggers(AfterInsert, nil, row)
 		}
 	}
@@ -1405,7 +1443,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Build equality boundaries for the index lookup
 	bounds := make(boundaries, len(columns))
 	for i, col := range columns {
-		bounds[i] = columnboundaries{col, values[i], true, values[i], true}
+		bounds[i] = columnboundaries{col: col, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
 	}
 	lower, upperLast := indexFromBoundaries(bounds)
 
@@ -1845,18 +1883,31 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		// query after rebuild does not pay a cold-start full-scan penalty.
 		for _, idx := range result.Indexes {
 			if idx.Savings >= 2.0 && !idx.active {
-				idxCols := make([]ColumnStorage, len(idx.Cols))
+				// Verify all required columns exist before building the index.
+				// A column may be absent from this shard if it was added after
+				// the shard was created (e.g. ALTER TABLE ADD COLUMN).
 				allFound := true
 				for i, colName := range idx.Cols {
-					cs, ok := result.columns[colName]
-					if !ok || cs == nil {
-						allFound = false
+					if len(idx.ColMapFn) > i && !idx.ColMapFn[i].IsNil() {
+						// computed column: check that all source columns exist
+						for _, mc := range idx.ColMapCols[i] {
+							if cs, ok := result.columns[mc]; !ok || cs == nil {
+								allFound = false
+								break
+							}
+						}
+					} else {
+						// raw column: check the column itself exists
+						if cs, ok := result.columns[colName]; !ok || cs == nil {
+							allFound = false
+						}
+					}
+					if !allFound {
 						break
 					}
-					idxCols[i] = cs
 				}
 				if allFound {
-					idx.buildIndex(idxCols)
+					idx.buildIndex(idx.buildGetters())
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}
 			}
@@ -1915,7 +1966,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result.mu.Unlock()
 	resultLocked = false
 	// Register the new shard with CacheManager
-	result.lastAccessed = time.Now()
+	atomic.StoreUint64(&result.lastAccessed, uint64(time.Now().UnixNano()))
 	if result.t.PersistencyMode != Memory && !strings.HasPrefix(result.t.Name, ".") {
 		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}

@@ -436,6 +436,27 @@ func (s *StorageEnum) findChunk(idx int) int {
 }
 
 // --- Serialization ---
+//
+// StorageEnum binary layout (magic byte 40 consumed by shard loader):
+//
+//	[k uint8]              ← number of symbols (2..8)
+//	[count uint64]
+//	[jumpL1Stride uint32]
+//	[dataLen uint64]
+//	[l1Len uint64]
+//	[l2Len uint64]
+//	[scanFreqs: k × uint64]
+//	[symbol values: k × (uint32 length + JSON bytes)]
+//	[data: dataLen × uint64]
+//	[jumpL1: l1Len × uint32]
+//	[jumpL2: l2Len × uint16]
+//
+// Version history:
+//
+//	v0 (original, no version byte): layout as above.  The first byte after the
+//	magic is k (uint8, always 2..8), so there is no safe location for an inline
+//	version byte.  Format changes require a NEW magic byte in storages[]
+//	(storage.go); keep magic 40 as a legacy reader forever.
 
 func (s *StorageEnum) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(40)) // magic byte 40 = StorageEnum
@@ -473,6 +494,8 @@ func (s *StorageEnum) Serialize(f io.Writer) {
 }
 
 func (s *StorageEnum) Deserialize(f io.Reader) uint {
+	// No version byte: the first byte is k (number of symbols).
+	// Format changes require a new magic byte.
 	binary.Read(f, binary.LittleEndian, &s.k)
 	binary.Read(f, binary.LittleEndian, &s.count)
 	var stride uint32

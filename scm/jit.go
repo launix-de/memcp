@@ -288,8 +288,8 @@ func jitCompile(a ...Scmer) Scmer {
 					return NewJIT(&JITEntryPoint{
 						Native:  nativeFn,
 						Closure: cs, // prevent GC from collecting the closure
-						Proc:   *proc,
-						Arch:   runtime.GOARCH,
+						Proc:    *proc,
+						Arch:    runtime.GOARCH,
 					})
 				}
 				syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])

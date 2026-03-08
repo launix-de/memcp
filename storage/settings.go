@@ -34,6 +34,7 @@ type SettingsT struct {
 	DefaultEngine          string
 	ShardSize              uint
 	AnalyzeMinItems        int
+	IndexThreshold         int   // min shard rows before creating a new adaptive index (0 = default 5)
 	MaxRamPercent          int   // 0 = default (50%), otherwise 1-100; total memory budget
 	MaxRamBytes            int64 // 0 = use MaxRamPercent; >0 = override total budget in bytes
 	MaxPersistPercent      int   // 0 = default (30%), otherwise 1-100; budget for persisted shards+indexes
@@ -42,9 +43,11 @@ type SettingsT struct {
 	MetricsTracingInterval int   // interval in seconds (0 = default 60s)
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
 	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
+	ScanDebugging          bool  // when true, log every scan/scan_order: db+table+boundaries+index
+	ExplainWidth           int   // max chars before EXPLAIN pretty-prints a sub-expression on multiple lines (0 = default 20)
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0, false, 0, 0, false}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -67,6 +70,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("DefaultEngine"), scm.NewString(Settings.DefaultEngine),
 			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
 			scm.NewString("AnalyzeMinItems"), scm.NewInt(int64(Settings.AnalyzeMinItems)),
+			scm.NewString("IndexThreshold"), scm.NewInt(int64(Settings.IndexThreshold)),
 			scm.NewString("MaxRamPercent"), scm.NewInt(int64(Settings.MaxRamPercent)),
 			scm.NewString("MaxRamBytes"), scm.NewInt(Settings.MaxRamBytes),
 			scm.NewString("MaxPersistPercent"), scm.NewInt(int64(Settings.MaxPersistPercent)),
@@ -75,6 +79,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("MetricsTracingInterval"), scm.NewInt(int64(Settings.MetricsTracingInterval)),
 			scm.NewString("ShutdownDrainSeconds"), scm.NewInt(int64(Settings.ShutdownDrainSeconds)),
 			scm.NewString("LogJIT"), scm.NewBool(Settings.LogJIT),
+			scm.NewString("ScanDebugging"), scm.NewBool(Settings.ScanDebugging),
+			scm.NewString("ExplainWidth"), scm.NewInt(int64(Settings.ExplainWidth)),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -92,6 +98,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.ShardSize))
 		case "AnalyzeMinItems":
 			return scm.NewInt(int64(Settings.AnalyzeMinItems))
+		case "IndexThreshold":
+			return scm.NewInt(int64(Settings.IndexThreshold))
 		case "MaxRamPercent":
 			return scm.NewInt(int64(Settings.MaxRamPercent))
 		case "MaxRamBytes":
@@ -108,6 +116,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(int64(Settings.ShutdownDrainSeconds))
 		case "LogJIT":
 			return scm.NewBool(Settings.LogJIT)
+		case "ScanDebugging":
+			return scm.NewBool(Settings.ScanDebugging)
+		case "ExplainWidth":
+			return scm.NewInt(int64(Settings.ExplainWidth))
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -130,6 +142,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.ShardSize = uint(scm.ToInt(a[1]))
 		case "AnalyzeMinItems":
 			Settings.AnalyzeMinItems = scm.ToInt(a[1])
+		case "IndexThreshold":
+			Settings.IndexThreshold = scm.ToInt(a[1])
 		case "MaxRamPercent":
 			Settings.MaxRamPercent = scm.ToInt(a[1])
 			total, persisted := computeMemoryBudgets()
@@ -155,6 +169,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		case "LogJIT":
 			Settings.LogJIT = scm.ToBool(a[1])
 			scm.LogJIT = Settings.LogJIT
+		case "ScanDebugging":
+			Settings.ScanDebugging = scm.ToBool(a[1])
+		case "ExplainWidth":
+			Settings.ExplainWidth = scm.ToInt(a[1])
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}

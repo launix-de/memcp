@@ -20,11 +20,11 @@ import "fmt"
 import "io"
 import "sort"
 import "sync"
+import "sync/atomic"
 import "time"
 import "strconv"
 import "reflect"
 import "strings"
-import "sync/atomic"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
 
@@ -57,6 +57,54 @@ type ColumnStorage interface {
 	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)
 }
 
+// storages maps the on-disk magic byte to the Go type used for deserialization.
+//
+// ⚠️  STORAGE FORMAT VERSIONING — READ BEFORE CHANGING ANY Serialize/Deserialize METHOD ⚠️
+//
+// Two-level versioning scheme:
+//
+//	Level 1 — magic byte (this map):
+//	  Identifies the storage TYPE.  Every persisted column file starts with one
+//	  magic byte; the runtime dispatches to the matching type via this map.
+//	  The magic byte must NEVER change for an existing type.
+//
+//	Level 2 — per-type version byte (inside each Serialize/Deserialize pair):
+//	  Identifies the LAYOUT VERSION within a type.  Each type reads a version
+//	  byte immediately after the magic byte (or reuses an existing padding byte)
+//	  and dispatches via a switch to the appropriate deserializeXxxV* helper.
+//
+// Per-type versioning rules (enforced in each Serialize/Deserialize pair):
+//  1. Serialize always writes the CURRENT version constant as the first byte.
+//  2. Deserialize reads the version byte first, then switches on it.
+//  3. NEVER delete an old deserializeXxxV* helper — old on-disk data must stay
+//     readable forever.
+//  4. When changing binary layout: increment the version constant and add a new
+//     deserializeXxxV* method.  Leave the old one untouched.
+//  5. Data written before this versioning scheme was introduced is "version 0"
+//     (or a named legacy constant).  Each type documents what version 0 means.
+//
+// Exception — magic bytes 1, 2, 13, 40 (StorageSCMER, StorageSparse, StorageDecimal, StorageEnum):
+//
+//	These types existed before the versioning scheme and had NO padding byte in
+//	their original layout, so there is no safe location for an inline version
+//	byte without corrupting existing data.  They read their first field directly
+//	with NO version byte.  If any of their formats must change, register a NEW
+//	magic byte for the new layout and keep the old magic as a read-only legacy
+//	reader forever.
+//
+// Current magic byte assignments:
+//
+//	 1  StorageSCMER   – generic Scmer values        (no version byte — see above)
+//	 2  StorageSparse  – sparse/NULL-only column     (no version byte — see above)
+//	10  StorageInt     – bit-packed integer
+//	11  StorageSeq     – sequential/auto-increment integer
+//	12  StorageFloat   – 64-bit float
+//	13  StorageDecimal – fixed-precision decimal      (no version byte — see above)
+//	20  StorageString  – dictionary-compressed or buffer string
+//	21  StoragePrefix  – prefix-compressed string (experimental)
+//	31  OverlayBlob    – large binary/blob overlay
+//	40  StorageEnum    – rANS-entropy-coded enum         (no version byte — see above)
+//	50  StorageComputeProxy – computed/cached column
 var storages = map[uint8]reflect.Type{
 	1:  reflect.TypeOf(StorageSCMER{}),
 	2:  reflect.TypeOf(StorageSparse{}),
@@ -1253,7 +1301,19 @@ func Init(en scm.Env) {
 			if tbl == nil {
 				return scm.NewBool(false)
 			}
-			atomic.StoreInt64(&tbl.leaseUntil, time.Now().Add(time.Second).UnixNano())
+			now := time.Now()
+			nowNs := uint64(now.UnixNano())
+			for _, s := range tbl.Shards {
+				atomic.StoreUint64(&s.lastAccessed, nowNs)
+			}
+			for _, s := range tbl.PShards {
+				atomic.StoreUint64(&s.lastAccessed, nowNs)
+			}
+			for _, c := range tbl.Columns {
+				if c.IsTemp {
+					atomic.StoreInt64(&c.lastAccessed, now.UnixNano())
+				}
+			}
 			return scm.NewBool(true)
 		}, false, false, nil,
 		nil,
@@ -1459,6 +1519,7 @@ func Init(en scm.Env) {
 						partitions = append(partitions, scm.NewSlice([]scm.Scmer{
 							scm.NewString("Column"), scm.NewString(sd.Column),
 							scm.NewString("NumPartitions"), scm.NewInt(int64(sd.NumPartitions)),
+							scm.NewString("Pivots"), scm.NewSlice(sd.Pivots),
 						}))
 					}
 				}
@@ -1942,8 +2003,15 @@ func Init(en scm.Env) {
 		nil,
 	})
 
-	initDashboard(en)
 	initMySQLImport(en)
+	initDashboard(en)
+	scm.DeclareInSection("Sync", &en, &scm.Declaration{
+		"newcachemap", "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
+		0, 0,
+		[]scm.DeclarationParameter{}, "func",
+		NewCacheMap, false, false, nil,
+		nil,
+	})
 	initTransaction(en)
 	initFKBuiltins(en)
 }
@@ -2286,15 +2354,6 @@ func initFKBuiltins(en scm.Env) {
 		nil,
 	})
 
-	scm.DeclareTitle("Cache")
-
-	scm.Declare(&en, &scm.Declaration{
-		"newcachemap", "Creates a new cachemap which is a threadsafe key-value store with LRU eviction under memory pressure. (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
-		0, 0,
-		[]scm.DeclarationParameter{}, "func",
-		NewCacheMap, false, false, nil,
-		nil,
-	})
 }
 
 // buildFKProc constructs a serializable Proc that calls a builtin with the given args.

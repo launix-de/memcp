@@ -872,7 +872,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "value for the list", nil},
 		}, "list",
-		nil, false, false, nil,
+		nil, true, false, nil,
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1034,6 +1034,22 @@ Patterns can be any of:
 		}, false, false, nil,
 		nil,
 	})
+	Declare(&Globalenv, &Declaration{
+		"pretty_print", "formats Scheme code as an indented, human-readable string; expressions up to width characters are kept on one line, longer ones are expanded with one argument per line",
+		1, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"code", "list", "Scheme code to format", nil},
+			DeclarationParameter{"width", "int", "max characters before expanding (default 20)", nil},
+		}, "string",
+		func(a ...Scmer) Scmer {
+			width := 20
+			if len(a) >= 2 {
+				width = ToInt(a[1])
+			}
+			return NewString(PrettyPrint(a[0], &Globalenv, width))
+		}, false, false, nil,
+		nil,
+	})
 
 	init_alu()
 	init_strings()
@@ -1043,8 +1059,8 @@ Patterns can be any of:
 	init_vector()
 	init_parser()
 	init_sync()
-	init_window()
 	init_scheduler()
+	init_window()
 	init_jit()
 	InitMetricsDeclarations()
 

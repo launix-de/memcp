@@ -50,7 +50,7 @@ func (s Scmer) ComputeSize() uint {
 	return ComputeSize(s)
 }
 
-// Type tags (upper 16 bits of aux)
+// Type tags (lower 8 bits of aux)
 // Software Contract: data will ALWAYS be stored with the correct tag, so a tagAny will never store an integer value or a []Scmer, so e.g. a scm.Proc will never be packed into an interface{} by NewAny but always be stored in NewProc()
 const (
 	tagNil = iota
@@ -70,26 +70,54 @@ const (
 	tagFastDict
 	tagDate
 	tagAny
-	tagRegex // *regexp.Regexp
+	tagRegex   // *regexp.Regexp
+	tagCString // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
+	tagBString // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
 	// custom tags >= 100
 )
 
 // Exported tag constants for type checking in other packages
 const (
-	TagString = tagString
-	TagSymbol = tagSymbol
-	TagDate   = tagDate
+	TagString  = tagString
+	TagSymbol  = tagSymbol
+	TagDate    = tagDate
+	TagCString = tagCString
+	TagBString = tagBString
 )
+
+// CStringDecompress is set by the storage package to materialize a compressed string.
+// ptr points into the StorageString dictionary; val is the 48-bit aux value carrying
+// format (bits 47-44), nibbleOffset (bit 43), and charLen (bits 42-0).
+var CStringDecompress func(ptr *byte, val uint64) string
+
+// NewCString creates a lazy compressed-string Scmer.
+// ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
+// format: storage.StringFormat value (4 bits); nibbleOff: 0 or 1; charLen: original char count.
+func NewCString(ptr *byte, format uint8, nibbleOff uint8, charLen int) Scmer {
+	val := uint64(format)<<44 | uint64(nibbleOff)<<43 | uint64(charLen)
+	return Scmer{ptr, makeAux(tagCString, val)}
+}
+
+// NewBString creates a binary-blob Scmer whose string representation is Base64.
+// ptr points to raw bytes in the StorageString dictionary (must stay alive as long as the Scmer).
+// byteLen is the number of raw bytes. urlSafe selects URL-safe vs standard Base64 on .String().
+func NewBString(ptr *byte, byteLen int, urlSafe bool) Scmer {
+	var flag uint64
+	if urlSafe {
+		flag = 1 << 47
+	}
+	return Scmer{ptr, makeAux(tagBString, flag|uint64(byteLen))}
+}
 
 var scmerIntSentinel byte
 var scmerFloatSentinel byte
 
 // Helpers
 func makeAux(tag uint16, val uint64) uint64 {
-	return uint64(tag)<<48 | (val & ((1 << 48) - 1))
+	return (val << 8) | uint64(tag&0xFF)
 }
-func auxTag(aux uint64) uint16 { return uint16(aux >> 48) }
-func auxVal(aux uint64) uint64 { return aux & ((1 << 48) - 1) }
+func auxTag(aux uint64) uint16 { return uint16(aux & 0xFF) }
+func auxVal(aux uint64) uint64 { return aux >> 8 }
 func (s Scmer) GetTag() uint16 {
 	if s.ptr == &scmerIntSentinel {
 		return tagInt
@@ -121,11 +149,11 @@ func NewDate(unixts int64) Scmer {
 	return Scmer{nil, makeAux(tagDate, uint64(unixts))}
 }
 
-// signExtend48 sign-extends a 48-bit two's complement value to int64.
-func signExtend48(v uint64) int64 {
-	v &= (1 << 48) - 1
-	if v&(1<<47) != 0 {
-		return int64(v) | (int64(-1) << 48)
+// signExtend56 sign-extends a 56-bit two's complement value to int64.
+func signExtend56(v uint64) int64 {
+	v &= (1 << 56) - 1
+	if v&(1<<55) != 0 {
+		return int64(v) | (int64(-1) << 56)
 	}
 	return int64(v)
 }
@@ -379,7 +407,22 @@ func (s Scmer) IsString() bool {
 	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
 		return false
 	}
-	return auxTag(s.aux) == tagString
+	t := auxTag(s.aux)
+	return t == tagString || t == tagCString || t == tagBString
+}
+
+func (s Scmer) IsCString() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagCString
+}
+
+func (s Scmer) IsBString() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagBString
 }
 
 func (s Scmer) IsSymbol() bool {
@@ -431,7 +474,7 @@ func (s Scmer) Bool() bool {
 		return int64(s.aux) != 0
 	case tagFloat:
 		return math.Float64frombits(s.aux) != 0.0
-	case tagString, tagSymbol:
+	case tagString, tagSymbol, tagCString, tagBString:
 		str := s.String()
 		return str != "" && str != "false"
 	case tagSlice:
@@ -463,7 +506,7 @@ func (s Scmer) Int() int64 {
 		}
 		return v
 	case tagDate:
-		return signExtend48(auxVal(s.aux))
+		return signExtend56(auxVal(s.aux))
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1
@@ -492,7 +535,7 @@ func (s Scmer) Float() float64 {
 		}
 		return v
 	case tagDate:
-		return float64(signExtend48(auxVal(s.aux)))
+		return float64(signExtend56(auxVal(s.aux)))
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1.0
@@ -503,35 +546,68 @@ func (s Scmer) Float() float64 {
 	}
 }
 
-func (s Scmer) String() string {
+// AppendString converts s to its string representation, appending any newly
+// allocated bytes to dst (following Go's Append conventions). For types that
+// already carry their data as a Go string (tagString, tagSymbol) or that
+// return a constant literal (tagBool, tagNil, …), dst is returned unchanged
+// and the returned string points directly into the existing backing memory —
+// zero allocation. For tagInt and tagFloat the digits are written into dst,
+// and the returned string is an unsafe view into those bytes; callers must
+// ensure dst outlives all uses of the returned string. For all other types
+// the representation may allocate regardless of dst.
+//
+// Typical usage for zero-alloc comparison of two values:
+//
+//	var buf [64]byte
+//	sa, buf2 := a.AppendString(buf[:0])
+//	sb, _    := b.AppendString(buf2)
+//	return sa < sb
+func (s Scmer) AppendString(dst []byte) (string, []byte) {
 	switch s.GetTag() {
 	case tagString, tagSymbol:
-		return unsafe.String(s.ptr, int(auxVal(s.aux)))
+		return unsafe.String(s.ptr, int(auxVal(s.aux))), dst
 	case tagInt:
-		return strconv.FormatInt(int64(s.aux), 10)
+		start := len(dst)
+		dst = strconv.AppendInt(dst, int64(s.aux), 10)
+		return unsafe.String(&dst[start], len(dst)-start), dst
 	case tagFloat:
-		return strconv.FormatFloat(math.Float64frombits(s.aux), 'g', -1, 64)
+		start := len(dst)
+		dst = strconv.AppendFloat(dst, math.Float64frombits(s.aux), 'g', -1, 64)
+		return unsafe.String(&dst[start], len(dst)-start), dst
+	case tagCString:
+		if CStringDecompress != nil {
+			return CStringDecompress(s.ptr, auxVal(s.aux)), dst
+		}
+		return "<compressed string>", dst
+	case tagBString:
+		val := auxVal(s.aux)
+		byteLen := int(val & ((1 << 47) - 1))
+		b := unsafe.Slice(s.ptr, byteLen)
+		if val>>47 != 0 {
+			return base64.URLEncoding.EncodeToString(b), dst
+		}
+		return base64.StdEncoding.EncodeToString(b), dst
 	case tagBool:
 		if auxVal(s.aux) != 0 {
-			return "true"
+			return "true", dst
 		}
-		return "false"
+		return "false", dst
 	case tagDate:
-		return time.Unix(signExtend48(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05")
+		return time.Unix(signExtend56(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"), dst
 	case tagNil:
-		return "nil"
+		return "nil", dst
 	case tagFunc:
 		decl := DeclarationForValue(s)
 		if decl != nil {
-			return decl.Name
+			return decl.Name, dst
 		}
-		return "[func]"
+		return "[func]", dst
 	case tagFuncEnv:
-		return "[func]"
+		return "[func]", dst
 	case tagSlice:
 		sl := s.Slice()
 		if len(sl) == 0 {
-			return "()"
+			return "()", dst
 		}
 		var sb strings.Builder
 		sb.WriteString("(")
@@ -542,30 +618,34 @@ func (s Scmer) String() string {
 			el.Write(&sb)
 		}
 		sb.WriteString(")")
-		return sb.String()
+		return sb.String(), dst
 	case tagFastDict:
 		fd := s.FastDict()
 		if fd == nil {
-			return "()"
+			return "()", dst
 		}
 		parts := make([]string, len(fd.Pairs))
 		for i, el := range fd.Pairs {
-			parts[i] = el.String()
+			parts[i], _ = el.AppendString(nil)
 		}
-		return "(" + strings.Join(parts, " ") + ")"
+		return "(" + strings.Join(parts, " ") + ")", dst
 	case tagParser:
-		return fmt.Sprint(s.Parser())
-		return "[parser]"
+		return fmt.Sprint(s.Parser()), dst
 	case tagSourceInfo:
-		return s.SourceInfo().String()
+		return s.SourceInfo().value.AppendString(dst)
 	case tagJIT:
-		return "[jit lambda]"
+		return "[jit lambda]", dst
 	default:
 		if s.GetTag() == tagAny {
-			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr)))
+			return fmt.Sprintf("%v", *(*any)(unsafe.Pointer(s.ptr))), dst
 		}
-		return fmt.Sprintf("<custom %d>", s.GetTag())
+		return fmt.Sprintf("<custom %d>", s.GetTag()), dst
 	}
+}
+
+func (s Scmer) String() string {
+	str, _ := s.AppendString(nil)
+	return str
 }
 
 // Stream returns an io.Reader for the value.
@@ -635,6 +715,14 @@ func (s Scmer) IsProc() bool {
 		return false
 	}
 	return auxTag(s.aux) == tagProc
+}
+
+// IsNativeFunc reports whether s is a resolved Go native function (tagFunc or tagFuncEnv).
+// After optimization, symbols like "contains?", "<", "equal?" may be replaced with
+// their native function values. IsNativeFunc lets callers treat them as pure constants.
+func (s Scmer) IsNativeFunc() bool {
+	t := s.GetTag()
+	return t == tagFunc || t == tagFuncEnv
 }
 
 func (s Scmer) Proc() *Proc {
@@ -761,7 +849,7 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagFloat:
 			return v.Float()
 		case tagDate:
-			return time.Unix(signExtend48(auxVal(v.aux)), 0).UTC().Format("2006-01-02 15:04:05")
+			return time.Unix(signExtend56(auxVal(v.aux)), 0).UTC().Format("2006-01-02 15:04:05")
 		case tagString:
 			s := v.String()
 			if !utf8.ValidString(s) {
@@ -861,7 +949,7 @@ func (s *Scmer) Write(w io.Writer) {
 		b := strconv.AppendFloat(buf[:0], f, 'g', -1, 64)
 		w.Write(b)
 	case tagDate:
-		io.WriteString(w, time.Unix(signExtend48(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"))
+		io.WriteString(w, time.Unix(signExtend56(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"))
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
 	case tagFunc:

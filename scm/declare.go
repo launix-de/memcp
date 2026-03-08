@@ -29,9 +29,9 @@ type Declaration struct {
 	Params       []DeclarationParameter
 	Returns      string // any | string | number | int | bool | func | list | symbol | nil
 	Fn           func(...Scmer) Scmer
-	Foldable     bool            // safe to constant-fold when all args are literals
-	Forbidden    bool            // optimizer-only: hidden from help, blocked from .scm code
-	Type         *TypeDescriptor // function type with optional Optimize hook; nil = derive from Params/Returns
+	Foldable     bool                                                                                        // safe to constant-fold when all args are literals
+	Forbidden    bool                                                                                        // optimizer-only: hidden from help, blocked from .scm code
+	Type         *TypeDescriptor                                                                             // function type with optional Optimize hook; nil = derive from Params/Returns
 	JITEmit      func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc // optional JIT emitter; nil = not JIT-able
 }
 
@@ -94,6 +94,39 @@ func Declare(env *Env, def *Declaration) {
 		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
 		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
 	}
+}
+
+// DeclareInSection registers a declaration and inserts it at the end of an
+// existing named section in the help index. If the section is not found,
+// it falls back to a normal Declare (appending at the end).
+func DeclareInSection(section string, env *Env, def *Declaration) {
+	declarations[def.Name] = def
+	if def.Fn != nil {
+		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
+		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
+	}
+	if def.Forbidden {
+		return
+	}
+	// find the position right before the next section header after sectionName
+	insertAt := -1
+	inSection := false
+	for i, t := range declaration_titles {
+		if t == "#"+section {
+			inSection = true
+		} else if inSection && len(t) > 0 && t[0] == '#' {
+			insertAt = i
+			break
+		}
+	}
+	if inSection {
+		insertAt = len(declaration_titles)
+	}
+	if insertAt < 0 {
+		declaration_titles = append(declaration_titles, def.Name)
+		return
+	}
+	declaration_titles = append(declaration_titles[:insertAt], append([]string{def.Name}, declaration_titles[insertAt:]...)...)
 }
 
 // slugify makes a filesystem-safe, lowercase slug from a chapter title.
@@ -385,37 +418,33 @@ func Validate(val Scmer, require string) string {
 	return "any"
 }
 
-func Help(fn Scmer) {
+func Help(fn Scmer) string {
+	var b strings.Builder
 	if fn.IsNil() {
-		fmt.Println("Available scm functions:")
+		b.WriteString("Available scm functions:\n")
 		for _, title := range declaration_titles {
 			if title[0] == '#' {
-				fmt.Println("")
-				fmt.Println("-- " + title[1:] + " --")
+				b.WriteString("\n-- " + title[1:] + " --\n")
 			} else if d, ok := declarations[title]; ok && !d.Forbidden {
-				fmt.Println("  " + title + ": " + strings.Split(d.Desc, "\n")[0])
+				b.WriteString("  " + title + ": " + strings.Split(d.Desc, "\n")[0] + "\n")
 			}
 		}
-		fmt.Println("")
-		fmt.Println("get further information by typing (help \"functionname\") to get more info")
+		b.WriteString("\nget further information by typing (help \"functionname\") to get more info\n")
 	} else {
 		def := DeclarationForValue(fn)
 		if def != nil {
-			fmt.Println("Help for: " + def.Name)
-			fmt.Println("===")
-			fmt.Println("")
-			fmt.Println(def.Desc)
-			fmt.Println("")
-			fmt.Println("Allowed nø of parameters: ", def.MinParameter, "-", def.MaxParameter)
-			fmt.Println("")
+			b.WriteString("Help for: " + def.Name + "\n===\n\n")
+			b.WriteString(def.Desc + "\n\n")
+			b.WriteString(fmt.Sprintf("Allowed nø of parameters: %d-%d\n\n", def.MinParameter, def.MaxParameter))
 			for _, p := range def.Params {
-				fmt.Println(" - " + p.Name + " (" + p.Type + "): " + p.Desc)
+				b.WriteString(" - " + p.Name + " (" + p.Type + "): " + p.Desc + "\n")
 			}
-			fmt.Println("")
+			b.WriteString("\n")
 		} else {
 			panic("function not found: " + String(fn))
 		}
 	}
+	return b.String()
 }
 
 // DeclarationForValue resolves a callable head (symbol or native func) to its Declaration.

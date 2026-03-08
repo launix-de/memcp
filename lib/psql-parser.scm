@@ -372,6 +372,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 	(define psql_select_core (parser '(
 		(atom "SELECT" true)
+		(? (atom "DISTINCT" true))
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
 			(parser '((define tbl psql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
@@ -505,6 +506,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				tbl
 				(cons list filtercols)
 				'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
+				'(list "$update")
+				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+				(quote +)
+				0
+			)
+	)))
+
+	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
+	(define psql_truncate (parser '(
+		(atom "TRUNCATE" true) (? (atom "TABLE" true))
+		/* schema-qualified */
+		(? (define schema2 psql_identifier) ".") (define tbl psql_identifier)
+	) (begin
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			'((quote scan)
+				(coalesce schema2 schema)
+				tbl
+				'(list)
+				'((quote lambda) '() true)
 				'(list "$update")
 				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
 				(quote +)
@@ -715,13 +735,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query psql_select) (build_queryplan_term query))
-		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (serialize (build_queryplan_term query)))))
+		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
 		psql_insert_into
 		psql_insert_select
 		psql_create_table
 		psql_alter_table
 		psql_update
 		psql_delete
+		psql_truncate
 
 		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false))) )
 		(parser '((atom "CREATE" true) (atom "USER" true) (define username psql_identifier)
