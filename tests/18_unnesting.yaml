@@ -38,7 +38,6 @@ test_cases:
           ra: 2
 
   - name: "Outer query ORDER BY on derived table column"
-    noncritical: true
     sql: |
       SELECT t.a
       FROM (SELECT a FROM unnest_t) t

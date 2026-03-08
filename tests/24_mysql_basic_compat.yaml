@@ -81,7 +81,6 @@ test_cases:
         - s: "can't"
 
   - name: "Backslash literal (no escape)"
-    noncritical: true
     sql: |
       SELECT 'line\\nbreak' AS s
     expect:
