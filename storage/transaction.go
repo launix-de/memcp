@@ -109,6 +109,7 @@ type TxContext struct {
 	// Deferred sync (§10)
 	touchedShards sync.Map // map[*storageShard]bool
 	autoCommit    bool
+	writeHeld     map[*storageShard]uint32 // reentrant write-lock marker per shard
 
 	mu sync.Mutex
 }
@@ -116,9 +117,10 @@ type TxContext struct {
 // NewTxContext creates a new active transaction context with the given mode.
 func NewTxContext(mode TxMode) *TxContext {
 	tx := &TxContext{
-		ID:    atomic.AddUint64(&txIDCounter, 1),
-		State: TxActive,
-		Mode:  mode,
+		ID:        atomic.AddUint64(&txIDCounter, 1),
+		State:     TxActive,
+		Mode:      mode,
+		writeHeld: make(map[*storageShard]uint32),
 	}
 	switch mode {
 	case TxCursorStability:
@@ -129,6 +131,34 @@ func NewTxContext(mode TxMode) *TxContext {
 		tx.UndeleteMask = make(map[*storageShard]*shardOverlay)
 	}
 	return tx
+}
+
+// EnterShardWrite marks that the current transaction context holds a write lock
+// on the given shard in this call stack.
+func (tx *TxContext) EnterShardWrite(shard *storageShard) {
+	tx.mu.Lock()
+	tx.writeHeld[shard]++
+	tx.mu.Unlock()
+}
+
+// ExitShardWrite decrements the write-hold depth for a shard.
+func (tx *TxContext) ExitShardWrite(shard *storageShard) {
+	tx.mu.Lock()
+	if d := tx.writeHeld[shard]; d <= 1 {
+		delete(tx.writeHeld, shard)
+	} else {
+		tx.writeHeld[shard] = d - 1
+	}
+	tx.mu.Unlock()
+}
+
+// HasShardWrite returns true when this tx context currently holds a write lock
+// on the shard in this call stack. It is used to avoid re-entering shard read
+// locks from nested scans (self-join/subquery in update mapper).
+func (tx *TxContext) HasShardWrite(shard *storageShard) bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return tx.writeHeld[shard] > 0
 }
 
 // CreateSavepoint captures the current transaction state for later rollback.

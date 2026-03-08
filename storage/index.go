@@ -526,8 +526,14 @@ func (s *StorageIndex) iterate(lower []scm.Scmer, upperLast scm.Scmer, lowerIncl
 			s.fullScan(maxInsertIndex, buf, callback)
 			return
 		} else {
-			// rebuild index
-			s.mu.Lock()
+			// Rebuild index without blocking on index mutex contention.
+			// Under heavy parallel UPDATE load, waiting here can stall requests.
+			// Falling back to a single full scan keeps progress while another
+			// goroutine builds or updates this index.
+			if !s.mu.TryLock() {
+				s.fullScan(maxInsertIndex, buf, callback)
+				return
+			}
 			if s.active {
 				// someone has built it in the meantime
 				s.mu.Unlock()
@@ -544,7 +550,10 @@ start_scan:
 	// Snapshot index state under the lock to prevent a TOCTOU race with
 	// indexCleanup, which may set active=false / mainIndexes={} / deltaBtree=nil
 	// concurrently. The snapshot keeps the backing data alive via GC references.
-	s.mu.Lock()
+	if !s.mu.TryLock() {
+		s.fullScan(maxInsertIndex, buf, callback)
+		return
+	}
 	if !s.active {
 		// Index was evicted between our initial check and here.
 		s.mu.Unlock()

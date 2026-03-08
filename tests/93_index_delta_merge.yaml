@@ -18,9 +18,9 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS idx_merge"
       - sql: "DROP TABLE IF EXISTS idx_dim"
-      - sql: "DROP TABLE IF EXISTS mat_a"
-      - sql: "DROP TABLE IF EXISTS mat_b"
-      - sql: "DROP TABLE IF EXISTS mat_c"
+      - sql: "DROP TABLE IF EXISTS idx93_mat_a"
+      - sql: "DROP TABLE IF EXISTS idx93_mat_b"
+      - sql: "DROP TABLE IF EXISTS idx93_mat_c"
       - scm: "(rebuild)"
     sql: "CREATE TABLE idx_merge (id INT PRIMARY KEY, cat INT, val INT)"
 
@@ -173,27 +173,27 @@ test_cases:
   # ==============================================================
 
   - name: "Create matrix A"
-    sql: "CREATE TABLE mat_a (r INT, c INT, v INT)"
+    sql: "CREATE TABLE idx93_mat_a (r INT, c INT, v INT)"
 
   - name: "Create matrix B"
-    sql: "CREATE TABLE mat_b (r INT, c INT, v INT)"
+    sql: "CREATE TABLE idx93_mat_b (r INT, c INT, v INT)"
 
   - name: "Create result table"
-    sql: "CREATE TABLE mat_c (r INT, c INT, v INT)"
+    sql: "CREATE TABLE idx93_mat_c (r INT, c INT, v INT)"
 
   - name: "Populate A = [[1,2,3],[4,5,6],[7,8,9]]"
-    sql: "INSERT INTO mat_a VALUES (0,0,1),(0,1,2),(0,2,3),(1,0,4),(1,1,5),(1,2,6),(2,0,7),(2,1,8),(2,2,9)"
+    sql: "INSERT INTO idx93_mat_a VALUES (0,0,1),(0,1,2),(0,2,3),(1,0,4),(1,1,5),(1,2,6),(2,0,7),(2,1,8),(2,2,9)"
 
   - name: "Populate B = [[9,8,7],[6,5,4],[3,2,1]]"
-    sql: "INSERT INTO mat_b VALUES (0,0,9),(0,1,8),(0,2,7),(1,0,6),(1,1,5),(1,2,4),(2,0,3),(2,1,2),(2,2,1)"
+    sql: "INSERT INTO idx93_mat_b VALUES (0,0,9),(0,1,8),(0,2,7),(1,0,6),(1,1,5),(1,2,4),(2,0,3),(2,1,2),(2,2,1)"
 
   - name: "Materialize join: C_flat = A.v * B.v for matching A.c = B.r"
-    sql: "INSERT INTO mat_c (r, c, v) SELECT a.r, b.c, a.v * b.v FROM mat_a a JOIN mat_b b ON a.c = b.r"
+    sql: "INSERT INTO idx93_mat_c (r, c, v) SELECT a.r, b.c, a.v * b.v FROM idx93_mat_a a JOIN idx93_mat_b b ON a.c = b.r"
     expect:
       affected_rows: 27
 
   - name: "Matrix multiply C = A*B via SUM on materialized join"
-    sql: "SELECT r, c, SUM(v) AS v FROM mat_c GROUP BY r, c ORDER BY r, c"
+    sql: "SELECT r, c, SUM(v) AS v FROM idx93_mat_c GROUP BY r, c ORDER BY r, c"
     expect:
       data:
         - r: 0
@@ -229,15 +229,15 @@ test_cases:
     scm: "(rebuild)"
 
   - name: "Insert delta row into A: row 3 = [1,1,1]"
-    sql: "INSERT INTO mat_a VALUES (3,0,1),(3,1,1),(3,2,1)"
+    sql: "INSERT INTO idx93_mat_a VALUES (3,0,1),(3,1,1),(3,2,1)"
 
   - name: "Recreate result table for delta test"
     setup:
-      - sql: "DROP TABLE IF EXISTS mat_c"
-    sql: "CREATE TABLE mat_c (r INT, c INT, v INT)"
+      - sql: "DROP TABLE IF EXISTS idx93_mat_c"
+    sql: "CREATE TABLE idx93_mat_c (r INT, c INT, v INT)"
 
   - name: "Join with delta row: [1,1,1] * B row 0"
-    sql: "SELECT a.r, b.c, a.v * b.v AS v FROM mat_a a JOIN mat_b b ON a.c = b.r WHERE a.r = 3 AND b.c = 0 ORDER BY a.c"
+    sql: "SELECT a.r, b.c, a.v * b.v AS v FROM idx93_mat_a a JOIN idx93_mat_b b ON a.c = b.r WHERE a.r = 3 AND b.c = 0 ORDER BY a.c"
     expect:
       data:
         - r: 3
@@ -255,7 +255,7 @@ test_cases:
   # ==============================================================
 
   - name: "Matrix multiply via direct GROUP BY on join"
-    sql: "SELECT a.r, b.c, SUM(a.v * b.v) AS v FROM mat_a a JOIN mat_b b ON a.c = b.r GROUP BY a.r, b.c ORDER BY a.r, b.c"
+    sql: "SELECT a.r, b.c, SUM(a.v * b.v) AS v FROM idx93_mat_a a JOIN idx93_mat_b b ON a.c = b.r GROUP BY a.r, b.c ORDER BY a.r, b.c"
     expect:
       data:
         - r: 0
@@ -307,7 +307,7 @@ test_cases:
           cnt: 20
 
   - name: "GROUP BY join with HAVING"
-    sql: "SELECT a.r, SUM(a.v * b.v) AS total FROM mat_a a JOIN mat_b b ON a.c = b.r GROUP BY a.r HAVING SUM(a.v * b.v) > 100 ORDER BY a.r"
+    sql: "SELECT a.r, SUM(a.v * b.v) AS total FROM idx93_mat_a a JOIN idx93_mat_b b ON a.c = b.r GROUP BY a.r HAVING SUM(a.v * b.v) > 100 ORDER BY a.r"
     expect:
       data:
         - r: 1
@@ -318,6 +318,6 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS idx_merge"
   - sql: "DROP TABLE IF EXISTS idx_dim"
-  - sql: "DROP TABLE IF EXISTS mat_a"
-  - sql: "DROP TABLE IF EXISTS mat_b"
-  - sql: "DROP TABLE IF EXISTS mat_c"
+  - sql: "DROP TABLE IF EXISTS idx93_mat_a"
+  - sql: "DROP TABLE IF EXISTS idx93_mat_b"
+  - sql: "DROP TABLE IF EXISTS idx93_mat_c"
