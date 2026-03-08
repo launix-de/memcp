@@ -435,16 +435,10 @@ func (s *StorageEnum) findChunk(idx int) int {
 	return lo
 }
 
-// storageEnumVersion is the current binary format version for StorageEnum.
-// Increment this constant and add a new deserializeEnumV* helper whenever the
-// layout after the magic byte changes.  Never delete old helpers.
-const storageEnumVersion = 0
-
 // --- Serialization ---
 //
 // StorageEnum binary layout (magic byte 40 consumed by shard loader):
 //
-//	[version uint8]        ← first byte read by Deserialize
 //	[k uint8]              ← number of symbols (2..8)
 //	[count uint64]
 //	[jumpL1Stride uint32]
@@ -459,12 +453,13 @@ const storageEnumVersion = 0
 //
 // Version history:
 //
-//	0 (current): layout as above.  StorageEnum was introduced after the
-//	             versioning scheme, so no legacy format exists.
+//	v0 (original, no version byte): layout as above.  The first byte after the
+//	magic is k (uint8, always 2..8), so there is no safe location for an inline
+//	version byte.  Format changes require a NEW magic byte in storages[]
+//	(storage.go); keep magic 40 as a legacy reader forever.
 
 func (s *StorageEnum) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(40))                 // magic byte 40 = StorageEnum
-	binary.Write(f, binary.LittleEndian, uint8(storageEnumVersion)) // version byte
+	binary.Write(f, binary.LittleEndian, uint8(40)) // magic byte 40 = StorageEnum
 	binary.Write(f, binary.LittleEndian, uint8(s.k))
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint32(s.jumpL1Stride))
@@ -499,17 +494,8 @@ func (s *StorageEnum) Serialize(f io.Writer) {
 }
 
 func (s *StorageEnum) Deserialize(f io.Reader) uint {
-	var version uint8
-	binary.Read(f, binary.LittleEndian, &version)
-	switch version {
-	case 0:
-		return s.deserializeEnumV0(f)
-	default:
-		panic(fmt.Sprintf("StorageEnum: unknown version %d", version))
-	}
-}
-
-func (s *StorageEnum) deserializeEnumV0(f io.Reader) uint {
+	// No version byte: the first byte is k (number of symbols).
+	// Format changes require a new magic byte.
 	binary.Read(f, binary.LittleEndian, &s.k)
 	binary.Read(f, binary.LittleEndian, &s.count)
 	var stride uint32

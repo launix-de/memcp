@@ -83,12 +83,13 @@ type ColumnStorage interface {
 //  5. Data written before this versioning scheme was introduced is "version 0"
 //     (or a named legacy constant).  Each type documents what version 0 means.
 //
-// Exception — magic bytes 1 (StorageSCMER) and 2 (StorageSparse):
+// Exception — magic bytes 1, 2, 13, 40 (StorageSCMER, StorageSparse, StorageDecimal, StorageEnum):
 //   These types existed before the versioning scheme and had NO padding byte in
 //   their original layout, so there is no safe location for an inline version
-//   byte without corrupting existing data.  They read count directly, with NO
-//   version byte.  If either format must change, register a NEW magic byte
-//   (e.g. 101/102) for the new layout and keep 1/2 as read-only legacy readers.
+//   byte without corrupting existing data.  They read their first field directly
+//   with NO version byte.  If any of their formats must change, register a NEW
+//   magic byte for the new layout and keep the old magic as a read-only legacy
+//   reader forever.
 //
 // Current magic byte assignments:
 //
@@ -97,11 +98,11 @@ type ColumnStorage interface {
 //	10  StorageInt     – bit-packed integer
 //	11  StorageSeq     – sequential/auto-increment integer
 //	12  StorageFloat   – 64-bit float
-//	13  StorageDecimal – fixed-precision decimal
+//	13  StorageDecimal – fixed-precision decimal      (no version byte — see above)
 //	20  StorageString  – dictionary-compressed or buffer string
 //	21  StoragePrefix  – prefix-compressed string (experimental)
 //	31  OverlayBlob    – large binary/blob overlay
-//	40  StorageEnum    – rANS-entropy-coded enum
+//	40  StorageEnum    – rANS-entropy-coded enum         (no version byte — see above)
 //	50  StorageComputeProxy – computed/cached column
 var storages = map[uint8]reflect.Type{
 	1:  reflect.TypeOf(StorageSCMER{}),
