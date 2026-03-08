@@ -133,9 +133,13 @@ func Repl(en *Env) {
 			Validate(code, "any")
 			code = Optimize(code, en)
 			result := Eval(code, en)
-			Serialize(&b, result, en)
 			fmt.Print(resultprompt)
-			fmt.Println(b.String())
+			if result.IsString() && strings.Contains(result.String(), "\n") {
+				fmt.Print(result.String())
+			} else {
+				Serialize(&b, result, en)
+				fmt.Println(b.String())
+			}
 			oldline = ""
 			l.SetPrompt(newprompt)
 		}()

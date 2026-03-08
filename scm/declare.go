@@ -385,37 +385,33 @@ func Validate(val Scmer, require string) string {
 	return "any"
 }
 
-func Help(fn Scmer) {
+func Help(fn Scmer) string {
+	var b strings.Builder
 	if fn.IsNil() {
-		fmt.Println("Available scm functions:")
+		b.WriteString("Available scm functions:\n")
 		for _, title := range declaration_titles {
 			if title[0] == '#' {
-				fmt.Println("")
-				fmt.Println("-- " + title[1:] + " --")
+				b.WriteString("\n-- " + title[1:] + " --\n")
 			} else if d, ok := declarations[title]; ok && !d.Forbidden {
-				fmt.Println("  " + title + ": " + strings.Split(d.Desc, "\n")[0])
+				b.WriteString("  " + title + ": " + strings.Split(d.Desc, "\n")[0] + "\n")
 			}
 		}
-		fmt.Println("")
-		fmt.Println("get further information by typing (help \"functionname\") to get more info")
+		b.WriteString("\nget further information by typing (help \"functionname\") to get more info\n")
 	} else {
 		def := DeclarationForValue(fn)
 		if def != nil {
-			fmt.Println("Help for: " + def.Name)
-			fmt.Println("===")
-			fmt.Println("")
-			fmt.Println(def.Desc)
-			fmt.Println("")
-			fmt.Println("Allowed nø of parameters: ", def.MinParameter, "-", def.MaxParameter)
-			fmt.Println("")
+			b.WriteString("Help for: " + def.Name + "\n===\n\n")
+			b.WriteString(def.Desc + "\n\n")
+			b.WriteString(fmt.Sprintf("Allowed nø of parameters: %d-%d\n\n", def.MinParameter, def.MaxParameter))
 			for _, p := range def.Params {
-				fmt.Println(" - " + p.Name + " (" + p.Type + "): " + p.Desc)
+				b.WriteString(" - " + p.Name + " (" + p.Type + "): " + p.Desc + "\n")
 			}
-			fmt.Println("")
+			b.WriteString("\n")
 		} else {
 			panic("function not found: " + String(fn))
 		}
 	}
+	return b.String()
 }
 
 // DeclarationForValue resolves a callable head (symbol or native func) to its Declaration.
