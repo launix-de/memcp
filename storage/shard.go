@@ -41,8 +41,6 @@ type storageShard struct {
 	deltaColumns map[string]int
 	inserts      [][]scm.Scmer                       // items added to storage
 	deletions    NonLockingReadMap.NonBlockingBitMap // items removed from main or inserts (based on main_count + i)
-	rowLocks     NonLockingReadMap.NonBlockingBitMap // per-row lock bits for $update contention control
-	rowLockMu    sync.Mutex                          // guards rowLocks acquire/release transitions
 	writeOwners  map[uint64]uint32                   // goroutine-local write ownership marker
 	writeOwnMu   sync.Mutex                          // guards writeOwners
 	logfile      PersistenceLogfile                  // only in safe mode
@@ -412,25 +410,6 @@ func NewShard(t *table) *storageShard {
 
 func (t *storageShard) Count() uint32 {
 	return t.main_count + uint32(len(t.inserts)) - uint32(t.deletions.Count())
-}
-
-func (t *storageShard) acquireRowLock(recid uint32) {
-	for {
-		t.rowLockMu.Lock()
-		if !t.rowLocks.Get(recid) {
-			t.rowLocks.Set(recid, true)
-			t.rowLockMu.Unlock()
-			return
-		}
-		t.rowLockMu.Unlock()
-		runtime.Gosched()
-	}
-}
-
-func (t *storageShard) releaseRowLock(recid uint32) {
-	t.rowLockMu.Lock()
-	t.rowLocks.Set(recid, false)
-	t.rowLockMu.Unlock()
 }
 
 func currentGoroutineID() uint64 {
