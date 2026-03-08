@@ -1,0 +1,269 @@
+metadata:
+  version: "1.0"
+  description: "String compression: round-trip correctness for UUID, hex, phone, decimal, datetime, raw"
+
+test_cases:
+  - name: "Setup: drop tables if exist"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `sc_uuid`"
+      - sql: "DROP TABLE IF EXISTS `sc_hex`"
+      - sql: "DROP TABLE IF EXISTS `sc_phone`"
+      - sql: "DROP TABLE IF EXISTS `sc_decimal`"
+      - sql: "DROP TABLE IF EXISTS `sc_datetime`"
+      - sql: "DROP TABLE IF EXISTS `sc_raw`"
+      - sql: "DROP TABLE IF EXISTS `sc_b64std`"
+      - sql: "DROP TABLE IF EXISTS `sc_b64url`"
+    sql: "SELECT 1"
+
+  - name: "Create UUID table"
+    sql: "CREATE TABLE `sc_uuid` (id INT, val VARCHAR(36))"
+
+  - name: "Create hex table"
+    sql: "CREATE TABLE `sc_hex` (id INT, val VARCHAR(64))"
+
+  - name: "Create phone table"
+    sql: "CREATE TABLE `sc_phone` (id INT, val VARCHAR(32))"
+
+  - name: "Create decimal table"
+    sql: "CREATE TABLE `sc_decimal` (id INT, val VARCHAR(32))"
+
+  - name: "Create datetime table"
+    sql: "CREATE TABLE `sc_datetime` (id INT, val VARCHAR(32))"
+
+  - name: "Create raw table"
+    sql: "CREATE TABLE `sc_raw` (id INT, val VARCHAR(64))"
+
+  - name: "Create standard base64 table"
+    sql: "CREATE TABLE `sc_b64std` (id INT, val VARCHAR(64))"
+
+  - name: "Create URL-safe base64 table"
+    sql: "CREATE TABLE `sc_b64url` (id INT, val VARCHAR(64))"
+
+  - name: "Insert UUID values"
+    sql: "INSERT INTO sc_uuid VALUES (1, '550e8400-e29b-41d4-a716-446655440000'), (2, '6ba7b810-9dad-11d1-80b4-00c04fd430c8'), (3, '00000000-0000-0000-0000-000000000000')"
+    expect:
+      affected_rows: 3
+
+  - name: "Insert hex values"
+    sql: "INSERT INTO sc_hex VALUES (1, 'd41d8cd98f00b204e9800998ecf8427e'), (2, '098f6bcd4621d373cade4e832627b4f6'), (3, 'aabbccddeeff00112233445566778899')"
+    expect:
+      affected_rows: 3
+
+  - name: "Insert phone values"
+    sql: "INSERT INTO sc_phone VALUES (1, '+49 30 1234567'), (2, '0800/123 456'), (3, '+1 (555) 123-4567')"
+    expect:
+      affected_rows: 3
+
+  - name: "Insert decimal values"
+    sql: "INSERT INTO sc_decimal VALUES (1, '3.14'), (2, '-1.23'), (3, '192.168.1.1'), (4, '1.23e+10')"
+    expect:
+      affected_rows: 4
+
+  - name: "Insert datetime values"
+    sql: "INSERT INTO sc_datetime VALUES (1, '2024-03-07 15:30:00'), (2, '2023-12-31T23:59:59'), (3, '2000-01-01')"
+    expect:
+      affected_rows: 3
+
+  - name: "Insert raw values"
+    sql: "INSERT INTO sc_raw VALUES (1, 'Hello, World!'), (2, 'foo bar baz'), (3, 'mixed 123 content!')"
+    expect:
+      affected_rows: 3
+
+  - name: "Insert standard base64 values"
+    sql: "INSERT INTO sc_b64std VALUES (1, 'dGVzdA=='), (2, 'AAAA'), (3, '++//')"
+    expect:
+      affected_rows: 3
+
+  - name: "Insert URL-safe base64 values"
+    sql: "INSERT INTO sc_b64url VALUES (1, 'dGVzdA=='), (2, '--__')"
+    expect:
+      affected_rows: 2
+
+  - name: "Round-trip UUID values"
+    sql: "SELECT val FROM sc_uuid ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "550e8400-e29b-41d4-a716-446655440000"
+        - val: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        - val: "00000000-0000-0000-0000-000000000000"
+
+  - name: "Round-trip hex values"
+    sql: "SELECT val FROM sc_hex ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "d41d8cd98f00b204e9800998ecf8427e"
+        - val: "098f6bcd4621d373cade4e832627b4f6"
+        - val: "aabbccddeeff00112233445566778899"
+
+  - name: "Round-trip phone values"
+    sql: "SELECT val FROM sc_phone ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "+49 30 1234567"
+        - val: "0800/123 456"
+        - val: "+1 (555) 123-4567"
+
+  - name: "Round-trip decimal values"
+    sql: "SELECT val FROM sc_decimal ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - val: "3.14"
+        - val: "-1.23"
+        - val: "192.168.1.1"
+        - val: "1.23e+10"
+
+  - name: "Round-trip datetime values"
+    sql: "SELECT val FROM sc_datetime ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "2024-03-07 15:30:00"
+        - val: "2023-12-31T23:59:59"
+        - val: "2000-01-01"
+
+  - name: "Round-trip raw values"
+    sql: "SELECT val FROM sc_raw ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "Hello, World!"
+        - val: "foo bar baz"
+        - val: "mixed 123 content!"
+
+  - name: "Round-trip standard base64 values"
+    sql: "SELECT val FROM sc_b64std ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "dGVzdA=="
+        - val: "AAAA"
+        - val: "++//"
+
+  - name: "Round-trip URL-safe base64 values"
+    sql: "SELECT val FROM sc_b64url ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - val: "dGVzdA=="
+        - val: "--__"
+
+  - name: "WHERE on standard base64 column"
+    sql: "SELECT id FROM sc_b64std WHERE val = 'AAAA'"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "WHERE on URL-safe base64 column"
+    sql: "SELECT id FROM sc_b64url WHERE val = '--__'"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "WHERE on UUID column"
+    sql: "SELECT id FROM sc_uuid WHERE val = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "WHERE on hex column"
+    sql: "SELECT id FROM sc_hex WHERE val = 'd41d8cd98f00b204e9800998ecf8427e'"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
+  - name: "Rebuild storage"
+    setup:
+      - scm: "(rebuild)"
+    sql: "SELECT 1"
+
+  - name: "Round-trip UUID values after rebuild"
+    sql: "SELECT val FROM sc_uuid ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "550e8400-e29b-41d4-a716-446655440000"
+        - val: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        - val: "00000000-0000-0000-0000-000000000000"
+
+  - name: "Round-trip hex values after rebuild"
+    sql: "SELECT val FROM sc_hex ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "d41d8cd98f00b204e9800998ecf8427e"
+        - val: "098f6bcd4621d373cade4e832627b4f6"
+        - val: "aabbccddeeff00112233445566778899"
+
+  - name: "Round-trip phone values after rebuild"
+    sql: "SELECT val FROM sc_phone ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "+49 30 1234567"
+        - val: "0800/123 456"
+        - val: "+1 (555) 123-4567"
+
+  - name: "Round-trip decimal values after rebuild"
+    sql: "SELECT val FROM sc_decimal ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - val: "3.14"
+        - val: "-1.23"
+        - val: "192.168.1.1"
+        - val: "1.23e+10"
+
+  - name: "Round-trip datetime values after rebuild"
+    sql: "SELECT val FROM sc_datetime ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "2024-03-07 15:30:00"
+        - val: "2023-12-31T23:59:59"
+        - val: "2000-01-01"
+
+  - name: "Round-trip raw values after rebuild"
+    sql: "SELECT val FROM sc_raw ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "Hello, World!"
+        - val: "foo bar baz"
+        - val: "mixed 123 content!"
+
+  - name: "Round-trip standard base64 values after rebuild"
+    sql: "SELECT val FROM sc_b64std ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - val: "dGVzdA=="
+        - val: "AAAA"
+        - val: "++//"
+
+  - name: "Round-trip URL-safe base64 values after rebuild"
+    sql: "SELECT val FROM sc_b64url ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - val: "dGVzdA=="
+        - val: "--__"
+
+  - name: "Cleanup"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS `sc_uuid`"
+      - sql: "DROP TABLE IF EXISTS `sc_hex`"
+      - sql: "DROP TABLE IF EXISTS `sc_phone`"
+      - sql: "DROP TABLE IF EXISTS `sc_decimal`"
+      - sql: "DROP TABLE IF EXISTS `sc_datetime`"
+      - sql: "DROP TABLE IF EXISTS `sc_raw`"
+      - sql: "DROP TABLE IF EXISTS `sc_b64std`"
+      - sql: "DROP TABLE IF EXISTS `sc_b64url`"
+    sql: "SELECT 1"

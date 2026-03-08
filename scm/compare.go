@@ -21,6 +21,117 @@ import (
 	"unsafe"
 )
 
+// nibbleAt reads the 4-bit nibble at absolute nibble index absIdx from ptr.
+// absIdx = byte_offset*2 + nibble_within_byte (0=low nibble, 1=high nibble).
+func nibbleAt(ptr *byte, absIdx int) byte {
+	b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(absIdx>>1)))
+	if absIdx&1 == 0 {
+		return b & 0x0F
+	}
+	return b >> 4
+}
+
+// ptrOff advances ptr by n bytes using unsafe arithmetic.
+func ptrOff(ptr *byte, n int) *byte {
+	return (*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(n)))
+}
+
+// nibbleRangeEqual compares charLen nibbles starting at nibOff (0 or 1) in ptrA and ptrB.
+// Both pointers must have the same nibOff. Uses memcmp for inner aligned bytes and
+// nibble-mask comparisons for the leading/trailing overhangs.
+//
+// Byte layout for nibOff=0 (first char = low nibble of ptr[0]):
+//
+//	Full bytes 0..charLen/2-1; trailing low-nibble overhang if charLen is odd.
+//
+// Byte layout for nibOff=1 (first char = high nibble of ptr[0]):
+//
+//	Leading high-nibble overhang at ptr[0]; full bytes 1..(charLen-1)/2;
+//	trailing low-nibble overhang at ptr[charLen/2] if charLen is even.
+func nibbleRangeEqual(ptrA, ptrB *byte, nibOff, charLen int) bool {
+	if charLen == 0 {
+		return true
+	}
+	if nibOff == 0 {
+		// Inner full bytes 0..charLen/2-1.
+		fullBytes := charLen / 2
+		if fullBytes > 0 && unsafe.String(ptrA, fullBytes) != unsafe.String(ptrB, fullBytes) {
+			return false
+		}
+		// Trailing overhang: low nibble of ptr[fullBytes] when charLen is odd.
+		if charLen%2 == 1 {
+			return *ptrOff(ptrA, fullBytes)&0x0F == *ptrOff(ptrB, fullBytes)&0x0F
+		}
+		return true
+	}
+	// nibOff == 1.
+	// Leading overhang: high nibble of ptr[0].
+	if *ptrA>>4 != *ptrB>>4 {
+		return false
+	}
+	if charLen == 1 {
+		return true
+	}
+	// Inner full bytes 1..(charLen-1)/2.
+	innerCount := (charLen - 1) / 2
+	if innerCount > 0 {
+		if unsafe.String(ptrOff(ptrA, 1), innerCount) != unsafe.String(ptrOff(ptrB, 1), innerCount) {
+			return false
+		}
+	}
+	// Trailing overhang: low nibble of ptr[charLen/2] when charLen is even.
+	if charLen%2 == 0 {
+		return *ptrOff(ptrA, charLen/2)&0x0F == *ptrOff(ptrB, charLen/2)&0x0F
+	}
+	return true
+}
+
+// cstringIsNibble reports whether the format field of a tagCString aux value
+// uses 4-bit nibble packing (one nibble per character).
+// Must stay in sync with storage.StringFormat constants:
+//
+//	1=Phone, 2=HexLower, 3=HexUpper, 8=Decimal, 9=DateTime, 10=PhoneDTMF
+func cstringIsNibble(format uint8) bool {
+	return format == 1 || format == 2 || format == 3 || format == 8 || format == 9 || format == 10
+}
+
+// cstringEqual compares two tagCString Scmers without materializing strings.
+// Algorithm: len≠len → false; fmt≠fmt → materialize; fmt=fmt → nibble or byte compare.
+func cstringEqual(a, b Scmer) bool {
+	aVal := auxVal(a.aux)
+	bVal := auxVal(b.aux)
+	aCharLen := int(aVal & ((1 << 43) - 1))
+	bCharLen := int(bVal & ((1 << 43) - 1))
+	if aCharLen != bCharLen {
+		return false
+	}
+	aFmt := uint8(aVal >> 44)
+	bFmt := uint8(bVal >> 44)
+	if aFmt != bFmt {
+		return a.String() == b.String() // different formats, materialize
+	}
+	aNibOff := int((aVal >> 43) & 1)
+	bNibOff := int((bVal >> 43) & 1)
+	if cstringIsNibble(aFmt) {
+		if aNibOff == bNibOff {
+			// Same offset: memcmp inner bytes + mask overhangs, zero allocation.
+			return nibbleRangeEqual(a.ptr, b.ptr, aNibOff, aCharLen)
+		}
+		// Different offsets (cross-column / nodict): per-nibble fallback.
+		for i := 0; i < aCharLen; i++ {
+			if nibbleAt(a.ptr, aNibOff+i) != nibbleAt(b.ptr, bNibOff+i) {
+				return false
+			}
+		}
+		return true
+	}
+	// UUID formats (6=UUIDLower, 7=UUIDUpper): stored as 16 raw bytes, nibbleOff always 0
+	if aFmt == 6 || aFmt == 7 {
+		return unsafe.String(a.ptr, 16) == unsafe.String(b.ptr, 16)
+	}
+	return a.String() == b.String() // fallback for unknown/future formats
+}
+
 func EqualScm(a, b Scmer) Scmer { return NewBool(Equal(a, b)) }
 
 func Equal(a, b Scmer) bool {
@@ -65,6 +176,15 @@ func Equal(a, b Scmer) bool {
 			return a.Float() == b.Float()
 		case tagString, tagSymbol:
 			return a.String() == b.String()
+		case tagCString:
+			return cstringEqual(a, b)
+		case tagBString:
+			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
+			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
+			if aLen != bLen {
+				return false
+			}
+			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
 		case tagSlice:
 			as := a.Slice()
 			bs := b.Slice()
@@ -147,6 +267,18 @@ func Equal(a, b Scmer) bool {
 		}
 		if tb == tagBool {
 			return a.Bool() == b.Bool()
+		}
+		return a.String() == b.String()
+	case tagCString:
+		return a.String() == b.String()
+	case tagBString:
+		if tb == tagBString {
+			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
+			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
+			if aLen != bLen {
+				return false
+			}
+			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
 		}
 		return a.String() == b.String()
 	case tagSlice:
@@ -259,6 +391,15 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(a.Float() == b.Float())
 		case tagString, tagSymbol:
 			return NewBool(strings.EqualFold(a.String(), b.String()))
+		case tagCString:
+			return NewBool(cstringEqual(a, b))
+		case tagBString:
+			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
+			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
+			if aLen != bLen {
+				return NewBool(false)
+			}
+			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
 		case tagSlice:
 			as := a.Slice()
 			bs := b.Slice()
@@ -328,6 +469,18 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(a.Bool() == b.Bool())
 		}
 		return NewBool(strings.EqualFold(a.String(), b.String()))
+	case tagCString:
+		return NewBool(strings.EqualFold(a.String(), b.String()))
+	case tagBString:
+		if tb == tagBString {
+			aLen := int(auxVal(a.aux) & ((1 << 47) - 1))
+			bLen := int(auxVal(b.aux) & ((1 << 47) - 1))
+			if aLen != bLen {
+				return NewBool(false)
+			}
+			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
+		}
+		return NewBool(strings.EqualFold(a.String(), b.String()))
 	case tagBool:
 		return NewBool(a.Bool() == b.Bool())
 	case tagSlice:
@@ -379,7 +532,7 @@ func Less(a, b Scmer) bool {
 		return float64(a.Int()) < b.Float()
 	case tagFloat:
 		return a.Float() < b.Float()
-	case tagString, tagSymbol:
+	case tagString, tagSymbol, tagCString, tagBString:
 		switch tb {
 		case tagDate:
 			if ts, ok := ParseDateString(a.String()); ok {
@@ -390,7 +543,7 @@ func Less(a, b Scmer) bool {
 			return a.Float() < b.Float()
 		case tagFloat:
 			return a.Float() < b.Float()
-		case tagString, tagSymbol:
+		case tagString, tagSymbol, tagCString, tagBString:
 			return a.String() < b.String()
 		default:
 			// Fallback: compare by string representation to avoid panics on mixed types
