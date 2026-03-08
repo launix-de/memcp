@@ -162,12 +162,38 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	if len(boundaries) > 0 {
 		allEq := true
 		for _, b := range boundaries {
-			if !scm.Equal(b.lower, b.upper) {
+			if !boundaryIsPoint(b) {
 				allEq = false
 				break
 			}
 		}
-		if allEq {
+		// Only append ORDER BY columns when comparators are index-order compatible.
+		// A mixed/DESC comparator currently needs post-sort anyway and can produce
+		// malformed seek prefixes for nil/unbounded tails if forced into boundaries.
+		canAppendSortPrefix := len(sortcols) > 0
+		for i := range sortcols {
+			if i >= len(sortdirs) || sortdirs[i] == nil {
+				continue // default ASC
+			}
+			asc := false
+			probeOK := true
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						probeOK = false
+					}
+				}()
+				if scm.ToBool(sortdirs[i](scm.NewInt(1), scm.NewInt(2))) &&
+					!scm.ToBool(sortdirs[i](scm.NewInt(2), scm.NewInt(1))) {
+					asc = true
+				}
+			}()
+			if !probeOK || !asc {
+				canAppendSortPrefix = false
+				break
+			}
+		}
+		if allEq && canAppendSortPrefix {
 			for _, scol := range sortcols {
 				if scol.IsString() {
 					col := scol.String()
@@ -504,15 +530,28 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		if _, _, isCollate := scm.LookupCollate(sortdirs[i]); isCollate {
 			continue
 		}
-		// Derive reverse flag by probing comparator semantics (robust across pointer differences)
+		// Derive reverse flag by probing comparator semantics (robust across pointer differences).
+		// Keep panic recovery strictly local to this probe: a function-wide defer-recover
+		// here would swallow unrelated panics from scan/filter/map and surface as empty
+		// result sets instead of proper SQL errors.
 		reverse := false // ASC by default
-		defer func() { _ = recover() }()
-		// If dir(1,2) is true, comparator behaves like '<' (ASC) -> reverse=false
-		// Else if dir(2,1) is true, comparator behaves like '>' (DESC) -> reverse=true
-		if res := dir(scm.NewInt(1), scm.NewInt(2)); scm.ToBool(res) {
-			reverse = false
-		} else if res2 := dir(scm.NewInt(2), scm.NewInt(1)); scm.ToBool(res2) {
-			reverse = true
+		probeOK := true
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					probeOK = false
+				}
+			}()
+			// If dir(1,2) is true, comparator behaves like '<' (ASC) -> reverse=false
+			// Else if dir(2,1) is true, comparator behaves like '>' (DESC) -> reverse=true
+			if res := dir(scm.NewInt(1), scm.NewInt(2)); scm.ToBool(res) {
+				reverse = false
+			} else if res2 := dir(scm.NewInt(2), scm.NewInt(1)); scm.ToBool(res2) {
+				reverse = true
+			}
+		}()
+		if !probeOK {
+			continue
 		}
 		// Build comparator via (collate coll reverse?)
 		cmpScm := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(coll), scm.NewBool(reverse))

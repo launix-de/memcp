@@ -40,6 +40,26 @@ type columnboundaries struct {
 
 type boundaries []columnboundaries
 
+// boundaryValueEqual compares boundary values in index-order semantics.
+// Do not use scm.Equal here: it intentionally applies SQL-ish truthy/nil
+// coercions (e.g. 0 == nil), which breaks range/equality boundary decisions.
+func boundaryValueEqual(a, b scm.Scmer) bool {
+	return !scm.Less(a, b) && !scm.Less(b, a)
+}
+
+// boundaryIsPoint reports whether a boundary represents an exact point lookup.
+// Special case: nil..nil is only a point for explicit IS NULL bounds where both
+// inclusiveness flags are true; unbounded placeholders use nil..nil with false flags.
+func boundaryIsPoint(b columnboundaries) bool {
+	if !boundaryValueEqual(b.lower, b.upper) {
+		return false
+	}
+	if b.lower.IsNil() && b.upper.IsNil() {
+		return b.lowerInclusive && b.upperInclusive
+	}
+	return true
+}
+
 // addConstraint merges a column boundary into an existing set, narrowing the
 // range for an already-present column (AND semantics) or appending a new entry.
 func addConstraint(in boundaries, b2 columnboundaries) boundaries {
@@ -49,14 +69,14 @@ func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 			if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
 				in[i].lower = b2.lower
 				in[i].lowerInclusive = b2.lowerInclusive
-			} else if !b.lower.IsNil() && !b2.lower.IsNil() && scm.Equal(b.lower, b2.lower) {
+			} else if !b.lower.IsNil() && !b2.lower.IsNil() && boundaryValueEqual(b.lower, b2.lower) {
 				in[i].lowerInclusive = b.lowerInclusive && b2.lowerInclusive
 			}
 			// upper: pick the tighter (lower) bound
 			if b.upper.IsNil() || (!b2.upper.IsNil() && scm.Less(b2.upper, b.upper)) {
 				in[i].upper = b2.upper
 				in[i].upperInclusive = b2.upperInclusive
-			} else if !b.upper.IsNil() && !b2.upper.IsNil() && scm.Equal(b.upper, b2.upper) {
+			} else if !b.upper.IsNil() && !b2.upper.IsNil() && boundaryValueEqual(b.upper, b2.upper) {
 				in[i].upperInclusive = b.upperInclusive && b2.upperInclusive
 			}
 			return in
@@ -86,7 +106,7 @@ func widenBounds(a, b boundaries) boundaries {
 			} else if scm.Less(cb.lower, a[i].lower) {
 				a[i].lower = cb.lower
 				a[i].lowerInclusive = cb.lowerInclusive
-			} else if scm.Equal(cb.lower, a[i].lower) {
+			} else if boundaryValueEqual(cb.lower, a[i].lower) {
 				a[i].lowerInclusive = a[i].lowerInclusive || cb.lowerInclusive
 			}
 			// widen upper: take the larger
@@ -98,7 +118,7 @@ func widenBounds(a, b boundaries) boundaries {
 			} else if scm.Less(a[i].upper, cb.upper) {
 				a[i].upper = cb.upper
 				a[i].upperInclusive = cb.upperInclusive
-			} else if scm.Equal(a[i].upper, cb.upper) {
+			} else if boundaryValueEqual(a[i].upper, cb.upper) {
 				a[i].upperInclusive = a[i].upperInclusive || cb.upperInclusive
 			}
 			break
@@ -405,7 +425,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	if len(cols) > 1 {
 		isEq := make([]bool, len(cols))
 		for i := range cols {
-			isEq[i] = scm.Equal(cols[i].lower, cols[i].upper)
+			isEq[i] = boundaryIsPoint(cols[i])
 		}
 		sort.Slice(cols, func(i, j int) bool {
 			if isEq[i] != isEq[j] {
@@ -426,8 +446,8 @@ func reorderByFrequency(bounds boundaries, t *table) {
 		t.bumpColFreq(b.col)
 	}
 	sort.SliceStable(bounds, func(i, j int) bool {
-		iEq := scm.Equal(bounds[i].lower, bounds[i].upper)
-		jEq := scm.Equal(bounds[j].lower, bounds[j].upper)
+		iEq := boundaryIsPoint(bounds[i])
+		jEq := boundaryIsPoint(bounds[j])
 		if iEq != jEq {
 			return iEq // equality first
 		}
@@ -446,7 +466,7 @@ func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scme
 		//fmt.Println("conditions:", cols)
 		// build up lower and upper bounds of index
 		for {
-			if len(cols) >= 2 && !scm.Equal(cols[len(cols)-2].lower, cols[len(cols)-2].upper) {
+			if len(cols) >= 2 && !boundaryIsPoint(cols[len(cols)-2]) {
 				// remove last col -> we cant have two ranged cols
 				cols = cols[:len(cols)-1]
 			} else {
