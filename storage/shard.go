@@ -655,9 +655,11 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				if withTrigger && triggerOldRow != nil {
 					newSchemaRow := schemaRowFromDelta(d2)
 					if alreadyLocked {
-						t.mu.Unlock()
-						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow)
-						t.mu.Lock()
+						func() {
+							t.mu.Unlock()
+							defer t.mu.Lock()
+							newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow)
+						}()
 					} else {
 						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow)
 					}
@@ -851,9 +853,11 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 			}
 			if withTrigger && triggerOldRow != nil {
 				if alreadyLocked {
-					t.mu.Unlock()
-					t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
-					t.mu.Lock()
+					func() {
+						t.mu.Unlock()
+						defer t.mu.Lock()
+						t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
+					}()
 				} else {
 					t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
 				}
@@ -891,9 +895,11 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				// Execute BEFORE DELETE triggers (can abort delete by returning false)
 				beforeDeleteOk := true
 				if alreadyLocked {
-					t.mu.Unlock()
-					beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow)
-					t.mu.Lock()
+					func() {
+						t.mu.Unlock()
+						defer t.mu.Lock()
+						beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow)
+					}()
 				} else {
 					beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow)
 				}
@@ -941,9 +947,11 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 			}
 			if withTrigger && triggerDeletedRow != nil {
 				if alreadyLocked {
-					t.mu.Unlock()
-					t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
-					t.mu.Lock()
+					func() {
+						t.mu.Unlock()
+						defer t.mu.Lock()
+						t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
+					}()
 				} else {
 					t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
 				}
