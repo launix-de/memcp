@@ -18,6 +18,23 @@ package storage
 
 import "github.com/launix-de/memcp/scm"
 
+// containsNthLocalVar reports whether expr contains at least one optimizer-local
+// variable reference (var i). This is used to decide whether Proc.NumVars must
+// be set for serial execution.
+func containsNthLocalVar(expr scm.Scmer) bool {
+	if expr.IsNthLocalVar() {
+		return true
+	}
+	if expr.IsSlice() {
+		for _, it := range expr.Slice() {
+			if containsNthLocalVar(it) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isRawDataset reports whether expr uses only:
 //   - param symbols (or NthLocalVar within param range)
 //   - constants (int, float, string, bool, nil)
@@ -239,7 +256,14 @@ func buildComputedFn(formulaExpr scm.Scmer, origParams scm.Scmer, env *scm.Env, 
 	// OptimizeProcToSerialFunction uses VarsNumbered instead of Vars[sym], which
 	// would leave NthLocalVar(i) unresolvable and cause an index-out-of-range panic.
 	if result.IsProc() {
-		result.Proc().NumVars = len(conditionCols)
+		// Important: only set NumVars when the body actually uses NthLocalVar.
+		// For symbol-based bodies, forcing NumVars would skip symbol bindings in
+		// OptimizeProcToSerialFunction and make every param read as nil.
+		if containsNthLocalVar(result.Proc().Body) {
+			result.Proc().NumVars = len(conditionCols)
+		} else {
+			result.Proc().NumVars = 0
+		}
 	}
 	// mapCols = all conditionCols (lambda takes all params in order)
 	return conditionCols, result
