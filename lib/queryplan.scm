@@ -1390,8 +1390,10 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(define fk_child_col (if is_fk_reuse
 							(match (car stage_group) '('get_column _ false scol false) scol)
 							nil))
-						/* exists column: needed when WHERE condition present (non-global aggregate) */
-						(define needs_exists (and (not (equal? condition true)) (not (equal? stage_group '(1)))))
+						/* exists column: always enforce non-empty groups for non-global GROUP BY.
+						This prevents stale empty keytable rows (e.g. after bulk key updates) from surfacing
+						as groups with zeroed aggregates. */
+						(define needs_exists (not (equal? stage_group '(1))))
 						(define exists_col_name (if needs_exists (concat ".exists|" (expr_name condition)) nil))
 
 						/* AND exists>0 into HAVING so empty/non-matching groups are excluded */
