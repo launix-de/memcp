@@ -788,7 +788,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 		incremental := false
 		if selective {
 			scanNode = findScanNode(computor, ref.schema, ref.table)
-			if scanNode != nil && isAdditiveAggregate(scanNode) && !strings.HasPrefix(name, ".exists|") {
+			if scanNode != nil && isAdditiveAggregate(scanNode) && !strings.HasPrefix(name, ".") {
 				incremental = true
 			}
 		}
