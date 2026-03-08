@@ -19,7 +19,7 @@ package storage
 import "github.com/launix-de/memcp/scm"
 
 func initDashboard(en scm.Env) {
-	scm.DeclareTitle("Dashboard")
+	scm.DeclareTitle("Sync")
 
 	scm.Declare(&en, &scm.Declaration{
 		Name:         "cache_stat",

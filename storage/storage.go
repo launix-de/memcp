@@ -2003,8 +2003,15 @@ func Init(en scm.Env) {
 		nil,
 	})
 
-	initDashboard(en)
 	initMySQLImport(en)
+	initDashboard(en)
+	scm.Declare(&en, &scm.Declaration{
+		"newcachemap", "Creates a new cachemap which is a threadsafe key-value store with LRU eviction under memory pressure. (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
+		0, 0,
+		[]scm.DeclarationParameter{}, "func",
+		NewCacheMap, false, false, nil,
+		nil,
+	})
 	initTransaction(en)
 	initFKBuiltins(en)
 }
@@ -2347,15 +2354,6 @@ func initFKBuiltins(en scm.Env) {
 		nil,
 	})
 
-	scm.DeclareTitle("Cache")
-
-	scm.Declare(&en, &scm.Declaration{
-		"newcachemap", "Creates a new cachemap which is a threadsafe key-value store with LRU eviction under memory pressure. (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
-		0, 0,
-		[]scm.DeclarationParameter{}, "func",
-		NewCacheMap, false, false, nil,
-		nil,
-	})
 }
 
 // buildFKProc constructs a serializable Proc that calls a builtin with the given args.
