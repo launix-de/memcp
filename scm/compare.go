@@ -31,6 +31,61 @@ func nibbleAt(ptr *byte, absIdx int) byte {
 	return b >> 4
 }
 
+// ptrOff advances ptr by n bytes using unsafe arithmetic.
+func ptrOff(ptr *byte, n int) *byte {
+	return (*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(n)))
+}
+
+// nibbleRangeEqual compares charLen nibbles starting at nibOff (0 or 1) in ptrA and ptrB.
+// Both pointers must have the same nibOff. Uses memcmp for inner aligned bytes and
+// nibble-mask comparisons for the leading/trailing overhangs.
+//
+// Byte layout for nibOff=0 (first char = low nibble of ptr[0]):
+//
+//	Full bytes 0..charLen/2-1; trailing low-nibble overhang if charLen is odd.
+//
+// Byte layout for nibOff=1 (first char = high nibble of ptr[0]):
+//
+//	Leading high-nibble overhang at ptr[0]; full bytes 1..(charLen-1)/2;
+//	trailing low-nibble overhang at ptr[charLen/2] if charLen is even.
+func nibbleRangeEqual(ptrA, ptrB *byte, nibOff, charLen int) bool {
+	if charLen == 0 {
+		return true
+	}
+	if nibOff == 0 {
+		// Inner full bytes 0..charLen/2-1.
+		fullBytes := charLen / 2
+		if fullBytes > 0 && unsafe.String(ptrA, fullBytes) != unsafe.String(ptrB, fullBytes) {
+			return false
+		}
+		// Trailing overhang: low nibble of ptr[fullBytes] when charLen is odd.
+		if charLen%2 == 1 {
+			return *ptrOff(ptrA, fullBytes)&0x0F == *ptrOff(ptrB, fullBytes)&0x0F
+		}
+		return true
+	}
+	// nibOff == 1.
+	// Leading overhang: high nibble of ptr[0].
+	if *ptrA>>4 != *ptrB>>4 {
+		return false
+	}
+	if charLen == 1 {
+		return true
+	}
+	// Inner full bytes 1..(charLen-1)/2.
+	innerCount := (charLen - 1) / 2
+	if innerCount > 0 {
+		if unsafe.String(ptrOff(ptrA, 1), innerCount) != unsafe.String(ptrOff(ptrB, 1), innerCount) {
+			return false
+		}
+	}
+	// Trailing overhang: low nibble of ptr[charLen/2] when charLen is even.
+	if charLen%2 == 0 {
+		return *ptrOff(ptrA, charLen/2)&0x0F == *ptrOff(ptrB, charLen/2)&0x0F
+	}
+	return true
+}
+
 // cstringIsNibble reports whether the format field of a tagCString aux value
 // uses 4-bit nibble packing (one nibble per character).
 // Must stay in sync with storage.StringFormat constants:
@@ -58,8 +113,11 @@ func cstringEqual(a, b Scmer) bool {
 	aNibOff := int((aVal >> 43) & 1)
 	bNibOff := int((bVal >> 43) & 1)
 	if cstringIsNibble(aFmt) {
-		// Nibble comparison: O(charLen), zero allocation, format-agnostic
-		// (same nibble index ↔ same character regardless of charset mapping)
+		if aNibOff == bNibOff {
+			// Same offset: memcmp inner bytes + mask overhangs, zero allocation.
+			return nibbleRangeEqual(a.ptr, b.ptr, aNibOff, aCharLen)
+		}
+		// Different offsets (cross-column / nodict): per-nibble fallback.
 		for i := 0; i < aCharLen; i++ {
 			if nibbleAt(a.ptr, aNibOff+i) != nibbleAt(b.ptr, bNibOff+i) {
 				return false

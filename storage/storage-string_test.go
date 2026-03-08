@@ -270,6 +270,100 @@ func TestBase64BStringEquality(t *testing.T) {
 	}
 }
 
+// TestCStringNibbleRangeEqual exercises all nibbleRangeEqual code paths via scm.Equal.
+//
+// For hex strings, the nibbleOff of entry i equals (sum of lengths of entries 0..i-1) % 2,
+// because dense packing means each entry's starting nibble = cumulative nibble count so far.
+//
+// Equal / not-equal cases:
+//
+//	nibOff=0, charLen even  → pure inner memcmp
+//	nibOff=0, charLen odd   → inner memcmp + trailing low-nibble mask
+//	nibOff=1, charLen even  → leading high-nibble mask + inner memcmp + trailing low-nibble mask
+//	nibOff=1, charLen odd   → leading high-nibble mask + inner memcmp (no trailing overhang)
+//	nibOff=1, charLen=1     → leading high-nibble mask only
+//	nibOff=1, charLen=2     → leading high-nibble mask + trailing low-nibble mask
+//	cross nibOff (0 vs 1)   → per-nibble fallback
+func TestCStringNibbleRangeEqual(t *testing.T) {
+	// eqCase: build two identical columns, compare entry at given index → must be equal.
+	// Also build an "other" column where that entry differs by one hex digit and verify ≠.
+	type eqCase struct {
+		name     string
+		inputs   []string // shared by both identical columns
+		other    []string // same prefix for nibbleOff, but target entry is different
+		entry    int
+	}
+	cases := []eqCase{
+		// nibOff=0, even charLen (pure memcmp)
+		{name: "nibOff=0 even", inputs: []string{"abcd"}, other: []string{"ab0d"}, entry: 0},
+		// nibOff=0, odd charLen (inner memcmp + trailing low-nibble)
+		{name: "nibOff=0 odd", inputs: []string{"abc"}, other: []string{"ab0"}, entry: 0},
+		// nibOff=0, charLen=1 (trailing low-nibble only)
+		{name: "nibOff=0 len1", inputs: []string{"a"}, other: []string{"b"}, entry: 0},
+		// nibOff=0, charLen=2 (single full byte)
+		{name: "nibOff=0 len2", inputs: []string{"ab"}, other: []string{"0b"}, entry: 0},
+		// nibOff=1, charLen=1 (leading high-nibble only): "a"(len=1) → entry1 nibbleOff=1
+		{name: "nibOff=1 len1", inputs: []string{"a", "b"}, other: []string{"a", "c"}, entry: 1},
+		// nibOff=1, charLen=2 (leading + trailing overhang): differ at first nibble
+		{name: "nibOff=1 len2 first", inputs: []string{"a", "bc"}, other: []string{"a", "0c"}, entry: 1},
+		// nibOff=1, charLen=2 differ at last nibble
+		{name: "nibOff=1 len2 last", inputs: []string{"a", "bc"}, other: []string{"a", "b0"}, entry: 1},
+		// nibOff=1, odd charLen (leading + inner memcmp, no trailing): len=3
+		{name: "nibOff=1 odd len3 first", inputs: []string{"a", "bcd"}, other: []string{"a", "0cd"}, entry: 1},
+		{name: "nibOff=1 odd len3 inner", inputs: []string{"a", "bcd"}, other: []string{"a", "b0d"}, entry: 1},
+		{name: "nibOff=1 odd len3 last", inputs: []string{"a", "bcd"}, other: []string{"a", "bc0"}, entry: 1},
+		// nibOff=1, even charLen (leading + inner + trailing): len=4
+		{name: "nibOff=1 even len4 first", inputs: []string{"a", "bcde"}, other: []string{"a", "0cde"}, entry: 1},
+		{name: "nibOff=1 even len4 inner", inputs: []string{"a", "bcde"}, other: []string{"a", "b0de"}, entry: 1},
+		{name: "nibOff=1 even len4 last", inputs: []string{"a", "bcde"}, other: []string{"a", "bcd0"}, entry: 1},
+		// nibOff=1, len=5 (leading + 2 inner bytes, no trailing)
+		{name: "nibOff=1 len5 inner", inputs: []string{"a", "bcdef"}, other: []string{"a", "bc0ef"}, entry: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			colA := buildStringColumn(tc.inputs)
+			colB := buildStringColumn(tc.inputs) // identical → equal
+			colC := buildStringColumn(tc.other)  // differs at target entry → not equal
+
+			va := colA.GetValue(uint32(tc.entry))
+			vb := colB.GetValue(uint32(tc.entry))
+			vc := colC.GetValue(uint32(tc.entry))
+
+			if !scm.Equal(va, vb) {
+				t.Errorf("Equal(same, same) = false for %q (format=%d)", tc.inputs[tc.entry], colA.format)
+			}
+			if scm.Equal(va, vc) {
+				t.Errorf("Equal(different, different) = true: %q vs %q", tc.inputs[tc.entry], tc.other[tc.entry])
+			}
+		})
+	}
+
+	// Cross-nibbleOff: same string value but different nibbleOff → per-nibble fallback, still equal.
+	t.Run("cross nibOff equal", func(t *testing.T) {
+		// colA: "ab" (len=2) → entry1 nibbleOff=0
+		// colB: "a"  (len=1) → entry1 nibbleOff=1
+		// Both have entry1="cd", verify Equal returns true despite different offsets.
+		colA := buildStringColumn([]string{"ab", "cd"})
+		colB := buildStringColumn([]string{"a", "cd"})
+		va := colA.GetValue(1) // "cd", nibbleOff=0
+		vb := colB.GetValue(1) // "cd", nibbleOff=1
+		if !scm.Equal(va, vb) {
+			t.Errorf("cross-nibbleOff Equal = false for same string %q", "cd")
+		}
+	})
+
+	t.Run("cross nibOff unequal", func(t *testing.T) {
+		colA := buildStringColumn([]string{"ab", "cd"})
+		colB := buildStringColumn([]string{"a", "ce"})
+		va := colA.GetValue(1) // "cd", nibbleOff=0
+		vb := colB.GetValue(1) // "ce", nibbleOff=1
+		if scm.Equal(va, vb) {
+			t.Errorf("cross-nibbleOff Equal = true for different strings")
+		}
+	})
+}
+
 // TestNibbleOddLength ensures odd-length strings are reconstructed exactly.
 func TestNibbleOddLength(t *testing.T) {
 	for _, tc := range []struct {
