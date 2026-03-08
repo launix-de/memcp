@@ -802,7 +802,6 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows verify"
-    noncritical: true
     sql: "SELECT SUM(val) AS s, COUNT(*) AS c, MIN(val) AS mi, MAX(val) AS ma FROM cu_all"
     expect:
       rows: 1

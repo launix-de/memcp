@@ -8,29 +8,29 @@ metadata:
 
 setup:
   - name: "Clean up test tables"
-    sql: "DROP TABLE IF EXISTS simple_test"
+    sql: "DROP TABLE IF EXISTS simple_test_09"
   - name: "Clean up test tables"
     sql: "DROP TABLE IF EXISTS related_data"
   - name: "init 1"
-    sql: "CREATE TABLE simple_test (id INT, name VARCHAR(50))"
+    sql: "CREATE TABLE simple_test_09 (id INT, name VARCHAR(50))"
   - name: "init2"
-    sql: "CREATE TABLE related_data (id INT, simple_test_id INT, description VARCHAR(100))"
+    sql: "CREATE TABLE related_data_09 (id INT, simple_test_id INT, description VARCHAR(100))"
   - name: "init3"
-    sql: "INSERT INTO simple_test (id, name) VALUES (1, 'test'), (2, 'another')"
+    sql: "INSERT INTO simple_test_09 (id, name) VALUES (1, 'test'), (2, 'another')"
 
 test_cases:
   - name: "Simple INSERT"
-    sql: "INSERT INTO related_data (id, simple_test_id, description) VALUES (101, 1, 'Description for test'), (102, 2, 'Another description')"
+    sql: "INSERT INTO related_data_09 (id, simple_test_id, description) VALUES (101, 1, 'Description for test'), (102, 2, 'Another description')"
     expect:
       affected_rows: 2 #Should be two inserts
 
   - name: "SELECT simple test"
-    sql: "SELECT * FROM related_data WHERE simple_test_id = 1"
+    sql: "SELECT * FROM related_data_09 WHERE simple_test_id = 1"
     expect:
       rows: 1 # Should return the row where simple_test_id is 1
 
   - name: "SELECT JOIN test with multiple records"
-    sql: "SELECT s.name, r.description FROM simple_test s JOIN related_data r ON s.id = r.simple_test_id WHERE s.id = 1"
+    sql: "SELECT s.name, r.description FROM simple_test_09 s JOIN related_data_09 r ON s.id = r.simple_test_id WHERE s.id = 1"
     expect:
       rows: 1
       expected_results:
@@ -63,6 +63,6 @@ test_cases:
 #
 cleanup:
   - name: "Drop related_data after suite"
-    sql: "DROP TABLE IF EXISTS related_data"
+    sql: "DROP TABLE IF EXISTS related_data_09"
   - name: "Drop simple_test after suite"
-    sql: "DROP TABLE IF EXISTS simple_test"
+    sql: "DROP TABLE IF EXISTS simple_test_09"

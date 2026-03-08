@@ -514,19 +514,20 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32) (uint
 	}
 
 	limit := t.main_count + uint32(len(t.inserts))
-	for recid := uint32(0); recid < limit; recid++ {
-		if recid == staleRecid || t.deletions.Get(recid) {
+	for recid := limit; recid > 0; recid-- {
+		candidate := recid - 1
+		if candidate == staleRecid || t.deletions.Get(candidate) {
 			continue
 		}
 		match := true
 		for i, col := range primaryCols {
-			if !scm.Equal(t.rowValueByRecidLocked(recid, col), key[i]) {
+			if !scm.Equal(t.rowValueByRecidLocked(candidate, col), key[i]) {
 				match = false
 				break
 			}
 		}
 		if match {
-			return recid, true
+			return candidate, true
 		}
 	}
 	return 0, false
@@ -555,26 +556,32 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				// For non-ACID updates, callbacks may race on stale recids that are
 				// already deleted by a concurrent writer. Follow to the currently
 				// visible row with the same PRIMARY key.
-				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
-					if t.deletions.Get(targetIdx) {
-						followed := false
-						for attempt := 0; attempt < 256; attempt++ {
-							if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(targetIdx); ok {
-								targetIdx = followIdx
-								followed = true
-								break
-							}
-							// Another writer may be between temporary delete and
-							// insert publication. Yield and retry.
-							if attempt < 255 {
-								t.mu.Unlock()
-								runtime.Gosched()
-								t.mu.Lock()
-							}
+				if (func() bool {
+					tx := CurrentTx()
+					return tx == nil || tx.Mode != TxACID
+				})() && t.deletions.Get(targetIdx) {
+					followed := false
+					for attempt := 0; attempt < 256; attempt++ {
+						if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(targetIdx); ok {
+							targetIdx = followIdx
+							followed = true
+							break
 						}
-						if !followed {
-							return
+						// If we own the lock from caller context we cannot release it
+						// here; in this case, resolving failed for this recid.
+						if alreadyLocked {
+							break
 						}
+						// Another writer may be between temporary delete and
+						// insert publication. Yield and retry.
+						if attempt < 255 {
+							t.mu.Unlock()
+							runtime.Gosched()
+							t.mu.Lock()
+						}
+					}
+					if !followed {
+						return
 					}
 				}
 
@@ -588,12 +595,12 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					}
 				}
 				uniqueColsTouched := false
-				// build the whole dataset from storage
-				cols := make([]string, len(t.columns))
-				d2 := make([]scm.Scmer, 0, len(t.columns))
-				for k := range t.columns {
-					// Access to t.columns is protected by t.mu and storages may be
-					// lazily loaded; ensure we obtain a non-nil storage pointer.
+				// Build a complete row using schema columns (not only currently
+				// loaded shard columns). Otherwise UPDATEs on a subset of columns
+				// can write delta rows that miss PK/other fields.
+				d2 := make([]scm.Scmer, 0, len(t.t.Columns))
+				for _, colDesc := range t.t.Columns {
+					k := colDesc.Name
 					cs := t.getColumnStorageOrPanicEx(k, true)
 					colidx, ok := t.deltaColumns[k]
 					if !ok {
@@ -603,12 +610,27 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					for len(d2) <= colidx {
 						d2 = append(d2, scm.NewNil())
 					}
-					cols[colidx] = k
 					if targetIdx < t.main_count {
 						d2[colidx] = cs.GetValue(targetIdx)
 					} else {
 						d2[colidx] = t.getDelta(int(targetIdx-t.main_count), k)
 					}
+				}
+				buildPayload := func() ([]string, []scm.Scmer) {
+					pCols := make([]string, 0, len(t.t.Columns))
+					pRow := make([]scm.Scmer, 0, len(t.t.Columns))
+					for _, colDesc := range t.t.Columns {
+						colName := colDesc.Name
+						pos, ok := t.deltaColumns[colName]
+						if !ok || pos >= len(d2) {
+							pCols = append(pCols, colName)
+							pRow = append(pRow, scm.NewNil())
+							continue
+						}
+						pCols = append(pCols, colName)
+						pRow = append(pRow, d2[pos])
+					}
+					return pCols, pRow
 				}
 				// now d2 contains the old row values
 				oldRow := append(dataset{}, d2...)
@@ -648,12 +670,12 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 						d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
 					}
 					// BEFORE triggers may change typed/NOT NULL columns; sanitize again.
-					for i, col := range cols {
-						for _, colDesc := range t.t.Columns {
-							if col == colDesc.Name && colDesc.sanitizer != nil {
-								d2[i] = colDesc.sanitizer(d2[i])
-								break
-							}
+					for _, colDesc := range t.t.Columns {
+						if colDesc.sanitizer == nil {
+							continue
+						}
+						if pos, ok := t.deltaColumns[colDesc.Name]; ok && pos < len(d2) {
+							d2[pos] = colDesc.sanitizer(d2[pos])
 						}
 					}
 					// Recheck if anything changed after trigger modifications
@@ -702,10 +724,11 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 
 				// unique constraint checking
 				if uniqueCheckNeeded {
+					payloadCols, payloadRow := buildPayload()
 					wasDeletedBefore := t.deletions.Get(targetIdx)
 					t.deletions.Set(targetIdx, true) // mark as deleted temporarily for unique check
 					t.mu.Unlock()                    // release write lock, so the scan can be performed
-					t.t.ProcessUniqueCollision(cols, [][]scm.Scmer{d2}, false, func(values [][]scm.Scmer) {
+					t.t.ProcessUniqueCollision(payloadCols, [][]scm.Scmer{payloadRow}, false, func(values [][]scm.Scmer) {
 						t.mu.Lock() // start write lock
 					}, nil, func(errmsg string, data []scm.Scmer) {
 						t.mu.Lock() // start write lock
@@ -723,19 +746,56 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					}
 				}
 
+				payloadCols, payloadRow := buildPayload()
 				newRecid = t.main_count + uint32(len(t.inserts))
-				t.insertDataset(cols, [][]scm.Scmer{d2}, nil)
+				t.insertDataset(payloadCols, [][]scm.Scmer{payloadRow}, nil)
 				if !acidMode && !uniqueCheckNeeded {
 					// Atomic visibility switch under shard write lock:
 					// make new row hidden first, then delete old, then publish new.
 					t.deletions.Set(newRecid, true)
 					t.deletions.Set(targetIdx, true)
 					t.deletions.Set(newRecid, false)
+					// Maintain the non-ACID invariant: at most one visible row per
+					// PRIMARY key. Under heavy concurrent UPDATE chains, stale targets
+					// can leave older versions visible; collapse them here.
+					var primaryCols []string
+					for _, uk := range t.t.Unique {
+						if uk.Id == "PRIMARY" {
+							primaryCols = uk.Cols
+							break
+						}
+					}
+					if len(primaryCols) > 0 {
+						pkVals := make([]scm.Scmer, len(primaryCols))
+						for i, col := range primaryCols {
+							if pos, ok := t.deltaColumns[col]; ok && pos < len(d2) {
+								pkVals[i] = d2[pos]
+							} else {
+								pkVals[i] = scm.NewNil()
+							}
+						}
+						limit := t.main_count + uint32(len(t.inserts))
+						for recid := uint32(0); recid < limit; recid++ {
+							if recid == newRecid || t.deletions.Get(recid) {
+								continue
+							}
+							match := true
+							for i, col := range primaryCols {
+								if !scm.Equal(t.rowValueByRecidLocked(recid, col), pkVals[i]) {
+									match = false
+									break
+								}
+							}
+							if match {
+								t.deletions.Set(recid, true)
+							}
+						}
+					}
 				}
 				// Capture for dual-write forwarding (cols/d2 are closure-local)
 				if t.t.repartitionActive {
-					dualWriteCols = cols
-					dualWriteRow = [][]scm.Scmer{d2}
+					dualWriteCols = payloadCols
+					dualWriteRow = [][]scm.Scmer{payloadRow}
 				}
 
 				if currentTx != nil && currentTx.Mode == TxACID {
@@ -759,13 +819,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					currentTx.AddToUndeleteMask(t, newRecid)
 					// Only log the insert (delete applied at commit)
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
-						t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
+						t.logfile.Write(LogEntryInsert{payloadCols, [][]scm.Scmer{payloadRow}})
 					}
 				} else {
 					// Cursor-stability / no-tx: existing behavior
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 						t.logfile.Write(LogEntryDelete{targetIdx})
-						t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
+						t.logfile.Write(LogEntryInsert{payloadCols, [][]scm.Scmer{payloadRow}})
 					}
 				}
 			}()
@@ -930,7 +990,7 @@ type ShardMapReducer struct {
 	reduceScmer     scm.Scmer // original Scmer for network serialization
 	mainCount       uint32
 	hasUpdateCol    bool
-	updatedRecids   map[uint32]struct{} // statement-local guard against re-following own stale recids
+	hasIncrementCol bool
 }
 
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
@@ -953,7 +1013,6 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		mapScmer:        mapFn,
 		reduceScmer:     reduceFn,
 		mainCount:       t.main_count,
-		updatedRecids:   make(map[uint32]struct{}),
 	}
 	for i, col := range cols {
 		if col == "$update" {
@@ -971,6 +1030,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			}
 		} else if len(col) > 11 && col[:11] == "$increment:" {
 			mr.isIncrement[i] = true
+			mr.hasIncrementCol = true
 			cacheColName := col[11:]
 			cs := t.getColumnStorageOrPanic(cacheColName)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
@@ -1013,22 +1073,21 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	for _, id := range recids {
 		func() {
 			effectiveID := id
-			if m.hasUpdateCol {
-				m.shard.enterWriteOwner()
-				defer m.shard.exitWriteOwner()
-				if tx := CurrentTx(); tx != nil {
-					tx.EnterShardWrite(m.shard)
-					defer tx.ExitShardWrite(m.shard)
+			if m.hasUpdateCol || m.hasIncrementCol {
+				currentTx := CurrentTx()
+				holdsWrite := m.shard.hasWriteOwner()
+				if !holdsWrite {
+					m.shard.mu.Lock()
+					defer m.shard.mu.Unlock()
+					m.shard.enterWriteOwner()
+					defer m.shard.exitWriteOwner()
+					if currentTx != nil {
+						currentTx.EnterShardWrite(m.shard)
+						defer currentTx.ExitShardWrite(m.shard)
+					}
 				}
-				m.shard.mu.Lock()
-				defer m.shard.mu.Unlock()
-				// Resolve stale recids before reading row values so UPDATE expressions
-				// are computed from the same visible row that will be mutated.
 				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
 					if m.shard.deletions.Get(effectiveID) {
-						if _, updatedInThisStmt := m.updatedRecids[effectiveID]; updatedInThisStmt {
-							return
-						}
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
 							return
@@ -1063,13 +1122,14 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				} else if m.isUpdate[i] {
 					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, m.hasUpdateCol))
 				} else {
-					m.args[i] = col.GetValue(effectiveID)
+					if effectiveID < m.mainCount {
+						m.args[i] = col.GetValue(effectiveID)
+					} else {
+						m.args[i] = m.shard.getDelta(int(effectiveID-m.mainCount), m.colNames[i])
+					}
 				}
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
-			if m.hasUpdateCol && m.shard.deletions.Get(effectiveID) {
-				m.updatedRecids[effectiveID] = struct{}{}
-			}
 		}()
 	}
 	return acc
@@ -1080,22 +1140,21 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 	for _, id := range recids {
 		func() {
 			effectiveID := id
-			if m.hasUpdateCol {
-				m.shard.enterWriteOwner()
-				defer m.shard.exitWriteOwner()
-				if tx := CurrentTx(); tx != nil {
-					tx.EnterShardWrite(m.shard)
-					defer tx.ExitShardWrite(m.shard)
+			if m.hasUpdateCol || m.hasIncrementCol {
+				currentTx := CurrentTx()
+				holdsWrite := m.shard.hasWriteOwner()
+				if !holdsWrite {
+					m.shard.mu.Lock()
+					defer m.shard.mu.Unlock()
+					m.shard.enterWriteOwner()
+					defer m.shard.exitWriteOwner()
+					if currentTx != nil {
+						currentTx.EnterShardWrite(m.shard)
+						defer currentTx.ExitShardWrite(m.shard)
+					}
 				}
-				m.shard.mu.Lock()
-				defer m.shard.mu.Unlock()
-				// Resolve stale recids before reading row values so UPDATE expressions
-				// are computed from the same visible row that will be mutated.
 				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
 					if m.shard.deletions.Get(effectiveID) {
-						if _, updatedInThisStmt := m.updatedRecids[effectiveID]; updatedInThisStmt {
-							return
-						}
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
 							return
@@ -1115,13 +1174,14 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 				} else if len(col) >= 4 && col[:4] == "NEW." {
 					m.args[i] = scm.NewNil()
 				} else {
-					m.args[i] = m.shard.getDelta(int(effectiveID-m.mainCount), col)
+					if effectiveID < m.mainCount {
+						m.args[i] = m.mainCols[i].GetValue(effectiveID)
+					} else {
+						m.args[i] = m.shard.getDelta(int(effectiveID-m.mainCount), col)
+					}
 				}
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
-			if m.hasUpdateCol && m.shard.deletions.Get(effectiveID) {
-				m.updatedRecids[effectiveID] = struct{}{}
-			}
 		}()
 	}
 	return acc
@@ -1292,9 +1352,11 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		// also notify indices
 		for _, index := range t.Indexes {
 			// add to delta indexes
+			index.mu.Lock()
 			if index.deltaBtree != nil {
 				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
 			}
+			index.mu.Unlock()
 		}
 	}
 	// update tracked size in CacheManager (heuristic: 16 bytes per column per row)
@@ -1344,9 +1406,11 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 
 		// update delta indexes
 		for _, index := range t.Indexes {
+			index.mu.Lock()
 			if index.deltaBtree != nil {
 				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
 			}
+			index.mu.Unlock()
 		}
 	}
 }

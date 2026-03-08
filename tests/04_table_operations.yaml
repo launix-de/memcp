@@ -7,44 +7,44 @@ metadata:
 
 cleanup:
   - action: "Clean up test table"
-    sql: "DROP TABLE IF EXISTS simple_test"
+    sql: "DROP TABLE IF EXISTS simple_test_04"
 
 setup:
   - action: "Drop pre-existing table"
-    sql: "DROP TABLE IF EXISTS simple_test"
-  - action: "CREATE TABLE simple_test"
-    sql: "CREATE TABLE simple_test (id INT, name VARCHAR(50))"
+    sql: "DROP TABLE IF EXISTS simple_test_04"
+  - action: "CREATE TABLE simple_test_04"
+    sql: "CREATE TABLE simple_test_04 (id INT, name VARCHAR(50))"
 
 test_cases:
   - name: "Simple INSERT test"
-    sql: "INSERT INTO simple_test (id, name) VALUES (1, 'test')"
+    sql: "INSERT INTO simple_test_04 (id, name) VALUES (1, 'test')"
     expect:
       affected_rows: 1
 
   - name: "Simple SELECT test"
-    sql: "SELECT * FROM simple_test"
+    sql: "SELECT * FROM simple_test_04"
     expect:
       rows: 1
 
   - name: "Schema-qualified INSERT"
-    sql: "INSERT INTO `memcp-tests`.simple_test (id, name) VALUES (2, 'q')"
+    sql: "INSERT INTO `memcp-tests`.simple_test_04 (id, name) VALUES (2, 'q')"
     expect:
       affected_rows: 1
 
   - name: "Row count after qualified INSERT"
-    sql: "SELECT COUNT(*) AS c FROM simple_test"
+    sql: "SELECT COUNT(*) AS c FROM simple_test_04"
     expect:
       rows: 1
       data:
         - c: 2
 
   - name: "INSERT with trailing semicolon"
-    sql: "INSERT INTO simple_test (id, name) VALUES (3, 'semi');"
+    sql: "INSERT INTO simple_test_04 (id, name) VALUES (3, 'semi');"
     expect:
       affected_rows: 1
 
   - name: "Row count after trailing-semicolon INSERT"
-    sql: "SELECT COUNT(*) AS c FROM simple_test"
+    sql: "SELECT COUNT(*) AS c FROM simple_test_04"
     expect:
       rows: 1
       data:

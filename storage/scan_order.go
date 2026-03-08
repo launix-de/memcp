@@ -450,6 +450,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	t.ensureMainCount(skipShardReadLock)
 	// scan loop in read lock
 	var maxInsertIndex int
+	var visibleUpper uint32
 	func() {
 		if !skipShardReadLock {
 			t.mu.RLock()         // lock whole shard for reading since we frequently read deletions
@@ -457,6 +458,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		}
 		// remember current insert status (so don't scan things that are inserted during map)
 		maxInsertIndex = len(t.inserts)
+		visibleUpper = t.main_count + uint32(maxInsertIndex)
 
 		// iterate over items (indexed)
 		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
@@ -468,6 +470,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			// filter in-place: overwrite batch with passing IDs
 			outN := 0
 			for _, idx := range batch {
+				if idx >= visibleUpper {
+					continue
+				}
 				if currentTx != nil && currentTx.Mode == TxACID {
 					if !currentTx.IsVisible(t, idx) {
 						continue

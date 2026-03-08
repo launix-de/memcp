@@ -159,6 +159,12 @@ type table struct {
 	// so that the most-queried columns come first, maximizing prefix overlap.
 	colFreq   map[string]int64
 	colFreqMu sync.Mutex
+	// mutationMu serializes concurrent mutation scan statements (e.g. UPDATE with
+	// $update callbacks) on this table. Ownership is tracked per goroutine to
+	// allow reentrant scans within the same call stack.
+	mutationMu     sync.Mutex
+	mutationOwnMu  sync.Mutex
+	mutationOwners map[uint64]uint32
 
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode         ShardMode
@@ -167,6 +173,43 @@ type table struct {
 	Shards            []*storageShard // unordered shards (used when ShardMode == ShardModeFree)
 	PShards           []*storageShard // partitioned shards according to PDimensions (used when ShardMode == ShardModePartition)
 	PDimensions       []shardDimension
+}
+
+func (t *table) enterMutationOwner() {
+	goid := currentGoroutineID()
+	if goid == 0 {
+		return
+	}
+	t.mutationOwnMu.Lock()
+	if t.mutationOwners == nil {
+		t.mutationOwners = make(map[uint64]uint32)
+	}
+	t.mutationOwners[goid]++
+	t.mutationOwnMu.Unlock()
+}
+
+func (t *table) exitMutationOwner() {
+	goid := currentGoroutineID()
+	if goid == 0 {
+		return
+	}
+	t.mutationOwnMu.Lock()
+	if d := t.mutationOwners[goid]; d <= 1 {
+		delete(t.mutationOwners, goid)
+	} else {
+		t.mutationOwners[goid] = d - 1
+	}
+	t.mutationOwnMu.Unlock()
+}
+
+func (t *table) hasMutationOwner() bool {
+	goid := currentGoroutineID()
+	if goid == 0 {
+		return false
+	}
+	t.mutationOwnMu.Lock()
+	defer t.mutationOwnMu.Unlock()
+	return t.mutationOwners[goid] > 0
 }
 
 // bumpColFreq increments the query frequency counter for a column.
