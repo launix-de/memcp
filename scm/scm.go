@@ -872,7 +872,7 @@ func init() {
 		[]DeclarationParameter{
 			DeclarationParameter{"value...", "any", "value for the list", nil},
 		}, "list",
-		nil, false, false, nil,
+		nil, true, false, nil,
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{

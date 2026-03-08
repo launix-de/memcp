@@ -1085,3 +1085,37 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 	}
 	return val
 }
+
+// deoptimizeExpr rewrites optimizer-produced special forms back to plain equivalents
+// so that buildComputedFn lambdas do not depend on VarsNumbered slots beyond params.
+// Currently handles: (!list NthLocalVar(start) count expr...) -> (list expr...)
+func DeoptimizeExpr(expr Scmer) Scmer {
+	if !expr.IsSlice() {
+		return expr
+	}
+	items := expr.Slice()
+	if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "!list" {
+		count := int(ToInt(items[2]))
+		if count == len(items)-3 {
+			newItems := make([]Scmer, 1+count)
+			newItems[0] = NewSymbol("list")
+			for i := 0; i < count; i++ {
+				newItems[1+i] = DeoptimizeExpr(items[3+i])
+			}
+			return NewSlice(newItems)
+		}
+	}
+	// recurse into sub-expressions
+	newItems := make([]Scmer, len(items))
+	changed := false
+	for i, item := range items {
+		newItems[i] = DeoptimizeExpr(item)
+		if !Equal(newItems[i], item) {
+			changed = true
+		}
+	}
+	if !changed {
+		return expr
+	}
+	return NewSlice(newItems)
+}

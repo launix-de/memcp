@@ -2,8 +2,6 @@ module github.com/launix-de/memcp
 
 go 1.24.0
 
-toolchain go1.24.12
-
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
@@ -24,6 +22,7 @@ require (
 	github.com/launix-de/go-packrat/v2 v2.1.21
 	github.com/ulikunitz/xz v0.5.15
 	golang.org/x/text v0.21.0
+	golang.org/x/tools v0.42.0
 )
 
 require (
@@ -49,9 +48,10 @@ require (
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/tools v0.42.0 // indirect
 )
 
 replace github.com/launix-de/NonLockingReadMap => ./third_party/NonLockingReadMap
 
 replace github.com/launix-de/go-mysqlstack => ./third_party/go-mysqlstack
+
+replace golang.org/x/text => github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a

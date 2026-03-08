@@ -41,10 +41,10 @@ func jitNthArgument(idx int) []byte { // up to 16 params
 		code = append(code, 0x48, 0x83, 0xC0, byte(idx*16)) // add rax, 16*idx
 	}
 	code = append(code,
-		0x48, 0x8b, 0x08,       // mov rcx, [rax]
+		0x48, 0x8b, 0x08, // mov rcx, [rax]
 		0x48, 0x8b, 0x58, 0x08, // mov rbx, [rax+8]
-		0x48, 0x89, 0xc8,       // mov rax, rcx
-		0xC3,                    // ret
+		0x48, 0x89, 0xc8, // mov rax, rcx
+		0xC3, // ret
 	)
 	return code
 }
@@ -90,10 +90,10 @@ func jitCompileCall(call []Scmer) []byte {
 
 	// Emit stack frame prologue (required by Go calling convention)
 	// PUSH RBP; MOV RBP, RSP; SUB RSP, frameSize
-	frameSize := byte(0x10) // 16 bytes for saving RAX (args slice ptr)
-	w.emitByte(0x55)                          // PUSH RBP
-	w.emitBytes(0x48, 0x89, 0xE5)             // MOV RBP, RSP
-	w.emitBytes(0x48, 0x83, 0xEC, frameSize)  // SUB RSP, frameSize
+	frameSize := byte(0x10)                  // 16 bytes for saving RAX (args slice ptr)
+	w.emitByte(0x55)                         // PUSH RBP
+	w.emitBytes(0x48, 0x89, 0xE5)            // MOV RBP, RSP
+	w.emitBytes(0x48, 0x83, 0xEC, frameSize) // SUB RSP, frameSize
 
 	// Save RAX (args slice pointer) on stack before clobbering it
 	// MOV [RSP], RAX
@@ -125,9 +125,9 @@ func jitCompileCall(call []Scmer) []byte {
 	decl.JITEmit(ctx, args, descs, resultDesc)
 
 	// Emit stack frame epilogue + RET
-	w.emitBytes(0x48, 0x83, 0xC4, frameSize)  // ADD RSP, frameSize
-	w.emitByte(0x5D)                           // POP RBP
-	w.emitByte(0xC3)                           // RET
+	w.emitBytes(0x48, 0x83, 0xC4, frameSize) // ADD RSP, frameSize
+	w.emitByte(0x5D)                         // POP RBP
+	w.emitByte(0xC3)                         // RET
 
 	codeLen := int(uintptr(w.Ptr) - uintptr(w.Start))
 	return buf[:codeLen]
