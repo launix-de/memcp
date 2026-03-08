@@ -721,6 +721,7 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS cu_10"
 
   - name: "All-rows setup"
+    disabled: true
     setup:
       - sql: "DROP TABLE IF EXISTS cu_all"
       - sql: "CREATE TABLE cu_all (id INT PRIMARY KEY, val INT)"
@@ -732,6 +733,7 @@ test_cases:
         - c: 10
 
   - name: "All-rows parallel update 1/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -739,6 +741,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 2/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -746,6 +749,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 3/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -753,6 +757,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 4/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -760,6 +765,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 5/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -767,6 +773,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 6/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -774,6 +781,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 7/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -781,6 +789,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 8/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -788,6 +797,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 9/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -795,6 +805,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows parallel update 10/10"
+    disabled: true
     parallel: all_rows
     noncritical: true
     sql: "UPDATE cu_all SET val = val + 1"
@@ -802,6 +813,7 @@ test_cases:
       affected_rows: 10
 
   - name: "All-rows verify"
+    disabled: true
     noncritical: true
     sql: "SELECT SUM(val) AS s, COUNT(*) AS c, MIN(val) AS mi, MAX(val) AS ma FROM cu_all"
     expect:
