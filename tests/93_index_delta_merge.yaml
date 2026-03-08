@@ -7,6 +7,7 @@
 metadata:
   version: "1.0"
   description: "Non-unique index: delta+main streaming merge, matrix multiply"
+  isolated: true
 
 test_cases:
   # ==============================================================

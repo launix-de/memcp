@@ -70,9 +70,11 @@ test_cases:
   # --- Inspect keytable after GROUP BY (noncritical) ---
   - name: "Keytable exists after GROUP BY and contains group keys"
     noncritical: true
-    sql: "SELECT * FROM `.sc_base:((get_column sc_base false dept false))` ORDER BY `(get_column sc_base false dept false)`"
+    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"memcp-tests.sc_base\" false \"dept\" false))`"
     expect:
-      rows: 3
+      rows: 1
+      data:
+        - c: 3
 
   # === INSERT new rows into base table ===
   - name: "Insert new Engineering employee"
@@ -122,9 +124,11 @@ test_cases:
 
   - name: "Keytable updated after INSERT (new dept visible)"
     noncritical: true
-    sql: "SELECT * FROM `.sc_base:((get_column sc_base false dept false))` ORDER BY `(get_column sc_base false dept false)`"
+    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"memcp-tests.sc_base\" false \"dept\" false))`"
     expect:
-      rows: 4
+      rows: 1
+      data:
+        - c: 4
 
   # === UPDATE rows in base table ===
   - name: "Move employee from Sales to HR"
@@ -188,9 +192,11 @@ test_cases:
 
   - name: "Keytable has Sales key removed after DELETE (cleanup trigger)"
     noncritical: true
-    sql: "SELECT * FROM `.sc_base:((get_column sc_base false dept false))` ORDER BY `(get_column sc_base false dept false)`"
+    sql: "SELECT COUNT(*) AS c FROM `.sc_base:((get_column \"memcp-tests.sc_base\" false \"dept\" false))`"
     expect:
-      rows: 3
+      rows: 1
+      data:
+        - c: 3
 
   - name: "Delete all Sales employees to fully empty that group"
     sql: "DELETE FROM sc_base WHERE dept = 'Sales'"

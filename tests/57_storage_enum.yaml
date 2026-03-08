@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "StorageEnum rANS compression correctness and persistence"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS se_bool"
