@@ -55,7 +55,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define sql_identifier (parser (define x (or sql_identifier_unquoted sql_identifier_quoted)) x))
 
 /* MySQL 'username'@'host' syntax used in CREATE USER, DROP USER, GRANT, REVOKE.
-   Extracts only the username portion; the @host part is accepted but ignored. */
+Extracts only the username portion; the @host part is accepted but ignored. */
 (define sql_user_ident (parser (or
 	(parser '((define u sql_string) "@" sql_string) u)
 	(parser '((define u sql_string) "@" sql_identifier) u)
@@ -836,6 +836,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
+		(? (atom "DISTINCT" true))
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
 			(parser '((define tbl sql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))

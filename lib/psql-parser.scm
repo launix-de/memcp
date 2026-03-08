@@ -372,6 +372,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)))
 	(define psql_select_core (parser '(
 		(atom "SELECT" true)
+		(? (atom "DISTINCT" true))
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
 			(parser '((define tbl psql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
