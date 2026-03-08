@@ -71,7 +71,11 @@ func (s *shardqueue) Len() int {
 	return len(s.items)
 }
 func (s *shardqueue) Less(i, j int) bool {
-	for c := 0; c < len(s.scols); c++ {
+	cmpCount := len(s.scols)
+	if len(s.sortdirs) < cmpCount {
+		cmpCount = len(s.sortdirs)
+	}
+	for c := 0; c < cmpCount; c++ {
 		a := s.scols[c](s.items[i])
 		b := s.scols[c](s.items[j])
 		if scm.ToBool(s.sortdirs[c](a, b)) {
@@ -96,7 +100,17 @@ func (s *globalqueue) Len() int {
 	return len(s.q)
 }
 func (s *globalqueue) Less(i, j int) bool {
-	for c := 0; c < len(s.q[i].scols); c++ {
+	cmpCount := len(s.q[i].scols)
+	if len(s.q[j].scols) < cmpCount {
+		cmpCount = len(s.q[j].scols)
+	}
+	if len(s.q[i].sortdirs) < cmpCount {
+		cmpCount = len(s.q[i].sortdirs)
+	}
+	if len(s.q[j].sortdirs) < cmpCount {
+		cmpCount = len(s.q[j].sortdirs)
+	}
+	for c := 0; c < cmpCount; c++ {
 		a := s.q[i].scols[c](s.q[i].items[0])
 		b := s.q[j].scols[c](s.q[j].items[0])
 		if scm.ToBool(s.q[i].sortdirs[c](a, b)) {
@@ -397,6 +411,12 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limit int, callbackCols []string) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
+	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
+		if len(args) < 2 {
+			return scm.NewBool(false)
+		}
+		return scm.NewBool(scm.Less(args[0], args[1]))
+	}
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
@@ -450,9 +470,13 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// replace the comparator with the appropriate collator-based comparator to honor
 	// column collation without explicit ORDER BY COLLATE.
 	// Build an adjusted sortdirs slice for this scan.
-	adjustedSortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortdirs))
-	for i := range sortdirs {
-		adjustedSortdirs[i] = sortdirs[i]
+	adjustedSortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcols))
+	for i := range sortcols {
+		dir := defaultSortDir
+		if i < len(sortdirs) && sortdirs[i] != nil {
+			dir = sortdirs[i]
+		}
+		adjustedSortdirs[i] = dir
 		colname := ""
 		if sortcols[i].IsString() {
 			colname = sortcols[i].String()
@@ -485,9 +509,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		defer func() { _ = recover() }()
 		// If dir(1,2) is true, comparator behaves like '<' (ASC) -> reverse=false
 		// Else if dir(2,1) is true, comparator behaves like '>' (DESC) -> reverse=true
-		if res := sortdirs[i](scm.NewInt(1), scm.NewInt(2)); scm.ToBool(res) {
+		if res := dir(scm.NewInt(1), scm.NewInt(2)); scm.ToBool(res) {
 			reverse = false
-		} else if res2 := sortdirs[i](scm.NewInt(2), scm.NewInt(1)); scm.ToBool(res2) {
+		} else if res2 := dir(scm.NewInt(2), scm.NewInt(1)); scm.ToBool(res2) {
 			reverse = true
 		}
 		// Build comparator via (collate coll reverse?)

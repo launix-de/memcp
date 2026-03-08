@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "StorageComputeProxy serialize round-trip: persist, restart, verify"
+  isolated: true
 
 test_cases:
   # --- Setup ---

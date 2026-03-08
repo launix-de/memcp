@@ -152,6 +152,9 @@ type table struct {
 	Charset         string
 	Comment         string
 
+	// lease: CacheManager defers eviction until this time (UnixNano, atomic)
+	leaseUntil int64
+
 	// index column frequency: used to sort equality columns by frequency
 	// so that the most-queried columns come first, maximizing prefix overlap.
 	colFreq   map[string]int64
@@ -665,6 +668,9 @@ func (t *table) DropColumn(name string) bool {
 
 			t.schema.save()
 			t.schema.schemalock.Unlock()
+			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
+			// can invalidate without lock-ordering cycles.
+			t.ExecuteTableLifecycleTriggers(AfterDropColumn)
 			// deregister temp column AFTER releasing schemalock
 			if removedCol.IsTemp {
 				GlobalCache.Remove(removedCol)
@@ -1107,7 +1113,11 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 							t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1) // flush
 						}()
 						if flushPanic != nil {
-							uniquelockHeld = false
+							// Only deeper unique-check levels (idx+1 < len(t.Unique)) can
+							// have released our lock. The success callback level does not.
+							if idx+1 < len(t.Unique) {
+								uniquelockHeld = false
+							}
 							panic(flushPanic)
 						}
 					}
@@ -1163,7 +1173,11 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1) // flush the rest
 			}()
 			if flushPanic != nil {
-				uniquelockHeld = false
+				// Same rationale as above: only inner unique-check levels may have
+				// unlocked our lock before panicking.
+				if idx+1 < len(t.Unique) {
+					uniquelockHeld = false
+				}
 				panic(flushPanic)
 			}
 		}

@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "Comprehensive storage format coverage"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS sf_float"

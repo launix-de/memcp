@@ -48,4 +48,3 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS coll_t"
-

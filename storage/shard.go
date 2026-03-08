@@ -543,12 +543,12 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 					t.deletions.Set(uint32(newRecid), true)
 					tx.AddToUndeleteMask(t, newRecid)
 					// Only log the insert (delete applied at commit)
-					if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 						t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
 					}
 				} else {
 					// Cursor-stability / no-tx: existing behavior
-					if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 						t.logfile.Write(LogEntryDelete{idx})
 						t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{d2}})
 					}
@@ -569,7 +569,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 						tx.LogInsert(t, newRecid)
 						tx.RegisterTouchedShard(t)
 					}
-				} else if t.t.PersistencyMode == Safe {
+				} else if t.t.PersistencyMode == Safe && t.logfile != nil {
 					defer t.logfile.Sync()
 				}
 			}
@@ -622,7 +622,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 					defer t.mu.Unlock() // write lock
 
 					t.deletions.Set(uint32(idx), true) // mark as deleted
-					if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 						t.logfile.Write(LogEntryDelete{idx})
 					}
 					result = true
@@ -631,7 +631,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 				if tx != nil {
 					tx.RegisterTouchedShard(t)
 					tx.LogDelete(t, idx)
-				} else if t.t.PersistencyMode == Safe {
+				} else if t.t.PersistencyMode == Safe && t.logfile != nil {
 					defer t.logfile.Sync()
 				}
 			}
@@ -838,7 +838,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
 	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
 	t.insertDataset(columns, values, onFirstInsertId)
-	if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
+	if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 		// Log the actual inserted rows (not the original columns/values) so that
 		// auto-incremented IDs and column defaults are preserved across restarts.
 		idx2col := make([]string, len(t.deltaColumns))
@@ -881,7 +881,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 			}
 			tx.RegisterTouchedShard(t)
 		}
-	} else if t.t.PersistencyMode == Safe {
+	} else if t.t.PersistencyMode == Safe && t.logfile != nil {
 		t.logfile.Sync() // write barrier; no tx means immediate sync
 	}
 	// execute AFTER INSERT triggers

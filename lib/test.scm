@@ -1229,6 +1229,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(parallel (par_done "a" true) (par_done "b" true))
 	(assert (par_done "a") true "parallel executed branch a")
 	(assert (par_done "b") true "parallel executed branch b")
+	(assert (equal? (parallelN 6 (lambda (i) (+ i 10))) '(10 11 12 13 14 15)) true "parallelN returns stable index order")
+	(assert (equal? (produceN_mut 4 (lambda (i) (* i 3)) '(nil nil nil nil)) '(0 3 6 9)) true "produceN_mut writes into target")
+	(assert (equal? (parallelN_mut 4 (lambda (i) (+ i 1)) '(nil nil nil nil)) '(1 2 3 4)) true "parallelN_mut writes into target")
+	(assert (equal? (produceN_mut 4 (lambda (i) (+ i 1)) nil) nil) true "produceN_mut nil-target avoids allocation")
+	(assert (equal? (parallelN_mut 4 (lambda (i) (+ i 1)) nil) nil) true "parallelN_mut nil-target avoids allocation")
 
 	/* scm.go: for_mut (optimizer-internal but callable) */
 	(assert (equal? (for_mut (list 0) (lambda (x) (< x 5)) (lambda (x) (list (+ x 1)))) '(5)) true "for_mut counts to 5")

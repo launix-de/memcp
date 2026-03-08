@@ -4,6 +4,7 @@
 metadata:
   version: "1.0"
   description: "SQL trigger infrastructure tests"
+  isolated: true
 
 cleanup:
   - action: "Clean up test tables"

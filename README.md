@@ -216,6 +216,12 @@ curl -X POST http://localhost:4321/sql/system \
 
 **We'd love your help making MemCP even better!** 
 
+### CI behavior
+
+- Pull requests to `master` run the full required `test` workflow.
+- Direct pushes run `test` only on `master` (to avoid duplicate branch + PR runs).
+- If a PR shows pending/old checks, push one fresh commit so the current workflow config is applied.
+
 ### 🌟 **Why Contribute?**
 - Work with **cutting-edge database technology**
 - Learn **Go, Scheme, and database internals**

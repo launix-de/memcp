@@ -133,12 +133,14 @@ type TriggerDescription struct {
 
 // GetTriggers returns all triggers for a specific timing
 func (t *table) GetTriggers(timing TriggerTiming) []TriggerDescription {
-	result := make([]TriggerDescription, 0)
+	t.mu.Lock()
+	result := make([]TriggerDescription, 0, len(t.Triggers))
 	for _, tr := range t.Triggers {
 		if tr.Timing == timing {
 			result = append(result, tr)
 		}
 	}
+	t.mu.Unlock()
 	return result
 }
 
@@ -146,7 +148,18 @@ func (t *table) GetTriggers(timing TriggerTiming) []TriggerDescription {
 func (t *table) AddTrigger(trigger TriggerDescription) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.Triggers = append(t.Triggers, trigger)
+	// Keep trigger list ordered by priority (lower = earlier). For equal
+	// priorities preserve registration order by inserting after existing ties.
+	insertAt := len(t.Triggers)
+	for i, tr := range t.Triggers {
+		if tr.Priority > trigger.Priority {
+			insertAt = i
+			break
+		}
+	}
+	t.Triggers = append(t.Triggers, TriggerDescription{})
+	copy(t.Triggers[insertAt+1:], t.Triggers[insertAt:])
+	t.Triggers[insertAt] = trigger
 }
 
 // RemoveTrigger removes a trigger by name

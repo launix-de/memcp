@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "INSERT edge cases, bulk inserts, type coercion, storage heuristics"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS iec_bulk"

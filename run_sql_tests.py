@@ -35,6 +35,7 @@ import subprocess
 import time
 import threading
 import multiprocessing
+import re
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
@@ -113,12 +114,11 @@ def get_max_rows_for_ram(bytes_per_row: int = 100) -> int:
     return 10_000_000  # fallback: 10M rows
 
 class SQLTestRunner:
-    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", suite_db_cleanup=True):
+    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests"):
         self.base_url = base_url
         self.username = username
         self.password = password
         self.default_database = default_database
-        self.suite_db_cleanup = suite_db_cleanup
         self.auth_header = self._create_auth_header()
         self.test_count = 0
         self.test_passed = 0
@@ -275,12 +275,14 @@ class SQLTestRunner:
         route = "psql" if normalized == "postgresql" else "sql"
         url = f"{self.base_url}/{route}/{encoded_db}"
         headers = dict(auth_header if auth_header is not None else self.auth_header)
+        headers.setdefault("Content-Type", "text/plain; charset=utf-8")
+        body = query.encode("utf-8") if isinstance(query, str) else query
         if session_id:
             headers["X-Session-Id"] = session_id
         # Try request; if connection fails, wait for memcp to be ready and retry a few times
         for attempt in range(5):
             try:
-                return requests.post(url, data=query, headers=headers, timeout=timeout)
+                return requests.post(url, data=body, headers=headers, timeout=timeout)
             except Exception:
                 # parse port from base_url
                 try:
@@ -305,7 +307,11 @@ class SQLTestRunner:
             encoded_db = quote(database, safe='')
             url = f"{self.base_url}/rdf/{encoded_db}"
             headers = auth_header if auth_header is not None else self.auth_header
-            return requests.post(url, data=query, headers=headers, timeout=timeout)
+            if isinstance(headers, dict):
+                headers = dict(headers)
+                headers.setdefault("Content-Type", "text/plain; charset=utf-8")
+            body = query.encode("utf-8") if isinstance(query, str) else query
+            return requests.post(url, data=body, headers=headers, timeout=timeout)
         except Exception as e:
             print(f"Error executing SPARQL: {e}")
             return None
@@ -385,6 +391,15 @@ class SQLTestRunner:
                     if is_perf_test:
                         sql_code = sql_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     resp = self.execute_sql(database, sql_code, syntax=self.suite_syntax)
+                    expect_error = self._step_expects_error(step)
+                    if resp is None:
+                        return self._record_fail(name, "Setup SQL failed: no response", sql_code, None, None, is_noncritical)
+                    if expect_error:
+                        if resp.status_code == 200 and "Error" not in resp.text:
+                            return self._record_fail(name, "Setup SQL expected error but succeeded", sql_code, resp, {"error": True}, is_noncritical)
+                    else:
+                        if resp.status_code != 200 or "Error" in resp.text:
+                            return self._record_fail(name, "Setup SQL failed", sql_code, resp, None, is_noncritical)
                 elif "scm" in step:
                     scm = step["scm"]
                     if is_perf_test:
@@ -466,20 +481,26 @@ class SQLTestRunner:
                 if self._restart_handler is not None:
                     self._restart_handler()
                 else:
-                    # No restart handler (--connect-only): wait for external supervisor to restart
-                    import time as _time
-                    for _i in range(60):
-                        _time.sleep(1)
-                        try:
-                            if requests.get(self.base_url, timeout=2).status_code < 500:
-                                break
-                        except Exception:
-                            pass
+                    # No restart handler (--connect-only): wait until SQL endpoint is actually ready again.
+                    if not wait_for_sql_ready(self.base_url, tc_user, tc_pass, database, timeout=60):
+                        return self._record_fail(name, "Restart timeout: SQL not ready after SHUTDOWN", query, None, None, is_noncritical)
                 self._record_success(name, is_noncritical)
                 return True
 
             response = resp
         else:
+            if not is_sparql:
+                create_table = self._extract_create_table_name(query)
+                if create_table and not self._is_create_table_if_not_exists(query):
+                    self.execute_sql(
+                        database,
+                        f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}",
+                        auth_header,
+                        active_syntax,
+                        session_id=session_id,
+                        timeout=sql_timeout,
+                    )
+
             # Show query plan if PERF_EXPLAIN is enabled
             if is_perf_test and PERF_EXPLAIN and not is_sparql:
                 explain_resp = self.execute_sql(database, f"DESCRIBE {query}", auth_header, active_syntax)
@@ -569,10 +590,55 @@ class SQLTestRunner:
     def run_setup(self, setup_steps: List[Dict], database: str) -> bool:
         self.setup_operations = []
         self.current_database = database
-        for step in setup_steps:
+        for idx, step in enumerate(setup_steps, start=1):
             self.setup_operations.append(step)
-            resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
-            if resp is None or resp.status_code not in [200, 500]:
+            expect_error = self._step_expects_error(step)
+            if "sql" in step:
+                create_table = self._extract_create_table_name(step.get('sql'))
+                if create_table and not self._is_create_table_if_not_exists(step.get('sql')):
+                    self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}", syntax=self.suite_syntax)
+                resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
+                if resp is None:
+                    print(f"❌ Setup step {idx} failed: no response")
+                    print(f"    SQL: {step.get('sql','')[:300]}")
+                    return False
+                if expect_error:
+                    if resp.status_code == 200 and "Error" not in resp.text:
+                        print(f"❌ Setup step {idx} failed: expected error but succeeded")
+                        print(f"    SQL: {step.get('sql','')[:300]}")
+                        print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+                        return False
+                elif resp.status_code != 200 or "Error" in resp.text:
+                    print(f"❌ Setup step {idx} failed")
+                    print(f"    SQL: {step.get('sql','')[:300]}")
+                    print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+                    return False
+            elif "scm" in step:
+                scm_code = step["scm"]
+                try:
+                    url = f"{self.base_url}/scm"
+                    resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=600)
+                except Exception as e:
+                    print(f"❌ Setup step {idx} failed: SCM exception: {e}")
+                    print(f"    SCM: {scm_code[:300]}")
+                    return False
+                if resp is None:
+                    print(f"❌ Setup step {idx} failed: no SCM response")
+                    print(f"    SCM: {scm_code[:300]}")
+                    return False
+                if expect_error:
+                    if resp.status_code == 200 and "Error" not in resp.text:
+                        print(f"❌ Setup step {idx} failed: expected SCM error but succeeded")
+                        print(f"    SCM: {scm_code[:300]}")
+                        print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+                        return False
+                elif resp.status_code != 200 or "Error" in resp.text:
+                    print(f"❌ Setup step {idx} failed")
+                    print(f"    SCM: {scm_code[:300]}")
+                    print(f"    HTTP {resp.status_code}: {resp.text[:500]}")
+                    return False
+            else:
+                print(f"❌ Setup step {idx} failed: unknown step type (expected sql or scm)")
                 return False
         return True
 
@@ -580,29 +646,57 @@ class SQLTestRunner:
         for step in cleanup_steps:
             self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
 
-    def cleanup_test_database(self, database: str) -> None:
-        try:
-            global is_connect_only_mode
-            if is_connect_only_mode:
-                resp = self.execute_sql(database, "SHOW TABLES")
-                if resp is not None and resp.status_code == 200:
-                    try:
-                        tables = resp.json().get('data', [])
-                        for row in tables:
-                            tbl = list(row.values())[0]
-                            self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(tbl)}")
-                    except:
-                        pass
-                return
-            self.execute_sql("system", f"DROP DATABASE IF EXISTS {self._quote_ident(database)}")
-            # drop ensures next ensure_database will recreate
-            if database in self._ensured_dbs:
-                try:
-                    self._ensured_dbs.remove(database)
-                except KeyError:
-                    pass
-        except:
-            pass
+    def _extract_create_table_name(self, sql: Any) -> Optional[str]:
+        if not isinstance(sql, str):
+            return None
+        m = re.search(r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:`[^`]+`|[A-Za-z0-9_.-])+)", sql, re.IGNORECASE)
+        if not m:
+            return None
+        raw = m.group(1).strip().strip(";").strip("(")
+        if "`.`" in raw:
+            raw = raw.rsplit("`.`", 1)[1]
+        elif "." in raw:
+            raw = raw.rsplit(".", 1)[1]
+        table = raw.strip("`")
+        if not table:
+            return None
+        return table
+
+    def _is_create_table_if_not_exists(self, sql: Any) -> bool:
+        if not isinstance(sql, str):
+            return False
+        return re.search(r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b", sql, re.IGNORECASE) is not None
+
+    def _step_expects_error(self, step: Any) -> bool:
+        if not isinstance(step, dict):
+            return False
+        if step.get("error_expected") is True:
+            return True
+        expect = step.get("expect")
+        if isinstance(expect, dict) and expect.get("error") is True:
+            return True
+        return False
+
+    def _extract_created_tables(self, spec: Dict[str, Any]) -> List[str]:
+        # Keep cleanup scoped to tables this suite creates (no global DB cleanup).
+        tables = set()
+
+        def add_from_sql(sql: Any):
+            table = self._extract_create_table_name(sql)
+            if table:
+                tables.add(table)
+
+        for step in spec.get("setup", []) or []:
+            if isinstance(step, dict):
+                add_from_sql(step.get("sql"))
+        for tc in spec.get("test_cases", []) or []:
+            if isinstance(tc, dict):
+                add_from_sql(tc.get("sql"))
+        return sorted(tables)
+
+    def _drop_created_tables(self, database: str, tables: List[str]) -> None:
+        for tbl in tables:
+            self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(tbl)}", syntax=self.suite_syntax)
 
     # ----------------------
     # Parallel test groups
@@ -625,6 +719,14 @@ class SQLTestRunner:
         for t in threads:
             t.join(timeout=120)
 
+    def _format_duration(self, seconds: float) -> str:
+        total_ms = int(seconds * 1000)
+        mins, rem_ms = divmod(total_ms, 60_000)
+        secs, ms = divmod(rem_ms, 1000)
+        if mins > 0:
+            return f"{mins}m {secs}s {ms}ms"
+        return f"{secs}s {ms}ms"
+
     # ----------------------
     # Spec Runner
     # ----------------------
@@ -641,6 +743,8 @@ class SQLTestRunner:
             print(f"⏭️  Suite disabled: {metadata.get('description', spec_file)}")
             return True
 
+        suite_start = time.perf_counter()
+
         # Load performance baselines for this machine
         if PERF_TEST_ENABLED:
             self.load_perf_baselines()
@@ -651,14 +755,16 @@ class SQLTestRunner:
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
         print(f"💾 Database: {database}")
 
-        # Optional suite-level DB isolation. In shared-server parallel runs we
-        # disable this to avoid cross-suite DROP/CREATE races.
-        if self.suite_db_cleanup:
-            self.cleanup_test_database(database)
         self.ensure_database(database)
+        created_tables = self._extract_created_tables(spec)
+        if created_tables:
+            self._drop_created_tables(database, created_tables)
 
         if spec.get('setup') and not self.run_setup(spec['setup'], database):
+            if created_tables:
+                self._drop_created_tables(database, created_tables)
             print("❌ Setup failed")
+            print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
             return False
 
         # Group consecutive test cases by 'parallel' key and run groups concurrently
@@ -683,8 +789,8 @@ class SQLTestRunner:
 
         if spec.get('cleanup'):
             self.run_cleanup(spec['cleanup'], database)
-        if self.suite_db_cleanup:
-            self.cleanup_test_database(database)
+        if created_tables:
+            self._drop_created_tables(database, created_tables)
 
         print("="*60)
         total = self.test_count
@@ -700,6 +806,7 @@ class SQLTestRunner:
                 print(f"   {'⚠️' if is_noncrit else '❌'} {name}{suffix}")
         else:
             print("🎉 All tests passed!")
+        print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
         print("="*60)
 
         # Update performance baselines on success (or in calibration mode)
@@ -709,14 +816,26 @@ class SQLTestRunner:
         # Suite success is determined solely by critical tests
         return failed_crit == 0
 
-def wait_for_memcp(port=4321, timeout=30) -> bool:
+def wait_for_sql_ready(base_url: str, username: str = "root", password: str = "admin", database: str = "memcp-tests", timeout: int = 30) -> bool:
+    auth = b64encode(f"{username}:{password}".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {auth}",
+        "Content-Type": "text/plain; charset=utf-8",
+    }
+    sql_url = f"{base_url}/sql/{quote(database, safe='')}"
     for _ in range(timeout):
         try:
-            requests.get(f"http://localhost:{port}", timeout=2)
-            return True
-        except:
-            time.sleep(1)
+            resp = requests.post(sql_url, data="SELECT 1".encode("utf-8"), headers=headers, timeout=2)
+            if resp is not None and resp.status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
     return False
+
+
+def wait_for_memcp(port=4321, timeout=30) -> bool:
+    return wait_for_sql_ready(f"http://localhost:{port}", timeout=timeout)
 
 def start_memcp_process(port: int) -> subprocess.Popen | None:
     try:
@@ -754,19 +873,16 @@ def kill_memcp_by_port(port: int) -> None:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only] [--no-db-cleanup]")
+        print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only]")
         sys.exit(1)
 
     spec_file = sys.argv[1]
     port = 4321
     connect_only = False
-    suite_db_cleanup = True
 
     for arg in sys.argv[2:]:
         if arg == "--connect-only":
             connect_only = True
-        elif arg == "--no-db-cleanup":
-            suite_db_cleanup = False
         elif arg.isdigit():
             port = int(arg)
 
@@ -776,9 +892,7 @@ def main():
 
     memcp_process = None
     if connect_only:
-        try:
-            requests.get(base_url, timeout=2)
-        except:
+        if not wait_for_sql_ready(base_url, timeout=10):
             print(f"❌ Cannot connect to MemCP on port {port}")
             sys.exit(1)
     else:
@@ -790,7 +904,7 @@ def main():
                 print("❌ Failed to start MemCP")
                 sys.exit(1)
 
-    runner = SQLTestRunner(base_url, suite_db_cleanup=suite_db_cleanup)
+    runner = SQLTestRunner(base_url)
     if not connect_only:
         def restart_handler() -> bool:
             nonlocal memcp_process
