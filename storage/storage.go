@@ -84,12 +84,13 @@ type ColumnStorage interface {
 //     (or a named legacy constant).  Each type documents what version 0 means.
 //
 // Exception — magic bytes 1, 2, 13, 40 (StorageSCMER, StorageSparse, StorageDecimal, StorageEnum):
-//   These types existed before the versioning scheme and had NO padding byte in
-//   their original layout, so there is no safe location for an inline version
-//   byte without corrupting existing data.  They read their first field directly
-//   with NO version byte.  If any of their formats must change, register a NEW
-//   magic byte for the new layout and keep the old magic as a read-only legacy
-//   reader forever.
+//
+//	These types existed before the versioning scheme and had NO padding byte in
+//	their original layout, so there is no safe location for an inline version
+//	byte without corrupting existing data.  They read their first field directly
+//	with NO version byte.  If any of their formats must change, register a NEW
+//	magic byte for the new layout and keep the old magic as a read-only legacy
+//	reader forever.
 //
 // Current magic byte assignments:
 //

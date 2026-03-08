@@ -558,8 +558,9 @@ func (w *JITWriter) EmitShlRegImm8(dst Reg, imm uint8) {
 // Input: ptrReg holds s.ptr, auxReg holds s.aux.
 // Output: result in dstReg as uint16.
 // Logic: if ptr == &scmerIntSentinel → tagInt (4)
-//        if ptr == &scmerFloatSentinel → tagFloat (3)
-//        else → aux & 0xFF
+//
+//	if ptr == &scmerFloatSentinel → tagFloat (3)
+//	else → aux & 0xFF
 func (w *JITWriter) EmitGetTag(dst, ptrReg, auxReg Reg) {
 	// CMP ptrReg, &scmerIntSentinel (via R11 as scratch)
 	w.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
