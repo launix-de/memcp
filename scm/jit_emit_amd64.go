@@ -139,17 +139,12 @@ func (w *JITWriter) EmitReturnBool(src JITValueDesc) {
 		w.emitBytes(0x48, 0xBB) // MOV RBX, imm64
 		w.emitU64(aux)
 	case LocReg:
-		// MOVZX EBX, src.Reg (low byte); then OR with tagBool<<48
-		// For simplicity: SHL + OR approach
-		// First zero-extend the bool into RBX
+		// aux = (val << 8) | tagBool
 		w.emitMovRegReg(RegRBX, src.Reg)
-		w.emitBytes(0x48, 0x81, 0xE3) // AND RBX, 0x01
-		w.emitU32(1)
-		// MOV RCX, tagBool<<48
-		w.emitBytes(0x48, 0xB9) // MOV RCX, imm64
-		w.emitU64(uint64(tagBool) << 48)
-		// OR RBX, RCX
-		w.emitBytes(0x48, 0x09, 0xCB)
+		w.emitAndRegImm32(RegRBX, 1)
+		w.EmitShlRegImm8(RegRBX, 8)
+		w.EmitMovRegImm64(RegR11, uint64(tagBool))
+		w.emitOrRegReg(RegRBX, RegR11)
 	}
 	w.emitByte(0xC3) // RET
 }
@@ -166,12 +161,13 @@ func (w *JITWriter) EmitMakeBool(dst JITValueDesc, src JITValueDesc) {
 		aux := makeAux(tagBool, uint64(src.Imm)&1)
 		w.EmitMovRegImm64(dst.Reg2, aux)
 	case LocReg:
-		// dst.Reg2 = tagBool<<48 | (src.Reg & 1)
+		// dst.Reg2 = (src.Reg << 8) | tagBool
 		if dst.Reg2 != src.Reg {
 			w.emitMovRegReg(dst.Reg2, src.Reg)
 		}
 		w.emitAndRegImm32(dst.Reg2, 1)
-		w.EmitMovRegImm64(RegR11, uint64(tagBool)<<48)
+		w.EmitShlRegImm8(dst.Reg2, 8)
+		w.EmitMovRegImm64(RegR11, uint64(tagBool))
 		w.emitOrRegReg(dst.Reg2, RegR11)
 	}
 }
@@ -546,15 +542,24 @@ func (w *JITWriter) EmitShrRegImm8(dst Reg, imm uint8) {
 	w.emitBytes(rex, 0xC1, modrm, imm)
 }
 
+// EmitShlRegImm8 emits SHL r64, imm8 (logical shift left by immediate)
+func (w *JITWriter) EmitShlRegImm8(dst Reg, imm uint8) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x01 // REX.B
+	}
+	modrm := byte(0xE0) | byte(dst&7) // /4 = SHL
+	w.emitBytes(rex, 0xC1, modrm, imm)
+}
+
 // --- GetTag inline emitter ---
 
 // EmitGetTag emits inline code for (Scmer).GetTag().
 // Input: ptrReg holds s.ptr, auxReg holds s.aux.
 // Output: result in dstReg as uint16.
 // Logic: if ptr == &scmerIntSentinel → tagInt (4)
-//
-//	if ptr == &scmerFloatSentinel → tagFloat (3)
-//	else → aux >> 48
+//        if ptr == &scmerFloatSentinel → tagFloat (3)
+//        else → aux & 0xFF
 func (w *JITWriter) EmitGetTag(dst, ptrReg, auxReg Reg) {
 	// CMP ptrReg, &scmerIntSentinel (via R11 as scratch)
 	w.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(&scmerIntSentinel))))
@@ -572,11 +577,11 @@ func (w *JITWriter) EmitGetTag(dst, ptrReg, auxReg Reg) {
 	isFloatFixup := w.Ptr
 	w.emitU32(0)
 
-	// Default: dst = aux >> 48
+	// Default: dst = aux & 0xFF
 	if dst != auxReg {
 		w.emitMovRegReg(dst, auxReg)
 	}
-	w.EmitShrRegImm8(dst, 48)
+	w.emitAndRegImm32(dst, 0xFF)
 	// JMP .done
 	w.emitByte(0xE9) // JMP rel32
 	doneFixup := w.Ptr
