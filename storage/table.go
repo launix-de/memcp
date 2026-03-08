@@ -1127,7 +1127,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					params := make([]scm.Scmer, len(onCollisionCols))
 					for i, p := range onCollisionCols {
 						if p == "$update" {
-							params[i] = scm.NewFunc(s.UpdateFunction(uid, true))
+							params[i] = scm.NewFunc(s.UpdateFunction(uid, true, false))
 						} else if len(p) >= 4 && p[:4] == "NEW." {
 							for j, c := range columns {
 								if p[4:] == c {

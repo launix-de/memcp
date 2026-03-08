@@ -248,6 +248,8 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// MapReducer for map+reduce phase (builds column readers internally)
 	mapper := t.OpenMapReducer(callbackCols, callback, aggregate)
 	defer mapper.Close()
+	currentTx := CurrentTx()
+	allowStaleUpdateRecids := mapper.hasUpdateCol && (currentTx == nil || currentTx.Mode != TxACID)
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	t.mu.RLock()
 	locked := true
@@ -261,7 +263,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// filter phase: iterateIndex fills stack buffer, callback filters in-place and flushes to MapReducer
 	var buf [1024]uint32
 	hadValue := false
-	currentTx := CurrentTx()
 
 	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
 		// filter in-place: overwrite batch with passing IDs
@@ -273,7 +274,9 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				}
 			} else {
 				if t.deletions.Get(idx) {
-					continue // item is on delete list
+					if !allowStaleUpdateRecids {
+						continue // item is on delete list
+					}
 				}
 			}
 

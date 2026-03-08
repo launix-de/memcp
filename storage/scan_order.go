@@ -446,6 +446,13 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// initialize main_count lazily if needed
 	t.ensureMainCount(false)
+	hasUpdateCol := false
+	for _, c := range callbackCols {
+		if c == "$update" || (len(c) >= 4 && c[:4] == "NEW.") {
+			hasUpdateCol = true
+			break
+		}
+	}
 	// scan loop in read lock
 	var maxInsertIndex int
 	func() {
@@ -471,7 +478,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					}
 				} else {
 					if t.deletions.Get(idx) {
-						continue // item is on delete list
+						if !hasUpdateCol {
+							continue // item is on delete list
+						}
 					}
 				}
 
