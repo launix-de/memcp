@@ -444,26 +444,22 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		ccols[i] = t.getColumnStorageOrPanic(k)
 	}
 
+	currentTx := CurrentTx()
+	skipShardReadLock := currentTx != nil && currentTx.HasShardWrite(t)
 	// initialize main_count lazily if needed
-	t.ensureMainCount(false)
-	hasUpdateCol := false
-	for _, c := range callbackCols {
-		if c == "$update" || (len(c) >= 4 && c[:4] == "NEW.") {
-			hasUpdateCol = true
-			break
-		}
-	}
+	t.ensureMainCount(skipShardReadLock)
 	// scan loop in read lock
 	var maxInsertIndex int
 	func() {
-		t.mu.RLock()         // lock whole shard for reading since we frequently read deletions
-		defer t.mu.RUnlock() // finished reading
+		if !skipShardReadLock {
+			t.mu.RLock()         // lock whole shard for reading since we frequently read deletions
+			defer t.mu.RUnlock() // finished reading
+		}
 		// remember current insert status (so don't scan things that are inserted during map)
 		maxInsertIndex = len(t.inserts)
 
 		// iterate over items (indexed)
 		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
-		currentTx := CurrentTx()
 		var buf [1024]uint32
 		resultCap := 1024
 		result.items = make([]uint32, resultCap)
@@ -476,12 +472,8 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					if !currentTx.IsVisible(t, idx) {
 						continue
 					}
-				} else {
-					if t.deletions.Get(idx) {
-						if !hasUpdateCol {
-							continue // item is on delete list
-						}
-					}
+				} else if t.deletions.Get(idx) {
+					continue // item is on delete list
 				}
 
 				if idx < t.main_count {

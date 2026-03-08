@@ -222,6 +222,9 @@ func (u *storageShard) getColumnStorageRLocked(colName string) ColumnStorage {
 // getColumnStorageOrPanic returns a stable pointer to a column's storage.
 // It never reads u.columns without holding the shard lock and loads on demand.
 func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
+	if tx := CurrentTx(); tx != nil && tx.HasShardWrite(u) {
+		return u.getColumnStorageOrPanicEx(colName, true)
+	}
 	// try under read lock
 	u.mu.RLock()
 	cs, present := u.columns[colName]
@@ -722,7 +725,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				}
 			}
 			if withTrigger && triggerOldRow != nil {
-				t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
+				if alreadyLocked {
+					t.mu.Unlock()
+					t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
+					t.mu.Lock()
+				} else {
+					t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
+				}
 			}
 		} else {
 			// delete
@@ -798,7 +807,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				}
 			}
 			if withTrigger && triggerDeletedRow != nil {
-				t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
+				if alreadyLocked {
+					t.mu.Unlock()
+					t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
+					t.mu.Lock()
+				} else {
+					t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
+				}
 			}
 		}
 		if result && t.next != nil {
@@ -925,6 +940,12 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 		func() {
 			effectiveID := id
 			if m.hasUpdateCol {
+				if tx := CurrentTx(); tx != nil {
+					tx.EnterShardWrite(m.shard)
+					defer tx.ExitShardWrite(m.shard)
+				}
+				m.shard.mu.Lock()
+				defer m.shard.mu.Unlock()
 				m.shard.acquireRowLock(effectiveID)
 				defer m.shard.releaseRowLock(effectiveID)
 			}
@@ -952,7 +973,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 						m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
 					}
 				} else if m.isUpdate[i] {
-					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, false))
+					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, m.hasUpdateCol))
 				} else {
 					m.args[i] = col.GetValue(effectiveID)
 				}
@@ -969,6 +990,12 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 		func() {
 			effectiveID := id
 			if m.hasUpdateCol {
+				if tx := CurrentTx(); tx != nil {
+					tx.EnterShardWrite(m.shard)
+					defer tx.ExitShardWrite(m.shard)
+				}
+				m.shard.mu.Lock()
+				defer m.shard.mu.Unlock()
 				m.shard.acquireRowLock(effectiveID)
 				defer m.shard.releaseRowLock(effectiveID)
 			}
@@ -979,7 +1006,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 						return scm.NewBool(true)
 					})
 				} else if m.isUpdate[i] {
-					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, false))
+					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, m.hasUpdateCol))
 				} else if len(col) >= 4 && col[:4] == "NEW." {
 					m.args[i] = scm.NewNil()
 				} else {

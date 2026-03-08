@@ -236,7 +236,9 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// shards have their column map populated by load(t) first.
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
-	t.ensureMainCount(false)
+	currentTx := CurrentTx()
+	skipShardReadLock := currentTx != nil && currentTx.HasShardWrite(t)
+	t.ensureMainCount(skipShardReadLock)
 
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -248,11 +250,12 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// MapReducer for map+reduce phase (builds column readers internally)
 	mapper := t.OpenMapReducer(callbackCols, callback, aggregate)
 	defer mapper.Close()
-	currentTx := CurrentTx()
-	allowStaleUpdateRecids := mapper.hasUpdateCol && (currentTx == nil || currentTx.Mode != TxACID)
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
-	t.mu.RLock()
-	locked := true
+	locked := false
+	if !skipShardReadLock {
+		t.mu.RLock()
+		locked = true
+	}
 	defer func() {
 		if locked {
 			t.mu.RUnlock()
@@ -272,12 +275,8 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				if !currentTx.IsVisible(t, idx) {
 					continue
 				}
-			} else {
-				if t.deletions.Get(idx) {
-					if !allowStaleUpdateRecids {
-						continue // item is on delete list
-					}
-				}
+			} else if t.deletions.Get(idx) {
+				continue // item is on delete list
 			}
 
 			// condition check
@@ -299,20 +298,26 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		}
 		if outN > 0 {
 			// release lock for map+reduce (UpdateFunction needs write lock)
-			t.mu.RUnlock()
-			locked = false
+			if locked {
+				t.mu.RUnlock()
+				locked = false
+			}
 			outCount += int64(outN)
 			akkumulator = mapper.Stream(akkumulator, batch[:outN])
 			hadValue = true
-			t.mu.RLock()
-			locked = true
+			if !skipShardReadLock {
+				t.mu.RLock()
+				locked = true
+			}
 		}
 		return true
 	})
 
 	// finished reading
-	t.mu.RUnlock()
-	locked = false
+	if locked {
+		t.mu.RUnlock()
+		locked = false
+	}
 	if !hadValue {
 		return scm.NewNil(), outCount
 	}
