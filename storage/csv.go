@@ -25,15 +25,6 @@ func LoadCSV(schema, table string, f io.Reader, delimiter string, firstLine bool
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
 
-	lines := make(chan string, 512)
-
-	go func() {
-		for scanner.Scan() {
-			lines <- scanner.Text()
-		}
-		close(lines)
-	}()
-
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("database " + schema + " does not exist")
@@ -55,6 +46,15 @@ func LoadCSV(schema, table string, f io.Reader, delimiter string, firstLine bool
 			cols[i] = col.Name
 		}
 	}
+
+	lines := make(chan string, 512)
+
+	go func() {
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+		close(lines)
+	}()
 	buffer := make([][]scm.Scmer, 0, 4096)
 	for s := range lines {
 		if s == "" {
