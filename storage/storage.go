@@ -84,12 +84,13 @@ type ColumnStorage interface {
 //     (or a named legacy constant).  Each type documents what version 0 means.
 //
 // Exception — magic bytes 1, 2, 13, 40 (StorageSCMER, StorageSparse, StorageDecimal, StorageEnum):
-//   These types existed before the versioning scheme and had NO padding byte in
-//   their original layout, so there is no safe location for an inline version
-//   byte without corrupting existing data.  They read their first field directly
-//   with NO version byte.  If any of their formats must change, register a NEW
-//   magic byte for the new layout and keep the old magic as a read-only legacy
-//   reader forever.
+//
+//	These types existed before the versioning scheme and had NO padding byte in
+//	their original layout, so there is no safe location for an inline version
+//	byte without corrupting existing data.  They read their first field directly
+//	with NO version byte.  If any of their formats must change, register a NEW
+//	magic byte for the new layout and keep the old magic as a read-only legacy
+//	reader forever.
 //
 // Current magic byte assignments:
 //
@@ -2002,8 +2003,15 @@ func Init(en scm.Env) {
 		nil,
 	})
 
-	initDashboard(en)
 	initMySQLImport(en)
+	initDashboard(en)
+	scm.DeclareInSection("Sync", &en, &scm.Declaration{
+		"newcachemap", "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
+		0, 0,
+		[]scm.DeclarationParameter{}, "func",
+		NewCacheMap, false, false, nil,
+		nil,
+	})
 	initTransaction(en)
 	initFKBuiltins(en)
 }
@@ -2346,15 +2354,6 @@ func initFKBuiltins(en scm.Env) {
 		nil,
 	})
 
-	scm.DeclareTitle("Cache")
-
-	scm.Declare(&en, &scm.Declaration{
-		"newcachemap", "Creates a new cachemap which is a threadsafe key-value store with LRU eviction under memory pressure. (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
-		0, 0,
-		[]scm.DeclarationParameter{}, "func",
-		NewCacheMap, false, false, nil,
-		nil,
-	})
 }
 
 // buildFKProc constructs a serializable Proc that calls a builtin with the given args.

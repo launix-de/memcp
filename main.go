@@ -231,18 +231,17 @@ func setupIO(wd string) {
 		nil,
 	})
 	scm.Declare(&IOEnv, &scm.Declaration{
-		"help", "Lists all functions or print help for a specific function",
+		"help", "Lists all functions or returns help for a specific function as a string",
 		0, 1,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"topic", "string", "function to print help about", nil},
-		}, "nil",
+			scm.DeclarationParameter{"topic", "string", "function to get help about", nil},
+		}, "string",
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
-				scm.Help(scm.NewNil())
+				return scm.NewString(scm.Help(scm.NewNil()))
 			} else {
-				scm.Help(a[0])
+				return scm.NewString(scm.Help(a[0]))
 			}
-			return scm.NewNil()
 		}, false, false, nil,
 		nil,
 	})

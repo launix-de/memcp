@@ -333,3 +333,67 @@ func serializeNativeFunc(b *bytes.Buffer, fn any, en *Env) {
 	}
 	b.WriteString("[unserializable native func]")
 }
+
+// PrettyPrint formats a Scmer value as a human-readable, indented string.
+// Atoms and expressions whose compact serialization fits within width characters
+// are kept on a single line. Longer list expressions are expanded: the head on
+// the opening line, each argument on its own indented line, and the closing
+// parenthesis on a line by itself. Consecutive lines that contain only closing
+// parentheses are merged into a single line at the outermost indent level.
+func PrettyPrint(v Scmer, glob *Env, width int) string {
+	lines := prettyLines(v, glob, width, 0)
+	// merge consecutive closing-paren-only lines
+	result := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimLeft(line, "\t")
+		if strings.Trim(trimmed, ")") == "" && trimmed != "" {
+			// this line is only closing parens; collect following ones
+			merged := line
+			for i+1 < len(lines) {
+				next := lines[i+1]
+				nextTrimmed := strings.TrimLeft(next, "\t")
+				if strings.Trim(nextTrimmed, ")") == "" && nextTrimmed != "" {
+					merged = strings.TrimLeft(merged, "\t") // drop indent of earlier line
+					// use indentation of the later (outer) line
+					merged = next + strings.TrimLeft(merged, "\t")
+					i++
+				} else {
+					break
+				}
+			}
+			result = append(result, merged)
+		} else {
+			result = append(result, line)
+		}
+	}
+	return strings.Join(result, "\n")
+}
+
+// prettyLines returns the lines (already indented with tabs) for a value.
+func prettyLines(v Scmer, glob *Env, width int, indent int) []string {
+	compact := SerializeToString(v, glob)
+	indentStr := strings.Repeat("\t", indent)
+	if len(compact) <= width || v.GetTag() != tagSlice {
+		return []string{indentStr + compact}
+	}
+	slice := v.Slice()
+	if len(slice) == 0 {
+		return []string{indentStr + "()"}
+	}
+	headCompact := SerializeToString(slice[0], glob)
+	lines := []string{indentStr + "(" + headCompact}
+	for _, arg := range slice[1:] {
+		lines = append(lines, prettyLines(arg, glob, width, indent+1)...)
+	}
+	// closing paren: append to last line if it is already a closing-paren-only line,
+	// otherwise add a new line at the current indent
+	last := lines[len(lines)-1]
+	lastTrimmed := strings.TrimLeft(last, "\t")
+	if strings.Trim(lastTrimmed, ")") == "" && lastTrimmed != "" {
+		lines[len(lines)-1] = last + ")"
+	} else {
+		lines = append(lines, indentStr+")")
+	}
+	return lines
+}
