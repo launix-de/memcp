@@ -974,7 +974,9 @@ consoleSendBtn.textContent="Send (Ctrl+Enter)";
 consoleTa.focus();
 addHistory(syn,db,query);
 if(syn==="scheme"){
-consoleResult.innerHTML="<pre>"+esc(text)+"</pre>";
+var parsed;try{parsed=JSON.parse(text)}catch(e){}
+if(typeof parsed==="string"){consoleResult.innerHTML="<pre>"+esc(parsed)+"</pre>";}
+else{consoleResult.innerHTML="<pre>"+esc(text)+"</pre>";}
 }else{
 var lines=text.trim().split("\n").filter(function(l){return l.length>0});
 if(!lines.length){consoleResult.innerHTML="<pre>No results</pre>";return}
