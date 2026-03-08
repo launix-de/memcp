@@ -77,7 +77,6 @@ test_cases:
   # or a dedicated shuffle/merge operator in storage; not preplanned in this step.
 
   - name: "UNION ALL with ORDER BY"
-    noncritical: true
     sql: |
       SELECT ID, name FROM fop_files WHERE ID <= 2
       UNION ALL
@@ -87,7 +86,6 @@ test_cases:
       error: true
 
   - name: "UNION ALL with LIMIT"
-    noncritical: true
     sql: |
       SELECT name FROM fop_files
       UNION ALL
@@ -97,7 +95,6 @@ test_cases:
       error: true
 
   - name: "UNION ALL with ORDER BY and LIMIT"
-    noncritical: true
     sql: |
       SELECT ID, name FROM fop_files
       UNION ALL
@@ -138,7 +135,6 @@ test_cases:
   # === UNION ALL branch shape / staged branch behavior ===
 
   - name: "UNION ALL keeps output aliases from first branch"
-    noncritical: true
     sql: |
       SELECT ID AS file_id, name AS label FROM fop_files WHERE ID = 1
       UNION ALL
@@ -148,7 +144,6 @@ test_cases:
       error: true
 
   - name: "UNION ALL with inner ORDER BY/LIMIT per branch"
-    noncritical: true
     sql: |
       SELECT ID FROM (
         SELECT ID FROM fop_files ORDER BY ID DESC LIMIT 2
@@ -162,7 +157,6 @@ test_cases:
       error: true
 
   - name: "UNION ALL with grouped branch"
-    noncritical: true
     sql: |
       SELECT ID, name FROM fop_files WHERE ID <= 2
       UNION ALL
@@ -175,7 +169,6 @@ test_cases:
       error: true
 
   - name: "UNION ALL with derived branch filtering"
-    noncritical: true
     sql: |
       SELECT ID, name FROM fop_files WHERE ID = 5
       UNION ALL
@@ -187,7 +180,6 @@ test_cases:
       error: true
 
   - name: "UNION ALL with NULL payload in one branch"
-    noncritical: true
     sql: |
       SELECT ID, name FROM fop_files WHERE ID = 1
       UNION ALL
