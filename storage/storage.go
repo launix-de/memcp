@@ -1175,7 +1175,7 @@ func Init(en scm.Env) {
 				}),
 			})
 
-			// Register triggers with idempotency
+			// Register DML triggers with idempotency
 			triggerDefs := []struct {
 				timing TriggerTiming
 				body   scm.Scmer
@@ -1202,6 +1202,35 @@ func Init(en scm.Env) {
 					IsSystem: true,
 					Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
 					Func:     buildFKProc(td.body),
+				})
+			}
+			// Lifecycle cleanup: when the base table is dropped/shape-changed, the keytable
+			// must be dropped as well, otherwise stale keytables can be reused by a later
+			// table recreation with the same name and cause cross-suite flakes.
+			dropBody := scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("droptable"),
+				scm.NewString(ktSchema),
+				scm.NewString(ktName),
+				scm.NewBool(true),
+			})
+			for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {
+				triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + timing.String()
+				exists := false
+				for _, tr := range baseTable.Triggers {
+					if tr.Name == triggerName {
+						exists = true
+						break
+					}
+				}
+				if exists {
+					continue
+				}
+				baseTable.AddTrigger(TriggerDescription{
+					Name:     triggerName,
+					Timing:   timing,
+					IsSystem: true,
+					Priority: 90,
+					Func:     buildFKProc(dropBody),
 				})
 			}
 			return scm.NewBool(true)
