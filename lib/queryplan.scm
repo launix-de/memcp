@@ -1394,7 +1394,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						This prevents stale empty keytable rows (e.g. after bulk key updates) from surfacing
 						as groups with zeroed aggregates. */
 						(define needs_exists (not (equal? stage_group '(1))))
-						(define exists_col_name (if needs_exists (concat ".exists|" (expr_name condition)) nil))
+						(define exists_col_name (if needs_exists (concat "." (expr_name condition)) nil))
 
 						/* AND exists>0 into HAVING so empty/non-matching groups are excluded */
 						(define effective_having (if needs_exists
