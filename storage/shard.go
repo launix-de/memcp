@@ -24,6 +24,7 @@ import "time"
 import "strings"
 import "reflect"
 import "runtime"
+import "strconv"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
@@ -42,6 +43,8 @@ type storageShard struct {
 	deletions    NonLockingReadMap.NonBlockingBitMap // items removed from main or inserts (based on main_count + i)
 	rowLocks     NonLockingReadMap.NonBlockingBitMap // per-row lock bits for $update contention control
 	rowLockMu    sync.Mutex                          // guards rowLocks acquire/release transitions
+	writeOwners  map[uint64]uint32                   // goroutine-local write ownership marker
+	writeOwnMu   sync.Mutex                          // guards writeOwners
 	logfile      PersistenceLogfile                  // only in safe mode
 	mu           sync.RWMutex                        // delta write lock (working on main storage is lock free)
 	uniquelock   sync.Mutex                          // unique insert lock (only used in the sharded case)
@@ -222,6 +225,9 @@ func (u *storageShard) getColumnStorageRLocked(colName string) ColumnStorage {
 // getColumnStorageOrPanic returns a stable pointer to a column's storage.
 // It never reads u.columns without holding the shard lock and loads on demand.
 func (u *storageShard) getColumnStorageOrPanic(colName string) ColumnStorage {
+	if u.hasWriteOwner() {
+		return u.getColumnStorageOrPanicEx(colName, true)
+	}
 	if tx := CurrentTx(); tx != nil && tx.HasShardWrite(u) {
 		return u.getColumnStorageOrPanicEx(colName, true)
 	}
@@ -425,6 +431,58 @@ func (t *storageShard) releaseRowLock(recid uint32) {
 	t.rowLockMu.Lock()
 	t.rowLocks.Set(recid, false)
 	t.rowLockMu.Unlock()
+}
+
+func currentGoroutineID() uint64 {
+	var b [64]byte
+	n := runtime.Stack(b[:], false)
+	line := string(b[:n])
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return 0
+	}
+	id, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+func (t *storageShard) enterWriteOwner() {
+	goid := currentGoroutineID()
+	if goid == 0 {
+		return
+	}
+	t.writeOwnMu.Lock()
+	if t.writeOwners == nil {
+		t.writeOwners = make(map[uint64]uint32)
+	}
+	t.writeOwners[goid]++
+	t.writeOwnMu.Unlock()
+}
+
+func (t *storageShard) exitWriteOwner() {
+	goid := currentGoroutineID()
+	if goid == 0 {
+		return
+	}
+	t.writeOwnMu.Lock()
+	if d := t.writeOwners[goid]; d <= 1 {
+		delete(t.writeOwners, goid)
+	} else {
+		t.writeOwners[goid] = d - 1
+	}
+	t.writeOwnMu.Unlock()
+}
+
+func (t *storageShard) hasWriteOwner() bool {
+	goid := currentGoroutineID()
+	if goid == 0 {
+		return false
+	}
+	t.writeOwnMu.Lock()
+	defer t.writeOwnMu.Unlock()
+	return t.writeOwners[goid] > 0
 }
 
 // rowValueByRecidLocked reads a column value for a recid. Caller must hold t.mu.
@@ -956,6 +1014,8 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 		func() {
 			effectiveID := id
 			if m.hasUpdateCol {
+				m.shard.enterWriteOwner()
+				defer m.shard.exitWriteOwner()
 				if tx := CurrentTx(); tx != nil {
 					tx.EnterShardWrite(m.shard)
 					defer tx.ExitShardWrite(m.shard)
@@ -1021,6 +1081,8 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 		func() {
 			effectiveID := id
 			if m.hasUpdateCol {
+				m.shard.enterWriteOwner()
+				defer m.shard.exitWriteOwner()
 				if tx := CurrentTx(); tx != nil {
 					tx.EnterShardWrite(m.shard)
 					defer tx.ExitShardWrite(m.shard)

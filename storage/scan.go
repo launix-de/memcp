@@ -237,7 +237,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
 	currentTx := CurrentTx()
-	skipShardReadLock := currentTx != nil && currentTx.HasShardWrite(t)
+	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
 	t.ensureMainCount(skipShardReadLock)
 
 	// condition column readers
