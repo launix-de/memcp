@@ -293,9 +293,9 @@ func adjustLensForFormat(lens *StorageInt, format StringFormat) {
 		// negative relative values from padding variability
 		lens.offset = 0
 		lens.max = int64(base64.StdEncoding.DecodedLen(int(lens.max)))
-	// All nibble formats (Hex, Phone, PhoneDTMF, Decimal, DateTime): char count == raw len → no adjustment
-	// UUID: lens is never read → no adjustment
-	// Raw: byte count == char count → no adjustment
+		// All nibble formats (Hex, Phone, PhoneDTMF, Decimal, DateTime): char count == raw len → no adjustment
+		// UUID: lens is never read → no adjustment
+		// Raw: byte count == char count → no adjustment
 	}
 }
 
@@ -401,6 +401,39 @@ func (s *StorageString) String() string {
 	}
 }
 
+// storageStringVersion is the current binary format version for StorageString.
+// Increment this constant and add a new deserializeStringV* helper whenever the
+// layout after [nodict][format] changes.  Never delete old helpers.
+//
+// NOTE: The version byte occupies pad[0] (first of the 5 alignment bytes after
+// format).  Old "smallerstrings" data had 0 there (pad was zero-filled), so it
+// reads correctly as version 0.
+//
+// CAUTION: StringFormat values only go up to 10.  If a future StringFormat
+// reaches 11 or higher, the legacy sentinel (>10 for old "123456" dummy) must
+// be revisited.  New binary layout changes must use a version increment, NOT
+// a new StringFormat value.
+const storageStringVersion = 0
+
+// StorageString binary layout (magic byte 20 consumed by shard loader):
+//
+//	[nodict uint8]         ← 0=dict mode, 1=buffer mode
+//	[format uint8]         ← StringFormat (0..10); if >10: legacy pre-smallerstrings sentinel
+//
+//	Legacy (format byte > 10, i.e. '1'=49 from old ASCII dummy "123456"):
+//	  [legacyPad 5 bytes]  ← consume remaining dummy bytes; format = FormatRaw
+//	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
+//	  [dictlen uint64] [dict bytes]
+//
+//	Version 0 (current):
+//	  [version uint8]      ← pad[0], was 0 in all pre-versioning smallerstrings data
+//	  [pad 4 bytes]        ← alignment padding
+//	  [count uint64] [values StorageInt] [starts StorageInt] [lens StorageInt]
+//	  [dictlen uint64] [dict bytes]
+//
+// Version history:
+//
+//	0 (current): smallerstrings format; format byte 0..10; version in pad[0].
 func (s *StorageString) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(20)) // 20 = StorageString
 	var nodict uint8 = 0
@@ -408,10 +441,10 @@ func (s *StorageString) Serialize(f io.Writer) {
 		nodict = 1
 	}
 	binary.Write(f, binary.LittleEndian, uint8(nodict))
-	// formerly 6 dummy bytes; first byte now carries the format
 	binary.Write(f, binary.LittleEndian, uint8(s.format))
-	var pad [5]byte
-	f.Write(pad[:])
+	binary.Write(f, binary.LittleEndian, uint8(storageStringVersion)) // pad[0] repurposed as version byte
+	var pad [4]byte
+	f.Write(pad[:]) // remaining 4 alignment bytes
 	if s.nodict {
 		binary.Write(f, binary.LittleEndian, uint64(s.starts.count))
 	} else {
@@ -432,9 +465,31 @@ func (s *StorageString) Deserialize(f io.Reader) uint {
 	}
 	var formatByte uint8
 	binary.Read(f, binary.LittleEndian, &formatByte)
+	// Legacy compatibility: old format wrote the ASCII string "123456" as a
+	// 6-byte dummy.  The first byte of that dummy is '1' (0x31 = 49).
+	// No valid StringFormat constant uses a value > 10, so we detect legacy
+	// by checking formatByte > 10: consume the remaining 5 legacy dummy bytes
+	// and treat the column as FormatRaw (the only format the old code supported).
+	if formatByte > 10 {
+		var legacyPad [5]byte
+		f.Read(legacyPad[:])
+		s.format = FormatRaw
+		return s.deserializeStringBody(f)
+	}
 	s.format = StringFormat(formatByte)
-	var pad [5]byte
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version) // pad[0] repurposed as version byte
+	var pad [4]byte
 	f.Read(pad[:])
+	switch version {
+	case 0:
+		return s.deserializeStringBody(f)
+	default:
+		panic(fmt.Sprintf("StorageString: unknown version %d", version))
+	}
+}
+
+func (s *StorageString) deserializeStringBody(f io.Reader) uint {
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.values.DeserializeEx(f, true)

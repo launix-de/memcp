@@ -44,17 +44,46 @@ func (s *OverlayBlob) String() string {
 	return fmt.Sprintf("overlay[blob]+%s", s.Base.String())
 }
 
+// overlayBlobVersion is the current binary format version for OverlayBlob.
+// Increment this constant and add a new deserializeBlobV* helper whenever the
+// layout after the magic byte changes.  Never delete old helpers.
+const overlayBlobVersion = 0
+
+// OverlayBlob binary layout (magic byte 31 consumed by shard loader):
+//
+//	[version uint8]      ← first byte read by Deserialize
+//	[pad 6 bytes]        ← alignment padding
+//	[size uint64]        ← number of inline blobs (always 0 in v0; legacy may have >0)
+//	[base storage]       ← magic byte + full serialized base column
+//
+// Version history:
+//
+//	0 (current): layout as above; the version byte was previously the first byte
+//	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
+//	             Legacy: version byte '1'=49 → treat as v0 (inline blobs still possible).
 func (s *OverlayBlob) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(31)) // 31 = OverlayBlob
-	io.WriteString(f, "1234567")                    // dummy
+	binary.Write(f, binary.LittleEndian, uint8(31))                 // 31 = OverlayBlob
+	binary.Write(f, binary.LittleEndian, uint8(overlayBlobVersion)) // version byte (was '1' in legacy)
+	var pad [6]byte
+	f.Write(pad[:])                                 // remaining alignment padding (was "234567")
 	binary.Write(f, binary.LittleEndian, uint64(0)) // size=0: no inline blobs
 	s.Base.Serialize(f)                             // serialize base
 }
 
 func (s *OverlayBlob) Deserialize(f io.Reader) uint {
-	var dummy [7]byte
-	f.Read(dummy[:]) // read padding
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version)
+	var pad [6]byte
+	f.Read(pad[:])
+	switch version {
+	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
+		return s.deserializeBlobV0(f)
+	default:
+		panic(fmt.Sprintf("OverlayBlob: unknown version %d", version))
+	}
+}
 
+func (s *OverlayBlob) deserializeBlobV0(f io.Reader) uint {
 	var size uint64
 	binary.Read(f, binary.LittleEndian, &size) // read size
 	s.values = make(map[[32]byte]string)

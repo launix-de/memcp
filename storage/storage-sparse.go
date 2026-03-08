@@ -17,6 +17,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package storage
 
 import "io"
+import "fmt"
 import "bufio"
 import "encoding/json"
 import "encoding/binary"
@@ -39,8 +40,25 @@ func (s *StorageSparse) ComputeSize() uint {
 func (s *StorageSparse) String() string {
 	return "SCMER-sparse"
 }
+
+// storageSparseVersion is the current binary format version for StorageSparse.
+// Increment this constant and add a new deserializeSparseV* helper whenever the
+// layout after the magic byte changes.  Never delete old helpers.
+const storageSparseVersion = 0
+
+// StorageSparse binary layout (magic byte 2 consumed by shard loader):
+//
+//	[version uint8]        ← first byte read by Deserialize
+//	[count uint64]         ← total row count (including NULL rows)
+//	[l2 uint64]            ← number of non-NULL (sparse) entries
+//	[entries: l2 pairs of JSON lines: recid\nvalue\n]
+//
+// Version history:
+//
+//	0 (current): layout as above.
 func (s *StorageSparse) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(2)) // 2 = StorageSparse
+	binary.Write(f, binary.LittleEndian, uint8(2))                    // 2 = StorageSparse
+	binary.Write(f, binary.LittleEndian, uint8(storageSparseVersion)) // version byte
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for k, v := range s.values {
@@ -49,16 +67,27 @@ func (s *StorageSparse) Serialize(f io.Writer) {
 			panic(err)
 		}
 		f.Write(vbytes)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file
 		vbytes, err = json.Marshal(v)
 		if err != nil {
 			panic(err)
 		}
 		f.Write(vbytes)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file
 	}
 }
 func (s *StorageSparse) Deserialize(f io.Reader) uint {
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version)
+	switch version {
+	case 0:
+		return s.deserializeSparseV0(f)
+	default:
+		panic(fmt.Sprintf("StorageSparse: unknown version %d", version))
+	}
+}
+
+func (s *StorageSparse) deserializeSparseV0(f io.Reader) uint {
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.count = l

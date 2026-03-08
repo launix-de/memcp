@@ -43,7 +43,7 @@ type SettingsT struct {
 	MetricsTracingInterval int   // interval in seconds (0 = default 60s)
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
 	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
-	ScanDebugging           bool  // when true, log every scan/scan_order: db+table+boundaries+index
+	ScanDebugging          bool  // when true, log every scan/scan_order: db+table+boundaries+index
 }
 
 var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false}
@@ -69,7 +69,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("DefaultEngine"), scm.NewString(Settings.DefaultEngine),
 			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
 			scm.NewString("AnalyzeMinItems"), scm.NewInt(int64(Settings.AnalyzeMinItems)),
-		scm.NewString("IndexThreshold"), scm.NewInt(int64(Settings.IndexThreshold)),
+			scm.NewString("IndexThreshold"), scm.NewInt(int64(Settings.IndexThreshold)),
 			scm.NewString("MaxRamPercent"), scm.NewInt(int64(Settings.MaxRamPercent)),
 			scm.NewString("MaxRamBytes"), scm.NewInt(Settings.MaxRamBytes),
 			scm.NewString("MaxPersistPercent"), scm.NewInt(int64(Settings.MaxPersistPercent)),

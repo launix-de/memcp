@@ -57,6 +57,45 @@ type ColumnStorage interface {
 	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)
 }
 
+// storages maps the on-disk magic byte to the Go type used for deserialization.
+//
+// ⚠️  STORAGE FORMAT VERSIONING — READ BEFORE CHANGING ANY Serialize/Deserialize METHOD ⚠️
+//
+// Two-level versioning scheme:
+//
+//	Level 1 — magic byte (this map):
+//	  Identifies the storage TYPE.  Every persisted column file starts with one
+//	  magic byte; the runtime dispatches to the matching type via this map.
+//	  The magic byte must NEVER change for an existing type.
+//
+//	Level 2 — per-type version byte (inside each Serialize/Deserialize pair):
+//	  Identifies the LAYOUT VERSION within a type.  Each type reads a version
+//	  byte immediately after the magic byte (or reuses an existing padding byte)
+//	  and dispatches via a switch to the appropriate deserializeXxxV* helper.
+//
+// Per-type versioning rules (enforced in each Serialize/Deserialize pair):
+//  1. Serialize always writes the CURRENT version constant as the first byte.
+//  2. Deserialize reads the version byte first, then switches on it.
+//  3. NEVER delete an old deserializeXxxV* helper — old on-disk data must stay
+//     readable forever.
+//  4. When changing binary layout: increment the version constant and add a new
+//     deserializeXxxV* method.  Leave the old one untouched.
+//  5. Data written before this versioning scheme was introduced is "version 0"
+//     (or a named legacy constant).  Each type documents what version 0 means.
+//
+// Current magic byte assignments:
+//
+//	 1  StorageSCMER   – generic Scmer values
+//	 2  StorageSparse  – sparse/NULL-only column
+//	10  StorageInt     – bit-packed integer
+//	11  StorageSeq     – sequential/auto-increment integer
+//	12  StorageFloat   – 64-bit float
+//	13  StorageDecimal – fixed-precision decimal
+//	20  StorageString  – dictionary-compressed or buffer string
+//	21  StoragePrefix  – prefix-compressed string (experimental)
+//	31  OverlayBlob    – large binary/blob overlay
+//	40  StorageEnum    – rANS-entropy-coded enum
+//	50  StorageComputeProxy – computed/cached column
 var storages = map[uint8]reflect.Type{
 	1:  reflect.TypeOf(StorageSCMER{}),
 	2:  reflect.TypeOf(StorageSparse{}),

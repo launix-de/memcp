@@ -17,6 +17,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package storage
 
 import "io"
+import "fmt"
 import "math"
 import "bufio"
 import "encoding/json"
@@ -54,8 +55,23 @@ func (s *StorageSCMER) String() string {
 	return "SCMER"
 }
 
+// storageSCMERVersion is the current binary format version for StorageSCMER.
+// Increment this constant and add a new deserializeSCMERV* helper whenever the
+// layout after the magic byte changes.  Never delete old helpers.
+const storageSCMERVersion = 0
+
+// StorageSCMER binary layout (magic byte 1 consumed by shard loader):
+//
+//	[version uint8]        ← first byte read by Deserialize
+//	[count uint64]
+//	[values: count × JSON line (terminated by '\n')]
+//
+// Version history:
+//
+//	0 (current): layout as above.
 func (s *StorageSCMER) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
+	binary.Write(f, binary.LittleEndian, uint8(1))                   // 1 = StorageSCMER
+	binary.Write(f, binary.LittleEndian, uint8(storageSCMERVersion)) // version byte
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for i := 0; i < len(s.values); i++ {
 		v, err := json.Marshal(s.values[i])
@@ -63,10 +79,21 @@ func (s *StorageSCMER) Serialize(f io.Writer) {
 			panic(err)
 		}
 		f.Write(v)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 10
 	}
 }
 func (s *StorageSCMER) Deserialize(f io.Reader) uint {
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version)
+	switch version {
+	case 0:
+		return s.deserializeSCMERV0(f)
+	default:
+		panic(fmt.Sprintf("StorageSCMER: unknown version %d", version))
+	}
+}
+
+func (s *StorageSCMER) deserializeSCMERV0(f io.Reader) uint {
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.values = make([]scm.Scmer, l)
