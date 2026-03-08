@@ -19,9 +19,7 @@ package storage
 import "github.com/launix-de/memcp/scm"
 
 func initDashboard(en scm.Env) {
-	scm.DeclareTitle("Sync")
-
-	scm.Declare(&en, &scm.Declaration{
+	scm.DeclareInSection("Sync", &en, &scm.Declaration{
 		Name:         "cache_stat",
 		Desc:         "Returns cache statistics as an associative list with current_memory, persisted_budget, memory_budget, persisted_memory",
 		MinParameter: 0,

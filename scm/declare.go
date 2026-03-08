@@ -96,6 +96,39 @@ func Declare(env *Env, def *Declaration) {
 	}
 }
 
+// DeclareInSection registers a declaration and inserts it at the end of an
+// existing named section in the help index. If the section is not found,
+// it falls back to a normal Declare (appending at the end).
+func DeclareInSection(section string, env *Env, def *Declaration) {
+	declarations[def.Name] = def
+	if def.Fn != nil {
+		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
+		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
+	}
+	if def.Forbidden {
+		return
+	}
+	// find the position right before the next section header after sectionName
+	insertAt := -1
+	inSection := false
+	for i, t := range declaration_titles {
+		if t == "#"+section {
+			inSection = true
+		} else if inSection && len(t) > 0 && t[0] == '#' {
+			insertAt = i
+			break
+		}
+	}
+	if inSection {
+		insertAt = len(declaration_titles)
+	}
+	if insertAt < 0 {
+		declaration_titles = append(declaration_titles, def.Name)
+		return
+	}
+	declaration_titles = append(declaration_titles[:insertAt], append([]string{def.Name}, declaration_titles[insertAt:]...)...)
+}
+
 // slugify makes a filesystem-safe, lowercase slug from a chapter title.
 func slugify(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
