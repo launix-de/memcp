@@ -504,7 +504,8 @@ var settingsGroups=[
 ]},
 {group:"Query Optimizer",items:[
 {key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"},
-{key:"IndexThreshold",desc:"Min shard rows before creating an adaptive index (0=5); below this a full scan is cheaper",type:"number"}
+{key:"IndexThreshold",desc:"Min shard rows before creating an adaptive index (0=5); below this a full scan is cheaper",type:"number"},
+{key:"ExplainWidth",desc:"Max chars per expression before EXPLAIN expands to multiple lines (default 20)",type:"number"}
 ]},
 {group:"Metrics",items:[
 {key:"MetricsTracing",desc:"Periodically record metrics to system_statistic.perf_metrics",type:"bool"},
@@ -796,7 +797,8 @@ for(var r=0;r<rows.length;r++){
 h+="<tr>";
 for(var k=0;k<keys.length;k++){
 var v=rows[r][keys[k]];
-h+="<td>"+esc(v===null?"NULL":v)+"</td>";
+var vs=v===null?"NULL":String(v);
+h+="<td>"+(vs.indexOf("\n")>=0?"<pre>"+esc(vs)+"</pre>":esc(vs))+"</td>";
 }
 h+="</tr>";
 }
@@ -991,7 +993,8 @@ for(var r=0;r<rows.length;r++){
 h+="<tr>";
 for(var k=0;k<keys.length;k++){
 var v=rows[r][keys[k]];
-h+="<td>"+esc(v===null?"NULL":v)+"</td>";
+var vs=v===null?"NULL":String(v);
+h+="<td>"+(vs.indexOf("\n")>=0?"<pre>"+esc(vs)+"</pre>":esc(vs))+"</td>";
 }
 h+="</tr>";
 }
