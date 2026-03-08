@@ -719,6 +719,14 @@ class SQLTestRunner:
         for t in threads:
             t.join(timeout=120)
 
+    def _format_duration(self, seconds: float) -> str:
+        total_ms = int(seconds * 1000)
+        mins, rem_ms = divmod(total_ms, 60_000)
+        secs, ms = divmod(rem_ms, 1000)
+        if mins > 0:
+            return f"{mins}m {secs}s {ms}ms"
+        return f"{secs}s {ms}ms"
+
     # ----------------------
     # Spec Runner
     # ----------------------
@@ -734,6 +742,8 @@ class SQLTestRunner:
         if metadata.get('disabled'):
             print(f"⏭️  Suite disabled: {metadata.get('description', spec_file)}")
             return True
+
+        suite_start = time.perf_counter()
 
         # Load performance baselines for this machine
         if PERF_TEST_ENABLED:
@@ -754,6 +764,7 @@ class SQLTestRunner:
             if created_tables:
                 self._drop_created_tables(database, created_tables)
             print("❌ Setup failed")
+            print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
             return False
 
         # Group consecutive test cases by 'parallel' key and run groups concurrently
@@ -795,6 +806,7 @@ class SQLTestRunner:
                 print(f"   {'⚠️' if is_noncrit else '❌'} {name}{suffix}")
         else:
             print("🎉 All tests passed!")
+        print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
         print("="*60)
 
         # Update performance baselines on success (or in calibration mode)
