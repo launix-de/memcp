@@ -45,9 +45,31 @@ func (s *StorageSeq) String() string {
 	return fmt.Sprintf("seq[%dx %s/%s]", s.seqCount, s.start.String(), s.stride.String())
 }
 
+// storageSeqVersion is the current binary format version for StorageSeq.
+// Increment this constant and add a new deserializeSeqV* helper whenever the
+// layout after the magic byte changes.  Never delete old helpers.
+const storageSeqVersion = 0
+
+// StorageSeq binary layout (magic byte 11 consumed by shard loader):
+//
+//	[version uint8]    ← first byte read by Deserialize
+//	[pad 7 bytes]      ← alignment padding
+//	[count uint64]
+//	[seqCount uint64]
+//	[recordId StorageInt] (with its own magic byte)
+//	[start StorageInt]    (with its own magic byte)
+//	[stride StorageInt]   (with its own magic byte)
+//
+// Version history:
+//
+//	0 (current): layout as above; the version byte was previously the first byte
+//	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
+//	             Legacy detection: if version byte == '1' (49), treat as v0 legacy.
 func (s *StorageSeq) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(11)) // 11 = StorageSeq
-	io.WriteString(f, "1234567")                    // dummy
+	binary.Write(f, binary.LittleEndian, uint8(11))                // 11 = StorageSeq
+	binary.Write(f, binary.LittleEndian, uint8(storageSeqVersion)) // version byte (was '1' in legacy)
+	var pad [6]byte
+	f.Write(pad[:]) // remaining alignment padding (was "234567")
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(s.seqCount))
 	s.recordId.Serialize(f)
@@ -56,8 +78,19 @@ func (s *StorageSeq) Serialize(f io.Writer) {
 }
 
 func (s *StorageSeq) Deserialize(f io.Reader) uint {
-	var dummy [7]byte
-	f.Read(dummy[:])
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version)
+	var pad [6]byte
+	f.Read(pad[:])
+	switch version {
+	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
+		return s.deserializeSeqV0(f)
+	default:
+		panic(fmt.Sprintf("StorageSeq: unknown version %d", version))
+	}
+}
+
+func (s *StorageSeq) deserializeSeqV0(f io.Reader) uint {
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.count = uint(l)

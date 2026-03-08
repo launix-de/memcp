@@ -158,13 +158,39 @@ func (s *StorageDecimal) finish() {
 	s.inner.finish()
 }
 
+// storageDecimalVersion is the current binary format version for StorageDecimal.
+// Increment this constant and add a new deserializeDecimalV* helper whenever the
+// layout after the magic byte changes.  Never delete old helpers.
+const storageDecimalVersion = 0
+
+// StorageDecimal binary layout (magic byte 13 consumed by shard loader):
+//
+//	[version uint8]      ← first byte read by Deserialize
+//	[scaleExp int8]      ← power-of-ten exponent: real_value = stored_int * 10^scaleExp
+//	[inner StorageInt]   ← with its own magic byte 10 and version byte
+//
+// Version history:
+//
+//	0 (current): layout as above; no prior format existed so no legacy detection needed.
 func (s *StorageDecimal) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(13))
+	binary.Write(f, binary.LittleEndian, uint8(storageDecimalVersion)) // version byte
 	binary.Write(f, binary.LittleEndian, s.scaleExp)
 	s.inner.Serialize(f) // writes magic 10 + data
 }
 
 func (s *StorageDecimal) Deserialize(f io.Reader) uint {
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version)
+	switch version {
+	case 0:
+		return s.deserializeDecimalV0(f)
+	default:
+		panic(fmt.Sprintf("StorageDecimal: unknown version %d", version))
+	}
+}
+
+func (s *StorageDecimal) deserializeDecimalV0(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &s.scaleExp)
 	return s.inner.DeserializeEx(f, true) // reads magic 10 + data
 }

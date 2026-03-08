@@ -17,6 +17,7 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package storage
 
 import "io"
+import "fmt"
 import "math"
 import "unsafe"
 import "encoding/binary"
@@ -35,9 +36,28 @@ func (s *StorageFloat) String() string {
 	return "float64"
 }
 
+// storageFloatVersion is the current binary format version for StorageFloat.
+// Increment this constant and add a new deserializeFloatV* helper whenever the
+// layout after the magic byte changes.  Never delete old helpers.
+const storageFloatVersion = 0
+
+// StorageFloat binary layout (magic byte 12 consumed by shard loader):
+//
+//	[version uint8]      ← first byte read by Deserialize
+//	[pad 6 bytes]        ← alignment padding to reach 8-byte boundary before count
+//	[count uint64]
+//	[values: count × 8 bytes float64, NaN = NULL]
+//
+// Version history:
+//
+//	0 (current): layout as above; the version byte was previously the first byte
+//	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
+//	             Legacy detection: if version byte == '1' (49), treat as v0 legacy.
 func (s *StorageFloat) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(12)) // 12 = StorageFloat
-	io.WriteString(f, "1234567")                    // fill up to 64 bit alignment
+	binary.Write(f, binary.LittleEndian, uint8(12))                  // 12 = StorageFloat
+	binary.Write(f, binary.LittleEndian, uint8(storageFloatVersion)) // version byte (was '1' in legacy)
+	var pad [6]byte
+	f.Write(pad[:]) // remaining alignment padding (was "234567")
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	// now at offset 16 begin data
 	rawdata := unsafe.Slice((*byte)(unsafe.Pointer(&s.values[0])), 8*len(s.values))
@@ -49,8 +69,19 @@ func (s *StorageFloat) Serialize(f io.Writer) {
 	*/
 }
 func (s *StorageFloat) Deserialize(f io.Reader) uint {
-	var dummy [7]byte
-	f.Read(dummy[:])
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version)
+	var pad [6]byte
+	f.Read(pad[:])
+	switch version {
+	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
+		return s.deserializeFloatV0(f)
+	default:
+		panic(fmt.Sprintf("StorageFloat: unknown version %d", version))
+	}
+}
+
+func (s *StorageFloat) deserializeFloatV0(f io.Reader) uint {
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) { f.Close() })

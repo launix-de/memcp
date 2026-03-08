@@ -33,17 +33,38 @@ type StorageInt struct {
 	null    uint64 // which value is null
 }
 
+// storageIntVersion is the current binary format version for StorageInt.
+// Increment this constant and add a new deserializeIntV* helper whenever the
+// layout after the magic byte changes.  Never delete old helpers.
+const storageIntVersion = 0
+
+// StorageInt binary layout (magic byte 10 consumed by shard loader):
+//
+//	[version uint8]        ← first byte read by Deserialize; was padding in v0
+//	[bitsize uint8]
+//	[hasNull uint8]
+//	[pad uint32]
+//	[chunkcount uint64]
+//	[count uint64]
+//	[offset int64]
+//	[null uint64]
+//	[chunk data: chunkcount × 8 bytes]
+//
+// Version history:
+//
+//	0 (current): layout as above; the version byte was previously a uint8(0)
+//	             padding byte, so all pre-versioning data reads correctly as v0.
 func (s *StorageInt) Serialize(f io.Writer) {
 	var hasNull uint8
 	if s.hasNull {
 		hasNull = 1
 	}
-	binary.Write(f, binary.LittleEndian, uint8(10))            // 10 = StorageInt
-	binary.Write(f, binary.LittleEndian, uint8(s.bitsize))     // len=2
-	binary.Write(f, binary.LittleEndian, uint8(hasNull))       // len=3
-	binary.Write(f, binary.LittleEndian, uint8(0))             // len=4
-	binary.Write(f, binary.LittleEndian, uint32(0))            // len=8
-	binary.Write(f, binary.LittleEndian, uint64(len(s.chunk))) // chunk size so we know how many data is left
+	binary.Write(f, binary.LittleEndian, uint8(10))                // 10 = StorageInt
+	binary.Write(f, binary.LittleEndian, uint8(s.bitsize))         // len=2
+	binary.Write(f, binary.LittleEndian, uint8(hasNull))           // len=3
+	binary.Write(f, binary.LittleEndian, uint8(storageIntVersion)) // len=4  ← version byte (was uint8(0) pad)
+	binary.Write(f, binary.LittleEndian, uint32(0))                // len=8  pad
+	binary.Write(f, binary.LittleEndian, uint64(len(s.chunk)))     // chunk size so we know how many data is left
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(s.offset))
 	binary.Write(f, binary.LittleEndian, uint64(s.null))
@@ -68,8 +89,18 @@ func (s *StorageInt) DeserializeEx(f io.Reader, readMagicbyte bool) uint {
 	var hasNull uint8
 	binary.Read(f, binary.LittleEndian, &hasNull)
 	s.hasNull = hasNull != 0
-	binary.Read(f, binary.LittleEndian, &dummy8)
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version) // was uint8(0) pad; now version byte
 	binary.Read(f, binary.LittleEndian, &dummy32)
+	switch version {
+	case 0:
+		return s.deserializeIntV0(f)
+	default:
+		panic(fmt.Sprintf("StorageInt: unknown version %d", version))
+	}
+}
+
+func (s *StorageInt) deserializeIntV0(f io.Reader) uint {
 	var chunkcount uint64
 	binary.Read(f, binary.LittleEndian, &chunkcount)
 	binary.Read(f, binary.LittleEndian, &s.count)

@@ -54,6 +54,19 @@ func (s *StorageSCMER) String() string {
 	return "SCMER"
 }
 
+// StorageSCMER binary layout (magic byte 1 consumed by shard loader):
+//
+//	[count uint64]
+//	[values: count × JSON line (terminated by '\n')]
+//
+// Version history:
+//
+//	v0 (original, no version byte): layout as above.  This type had no padding
+//	byte in v0.1.0.  StorageSCMER is never the final storage type on disk
+//	(proposeCompression always returns a more specific type), so in practice
+//	no persisted files exist with magic 1.  Still, format changes require a
+//	NEW magic byte in storages[] (storage.go); keep magic 1 as a legacy
+//	reader forever.
 func (s *StorageSCMER) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
@@ -63,10 +76,12 @@ func (s *StorageSCMER) Serialize(f io.Writer) {
 			panic(err)
 		}
 		f.Write(v)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 9
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 10
 	}
 }
 func (s *StorageSCMER) Deserialize(f io.Reader) uint {
+	// No version byte: this type had no padding byte in v0.1.0.
+	// Count is read directly.  Format changes require a new magic byte.
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.values = make([]scm.Scmer, l)

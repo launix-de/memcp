@@ -631,12 +631,12 @@ h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name
 }
 tb.innerHTML=h||"<tr><td colspan='5' style='color:#888;text-align:center'>No databases</td></tr>";
 tb.querySelectorAll("[data-truncdb]").forEach(function(btn){
-btn.onclick=function(e){e.stopPropagation();var db=btn.getAttribute("data-truncdb");if(window.confirm("Truncate all tables in database '"+db+"'? All data will be deleted.")){
+btn.onclick=function(e){e.stopPropagation();var db=btn.getAttribute("data-truncdb");if(window.confirm("Drop all tables in database '"+db+"'? All data will be deleted.")){
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db),function(tables){
 var pending=tables.length;
 if(!pending){route();return}
 for(var j=0;j<tables.length;j++){(function(t){
-execSQL(db,"TRUNCATE TABLE `"+t.name+"`",function(){pending--;if(!pending)route()});
+execSQL(db,"DROP TABLE IF EXISTS `"+t.name+"`",function(){pending--;if(!pending)route()});
 })(tables[j])}
 });
 }};

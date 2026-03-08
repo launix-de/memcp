@@ -17,6 +17,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import "io"
+import "fmt"
 import "sync"
 import "reflect"
 import "encoding/json"
@@ -290,8 +291,32 @@ func (p *StorageComputeProxy) finish() {
 }
 
 // Serialize writes the proxy to the given writer.
+// storageComputeProxyVersion is the current binary format version for StorageComputeProxy.
+// Increment this constant and add a new deserializeComputeProxyV* helper whenever the
+// layout after the magic byte changes.  Never delete old helpers.
+const storageComputeProxyVersion = 0
+
+// StorageComputeProxy binary layout (magic byte 50 consumed by shard loader):
+//
+//	[version uint8]         ← first byte read by Deserialize
+//	[count uint32]
+//	[numCols uint16]
+//	[inputCols: numCols × (uint16 length + bytes)]
+//	[computorLen uint32]
+//	[computorJSON: computorLen bytes]
+//	[compressed uint8]      ← 1=compressed, 0=delta only
+//	[hasMain uint8]         ← 1=has main storage, 0=delta map
+//	  if hasMain: [magic uint8 + full serialized main storage]
+//	  else:       [deltaLen uint32] [delta: deltaLen × (uint32 idx + uint32 valLen + JSON bytes)]
+//	[validCount uint32]     ← number of set bits in validMask
+//	[validMask: validCount × uint32 indices]
+//
+// Version history:
+//
+//	0 (current): layout as above.
 func (p *StorageComputeProxy) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(50)) // magic byte
+	binary.Write(f, binary.LittleEndian, uint8(50))                         // magic byte
+	binary.Write(f, binary.LittleEndian, uint8(storageComputeProxyVersion)) // version byte
 	binary.Write(f, binary.LittleEndian, p.count)
 
 	// inputCols
@@ -347,6 +372,17 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 // Deserialize reads the proxy from the given reader.
 // Note: magic byte 50 is already consumed by the caller.
 func (p *StorageComputeProxy) Deserialize(f io.Reader) uint {
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version)
+	switch version {
+	case 0:
+		return p.deserializeComputeProxyV0(f)
+	default:
+		panic(fmt.Sprintf("StorageComputeProxy: unknown version %d", version))
+	}
+}
+
+func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &p.count)
 
 	// inputCols

@@ -42,9 +42,9 @@ func buildStringColumn(values []string) *StorageString {
 // when all input strings belong to a specific charset.
 func TestFormatSelection(t *testing.T) {
 	cases := []struct {
-		name    string
-		inputs  []string
-		want    StringFormat
+		name   string
+		inputs []string
+		want   StringFormat
 	}{
 		{
 			name: "UUID lowercase",
@@ -288,10 +288,10 @@ func TestCStringNibbleRangeEqual(t *testing.T) {
 	// eqCase: build two identical columns, compare entry at given index → must be equal.
 	// Also build an "other" column where that entry differs by one hex digit and verify ≠.
 	type eqCase struct {
-		name     string
-		inputs   []string // shared by both identical columns
-		other    []string // same prefix for nibbleOff, but target entry is different
-		entry    int
+		name   string
+		inputs []string // shared by both identical columns
+		other  []string // same prefix for nibbleOff, but target entry is different
+		entry  int
 	}
 	cases := []eqCase{
 		// nibOff=0, even charLen (pure memcmp)
