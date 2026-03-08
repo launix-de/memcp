@@ -23,9 +23,9 @@ setup:
         order_date VARCHAR(20),
         status VARCHAR(20)
       )
-  - action: "CREATE TABLE products"
+  - action: "CREATE TABLE adv_products"
     sql: |
-      CREATE TABLE products (
+      CREATE TABLE adv_products (
         id INT,
         name VARCHAR(100),
         category VARCHAR(50),
@@ -59,7 +59,7 @@ test_cases:
 
   - name: "Insert product test data"
     sql: |
-      INSERT INTO products (id, name, category, price) VALUES
+      INSERT INTO adv_products (id, name, category, price) VALUES
       (1, 'Laptop', 'Electronics', 999.99),
       (2, 'Mouse', 'Electronics', 25.99),
       (3, 'Keyboard', 'Electronics', 79.99),
@@ -83,5 +83,5 @@ cleanup:
     sql: "DROP TABLE IF EXISTS adv_customers"
   - action: "Clean up adv_orders table" 
     sql: "DROP TABLE IF EXISTS adv_orders"
-  - action: "Clean up products table"
-    sql: "DROP TABLE IF EXISTS products"
+  - action: "Clean up adv_products table"
+    sql: "DROP TABLE IF EXISTS adv_products"

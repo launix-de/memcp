@@ -61,3 +61,8 @@ test_cases:
 #        - description: "Description for test"
 #        - description: "Another description"
 #
+cleanup:
+  - name: "Drop related_data after suite"
+    sql: "DROP TABLE IF EXISTS related_data"
+  - name: "Drop simple_test after suite"
+    sql: "DROP TABLE IF EXISTS simple_test"
