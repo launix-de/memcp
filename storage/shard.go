@@ -582,7 +582,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 
 				// Execute BEFORE UPDATE triggers (can modify d2)
 				if withTrigger && triggerOldRow != nil {
-					d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
+					if alreadyLocked {
+						t.mu.Unlock()
+						d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
+						t.mu.Lock()
+					} else {
+						d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
+					}
 					// BEFORE triggers may change typed/NOT NULL columns; sanitize again.
 					for i, col := range cols {
 						for _, colDesc := range t.t.Columns {
@@ -764,7 +770,15 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				}
 
 				// Execute BEFORE DELETE triggers (can abort delete by returning false)
-				if !t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow) {
+				beforeDeleteOk := true
+				if alreadyLocked {
+					t.mu.Unlock()
+					beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow)
+					t.mu.Lock()
+				} else {
+					beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow)
+				}
+				if !beforeDeleteOk {
 					return scm.NewBool(false) // trigger aborted delete
 				}
 			}
@@ -858,6 +872,7 @@ type ShardMapReducer struct {
 	reduceScmer     scm.Scmer // original Scmer for network serialization
 	mainCount       uint32
 	hasUpdateCol    bool
+	updatedRecids   map[uint32]struct{} // statement-local guard against re-following own stale recids
 }
 
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
@@ -880,6 +895,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		mapScmer:        mapFn,
 		reduceScmer:     reduceFn,
 		mainCount:       t.main_count,
+		updatedRecids:   make(map[uint32]struct{}),
 	}
 	for i, col := range cols {
 		if col == "$update" {
@@ -946,8 +962,20 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				}
 				m.shard.mu.Lock()
 				defer m.shard.mu.Unlock()
-				m.shard.acquireRowLock(effectiveID)
-				defer m.shard.releaseRowLock(effectiveID)
+				// Resolve stale recids before reading row values so UPDATE expressions
+				// are computed from the same visible row that will be mutated.
+				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
+					if m.shard.deletions.Get(effectiveID) {
+						if _, updatedInThisStmt := m.updatedRecids[effectiveID]; updatedInThisStmt {
+							return
+						}
+						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
+						if !ok {
+							return
+						}
+						effectiveID = followedID
+					}
+				}
 			}
 			for i, col := range m.mainCols {
 				if m.isInvalidate[i] {
@@ -979,6 +1007,9 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				}
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
+			if m.hasUpdateCol && m.shard.deletions.Get(effectiveID) {
+				m.updatedRecids[effectiveID] = struct{}{}
+			}
 		}()
 	}
 	return acc
@@ -996,8 +1027,20 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 				}
 				m.shard.mu.Lock()
 				defer m.shard.mu.Unlock()
-				m.shard.acquireRowLock(effectiveID)
-				defer m.shard.releaseRowLock(effectiveID)
+				// Resolve stale recids before reading row values so UPDATE expressions
+				// are computed from the same visible row that will be mutated.
+				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
+					if m.shard.deletions.Get(effectiveID) {
+						if _, updatedInThisStmt := m.updatedRecids[effectiveID]; updatedInThisStmt {
+							return
+						}
+						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
+						if !ok {
+							return
+						}
+						effectiveID = followedID
+					}
+				}
 			}
 			for i, col := range m.colNames {
 				if m.isInvalidate[i] || m.isIncrement[i] {
@@ -1014,6 +1057,9 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 				}
 			}
 			acc = m.reduceFn(acc, m.mapFn(m.args...))
+			if m.hasUpdateCol && m.shard.deletions.Get(effectiveID) {
+				m.updatedRecids[effectiveID] = struct{}{}
+			}
 		}()
 	}
 	return acc
