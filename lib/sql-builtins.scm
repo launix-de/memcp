@@ -16,6 +16,18 @@
 (sql_builtins "DATE" date_trunc_day)
 (sql_builtins "CURRENT_DATE" current_date)
 (sql_builtins "DATEDIFF" datediff)
+/* MySQL-style date part extraction shortcuts */
+(sql_builtins "YEAR" (lambda (d) (extract_date d "YEAR")))
+(sql_builtins "MONTH" (lambda (d) (extract_date d "MONTH")))
+(sql_builtins "DAY" (lambda (d) (extract_date d "DAY")))
+(sql_builtins "HOUR" (lambda (d) (extract_date d "HOUR")))
+(sql_builtins "MINUTE" (lambda (d) (extract_date d "MINUTE")))
+(sql_builtins "SECOND" (lambda (d) (extract_date d "SECOND")))
+(sql_builtins "DAYOFMONTH" (lambda (d) (extract_date d "DAY")))
+(sql_builtins "DAYOFWEEK" (lambda (d) (extract_date d "DAYOFWEEK")))
+(sql_builtins "WEEKDAY" (lambda (d) (extract_date d "WEEKDAY")))
+(sql_builtins "WEEK" (lambda (d) (extract_date d "WEEK")))
+(sql_builtins "QUARTER" (lambda (d) (extract_date d "QUARTER")))
 
 /* math */
 (sql_builtins "FLOOR" floor)

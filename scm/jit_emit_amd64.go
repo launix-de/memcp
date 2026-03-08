@@ -43,12 +43,12 @@ const (
 	RegR14 Reg = 14
 	RegR15 Reg = 15
 	// XMM registers start at 16
-	RegX0  Reg = 16
-	RegX1  Reg = 17
-	RegX2  Reg = 18
-	RegX3  Reg = 19
-	RegX4  Reg = 20
-	RegX5  Reg = 21
+	RegX0 Reg = 16
+	RegX1 Reg = 17
+	RegX2 Reg = 18
+	RegX3 Reg = 19
+	RegX4 Reg = 20
+	RegX5 Reg = 21
 )
 
 // emitByte appends a single byte to the writer.
@@ -122,7 +122,7 @@ func (w *JITWriter) EmitReturnNil() {
 	w.emitBytes(
 		0x31, 0xC0, // XOR EAX, EAX
 		0x31, 0xDB, // XOR EBX, EBX
-		0xC3,       // RET
+		0xC3, // RET
 	)
 }
 

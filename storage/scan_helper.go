@@ -102,6 +102,22 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 					io.WriteString(w, "?")
 					return
 				}
+				// Normalize !list optimizer form back to (list ...) for stable canonical names.
+				// (!list NthLocalVar(start) count expr...) encodes (list expr...) but the
+				// storage slot (items[1]) varies per call site, so two identical lists would
+				// get different canonical names. Strip items[1] and items[2] and use "list".
+				if slice[0].IsSymbol() && slice[0].String() == "!list" && len(slice) >= 3 {
+					count := int(scm.ToInt(slice[2]))
+					if count == len(slice)-3 {
+						io.WriteString(w, "(list")
+						for _, item := range slice[3:] {
+							io.WriteString(w, " ")
+							enc(item)
+						}
+						io.WriteString(w, ")")
+						return
+					}
+				}
 			}
 			io.WriteString(w, "(")
 			for i, item := range slice {
@@ -114,7 +130,10 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 		default:
 			// Prefer tag-based decoding for special cases.
 			if node.IsProc() {
-				io.WriteString(w, "?")
+				// Use pointer address to produce a unique stable name per lambda within
+				// the session. Prevents YEAR, MONTH, DAY, etc. from colliding on the
+				// same canonical index name.
+				io.WriteString(w, fmt.Sprintf("%p", node.Proc()))
 				return
 			}
 			if node.IsNthLocalVar() {
@@ -302,25 +321,14 @@ func safeLogScan(schema, table string, ordered bool, filter, order string, input
 	t.Insert(cols, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
 }
 
-// touchTempColumns updates lastAccessed on temp columns used by this scan (lock-free).
+// touchTempColumns updates lastAccessed on all temp columns of the table (lock-free).
+// Touching every temp column (not just the ones in the scan's column lists) prevents
+// a concurrent eviction from modifying t.Columns while the scan is in progress.
 func touchTempColumns(t *table, colSets ...[]string) {
 	now := time.Now().UnixNano()
 	for _, c := range t.Columns {
-		if !c.IsTemp {
-			continue
-		}
-		for _, cols := range colSets {
-			found := false
-			for _, col := range cols {
-				if col == c.Name {
-					atomic.StoreInt64(&c.lastAccessed, now)
-					found = true
-					break
-				}
-			}
-			if found {
-				break
-			}
+		if c.IsTemp {
+			atomic.StoreInt64(&c.lastAccessed, now)
 		}
 	}
 }

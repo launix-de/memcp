@@ -170,11 +170,11 @@ func init_date() {
 
 	// EXTRACT(field FROM expr) - implemented as extract_date(expr, field)
 	Declare(&Globalenv, &Declaration{
-		"extract_date", "extracts a date field (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND) from a date value",
+		"extract_date", "extracts a date field (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY) from a date value",
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"value", "any", "date value", nil},
-			DeclarationParameter{"field", "string", "field name: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND", nil},
+			DeclarationParameter{"field", "string", "field name: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY", nil},
 		}, "int",
 		func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
@@ -198,6 +198,17 @@ func init_date() {
 				return NewInt(int64(t.Minute()))
 			case "SECOND":
 				return NewInt(int64(t.Second()))
+			case "QUARTER":
+				return NewInt(int64((int(t.Month())-1)/3 + 1))
+			case "WEEK":
+				_, week := t.ISOWeek()
+				return NewInt(int64(week))
+			case "DAYOFWEEK":
+				// MySQL: 1=Sunday, 2=Monday, ..., 7=Saturday
+				return NewInt(int64(t.Weekday()) + 1)
+			case "WEEKDAY":
+				// MySQL WEEKDAY: 0=Monday, 1=Tuesday, ..., 6=Sunday
+				return NewInt(int64((t.Weekday() + 6) % 7))
 			default:
 				panic("unknown EXTRACT field: " + field)
 			}

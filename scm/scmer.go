@@ -637,6 +637,14 @@ func (s Scmer) IsProc() bool {
 	return auxTag(s.aux) == tagProc
 }
 
+// IsNativeFunc reports whether s is a resolved Go native function (tagFunc or tagFuncEnv).
+// After optimization, symbols like "contains?", "<", "equal?" may be replaced with
+// their native function values. IsNativeFunc lets callers treat them as pure constants.
+func (s Scmer) IsNativeFunc() bool {
+	t := s.GetTag()
+	return t == tagFunc || t == tagFuncEnv
+}
+
 func (s Scmer) Proc() *Proc {
 	if s.GetTag() != tagProc {
 		panic("not proc")

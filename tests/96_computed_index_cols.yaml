@@ -1,0 +1,314 @@
+# Computed/expression columns used in ORDER BY, WHERE, GROUP BY.
+# Covers MySQL-style YEAR()/MONTH()/DAY() shorthand functions and their
+# use as sort/filter keys (the building blocks for expression-index optimisation).
+
+metadata:
+  version: "1.0"
+  description: "Expression columns: YEAR/MONTH/DAY/QUARTER/WEEK functions and use in ORDER BY / WHERE / GROUP BY"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ci_events"
+  - sql: |
+      CREATE TABLE ci_events (
+        id   INT,
+        name VARCHAR(50),
+        dt   DATETIME
+      )
+  - sql: |
+      INSERT INTO ci_events VALUES
+        (1, 'Alpha',   '2022-03-15 08:00:00'),
+        (2, 'Beta',    '2022-11-20 12:30:00'),
+        (3, 'Gamma',   '2023-05-01 09:15:00'),
+        (4, 'Delta',   '2023-09-25 17:45:00'),
+        (5, 'Epsilon', '2024-01-10 06:00:00'),
+        (6, 'Zeta',    '2024-06-30 23:59:00'),
+        (7, 'Eta',     '2024-12-31 00:00:00'),
+        (8, 'Theta',   NULL)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ci_events"
+
+test_cases:
+
+  # === YEAR() / MONTH() / DAY() in SELECT ===
+
+  - name: "YEAR() in SELECT"
+    sql: "SELECT id, YEAR(dt) AS y FROM ci_events WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          y: 2022
+
+  - name: "MONTH() in SELECT"
+    sql: "SELECT id, MONTH(dt) AS m FROM ci_events WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - id: 3
+          m: 5
+
+  - name: "DAY() in SELECT"
+    sql: "SELECT id, DAY(dt) AS d FROM ci_events WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - id: 6
+          d: 30
+
+  - name: "DAYOFMONTH() alias matches DAY()"
+    sql: "SELECT DAYOFMONTH(dt) AS dom FROM ci_events WHERE id = 6"
+    expect:
+      rows: 1
+      data:
+        - dom: 30
+
+  - name: "HOUR() in SELECT"
+    sql: "SELECT HOUR(dt) AS h FROM ci_events WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - h: 12
+
+  - name: "MINUTE() in SELECT"
+    sql: "SELECT MINUTE(dt) AS mi FROM ci_events WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - mi: 30
+
+  - name: "SECOND() in SELECT"
+    sql: "SELECT SECOND(dt) AS s FROM ci_events WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - s: 0
+
+  - name: "YEAR() of NULL returns NULL"
+    sql: "SELECT YEAR(dt) AS y FROM ci_events WHERE id = 8"
+    expect:
+      rows: 1
+      data:
+        - y: null
+
+  # === QUARTER / WEEK / DAYOFWEEK / WEEKDAY ===
+
+  - name: "QUARTER() Q1"
+    sql: "SELECT QUARTER(dt) AS q FROM ci_events WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - q: 1
+
+  - name: "QUARTER() Q3"
+    sql: "SELECT QUARTER(dt) AS q FROM ci_events WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - q: 3
+
+  - name: "QUARTER() Q4"
+    sql: "SELECT QUARTER(dt) AS q FROM ci_events WHERE id = 7"
+    expect:
+      rows: 1
+      data:
+        - q: 4
+
+  - name: "WEEK() returns ISO week number"
+    sql: "SELECT WEEK(dt) AS w FROM ci_events WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - w: 11
+
+  - name: "DAYOFWEEK() Tuesday = 3"
+    # 2022-03-15 is a Tuesday; MySQL DAYOFWEEK: 1=Sun, 2=Mon, 3=Tue
+    sql: "SELECT DAYOFWEEK(dt) AS dow FROM ci_events WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - dow: 3
+
+  - name: "WEEKDAY() Tuesday = 1"
+    # MySQL WEEKDAY: 0=Mon, 1=Tue, ..., 6=Sun
+    sql: "SELECT WEEKDAY(dt) AS wd FROM ci_events WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - wd: 1
+
+  # === YEAR() / MONTH() in WHERE ===
+
+  - name: "Filter by YEAR()"
+    sql: "SELECT COUNT(*) AS cnt FROM ci_events WHERE YEAR(dt) = 2024"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  - name: "Filter by MONTH() = 12 (December)"
+    # Only id=7 (2024-12-31) has month 12
+    sql: "SELECT id FROM ci_events WHERE MONTH(dt) = 12"
+    expect:
+      rows: 1
+      data:
+        - id: 7
+
+  - name: "Filter by MONTH() = 11 (November)"
+    # Only id=2 (2022-11-20) has month 11
+    sql: "SELECT id FROM ci_events WHERE MONTH(dt) = 11"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "Filter by DAY() = 1"
+    # Only id=3 (2023-05-01) has day 1
+    sql: "SELECT id FROM ci_events WHERE DAY(dt) = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 3
+
+  - name: "Filter by QUARTER()"
+    sql: "SELECT COUNT(*) AS cnt FROM ci_events WHERE QUARTER(dt) = 1"
+    expect:
+      rows: 1
+      data:
+        # id=1 (March), id=5 (January)
+        - cnt: 2
+
+  - name: "Compound: YEAR and MONTH filter"
+    sql: "SELECT name FROM ci_events WHERE YEAR(dt) = 2023 AND MONTH(dt) = 9"
+    expect:
+      rows: 1
+      data:
+        - name: Delta
+
+  # === ORDER BY expression ===
+
+  - name: "ORDER BY YEAR(dt) ASC"
+    sql: "SELECT id FROM ci_events WHERE dt IS NOT NULL ORDER BY YEAR(dt) ASC, id ASC"
+    expect:
+      rows: 7
+      data:
+        - id: 1
+        - id: 2
+        - id: 3
+        - id: 4
+        - id: 5
+        - id: 6
+        - id: 7
+
+  - name: "ORDER BY MONTH(dt) within a year"
+    sql: "SELECT id FROM ci_events WHERE YEAR(dt) = 2022 ORDER BY MONTH(dt)"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 2
+
+  - name: "ORDER BY complex expression (repeat expression, not alias)"
+    sql: |
+      SELECT id, YEAR(dt)*100 + MONTH(dt) AS ym
+      FROM ci_events WHERE dt IS NOT NULL
+      ORDER BY YEAR(dt)*100 + MONTH(dt) LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          ym: 202203
+        - id: 2
+          ym: 202211
+        - id: 3
+          ym: 202305
+
+  # === GROUP BY YEAR() / MONTH() ===
+
+  - name: "GROUP BY YEAR(dt) count per year"
+    sql: |
+      SELECT YEAR(dt) AS y, COUNT(*) AS cnt
+      FROM ci_events WHERE dt IS NOT NULL
+      GROUP BY YEAR(dt) ORDER BY YEAR(dt)
+    expect:
+      rows: 3
+      data:
+        - y: 2022
+          cnt: 2
+        - y: 2023
+          cnt: 2
+        - y: 2024
+          cnt: 3
+
+  - name: "GROUP BY MONTH(dt) for a single year"
+    sql: |
+      SELECT MONTH(dt) AS m, COUNT(*) AS cnt
+      FROM ci_events WHERE YEAR(dt) = 2024
+      GROUP BY MONTH(dt) ORDER BY MONTH(dt)
+    expect:
+      rows: 3
+      data:
+        - m: 1
+          cnt: 1
+        - m: 6
+          cnt: 1
+        - m: 12
+          cnt: 1
+
+  - name: "GROUP BY YEAR and MONTH together"
+    sql: |
+      SELECT YEAR(dt) AS y, MONTH(dt) AS m, COUNT(*) AS cnt
+      FROM ci_events WHERE dt IS NOT NULL
+      GROUP BY YEAR(dt), MONTH(dt)
+      ORDER BY YEAR(dt), MONTH(dt)
+    expect:
+      rows: 7
+
+  - name: "GROUP BY QUARTER, count per quarter"
+    sql: |
+      SELECT QUARTER(dt) AS q, COUNT(*) AS cnt
+      FROM ci_events WHERE dt IS NOT NULL
+      GROUP BY QUARTER(dt) ORDER BY QUARTER(dt)
+    expect:
+      rows: 4
+      data:
+        # Q1: Jan(5)+Mar(1)=2, Q2: May(3)+Jun(6)=2, Q3: Sep(4)=1, Q4: Nov(2)+Dec(7)=2
+        - q: 1
+          cnt: 2
+        - q: 2
+          cnt: 2
+        - q: 3
+          cnt: 1
+        - q: 4
+          cnt: 2
+
+  # === EXTRACT() parity — identical results to YEAR()/MONTH() ===
+
+  - name: "EXTRACT YEAR equals YEAR()"
+    sql: |
+      SELECT id FROM ci_events
+      WHERE EXTRACT(YEAR FROM dt) = 2024
+      ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - id: 5
+        - id: 6
+        - id: 7
+
+  - name: "ORDER BY EXTRACT YEAR"
+    sql: "SELECT id FROM ci_events WHERE dt IS NOT NULL ORDER BY EXTRACT(YEAR FROM dt) ASC, id ASC LIMIT 2"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 2
+
+  # === Expression index syntax (CREATE INDEX on expression) ===
+  # Currently the parser accepts plain column names only;
+  # expression index DDL is not yet implemented — these must error.
+
+  - name: "CREATE INDEX on expression rejects unparenthesized function"
+    sql: "CREATE INDEX idx_year ON ci_events (YEAR(dt))"
+    expect:
+      error: true
