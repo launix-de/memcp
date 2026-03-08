@@ -4,6 +4,7 @@
 metadata:
   version: "1.0"
   description: "Coverage tests for scan, scan_order, and shard code paths"
+  isolated: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS cov_main"

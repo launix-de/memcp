@@ -6,6 +6,7 @@
 metadata:
   version: "1.0"
   description: "Range scan, EXPLAIN, and scan statistics coverage"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS rs_data"

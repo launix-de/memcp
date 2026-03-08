@@ -1,0 +1,815 @@
+# Concurrent UPDATE contention coverage
+
+metadata:
+  version: "1.0"
+  description: "Concurrent UPDATE contention: hot-row, 10x10 row workers, and full-table updates"
+
+test_cases:
+  - name: "Hot-row setup"
+    setup:
+      - sql: "DROP TABLE IF EXISTS cu_hot"
+      - sql: "CREATE TABLE cu_hot (id INT PRIMARY KEY, val INT)"
+      - sql: "INSERT INTO cu_hot (id, val) VALUES (1, 0)"
+    sql: "SELECT val FROM cu_hot WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - val: 0
+
+  - name: "Hot-row parallel update 1/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 2/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 3/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 4/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 5/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 6/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 7/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 8/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 9/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row parallel update 10/10"
+    parallel: hot_row
+    noncritical: true
+    sql: "UPDATE cu_hot SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Hot-row verify"
+    noncritical: true
+    sql: "SELECT COUNT(*) AS c, SUM(val) AS s FROM cu_hot"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+          s: 10
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS cu_hot"
+
+  - name: "10 rows setup"
+    setup:
+      - sql: "DROP TABLE IF EXISTS cu_10"
+      - sql: "CREATE TABLE cu_10 (id INT PRIMARY KEY, val INT)"
+      - sql: "INSERT INTO cu_10 (id, val) VALUES (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),(8,0),(9,0)"
+    sql: "SELECT COUNT(*) AS c FROM cu_10"
+    expect:
+      rows: 1
+      data:
+        - c: 10
+
+  - name: "10 rows round 1 worker id=0"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=1"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=2"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=3"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=4"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=5"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=6"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=7"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=8"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 1 worker id=9"
+    parallel: rows_round_1
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=0"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=1"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=2"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=3"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=4"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=5"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=6"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=7"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=8"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 2 worker id=9"
+    parallel: rows_round_2
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=0"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=1"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=2"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=3"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=4"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=5"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=6"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=7"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=8"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 3 worker id=9"
+    parallel: rows_round_3
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=0"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=1"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=2"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=3"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=4"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=5"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=6"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=7"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=8"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 4 worker id=9"
+    parallel: rows_round_4
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=0"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=1"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=2"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=3"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=4"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=5"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=6"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=7"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=8"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 5 worker id=9"
+    parallel: rows_round_5
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=0"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=1"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=2"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=3"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=4"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=5"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=6"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=7"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=8"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 6 worker id=9"
+    parallel: rows_round_6
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=0"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=1"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=2"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=3"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=4"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=5"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=6"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=7"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=8"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 7 worker id=9"
+    parallel: rows_round_7
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=0"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=1"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=2"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=3"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=4"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=5"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=6"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=7"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=8"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 8 worker id=9"
+    parallel: rows_round_8
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=0"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=1"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=2"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=3"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=4"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=5"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=6"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=7"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=8"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 9 worker id=9"
+    parallel: rows_round_9
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=0"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=1"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=2"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=3"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=4"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=5"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 5"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=6"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 6"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=7"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 7"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=8"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 8"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows round 10 worker id=9"
+    parallel: rows_round_10
+    sql: "UPDATE cu_10 SET val = val + 1 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "10 rows x10 writes verify"
+    sql: "SELECT SUM(val) AS s, COUNT(*) AS c, MIN(val) AS mi, MAX(val) AS ma FROM cu_10"
+    expect:
+      rows: 1
+      data:
+        - s: 100
+          c: 10
+          mi: 10
+          ma: 10
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS cu_10"
+
+  - name: "All-rows setup"
+    setup:
+      - sql: "DROP TABLE IF EXISTS cu_all"
+      - sql: "CREATE TABLE cu_all (id INT PRIMARY KEY, val INT)"
+      - sql: "INSERT INTO cu_all (id, val) VALUES (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),(8,0),(9,0)"
+    sql: "SELECT COUNT(*) AS c FROM cu_all"
+    expect:
+      rows: 1
+      data:
+        - c: 10
+
+  - name: "All-rows parallel update 1/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 2/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 3/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 4/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 5/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 6/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 7/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 8/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 9/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows parallel update 10/10"
+    parallel: all_rows
+    noncritical: true
+    sql: "UPDATE cu_all SET val = val + 1"
+    expect:
+      affected_rows: 10
+
+  - name: "All-rows verify"
+    noncritical: true
+    sql: "SELECT SUM(val) AS s, COUNT(*) AS c, MIN(val) AS mi, MAX(val) AS ma FROM cu_all"
+    expect:
+      rows: 1
+      data:
+        - s: 100
+          c: 10
+          mi: 10
+          ma: 10
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS cu_all"

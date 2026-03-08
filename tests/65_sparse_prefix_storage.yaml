@@ -6,6 +6,7 @@
 metadata:
   version: "1.0"
   description: "Sparse columns, prefix compression, and storage type selection"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS sp_sparse"

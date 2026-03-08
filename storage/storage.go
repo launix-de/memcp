@@ -934,6 +934,45 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"canonical_expr_name", "builds a canonical string for an expression; maps var(n)/lambda params to column names and can normalize aliases",
+		1, 4,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"expr", "any", "expression to normalize", nil},
+			scm.DeclarationParameter{"columns", "list", "optional list of column names for var(n) mapping", nil},
+			scm.DeclarationParameter{"params", "list", "optional list of lambda parameter symbols", nil},
+			scm.DeclarationParameter{"alias_map", "list", "optional list of (alias canonical) pairs", nil},
+		}, "string",
+		func(a ...scm.Scmer) scm.Scmer {
+			expr := a[0]
+
+			columns := []string{}
+			if len(a) >= 2 && !a[1].IsNil() {
+				for _, item := range mustScmerSlice(a[1], "columns") {
+					columns = append(columns, scm.String(item))
+				}
+			}
+
+			params := []scm.Scmer{}
+			if len(a) >= 3 && !a[2].IsNil() {
+				params = mustScmerSlice(a[2], "params")
+			}
+
+			aliasMap := map[string]string{}
+			if len(a) >= 4 && !a[3].IsNil() {
+				for _, pair := range mustScmerSlice(a[3], "alias_map") {
+					pp := mustScmerSlice(pair, "alias_map pair")
+					if len(pp) != 2 {
+						continue
+					}
+					aliasMap[strings.ToLower(scm.String(pp[0]))] = scm.String(pp[1])
+				}
+			}
+
+			return scm.NewString(canonicalizeScmerToString(expr, columns, params, aliasMap))
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"register_prejoin_invalidation", "registers triggers on a source table to drop a prejoin table when source data changes",
 		4, 4,
 		[]scm.DeclarationParameter{
@@ -953,7 +992,7 @@ func Init(en scm.Env) {
 			}
 			pjSchema := scm.String(a[2])
 			pjTable := scm.String(a[3])
-			for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+			for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete, AfterDropTable, AfterDropColumn} {
 				triggerName := ".prejoin:" + pjTable + "|" + srcTable.Name + "|" + timing.String()
 				exists := false
 				for _, tr := range srcTable.Triggers {
@@ -1136,7 +1175,7 @@ func Init(en scm.Env) {
 				}),
 			})
 
-			// Register triggers with idempotency
+			// Register DML triggers with idempotency
 			triggerDefs := []struct {
 				timing TriggerTiming
 				body   scm.Scmer
@@ -1163,6 +1202,35 @@ func Init(en scm.Env) {
 					IsSystem: true,
 					Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
 					Func:     buildFKProc(td.body),
+				})
+			}
+			// Lifecycle cleanup: when the base table is dropped/shape-changed, the keytable
+			// must be dropped as well, otherwise stale keytables can be reused by a later
+			// table recreation with the same name and cause cross-suite flakes.
+			dropBody := scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("droptable"),
+				scm.NewString(ktSchema),
+				scm.NewString(ktName),
+				scm.NewBool(true),
+			})
+			for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {
+				triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + timing.String()
+				exists := false
+				for _, tr := range baseTable.Triggers {
+					if tr.Name == triggerName {
+						exists = true
+						break
+					}
+				}
+				if exists {
+					continue
+				}
+				baseTable.AddTrigger(TriggerDescription{
+					Name:     triggerName,
+					Timing:   timing,
+					IsSystem: true,
+					Priority: 90,
+					Func:     buildFKProc(dropBody),
 				})
 			}
 			return scm.NewBool(true)
