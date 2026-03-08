@@ -416,6 +416,18 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 			var newRecid uint32                      // recid of the newly inserted row (for tx undo)
 			var dualWriteCols []string               // captured for dual-write forwarding
 			var dualWriteRow [][]scm.Scmer           // captured for dual-write forwarding
+			// Build a row in schema-column order from a delta-ordered row buffer.
+			schemaRowFromDelta := func(deltaRow dataset) dataset {
+				row := make(dataset, len(t.t.Columns))
+				for i, colDesc := range t.t.Columns {
+					if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(deltaRow) {
+						row[i] = deltaRow[colidx]
+					} else {
+						row[i] = scm.NewNil()
+					}
+				}
+				return row
+			}
 			func() {
 				t.mu.Lock()         // write lock
 				defer t.mu.Unlock() // write lock
@@ -446,9 +458,10 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 					}
 				}
 				// now d2 contains the old row values
+				oldDeltaRow := append(dataset{}, d2...)
 				// copy slice for triggers before modifying (scheme values are immutable, but Go slice is modified)
 				if withTrigger && len(t.t.Triggers) > 0 {
-					triggerOldRow = append(dataset{}, d2...)
+					triggerOldRow = schemaRowFromDelta(d2)
 				}
 				for j := 0; j < len(changes); j += 2 {
 					colidx, ok := t.deltaColumns[scm.String(changes[j])]
@@ -471,7 +484,14 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 
 				// Execute BEFORE UPDATE triggers (can modify d2)
 				if withTrigger && triggerOldRow != nil {
-					d2 = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, d2)
+					newSchemaRow := schemaRowFromDelta(d2)
+					newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow)
+					// Write trigger-mutated schema values back to delta row layout.
+					for i, colDesc := range t.t.Columns {
+						if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(d2) && i < len(newSchemaRow) {
+							d2[colidx] = newSchemaRow[i]
+						}
+					}
 					// BEFORE triggers may change typed/NOT NULL columns; sanitize again.
 					for i, col := range cols {
 						for _, colDesc := range t.t.Columns {
@@ -484,10 +504,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 					// Recheck if anything changed after trigger modifications
 					result = false
 					for i, v := range d2 {
-						if !scm.Equal(triggerOldRow[i], v) {
+						if i < len(oldDeltaRow) && !scm.Equal(oldDeltaRow[i], v) {
 							result = true
 							break
 						}
+					}
+					if !result && len(d2) != len(oldDeltaRow) {
+						result = true
 					}
 				}
 
@@ -497,7 +520,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool) func(...scm.
 
 				// save new row for triggers (d2 now contains new values)
 				if withTrigger && len(t.t.Triggers) > 0 {
-					triggerNewRow = d2 // no copy needed, d2 won't be modified after this
+					triggerNewRow = schemaRowFromDelta(d2)
 				}
 
 				// unique constraint checking
@@ -837,7 +860,23 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
 	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
+	var triggerInsertRows []dataset
 	t.insertDataset(columns, values, onFirstInsertId)
+	if len(t.t.Triggers) > 0 {
+		newRows := t.inserts[firstNewInsertIdx:]
+		triggerInsertRows = make([]dataset, len(newRows))
+		for i, deltaRow := range newRows {
+			row := make(dataset, len(t.t.Columns))
+			for j, colDesc := range t.t.Columns {
+				if colidx, ok := t.deltaColumns[colDesc.Name]; ok && colidx < len(deltaRow) {
+					row[j] = deltaRow[colidx]
+				} else {
+					row[j] = scm.NewNil()
+				}
+			}
+			triggerInsertRows[i] = row
+		}
+	}
 	if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 		// Log the actual inserted rows (not the original columns/values) so that
 		// auto-incremented IDs and column defaults are preserved across restarts.
@@ -886,7 +925,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	}
 	// execute AFTER INSERT triggers
 	if len(t.t.Triggers) > 0 {
-		for _, row := range values {
+		for _, row := range triggerInsertRows {
 			t.t.ExecuteTriggers(AfterInsert, nil, row)
 		}
 	}
