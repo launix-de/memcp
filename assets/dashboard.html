@@ -503,7 +503,8 @@ var settingsGroups=[
 {key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logging","sloppy","memory"]}
 ]},
 {group:"Query Optimizer",items:[
-{key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"}
+{key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"},
+{key:"IndexThreshold",desc:"Min shard rows before creating an adaptive index (0=5); below this a full scan is cheaper",type:"number"}
 ]},
 {group:"Metrics",items:[
 {key:"MetricsTracing",desc:"Periodically record metrics to system_statistic.perf_metrics",type:"bool"},
@@ -515,7 +516,8 @@ var settingsGroups=[
 {group:"Debugging",items:[
 {key:"Backtrace",desc:"Enable detailed error backtraces",type:"bool"},
 {key:"Trace",desc:"Enable Scheme runtime tracing to file",type:"bool"},
-{key:"TracePrint",desc:"Print trace timing to stdout",type:"bool"}
+{key:"TracePrint",desc:"Print trace timing to stdout",type:"bool"},
+{key:"ScanDebugging",desc:"Log every scan/scan_order: db+table+boundaries+index",type:"bool"}
 ]}
 ];
 

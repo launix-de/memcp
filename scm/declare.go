@@ -29,9 +29,9 @@ type Declaration struct {
 	Params       []DeclarationParameter
 	Returns      string // any | string | number | int | bool | func | list | symbol | nil
 	Fn           func(...Scmer) Scmer
-	Foldable     bool            // safe to constant-fold when all args are literals
-	Forbidden    bool            // optimizer-only: hidden from help, blocked from .scm code
-	Type         *TypeDescriptor // function type with optional Optimize hook; nil = derive from Params/Returns
+	Foldable     bool                                                                                        // safe to constant-fold when all args are literals
+	Forbidden    bool                                                                                        // optimizer-only: hidden from help, blocked from .scm code
+	Type         *TypeDescriptor                                                                             // function type with optional Optimize hook; nil = derive from Params/Returns
 	JITEmit      func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc // optional JIT emitter; nil = not JIT-able
 }
 

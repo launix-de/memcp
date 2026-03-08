@@ -127,7 +127,8 @@ func (p *StorageComputeProxy) Compress() {
 		for j := range readers {
 			colvalues[j] = readers[j].GetValue(idx)
 		}
-		return fn(colvalues...)
+		result := fn(colvalues...)
+		return result
 	}
 
 	// Standard proposeCompression loop (same as shard rebuild)
