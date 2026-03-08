@@ -473,50 +473,50 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 						))
 						(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
 						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
-					/* hash of inner query after column-resolution — used as dedup key and unique name suffix */
-					(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
-					(define _sq_acc_name (concat "accsess_" _sq_hash))
-					(define _sq_rr_name  (concat "__scalar_resultrow_" _sq_hash))
-					/* dedup: if identical subquery already generated, reuse its accumulator */
-					(if (not (nil? (sq_cache _sq_hash)))
-						(sq_cache _sq_hash)
-						/* first occurrence: generate full setup+subplan */
-						(begin
-							(define replace_resultrow (lambda (expr) (match expr
-								(cons sym args) (if (equal? sym (quote resultrow))
-									(cons (symbol _sq_rr_name) (map args replace_resultrow))
-									(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-										(list (quote symbol) _sq_rr_name)
-										(cons (replace_resultrow sym) (map args replace_resultrow))
-									)
-								)
-								expr
-							)))
-							(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
-							/* cache the read expression so duplicate subqueries skip the subplan */
-							(sq_cache _sq_hash (list (quote if) (list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral) nil (list (symbol _sq_acc_name) "acc")))
-							(list (quote !begin)
-								(list (quote set) (symbol _sq_acc_name) (list (quote newsession)))
-								(list (symbol _sq_acc_name) "acc" scalar_neutral)
-								(list (quote set) (symbol _sq_rr_name)
-									(list (quote lambda) (list (symbol "row"))
-										(list (quote begin)
-											(list (symbol _sq_acc_name) "acc"
-												(list scalar_reduce
-													(list (symbol _sq_acc_name) "acc")
-													(list (quote nth) (symbol "row") 1)))
-											true
+						/* hash of inner query after column-resolution — used as dedup key and unique name suffix */
+						(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
+						(define _sq_acc_name (concat "accsess_" _sq_hash))
+						(define _sq_rr_name  (concat "__scalar_resultrow_" _sq_hash))
+						/* dedup: if identical subquery already generated, reuse its accumulator */
+						(if (not (nil? (sq_cache _sq_hash)))
+							(sq_cache _sq_hash)
+							/* first occurrence: generate full setup+subplan */
+							(begin
+								(define replace_resultrow (lambda (expr) (match expr
+									(cons sym args) (if (equal? sym (quote resultrow))
+										(cons (symbol _sq_rr_name) (map args replace_resultrow))
+										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+											(list (quote symbol) _sq_rr_name)
+											(cons (replace_resultrow sym) (map args replace_resultrow))
 										)
 									)
+									expr
+								)))
+								(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
+								/* cache the read expression so duplicate subqueries skip the subplan */
+								(sq_cache _sq_hash (list (quote if) (list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral) nil (list (symbol _sq_acc_name) "acc")))
+								(list (quote !begin)
+									(list (quote set) (symbol _sq_acc_name) (list (quote newsession)))
+									(list (symbol _sq_acc_name) "acc" scalar_neutral)
+									(list (quote set) (symbol _sq_rr_name)
+										(list (quote lambda) (list (symbol "row"))
+											(list (quote begin)
+												(list (symbol _sq_acc_name) "acc"
+													(list scalar_reduce
+														(list (symbol _sq_acc_name) "acc")
+														(list (quote nth) (symbol "row") 1)))
+												true
+											)
+										)
+									)
+									subplan
+									(list (quote if)
+										(list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral)
+										nil
+										(list (symbol _sq_acc_name) "acc"))
 								)
-								subplan
-								(list (quote if)
-									(list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral)
-									nil
-									(list (symbol _sq_acc_name) "acc"))
 							)
 						)
-					)
 					)
 				)
 			)
