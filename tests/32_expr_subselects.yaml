@@ -144,6 +144,32 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "IN subselect with DISTINCT parses and executes"
+    sql: "SELECT id FROM t1 WHERE id IN (SELECT DISTINCT owner FROM t2)"
+    expect:
+      rows: 1
+      data:
+        - id: 4
+
+  - name: "NOT IN subselect with DISTINCT"
+    sql: "SELECT id FROM t1 WHERE id NOT IN (SELECT DISTINCT owner FROM t2 WHERE owner < 3)"
+    expect:
+      rows: 1
+      data:
+        - id: 4
+
+  - name: "IN subselect DISTINCT with derived table and LEFT JOIN parses"
+    sql: >
+      SELECT id FROM t1 WHERE id IN (
+        SELECT DISTINCT t.owner FROM (
+          SELECT owner, val FROM t2
+        ) AS t
+        LEFT JOIN t1 AS ref ON t.owner = ref.id
+        WHERE TRUE
+      )
+    expect:
+      error: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS t4"
   - sql: "DROP TABLE IF EXISTS t3"
