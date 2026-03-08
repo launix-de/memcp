@@ -17,7 +17,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package storage
 
 import "io"
-import "fmt"
 import "bufio"
 import "encoding/json"
 import "encoding/binary"
@@ -41,24 +40,21 @@ func (s *StorageSparse) String() string {
 	return "SCMER-sparse"
 }
 
-// storageSparseVersion is the current binary format version for StorageSparse.
-// Increment this constant and add a new deserializeSparseV* helper whenever the
-// layout after the magic byte changes.  Never delete old helpers.
-const storageSparseVersion = 0
-
 // StorageSparse binary layout (magic byte 2 consumed by shard loader):
 //
-//	[version uint8]        ← first byte read by Deserialize
 //	[count uint64]         ← total row count (including NULL rows)
 //	[l2 uint64]            ← number of non-NULL (sparse) entries
 //	[entries: l2 pairs of JSON lines: recid\nvalue\n]
 //
 // Version history:
 //
-//	0 (current): layout as above.
+//	v0 (original, no version byte): layout as above.  This type had no padding
+//	byte in v0.1.0, so there is no safe location for a version byte without
+//	breaking existing data.  If the format must change, register a NEW magic
+//	byte in storages[] (storage.go) for the new layout and keep magic 2 for
+//	reading legacy data forever.
 func (s *StorageSparse) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(2))                    // 2 = StorageSparse
-	binary.Write(f, binary.LittleEndian, uint8(storageSparseVersion)) // version byte
+	binary.Write(f, binary.LittleEndian, uint8(2)) // 2 = StorageSparse
 	binary.Write(f, binary.LittleEndian, uint64(s.count))
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for k, v := range s.values {
@@ -77,17 +73,8 @@ func (s *StorageSparse) Serialize(f io.Writer) {
 	}
 }
 func (s *StorageSparse) Deserialize(f io.Reader) uint {
-	var version uint8
-	binary.Read(f, binary.LittleEndian, &version)
-	switch version {
-	case 0:
-		return s.deserializeSparseV0(f)
-	default:
-		panic(fmt.Sprintf("StorageSparse: unknown version %d", version))
-	}
-}
-
-func (s *StorageSparse) deserializeSparseV0(f io.Reader) uint {
+	// No version byte: this type had no padding byte in v0.1.0.
+	// Count is read directly.  Format changes require a new magic byte.
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.count = l

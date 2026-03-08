@@ -83,10 +83,17 @@ type ColumnStorage interface {
 //  5. Data written before this versioning scheme was introduced is "version 0"
 //     (or a named legacy constant).  Each type documents what version 0 means.
 //
+// Exception — magic bytes 1 (StorageSCMER) and 2 (StorageSparse):
+//   These types existed before the versioning scheme and had NO padding byte in
+//   their original layout, so there is no safe location for an inline version
+//   byte without corrupting existing data.  They read count directly, with NO
+//   version byte.  If either format must change, register a NEW magic byte
+//   (e.g. 101/102) for the new layout and keep 1/2 as read-only legacy readers.
+//
 // Current magic byte assignments:
 //
-//	 1  StorageSCMER   – generic Scmer values
-//	 2  StorageSparse  – sparse/NULL-only column
+//	 1  StorageSCMER   – generic Scmer values        (no version byte — see above)
+//	 2  StorageSparse  – sparse/NULL-only column     (no version byte — see above)
 //	10  StorageInt     – bit-packed integer
 //	11  StorageSeq     – sequential/auto-increment integer
 //	12  StorageFloat   – 64-bit float

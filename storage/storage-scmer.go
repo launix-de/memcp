@@ -17,7 +17,6 @@ Copyright (C) 2023  Carl-Philip Hänsch
 package storage
 
 import "io"
-import "fmt"
 import "math"
 import "bufio"
 import "encoding/json"
@@ -55,23 +54,21 @@ func (s *StorageSCMER) String() string {
 	return "SCMER"
 }
 
-// storageSCMERVersion is the current binary format version for StorageSCMER.
-// Increment this constant and add a new deserializeSCMERV* helper whenever the
-// layout after the magic byte changes.  Never delete old helpers.
-const storageSCMERVersion = 0
-
 // StorageSCMER binary layout (magic byte 1 consumed by shard loader):
 //
-//	[version uint8]        ← first byte read by Deserialize
 //	[count uint64]
 //	[values: count × JSON line (terminated by '\n')]
 //
 // Version history:
 //
-//	0 (current): layout as above.
+//	v0 (original, no version byte): layout as above.  This type had no padding
+//	byte in v0.1.0.  StorageSCMER is never the final storage type on disk
+//	(proposeCompression always returns a more specific type), so in practice
+//	no persisted files exist with magic 1.  Still, format changes require a
+//	NEW magic byte in storages[] (storage.go); keep magic 1 as a legacy
+//	reader forever.
 func (s *StorageSCMER) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(1))                   // 1 = StorageSCMER
-	binary.Write(f, binary.LittleEndian, uint8(storageSCMERVersion)) // version byte
+	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for i := 0; i < len(s.values); i++ {
 		v, err := json.Marshal(s.values[i])
@@ -83,17 +80,8 @@ func (s *StorageSCMER) Serialize(f io.Writer) {
 	}
 }
 func (s *StorageSCMER) Deserialize(f io.Reader) uint {
-	var version uint8
-	binary.Read(f, binary.LittleEndian, &version)
-	switch version {
-	case 0:
-		return s.deserializeSCMERV0(f)
-	default:
-		panic(fmt.Sprintf("StorageSCMER: unknown version %d", version))
-	}
-}
-
-func (s *StorageSCMER) deserializeSCMERV0(f io.Reader) uint {
+	// No version byte: this type had no padding byte in v0.1.0.
+	// Count is read directly.  Format changes require a new magic byte.
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
 	s.values = make([]scm.Scmer, l)
