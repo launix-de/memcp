@@ -61,17 +61,17 @@ test_cases:
 
   # Policy enforcement tests (per-user auth)
   - name: "prepare table t as root (create)"
-    sql: "CREATE TABLE t(id INT, name TEXT)"
+    sql: "CREATE TABLE grant_t(id INT, name TEXT)"
     expect: {}
 
   - name: "prepare table t as root (insert)"
-    sql: "INSERT INTO t(id, name) VALUES (1, 'x')"
+    sql: "INSERT INTO grant_t(id, name) VALUES (1, 'x')"
     expect: { affected_rows: 1 }
 
   - name: "alice cannot read without grant"
     username: "alice"
     password: "pw"
-    sql: "SELECT * FROM t"
+    sql: "SELECT * FROM grant_t"
     expect:
       error: true
 
@@ -82,7 +82,7 @@ test_cases:
   - name: "alice can read after grant"
     username: "alice"
     password: "pw"
-    sql: "SELECT id, name FROM t"
+    sql: "SELECT id, name FROM grant_t"
     expect:
       rows: 1
       data:
@@ -113,13 +113,13 @@ test_cases:
 
   - name: "psql grant select on table (noop)"
     syntax: postgresql
-    sql: "GRANT SELECT ON TABLE t TO alice"
+    sql: "GRANT SELECT ON TABLE grant_t TO alice"
     expect:
       error: true
 
   - name: "psql revoke select on table (noop)"
     syntax: postgresql
-    sql: "REVOKE SELECT ON TABLE t FROM alice"
+    sql: "REVOKE SELECT ON TABLE grant_t FROM alice"
     expect:
       error: true
 

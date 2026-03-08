@@ -1,0 +1,54 @@
+# IN subselect with multiple tables (multi-table JOIN inside IN)
+
+metadata:
+  version: "1.0"
+  description: "IN subselect with multi-table join (Neumann unnesting)"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS insub_post"
+  - sql: "DROP TABLE IF EXISTS insub_author"
+  - sql: "CREATE TABLE insub_author (id INT, name VARCHAR(100))"
+  - sql: "CREATE TABLE insub_post (id INT, author_id INT, title VARCHAR(200))"
+  - sql: "INSERT INTO insub_author (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')"
+  - sql: "INSERT INTO insub_post (id, author_id, title) VALUES (1, 1, 'Hello'), (2, 1, 'World'), (3, 2, 'Foo')"
+
+test_cases:
+  - name: "IN subselect single table (baseline)"
+    sql: "SELECT name FROM insub_author WHERE id IN (SELECT author_id FROM insub_post)"
+    expect:
+      rows: 2
+      data:
+        - name: Alice
+        - name: Bob
+
+  - name: "IN subselect multi-table inner join"
+    sql: "SELECT name FROM insub_author WHERE id IN (SELECT p.author_id FROM insub_post p JOIN insub_author a ON p.author_id = a.id WHERE a.name <> 'Carol')"
+    expect:
+      rows: 2
+      data:
+        - name: Alice
+        - name: Bob
+
+  - name: "IN subselect multi-table LEFT JOIN"
+    sql: "SELECT name FROM insub_author WHERE id IN (SELECT p.author_id FROM insub_post p LEFT JOIN insub_author a ON p.author_id = a.id)"
+    expect:
+      rows: 2
+      data:
+        - name: Alice
+        - name: Bob
+
+  - name: "IN subselect multi-table join no match"
+    sql: "SELECT name FROM insub_author WHERE id IN (SELECT p.author_id FROM insub_post p JOIN insub_author a ON p.author_id = a.id WHERE a.name = 'Carol')"
+    expect:
+      rows: 0
+
+  - name: "NOT IN subselect multi-table join"
+    sql: "SELECT name FROM insub_author WHERE id NOT IN (SELECT p.author_id FROM insub_post p JOIN insub_author a ON p.author_id = a.id)"
+    expect:
+      rows: 1
+      data:
+        - name: Carol
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS insub_post"
+  - sql: "DROP TABLE IF EXISTS insub_author"

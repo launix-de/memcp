@@ -582,79 +582,97 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 									(list (quote and) condition2 (list (quote equal??) target_expr value_expr)))
 							)
 							(begin
-								(if (not (and (list? tables2) (equal? (count tables2) 1)))
-									(error "IN subselect with multiple tables not supported yet")
-								)
-								(define tdesc (car tables2))
-								(if (not (and (list? tdesc) (equal? (count tdesc) 5)))
-									(error "IN subselect with multiple tables not supported yet")
-								)
-								(define tblvar (nth tdesc 0))
-								(define schema3 (nth tdesc 1))
-								(define tbl (nth tdesc 2))
-								(define isOuter (nth tdesc 3))
-								(define joinexpr (nth tdesc 4))
-								(if (not (nil? joinexpr)) (error "IN subselect joins not supported yet"))
-								(define filtercols (extract_columns_for_tblvar tblvar condition2))
-								(define mapcols (extract_columns_for_tblvar tblvar value_expr))
+								/* OR-reduce for semi-join membership test */
+								(define in_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
+									(list (quote or) (quote acc) (quote v))
+								))
+								(define in_neutral false)
 								(define use_ordered (or (and (not (nil? stage_order)) (not (equal? stage_order '()))) (not (nil? stage_limit)) (not (nil? stage_offset))))
+								(if (and use_ordered (not (equal? (count tables2) 1)))
+									(error "IN subselect ORDER BY with multiple tables not supported yet")
+								)
+								/* for single-table ordered case: extract sort columns from the one table */
+								(define tblvar0 (nth (car tables2) 0))
 								(define ordercols (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
-									'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
-									'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar) (list col) '())
+									'((symbol get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar0) (list col) '())
+									'((quote get_column) alias_ ti col _) (if ((if ti equal?? equal?) alias_ tblvar0) (list col) '())
 									_ '()
 								))))))
 								(define dirs (merge (map stage_order (lambda (order_item) (match order_item '(col dir) (match col
-									'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
-									'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar) (list dir) '())
+									'((symbol get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar0) (list dir) '())
+									'((quote get_column) alias_ ti _ _) (if ((if ti equal?? equal?) alias_ tblvar0) (list dir) '())
 									_ '()
 								))))))
 								(if (and use_ordered (not (equal? stage_order '())) (not (equal? (count ordercols) (count stage_order))))
 									(error "IN subselect ORDER BY must use direct columns")
 								)
-								(define in_reduce (list (quote lambda) (list (symbol "acc") (symbol "v"))
-									(list (quote or) (quote acc) (quote v))
+								/* recursive nested-scan builder: push dependent semi-join down through tables (Neumann unnesting) */
+								(define build_in_scan (lambda (scan_tables scan_condition)
+									(match scan_tables
+										(cons '(tblvar schema3 tbl3 isOuter3 _) rest_tables) (begin
+											/* columns from this table needed at this and inner scan levels */
+											(define cur_cols (merge_unique (list
+												(merge_unique (cons
+													(extract_columns_for_tblvar tblvar scan_condition)
+													(list (extract_columns_for_tblvar tblvar value_expr))
+												))
+												(merge_unique (cons
+													(extract_outer_columns_for_tblvar tblvar scan_condition)
+													(list (extract_outer_columns_for_tblvar tblvar value_expr))
+												))
+											)))
+											/* split condition: evaluate now vs defer to inner tables */
+											(match (split_condition (coalesceNil scan_condition true) rest_tables) '(now_condition later_condition) (begin
+												(define cur_filtercols (merge_unique (list
+													(extract_columns_for_tblvar tblvar now_condition)
+													(extract_outer_columns_for_tblvar tblvar now_condition)
+												)))
+												(if (and use_ordered (equal? rest_tables '()))
+													/* single-table ordered path */
+													(list (quote scan_order)
+														schema3 tbl3
+														(cons list cur_filtercols)
+														(list (quote lambda)
+															(map cur_filtercols (lambda (col) (symbol (concat tblvar "." col))))
+															(optimize (replace_columns_from_expr now_condition))
+														)
+														(cons list ordercols)
+														(cons list dirs)
+														(coalesceNil stage_offset 0)
+														(coalesceNil stage_limit -1)
+														(cons list cur_cols)
+														(list (quote lambda)
+															(map cur_cols (lambda (col) (symbol (concat tblvar "." col))))
+															(list (quote equal??) (replace_columns_from_expr target_expr) (replace_columns_from_expr value_expr))
+														)
+														in_reduce
+														in_neutral
+													)
+													/* unordered path: nest scans (Neumann dependent join push-down) */
+													(scan_wrapper 'scan schema3 tbl3
+														(cons list cur_filtercols)
+														(list (quote lambda)
+															(map cur_filtercols (lambda (col) (symbol (concat tblvar "." col))))
+															(optimize (replace_columns_from_expr now_condition))
+														)
+														(cons list cur_cols)
+														(list (quote lambda)
+															(map cur_cols (lambda (col) (symbol (concat tblvar "." col))))
+															(build_in_scan rest_tables later_condition)
+														)
+														in_reduce
+														in_neutral
+														in_reduce
+														isOuter3
+													)
+												)
+											))
+										)
+										/* base case: all tables visited, test membership equality */
+										'() (list (quote equal??) (replace_columns_from_expr target_expr) (replace_columns_from_expr value_expr))
+									)
 								))
-								(define in_neutral false)
-								(define map_expr (list (quote equal??) (replace_columns_from_expr target_expr) (replace_columns_from_expr value_expr)))
-								(if use_ordered
-									(list (quote scan_order)
-										schema3
-										tbl
-										(cons list filtercols)
-										(list (quote lambda)
-											(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-											(optimize (replace_columns_from_expr condition2))
-										)
-										(cons list ordercols)
-										(cons list dirs)
-										(coalesceNil stage_offset 0)
-										(coalesceNil stage_limit -1)
-										(cons list mapcols)
-										(list (quote lambda)
-											(map mapcols (lambda (col) (symbol (concat tblvar "." col))))
-											map_expr
-										)
-										in_reduce
-										in_neutral
-									)
-									(list (quote scan)
-										schema3
-										tbl
-										(cons list filtercols)
-										(list (quote lambda)
-											(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
-											(optimize (replace_columns_from_expr condition2))
-										)
-										(cons list mapcols)
-										(list (quote lambda)
-											(map mapcols (lambda (col) (symbol (concat tblvar "." col))))
-											map_expr
-										)
-										in_reduce
-										in_neutral
-										in_reduce
-									)
-								)
+								(build_in_scan tables2 condition2)
 							)
 						))
 						in_expr

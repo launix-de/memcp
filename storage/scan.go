@@ -73,6 +73,19 @@ type scanResult struct {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
+	hasMutationCallback := false
+	for _, c := range callbackCols {
+		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
+			hasMutationCallback = true
+			break
+		}
+	}
+	if hasMutationCallback && !t.hasMutationOwner() {
+		t.mutationMu.Lock()
+		defer t.mutationMu.Unlock()
+		t.enterMutationOwner()
+		defer t.exitMutationOwner()
+	}
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time (boundary extraction, sharding hints)
@@ -238,13 +251,34 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	var outCount int64
 
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	hasMutationCallback := false
+	for _, c := range callbackCols {
+		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
+			hasMutationCallback = true
+			break
+		}
+	}
 
 	// Ensure shard is loaded from disk before accessing columns.
 	// ensureLoaded() must run before getColumnStorageOrPanic so that COLD
 	// shards have their column map populated by load(t) first.
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
-	t.ensureMainCount(false)
+	currentTx := CurrentTx()
+	ownsWrite := t.hasWriteOwner()
+	lockMutationExclusively := hasMutationCallback && !ownsWrite
+	if lockMutationExclusively {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.enterWriteOwner()
+		defer t.exitWriteOwner()
+		if currentTx != nil {
+			currentTx.EnterShardWrite(t)
+			defer currentTx.ExitShardWrite(t)
+		}
+	}
+	skipShardReadLock := ownsWrite || lockMutationExclusively
+	t.ensureMainCount(skipShardReadLock)
 
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -257,42 +291,67 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	mapper := t.OpenMapReducer(callbackCols, callback, aggregate)
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
-	t.mu.RLock()
-	locked := true
+	locked := false
+	if !skipShardReadLock {
+		t.mu.RLock()
+		locked = true
+	}
 	defer func() {
 		if locked {
 			t.mu.RUnlock()
 		}
 	}()
 	maxInsertIndex := len(t.inserts)
+	visibleUpper := t.main_count + uint32(maxInsertIndex)
+	var pendingRecids []uint32
+	var mutationSeen map[uint32]struct{}
+	if hasMutationCallback {
+		mutationSeen = make(map[uint32]struct{}, 128)
+	}
 
 	// filter phase: iterateIndex fills stack buffer, callback filters in-place and flushes to MapReducer
 	var buf [1024]uint32
 	hadValue := false
-	currentTx := CurrentTx()
 
 	t.iterateIndex(boundaries, lower, upperLast, maxInsertIndex, buf[:], func(batch []uint32) bool {
 		// filter in-place: overwrite batch with passing IDs
 		outN := 0
 		for _, idx := range batch {
-			if currentTx != nil && currentTx.Mode == TxACID {
-				if !currentTx.IsVisible(t, idx) {
+			effectiveIdx := idx
+			if effectiveIdx >= visibleUpper {
+				continue
+			}
+			if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
+				if t.deletions.Get(effectiveIdx) {
+					if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
+						effectiveIdx = followIdx
+					} else {
+						continue
+					}
+				}
+				// Multiple stale index entries can resolve to the same current row.
+				// Mutate each current row at most once per statement.
+				if _, ok := mutationSeen[effectiveIdx]; ok {
 					continue
 				}
-			} else {
-				if t.deletions.Get(idx) {
-					continue // item is on delete list
+				mutationSeen[effectiveIdx] = struct{}{}
+			}
+			if currentTx != nil && currentTx.Mode == TxACID {
+				if !currentTx.IsVisible(t, effectiveIdx) {
+					continue
 				}
+			} else if t.deletions.Get(effectiveIdx) {
+				continue // item is on delete list
 			}
 
 			// condition check
-			if idx < t.main_count {
+			if effectiveIdx < t.main_count {
 				for i, k := range ccols {
-					cdataset[i] = k.GetValue(idx)
+					cdataset[i] = k.GetValue(effectiveIdx)
 				}
 			} else {
 				for i, k := range conditionCols {
-					cdataset[i] = t.getDelta(int(idx-t.main_count), k)
+					cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
 				}
 			}
 			var condResult bool
@@ -303,27 +362,48 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				continue
 			}
 
-			batch[outN] = idx
+			batch[outN] = effectiveIdx
 			outN++
 		}
 		if outN > 0 {
-			// release lock for map+reduce (UpdateFunction needs write lock)
-			t.mu.RUnlock()
-			locked = false
-			outCount += int64(outN)
-			akkumulator = mapper.Stream(akkumulator, batch[:outN])
-			hadValue = true
-			t.mu.RLock()
-			locked = true
+			if hasMutationCallback {
+				pendingRecids = append(pendingRecids, batch[:outN]...)
+				outCount += int64(outN)
+				hadValue = true
+			} else {
+				// release lock for map+reduce (UpdateFunction needs write lock)
+				if locked {
+					t.mu.RUnlock()
+					locked = false
+				}
+				outCount += int64(outN)
+				akkumulator = mapper.Stream(akkumulator, batch[:outN])
+				hadValue = true
+				if !skipShardReadLock {
+					t.mu.RLock()
+					locked = true
+				}
+			}
 		}
 		return true
 	})
 
 	// finished reading
-	t.mu.RUnlock()
-	locked = false
+	if locked {
+		t.mu.RUnlock()
+		locked = false
+	}
 	if !hadValue {
 		return scm.NewNil(), outCount
+	}
+	if hasMutationCallback && len(pendingRecids) > 0 {
+		for i := 0; i < len(pendingRecids); i += len(buf) {
+			j := i + len(buf)
+			if j > len(pendingRecids) {
+				j = len(pendingRecids)
+			}
+			akkumulator = mapper.Stream(akkumulator, pendingRecids[i:j])
+		}
 	}
 	return akkumulator, outCount
 }
