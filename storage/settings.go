@@ -44,9 +44,10 @@ type SettingsT struct {
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
 	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
 	ScanDebugging          bool  // when true, log every scan/scan_order: db+table+boundaries+index
+	ExplainWidth           int   // max chars before EXPLAIN pretty-prints a sub-expression on multiple lines (0 = default 20)
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -79,6 +80,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("ShutdownDrainSeconds"), scm.NewInt(int64(Settings.ShutdownDrainSeconds)),
 			scm.NewString("LogJIT"), scm.NewBool(Settings.LogJIT),
 			scm.NewString("ScanDebugging"), scm.NewBool(Settings.ScanDebugging),
+			scm.NewString("ExplainWidth"), scm.NewInt(int64(Settings.ExplainWidth)),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -116,6 +118,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(Settings.LogJIT)
 		case "ScanDebugging":
 			return scm.NewBool(Settings.ScanDebugging)
+		case "ExplainWidth":
+			return scm.NewInt(int64(Settings.ExplainWidth))
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -167,6 +171,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.LogJIT = Settings.LogJIT
 		case "ScanDebugging":
 			Settings.ScanDebugging = scm.ToBool(a[1])
+		case "ExplainWidth":
+			Settings.ExplainWidth = scm.ToInt(a[1])
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}

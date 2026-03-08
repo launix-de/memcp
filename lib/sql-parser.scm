@@ -1426,7 +1426,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query sql_select) (build_queryplan_term query))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (serialize (build_queryplan_term query)))))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
 		sql_insert_into
 		sql_insert_select
 		sql_create_table
