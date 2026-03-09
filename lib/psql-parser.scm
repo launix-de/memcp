@@ -668,6 +668,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(define options (* (or
 			(parser '((atom "CHARACTER" true) (atom "SET" true) (define id psql_identifier)) '("charset" id))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) '("engine" "memory"))
+			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) '("engine" "cache"))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) '("engine" "sloppy"))
 			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) '("engine" "logged"))
 			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) '("engine" "safe"))
@@ -706,6 +707,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define cname psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) schema id "drop" col)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) schema id "engine" "memory")))
+			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) schema id "engine" "cache")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) schema id "engine" "sloppy")))
 			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) schema id "engine" "logged")))
 			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
@@ -839,6 +841,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			'((quote resultrow) '((quote list) "Engine" "SAFE"    "Support" "DEFAULT" "Comment" "Safe durable engine"              "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
 			'((quote resultrow) '((quote list) "Engine" "LOGGING" "Support" "YES"     "Comment" "Append-only logging engine"      "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
 			'((quote resultrow) '((quote list) "Engine" "MEMORY"  "Support" "YES"     "Comment" "In-memory engine"               "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
+			'((quote resultrow) '((quote list) "Engine" "CACHE"   "Support" "YES"     "Comment" "In-memory evictable engine"        "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
 			'((quote resultrow) '((quote list) "Engine" "SLOPPY"  "Support" "YES"     "Comment" "Relaxed engine"                 "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
 			'((quote resultrow) '((quote list) "Engine" "MyISAM"  "Support" "YES"     "Comment" "Alias of SAFE"                  "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))
 			'((quote resultrow) '((quote list) "Engine" "InnoDB"  "Support" "YES"     "Comment" "Alias of SAFE"                  "Transactions" "NO" "XA" "NO" "Savepoints" "NO"))

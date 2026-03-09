@@ -118,6 +118,18 @@ curl -u root:admin -X POST http://localhost:4321/dashboard/api/settings \
 
 **Separate budget for persistent data** — a second budget (default: 30% of RAM) controls how much space the on-disk data loaded into RAM may occupy, independently of temporary query working memory. Both limits are tunable at runtime without restart.
 
+### Storage Engines
+
+MemCP supports several storage engines, selectable per table via `CREATE TABLE ... ENGINE=<engine>` or `ALTER TABLE ... ENGINE=<engine>`:
+
+| Engine | Data durability | Evictable | Description |
+|--------|----------------|-----------|-------------|
+| `safe` | Persisted to disk (default) | Yes | All writes are immediately durable; data is evicted from RAM when memory is tight and reloaded on demand. |
+| `logged` | Persisted to disk | Yes | Like `safe` but uses a write-ahead log for faster writes with the same durability guarantee. |
+| `sloppy` | Persisted to disk | Yes | Data is written to disk asynchronously; faster writes but brief data loss on crash. |
+| `memory` | RAM only | No | Data lives entirely in RAM and is never written to disk. Not registered with the memory manager — data is never evicted. Lost on restart. |
+| `cache` | Schema only (RAM data) | Yes | Like `memory`, data lives in RAM and is never written to disk. Unlike `memory`, the data **is** registered with the memory manager and will be automatically cleared when MemCP approaches its memory limit. The table schema is always persisted; after eviction the table is accessible but empty. Useful for derived or precomputed data that can be regenerated on demand. |
+
 ### **🔧 Developer-Friendly**
 - **Comprehensive test suite** with 2470+ SQL tests across 100+ test suites
 - **YAML-based testing framework**

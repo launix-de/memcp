@@ -33,6 +33,8 @@ func initDashboard(en scm.Env) {
 				scm.NewString("persisted_budget"), scm.NewInt(stat.PersistedBudget),
 				scm.NewString("memory_budget"), scm.NewInt(stat.MemoryBudget),
 				scm.NewString("persisted_memory"), scm.NewInt(stat.PersistedMemory),
+				scm.NewString("cache_entry_count"), scm.NewInt(stat.CountByType[TypeCacheEntry]),
+				scm.NewString("cache_entry_size"), scm.NewInt(stat.SizeByType[TypeCacheEntry]),
 			})
 		},
 	})
