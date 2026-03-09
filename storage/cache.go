@@ -294,8 +294,11 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
 	}
 
 	// Tier 2+3: total budget merged with system-pressure budget — single evict pass.
-	// Start with the configured memory budget (0 = unconfigured = no constraint).
-	effectiveBudget := cm.memoryBudget
+	// Use -1 as sentinel for "no constraint"; >=0 means evict to that byte limit.
+	effectiveBudget := int64(-1)
+	if cm.memoryBudget > 0 {
+		effectiveBudget = cm.memoryBudget
+	}
 
 	// Check system-wide free RAM (throttled to once per second).
 	now := time.Now()
@@ -310,13 +313,13 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
 				sysBudget = 0
 			}
 			// Use the more restrictive of both budgets.
-			if effectiveBudget <= 0 || sysBudget < effectiveBudget {
+			if effectiveBudget < 0 || sysBudget < effectiveBudget {
 				effectiveBudget = sysBudget
 			}
 		}
 	}
 
-	if effectiveBudget > 0 {
+	if effectiveBudget >= 0 {
 		cm.evict(cm.currentMemory, effectiveBudget, additionalSize, nil)
 	}
 }
@@ -480,14 +483,19 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		return candidates[i].dynamicScore > candidates[j].dynamicScore
 	})
 
-	// evict worst 50%
-	evictCount := len(candidates) / 2
-	if evictCount < 1 && len(candidates) > 0 {
-		evictCount = 1
-	}
+	// evict all candidates, oldest first; stop once we are within budget
 	var freedByType [numEvictableTypes]int64
 	var totalFreed int64
-	for i := 0; i < evictCount; i++ {
+	for i := 0; i < len(candidates); i++ {
+		if cm.currentMemory <= budget {
+			// already within budget – push remaining survivors back
+			for ; i < len(candidates); i++ {
+				if _, ok := cm.itemMap[candidates[i].pointer]; ok {
+					heap.Push(&cm.h, candidates[i])
+				}
+			}
+			break
+		}
 		c := candidates[i]
 		// check again — previous cleanup in this loop may have freed this item recursively
 		if _, ok := cm.itemMap[c.pointer]; !ok {
@@ -512,13 +520,7 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		totalFreed += c.size
 	}
 
-	// push survivors back into heap
-	for i := evictCount; i < len(candidates); i++ {
-		c := candidates[i]
-		if _, ok := cm.itemMap[c.pointer]; ok {
-			heap.Push(&cm.h, c)
-		}
-	}
+	// survivors already pushed back inside the loop above (early-exit branch)
 
 	// log summary
 	if totalFreed > 0 {

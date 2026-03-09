@@ -1,0 +1,170 @@
+metadata:
+  version: "1.0"
+  description: "ENGINE=CACHE table: data evictable under memory pressure, schema persists"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cache_t"
+  - sql: "CREATE TABLE cache_t (id INT, v TEXT) ENGINE=CACHE"
+
+test_cases:
+  # --- Basic read/write ---
+
+  - name: "Insert rows into CACHE table"
+    sql: "INSERT INTO cache_t (id, v) VALUES (1, 'hello'), (2, 'world'), (3, 'foo')"
+    expect:
+      affected_rows: 3
+
+  - name: "Select returns inserted rows"
+    sql: "SELECT id, v FROM cache_t ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          v: "hello"
+        - id: 2
+          v: "world"
+        - id: 3
+          v: "foo"
+
+  # --- Schema persists across restart (like MEMORY) ---
+
+  - name: "SHUTDOWN memcp"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Schema survives restart (columns still defined)"
+    sql: "SHOW FULL COLUMNS FROM cache_t"
+    expect:
+      rows: 2
+
+  - name: "Data gone after restart (no disk backing)"
+    sql: "SELECT id, v FROM cache_t ORDER BY id"
+    expect:
+      rows: 0
+
+  # --- Re-insert for eviction test ---
+
+  - name: "Re-insert rows before eviction test"
+    sql: "INSERT INTO cache_t (id, v) VALUES (10, 'alpha'), (20, 'beta'), (30, 'gamma')"
+    expect:
+      affected_rows: 3
+
+  - name: "Data present before eviction"
+    sql: "SELECT COUNT(*) AS cnt FROM cache_t"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  # --- Memory pressure evicts CACHE data ---
+
+  - name: "Wait >1s so eviction lifetime guard allows eviction"
+    scm: (sleep 1.1)
+    expect: {}
+
+  - name: "Set MaxRamBytes to 1 (force eviction of cache data)"
+    scm: (settings "MaxRamBytes" 1)
+    expect: {}
+
+  - name: "Reset MaxRamBytes to 0"
+    scm: (settings "MaxRamBytes" 0)
+    expect: {}
+
+  - name: "Table is empty after eviction"
+    sql: "SELECT COUNT(*) AS cnt FROM cache_t"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  - name: "Schema still intact after eviction (columns accessible)"
+    sql: "SHOW FULL COLUMNS FROM cache_t"
+    expect:
+      rows: 2
+
+  - name: "Table is writable again after eviction"
+    sql: "INSERT INTO cache_t (id, v) VALUES (99, 'recovered')"
+    expect:
+      affected_rows: 1
+
+  - name: "Newly inserted row is readable"
+    sql: "SELECT id, v FROM cache_t WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - id: 99
+          v: "recovered"
+
+  # --- ALTER TABLE ENGINE transitions ---
+
+  - name: "Create SAFE table for SAFE→CACHE transition"
+    sql: "CREATE TABLE alter_safe_to_cache (id INT, v TEXT) ENGINE=SAFE"
+    expect:
+      rows: 0
+
+  - name: "Insert into SAFE table"
+    sql: "INSERT INTO alter_safe_to_cache (id, v) VALUES (1, 'a'), (2, 'b')"
+    expect:
+      affected_rows: 2
+
+  - name: "ALTER TABLE ENGINE=CACHE"
+    sql: "ALTER TABLE alter_safe_to_cache ENGINE=CACHE"
+    expect:
+      rows: 0
+
+  - name: "Data still readable after SAFE→CACHE"
+    sql: "SELECT id, v FROM alter_safe_to_cache ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          v: "a"
+        - id: 2
+          v: "b"
+
+  - name: "Create CACHE table for CACHE→SAFE transition"
+    sql: "CREATE TABLE alter_cache_to_safe (id INT, v TEXT) ENGINE=CACHE"
+    expect:
+      rows: 0
+
+  - name: "Insert into CACHE table for conversion"
+    sql: "INSERT INTO alter_cache_to_safe (id, v) VALUES (10, 'x'), (20, 'y')"
+    expect:
+      affected_rows: 2
+
+  - name: "ALTER TABLE ENGINE=SAFE from CACHE"
+    sql: "ALTER TABLE alter_cache_to_safe ENGINE=SAFE"
+    expect:
+      rows: 0
+
+  - name: "Data still readable after CACHE→SAFE"
+    sql: "SELECT id, v FROM alter_cache_to_safe ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 10
+          v: "x"
+        - id: 20
+          v: "y"
+
+  - name: "SHUTDOWN after CACHE→SAFE"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Data survives restart (now SAFE)"
+    sql: "SELECT id, v FROM alter_cache_to_safe ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 10
+          v: "x"
+        - id: 20
+          v: "y"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cache_t"
+  - sql: "DROP TABLE IF EXISTS alter_safe_to_cache"
+  - sql: "DROP TABLE IF EXISTS alter_cache_to_safe"

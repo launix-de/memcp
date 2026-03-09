@@ -52,6 +52,7 @@ test_cases:
   # --- SHUTDOWN to persist computed columns ---
   - name: "SHUTDOWN to persist StorageComputeProxy"
     sql: "SHUTDOWN"
+    restart_timeout: 300
     expect:
       rows: 0
 

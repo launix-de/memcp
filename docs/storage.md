@@ -90,7 +90,7 @@ creates a new database
 - **schema** (`string`): name of the database
 - **table** (`string`): name of the new table
 - **cols** (`list`): list of columns and constraints, each '("column" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '("primary" cols) or '("unique" cols) or '("foreign" cols tbl2 cols2 updatemode deletemode of 'restrict'|'cascade'|'set null')
-- **options** (`list`): further options like engine=safe|sloppy|memory
+- **options** (`list`): further options like engine=safe|logged|sloppy|memory (see docs/engine-semantics.md for durability guarantees; default: safe)
 - **ifnotexists** (`bool`): don't throw an error if table already exists
 
 ### Returns

@@ -27,7 +27,6 @@ setup:
 
 test_cases:
   - name: "IN subquery - files with render results"
-    noncritical: true  # IN subquery in WHERE with table scan not yet supported
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID IN (SELECT result FROM in_renderjob)
@@ -41,7 +40,6 @@ test_cases:
           name: "image3.png"
 
   - name: "NOT IN subquery - files without render results"
-    noncritical: true  # NOT IN subquery in WHERE with table scan not yet supported
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID NOT IN (SELECT result FROM in_renderjob)
@@ -57,7 +55,6 @@ test_cases:
           name: "image5.png"
 
   - name: "IN subquery with WHERE in subquery"
-    noncritical: true  # IN subquery in WHERE with table scan not yet supported
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID IN (SELECT result FROM in_renderjob WHERE ID > 101)
@@ -69,7 +66,6 @@ test_cases:
           name: "image3.png"
 
   - name: "IN subquery returns no matches"
-    noncritical: true  # IN subquery in WHERE with table scan not yet supported
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID IN (SELECT result FROM in_renderjob WHERE ID > 1000)
@@ -78,7 +74,6 @@ test_cases:
       rows: 0
 
   - name: "NOT IN subquery returns all when subquery empty"
-    noncritical: true  # NOT IN subquery in WHERE with table scan not yet supported
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID NOT IN (SELECT result FROM in_renderjob WHERE ID > 1000)
@@ -98,7 +93,6 @@ test_cases:
           name: "image5.png"
 
   - name: "IN subquery combined with other conditions"
-    noncritical: true  # IN subquery in WHERE with table scan not yet supported
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID IN (SELECT result FROM in_renderjob) AND name LIKE '%3%'
@@ -241,7 +235,6 @@ test_cases:
           name: "image3.png"
 
   - name: "IN with UNION ALL branch using inner ORDER BY/LIMIT"
-    noncritical: true
     sql: |
       SELECT ID, name FROM in_fop_files
       WHERE ID IN (

@@ -27,7 +27,6 @@ setup:
 
 test_cases:
   - name: "EXISTS with correlated subquery - customers with orders"
-    noncritical: true  # Correlated EXISTS in WHERE not yet supported
     sql: |
       SELECT ID, name FROM exists_customers c
       WHERE EXISTS (SELECT 1 FROM exists_orders o WHERE o.customer_id = c.ID)
@@ -41,7 +40,6 @@ test_cases:
           name: "Bob"
 
   - name: "NOT EXISTS - customers without orders"
-    noncritical: true  # Correlated EXISTS in WHERE not yet supported
     sql: |
       SELECT ID, name FROM exists_customers c
       WHERE NOT EXISTS (SELECT 1 FROM exists_orders o WHERE o.customer_id = c.ID)

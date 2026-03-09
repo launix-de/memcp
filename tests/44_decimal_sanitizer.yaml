@@ -81,13 +81,11 @@ test_cases:
   # === DECIMAL ROUNDING (noncritical — float precision) ===
 
   - name: "Rounding 12.565 to 2 decimal places"
-    noncritical: true
     sql: "INSERT INTO dec_basic (id, price, qty) VALUES (10, 12.565, 1)"
     expect:
       affected_rows: 1
 
   - name: "Readback rounded value 12.57"
-    noncritical: true
     sql: "SELECT price FROM dec_basic WHERE id = 10"
     expect:
       rows: 1
@@ -95,13 +93,11 @@ test_cases:
         - { price: 12.57 }
 
   - name: "Rounding 0.999 to 2 decimal places"
-    noncritical: true
     sql: "INSERT INTO dec_basic (id, price, qty) VALUES (11, 0.999, 1)"
     expect:
       affected_rows: 1
 
   - name: "Readback rounded value 1.00"
-    noncritical: true
     sql: "SELECT price FROM dec_basic WHERE id = 11"
     expect:
       rows: 1
@@ -109,13 +105,11 @@ test_cases:
         - { price: 1.0 }
 
   - name: "Rounding 3.141592 to 2 decimal places"
-    noncritical: true
     sql: "INSERT INTO dec_basic (id, price, qty) VALUES (12, 3.141592, 1)"
     expect:
       affected_rows: 1
 
   - name: "Readback rounded value 3.14"
-    noncritical: true
     sql: "SELECT price FROM dec_basic WHERE id = 12"
     expect:
       rows: 1
@@ -130,7 +124,6 @@ test_cases:
       affected_rows: 2
 
   - name: "Readback DECIMAL(10,0) truncates fractional"
-    noncritical: true
     sql: "SELECT val FROM dec_scale0 ORDER BY id"
     expect:
       rows: 2
@@ -153,13 +146,11 @@ test_cases:
         - { price: 77.77 }
 
   - name: "UPDATE rounds DECIMAL value"
-    noncritical: true
     sql: "UPDATE dec_basic SET price = 55.555 WHERE id = 2"
     expect:
       affected_rows: 1
 
   - name: "Readback UPDATE-rounded DECIMAL"
-    noncritical: true
     sql: "SELECT price FROM dec_basic WHERE id = 2"
     expect:
       rows: 1
@@ -269,13 +260,11 @@ test_cases:
       affected_rows: 1
 
   - name: "Insert too-long string into VARCHAR(5) gets truncated"
-    noncritical: true
     sql: "INSERT INTO vc_strict (id, s) VALUES (3, 'abcdefghij')"
     expect:
       affected_rows: 1
 
   - name: "Readback truncated VARCHAR"
-    noncritical: true
     sql: "SELECT s FROM vc_strict WHERE id = 3"
     expect:
       rows: 1
