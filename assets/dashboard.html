@@ -1021,8 +1021,12 @@ function getHistory(){try{return JSON.parse(localStorage.getItem(HISTORY_KEY))||
 function saveHistory(h){localStorage.setItem(HISTORY_KEY,JSON.stringify(h))}
 function addHistory(syn,db,query){
 var h=getHistory();
+if(h.length>0&&h[0].syntax===syn&&h[0].database===db&&h[0].query===query){
+h[0].time=new Date().toISOString();
+}else{
 h.unshift({time:new Date().toISOString(),syntax:syn,database:db,query:query});
 if(h.length>HISTORY_MAX)h=h.slice(0,HISTORY_MAX);
+}
 saveHistory(h);
 renderHistory();
 }
