@@ -60,6 +60,19 @@ memcp.deb: all
 	dpkg-deb --build --root-owner-group $(DEB_DIR) memcp.deb
 	rm -rf $(DEB_DIR)
 
+RPM_VERSION ?= $(DEB_VERSION)
+RPM_ARCH    ?= $(shell uname -m)
+
+memcp.rpm: all
+	mkdir -p .rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+	rpmbuild -bb memcp.spec \
+		--define "_topdir $(PWD)/.rpmbuild" \
+		--define "_version $(RPM_VERSION)" \
+		--define "_arch $(RPM_ARCH)" \
+		--define "_srcdir $(PWD)"
+	find .rpmbuild/RPMS/$(RPM_ARCH)/ -name 'memcp-*.rpm' -exec cp {} memcp.rpm \;
+	rm -rf .rpmbuild
+
 docs:
 	./memcp -write-docu docs
 
@@ -67,4 +80,4 @@ docker-release:
 	sudo docker build -t carli2/memcp:latest .
 	sudo docker push carli2/memcp:latest
 
-.PHONY: memcp.sif memcp.deb docs
+.PHONY: memcp.sif memcp.deb memcp.rpm docs
