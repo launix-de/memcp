@@ -500,7 +500,7 @@ var settingsGroups=[
 {group:"Storage",items:[
 {key:"ShardSize",desc:"Max rows per shard before splitting",type:"number"},
 {key:"PartitionMaxDimensions",desc:"Max partition dimensions for table sharding",type:"number"},
-{key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logging","sloppy","memory"]}
+{key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logged","sloppy","memory"]}
 ]},
 {group:"Query Optimizer",items:[
 {key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"},
@@ -674,7 +674,7 @@ btn.onclick=function(e){e.stopPropagation();openConsole(dbname,"SELECT * FROM `"
 function renderDetail(data,dbname,tblname){
 /* meta cards */
 var meta=data.meta||{};
-var engines=["safe","logging","sloppy","memory"];
+var engines=["safe","logged","sloppy","memory"];
 var engSel="<select class='inline-select' id='engine-select'>";
 for(var i=0;i<engines.length;i++){
 engSel+="<option value='"+engines[i]+"'"+(meta.engine===engines[i]?" selected":"")+">"+engines[i]+"</option>";
