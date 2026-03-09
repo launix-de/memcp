@@ -822,7 +822,7 @@ func Init(en scm.Env) {
 
 				t.mu.Lock()
 
-				if oldMode == Memory && newMode != Memory {
+				if (oldMode == Memory || oldMode == Cache) && newMode != Memory && newMode != Cache {
 					// Memory → Persisted: ensure all columns are loaded
 					// while PersistencyMode is still Memory (so they get
 					// initialized as StorageSparse instead of reading

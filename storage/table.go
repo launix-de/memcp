@@ -52,6 +52,7 @@ const (
 	Logged                 = 1
 	Sloppy                 = 3
 	Memory                 = 2
+	Cache  PersistencyMode = 4
 )
 
 // parsePersistencyMode converts an engine name string to a PersistencyMode.
@@ -59,6 +60,8 @@ func parsePersistencyMode(engine string) PersistencyMode {
 	switch engine {
 	case "memory":
 		return Memory
+	case "cache":
+		return Cache
 	case "sloppy":
 		return Sloppy
 	case "logged":
@@ -300,6 +303,9 @@ func (m *PersistencyMode) MarshalJSON() ([]byte, error) {
 	if *m == Safe {
 		return []byte("\"safe\""), nil
 	}
+	if *m == Cache {
+		return []byte("\"cache\""), nil
+	}
 	return nil, errors.New("unknown persistency mode")
 }
 
@@ -323,6 +329,10 @@ func (m *PersistencyMode) UnmarshalJSON(data []byte) error {
 	}
 	if str == "safe" {
 		*m = Safe
+		return nil
+	}
+	if str == "cache" {
+		*m = Cache
 		return nil
 	}
 	return errors.New("unknown persistency mode: " + str)
@@ -779,6 +789,9 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				shard = NewShard(t)
 				fmt.Println("started new shard for table", t.Name)
 				t.Shards = append(t.Shards, shard)
+				if t.PersistencyMode == Cache && !strings.HasPrefix(t.Name, ".") {
+					GlobalCache.AddItem(shard, 0, TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+				}
 			}
 			t.mu.Unlock()
 			return shard
