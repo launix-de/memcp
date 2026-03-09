@@ -153,8 +153,8 @@ if the user is not allowed to access this property, the function will throw an e
 						(if (equal? row last_row)
 							true
 							(begin (set last_row row) (original_resultrow row))))))
-					/* Execute with session in GLS so storage layer can access tx state */
-					(set query_result (with_session session (lambda () (eval (source "SQL Query" 1 1 formula)))))
+					/* Execute inside auto-commit tx (or existing explicit tx) */
+					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -209,7 +209,7 @@ if the user is not allowed to access this property, the function will throw an e
 						false))
 					(define query_result (if handled nil (begin
 						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username")))
-						(eval (source "SQL Query" 1 1 formula))
+						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
@@ -318,7 +318,7 @@ if the user is not allowed to access this property, the function will throw an e
 			(define formula (if (equal? (session "syntax") "postgresql")
 				(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username)
 				(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username)))
-			(eval (source "SQL Query" 1 1 formula))
+			(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 		) sql))
 )))
 
