@@ -191,6 +191,50 @@ curl -X POST http://localhost:4321/sql/system \
   -u root:admin
 ```
 
+## Importing Existing Data 📥
+
+MemCP can bulk-import schema and data from MySQL or PostgreSQL with a single Scheme call.
+The import drops and recreates the target tables on every run, so it is safe to re-run after schema changes.
+
+### Import from MySQL
+
+```scheme
+; import all databases (skip system dbs)
+(mysql_import nil nil "root" "secret")
+
+; import one specific database
+(mysql_import nil nil "root" "secret" "myapp")
+
+; import into a differently-named MemCP database
+(mysql_import nil nil "root" "secret" "myapp" "myapp_memcp")
+```
+
+Parameters: `host` (nil → 127.0.0.1), `port` (nil → 3306), `username`, `password`,
+`sourcedb` (nil → all), `targetdb` (nil → sourcedb), `sourcetable` (nil → all), `targettable` (nil → sourcetable).
+
+### Import from PostgreSQL
+
+PostgreSQL has an extra hierarchy level — **database → schema → table** — compared to MySQL.
+The `sourceschema` parameter selects which schema(s) within the database to import.
+All imported schemas land in the same MemCP database (`targetdb`).
+
+```scheme
+; import the public schema of one PostgreSQL database
+(psql_import nil nil "postgres" "secret" "myapp" "public")
+
+; import all non-system schemas of one database
+(psql_import nil nil "postgres" "secret" "myapp" nil "myapp")
+
+; import all databases (each becomes a separate MemCP database)
+(psql_import nil nil "postgres" "secret")
+```
+
+Parameters: `host` (nil → 127.0.0.1), `port` (nil → 5432), `username`, `password`,
+`sourcedb` (nil → all), `sourceschema` (nil → all non-system schemas), `targetdb` (nil → sourcedb),
+`sourcetable` (nil → all), `targettable` (nil → sourcetable).
+
+Both functions print a line for each imported table and return `true` on success.
+
 ## Performance Comparison 📈
 
 | Query | MySQL (SSD) | **MemCP** |
