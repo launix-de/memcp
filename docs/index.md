@@ -12,3 +12,4 @@
 - [Sync](sync.md)
 - [IO](io.md)
 - [Storage](storage.md)
+- [ENGINE Semantics and Durability Guarantees](engine-semantics.md)

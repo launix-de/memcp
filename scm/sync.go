@@ -194,11 +194,6 @@ func SetValues(vals map[string]any, fn func()) {
 	mgr.SetValues(glsVals, fn)
 }
 
-// TxSyncer is implemented by TxContext to allow deferred sync from
-// the MySQL/HTTP frontends without importing the storage package.
-type TxSyncer interface {
-	SyncTouchedShards()
-}
 
 // WithSession executes fn with the given session installed in GLS,
 // so that GetCurrentTx() and other GLS-based lookups use this session.

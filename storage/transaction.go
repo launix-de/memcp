@@ -505,6 +505,60 @@ func CurrentTx() *TxContext {
 
 // initTransaction registers the tx_begin, tx_begin_acid, tx_commit,
 // tx_rollback builtins.
+// WithAutocommit executes fn inside an implicit TxCursorStability transaction
+// if no explicit transaction is already active in session, and commits it
+// afterwards. If an explicit transaction is active (session["transaction"] != nil),
+// fn is executed as-is without any wrapping.
+//
+// On panic inside fn the auto-commit transaction is rolled back and the panic
+// is re-raised so the caller's error handler still fires. This guarantees that
+// every SQL statement executed via the HTTP or MySQL frontend runs inside a
+// transaction, enabling a single fsync per statement instead of one per write.
+func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Scmer {
+	// If an explicit transaction is active, just run fn — nothing to manage.
+	if !sessionFn(scm.NewString("transaction")).IsNil() {
+		return scm.Apply(fn)
+	}
+
+	// Start an implicit auto-commit transaction.
+	tx := NewTxContext(TxCursorStability)
+	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
+
+	var result scm.Scmer
+	var panicVal any
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicVal = r
+			}
+		}()
+		result = scm.Apply(fn)
+	}()
+
+	if panicVal != nil {
+		// Rollback on error, clear session tx, then re-raise.
+		if tx.State == TxActive {
+			tx.Rollback()
+		}
+		sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
+		panic(panicVal)
+	}
+
+	// If the query itself issued a BEGIN, session["transaction"] is now set and
+	// tx_begin already committed the auto-commit tx implicitly — do not commit again.
+	if !sessionFn(scm.NewString("transaction")).IsNil() {
+		return result
+	}
+
+	// Commit the auto-commit transaction (single fsync here).
+	if err := tx.Commit(); err != nil {
+		sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
+		panic("autocommit failed: " + err.Error())
+	}
+	sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
+	return result
+}
+
 func initTransaction(en scm.Env) {
 	scm.DeclareTitle("Transactions")
 
@@ -605,6 +659,25 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "with_autocommit",
+		Desc: "Executes fn inside an implicit TxCursorStability transaction if no explicit " +
+			"transaction is active in session. Commits on success, rolls back on error, " +
+			"and re-raises any panic so the caller's error handler still fires. " +
+			"If an explicit transaction is active (session[\"transaction\"] != nil), " +
+			"fn is executed without any wrapping.",
+		MinParameter: 2,
+		MaxParameter: 2,
+		Params: []scm.DeclarationParameter{
+			{Name: "session", Type: "func", Desc: "the session function holding tx state"},
+			{Name: "fn", Type: "func", Desc: "zero-argument function to execute"},
+		},
+		Returns: "any",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return WithAutocommit(a[0].Func(), a[1])
 		},
 	})
 }
