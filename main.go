@@ -44,9 +44,20 @@ import "github.com/launix-de/memcp/storage"
 
 var IOEnv scm.Env
 
+func getReadfile(path string) func(a ...scm.Scmer) scm.Scmer {
+	return func(a ...scm.Scmer) scm.Scmer {
+		filename := filepath.Join(path, scm.String(a[0]))
+		data, err := os.ReadFile(filename)
+		if err != nil {
+			panic("readfile: " + err.Error())
+		}
+		return scm.NewString(string(data))
+	}
+}
+
 func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
-		filename := path + "/" + scm.String(a[0])
+		filename := filepath.Join(path, scm.String(a[0]))
 		// TODO: filepath.Walk for wildcards
 		wd := filepath.Dir(filename)
 		otherPath := scm.Env{
@@ -57,6 +68,7 @@ func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 				"load":        scm.NewFunc(getLoad(wd)),
 				"stream":      scm.NewFunc(getStream(wd)),
 				"watch":       scm.NewFunc(getWatch(wd)),
+				"readfile":    scm.NewFunc(getReadfile(wd)),
 				"serveStatic": scm.NewFunc(scm.HTTPStaticGetter(wd)),
 			},
 			VarsNumbered: nil,
@@ -73,7 +85,7 @@ func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 
 func getStream(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
-		filename := path + "/" + scm.String(a[0])
+		filename := filepath.Join(path, scm.String(a[0]))
 		stream, err := os.Open(filename)
 		if err != nil {
 			panic(err)
@@ -124,7 +136,7 @@ func getLoad(path string) func(a ...scm.Scmer) scm.Scmer {
 
 func getWatch(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
-		filename := path + "/" + scm.String(a[0])
+		filename := filepath.Join(path, scm.String(a[0]))
 		reread := func() {
 			// read in whole
 			bytes, err := ioutil.ReadFile(filename)
@@ -533,8 +545,30 @@ func main() {
 	storage.LoadDatabases()
 	// scripts initialization
 	if len(imports) == 0 {
-		// load default script
-		IOEnv.Vars["import"].Func()(scm.NewString("lib/main.scm"))
+		// search for lib/main.scm in well-known locations
+		exePath, _ := os.Executable()
+		exeDir := filepath.Dir(exePath)
+		candidates := []string{
+			filepath.Join(wd, "lib/main.scm"),
+			filepath.Join(exeDir, "lib/main.scm"),
+			"/usr/local/lib/memcp/lib/main.scm",
+			"/usr/lib/memcp/lib/main.scm",
+		}
+		found := false
+		for _, candidate := range candidates {
+			if _, err := os.Stat(candidate); err == nil {
+				fmt.Println("Loading " + candidate + " ...")
+				dir := filepath.Dir(candidate)
+				base := filepath.Base(candidate)
+				getImport(dir)(scm.NewString(base))
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "error: could not find lib/main.scm; tried: %v\n", candidates)
+			os.Exit(1)
+		}
 	} else {
 		// load scripts from command line
 		for _, scmfile := range imports {
