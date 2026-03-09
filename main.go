@@ -32,6 +32,7 @@ import "sync"
 import "syscall"
 import "runtime"
 import "io/ioutil"
+import "strings"
 import "os/signal"
 import "crypto/rand"
 import "path/filepath"
@@ -441,6 +442,24 @@ func setupIO(wd string) {
 	})
 }
 
+// readConfigFile reads a config file where each non-blank, non-comment line
+// is one CLI argument (e.g. "--api-port=4321" or "-data /var/lib/memcp").
+func readConfigFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		args = append(args, line)
+	}
+	return args, nil
+}
+
 func main() {
 	fmt.Print(`memcp Copyright (C) 2023 - 2025   Carl-Philip Hänsch
     This program comes with ABSOLUTELY NO WARRANTY;
@@ -454,6 +473,32 @@ func main() {
 
 	// Set thread limit - while loading there is a lot of thread pressure because of waiting for IO
 	debug.SetMaxThreads(10000000)
+
+	// process --config=FILE early: inject its lines as CLI args (before explicit args, so CLI overrides)
+	{
+		remaining := []string{os.Args[0]}
+		for i := 1; i < len(os.Args); i++ {
+			arg := os.Args[i]
+			var configPath string
+			if strings.HasPrefix(arg, "--config=") {
+				configPath = arg[len("--config="):]
+			} else if arg == "--config" && i+1 < len(os.Args) {
+				i++
+				configPath = os.Args[i]
+			} else {
+				remaining = append(remaining, arg)
+				continue
+			}
+			configArgs, err := readConfigFile(configPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: reading config file %s: %v\n", configPath, err)
+				os.Exit(1)
+			}
+			// prepend config args so explicit CLI flags take precedence
+			remaining = append(remaining, configArgs...)
+		}
+		os.Args = remaining
+	}
 
 	// parse command line options
 	var commands arrayFlags
