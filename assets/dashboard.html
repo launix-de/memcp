@@ -500,7 +500,7 @@ var settingsGroups=[
 {group:"Storage",items:[
 {key:"ShardSize",desc:"Max rows per shard before splitting",type:"number"},
 {key:"PartitionMaxDimensions",desc:"Max partition dimensions for table sharding",type:"number"},
-{key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logging","sloppy","memory"]}
+{key:"DefaultEngine",desc:"Default storage engine for new tables",type:"select",options:["safe","logged","sloppy","memory"]}
 ]},
 {group:"Query Optimizer",items:[
 {key:"AnalyzeMinItems",desc:"Min table size for cardinality estimation",type:"number"},
@@ -674,7 +674,7 @@ btn.onclick=function(e){e.stopPropagation();openConsole(dbname,"SELECT * FROM `"
 function renderDetail(data,dbname,tblname){
 /* meta cards */
 var meta=data.meta||{};
-var engines=["safe","logging","sloppy","memory"];
+var engines=["safe","logged","sloppy","memory"];
 var engSel="<select class='inline-select' id='engine-select'>";
 for(var i=0;i<engines.length;i++){
 engSel+="<option value='"+engines[i]+"'"+(meta.engine===engines[i]?" selected":"")+">"+engines[i]+"</option>";
@@ -1021,8 +1021,12 @@ function getHistory(){try{return JSON.parse(localStorage.getItem(HISTORY_KEY))||
 function saveHistory(h){localStorage.setItem(HISTORY_KEY,JSON.stringify(h))}
 function addHistory(syn,db,query){
 var h=getHistory();
+if(h.length>0&&h[0].syntax===syn&&h[0].database===db&&h[0].query===query){
+h[0].time=new Date().toISOString();
+}else{
 h.unshift({time:new Date().toISOString(),syntax:syn,database:db,query:query});
 if(h.length>HISTORY_MAX)h=h.slice(0,HISTORY_MAX);
+}
 saveHistory(h);
 renderHistory();
 }
