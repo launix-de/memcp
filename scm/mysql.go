@@ -221,7 +221,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	if query == "select @@version_comment limit 1" {
 		callback(&sqltypes.Result{
 			Fields: []*querypb.Field{
-				{Name: "@@version_comment", Type: querypb.Type_TEXT},
+				{Name: "@@version_comment", Type: querypb.Type_TEXT, Charset: 45},
 			},
 			Rows: [][]sqltypes.Value{
 				{sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(runtime.GOOS))},
@@ -272,6 +272,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 					newcol := new(querypb.Field)
 					newcol.Name = colname
 					newcol.Type = val.Type()
+					if val.Type() == querypb.Type_TEXT || val.Type() == querypb.Type_VARCHAR || val.Type() == querypb.Type_CHAR || val.Type() == querypb.Type_BLOB {
+						newcol.Charset = 45 // utf8mb4_general_ci
+					}
 					result.Fields = append(result.Fields, newcol)
 					newitem = append(newitem, val)
 				}
