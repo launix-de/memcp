@@ -19,7 +19,11 @@ install: all
 	@if [ -z "$(DESTDIR)" ]; then \
 		systemctl daemon-reload; \
 		systemctl enable memcp; \
-		systemctl start memcp; \
+		if systemctl is-active --quiet memcp; then \
+			systemctl restart memcp; \
+		else \
+			systemctl start memcp; \
+		fi \
 	fi
 
 run:
