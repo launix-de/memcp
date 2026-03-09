@@ -176,6 +176,71 @@ curl -s -u root:admin "http://localhost:4399/sql/DBNAME" -d "SELECT 1"
   ```
 - When adding a `--binary` flag or build tag for alternative code paths, test both variants under the same benchmark harness to compare.
 
+## Data Safety Policy
+
+Preventing user-visible data loss is a first-class requirement. Every code
+change touching storage, DDL, persistence, or cleanup must comply with these
+policies. See also `docs/engine-semantics.md` for the user-facing reference.
+
+### ENGINE Durability Contract
+
+| Engine  | Durability guarantee | Crash recovery | Notes |
+|---------|----------------------|----------------|-------|
+| `safe`  | Full ACID, power-outage safe | WAL fsync'd + replayed at startup | **Default.** Use for all production data. |
+| `logged`| Process-crash safe (no fsync) | WAL written (no fsync) + replayed | Use when fsync latency is unacceptable and hardware power protection is provided. |
+| `sloppy`| Columnar files on disk, **no WAL** | In-memory deltas since last rebuild are **lost** | Use only for reconstructible data or caches. |
+| `memory`| None — RAM only | **All data lost on restart** | Never for data that must survive a restart. |
+
+### ENGINE Transition Rules
+
+- **Any persisted → `memory`**: IRREVERSIBLE. All on-disk column files and WAL
+  are deleted immediately upon `ALTER TABLE … ENGINE=memory`. No undo. Ensure
+  data is either backed up or no longer needed before issuing this statement.
+- **`safe`/`logged` → `sloppy`**: WAL is closed and removed. Deltas since the
+  last rebuild become crash-unsafe going forward.
+- **`memory` → any persisted**: Safe — current in-RAM data is serialised to disk.
+- **`sloppy` → `safe`/`logged`**: Safe — WAL is opened; future writes are durable.
+- **`safe` ↔ `logged`**: No-op at the shard level; both use WAL identically.
+
+### Cleanup Code Contract
+
+- **`shardCleanup()` (LRU eviction)**: MUST NEVER delete persistent data. It
+  only releases in-memory column representations; disk files remain intact.
+  Eviction of Memory-engine shards is unconditionally blocked (data would be
+  permanently lost). Eviction of shards with unflushed deltas is blocked.
+- **`RemoveFromDisk()`**: Called ONLY from `DropTable` (explicit user DDL) or
+  from the `transitionShardEngine` Persisted→Memory path (explicit ALTER TABLE).
+  Protected by `sync.Once` to prevent double-deletion.
+- **`removePersistence()`**: Even more targeted — exclusively called from the
+  Persisted→Memory branch of `transitionShardEngine`. Must NEVER be added to
+  background or eviction code paths.
+- **Trigger callbacks (`AfterDropTable`, etc.)**: MUST NOT delete data in
+  unrelated tables or shards, except through explicitly declared CASCADE foreign
+  key policies configured by the user. Triggers are lifecycle hooks, not GC.
+
+### Serialization Format Stability Contract
+
+See the versioning rules in the `storages` map comment in `storage/storage.go`.
+Summary:
+1. Magic bytes are permanent assignments — never change or reassign.
+2. Old `deserializeXxxVN` helpers must never be deleted; on-disk data must stay
+   readable forever.
+3. When changing binary layout: increment the version constant, add a new helper,
+   leave the old one untouched.
+4. Magic bytes 1, 2, 13, 40 (legacy, no version byte): if their format ever
+   needs to change, register a NEW magic byte; keep the old one as a read-only
+   legacy reader.
+
+### Implementation Checklist for Storage Changes
+
+Before merging any PR that touches storage, persistence, DDL, or cleanup code:
+- [ ] No new code path calls `removePersistence()` or `RemoveFromDisk()` outside
+      the approved call sites above.
+- [ ] No eviction or background cleanup path can reach disk-deletion code.
+- [ ] Any new binary format bump follows the magic/version byte rules.
+- [ ] ENGINE semantics table above remains accurate (update if behaviour changes).
+- [ ] `AfterDropTable` / trigger callbacks reviewed for unintended side-effects.
+
 ## MySQL ↔ MemCP Parallel Run Plan
 - Goal: operate MemCP alongside MySQL for months with minimal risk, validating correctness and performance before cutover.
 

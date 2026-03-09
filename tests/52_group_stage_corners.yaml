@@ -56,7 +56,6 @@ test_cases:
   # 2. LIMIT 1 + ORDER BY inside FROM subquery (top-1 per group pattern)
   # =================================================================
   - name: "Derived table with ORDER BY and LIMIT 1"
-    noncritical: true
     sql: |
       SELECT t.customer, t.amount
       FROM (SELECT customer, amount FROM gs_orders ORDER BY amount DESC LIMIT 1) t
@@ -195,7 +194,6 @@ test_cases:
   # 9. Aggregated subquery in JOIN
   # =================================================================
   - name: "JOIN with aggregated derived table"
-    noncritical: true
     sql: |
       SELECT o.customer, o.amount, t.total_qty
       FROM gs_orders o
@@ -284,7 +282,6 @@ test_cases:
   # 13. Subquery with LIMIT 1 in WHERE (scalar subselect)
   # =================================================================
   - name: "WHERE with LIMIT 1 subquery"
-    noncritical: true
     sql: |
       SELECT customer, amount
       FROM gs_orders

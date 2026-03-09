@@ -45,6 +45,59 @@ type column struct {
 	sanitizer         func(scm.Scmer) scm.Scmer
 	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
 }
+// PersistencyMode controls the durability and persistence behaviour of a table.
+//
+// DATA SAFETY CONTRACT — each mode's guarantees and risks:
+//
+//	Safe (default):
+//	  Full durability including power-outage protection. Every committed write
+//	  is recorded in a WAL and the log is fsync'd to disk at transaction end.
+//	  On the next startup the WAL is replayed; no committed write is ever lost,
+//	  even if power is cut mid-write.
+//	  Use for all production tables that must survive crashes AND power outages.
+//
+//	Logged:
+//	  Process-crash durability. The WAL is written but NOT fsync'd — the OS
+//	  page cache may buffer the write. Data is safe against a process crash or
+//	  clean shutdown, but a sudden power loss before the OS flushes the buffer
+//	  can lose the last uncommitted WAL tail.
+//	  Use when crash safety matters but the extra fsync latency of Safe is
+//	  unacceptable and hardware power protection (UPS, battery-backed RAID) is
+//	  provided externally.
+//
+//	Sloppy:
+//	  Data is stored on disk as compressed columnar files, but there is NO
+//	  write-ahead log. In-memory deltas (inserts/deletes since the last
+//	  rebuild/flush) are LOST on unclean shutdown. Only the data that has
+//	  been flushed via rebuild() to the main columnar storage is durable.
+//	  Use only for data that can be reconstructed or where some loss is
+//	  acceptable (e.g. caches, staging tables).
+//
+//	Memory:
+//	  Non-persistent. ALL data is held in RAM only and is LOST on any
+//	  shutdown or restart. This is intentional and by design.
+//	  ⚠️  ALTER TABLE … ENGINE=memory on a persisted table PERMANENTLY
+//	  DELETES all on-disk files with no possibility of recovery.
+//	  Never use for production data that must survive a restart.
+//
+// ENGINE TRANSITION DATA SAFETY:
+//   - persisted (Safe/Logged/Sloppy) → Memory:  IRREVERSIBLE disk deletion.
+//     All column files and logs are removed immediately. Ensure data is
+//     backed up or no longer needed before issuing ALTER TABLE ENGINE=memory.
+//   - Safe/Logged → Sloppy:  WAL is closed and deleted. Future writes lose
+//     crash/power-outage safety going forward.
+//   - Memory → persisted:  Safe — current in-RAM data is serialised to disk.
+//   - Sloppy → Safe:  WAL opened with fsync; future writes are fully durable.
+//   - Sloppy → Logged:  WAL opened without fsync; future writes survive crashes.
+//
+// CLEANUP RULES (must not be violated):
+//   - shardCleanup() (LRU eviction) MUST NEVER delete persistent data.
+//     It only releases in-memory representations; disk files remain intact.
+//   - RemoveFromDisk() is ONLY called from DropTable (explicit user DDL) or
+//     from transitionShardEngine when moving to Memory (explicit ALTER TABLE).
+//   - Trigger callbacks registered via AfterDropTable MUST NOT delete data
+//     in unrelated tables, except through explicitly declared CASCADE foreign
+//     key policies.
 type PersistencyMode uint8
 
 const (

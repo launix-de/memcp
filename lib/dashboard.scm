@@ -356,13 +356,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_401 res)
 					(begin
 						((res "header") "Content-Type" "text/html; charset=utf-8")
-						((res "print") (readfile "assets/dashboard.html"))
+						((res "print") (readfile "../assets/dashboard.html"))
 					)
 				)
 			)
 			"/dashboard/logo.svg" (begin
 				((res "header") "Content-Type" "image/svg+xml")
-				((res "print") (readfile "assets/memcp-logo.svg"))
+				((res "print") (readfile "../assets/memcp-logo.svg"))
 			)
 			"/ws/dashboard" (begin
 				(if (dashboard_check_admin req)

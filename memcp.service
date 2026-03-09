@@ -1,0 +1,12 @@
+[Unit]
+Description=memcp smart clusterable distributed database
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/memcp --no-repl -data /var/lib/memcp
+Restart=on-failure
+StateDirectory=memcp
+
+[Install]
+WantedBy=multi-user.target

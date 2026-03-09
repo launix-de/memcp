@@ -1597,6 +1597,12 @@ func (t *storageShard) RemoveFromDisk() {
 // sync.Once and is intended for shard disposal), this method allows the shard
 // to continue living in RAM after its persistence has been stripped.
 // Caller must hold s.mu.Lock().
+//
+// ⚠️  DATA SAFETY: This operation is IRREVERSIBLE and results in PERMANENT DATA
+// LOSS for the on-disk representation of this shard. It must only be called
+// from transitionShardEngine when the caller has explicitly requested
+// ENGINE=memory via ALTER TABLE. Never call this from background cleanup,
+// eviction, or any path triggered without explicit user intent.
 func (s *storageShard) removePersistence() {
 	if s.logfile != nil {
 		s.logfile.Close()
@@ -1611,13 +1617,26 @@ func (s *storageShard) removePersistence() {
 // transitionShardEngine handles the per-shard work when ALTER TABLE ENGINE=
 // changes the persistency mode. Caller must hold s.mu.Lock() and the table's
 // PersistencyMode must already be set to newMode.
+//
+// ⚠️  DATA SAFETY: The Persisted→Memory transition is IRREVERSIBLE. All
+// column files and WAL for this shard are permanently deleted. This path is
+// only reached from an explicit ALTER TABLE … ENGINE=memory statement.
+// Do NOT add calls to this function from background or cleanup code paths.
+//
+// Transition safety matrix:
+//   - Safe/Logged/Sloppy → Memory : permanent disk deletion (see removePersistence)
+//   - Memory → Safe/Logged/Sloppy : safe; in-RAM data is serialised to disk
+//   - Safe/Logged → Sloppy        : WAL removed; future writes lose crash safety
+//   - Sloppy → Safe/Logged        : WAL opened; future writes become durable
+//   - Safe ↔ Logged               : no-op at shard level
 func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 	oldPersisted := oldMode != Memory && oldMode != Cache
 	newPersisted := newMode != Memory && newMode != Cache
 
 	switch {
 	case oldPersisted && !newPersisted:
-		// Persisted → Memory/Cache: remove disk files, deregister from cache
+		// Persisted → Memory/Cache: IRREVERSIBLE — permanently delete on-disk files.
+		// Only reached via explicit ALTER TABLE ENGINE=memory/cache.
 		GlobalCache.Remove(s)
 		s.removePersistence()
 		if newMode == Cache && !strings.HasPrefix(s.t.Name, ".") {

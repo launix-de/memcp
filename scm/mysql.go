@@ -301,19 +301,6 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	if myerr != nil {
 		return myerr
 	}
-	// Post-query deferred sync: if no explicit transaction is active,
-	// sync touched shards now (autocommit behavior).
-	txVal := sessionFunc(NewString("__memcp_tx"))
-	if txVal.IsNil() {
-		// No transaction → sync touched shards from GLS tx if present
-	} else if txObj, ok := txVal.Any().(TxSyncer); ok {
-		// If inside a transaction, only sync if the transaction is
-		// not explicit (autocommit). Check by looking at session["transaction"].
-		txFlag := sessionFunc(NewString("transaction"))
-		if txFlag.IsNil() {
-			txObj.SyncTouchedShards()
-		}
-	}
 	// Retrieve last_insert_id from the session (set by INSERT with AUTO_INCREMENT).
 	// TODO: replace with a dedicated callback parameter to m.querycallback so the
 	// Scheme side has full control over returned insert IDs without hardcoded fields.

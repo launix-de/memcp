@@ -1057,6 +1057,7 @@ func Init(en scm.Env) {
 					Timing:   timing,
 					IsSystem: true,
 					Priority: 100,
+					Async:    true, // fire-and-forget: runs in background goroutine to avoid blocking source DML
 					Func: buildFKProc(scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("droptable"),
 						scm.NewString(pjSchema),
@@ -1494,7 +1495,7 @@ func Init(en scm.Env) {
 				engine := "safe"
 				switch t.PersistencyMode {
 				case Logged:
-					engine = "logging"
+					engine = "logged"
 				case Sloppy:
 					engine = "sloppy"
 				case Memory:
