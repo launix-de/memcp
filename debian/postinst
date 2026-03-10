@@ -3,6 +3,13 @@ set -e
 
 CONFIG=/etc/memcp/memcp.conf
 
+create_user() {
+	if ! getent passwd memcp >/dev/null 2>&1; then
+		adduser --system --group --no-create-home --home /var/lib/memcp \
+			--gecos "memcp database daemon" memcp
+	fi
+}
+
 configure() {
 	# Load existing values or defaults
 	DATA=/var/lib/memcp
@@ -97,7 +104,8 @@ EOF
 		printf "Initializing database...\n"
 		INIT_PORT=14321
 		mkdir -p "$DATA"
-		/usr/bin/memcp -data "$DATA" --root-password="$ROOT_PASSWORD" \
+		chown memcp:memcp "$DATA"
+		runuser -u memcp -- /usr/bin/memcp -data "$DATA" --root-password="$ROOT_PASSWORD" \
 			--no-repl --api-port=$INIT_PORT --disable-mysql \
 			</dev/null >/tmp/memcp-init.log 2>&1 &
 		INIT_PID=$!
@@ -117,6 +125,7 @@ EOF
 
 case "$1" in
 	configure)
+		create_user
 		configure
 		systemctl daemon-reload
 		systemctl enable memcp

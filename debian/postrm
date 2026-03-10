@@ -11,6 +11,12 @@ case "$1" in
 	purge)
 		rm -rf /var/lib/memcp
 		rm -rf /etc/memcp
+		if getent passwd memcp >/dev/null 2>&1; then
+			deluser --quiet memcp 2>/dev/null || true
+		fi
+		if getent group memcp >/dev/null 2>&1; then
+			delgroup --quiet memcp 2>/dev/null || true
+		fi
 		;;
 esac
 
