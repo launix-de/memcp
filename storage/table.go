@@ -699,12 +699,18 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	cp := &c
 	t.Columns = append(t.Columns, cp)
 	for _, s := range t.Shards {
+		if s == nil {
+			continue
+		}
 		// mutate shard column map under shard lock to avoid races with readers
 		s.mu.Lock()
 		s.columns[name] = new(StorageSparse)
 		s.mu.Unlock()
 	}
 	for _, s := range t.PShards {
+		if s == nil {
+			continue
+		}
 		// mutate shard column map under shard lock to avoid races with readers
 		s.mu.Lock()
 		s.columns[name] = new(StorageSparse)
