@@ -18,9 +18,10 @@ install: all
 	install -m 644 memcp.service $(DESTDIR)$(SYSTEMD_DIR)/memcp.service
 	@if [ -n "$(DESTDIR)" ]; then \
 		install -d $(DESTDIR)/etc/memcp; \
-		install -m 600 debian/memcp.conf.default $(DESTDIR)/etc/memcp/memcp.conf; \
+		install -m 640 debian/memcp.conf.default $(DESTDIR)/etc/memcp/memcp.conf; \
+		chgrp memcp $(DESTDIR)/etc/memcp/memcp.conf 2>/dev/null || true; \
 	else \
-		[ -f /etc/memcp/memcp.conf ] || (install -d /etc/memcp && install -m 600 debian/memcp.conf.default /etc/memcp/memcp.conf); \
+		[ -f /etc/memcp/memcp.conf ] || (install -d /etc/memcp && install -m 640 debian/memcp.conf.default /etc/memcp/memcp.conf && chgrp memcp /etc/memcp/memcp.conf 2>/dev/null || true); \
 		systemctl daemon-reload; \
 		systemctl enable memcp; \
 		if systemctl is-active --quiet memcp; then \
