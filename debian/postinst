@@ -60,7 +60,7 @@ configure() {
 			fi
 		fi
 
-		printf "Admin password: "
+		printf "root password: "
 		stty -echo 2>/dev/null || true
 		read ans
 		stty echo 2>/dev/null || true
