@@ -106,6 +106,13 @@ if the user is not allowed to access this property, the function will throw an e
 	) true)
 )) (lambda (e) true))
 
+/* migration: ensure root always has admin=true */
+(try (lambda () (begin
+	(if (has? (show "system") "user")
+		(scan "system" "user" '("username") (lambda (username) (equal? username "root")) '("$update") (lambda ($update) ($update '("admin" true))))
+		true)
+)) (lambda (e) true))
+
 /* ensure unique username constraint to avoid duplicates */
 (try (lambda () (begin
 	(if (has? (show "system") "user")

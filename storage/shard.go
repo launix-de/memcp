@@ -24,10 +24,10 @@ import "time"
 import "strings"
 import "reflect"
 import "runtime"
-import "strconv"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
+import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 
@@ -146,7 +146,7 @@ func (u *storageShard) load(t *table) {
 			numEntriesRestored++
 			switch l := logentry.(type) {
 			case LogEntryDelete:
-				u.deletions.Set(uint32(l.idx), true) // mark deletion
+				u.deletions.Set(uint(l.idx), true) // mark deletion
 			case LogEntryInsert:
 				u.insertDatasetFromLog(l.cols, l.values)
 			default:
@@ -291,7 +291,31 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 		}
 		return u.ensureColumnLoaded(colName, true)
 	}
-	return u.getColumnStorageOrPanic(colName)
+	// alreadyLocked=false: caller guarantees ownsWrite=false — skip hasWriteOwner().
+	if tx := CurrentTx(); tx != nil && tx.HasShardWrite(u) {
+		return u.getColumnStorageOrPanicEx(colName, true)
+	}
+	u.mu.RLock()
+	cs, present := u.columns[colName]
+	u.mu.RUnlock()
+	if !present {
+		for _, c := range u.t.Columns {
+			if c.Name == colName {
+				u.mu.Lock()
+				if _, present2 := u.columns[colName]; !present2 {
+					u.columns[colName] = new(StorageSparse)
+				}
+				cs2 := u.columns[colName]
+				u.mu.Unlock()
+				return cs2
+			}
+		}
+		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+	}
+	if cs != nil {
+		return cs
+	}
+	return u.ensureColumnLoaded(colName, false)
 }
 
 // ensureMainCount guarantees main_count is initialized by loading one column if needed.
@@ -464,18 +488,11 @@ func (t *storageShard) Count() uint32 {
 }
 
 func currentGoroutineID() uint64 {
-	var b [64]byte
-	n := runtime.Stack(b[:], false)
-	line := string(b[:n])
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
+	id, ok := gls.GetGoroutineId()
+	if !ok {
 		return 0
 	}
-	id, err := strconv.ParseUint(fields[1], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return id
+	return uint64(id)
 }
 
 func (t *storageShard) enterWriteOwner() {
@@ -546,7 +563,7 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32) (uint
 	limit := t.main_count + uint32(len(t.inserts))
 	for recid := limit; recid > 0; recid-- {
 		candidate := recid - 1
-		if candidate == staleRecid || t.deletions.Get(candidate) {
+		if candidate == staleRecid || t.deletions.Get(uint(candidate)) {
 			continue
 		}
 		match := true
@@ -601,7 +618,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				if (func() bool {
 					tx := CurrentTx()
 					return tx == nil || tx.Mode != TxACID
-				})() && t.deletions.Get(targetIdx) {
+				})() && t.deletions.Get(uint(targetIdx)) {
 					followed := false
 					for attempt := 0; attempt < 256; attempt++ {
 						if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(targetIdx); ok {
@@ -779,15 +796,15 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				// unique constraint checking
 				if uniqueCheckNeeded {
 					payloadCols, payloadRow := buildPayload()
-					wasDeletedBefore := t.deletions.Get(targetIdx)
-					t.deletions.Set(targetIdx, true) // mark as deleted temporarily for unique check
+					wasDeletedBefore := t.deletions.Get(uint(targetIdx))
+					t.deletions.Set(uint(targetIdx), true) // mark as deleted temporarily for unique check
 					t.mu.Unlock()                    // release write lock, so the scan can be performed
 					t.t.ProcessUniqueCollision(payloadCols, [][]scm.Scmer{payloadRow}, false, func(values [][]scm.Scmer) {
 						t.mu.Lock() // start write lock
 					}, nil, func(errmsg string, data []scm.Scmer) {
 						t.mu.Lock() // start write lock
 						if !wasDeletedBefore {
-							t.deletions.Set(targetIdx, false) // restore only if we changed visibility here
+							t.deletions.Set(uint(targetIdx), false) // restore only if we changed visibility here
 						}
 						panic("Unique key constraint violated in table " + t.t.Name + ": " + errmsg)
 					}, 0)
@@ -796,7 +813,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					// non-ACID mode. This avoids transient "row disappears" gaps that
 					// make concurrent UPDATE scans miss rows.
 					if acidMode {
-						t.deletions.Set(targetIdx, true) // staged delete in ACID overlay flow
+						t.deletions.Set(uint(targetIdx), true) // staged delete in ACID overlay flow
 					}
 				}
 
@@ -806,9 +823,9 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				if !acidMode && !uniqueCheckNeeded {
 					// Atomic visibility switch under shard write lock:
 					// make new row hidden first, then delete old, then publish new.
-					t.deletions.Set(newRecid, true)
-					t.deletions.Set(targetIdx, true)
-					t.deletions.Set(newRecid, false)
+					t.deletions.Set(uint(newRecid), true)
+					t.deletions.Set(uint(targetIdx), true)
+					t.deletions.Set(uint(newRecid), false)
 					// Maintain the non-ACID invariant: at most one visible row per
 					// PRIMARY key. Under heavy concurrent UPDATE chains, stale targets
 					// can leave older versions visible; collapse them here.
@@ -830,7 +847,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 						}
 						limit := t.main_count + uint32(len(t.inserts))
 						for recid := uint32(0); recid < limit; recid++ {
-							if recid == newRecid || t.deletions.Get(recid) {
+							if recid == newRecid || t.deletions.Get(uint(recid)) {
 								continue
 							}
 							match := true
@@ -841,7 +858,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 								}
 							}
 							if match {
-								t.deletions.Set(recid, true)
+								t.deletions.Set(uint(recid), true)
 							}
 						}
 					}
@@ -854,22 +871,20 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 
 				if currentTx != nil && currentTx.Mode == TxACID {
 					// Check if old row was staged by this tx (in UndeleteMask)
-					currentTx.mu.Lock()
-					um := currentTx.UndeleteMask[t]
-					currentTx.mu.Unlock()
-					wasStaged := um != nil && um.Has(targetIdx)
+					st := currentTx.getShardTx(t)
+					wasStaged := st != nil && st.UndeleteMask.Get(uint(targetIdx))
 					if wasStaged {
 						// Row was staged by this tx → remove from UndeleteMask.
 						// Keep shard.deletions[targetIdx]=true (already globally hidden).
 						// Don't add to DeleteMask (not a pre-existing row).
-						um.Bitmap.Set(targetIdx, false)
+						st.UndeleteMask.Set(uint(targetIdx), false)
 					} else {
 						// Pre-existing committed row → undo temporary global deletion
-						t.deletions.Set(targetIdx, false)
+						t.deletions.Set(uint(targetIdx), false)
 						currentTx.AddToDeleteMask(t, targetIdx)
 					}
 					// Stage new version: hide globally, add to undelete mask
-					t.deletions.Set(uint32(newRecid), true)
+					t.deletions.Set(uint(newRecid), true)
 					currentTx.AddToUndeleteMask(t, newRecid)
 					// Only log the insert (delete applied at commit)
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
@@ -888,15 +903,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				t.t.dualWriteInsert(dualWriteCols, dualWriteRow)
 			}
 			// transaction bookkeeping + deferred sync
+			// (shard is already registered via OpenMapReducer — no per-row RegisterTouchedShard)
 			if result {
 				if tx := CurrentTx(); tx != nil {
 					switch tx.Mode {
-					case TxACID:
-						tx.RegisterTouchedShard(t)
 					case TxCursorStability:
 						tx.LogDelete(t, targetIdx)
 						tx.LogInsert(t, newRecid)
-						tx.RegisterTouchedShard(t)
 					}
 				} else if t.t.PersistencyMode == Safe && t.logfile != nil {
 					defer t.logfile.Sync()
@@ -961,19 +974,17 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 
 			if tx := CurrentTx(); tx != nil && tx.Mode == TxACID {
 				// Check if row was staged by this tx
-				tx.mu.Lock()
-				um := tx.UndeleteMask[t]
-				tx.mu.Unlock()
-				wasStaged := um != nil && um.Has(idx)
+				st2 := tx.getShardTx(t)
+				wasStaged := st2 != nil && st2.UndeleteMask.Get(uint(idx))
 				if wasStaged {
 					// Row was staged by this tx → remove from UndeleteMask.
 					// Keep shard.deletions[idx]=true (already globally hidden).
-					um.Bitmap.Set(uint32(idx), false)
+					st2.UndeleteMask.Set(uint(idx), false)
 				} else {
 					// Pre-existing committed row → add to delete mask
 					tx.AddToDeleteMask(t, idx)
 				}
-				tx.RegisterTouchedShard(t)
+				// shard already registered via OpenMapReducer
 				result = true
 			} else {
 				func() {
@@ -982,15 +993,14 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 						defer t.mu.Unlock() // write lock
 					}
 
-					t.deletions.Set(uint32(idx), true) // mark as deleted
+					t.deletions.Set(uint(idx), true) // mark as deleted
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 						t.logfile.Write(LogEntryDelete{idx})
 					}
 					result = true
 				}()
-				// deferred sync
+				// deferred sync (shard already registered via OpenMapReducer)
 				if tx != nil {
-					tx.RegisterTouchedShard(t)
 					tx.LogDelete(t, idx)
 				} else if t.t.PersistencyMode == Safe && t.logfile != nil {
 					defer t.logfile.Sync()
@@ -1011,7 +1021,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 		if result && t.next != nil {
 			// also change in next storage
 			// idx translation (subtract the amount of deletions from that idx)
-			idx2 := targetIdx - uint32(t.deletions.CountUntil(targetIdx))
+			idx2 := targetIdx - uint32(t.deletions.CountUntil(uint(targetIdx)))
 			t.next.UpdateFunction(idx2, false, false)(a...) // propagate to succeeding shard
 		}
 		return scm.NewBool(result) // maybe instead return UpdateFunction for newly inserted item??
@@ -1051,6 +1061,10 @@ type ShardMapReducer struct {
 	mainCount       uint32
 	hasUpdateCol    bool
 	hasIncrementCol bool
+	// shardWriteLocked is true when the caller already holds shard.mu (write lock)
+	// and registered write ownership before opening this mapper. When true,
+	// processMainBlock/processDeltaBlock must NOT try to re-acquire the lock.
+	shardWriteLocked bool
 }
 
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
@@ -1058,21 +1072,29 @@ type ShardMapReducer struct {
 // mapFn and reduceFn are stored as Scmer for future network serialization;
 // OptimizeProcToSerialFunction is called here (TODO: replace with JIT compilation).
 func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer) *ShardMapReducer {
+	return t.openMapReducerEx(cols, mapFn, reduceFn, false)
+}
+
+// openMapReducerEx is the implementation of OpenMapReducer.
+// alreadyLocked=true skips the hasWriteOwner() check per column (caller already holds
+// the write lock or has confirmed ownsWrite=false via skipShardReadLock).
+func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool) *ShardMapReducer {
 	mr := &ShardMapReducer{
-		shard:           t,
-		mainCols:        make([]ColumnStorage, len(cols)),
-		colNames:        cols,
-		isUpdate:        make([]bool, len(cols)),
-		isInvalidate:    make([]bool, len(cols)),
-		invalidateProxy: make([]*StorageComputeProxy, len(cols)),
-		isIncrement:     make([]bool, len(cols)),
-		incrementProxy:  make([]*StorageComputeProxy, len(cols)),
-		args:            make([]scm.Scmer, len(cols)),
-		mapFn:           scm.OptimizeProcToSerialFunction(mapFn),
-		reduceFn:        scm.OptimizeProcToSerialFunction(reduceFn),
-		mapScmer:        mapFn,
-		reduceScmer:     reduceFn,
-		mainCount:       t.main_count,
+		shard:            t,
+		mainCols:         make([]ColumnStorage, len(cols)),
+		colNames:         cols,
+		isUpdate:         make([]bool, len(cols)),
+		isInvalidate:     make([]bool, len(cols)),
+		invalidateProxy:  make([]*StorageComputeProxy, len(cols)),
+		isIncrement:      make([]bool, len(cols)),
+		incrementProxy:   make([]*StorageComputeProxy, len(cols)),
+		args:             make([]scm.Scmer, len(cols)),
+		mapFn:            scm.OptimizeProcToSerialFunction(mapFn),
+		reduceFn:         scm.OptimizeProcToSerialFunction(reduceFn),
+		mapScmer:         mapFn,
+		reduceScmer:      reduceFn,
+		mainCount:        t.main_count,
+		shardWriteLocked: alreadyLocked,
 	}
 	for i, col := range cols {
 		if col == "$update" {
@@ -1084,7 +1106,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		} else if len(col) > 12 && col[:12] == "$invalidate:" {
 			mr.isInvalidate[i] = true
 			cacheColName := col[12:]
-			cs := t.getColumnStorageOrPanic(cacheColName)
+			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.invalidateProxy[i] = proxy
 			}
@@ -1092,12 +1114,18 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			mr.isIncrement[i] = true
 			mr.hasIncrementCol = true
 			cacheColName := col[11:]
-			cs := t.getColumnStorageOrPanic(cacheColName)
+			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.incrementProxy[i] = proxy
 			}
 		} else {
-			mr.mainCols[i] = t.getColumnStorageOrPanic(col)
+			mr.mainCols[i] = t.getColumnStorageOrPanicEx(col, alreadyLocked)
+		}
+	}
+	// Register shard for deferred fsync once, not per row.
+	if mr.hasUpdateCol {
+		if tx := CurrentTx(); tx != nil {
+			tx.RegisterTouchedShard(t)
 		}
 	}
 	return mr
@@ -1130,24 +1158,28 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32) scm.Scmer {
 // processMainBlock is a tight loop over main-storage records – no branching
 // on main vs delta, direct ColumnStorage.GetValue calls. JIT candidate.
 func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
+	// Hoist write-lock acquisition out of the per-row loop.
+	// shardWriteLocked is set by openMapReducerEx when the caller (scan.go) already
+	// holds shard.mu; in that case we must NOT re-acquire it. For the rare case
+	// where a mapper is opened without the shard being locked (e.g. NEW. columns
+	// outside a mutation scan), acquire once for the whole batch instead of per-row.
+	if (m.hasUpdateCol || m.hasIncrementCol) && !m.shardWriteLocked {
+		currentTx := CurrentTx()
+		m.shard.mu.Lock()
+		defer m.shard.mu.Unlock()
+		m.shard.enterWriteOwner()
+		defer m.shard.exitWriteOwner()
+		if currentTx != nil {
+			currentTx.EnterShardWrite(m.shard)
+			defer currentTx.ExitShardWrite(m.shard)
+		}
+	}
 	for _, id := range recids {
 		func() {
 			effectiveID := id
 			if m.hasUpdateCol || m.hasIncrementCol {
-				currentTx := CurrentTx()
-				holdsWrite := m.shard.hasWriteOwner()
-				if !holdsWrite {
-					m.shard.mu.Lock()
-					defer m.shard.mu.Unlock()
-					m.shard.enterWriteOwner()
-					defer m.shard.exitWriteOwner()
-					if currentTx != nil {
-						currentTx.EnterShardWrite(m.shard)
-						defer currentTx.ExitShardWrite(m.shard)
-					}
-				}
 				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
-					if m.shard.deletions.Get(effectiveID) {
+					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
 							return
@@ -1197,24 +1229,24 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 
 // processDeltaBlock handles delta-storage records via getDelta. JIT candidate.
 func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
+	// Same hoisting as processMainBlock (see comment there).
+	if (m.hasUpdateCol || m.hasIncrementCol) && !m.shardWriteLocked {
+		currentTx := CurrentTx()
+		m.shard.mu.Lock()
+		defer m.shard.mu.Unlock()
+		m.shard.enterWriteOwner()
+		defer m.shard.exitWriteOwner()
+		if currentTx != nil {
+			currentTx.EnterShardWrite(m.shard)
+			defer currentTx.ExitShardWrite(m.shard)
+		}
+	}
 	for _, id := range recids {
 		func() {
 			effectiveID := id
 			if m.hasUpdateCol || m.hasIncrementCol {
-				currentTx := CurrentTx()
-				holdsWrite := m.shard.hasWriteOwner()
-				if !holdsWrite {
-					m.shard.mu.Lock()
-					defer m.shard.mu.Unlock()
-					m.shard.enterWriteOwner()
-					defer m.shard.exitWriteOwner()
-					if currentTx != nil {
-						currentTx.EnterShardWrite(m.shard)
-						defer currentTx.ExitShardWrite(m.shard)
-					}
-				}
 				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
-					if m.shard.deletions.Get(effectiveID) {
+					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
 						if !ok {
 							return
@@ -1320,7 +1352,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 			// ACID: hide rows globally, add to undelete mask so this tx can see them
 			for i := range values {
 				recid := firstNewRecid + uint32(i)
-				t.deletions.Set(uint32(recid), true)
+				t.deletions.Set(uint(recid), true)
 				tx.AddToUndeleteMask(t, recid)
 			}
 			tx.RegisterTouchedShard(t)
@@ -1546,7 +1578,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 					present = true
 					return false
 				}
-			} else if !t.deletions.Get(uint32(idx)) {
+			} else if !t.deletions.Get(uint(idx)) {
 				result = idx
 				present = true
 				return false
@@ -1833,12 +1865,12 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			}
 			sortPerm = make([]uint32, 0, int(t.main_count)+maxInsertIndex)
 			for i := uint32(0); i < t.main_count; i++ {
-				if !deletions.Get(i) {
+				if !deletions.Get(uint(i)) {
 					sortPerm = append(sortPerm, i)
 				}
 			}
 			for i := 0; i < maxInsertIndex; i++ {
-				if !deletions.Get(t.main_count + uint32(i)) {
+				if !deletions.Get(uint(t.main_count) + uint(i)) {
 					sortPerm = append(sortPerm, t.main_count+uint32(i))
 				}
 			}
@@ -1897,7 +1929,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				} else {
 					// scan main
 					for idx := uint32(0); idx < t.main_count; idx++ {
-						if deletions.Get(uint32(idx)) {
+						if deletions.Get(uint(idx)) {
 							continue
 						}
 						newcol.scan(i, reader.GetValue(idx))
@@ -1905,7 +1937,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					}
 					// scan delta
 					for idx := 0; idx < maxInsertIndex; idx++ {
-						if deletions.Get(uint32(t.main_count + uint32(idx))) {
+						if deletions.Get(uint(t.main_count + uint32(idx))) {
 							continue
 						}
 						newcol.scan(i, t.getDelta(idx, col))
@@ -1944,7 +1976,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			} else {
 				// build main
 				for idx := uint32(0); idx < t.main_count; idx++ {
-					if deletions.Get(uint32(idx)) {
+					if deletions.Get(uint(idx)) {
 						continue
 					}
 					newcol.build(i, reader.GetValue(idx))
@@ -1952,7 +1984,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 				// build delta
 				for idx := 0; idx < maxInsertIndex; idx++ {
-					if deletions.Get(uint32(t.main_count + uint32(idx))) {
+					if deletions.Get(uint(t.main_count + uint32(idx))) {
 						continue
 					}
 					newcol.build(i, t.getDelta(idx, col))
