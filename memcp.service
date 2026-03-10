@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/memcp --no-repl -data /var/lib/memcp
+RuntimeDirectory=memcp
+ExecStart=/usr/bin/memcp --no-repl --config=/etc/memcp/memcp.conf
 Restart=on-failure
-StateDirectory=memcp
 
 [Install]
 WantedBy=multi-user.target

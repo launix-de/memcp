@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install packaging tools
+        run: sudo apt-get install -y rpm
+
+      - name: Build
+        run: go build -o memcp
+
+      - name: Build .deb
+        run: make memcp.deb
+
+      - name: Build .rpm
+        run: make memcp.rpm
+
+      - name: Create GitHub release
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "memcp ${{ github.ref_name }}" \
+            --generate-notes \
+            memcp \
+            memcp.deb \
+            memcp.rpm
+        env:
+          GH_TOKEN: ${{ github.token }}

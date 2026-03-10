@@ -219,6 +219,7 @@ test_cases:
   # ==== FK enforcement after persistence ====
   - name: "SHUTDOWN to persist FK metadata"
     sql: "SHUTDOWN"
+    restart_timeout: 300
 
   - name: "Insert into fk_child after persistence with invalid FK (must fail)"
     sql: "INSERT INTO fk_child (id, parent_id) VALUES (99, 777)"

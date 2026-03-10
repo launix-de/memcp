@@ -16,7 +16,11 @@ install: all
 	install -m 644 assets/* $(DESTDIR)$(PREFIX)/lib/memcp/assets/
 	install -d $(DESTDIR)$(SYSTEMD_DIR)
 	install -m 644 memcp.service $(DESTDIR)$(SYSTEMD_DIR)/memcp.service
-	@if [ -z "$(DESTDIR)" ]; then \
+	@if [ -n "$(DESTDIR)" ]; then \
+		install -d $(DESTDIR)/etc/memcp; \
+		install -m 600 debian/memcp.conf.default $(DESTDIR)/etc/memcp/memcp.conf; \
+	else \
+		[ -f /etc/memcp/memcp.conf ] || (install -d /etc/memcp && install -m 600 debian/memcp.conf.default /etc/memcp/memcp.conf); \
 		systemctl daemon-reload; \
 		systemctl enable memcp; \
 		if systemctl is-active --quiet memcp; then \
@@ -49,11 +53,25 @@ memcp.deb: all
 	$(MAKE) install DESTDIR=$(DEB_DIR) PREFIX=/usr SYSTEMD_DIR=/usr/lib/systemd/system
 	printf "Package: memcp\nVersion: $(DEB_VERSION)\nArchitecture: $(DEB_ARCH)\nMaintainer: Carl-Philip Hänsch <hänsch@launix.de>\nDescription: memcp smart clusterable distributed database\n" \
 		> $(DEB_DIR)/DEBIAN/control
-	printf '#!/bin/sh\nsystemctl daemon-reload\nsystemctl enable memcp\nsystemctl start memcp\n' \
-		> $(DEB_DIR)/DEBIAN/postinst
-	chmod 755 $(DEB_DIR)/DEBIAN/postinst
+	install -m 755 debian/postinst $(DEB_DIR)/DEBIAN/postinst
+	install -m 755 debian/prerm    $(DEB_DIR)/DEBIAN/prerm
+	install -m 755 debian/postrm   $(DEB_DIR)/DEBIAN/postrm
+	echo "/etc/memcp/memcp.conf" > $(DEB_DIR)/DEBIAN/conffiles
 	dpkg-deb --build --root-owner-group $(DEB_DIR) memcp.deb
 	rm -rf $(DEB_DIR)
+
+RPM_VERSION ?= $(DEB_VERSION)
+RPM_ARCH    ?= $(shell uname -m)
+
+memcp.rpm: all
+	mkdir -p .rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+	rpmbuild -bb memcp.spec \
+		--define "_topdir $(PWD)/.rpmbuild" \
+		--define "_version $(RPM_VERSION)" \
+		--define "_arch $(RPM_ARCH)" \
+		--define "_srcdir $(PWD)"
+	find .rpmbuild/RPMS/$(RPM_ARCH)/ -name 'memcp-*.rpm' -exec cp {} memcp.rpm \;
+	rm -rf .rpmbuild
 
 docs:
 	./memcp -write-docu docs
@@ -62,4 +80,4 @@ docker-release:
 	sudo docker build -t carli2/memcp:latest .
 	sudo docker push carli2/memcp:latest
 
-.PHONY: memcp.sif memcp.deb docs
+.PHONY: memcp.sif memcp.deb memcp.rpm docs
