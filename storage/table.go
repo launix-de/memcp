@@ -1204,7 +1204,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					if currentTx := CurrentTx(); currentTx != nil && currentTx.Mode == TxACID {
 						isVisible = currentTx.IsVisible(s, uid)
 					} else {
-						isVisible = !s.deletions.Get(uid)
+						isVisible = !s.deletions.Get(uint(uid))
 					}
 				}
 				if isVisible {

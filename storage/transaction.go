@@ -21,13 +21,13 @@ import "sort"
 import "sync"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
-import "github.com/launix-de/NonLockingReadMap"
+import NonLockingReadMap "github.com/launix-de/NonLockingReadMap"
 
 // TxMode selects the transaction isolation strategy.
 type TxMode uint8
 
 const (
-	TxCursorStability TxMode = iota // default: direct writes + undo log
+	TxCursorStability TxMode = iota // default: direct writes + undo masks
 	TxACID                          // snapshot isolation + OCC commit
 )
 
@@ -40,49 +40,52 @@ const (
 	TxAborted
 )
 
-// UndoType identifies the kind of undo operation (cursor-stability only).
-type UndoType int
+// storageShardTransaction holds all per-shard state for a transaction.
+//
+// All four NonBlockingBitMaps are embedded as values — they are zero-alloc
+// (lazy) until the first Set call, so allocating a storageShardTransaction
+// for a shard that is only read-checked costs only the struct allocation.
+//
+// The bitmaps are written exclusively under st.mu (plain Set is safe).
+// Reads in the hot-path visibility check (IsVisible) happen lock-free via Get.
+//
+// Fields by transaction mode:
+//
+//	CursorStability  InsertMask / InsertRecids  — inserted rows (undo = delete)
+//	                 DeletedMask / DeletedRecids — deleted rows  (undo = undelete)
+//	ACID             DeleteMask  / DeleteRecids  — rows to delete at commit
+//	                 UndeleteMask/ UndeleteRecids — staged rows visible to this tx
+type storageShardTransaction struct {
+	// cursor-stability undo bitmaps
+	InsertMask  NonLockingReadMap.NonBlockingBitMap
+	DeletedMask NonLockingReadMap.NonBlockingBitMap
+	// ACID overlay bitmaps
+	DeleteMask   NonLockingReadMap.NonBlockingBitMap
+	UndeleteMask NonLockingReadMap.NonBlockingBitMap
 
-const (
-	UndoInsert UndoType = iota // rollback: mark inserted row as deleted
-	UndoDelete                 // rollback: undelete the deleted row
-)
+	// Recids for iteration at rollback/commit time.
+	// Append-only; protected by mu.
+	InsertRecids   []uint32
+	DeletedRecids  []uint32
+	DeleteRecids   []uint32
+	UndeleteRecids []uint32
 
-// UndoEntry records one reversible storage operation (cursor-stability only).
-type UndoEntry struct {
-	Type     UndoType
-	Shard    *storageShard
-	RowIndex uint32
+	mu sync.Mutex
 }
 
-// shardOverlay provides O(1) visibility checks via bitmap and an iteration
-// list of recids for commit-time application.
-type shardOverlay struct {
-	Bitmap NonLockingReadMap.NonBlockingBitMap // O(1) visibility check in scan hot path
-	Recids []uint32                            // for commit-time iteration
-	mu     sync.Mutex                          // protects Recids append from parallel workers
-}
-
-// Add records a recid in both the bitmap and the iteration list.
-func (o *shardOverlay) Add(recid uint32) {
-	o.Bitmap.Set(recid, true)
-	o.mu.Lock()
-	o.Recids = append(o.Recids, recid)
-	o.mu.Unlock()
-}
-
-// Has checks whether a recid is in this overlay (O(1) via bitmap).
-func (o *shardOverlay) Has(recid uint32) bool {
-	return o.Bitmap.Get(recid)
+// shardSavepoint records the Recids slice lengths for one shard at a savepoint.
+type shardSavepoint struct {
+	InsertLen   int
+	DeletedLen  int
+	DeleteLen   int
+	UndeleteLen int
 }
 
 // Savepoint captures the state of a transaction at a point in time.
 // Used for nested transactions (trigger recovery, savepoints).
 type Savepoint struct {
-	UndoLogLen       int                   // cursor-stability: UndoLog length at savepoint
-	DeleteMaskLens   map[*storageShard]int // ACID: Recids length per shard in DeleteMask
-	UndeleteMaskLens map[*storageShard]int // ACID: Recids length per shard in UndeleteMask
-	Depth            uint32                // nesting depth at creation
+	shardLens map[*storageShard]shardSavepoint
+	Depth     uint32
 }
 
 // global transaction ID counter
@@ -92,24 +95,25 @@ var txIDCounter uint64
 var GlobalCommitEpoch uint64
 
 // TxContext holds the state for one transaction.
+//
+// All per-shard state lives in a single shards map, keyed by *storageShard.
+// The map is nil until the first write operation, so read-only transactions
+// (the common case with with_autocommit) allocate nothing beyond the
+// TxContext struct itself.
 type TxContext struct {
 	ID            uint64
 	Mode          TxMode
 	State         TxState
 	SnapshotEpoch uint64 // ACID: snapshot boundary
-	Depth         uint32 // for savepoint/trigger nesting (future)
+	Depth         uint32 // nesting depth for savepoints / triggers
 
-	// Cursor-stability: undo log
-	UndoLog []UndoEntry
+	// Per-shard state, nil until first write (zero-alloc for read-only transactions).
+	shards map[*storageShard]*storageShardTransaction
 
-	// ACID: per-shard overlays
-	DeleteMask   map[*storageShard]*shardOverlay // recids this tx wants to delete
-	UndeleteMask map[*storageShard]*shardOverlay // staged insert recids visible to this tx
-
-	// Deferred sync (§10)
+	// Deferred sync: shards with pending log writes that need fsync at commit.
 	touchedShards sync.Map // map[*storageShard]bool
 	autoCommit    bool
-	writeHeld     map[*storageShard]uint32 // reentrant write-lock marker per shard
+	writeHeld     map[*storageShard]uint32 // reentrant write-lock depth per shard
 
 	mu sync.Mutex
 }
@@ -117,26 +121,52 @@ type TxContext struct {
 // NewTxContext creates a new active transaction context with the given mode.
 func NewTxContext(mode TxMode) *TxContext {
 	tx := &TxContext{
-		ID:        atomic.AddUint64(&txIDCounter, 1),
-		State:     TxActive,
-		Mode:      mode,
-		writeHeld: make(map[*storageShard]uint32),
+		ID:    atomic.AddUint64(&txIDCounter, 1),
+		State: TxActive,
+		Mode:  mode,
 	}
-	switch mode {
-	case TxCursorStability:
-		tx.UndoLog = make([]UndoEntry, 0, 16)
-	case TxACID:
+	if mode == TxACID {
 		tx.SnapshotEpoch = atomic.LoadUint64(&GlobalCommitEpoch)
-		tx.DeleteMask = make(map[*storageShard]*shardOverlay)
-		tx.UndeleteMask = make(map[*storageShard]*shardOverlay)
 	}
 	return tx
 }
 
-// EnterShardWrite marks that the current transaction context holds a write lock
-// on the given shard in this call stack.
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+// getOrCreateShardTxLocked returns the storageShardTransaction for a shard,
+// creating it if it does not exist. Must be called with tx.mu held.
+func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShardTransaction {
+	if tx.shards == nil {
+		tx.shards = make(map[*storageShard]*storageShardTransaction)
+	}
+	st := tx.shards[shard]
+	if st == nil {
+		st = new(storageShardTransaction)
+		tx.shards[shard] = st
+	}
+	return st
+}
+
+// getShardTx returns the storageShardTransaction for a shard, or nil if none exists.
+func (tx *TxContext) getShardTx(shard *storageShard) *storageShardTransaction {
+	tx.mu.Lock()
+	st := tx.shards[shard] // nil map returns nil safely
+	tx.mu.Unlock()
+	return st
+}
+
+// ---------------------------------------------------------------------------
+// Write-lock tracking (reentrant depth counter per shard)
+// ---------------------------------------------------------------------------
+
+// EnterShardWrite marks that the current transaction holds a write lock on shard.
 func (tx *TxContext) EnterShardWrite(shard *storageShard) {
 	tx.mu.Lock()
+	if tx.writeHeld == nil {
+		tx.writeHeld = make(map[*storageShard]uint32)
+	}
 	tx.writeHeld[shard]++
 	tx.mu.Unlock()
 }
@@ -153,141 +183,89 @@ func (tx *TxContext) ExitShardWrite(shard *storageShard) {
 }
 
 // HasShardWrite returns true when this tx context currently holds a write lock
-// on the shard in this call stack. It is used to avoid re-entering shard read
-// locks from nested scans (self-join/subquery in update mapper).
+// on the shard. Used to avoid re-entering shard read locks from nested scans.
 func (tx *TxContext) HasShardWrite(shard *storageShard) bool {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	return tx.writeHeld[shard] > 0
 }
 
-// CreateSavepoint captures the current transaction state for later rollback.
-func (tx *TxContext) CreateSavepoint() Savepoint {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-	sp := Savepoint{Depth: tx.Depth}
-	tx.Depth++
-	switch tx.Mode {
-	case TxCursorStability:
-		sp.UndoLogLen = len(tx.UndoLog)
-	case TxACID:
-		sp.DeleteMaskLens = make(map[*storageShard]int, len(tx.DeleteMask))
-		for s, overlay := range tx.DeleteMask {
-			overlay.mu.Lock()
-			sp.DeleteMaskLens[s] = len(overlay.Recids)
-			overlay.mu.Unlock()
-		}
-		sp.UndeleteMaskLens = make(map[*storageShard]int, len(tx.UndeleteMask))
-		for s, overlay := range tx.UndeleteMask {
-			overlay.mu.Lock()
-			sp.UndeleteMaskLens[s] = len(overlay.Recids)
-			overlay.mu.Unlock()
-		}
-	}
-	return sp
-}
-
-// RollbackToSavepoint undoes all changes made since the savepoint was created.
-func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-	tx.Depth = sp.Depth
-	switch tx.Mode {
-	case TxCursorStability:
-		// Replay undo entries from current position back to savepoint
-		for i := len(tx.UndoLog) - 1; i >= sp.UndoLogLen; i-- {
-			entry := tx.UndoLog[i]
-			entry.Shard.mu.Lock()
-			switch entry.Type {
-			case UndoInsert:
-				entry.Shard.deletions.Set(entry.RowIndex, true)
-				if entry.Shard.logfile != nil {
-					entry.Shard.logfile.Write(LogEntryDelete{entry.RowIndex})
-				}
-			case UndoDelete:
-				entry.Shard.deletions.Set(entry.RowIndex, false)
-			}
-			entry.Shard.mu.Unlock()
-		}
-		tx.UndoLog = tx.UndoLog[:sp.UndoLogLen]
-	case TxACID:
-		// Rollback DeleteMask entries added since savepoint
-		for shard, overlay := range tx.DeleteMask {
-			savedLen := sp.DeleteMaskLens[shard] // 0 if shard was new
-			overlay.mu.Lock()
-			for i := len(overlay.Recids) - 1; i >= savedLen; i-- {
-				recid := overlay.Recids[i]
-				overlay.Bitmap.Set(recid, false)
-			}
-			overlay.Recids = overlay.Recids[:savedLen]
-			overlay.mu.Unlock()
-		}
-		// Rollback UndeleteMask entries added since savepoint
-		for shard, overlay := range tx.UndeleteMask {
-			savedLen := sp.UndeleteMaskLens[shard] // 0 if shard was new
-			overlay.mu.Lock()
-			for i := len(overlay.Recids) - 1; i >= savedLen; i-- {
-				recid := overlay.Recids[i]
-				overlay.Bitmap.Set(recid, false)
-				// Re-hide the row globally (it was un-hidden by AddToUndeleteMask)
-				shard.deletions.Set(recid, true)
-			}
-			overlay.Recids = overlay.Recids[:savedLen]
-			overlay.mu.Unlock()
-		}
-	}
-}
+// ---------------------------------------------------------------------------
+// Cursor-stability undo log
+// ---------------------------------------------------------------------------
 
 // LogInsert records that a row was inserted; on rollback it will be deleted.
 // Cursor-stability only.
 func (tx *TxContext) LogInsert(shard *storageShard, rowIndex uint32) {
 	tx.mu.Lock()
-	tx.UndoLog = append(tx.UndoLog, UndoEntry{
-		Type:     UndoInsert,
-		Shard:    shard,
-		RowIndex: rowIndex,
-	})
+	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
+	st.mu.Lock()
+	st.InsertMask.Set(uint(rowIndex), true)
+	st.InsertRecids = append(st.InsertRecids, rowIndex)
+	st.mu.Unlock()
 }
 
 // LogDelete records that a row was deleted; on rollback it will be undeleted.
 // Cursor-stability only.
 func (tx *TxContext) LogDelete(shard *storageShard, rowIndex uint32) {
 	tx.mu.Lock()
-	tx.UndoLog = append(tx.UndoLog, UndoEntry{
-		Type:     UndoDelete,
-		Shard:    shard,
-		RowIndex: rowIndex,
-	})
+	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
+	st.mu.Lock()
+	st.DeletedMask.Set(uint(rowIndex), true)
+	st.DeletedRecids = append(st.DeletedRecids, rowIndex)
+	st.mu.Unlock()
 }
 
-// AddToDeleteMask records that this ACID tx wants to delete a row.
+// ---------------------------------------------------------------------------
+// ACID overlay masks
+// ---------------------------------------------------------------------------
+
+// AddToDeleteMask records that this ACID tx wants to delete a row at commit.
 func (tx *TxContext) AddToDeleteMask(shard *storageShard, recid uint32) {
 	tx.mu.Lock()
-	overlay, ok := tx.DeleteMask[shard]
-	if !ok {
-		overlay = new(shardOverlay)
-		tx.DeleteMask[shard] = overlay
-	}
+	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
-	overlay.Add(recid)
+	st.mu.Lock()
+	st.DeleteMask.Set(uint(recid), true)
+	st.DeleteRecids = append(st.DeleteRecids, recid)
+	st.mu.Unlock()
 }
 
-// AddToUndeleteMask records that this ACID tx can see a staged row.
+// AddToUndeleteMask records that this ACID tx can see a staged (inserted) row.
 func (tx *TxContext) AddToUndeleteMask(shard *storageShard, recid uint32) {
 	tx.mu.Lock()
-	overlay, ok := tx.UndeleteMask[shard]
-	if !ok {
-		overlay = new(shardOverlay)
-		tx.UndeleteMask[shard] = overlay
-	}
+	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
-	overlay.Add(recid)
+	st.mu.Lock()
+	st.UndeleteMask.Set(uint(recid), true)
+	st.UndeleteRecids = append(st.UndeleteRecids, recid)
+	st.mu.Unlock()
 }
 
+// UnstageRow removes recid from UndeleteMask (ACID UPDATE/DELETE of a staged row).
+// Returns true if the row was staged by this tx and has been un-staged.
+func (tx *TxContext) UnstageRow(shard *storageShard, recid uint32) bool {
+	st := tx.getShardTx(shard)
+	if st == nil || !st.UndeleteMask.Get(uint(recid)) {
+		return false
+	}
+	// plain Set is safe: caller holds the shard write lock
+	st.UndeleteMask.Set(uint(recid), false)
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// Deferred fsync
+// ---------------------------------------------------------------------------
+
 // RegisterTouchedShard marks a shard as having pending writes for deferred sync.
+// Only Safe-engine shards need an fsync; Memory/Cache/Sloppy shards are skipped.
 func (tx *TxContext) RegisterTouchedShard(shard *storageShard) {
+	if shard.t.PersistencyMode != Safe {
+		return
+	}
 	tx.touchedShards.Store(shard, true)
 }
 
@@ -300,33 +278,130 @@ func (tx *TxContext) SyncTouchedShards() {
 		}
 		return true
 	})
-	tx.touchedShards = sync.Map{} // clear for next query/transaction
+	tx.touchedShards = sync.Map{}
 }
+
+// ---------------------------------------------------------------------------
+// Visibility (ACID)
+// ---------------------------------------------------------------------------
 
 // IsVisible determines whether a row is visible to this ACID transaction.
-// Formula: (!shard->delete[i] && !tx->delete[i]) || tx->undelete[i]
-// UndeleteMask always wins — it is the only way an ACID tx sees its own inserts.
+//
+//	UndeleteMask wins — it is the only way an ACID tx sees its own inserts.
+//	Otherwise: not globally deleted AND not locally (tx-level) deleted.
 func (tx *TxContext) IsVisible(shard *storageShard, recid uint32) bool {
-	tx.mu.Lock()
-	dm := tx.DeleteMask[shard]
-	um := tx.UndeleteMask[shard]
-	tx.mu.Unlock()
-	// undelete mask overrides everything — this tx staged this row
-	if um != nil && um.Has(recid) {
+	st := tx.getShardTx(shard)
+	if st == nil {
+		return !shard.deletions.Get(uint(recid))
+	}
+	if st.UndeleteMask.Get(uint(recid)) {
 		return true
 	}
-	// otherwise: not globally deleted AND not locally deleted
-	return !shard.deletions.Get(recid) && (dm == nil || !dm.Has(recid))
+	return !shard.deletions.Get(uint(recid)) && !st.DeleteMask.Get(uint(recid))
 }
 
-// Commit finalizes the transaction. For cursor-stability it discards the undo
-// log. For ACID it runs OCC validation and applies overlay masks.
+// ---------------------------------------------------------------------------
+// Savepoints
+// ---------------------------------------------------------------------------
+
+// CreateSavepoint captures the current transaction state for later rollback.
+func (tx *TxContext) CreateSavepoint() Savepoint {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	sp := Savepoint{Depth: tx.Depth}
+	tx.Depth++
+	if len(tx.shards) > 0 {
+		sp.shardLens = make(map[*storageShard]shardSavepoint, len(tx.shards))
+		for s, st := range tx.shards {
+			st.mu.Lock()
+			sp.shardLens[s] = shardSavepoint{
+				InsertLen:   len(st.InsertRecids),
+				DeletedLen:  len(st.DeletedRecids),
+				DeleteLen:   len(st.DeleteRecids),
+				UndeleteLen: len(st.UndeleteRecids),
+			}
+			st.mu.Unlock()
+		}
+	}
+	return sp
+}
+
+// RollbackToSavepoint undoes all changes made since the savepoint was created.
+func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.Depth = sp.Depth
+	for shard, st := range tx.shards {
+		lens := sp.shardLens[shard] // zero value (all zeros) if shard is new since savepoint
+		st.mu.Lock()
+		switch tx.Mode {
+		case TxCursorStability:
+			// Undo inserts: mark as globally deleted
+			for i := len(st.InsertRecids) - 1; i >= lens.InsertLen; i-- {
+				recid := st.InsertRecids[i]
+				st.InsertMask.Set(uint(recid), false)
+				shard.mu.Lock()
+				shard.deletions.Set(uint(recid), true)
+				if shard.logfile != nil {
+					shard.logfile.Write(LogEntryDelete{recid})
+				}
+				shard.mu.Unlock()
+			}
+			st.InsertRecids = st.InsertRecids[:lens.InsertLen]
+			// Undo deletes: restore global visibility
+			for i := len(st.DeletedRecids) - 1; i >= lens.DeletedLen; i-- {
+				recid := st.DeletedRecids[i]
+				st.DeletedMask.Set(uint(recid), false)
+				shard.mu.Lock()
+				shard.deletions.Set(uint(recid), false)
+				if shard.logfile != nil && recid >= shard.main_count {
+					deltaIdx := int(recid - shard.main_count)
+					if deltaIdx < len(shard.inserts) {
+						row := shard.inserts[deltaIdx]
+						cols := make([]string, 0, len(shard.deltaColumns))
+						vals := make([]scm.Scmer, 0, len(shard.deltaColumns))
+						for name, idx := range shard.deltaColumns {
+							if idx < len(row) {
+								cols = append(cols, name)
+								vals = append(vals, row[idx])
+							}
+						}
+						shard.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{vals}})
+					}
+				}
+				shard.mu.Unlock()
+			}
+			st.DeletedRecids = st.DeletedRecids[:lens.DeletedLen]
+
+		case TxACID:
+			// Rollback DeleteMask additions
+			for i := len(st.DeleteRecids) - 1; i >= lens.DeleteLen; i-- {
+				st.DeleteMask.Set(uint(st.DeleteRecids[i]), false)
+			}
+			st.DeleteRecids = st.DeleteRecids[:lens.DeleteLen]
+			// Rollback UndeleteMask additions (re-hide the staged rows)
+			for i := len(st.UndeleteRecids) - 1; i >= lens.UndeleteLen; i-- {
+				recid := st.UndeleteRecids[i]
+				st.UndeleteMask.Set(uint(recid), false)
+				shard.deletions.Set(uint(recid), true)
+			}
+			st.UndeleteRecids = st.UndeleteRecids[:lens.UndeleteLen]
+		}
+		st.mu.Unlock()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Commit
+// ---------------------------------------------------------------------------
+
+// Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
 	switch tx.Mode {
 	case TxCursorStability:
 		tx.mu.Lock()
 		tx.State = TxCommitted
-		tx.UndoLog = nil
+		tx.shards = nil
 		tx.mu.Unlock()
 		tx.SyncTouchedShards()
 	case TxACID:
@@ -341,38 +416,29 @@ func (tx *TxContext) Commit() error {
 // and applies overlay masks to global state.
 func (tx *TxContext) commitACID() error {
 	tx.mu.Lock()
-	// Collect all shards that have overlays
-	shardSet := make(map[*storageShard]bool)
-	for s := range tx.DeleteMask {
-		shardSet[s] = true
-	}
-	for s := range tx.UndeleteMask {
-		shardSet[s] = true
+	shards := make([]*storageShard, 0, len(tx.shards))
+	for s := range tx.shards {
+		shards = append(shards, s)
 	}
 	tx.mu.Unlock()
 
-	// Sort shards by UUID string for deterministic lock ordering
-	shards := make([]*storageShard, 0, len(shardSet))
-	for s := range shardSet {
-		shards = append(shards, s)
-	}
+	// Deterministic lock ordering prevents deadlocks.
 	sort.Slice(shards, func(i, j int) bool {
 		return shards[i].uuid.String() < shards[j].uuid.String()
 	})
-
-	// Lock all touched shards
 	for _, s := range shards {
 		s.mu.Lock()
 	}
 
-	// Validate: for each recid in DeleteMask, check it's not already
-	// globally deleted (another tx committed first → conflict → abort)
-	// Note: DeleteMask bits are never cleared, so no bitmap skip needed.
-	for shard, overlay := range tx.DeleteMask {
-		for _, recid := range overlay.Recids {
-			if shard.deletions.Get(recid) {
-				// Conflict: row was already deleted by another committed tx
-				// Unlock and abort
+	// Validate: for each recid in DeleteMask, check it hasn't already been
+	// globally deleted by another committed tx (write-write conflict → abort).
+	for _, shard := range shards {
+		st := tx.shards[shard]
+		for _, recid := range st.DeleteRecids {
+			if !st.DeleteMask.Get(uint(recid)) {
+				continue // bit was rolled back via savepoint
+			}
+			if shard.deletions.Get(uint(recid)) {
 				for _, s := range shards {
 					s.mu.Unlock()
 				}
@@ -384,47 +450,50 @@ func (tx *TxContext) commitACID() error {
 		}
 	}
 
-	// Apply: merge DeleteMask → set global deletions + log
-	for shard, overlay := range tx.DeleteMask {
-		for _, recid := range overlay.Recids {
-			shard.deletions.Set(recid, true)
+	// Apply DeleteMask → set global deletions + write log
+	for _, shard := range shards {
+		st := tx.shards[shard]
+		for _, recid := range st.DeleteRecids {
+			if !st.DeleteMask.Get(uint(recid)) {
+				continue
+			}
+			shard.deletions.Set(uint(recid), true)
 			if shard.logfile != nil {
 				shard.logfile.Write(LogEntryDelete{recid})
 			}
 		}
 	}
-	// Apply: merge UndeleteMask → clear global deletions (make staged rows visible)
-	for shard, overlay := range tx.UndeleteMask {
-		for _, recid := range overlay.Recids {
-			if !overlay.Bitmap.Get(recid) {
-				continue // removed (e.g., staged row superseded by UPDATE/DELETE in same tx)
+	// Apply UndeleteMask → clear global deletions (make staged rows visible)
+	for _, shard := range shards {
+		st := tx.shards[shard]
+		for _, recid := range st.UndeleteRecids {
+			if !st.UndeleteMask.Get(uint(recid)) {
+				continue // un-staged (row overwritten/deleted in same tx)
 			}
-			shard.deletions.Set(recid, false)
-			// The row data was already inserted globally; just making it visible.
-			// The logfile already has the Insert entry from when the row was staged.
+			shard.deletions.Set(uint(recid), false)
 		}
 	}
 
-	// Advance global commit epoch
 	atomic.AddUint64(&GlobalCommitEpoch, 1)
 
-	// Unlock shards
 	for _, s := range shards {
 		s.mu.Unlock()
 	}
 
 	tx.mu.Lock()
 	tx.State = TxCommitted
-	tx.DeleteMask = nil
-	tx.UndeleteMask = nil
+	tx.shards = nil
 	tx.mu.Unlock()
 
 	tx.SyncTouchedShards()
 	return nil
 }
 
-// Rollback undoes the transaction. For cursor-stability it replays the undo
-// log. For ACID it discards overlay masks (staged rows stay as garbage).
+// ---------------------------------------------------------------------------
+// Rollback
+// ---------------------------------------------------------------------------
+
+// Rollback undoes the transaction.
 func (tx *TxContext) Rollback() {
 	switch tx.Mode {
 	case TxCursorStability:
@@ -434,66 +503,66 @@ func (tx *TxContext) Rollback() {
 	}
 }
 
-// rollbackCursorStability replays the undo log in reverse order.
+// rollbackCursorStability replays undo masks in reverse to restore global state.
 func (tx *TxContext) rollbackCursorStability() {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
-	for i := len(tx.UndoLog) - 1; i >= 0; i-- {
-		entry := tx.UndoLog[i]
-		entry.Shard.mu.Lock()
-		switch entry.Type {
-		case UndoInsert:
-			// undo an insert: mark the inserted row as deleted
-			entry.Shard.deletions.Set(entry.RowIndex, true)
-			if entry.Shard.logfile != nil {
-				entry.Shard.logfile.Write(LogEntryDelete{entry.RowIndex})
+	for shard, st := range tx.shards {
+		st.mu.Lock()
+		// Undo inserts (reverse order): mark as globally deleted
+		for i := len(st.InsertRecids) - 1; i >= 0; i-- {
+			recid := st.InsertRecids[i]
+			shard.mu.Lock()
+			shard.deletions.Set(uint(recid), true)
+			if shard.logfile != nil {
+				shard.logfile.Write(LogEntryDelete{recid})
 			}
-		case UndoDelete:
-			// undo a delete: undelete the row
-			entry.Shard.deletions.Set(entry.RowIndex, false)
-			if entry.Shard.logfile != nil {
-				t := entry.Shard
-				if entry.RowIndex >= t.main_count {
-					deltaIdx := int(entry.RowIndex - t.main_count)
-					if deltaIdx < len(t.inserts) {
-						row := t.inserts[deltaIdx]
-						cols := make([]string, 0, len(t.deltaColumns))
-						vals := make([]scm.Scmer, 0, len(t.deltaColumns))
-						for name, idx := range t.deltaColumns {
-							if idx < len(row) {
-								cols = append(cols, name)
-								vals = append(vals, row[idx])
-							}
-						}
-						t.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{vals}})
-					}
-				}
-				// For main storage rows, persistence after rollback of
-				// main-row deletes is imperfect across restarts.
-			}
+			shard.mu.Unlock()
 		}
-		entry.Shard.mu.Unlock()
+		// Undo deletes (reverse order): restore global visibility
+		for i := len(st.DeletedRecids) - 1; i >= 0; i-- {
+			recid := st.DeletedRecids[i]
+			shard.mu.Lock()
+			shard.deletions.Set(uint(recid), false)
+			if shard.logfile != nil && recid >= shard.main_count {
+				deltaIdx := int(recid - shard.main_count)
+				if deltaIdx < len(shard.inserts) {
+					row := shard.inserts[deltaIdx]
+					cols := make([]string, 0, len(shard.deltaColumns))
+					vals := make([]scm.Scmer, 0, len(shard.deltaColumns))
+					for name, idx := range shard.deltaColumns {
+						if idx < len(row) {
+							cols = append(cols, name)
+							vals = append(vals, row[idx])
+						}
+					}
+					shard.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{vals}})
+				}
+			}
+			shard.mu.Unlock()
+		}
+		st.mu.Unlock()
 	}
 	tx.State = TxAborted
-	tx.UndoLog = nil
-	// No sync needed for rollback — discard touched shards
+	tx.shards = nil
 	tx.touchedShards = sync.Map{}
 }
 
 // rollbackACID discards overlay masks. Staged rows that were globally hidden
-// remain as garbage for GC.
+// remain as garbage (collected by the next GC/compaction pass).
 func (tx *TxContext) rollbackACID() {
 	tx.mu.Lock()
 	tx.State = TxAborted
-	tx.DeleteMask = nil
-	tx.UndeleteMask = nil
+	tx.shards = nil
 	tx.mu.Unlock()
-	// No sync needed — discard touched shards
 	tx.touchedShards = sync.Map{}
 }
 
-// CurrentTx returns the active TxContext from the goroutine-local storage,
-// or nil if no transaction is active.
+// ---------------------------------------------------------------------------
+// GLS / session helpers
+// ---------------------------------------------------------------------------
+
+// CurrentTx returns the active TxContext from goroutine-local storage, or nil.
 func CurrentTx() *TxContext {
 	txAny := scm.GetCurrentTx()
 	if txAny == nil {
@@ -503,8 +572,6 @@ func CurrentTx() *TxContext {
 	return tx
 }
 
-// initTransaction registers the tx_begin, tx_begin_acid, tx_commit,
-// tx_rollback builtins.
 // WithAutocommit executes fn inside an implicit TxCursorStability transaction
 // if no explicit transaction is already active in session, and commits it
 // afterwards. If an explicit transaction is active (session["transaction"] != nil),
@@ -515,12 +582,10 @@ func CurrentTx() *TxContext {
 // every SQL statement executed via the HTTP or MySQL frontend runs inside a
 // transaction, enabling a single fsync per statement instead of one per write.
 func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Scmer {
-	// If an explicit transaction is active, just run fn — nothing to manage.
 	if !sessionFn(scm.NewString("transaction")).IsNil() {
 		return scm.Apply(fn)
 	}
 
-	// Start an implicit auto-commit transaction.
 	tx := NewTxContext(TxCursorStability)
 	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 
@@ -536,7 +601,6 @@ func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Sc
 	}()
 
 	if panicVal != nil {
-		// Rollback on error, clear session tx, then re-raise.
 		if tx.State == TxActive {
 			tx.Rollback()
 		}
@@ -544,13 +608,10 @@ func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Sc
 		panic(panicVal)
 	}
 
-	// If the query itself issued a BEGIN, session["transaction"] is now set and
-	// tx_begin already committed the auto-commit tx implicitly — do not commit again.
 	if !sessionFn(scm.NewString("transaction")).IsNil() {
 		return result
 	}
 
-	// Commit the auto-commit transaction (single fsync here).
 	if err := tx.Commit(); err != nil {
 		sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
 		panic("autocommit failed: " + err.Error())
@@ -573,7 +634,6 @@ func initTransaction(en scm.Env) {
 		Returns: "bool",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
-			// Check if there's already an active transaction — implicit commit
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
 			if !existingTx.IsNil() {
 				if tx, ok := existingTx.Any().(*TxContext); ok && tx.State == TxActive {
@@ -598,7 +658,6 @@ func initTransaction(en scm.Env) {
 		Returns: "bool",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
-			// Check if there's already an active transaction — implicit commit
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
 			if !existingTx.IsNil() {
 				if tx, ok := existingTx.Any().(*TxContext); ok && tx.State == TxActive {
@@ -614,7 +673,7 @@ func initTransaction(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name:         "tx_commit",
-		Desc:         "Commits the current transaction. For cursor-stability: discards undo log. For ACID: validates and applies overlay masks.",
+		Desc:         "Commits the current transaction.",
 		MinParameter: 1,
 		MaxParameter: 1,
 		Params: []scm.DeclarationParameter{
@@ -641,7 +700,7 @@ func initTransaction(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name:         "tx_rollback",
-		Desc:         "Rolls back the current transaction. For cursor-stability: replays undo log. For ACID: discards overlay masks.",
+		Desc:         "Rolls back the current transaction.",
 		MinParameter: 1,
 		MaxParameter: 1,
 		Params: []scm.DeclarationParameter{

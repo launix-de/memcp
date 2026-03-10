@@ -599,7 +599,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					if !currentTx.IsVisible(t, idx) {
 						continue
 					}
-				} else if t.deletions.Get(idx) {
+				} else if t.deletions.Get(uint(idx)) {
 					continue // item is on delete list
 				}
 

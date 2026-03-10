@@ -520,7 +520,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	// Take a brief RLock on each old shard to snapshot its deletion bitmap
 	// and inserts count. This gives us a consistent baseline for reconciliation.
 	type shardSnapshot struct {
-		deletions   interface{ Get(uint32) bool } // deletion bitmap copy
+		deletions   interface{ Get(uint) bool } // deletion bitmap copy
 		insertCount int                           // number of delta inserts at snapshot time
 		mainCount   uint32                        // main_count at snapshot time
 	}
@@ -531,7 +531,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		s.mu.RLock()
 		total_count += uint64(s.Count())
 		snapshots[si] = shardSnapshot{
-			deletions:   func() interface{ Get(uint32) bool } { c := s.deletions.Copy(); return &c }(),
+			deletions:   func() interface{ Get(uint) bool } { c := s.deletions.Copy(); return &c }(),
 			insertCount: len(s.inserts),
 			mainCount:   s.main_count,
 		}
@@ -656,9 +656,9 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		if deltaLen > 0 {
 			// Shift deletion bitmap: bits in [0, deltaLen) move to [mainN, mainN+deltaLen)
 			for i := uint32(0); i < uint32(deltaLen); i++ {
-				if s.deletions.Get(i) {
-					s.deletions.Set(uint32(mainN)+i, true)
-					s.deletions.Set(i, false)
+				if s.deletions.Get(uint(i)) {
+					s.deletions.Set(uint(uint32(mainN)+i), true)
+					s.deletions.Set(uint(i), false)
 				}
 			}
 			// Rebuild hashmaps with shifted keys
@@ -737,7 +737,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		snap := snapshots[si]
 		// Check main storage deletions
 		for idx := uint32(0); idx < snap.mainCount; idx++ {
-			if s.deletions.Get(idx) && !snap.deletions.Get(idx) {
+			if s.deletions.Get(uint(idx)) && !snap.deletions.Get(uint(idx)) {
 				for nsi, items := range datasetids {
 					if items == nil {
 						continue
@@ -745,7 +745,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 					oldItems := items[si]
 					for newIdx, oldIdx := range oldItems {
 						if oldIdx == idx {
-							newshards[nsi].deletions.Set(uint32(newIdx), true)
+							newshards[nsi].deletions.Set(uint(uint32(newIdx)), true)
 							goto nextDeletion
 						}
 					}
@@ -756,7 +756,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 		// Check delta storage deletions
 		for idx := 0; idx < snap.insertCount; idx++ {
 			absIdx := snap.mainCount + uint32(idx)
-			if s.deletions.Get(absIdx) && !snap.deletions.Get(absIdx) {
+			if s.deletions.Get(uint(absIdx)) && !snap.deletions.Get(uint(absIdx)) {
 				for nsi, items := range datasetids {
 					if items == nil {
 						continue
@@ -764,7 +764,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 					oldItems := items[si]
 					for newIdx, oldIdx := range oldItems {
 						if oldIdx == absIdx {
-							newshards[nsi].deletions.Set(uint32(newIdx), true)
+							newshards[nsi].deletions.Set(uint(uint32(newIdx)), true)
 							goto nextDeltaDeletion
 						}
 					}
@@ -833,7 +833,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 		maincols[i], _ = s.columns[sd.Column]
 	}
 	for idx := uint32(0); idx < s.main_count; idx++ {
-		if s.deletions.Get(idx) {
+		if s.deletions.Get(uint(idx)) {
 			continue
 		}
 		for i, cs := range maincols {
@@ -850,7 +850,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 		deltacols[i], _ = s.deltaColumns[sd.Column]
 	}
 	for idx, dataset := range s.inserts {
-		if s.deletions.Get(s.main_count + uint32(idx)) {
+		if s.deletions.Get(uint(s.main_count + uint32(idx))) {
 			continue
 		}
 		for i, cs := range deltacols {

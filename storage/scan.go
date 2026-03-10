@@ -284,7 +284,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				continue
 			}
 			if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
-				if t.deletions.Get(effectiveIdx) {
+				if t.deletions.Get(uint(effectiveIdx)) {
 					if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
 						effectiveIdx = followIdx
 					} else {
@@ -302,7 +302,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				if !currentTx.IsVisible(t, effectiveIdx) {
 					continue
 				}
-			} else if t.deletions.Get(effectiveIdx) {
+			} else if t.deletions.Get(uint(effectiveIdx)) {
 				continue // item is on delete list
 			}
 
