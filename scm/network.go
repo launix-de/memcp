@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -29,6 +29,7 @@ import "net/url"
 import "net/http"
 import "sync/atomic"
 import "encoding/json"
+import "path/filepath"
 import "github.com/gorilla/websocket"
 
 var httpServersMu sync.Mutex
@@ -70,7 +71,7 @@ func HTTPStaticGetter(wd string) func(...Scmer) Scmer {
 	mime.AddExtensionType(".svg", "image/svg+xml")
 
 	return func(a ...Scmer) Scmer {
-		fs := http.FileServer(http.Dir(wd + "/" + a[0].String()))
+		fs := http.FileServer(http.Dir(filepath.Join(wd, a[0].String())))
 		return NewFunc(func(a ...Scmer) Scmer { // req res
 			resList := mustSliceNet("static response", a[1])
 			reqList := mustSliceNet("static request", a[0])

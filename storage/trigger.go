@@ -129,6 +129,7 @@ type TriggerDescription struct {
 	SourceSQL string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
 	IsSystem  bool          `json:"is_system,omitempty"`  // True for auto-generated triggers (hidden from SHOW TRIGGERS)
 	Priority  int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
+	Async     bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
 }
 
 // GetTriggers returns all triggers for a specific timing
@@ -212,6 +213,7 @@ func (t *table) dictToRow(dict scm.Scmer, columns []string) dataset {
 // oldRow is nil for INSERT, newRow is nil for DELETE.
 // If a transaction is active, a savepoint is created before each trigger;
 // on panic the savepoint is rolled back before re-panicking.
+// Triggers with Async=true are launched in a background goroutine (fire-and-forget).
 func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 	triggers := t.GetTriggers(timing)
 	for _, tr := range triggers {
@@ -228,6 +230,21 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 		case BeforeUpdate, AfterUpdate:
 			oldDict = t.rowToDict(oldRow)
 			newDict = t.rowToDict(newRow)
+		}
+		if tr.Async {
+			// Fire-and-forget: run in background goroutine, no transaction context
+			trFunc := tr.Func
+			trName := tr.Name
+			tName := t.Name
+			go func() {
+				defer func() {
+					recover() // async triggers must not crash the process
+					_ = trName
+					_ = tName
+				}()
+				scm.Apply(trFunc, oldDict, newDict)
+			}()
+			continue
 		}
 		// Execute trigger with savepoint for proper rollback
 		func() {

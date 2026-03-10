@@ -485,7 +485,8 @@ class SQLTestRunner:
                     self._restart_handler()
                 else:
                     # No restart handler (--connect-only): wait until SQL endpoint is actually ready again.
-                    if not wait_for_sql_ready(self.base_url, tc_user, tc_pass, database, timeout=60):
+                    restart_timeout = int(test_case.get("restart_timeout", 120))
+                    if not wait_for_sql_ready(self.base_url, tc_user, tc_pass, database, timeout=restart_timeout):
                         return self._record_fail(name, "Restart timeout: SQL not ready after SHUTDOWN", query, None, None, is_noncritical)
                 self._record_success(name, is_noncritical)
                 return True

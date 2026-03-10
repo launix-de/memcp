@@ -65,6 +65,28 @@ type storageShard struct {
 	cleanupOnce sync.Once
 }
 
+// computeSizeLocked computes the shard's memory footprint without acquiring s.mu.
+// Caller must already hold s.mu (read or write).
+func (s *storageShard) computeSizeLocked() uint {
+	var result uint = 14*8 + 32*8 // heuristic for columns map
+	if s.srState != COLD {
+		for _, c := range s.columns {
+			if c != nil {
+				result += c.ComputeSize()
+			}
+		}
+		result += s.deletions.ComputeSize()
+		result += scm.ComputeSize(scm.NewAny(s.inserts))
+		for _, idx := range s.Indexes {
+			result += idx.ComputeSize()
+		}
+		return result
+	}
+	result += s.deletions.ComputeSize()
+	result += scm.ComputeSize(scm.NewAny(s.inserts))
+	return result
+}
+
 func (s *storageShard) ComputeSize() uint {
 	var result uint = 14*8 + 32*8 // heuristic for columns map
 	if s.srState != COLD {
@@ -151,7 +173,7 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		if cs != nil {
 			return cs
 		}
-		if u.t.PersistencyMode == Memory {
+		if u.t.PersistencyMode == Memory || u.t.PersistencyMode == Cache {
 			u.columns[colName] = new(StorageSparse)
 			return u.columns[colName]
 		}
@@ -344,8 +366,10 @@ func (s *storageShard) ensureLoaded() {
 	}
 	s.mu.Unlock()
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
-	// register with CacheManager (skip temp tables and Memory-engine shards)
-	if s.t.PersistencyMode != Memory && !strings.HasPrefix(s.t.Name, ".") {
+	// register with CacheManager (skip Memory-engine shards and temp tables)
+	if s.t.PersistencyMode == Cache && !strings.HasPrefix(s.t.Name, ".") {
+		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+	} else if s.t.PersistencyMode != Memory && !strings.HasPrefix(s.t.Name, ".") {
 		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 }
@@ -385,6 +409,33 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 
 func shardLastUsed(ptr any) time.Time {
 	return time.Unix(0, int64(atomic.LoadUint64(&ptr.(*storageShard).lastAccessed)))
+}
+
+// cacheShardCleanup is called by the CacheManager when evicting a Cache-engine shard.
+// Unlike shardCleanup, it forcibly clears in-flight deltas since there is no disk backing.
+func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
+	s := ptr.(*storageShard)
+	if !s.mu.TryLock() {
+		return false // shard is in use, retry later
+	}
+	// remove indexes from CacheManager (recursive free)
+	for _, idx := range s.Indexes {
+		GlobalCache.removeInternal(idx, freedByType)
+		idx.active = false
+		idx.mainIndexes = StorageInt{}
+		idx.deltaBtree = nil
+	}
+	// clear in-memory data (no disk backing to flush to)
+	s.inserts = nil
+	s.deletions.Reset()
+	s.main_count = 0
+	for col := range s.columns {
+		s.columns[col] = nil
+	}
+	// COLD: on next access ensureLoaded re-initialises as empty and re-registers
+	s.srState = COLD
+	s.mu.Unlock()
+	return true
 }
 
 func NewShard(t *table) *storageShard {
@@ -1384,13 +1435,11 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			index.mu.Unlock()
 		}
 	}
-	// update tracked size in CacheManager (heuristic: 16 bytes per column per row)
-	delta := int64(len(values)) * int64(len(t.deltaColumns)) * 16
+	// Size tracking happens on rebuild only (computeSizeLocked gives accurate malloc-aware size).
+	// For temp keytables we still do a cheap heuristic update here (they are never rebuilt).
 	if strings.HasPrefix(t.t.Name, ".") {
-		// temp keytable: update the table-level entry (shards are not individually registered)
+		delta := int64(len(values)) * int64(len(t.deltaColumns)) * 16
 		GlobalCache.UpdateSize(t.t, delta)
-	} else {
-		GlobalCache.UpdateSize(t, delta)
 	}
 }
 
@@ -1581,19 +1630,29 @@ func (s *storageShard) removePersistence() {
 //   - Sloppy → Safe/Logged        : WAL opened; future writes become durable
 //   - Safe ↔ Logged               : no-op at shard level
 func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
-	oldPersisted := oldMode != Memory
-	newPersisted := newMode != Memory
+	oldPersisted := oldMode != Memory && oldMode != Cache
+	newPersisted := newMode != Memory && newMode != Cache
 
 	switch {
 	case oldPersisted && !newPersisted:
-		// Persisted → Memory: IRREVERSIBLE — permanently delete on-disk files.
-		// Only reached via explicit ALTER TABLE ENGINE=memory.
+		// Persisted → Memory/Cache: IRREVERSIBLE — permanently delete on-disk files.
+		// Only reached via explicit ALTER TABLE ENGINE=memory/cache.
 		GlobalCache.Remove(s)
 		s.removePersistence()
-		s.srState = WRITE
+		if newMode == Cache && !strings.HasPrefix(s.t.Name, ".") {
+			s.srState = SHARED
+			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+		} else {
+			s.srState = WRITE
+		}
 
 	case !oldPersisted && newPersisted:
-		// Memory → Persisted: materialize columns to disk, register with cache
+		// Memory/Cache → Persisted: materialize columns to disk, register with cache
+		// (Cache→Persisted goes through the rebuild path in storage.go; this case
+		// handles other non-persisted→persisted transitions that may arise.)
+		if oldMode == Cache {
+			GlobalCache.Remove(s)
+		}
 		s.ensureLoaded()
 		// write each column to disk
 		for colName, cs := range s.columns {
@@ -1610,8 +1669,20 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 		}
 		s.srState = SHARED
 		if !strings.HasPrefix(s.t.Name, ".") {
-			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeShard, shardCleanup, shardLastUsed, nil)
 		}
+
+	case oldMode == Memory && newMode == Cache:
+		// Memory → Cache: register with CacheManager as TypeCacheEntry
+		s.srState = SHARED
+		if !strings.HasPrefix(s.t.Name, ".") {
+			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+		}
+
+	case oldMode == Cache && newMode == Memory:
+		// Cache → Memory: deregister from CacheManager
+		GlobalCache.Remove(s)
+		s.srState = WRITE
 
 	case oldMode == Sloppy && (newMode == Safe || newMode == Logged):
 		// Sloppy → Safe/Logged: open logfile
@@ -1686,7 +1757,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			}
 			// Re-register old shard with CacheManager if we deregistered it
 			if removedFromCache && t.t != nil {
-				if t.t.PersistencyMode != Memory && !strings.HasPrefix(t.t.Name, ".") {
+				if t.t.PersistencyMode == Cache && !strings.HasPrefix(t.t.Name, ".") {
+					GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+				} else if t.t.PersistencyMode != Memory && !strings.HasPrefix(t.t.Name, ".") {
 					GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 				}
 			}
@@ -1896,7 +1969,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			b.WriteString(newcol.String()) // storage type (remove *storage.Storage, so it will only say SCMER, Sparse, Int or String)
 
 			// write to disc (only if required)
-			if t.t.PersistencyMode != Memory {
+			if t.t.PersistencyMode != Memory && t.t.PersistencyMode != Cache {
 				f := result.t.schema.persistence.WriteColumn(result.uuid.String(), col)
 				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
 				f.Close()
@@ -1994,7 +2067,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	resultLocked = false
 	// Register the new shard with CacheManager
 	atomic.StoreUint64(&result.lastAccessed, uint64(time.Now().UnixNano()))
-	if result.t.PersistencyMode != Memory && !strings.HasPrefix(result.t.Name, ".") {
+	if result.t.PersistencyMode == Cache && !strings.HasPrefix(result.t.Name, ".") {
+		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+	} else if result.t.PersistencyMode != Memory && !strings.HasPrefix(result.t.Name, ".") {
 		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 	return result
