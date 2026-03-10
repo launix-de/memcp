@@ -80,8 +80,8 @@ if the user is not allowed to access this property, the function will throw an e
 ))
 (if (has? (show "system") "user") true (begin
 	(print "creating table system.user")
-	(eval (parse_sql "system" "CREATE TABLE `user`(id int, username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema table write) true)))
-	(insert "system" "user" '("id" "username" "password" "admin") '('(1 "root" (password (arg "root-password" "admin")) true)))
+	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema table write) true)))
+	(insert "system" "user" '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
 ))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
@@ -94,6 +94,15 @@ if the user is not allowed to access this property, the function will throw an e
 				(scan "system" "user" '() (lambda () true) '("$update") (lambda ($update) ($update '("admin" true))))
 			)
 		)
+	) true)
+)) (lambda (e) true))
+
+/* migration: drop legacy id column that caused NOT NULL errors on CREATE USER */
+(try (lambda () (begin
+	(if (has? (show "system") "user") (begin
+		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "id")
+			(dropcolumn "system" "user" "id")
+			true)
 	) true)
 )) (lambda (e) true))
 

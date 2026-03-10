@@ -367,6 +367,20 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 </div>
 
+<!-- Change-PW modal overlay -->
+<div id="change-pw-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;align-items:center;justify-content:center">
+<div style="background:#16213e;border:1px solid #2a2a4a;border-radius:8px;padding:24px 28px;min-width:300px;max-width:380px;width:90%">
+<div style="font-size:1rem;font-weight:700;color:#ccc;margin-bottom:14px">Change Password</div>
+<div style="font-size:.85rem;color:#888;margin-bottom:10px">New password for <span id="change-pw-label" style="color:#e0e0e0;font-weight:600"></span></div>
+<input id="change-pw-input" type="password" placeholder="New password" style="width:100%;background:#1a1a2e;border:1px solid #2a2a4a;color:#fff;padding:8px 10px;border-radius:4px;font-size:.9rem;box-sizing:border-box;margin-bottom:16px">
+<input id="change-pw-user" type="hidden">
+<div style="display:flex;gap:10px;justify-content:flex-end">
+<button id="change-pw-cancel" class="btn-warn" style="background:#333">Cancel</button>
+<button id="change-pw-ok" class="btn-warn">Change</button>
+</div>
+</div>
+</div>
+
 <script>
 (function(){
 "use strict";
@@ -1214,13 +1228,12 @@ execSQL("system","REVOKE ALL ON *.* FROM "+sqlId(user),function(){apiFetch(base+
 tb.querySelectorAll(".change-pw").forEach(function(btn){
 btn.addEventListener("click",function(){
 var user=btn.getAttribute("data-user");
-var pw=window.prompt("New password for '"+user+"':");
-if(pw!==null&&pw!=="")
-execSQL("system","ALTER USER "+sqlId(user)+" IDENTIFIED BY "+sqlStr(pw),function(){
-/* update defaultPassword flag if root pw was changed */
-if(user==="root"){defaultPassword=false;["root-pw-warning","root-pw-warning-gauges","root-pw-warning-databases","root-pw-warning-users"].forEach(function(id){var el=document.getElementById(id);if(el)el.style.display="none";});}
-apiFetch(base+"/dashboard/api/users",renderUsers);
-});
+document.getElementById("change-pw-user").value=user;
+document.getElementById("change-pw-label").textContent=user;
+document.getElementById("change-pw-input").value="";
+var modal=document.getElementById("change-pw-modal");
+modal.style.display="flex";
+document.getElementById("change-pw-input").focus();
 });
 });
 tb.querySelectorAll(".remove-user").forEach(function(btn){
@@ -1234,6 +1247,25 @@ execSQL("system","DELETE FROM user WHERE username="+sqlStr(user),function(){apiF
 }
 
 window.onhashchange=route;
+
+/* Change-PW modal */
+var changePwModal=document.getElementById("change-pw-modal");
+var changePwUser=document.getElementById("change-pw-user");
+var changePwInput=document.getElementById("change-pw-input");
+document.getElementById("change-pw-cancel").addEventListener("click",function(){changePwModal.style.display="none";changePwInput.value="";});
+document.getElementById("change-pw-ok").addEventListener("click",function(){
+var user=changePwUser.value;
+var pw=changePwInput.value;
+if(!pw){changePwInput.focus();return;}
+changePwModal.style.display="none";
+changePwInput.value="";
+execSQL("system","ALTER USER "+sqlId(user)+" IDENTIFIED BY "+sqlStr(pw),function(){
+if(user==="root"){defaultPassword=false;["root-pw-warning","root-pw-warning-gauges","root-pw-warning-databases","root-pw-warning-users"].forEach(function(id){var el=document.getElementById(id);if(el)el.style.display="none";});}
+apiFetch(base+"/dashboard/api/users",renderUsers);
+});
+});
+changePwInput.addEventListener("keydown",function(e){if(e.key==="Enter")document.getElementById("change-pw-ok").click();if(e.key==="Escape")document.getElementById("change-pw-cancel").click();});
+
 })();
 </script>
 </body>
