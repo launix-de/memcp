@@ -1438,12 +1438,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		sql_delete
 		sql_truncate
 
-		/* CREATE DATABASE name FROM source_db */
-		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (atom "FROM" true) (define from_db sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil from_db)))
-		/* CREATE DATABASE name [DEFAULT] CHARACTER SET charset [COLLATE collation] — charset/collation ignored */
-		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (? (atom "DEFAULT" true)) (atom "CHARACTER" true) (atom "SET" true) sql_identifier (? (atom "COLLATE" true) sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil nil)))
-		/* CREATE DATABASE name [SET key=val, ...] */
-		(parser '((atom "CREATE" true) (atom "DATABASE" true) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (define opts (? (atom "SET" true) (+ (parser '((define k sql_identifier) "=" (define v sql_literal)) '(k v)) ",")))) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) (if opts (cons (quote list) (merge opts)) nil) nil)))
+		/* CREATE {DATABASE | SCHEMA} name FROM source_db */
+		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (atom "FROM" true) (define from_db sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil from_db)))
+		/* CREATE {DATABASE | SCHEMA} name [DEFAULT] CHARACTER SET charset [COLLATE collation] — charset/collation ignored */
+		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (? (atom "DEFAULT" true)) (atom "CHARACTER" true) (atom "SET" true) sql_identifier (? (atom "COLLATE" true) sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil nil)))
+		/* CREATE {DATABASE | SCHEMA} name [SET key=val, ...] */
+		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (define opts (? (atom "SET" true) (+ (parser '((define k sql_identifier) "=" (define v sql_literal)) '(k v)) ",")))) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) (if opts (cons (quote list) (merge opts)) nil) nil)))
 		/* DROP USER [IF EXISTS] user — deletes from system.user */
 		(parser '((atom "DROP" true) (atom "USER" true) (? (atom "IF" true) (atom "EXISTS" true)) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
@@ -1590,7 +1590,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression)) (quote true)) /* ignore */
 
 
-		(parser '((atom "DROP" true) (atom "DATABASE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id (if if_exists true false))))
+		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id (if if_exists true false))))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
