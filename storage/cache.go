@@ -20,6 +20,7 @@ import (
 	"container/heap"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -100,11 +101,31 @@ const systemFreeThreshold = 10 // percent
 // systemPressureCheckInterval is the minimum time between /proc/meminfo reads.
 const systemPressureCheckInterval = time.Second
 
-// systemMemInfo returns (freeBytes, totalBytes) of physical RAM via syscall.Sysinfo.
-// freeBytes is MemFree — hard-unallocated RAM, not counting reclaimable page cache.
-// Freeing our own cache directly increases this value.
+// systemMemInfo returns (freeBytes, totalBytes) of physical RAM.
+// freeBytes is MemAvailable from /proc/meminfo — includes page cache and reclaimable
+// memory, which is the correct metric for "how much RAM can we use before the OS
+// starts swapping". Falls back to syscall.Sysinfo.Freeram if /proc/meminfo is unavailable.
 // Returns (0, 0) on error.
 func systemMemInfo() (free, total int64) {
+	if f, err := os.Open("/proc/meminfo"); err == nil {
+		defer f.Close()
+		var available, totalkb int64
+		buf := make([]byte, 4096)
+		n, _ := f.Read(buf)
+		for _, line := range strings.SplitN(string(buf[:n]), "\n", 64) {
+			var kb int64
+			if strings.HasPrefix(line, "MemTotal:") {
+				fmt.Sscanf(strings.TrimPrefix(line, "MemTotal:"), "%d", &kb)
+				totalkb = kb
+			} else if strings.HasPrefix(line, "MemAvailable:") {
+				fmt.Sscanf(strings.TrimPrefix(line, "MemAvailable:"), "%d", &kb)
+				available = kb
+			}
+			if totalkb > 0 && available > 0 {
+				return available * 1024, totalkb * 1024
+			}
+		}
+	}
 	var info syscall.Sysinfo_t
 	if err := syscall.Sysinfo(&info); err != nil {
 		return 0, 0

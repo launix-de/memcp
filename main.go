@@ -456,7 +456,12 @@ func readConfigFile(path string) ([]string, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		args = append(args, line)
+		// "-flag value" → two args; "--flag=value" → one arg (no split needed)
+		if i := strings.Index(line, " "); i >= 0 {
+			args = append(args, line[:i], strings.TrimSpace(line[i+1:]))
+		} else {
+			args = append(args, line)
+		}
 	}
 	return args, nil
 }
