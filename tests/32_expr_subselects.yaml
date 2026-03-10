@@ -134,6 +134,23 @@ test_cases:
         - id: 4
           d: null
 
+  - name: "Scalar correlated subselect references derived-table computed column"
+    sql: >
+      SELECT x, (SELECT COUNT(1) FROM t2 WHERE owner = x) AS cnt
+      FROM (SELECT id AS x FROM t3) AS d
+      ORDER BY x
+    expect:
+      rows: 4
+      data:
+        - x: 1
+          cnt: 1
+        - x: 2
+          cnt: 2
+        - x: 3
+          cnt: 2
+        - x: 4
+          cnt: 1
+
   - name: "Scalar subselect multiple rows errors"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:
