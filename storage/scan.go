@@ -149,26 +149,6 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
 		}
-		// log statistics for unordered scan (best-effort, async so it doesn't add latency)
-		execNs := time.Since(execStart).Nanoseconds()
-		if inputCount > int64(Settings.AnalyzeMinItems) {
-			// log statistics for unordered scan (best-effort, async so it doesn't add latency)
-			go func(anNs, exNs int64) {
-				defer func() { _ = recover() }()
-				filterEnc := ""
-				if proc, ok := condition.Any().(scm.Proc); ok {
-					var params []scm.Scmer
-					if proc.Params.IsSlice() {
-						params = proc.Params.Slice()
-					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
-						params = arr
-					}
-					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
-				}
-				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
-			}(analyzeNs, execNs)
-		}
-		return akkumulator
 	} else if !aggregate.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
 		for msg := range values {
@@ -189,25 +169,6 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
 		}
-		execNs := time.Since(execStart).Nanoseconds()
-		if inputCount > int64(Settings.AnalyzeMinItems) {
-			// log statistics (async)
-			go func(anNs, exNs int64) {
-				defer func() { _ = recover() }()
-				filterEnc := ""
-				if proc, ok := condition.Any().(scm.Proc); ok {
-					var params []scm.Scmer
-					if proc.Params.IsSlice() {
-						params = proc.Params.Slice()
-					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
-						params = arr
-					}
-					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
-				}
-				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
-			}(analyzeNs, execNs)
-		}
-		return akkumulator
 	} else {
 		for msg := range values {
 			if msg.err.r != nil {
@@ -224,26 +185,27 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 			}
 			scm.Apply(callback, nullRow...) // outer join: push one NULL row
 		}
-		execNs := time.Since(execStart).Nanoseconds()
-		if inputCount > int64(Settings.AnalyzeMinItems) {
-			// log statistics (async)
-			go func(anNs, exNs int64) {
-				defer func() { _ = recover() }()
-				filterEnc := ""
-				if proc, ok := condition.Any().(scm.Proc); ok {
-					var params []scm.Scmer
-					if proc.Params.IsSlice() {
-						params = proc.Params.Slice()
-					} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
-						params = arr
-					}
-					filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
-				}
-				safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", inputCount, outCount, anNs, exNs)
-			}(analyzeNs, execNs)
-		}
-		return akkumulator
 	}
+	// log statistics (best-effort, async so it doesn't add latency)
+	execNs := time.Since(execStart).Nanoseconds()
+	if Settings.ScanDebugging || inputCount > int64(Settings.AnalyzeMinItems) {
+		go func(anNs, exNs int64) {
+			defer func() { _ = recover() }()
+			filterEnc := ""
+			if proc, ok := condition.Any().(scm.Proc); ok {
+				var params []scm.Scmer
+				if proc.Params.IsSlice() {
+					params = proc.Params.Slice()
+				} else if arr, ok := proc.Params.Any().([]scm.Scmer); ok {
+					params = arr
+				}
+				filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
+			}
+			indexColsEnc := boundaryIndexCols(boundaries)
+			safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", indexColsEnc, inputCount, outCount, anNs, exNs)
+		}(analyzeNs, execNs)
+	}
+	return akkumulator
 }
 
 func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer) (scm.Scmer, int64) {
@@ -283,12 +245,12 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
 	for i, k := range conditionCols {
-		ccols[i] = t.getColumnStorageOrPanic(k)
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	// MapReducer for map+reduce phase (builds column readers internally)
-	mapper := t.OpenMapReducer(callbackCols, callback, aggregate)
+	mapper := t.openMapReducerEx(callbackCols, callback, aggregate, skipShardReadLock)
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	locked := false

@@ -24,10 +24,10 @@ import "time"
 import "strings"
 import "reflect"
 import "runtime"
-import "strconv"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/google/uuid"
+import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 
@@ -291,7 +291,31 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 		}
 		return u.ensureColumnLoaded(colName, true)
 	}
-	return u.getColumnStorageOrPanic(colName)
+	// alreadyLocked=false: caller guarantees ownsWrite=false — skip hasWriteOwner().
+	if tx := CurrentTx(); tx != nil && tx.HasShardWrite(u) {
+		return u.getColumnStorageOrPanicEx(colName, true)
+	}
+	u.mu.RLock()
+	cs, present := u.columns[colName]
+	u.mu.RUnlock()
+	if !present {
+		for _, c := range u.t.Columns {
+			if c.Name == colName {
+				u.mu.Lock()
+				if _, present2 := u.columns[colName]; !present2 {
+					u.columns[colName] = new(StorageSparse)
+				}
+				cs2 := u.columns[colName]
+				u.mu.Unlock()
+				return cs2
+			}
+		}
+		panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
+	}
+	if cs != nil {
+		return cs
+	}
+	return u.ensureColumnLoaded(colName, false)
 }
 
 // ensureMainCount guarantees main_count is initialized by loading one column if needed.
@@ -464,18 +488,11 @@ func (t *storageShard) Count() uint32 {
 }
 
 func currentGoroutineID() uint64 {
-	var b [64]byte
-	n := runtime.Stack(b[:], false)
-	line := string(b[:n])
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
+	id, ok := gls.GetGoroutineId()
+	if !ok {
 		return 0
 	}
-	id, err := strconv.ParseUint(fields[1], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return id
+	return uint64(id)
 }
 
 func (t *storageShard) enterWriteOwner() {
@@ -888,15 +905,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				t.t.dualWriteInsert(dualWriteCols, dualWriteRow)
 			}
 			// transaction bookkeeping + deferred sync
+			// (shard is already registered via OpenMapReducer — no per-row RegisterTouchedShard)
 			if result {
 				if tx := CurrentTx(); tx != nil {
 					switch tx.Mode {
-					case TxACID:
-						tx.RegisterTouchedShard(t)
 					case TxCursorStability:
 						tx.LogDelete(t, targetIdx)
 						tx.LogInsert(t, newRecid)
-						tx.RegisterTouchedShard(t)
 					}
 				} else if t.t.PersistencyMode == Safe && t.logfile != nil {
 					defer t.logfile.Sync()
@@ -973,7 +988,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					// Pre-existing committed row → add to delete mask
 					tx.AddToDeleteMask(t, idx)
 				}
-				tx.RegisterTouchedShard(t)
+				// shard already registered via OpenMapReducer
 				result = true
 			} else {
 				func() {
@@ -988,9 +1003,8 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 					}
 					result = true
 				}()
-				// deferred sync
+				// deferred sync (shard already registered via OpenMapReducer)
 				if tx != nil {
-					tx.RegisterTouchedShard(t)
 					tx.LogDelete(t, idx)
 				} else if t.t.PersistencyMode == Safe && t.logfile != nil {
 					defer t.logfile.Sync()
@@ -1058,6 +1072,13 @@ type ShardMapReducer struct {
 // mapFn and reduceFn are stored as Scmer for future network serialization;
 // OptimizeProcToSerialFunction is called here (TODO: replace with JIT compilation).
 func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer) *ShardMapReducer {
+	return t.openMapReducerEx(cols, mapFn, reduceFn, false)
+}
+
+// openMapReducerEx is the implementation of OpenMapReducer.
+// alreadyLocked=true skips the hasWriteOwner() check per column (caller already holds
+// the write lock or has confirmed ownsWrite=false via skipShardReadLock).
+func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool) *ShardMapReducer {
 	mr := &ShardMapReducer{
 		shard:           t,
 		mainCols:        make([]ColumnStorage, len(cols)),
@@ -1084,7 +1105,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		} else if len(col) > 12 && col[:12] == "$invalidate:" {
 			mr.isInvalidate[i] = true
 			cacheColName := col[12:]
-			cs := t.getColumnStorageOrPanic(cacheColName)
+			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.invalidateProxy[i] = proxy
 			}
@@ -1092,12 +1113,18 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 			mr.isIncrement[i] = true
 			mr.hasIncrementCol = true
 			cacheColName := col[11:]
-			cs := t.getColumnStorageOrPanic(cacheColName)
+			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.incrementProxy[i] = proxy
 			}
 		} else {
-			mr.mainCols[i] = t.getColumnStorageOrPanic(col)
+			mr.mainCols[i] = t.getColumnStorageOrPanicEx(col, alreadyLocked)
+		}
+	}
+	// Register shard for deferred fsync once, not per row.
+	if mr.hasUpdateCol {
+		if tx := CurrentTx(); tx != nil {
+			tx.RegisterTouchedShard(t)
 		}
 	}
 	return mr

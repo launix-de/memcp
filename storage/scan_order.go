@@ -402,8 +402,8 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		akkumulator = aggregateFn(akkumulator, callbackFn(nullRow...)) // outer join: call once with NULLs
 	}
 	execNs := time.Since(execStart).Nanoseconds()
-	// log statistics for ordered scan (best-effort, async) if threshold met
-	if inputCount > int64(Settings.AnalyzeMinItems) {
+	// log statistics for ordered scan (best-effort, async) if threshold met or ScanDebugging
+	if Settings.ScanDebugging || inputCount > int64(Settings.AnalyzeMinItems) {
 		go func(anNs, exNs int64) {
 			defer func() { _ = recover() }()
 			filterEnc := ""
@@ -428,7 +428,8 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 				}
 			}
 			orderEnc := sb.String()
-			safeLogScan(t.schema.Name, t.Name, true, filterEnc, orderEnc, inputCount, outCount, anNs, exNs)
+			indexColsEnc := boundaryIndexCols(boundaries)
+			safeLogScan(t.schema.Name, t.Name, true, filterEnc, orderEnc, indexColsEnc, inputCount, outCount, anNs, exNs)
 		}(analyzeNs, execNs)
 	}
 	return akkumulator
@@ -559,14 +560,14 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		adjustedSortdirs[i] = cmpFn
 	}
 
-	// main storage
-	ccols := make([]ColumnStorage, len(conditionCols))
-	for i, k := range conditionCols { // iterate over columns
-		ccols[i] = t.getColumnStorageOrPanic(k)
-	}
-
 	currentTx := CurrentTx()
 	skipShardReadLock := t.hasWriteOwner() || (currentTx != nil && currentTx.HasShardWrite(t))
+
+	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
+	ccols := make([]ColumnStorage, len(conditionCols))
+	for i, k := range conditionCols { // iterate over columns
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock)
+	}
 	// initialize main_count lazily if needed
 	t.ensureMainCount(skipShardReadLock)
 	// scan loop in read lock
