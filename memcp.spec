@@ -8,6 +8,10 @@ BuildArch:      %{_arch}
 %description
 memcp smart clusterable distributed database working best on NVMe.
 
+%pre
+getent passwd memcp >/dev/null 2>&1 || \
+    useradd -r -s /sbin/nologin -d /var/lib/memcp -c "memcp database daemon" memcp
+
 %install
 make -C %{_srcdir} install DESTDIR=%{buildroot} PREFIX=/usr SYSTEMD_DIR=/usr/lib/systemd/system
 
@@ -31,6 +35,8 @@ systemctl daemon-reload 2>/dev/null || true
 if [ $1 -eq 0 ]; then
     rm -rf /var/lib/memcp
     rm -rf /etc/memcp
+    getent passwd memcp >/dev/null 2>&1 && userdel memcp 2>/dev/null || true
+    getent group memcp >/dev/null 2>&1 && groupdel memcp 2>/dev/null || true
 fi
 
 %files

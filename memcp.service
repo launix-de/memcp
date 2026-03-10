@@ -4,7 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
+User=memcp
+Group=memcp
 RuntimeDirectory=memcp
+StateDirectory=memcp
+ConfigurationDirectory=memcp
 ExecStart=/usr/bin/memcp --no-repl --config=/etc/memcp/memcp.conf
 Restart=on-failure
 
