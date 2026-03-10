@@ -442,9 +442,11 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 //
 // This function is called WITHOUT t.mu held (t.mu is released by the caller
 // before invoking repartition). It manages its own shard-level locking.
+// repartitionActive is already set to true by the caller under t.mu before
+// releasing it, so this guard only catches direct calls from outside db.rebuild.
 func (t *table) repartition(shardCandidates []shardDimension) {
-	// Guard against concurrent repartitions — only one at a time per table.
-	if t.repartitionActive {
+	// Safety-net: if somehow called directly without the flag being set.
+	if t.repartitionActive && t.PShards != nil {
 		return
 	}
 
@@ -511,7 +513,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	}
 	t.PShards = newshards
 	t.PDimensions = shardCandidates
-	t.repartitionActive = true
+	// repartitionActive was already set to true by db.rebuild() under t.mu.
 	// From this point, all concurrent inserts/updates go to BOTH shard sets.
 
 	// ── Phase B: Snapshot deletion baselines ──

@@ -394,12 +394,18 @@ func (db *database) rebuild(all bool, repartition bool) {
 			// Decide on repartition while holding t.mu, but execute it
 			// OUTSIDE the table lock so concurrent inserts can proceed
 			// and the dual-write mechanism works correctly.
+			// Also claim repartitionActive under t.mu so a concurrent
+			// rebuild (e.g. the 15-min scheduler) sees the flag and
+			// skips its own repartition instead of racing.
 			var shardCandidates []shardDimension
 			doRepart := false
-			if repartition && !hasColdShard {
+			if repartition && !hasColdShard && !t.repartitionActive {
 				var shouldChange bool
 				shardCandidates, shouldChange = t.proposerepartition(maincount)
 				doRepart = shouldChange || (t.ShardMode == ShardModeFree && t.Shards != nil)
+			}
+			if doRepart {
+				t.repartitionActive = true // claim under t.mu — atomic with the doRepart decision
 			}
 
 			t.mu.Unlock()
