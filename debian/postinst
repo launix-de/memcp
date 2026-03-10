@@ -23,7 +23,6 @@ configure() {
 				--mysql-port=*)  MYSQL_PORT="${line#--mysql-port=}" ;;
 				--disable-mysql) ENABLE_MYSQL=false ;;
 				--mysql-socket=*)MYSQL_SOCKET="${line#--mysql-socket=}" ;;
-				--root-password=*)ROOT_PASSWORD="${line#--root-password=}" ;;
 			esac
 		done < "$CONFIG"
 	fi
@@ -60,7 +59,7 @@ configure() {
 			fi
 		fi
 
-		printf "root password: "
+		printf "root password [admin]: "
 		stty -echo 2>/dev/null || true
 		read ans
 		stty echo 2>/dev/null || true
@@ -68,7 +67,7 @@ configure() {
 		[ -n "$ans" ] && ROOT_PASSWORD="$ans"
 	fi
 
-	# write config
+	# write config (root password is not stored — it was applied once during DB init below)
 	mkdir -p "$(dirname "$CONFIG")"
 	cat > "$CONFIG" <<EOF
 # memcp daemon configuration
@@ -77,7 +76,6 @@ configure() {
 # After editing, run: systemctl restart memcp
 
 -data $DATA
---root-password=$ROOT_PASSWORD
 
 --api-port=$API_PORT
 EOF
@@ -92,6 +90,29 @@ EOF
 		printf -- "--disable-mysql\n--mysql-socket=\n" >> "$CONFIG"
 	fi
 	chmod 600 "$CONFIG"
+
+	# One-time DB initialization: start memcp briefly to create system.user with the chosen password.
+	# Only needed on fresh installs (no existing data dir).
+	if [ ! -d "$DATA/system" ]; then
+		printf "Initializing database...\n"
+		INIT_PORT=14321
+		mkdir -p "$DATA"
+		/usr/bin/memcp -data "$DATA" --root-password="$ROOT_PASSWORD" \
+			--no-repl --api-port=$INIT_PORT --disable-mysql \
+			</dev/null >/tmp/memcp-init.log 2>&1 &
+		INIT_PID=$!
+		# Wait until the API port is listening (max 30s)
+		n=0
+		while [ $n -lt 30 ]; do
+			sleep 1
+			n=$((n+1))
+			kill -0 $INIT_PID 2>/dev/null || break
+			if ss -tlnp 2>/dev/null | grep -q ":$INIT_PORT "; then break; fi
+		done
+		kill $INIT_PID 2>/dev/null || true
+		wait $INIT_PID 2>/dev/null || true
+		printf "Database initialized.\n"
+	fi
 }
 
 case "$1" in

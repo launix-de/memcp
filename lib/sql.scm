@@ -83,9 +83,6 @@ if the user is not allowed to access this property, the function will throw an e
 	(eval (parse_sql "system" "CREATE TABLE `user`(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE" (lambda (schema table write) true)))
 	(insert "system" "user" '("username" "password" "admin") '('("root" (password (arg "root-password" "admin")) true)))
 ))
-/* sync root password from --root-password on every startup so reinstall/reconfigure takes effect */
-(let pw (password (arg "root-password" "admin"))
-	(eval (parse_sql "system" (concat "UPDATE `user` SET `password`='" pw "' WHERE `username`='root'") (lambda (schema table write) true))))
 
 /* migration: older instances may miss the admin column; add it and mark all existing users as admin */
 (try (lambda () (begin
