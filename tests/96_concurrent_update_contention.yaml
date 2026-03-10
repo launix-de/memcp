@@ -3,6 +3,7 @@
 metadata:
   version: "1.0"
   description: "Concurrent UPDATE contention: hot-row, 10x10 row workers, and full-table updates"
+  isolated: true
 
 test_cases:
   - name: "Hot-row setup"

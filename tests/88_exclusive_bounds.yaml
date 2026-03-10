@@ -4,6 +4,7 @@
 metadata:
   version: "1.0"
   description: "Exclusive bound index scan optimization"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS exbound"
