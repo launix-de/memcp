@@ -96,7 +96,8 @@ EOF
 		# disable both TCP and Unix socket when MySQL is disabled
 		printf -- "--disable-mysql\n--mysql-socket=\n" >> "$CONFIG"
 	fi
-	chmod 600 "$CONFIG"
+	chown root:memcp "$CONFIG"
+	chmod 640 "$CONFIG"
 
 	# One-time DB initialization: start memcp briefly to create system.user with the chosen password.
 	# Only needed on fresh installs (no existing data dir).
