@@ -2005,6 +2005,7 @@ func Init(en scm.Env) {
 	})
 
 	initMySQLImport(en)
+	initPSQLImport(en)
 	initDashboard(en)
 	scm.DeclareInSection("Sync", &en, &scm.Declaration{
 		"newcachemap", "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",

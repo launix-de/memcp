@@ -372,6 +372,9 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	(define offset (if _cd_has nil offset))
 
 	(define make_replace_find_column_subselect (lambda (schemas2 outer_schemas) (begin
+		/* force optimizer to retain both params by using them directly in the outer body */
+		(define _s schemas2)
+		(define _o outer_schemas)
 		(define alias_exists_in_schema (lambda (schemas alias_name table_insensitive) (reduce_assoc schemas (lambda (acc alias cols)
 			(or acc ((if table_insensitive equal?? equal?) alias_name alias))
 		) false)))
@@ -387,9 +390,27 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 				(cons only _) only
 			)
 		)))
+		/* wrap_outer_leaves: replace get_column leaf nodes with (outer tblvar.col) symbol references
+		so that derived-table computed columns are accessible via the optimizer's outer-scope mechanism */
+		(define is_get_column_sym (lambda (sym)
+			(or (equal? sym (quote get_column))
+				(equal? sym '(quote get_column))
+				(equal? sym '(symbol get_column))
+			)
+		))
+		(define wrap_outer_leaves (lambda (expr) (match expr
+			(cons sym args) (if (is_get_column_sym sym)
+				(match args
+					'(tblvar _ col _) (if (nil? tblvar) expr (list (quote outer) (symbol (concat tblvar "." col))))
+					_ (cons (wrap_outer_leaves sym) (map args wrap_outer_leaves))
+				)
+				(cons (wrap_outer_leaves sym) (map args wrap_outer_leaves))
+			)
+			expr
+		)))
 		(define replace_get_column_subselect (lambda (alias_name table_insensitive column_name column_insensitive expr) (begin
-			(define inner_alias (column_exists_in_schema schemas2 alias_name table_insensitive column_name column_insensitive))
-			(define inner_alias_exists (and (not (nil? alias_name)) (alias_exists_in_schema schemas2 alias_name table_insensitive)))
+			(define inner_alias (column_exists_in_schema _s alias_name table_insensitive column_name column_insensitive))
+			(define inner_alias_exists (and (not (nil? alias_name)) (alias_exists_in_schema _s alias_name table_insensitive)))
 			(if (and inner_alias_exists (nil? inner_alias))
 				(error (concat "column " alias_name "." column_name " does not exist in subquery"))
 				(if (not (nil? inner_alias))
@@ -397,22 +418,26 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 						'((quote get_column) inner_alias false column_name false)
 						expr)
 					(begin
-						(define outer_alias (column_exists_in_schema outer_schemas alias_name table_insensitive column_name column_insensitive))
+						(define outer_alias (column_exists_in_schema _o alias_name table_insensitive column_name column_insensitive))
 						(if (nil? outer_alias)
 							(if (nil? alias_name)
 								(error (concat "column " column_name " does not exist in outer query"))
 								expr)
-							(list (quote outer) (symbol (concat outer_alias "." column_name))))
+							(begin
+								/* check if the outer column is a computed expression (derived table) */
+								(define outer_cols (_o outer_alias))
+								(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") column_name)) coldef a)) nil))
+								(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
+								(if outer_expr
+									/* derived table computed column: inline expression with leaf get_column
+									nodes replaced by (outer sym) references for optimizer resolution */
+									(wrap_outer_leaves outer_expr)
+									/* real table column: symbol lookup in outer scope */
+									(list (quote outer) (symbol (concat outer_alias "." column_name))))))
 					)
 				)
 			)
 		)))
-		(define is_get_column_sym (lambda (sym)
-			(or (equal? sym (quote get_column))
-				(equal? sym '(quote get_column))
-				(equal? sym '(symbol get_column))
-			)
-		))
 		(define replace_find_column_subselect (lambda (expr) (match expr
 			(cons sym args) (if (is_get_column_sym sym)
 				(match args
@@ -473,51 +498,120 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 						))
 						(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
 						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
-						/* hash of inner query after column-resolution — used as dedup key and unique name suffix */
-						(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
-						(define _sq_acc_name (concat "accsess_" _sq_hash))
-						(define _sq_rr_name  (concat "__scalar_resultrow_" _sq_hash))
-						/* dedup: if identical subquery already generated, reuse its accumulator */
-						(if (not (nil? (sq_cache _sq_hash)))
-							(sq_cache _sq_hash)
-							/* first occurrence: generate full setup+subplan */
+						/* detect top-level aggregate for direct scan path */
+						(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
+						(define _is_aggregate_sym (lambda (sym)
+							(or (equal? sym (quote aggregate))
+								(equal? sym '(quote aggregate))
+								(equal? sym '(symbol aggregate))
+						)))
+						(define _agg_head (match value_expr_rep (cons sym _) sym _ nil))
+						(define _agg_args (if (and _agg_head (_is_aggregate_sym _agg_head))
+							(match value_expr_rep (cons _ args) args _ nil)
+							nil))
+						(define has_stage2 (and (not (nil? groups2)) (not (equal? groups2 '()))))
+						(define stage2 (if has_stage2 (car groups2) nil))
+						(define stage2_group (if stage2 (coalesceNil (stage_group_cols stage2) '()) '()))
+						(define stage2_having (if stage2 (stage_having_expr stage2) nil))
+						/* use direct scan: single top-level aggregate, no HAVING, no GROUP keys, has tables */
+						(define use_direct_agg_scan (and
+							(not (nil? _agg_args))
+							(equal? (count _agg_args) 3)
+							(nil? stage2_having)
+							(or (nil? stage2_group) (equal? stage2_group '()) (equal? stage2_group '(1)))
+							(not (nil? tables2))
+							(not (equal? tables2 '()))
+						))
+						(if use_direct_agg_scan
+							/* direct nested-scan aggregate: avoids build_queryplan keytable path */
 							(begin
-								(define replace_resultrow (lambda (expr) (match expr
-									(cons sym args) (if (equal? sym (quote resultrow))
-										(cons (symbol _sq_rr_name) (map args replace_resultrow))
-										(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-											(list (quote symbol) _sq_rr_name)
-											(cons (replace_resultrow sym) (map args replace_resultrow))
+								(define agg_item (nth _agg_args 0))
+								(define agg_reduce (nth _agg_args 1))
+								(define agg_neutral (nth _agg_args 2))
+								(define build_scalar_agg_scan (lambda (scan_tables scan_condition)
+									(match scan_tables
+										(cons '(tblvar schema3 tbl3 isOuter3 _) rest_tables) (begin
+											(define cur_cols (merge_unique (list
+												(extract_columns_for_tblvar tblvar scan_condition)
+												(extract_columns_for_tblvar tblvar agg_item)
+												(extract_outer_columns_for_tblvar tblvar scan_condition)
+												(extract_outer_columns_for_tblvar tblvar agg_item)
+											)))
+											(match (split_condition (coalesceNil scan_condition true) rest_tables) '(now_condition later_condition) (begin
+												(define filtercols (merge_unique (list
+													(extract_columns_for_tblvar tblvar now_condition)
+													(extract_outer_columns_for_tblvar tblvar now_condition)
+												)))
+												(define inner_body (build_scalar_agg_scan rest_tables later_condition))
+												(scan_wrapper 'scan schema3 tbl3
+													(cons list filtercols)
+													(list (quote lambda)
+														(map filtercols (lambda (col) (symbol (concat tblvar "." col))))
+														(replace_columns_from_expr now_condition)
+													)
+													(cons list cur_cols)
+													(list (quote lambda)
+														(map cur_cols (lambda (col) (symbol (concat tblvar "." col))))
+														inner_body
+													)
+													(eval agg_reduce) agg_neutral (eval agg_reduce) isOuter3
+												)
+											))
 										)
+										'() (replace_columns_from_expr agg_item)
 									)
-									expr
-								)))
-								(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
-								/* cache the read expression so duplicate subqueries skip the subplan */
-								(sq_cache _sq_hash (list (quote if) (list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral) nil (list (symbol _sq_acc_name) "acc")))
-								(list (quote !begin)
-									(list (quote set) (symbol _sq_acc_name) (list (quote newsession)))
-									(list (symbol _sq_acc_name) "acc" scalar_neutral)
-									(list (quote set) (symbol _sq_rr_name)
-										(list (quote lambda) (list (symbol "row"))
-											(list (quote begin)
-												(list (symbol _sq_acc_name) "acc"
-													(list scalar_reduce
-														(list (symbol _sq_acc_name) "acc")
-														(list (quote nth) (symbol "row") 1)))
-												true
+								))
+								(build_scalar_agg_scan tables2 condition2)
+							)
+							/* fallback: build_queryplan for non-aggregate or complex aggregate cases */
+							(begin
+								/* hash of inner query after column-resolution — used as dedup key and unique name suffix */
+								(define _sq_hash (fnv_hash (concat tables2 "|" fields2 "|" condition2)))
+								(define _sq_acc_name (concat "accsess_" _sq_hash))
+								(define _sq_rr_name  (concat "__scalar_resultrow_" _sq_hash))
+								/* dedup: if identical subquery already generated, reuse its accumulator */
+								(if (not (nil? (sq_cache _sq_hash)))
+									(sq_cache _sq_hash)
+									/* first occurrence: generate full setup+subplan */
+									(begin
+										(define replace_resultrow (lambda (expr) (match expr
+											(cons sym args) (if (equal? sym (quote resultrow))
+												(cons (symbol _sq_rr_name) (map args replace_resultrow))
+												(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
+													(list (quote symbol) _sq_rr_name)
+													(cons (replace_resultrow sym) (map args replace_resultrow))
+												)
 											)
+											expr
+										)))
+										(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
+										/* cache the read expression so duplicate subqueries skip the subplan */
+										(sq_cache _sq_hash (list (quote if) (list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral) nil (list (symbol _sq_acc_name) "acc")))
+										(list (quote !begin)
+											(list (quote set) (symbol _sq_acc_name) (list (quote newsession)))
+											(list (symbol _sq_acc_name) "acc" scalar_neutral)
+											(list (quote set) (symbol _sq_rr_name)
+												(list (quote lambda) (list (symbol "row"))
+													(list (quote begin)
+														(list (symbol _sq_acc_name) "acc"
+															(list scalar_reduce
+																(list (symbol _sq_acc_name) "acc")
+																(list (quote nth) (symbol "row") 1)))
+														true
+													)
+												)
+											)
+											subplan
+											(list (quote if)
+												(list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral)
+												nil
+												(list (symbol _sq_acc_name) "acc"))
 										)
 									)
-									subplan
-									(list (quote if)
-										(list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral)
-										nil
-										(list (symbol _sq_acc_name) "acc"))
 								)
 							)
-						)
-					)
+						) /* close fallback begin */
+					) /* close if use_direct_agg_scan */
 				)
 			)
 		)
@@ -1045,7 +1139,7 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 									/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
 									/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
 									(set globalFilter (if isOuter true (replace_column_alias condition2)))
-									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list alias (extract_assoc fields2 (lambda (k v) '("Field" k "Type" "any")))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
+									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
 								)
 							)
 						) (error "non matching return value for untangle_query"))
