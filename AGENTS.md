@@ -241,6 +241,52 @@ Before merging any PR that touches storage, persistence, DDL, or cleanup code:
 - [ ] ENGINE semantics table above remains accurate (update if behaviour changes).
 - [ ] `AfterDropTable` / trigger callbacks reviewed for unintended side-effects.
 
+## Release Process
+
+### Version Numbering
+- Scheme: `MAJOR.MINOR` — no dates in the version string.
+- `0.x` while the API is still evolving; bump to `1.0` for the first stable API.
+- Bump `MINOR` for every normal release; bump `MAJOR` only for breaking API changes.
+
+### CHANGELOG.md Format
+The first line of `CHANGELOG.md` must be the bare version number followed by an em-dash and ISO date:
+```
+0.2 — 2026-03-XX
+=================
+- feat: short description
+- fix: short description
+```
+The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'`).
+
+### Release Steps
+1. Add a new entry at the top of `CHANGELOG.md` with the new version and date.
+2. Commit the changelog update to `master` (via PR as usual).
+3. Tag the release commit:
+   ```
+   git tag -a v0.2 -m "Release 0.2"
+   git push origin v0.2
+   ```
+4. Build artefacts:
+   ```
+   make memcp_0.2_amd64.deb memcp_0.2_x86_64.rpm
+   ```
+   Output filenames include version and arch automatically (e.g. `memcp_0.2_amd64.deb`, `memcp_0.2_x86_64.rpm`).
+5. Create GitHub release with artefacts:
+   ```
+   gh release create v0.2 memcp_0.2_amd64.deb memcp_0.2_x86_64.rpm \
+     --title "v0.2" --notes-file <(sed -n '/^0\.2/,/^[0-9]/p' CHANGELOG.md | head -n -2)
+   ```
+6. Push Docker image (requires `docker login` once):
+   ```
+   make docker-release
+   ```
+   This tags `carli2/memcp:0.2` **and** `carli2/memcp:latest` and pushes both.
+
+### Makefile Variables
+- `VERSION` — auto-read from `CHANGELOG.md`; override with `make VERSION=0.2 memcp_0.2_amd64.deb`.
+- `DEB_ARCH` — defaults to `dpkg --print-architecture` (e.g. `amd64`).
+- `RPM_ARCH` — defaults to `uname -m` (e.g. `x86_64`).
+
 ## MySQL ↔ MemCP Parallel Run Plan
 - Goal: operate MemCP alongside MySQL for months with minimal risk, validating correctness and performance before cutover.
 
