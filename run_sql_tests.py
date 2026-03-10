@@ -817,6 +817,10 @@ class SQLTestRunner:
         if PERF_TEST_ENABLED and self.perf_results and (failed_crit == 0 or PERF_CALIBRATE):
             self.save_perf_baselines()
 
+        # Print memcp log on critical failures to aid debugging
+        if failed_crit > 0:
+            print_memcp_log(tail=100)
+
         # Suite success is determined solely by critical tests
         return failed_crit == 0
 
@@ -841,22 +845,42 @@ def wait_for_sql_ready(base_url: str, username: str = "root", password: str = "a
 def wait_for_memcp(port=4321, timeout=30) -> bool:
     return wait_for_sql_ready(f"http://localhost:{port}", timeout=timeout)
 
+_memcp_log_file: str = ""
+
 def start_memcp_process(port: int) -> subprocess.Popen | None:
+    global _memcp_log_file
     try:
         datadir = os.environ.get("MEMCP_TEST_DATADIR", f"/tmp/memcp-sql-tests-{port}")
+        _memcp_log_file = f"/tmp/memcp-test-{port}.log"
         env = os.environ.copy()
-        devnull = open(os.devnull, 'w')
+        logfile = open(_memcp_log_file, 'w')
         proc = subprocess.Popen([
             "./memcp", "-data", datadir,
             f"--api-port={port}", f"--mysql-port={port+1000}",
             "--disable-mysql", "lib/main.scm"
         ], cwd=os.path.dirname(os.path.abspath(__file__)),
-           env=env, stdin=subprocess.PIPE, stdout=devnull, stderr=devnull, text=True)
+           env=env, stdin=subprocess.PIPE, stdout=logfile, stderr=logfile, text=True)
         if not wait_for_memcp(port):
+            print_memcp_log(tail=50)
             return None
         return proc
     except Exception:
         return None
+
+def print_memcp_log(tail: int = 100) -> None:
+    if not _memcp_log_file:
+        return
+    try:
+        with open(_memcp_log_file, 'r') as f:
+            lines = f.readlines()
+        if not lines:
+            return
+        snippet = lines[-tail:]
+        print(f"\n--- memcp log (last {len(snippet)} lines from {_memcp_log_file}) ---")
+        print("".join(snippet), end="")
+        print("--- end memcp log ---\n")
+    except Exception:
+        pass
 
 def stop_memcp_process(proc: subprocess.Popen) -> None:
     try:
