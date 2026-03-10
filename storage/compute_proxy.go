@@ -63,7 +63,7 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	}
 
 	// Fast path 2: valid bit set → value in delta or main
-	if p.validMask.Get(idx) {
+	if p.validMask.Get(uint(idx)) {
 		p.mu.RLock()
 		if val, ok := p.delta[idx]; ok {
 			p.mu.RUnlock()
@@ -85,7 +85,7 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	p.mu.Lock()
 	p.delta[idx] = val
 	p.mu.Unlock()
-	p.validMask.Set(idx, true)
+	p.validMask.Set(uint(idx), true)
 
 	return val
 }
@@ -121,7 +121,7 @@ func (p *StorageComputeProxy) Compress() {
 		if val, ok := p.delta[idx]; ok {
 			return val
 		}
-		if p.main != nil && p.validMask.Get(idx) {
+		if p.main != nil && p.validMask.Get(uint(idx)) {
 			return p.main.GetValue(idx)
 		}
 		// compute
@@ -191,7 +191,7 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 				colvalues[j] = readers[j].GetValue(i)
 			}
 			p.delta[i] = fn(colvalues...)
-			p.validMask.Set(i, true)
+			p.validMask.Set(uint(i), true)
 		}
 	}
 	// Don't set compressed=true → unmatched rows stay lazy for on-demand GetValue
@@ -216,7 +216,7 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 		// main is compressed type → can't SetValue → fall back to lazy
 		p.compressed = false
 	}
-	p.validMask.Set(idx, false)
+	p.validMask.Set(uint(idx), false)
 	delete(p.delta, idx)
 }
 
@@ -226,7 +226,7 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.compressed && !p.validMask.Get(idx) {
+	if !p.compressed && !p.validMask.Get(uint(idx)) {
 		return // not valid → will be computed fresh on next read
 	}
 	var oldVal scm.Scmer
@@ -253,7 +253,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 		// non-compressed, mark all rows as valid so IncrementalUpdate works for
 		// other indices too. Values not in delta will fall through to main.
 		for i := uint32(0); i < p.count; i++ {
-			p.validMask.Set(i, true)
+			p.validMask.Set(uint(i), true)
 		}
 	}
 }
@@ -364,7 +364,7 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	// validMask: serialize set bits
 	validCount := p.validMask.Count()
 	binary.Write(f, binary.LittleEndian, uint32(validCount))
-	p.validMask.Iterate(func(idx uint32) {
+	p.validMask.Iterate(func(idx uint) {
 		binary.Write(f, binary.LittleEndian, idx)
 	})
 }
@@ -446,7 +446,7 @@ func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 	for i := uint32(0); i < validCount; i++ {
 		var idx uint32
 		binary.Read(f, binary.LittleEndian, &idx)
-		p.validMask.Set(idx, true)
+		p.validMask.Set(uint(idx), true)
 	}
 
 	// shard back-reference is set by post-load hook in ensureColumnLoaded

@@ -699,12 +699,18 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	cp := &c
 	t.Columns = append(t.Columns, cp)
 	for _, s := range t.Shards {
+		if s == nil {
+			continue
+		}
 		// mutate shard column map under shard lock to avoid races with readers
 		s.mu.Lock()
 		s.columns[name] = new(StorageSparse)
 		s.mu.Unlock()
 	}
 	for _, s := range t.PShards {
+		if s == nil {
+			continue
+		}
 		// mutate shard column map under shard lock to avoid races with readers
 		s.mu.Lock()
 		s.columns[name] = new(StorageSparse)
@@ -1204,7 +1210,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 					if currentTx := CurrentTx(); currentTx != nil && currentTx.Mode == TxACID {
 						isVisible = currentTx.IsVisible(s, uid)
 					} else {
-						isVisible = !s.deletions.Get(uid)
+						isVisible = !s.deletions.Get(uint(uid))
 					}
 				}
 				if isVisible {

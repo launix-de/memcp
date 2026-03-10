@@ -273,11 +273,13 @@ func ensureSystemStatistic() {
 		{"ordered", "BOOL"},
 		{"filter", "TEXT"},
 		{"order", "TEXT"},
+		{"index_cols", "TEXT"},
 		{"inputCount", "INT"},
 		{"outputCount", "INT"},
 		// TODO: measurements are temporary; remove later (store in nanoseconds)
 		{"analyze_ns", "INT"},
 		{"exec_ns", "INT"},
+		{"timestamp", "INT"},
 	}
 	have := make(map[string]bool)
 	if t != nil {
@@ -295,7 +297,7 @@ func ensureSystemStatistic() {
 
 // safeLogScan writes a single row into system_statistic.scans. Failures are ignored.
 // TODO: measurements are temporary; remove later (nanoseconds)
-func safeLogScan(schema, table string, ordered bool, filter, order string, inputCount, outputCount, analyzeNs, execNs int64) {
+func safeLogScan(schema, table string, ordered bool, filter, order, indexCols string, inputCount, outputCount, analyzeNs, execNs int64) {
 	defer func() { _ = recover() }()
 	db := GetDatabase("system_statistic")
 	if db == nil {
@@ -306,19 +308,37 @@ func safeLogScan(schema, table string, ordered bool, filter, order string, input
 		return
 	}
 
-	cols := []string{"schema", "table", "ordered", "filter", "order", "inputCount", "outputCount", "analyze_ns", "exec_ns"}
+	cols := []string{"schema", "table", "ordered", "filter", "order", "index_cols", "inputCount", "outputCount", "analyze_ns", "exec_ns", "timestamp"}
 	row := []scm.Scmer{
 		scm.NewString(schema),
 		scm.NewString(table),
 		scm.NewBool(ordered),
 		scm.NewString(filter),
 		scm.NewString(order),
+		scm.NewString(indexCols),
 		scm.NewInt(inputCount),
 		scm.NewInt(outputCount),
 		scm.NewInt(analyzeNs),
 		scm.NewInt(execNs),
+		scm.NewInt(time.Now().UnixNano()),
 	}
 	t.Insert(cols, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
+}
+
+// boundaryIndexCols returns a comma-separated list of column names from boundaries,
+// representing the columns used for index lookup in this scan.
+func boundaryIndexCols(b boundaries) string {
+	if len(b) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for i, bc := range b {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(bc.col)
+	}
+	return sb.String()
 }
 
 // touchTempColumns updates lastAccessed on all temp columns of the table (lock-free).

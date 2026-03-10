@@ -43,7 +43,7 @@ type SettingsT struct {
 	MetricsTracingInterval int   // interval in seconds (0 = default 60s)
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
 	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
-	ScanDebugging          bool  // when true, log every scan/scan_order: db+table+boundaries+index
+	ScanDebugging          bool  // when true, log every scan/scan_order: db+table+boundaries+index; also overrides AnalyzeMinItems for scan statistics
 	ExplainWidth           int   // max chars before EXPLAIN pretty-prints a sub-expression on multiple lines (0 = default 20)
 }
 

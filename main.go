@@ -40,6 +40,7 @@ import "runtime/pprof"
 import "runtime/debug"
 import "github.com/google/uuid"
 import "github.com/fsnotify/fsnotify"
+import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage"
 
@@ -592,47 +593,56 @@ func main() {
 	}
 
 	storage.Basepath = basepath
-	storage.LoadDatabases()
-	// scripts initialization
-	if len(imports) == 0 {
-		// search for lib/main.scm in well-known locations
-		exePath, _ := os.Executable()
-		exeDir := filepath.Dir(exePath)
-		candidates := []string{
-			filepath.Join(wd, "lib/main.scm"),
-			filepath.Join(exeDir, "lib/main.scm"),
-			"/usr/local/lib/memcp/lib/main.scm",
-			"/usr/lib/memcp/lib/main.scm",
-		}
-		found := false
-		for _, candidate := range candidates {
-			if _, err := os.Stat(candidate); err == nil {
-				fmt.Println("Loading " + candidate + " ...")
-				dir := filepath.Dir(candidate)
-				base := filepath.Base(candidate)
-				getImport(dir)(scm.NewString(base))
-				found = true
-				break
+	// Run initialization inside a gls.Go goroutine so that storage operations
+	// (scans, inserts, triggers) always have a valid GLS goroutine ID.
+	// Without this, hasWriteOwner/enterMutationOwner silently no-op (goid==0),
+	// breaking reentrancy guards and causing deadlocks.
+	initDone := make(chan struct{})
+	gls.Go(func() {
+		defer close(initDone)
+		storage.LoadDatabases()
+		// scripts initialization
+		if len(imports) == 0 {
+			// search for lib/main.scm in well-known locations
+			exePath, _ := os.Executable()
+			exeDir := filepath.Dir(exePath)
+			candidates := []string{
+				filepath.Join(wd, "lib/main.scm"),
+				filepath.Join(exeDir, "lib/main.scm"),
+				"/usr/local/lib/memcp/lib/main.scm",
+				"/usr/lib/memcp/lib/main.scm",
+			}
+			found := false
+			for _, candidate := range candidates {
+				if _, err := os.Stat(candidate); err == nil {
+					fmt.Println("Loading " + candidate + " ...")
+					dir := filepath.Dir(candidate)
+					base := filepath.Base(candidate)
+					getImport(dir)(scm.NewString(base))
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(os.Stderr, "error: could not find lib/main.scm; tried: %v\n", candidates)
+				os.Exit(1)
+			}
+		} else {
+			// load scripts from command line
+			for _, scmfile := range imports {
+				fmt.Println("Loading " + scmfile + " ...")
+				IOEnv.Vars["import"].Func()(scm.NewString(scmfile))
 			}
 		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "error: could not find lib/main.scm; tried: %v\n", candidates)
-			os.Exit(1)
+		for _, command := range commands {
+			fmt.Println("Executing " + command + " ...")
+			code := scm.Read("command line", command)
+			scm.Validate(code, "any")
+			code = scm.Optimize(code, &IOEnv)
+			scm.Eval(code, &IOEnv)
 		}
-	} else {
-		// load scripts from command line
-		for _, scmfile := range imports {
-			fmt.Println("Loading " + scmfile + " ...")
-			IOEnv.Vars["import"].Func()(scm.NewString(scmfile))
-		}
-	}
-	for _, command := range commands {
-		fmt.Println("Executing " + command + " ...")
-		code := scm.Read("command line", command)
-		scm.Validate(code, "any")
-		code = scm.Optimize(code, &IOEnv)
-		scm.Eval(code, &IOEnv)
-	}
+	})
+	<-initDone
 
 	// install exit handler
 	cancelChan := make(chan os.Signal, 1)
@@ -659,9 +669,9 @@ func main() {
 		defer pprof.StopCPUProfile()
 	}
 
-	// start cron
+	// start cron (inside gls.Go so storage scans in Rebuild have a valid GLS id)
 	exitable.Add(1)
-	go cronroutine()
+	gls.Go(cronroutine)
 
 	// REPL shell or wait for signal
 	if noRepl {
@@ -671,7 +681,12 @@ func main() {
 		<-sig
 	} else {
 		signal.Stop(cancelChan) // let readline handle SIGINT/SIGTERM in REPL mode
-		scm.Repl(&IOEnv)
+		replDone := make(chan struct{})
+		gls.Go(func() {
+			defer close(replDone)
+			scm.Repl(&IOEnv)
+		})
+		<-replDone
 	}
 
 	// normal shutdown
