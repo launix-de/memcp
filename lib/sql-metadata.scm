@@ -17,8 +17,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* format_create_table: build a CREATE TABLE statement from show metadata */
 (define format_create_table (lambda (schema tbl) (begin
-	(define cols (filter (show schema tbl) (lambda (col) (not (col "IsTemp")))))
-	(define meta (show schema tbl "meta"))
+	(define tblinfo (show schema tbl true))
+	(define cols (filter (tblinfo "columns") (lambda (col) (not (col "IsTemp")))))
+	(define meta (tblinfo "meta"))
 	(define col_defs (map cols (lambda (col)
 		(concat "  `" (col "Field") "` " (col "Type")
 			(if (not (col "Null")) " NOT NULL" "")
@@ -42,8 +43,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* build one INFORMATION_SCHEMA.TABLES row for (schema, tbl) */
 (define info_schema_table_row (lambda (schema tbl) (begin
-	(define meta (show schema tbl "meta"))
-	(define shards (show schema tbl "shards"))
+	(define tblinfo (show schema tbl true))
+	(define meta (tblinfo "meta"))
+	(define shards (tblinfo "shards"))
 	(list
 		"table_catalog" "def"
 		"table_schema" schema

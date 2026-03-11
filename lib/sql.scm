@@ -131,10 +131,10 @@ if the user is not allowed to access this property, the function will throw an e
 (error_log_counter "count" 0)
 
 /* error_log: insert a failed query into system_statistic.errors (no-op when ErrorQueryLog is off)
-   errmsg — error message (required)
-   db     — database name (pass "" when unknown)
-   usr    — username (pass "" when unknown)
-   qry    — query text (pass "" when unknown) */
+errmsg — error message (required)
+db     — database name (pass "" when unknown)
+usr    — username (pass "" when unknown)
+qry    — query text (pass "" when unknown) */
 (define error_log (lambda (errmsg db usr qry) (begin
 	/* always print to stdout for system logs */
 	(print (if (equal? db "") "" (concat "[" db "] ")) errmsg)
@@ -372,8 +372,8 @@ if the user is not allowed to access this property, the function will throw an e
 				(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 			) sql))
 	)) (lambda (e) (begin
-		(error_log (concat e) schema (coalesce (session "username") "root") sql)
-		(error e) /* re-throw so MySQL protocol sends proper error packet */
+			(error_log (concat e) schema (coalesce (session "username") "root") sql)
+			(error e) /* re-throw so MySQL protocol sends proper error packet */
 	)))
 )))
 

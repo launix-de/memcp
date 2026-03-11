@@ -906,7 +906,7 @@ if(b)b.classList.toggle("active",tabs[i]===tab);
 }
 if(_dbTabDb){
 if(tab==="tables") location.hash="db/"+encodeURIComponent(_dbTabDb);
-else location.hash="db/"+encodeURIComponent(_dbTabDb)+"/"+tab;
+else location.hash="db/"+encodeURIComponent(_dbTabDb)+"/%2B"+tab;
 }
 if(tab==="errors") loadDbErrors();
 if(tab==="console"){
@@ -926,7 +926,7 @@ if(tab==="console"){
 /* Navigate to the db-level console with a pre-filled SELECT */
 if(_tblTabDb){
 _pendingDbConsoleQuery="SELECT * FROM `"+(_tblTabName||"").replace(/`/g,"``")+"` LIMIT 100";
-location.hash="db/"+encodeURIComponent(_tblTabDb)+"/console";
+location.hash="db/"+encodeURIComponent(_tblTabDb)+"/%2Bconsole";
 }
 return;
 }
@@ -1056,7 +1056,7 @@ return JSON.stringify(String(v));
 function fetchSettings(cb){
 fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(json_encode_assoc (settings))"})
 .then(function(r){if(!r.ok)throw new Error(r.status);return r.text();})
-.then(function(t){cb(JSON.parse(t));})
+.then(function(t){var v=JSON.parse(t);if(typeof v==="string")v=JSON.parse(v);cb(v);})
 .catch(function(e){console.error("Settings error:",e);});
 }
 function saveSetting(key,value,cb){
@@ -1205,8 +1205,8 @@ document.getElementById("shard-title").textContent=db_+"."+tbl_+" - Shard #"+si;
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_)+"/shard/"+si,function(data){renderShardDetail(data,db_,tbl_,si)});
 return;
 }
-/* db/NAME/errors or db/NAME/console */
-m=hash.match(/^db\/([^/]+)\/(errors|console)$/);
+/* db/NAME/%2Berrors or db/NAME/%2Bconsole (special tabs; %2B prefix avoids conflict with tables named "errors"/"console") */
+m=hash.match(/^db\/([^/]+)\/%2B(errors|console)$/);
 if(m){
 var dbX=decodeURIComponent(m[1]),tabX=m[2];
 showView("view-tables");
@@ -1809,7 +1809,7 @@ var db=_dbTabDb;
 if(!db)return;
 var q="CREATE TABLE `newtable` (\n  `id` INT PRIMARY KEY,\n  `name` VARCHAR(255)\n)";
 _pendingDbConsoleQuery=q;
-location.hash="db/"+encodeURIComponent(db)+"/console";
+location.hash="db/"+encodeURIComponent(db)+"/%2Bconsole";
 });
 document.getElementById("btn-create-db-toggle").addEventListener("click",function(){
 createDbFormVisible=!createDbFormVisible;
@@ -2076,7 +2076,7 @@ document.getElementById("metrics-range").addEventListener("change",loadMetricsHi
 
 /* hook into gauges routing: load metrics history when gauges view shown */
 var _metricsOnGauges=function(){
-apiFetch(base+"/dashboard/api/settings",function(s){
+fetchSettings(function(s){
 var sec=document.getElementById("metrics-history");
 if(s&&s.MetricsTracing&&sec){loadMetricsHistory();}
 else if(sec){sec.style.display="none";}

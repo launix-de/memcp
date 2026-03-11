@@ -111,7 +111,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: sum size_bytes across all shards of a table */
 (define dashboard_table_size (lambda (db tbl)
-	(reduce (show db tbl "shards") (lambda (acc shard) (+ acc (shard "size_bytes"))) 0)
+	(reduce ((show db tbl true) "shards") (lambda (acc shard) (+ acc (shard "size_bytes"))) 0)
 ))
 
 /* helper: join list of JSON strings into a JSON array */
@@ -162,18 +162,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_json res (dashboard_json_array items))
 				))
 			)
-				/* API: shard column detail with compression types */
+			/* API: shard column detail with compression types */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define sidx (simplify shardidx))
-					(define cols (show dbname tblname "columns" sidx))
-					(define shards (show dbname tblname "shards"))
-					(define shard_info (if (nil? shards) nil (nth shards sidx)))
-					(define main_count (if (nil? shard_info) 0 (shard_info "main_count")))
-					(define delta_count (if (nil? shard_info) 0 (shard_info "delta")))
-					(define deletions (if (nil? shard_info) 0 (shard_info "deletions")))
-					(define shard_size (if (nil? shard_info) 0 (shard_info "size_bytes")))
-					(define shard_state (if (nil? shard_info) "" (shard_info "state")))
+					(define shardinfo (show dbname tblname sidx true))
+					(define cols (shardinfo "columns"))
+					(define indexes (shardinfo "indexes"))
+					(define main_count (shardinfo "main_count"))
+					(define delta_count (shardinfo "delta"))
+					(define deletions (shardinfo "deletions"))
+					(define shard_size (shardinfo "size_bytes"))
+					(define shard_state (shardinfo "state"))
 					(define items (map cols (lambda (c)
 						(json_encode_assoc (list
 							"name" (c "name")
@@ -181,7 +181,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							"size_bytes" (c "size_bytes")
 						))
 					)))
-					(define indexes (show dbname tblname "indexes" sidx))
 					(define index_items (if (nil? indexes) "[]"
 						(dashboard_json_array (map indexes (lambda (ix)
 							(json_encode_assoc (list
@@ -205,9 +204,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			/* API: table detail with columns, shards, meta */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)$" _ dbname tblname) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
-					(define cols (show dbname tblname))
-					(define shards (show dbname tblname "shards"))
-					(define meta (show dbname tblname "meta"))
+					(define tblinfo (show dbname tblname true))
+					(define cols (tblinfo "columns"))
+					(define shards (tblinfo "shards"))
+					(define meta (tblinfo "meta"))
 					(define col_items (map cols (lambda (col)
 						(json_encode_assoc (list
 							"name" (col "Field")
@@ -270,9 +270,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define tables (show dbname))
 					(define items (if (nil? tables) nil (map tables (lambda (tbl) (begin
-						(define meta (show dbname tbl "meta"))
-						(define cols (show dbname tbl))
-						(define shards (show dbname tbl "shards"))
+						(define tblinfo (show dbname tbl true))
+						(define meta (tblinfo "meta"))
+						(define cols (tblinfo "columns"))
+						(define shards (tblinfo "shards"))
 						(define col_count (if (nil? cols) 0 (count cols)))
 						(define shard_count (if (nil? shards) 0 (count shards)))
 						(define total_size (dashboard_table_size dbname tbl))

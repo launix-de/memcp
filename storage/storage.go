@@ -1460,17 +1460,17 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"show", "show databases/tables/columns/meta/shards\n\n(show) lists databases\n(show schema) lists tables\n(show schema tbl) lists columns\n(show schema tbl \"meta\") returns table metadata dict\n(show schema tbl \"shards\") returns shard list\n(show schema tbl \"columns\" shardIdx) returns per-column storage details for a shard\n(show schema tbl \"indexes\" shardIdx) returns index details for a shard",
+		"show", "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
 		0, 4,
 		[]scm.DeclarationParameter{
 			{"schema", "string", "(optional) database name", nil},
-			{"table", "string", "(optional) table name", nil},
-			{"property", "string", "(optional) \"meta\", \"shards\", \"statistics\", \"columns\", \"indexes\"", nil},
-			{"shard", "int", "(optional) shard index for \"columns\" and \"indexes\"", nil},
+			{"table", "string|bool", "(optional) table name, or true for full table listing", nil},
+			{"property", "int|bool", "(optional) shard index (int), true for full table info, or \"statistics\"", nil},
+			{"full", "bool", "(optional) true to include columns and indexes in shard detail", nil},
 		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
-				// show databases
+				// list databases
 				dbs := databases.GetAll()
 				result := make([]scm.Scmer, len(dbs))
 				for i, db := range dbs {
@@ -1478,25 +1478,53 @@ func Init(en scm.Env) {
 				}
 				return scm.NewSlice(result)
 			} else if len(a) == 1 {
-				// show tables
+				// list table names
 				db := GetDatabase(scm.String(a[0]))
 				if db == nil {
 					return scm.NewNil() // use this to check if a database exists
 				}
 				return db.ShowTables()
 			} else if len(a) == 2 {
-				// show columns
 				db := GetDatabase(scm.String(a[0]))
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
 				}
+				// (show schema true) → full table listing
+				if a[1].IsBool() && a[1].Bool() {
+					db.ensureLoaded()
+					tables := db.tables.GetAll()
+					rows := make([]scm.Scmer, 0, len(tables))
+					for _, t := range tables {
+						engine := showEngineStr(t)
+						var rowCount int64
+						var sizeBytes int64
+						for _, s := range t.ActiveShards() {
+							if s == nil {
+								continue
+							}
+							s.mu.RLock()
+							rowCount += int64(s.main_count) + int64(len(s.inserts)) - int64(s.deletions.Count())
+							sizeBytes += int64(s.ComputeSize())
+							s.mu.RUnlock()
+						}
+						rows = append(rows, scm.NewSlice([]scm.Scmer{
+							scm.NewString("name"), scm.NewString(t.Name),
+							scm.NewString("engine"), scm.NewString(engine),
+							scm.NewString("row_count"), scm.NewInt(rowCount),
+							scm.NewString("size_bytes"), scm.NewInt(sizeBytes),
+							scm.NewString("collation"), scm.NewString(t.Collation),
+							scm.NewString("comment"), scm.NewString(t.Comment),
+						}))
+					}
+					return scm.NewSlice(rows)
+				}
+				// (show schema tbl) → column defs
 				t := db.GetTable(scm.String(a[1]))
 				if t == nil {
 					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
 				return t.ShowColumns()
 			} else if len(a) == 3 {
-				// show table metadata or shards
 				db := GetDatabase(scm.String(a[0]))
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
@@ -1505,181 +1533,135 @@ func Init(en scm.Env) {
 				if t == nil {
 					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
-				if scm.String(a[2]) == "statistics" {
-				var result []scm.Scmer
-				for _, uk := range t.Unique {
-					for seq, col := range uk.Cols {
-						result = append(result, scm.NewSlice([]scm.Scmer{
-							scm.NewString("table_catalog"), scm.NewString("def"),
-							scm.NewString("table_schema"), scm.NewString(db.Name),
-							scm.NewString("table_name"), scm.NewString(t.Name),
-							scm.NewString("non_unique"), scm.NewInt(0),
-							scm.NewString("index_schema"), scm.NewString(db.Name),
-							scm.NewString("index_name"), scm.NewString(uk.Id),
-							scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
-							scm.NewString("column_name"), scm.NewString(col),
-							scm.NewString("collation"), scm.NewString("A"),
-							scm.NewString("cardinality"), scm.NewNil(),
-							scm.NewString("sub_part"), scm.NewNil(),
-							scm.NewString("packed"), scm.NewNil(),
-							scm.NewString("nullable"), scm.NewString(""),
-							scm.NewString("index_type"), scm.NewString("BTREE"),
-							scm.NewString("comment"), scm.NewString(""),
-							scm.NewString("index_comment"), scm.NewString(""),
-						}))
-					}
-				}
-				return scm.NewSlice(result)
-			}
-			if scm.String(a[2]) == "shards" {
-					shards := t.ActiveShards()
-					rows := make([]scm.Scmer, 0, len(shards))
-					for i, s := range shards {
-						if s == nil {
-							rows = append(rows, scm.NewSlice([]scm.Scmer{
-								scm.NewString("shard"), scm.NewInt(int64(i)),
-								scm.NewString("state"), scm.NewString("nil"),
-								scm.NewString("main_count"), scm.NewInt(0),
-								scm.NewString("delta"), scm.NewInt(0),
-								scm.NewString("deletions"), scm.NewInt(0),
-								scm.NewString("size_bytes"), scm.NewInt(0),
+				// (show schema tbl "statistics") → index statistics (INFORMATION_SCHEMA)
+				if a[2].IsString() && scm.String(a[2]) == "statistics" {
+					var result []scm.Scmer
+					for _, uk := range t.Unique {
+						for seq, col := range uk.Cols {
+							result = append(result, scm.NewSlice([]scm.Scmer{
+								scm.NewString("table_catalog"), scm.NewString("def"),
+								scm.NewString("table_schema"), scm.NewString(db.Name),
+								scm.NewString("table_name"), scm.NewString(t.Name),
+								scm.NewString("non_unique"), scm.NewInt(0),
+								scm.NewString("index_schema"), scm.NewString(db.Name),
+								scm.NewString("index_name"), scm.NewString(uk.Id),
+								scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
+								scm.NewString("column_name"), scm.NewString(col),
+								scm.NewString("collation"), scm.NewString("A"),
+								scm.NewString("cardinality"), scm.NewNil(),
+								scm.NewString("sub_part"), scm.NewNil(),
+								scm.NewString("packed"), scm.NewNil(),
+								scm.NewString("nullable"), scm.NewString(""),
+								scm.NewString("index_type"), scm.NewString("BTREE"),
+								scm.NewString("comment"), scm.NewString(""),
+								scm.NewString("index_comment"), scm.NewString(""),
 							}))
-							continue
 						}
-						s.mu.RLock()
-						mainCount := s.main_count
-						delta := len(s.inserts)
-						deletions := s.deletions.Count()
-						state := sharedStateStr(s.srState)
-						size := s.ComputeSize()
-						s.mu.RUnlock()
-						rows = append(rows, scm.NewSlice([]scm.Scmer{
-							scm.NewString("shard"), scm.NewInt(int64(i)),
-							scm.NewString("state"), scm.NewString(state),
-							scm.NewString("main_count"), scm.NewInt(int64(mainCount)),
-							scm.NewString("delta"), scm.NewInt(int64(delta)),
-							scm.NewString("deletions"), scm.NewInt(int64(deletions)),
-							scm.NewString("size_bytes"), scm.NewInt(int64(size)),
-						}))
 					}
-					return scm.NewSlice(rows)
+					return scm.NewSlice(result)
 				}
-				if scm.String(a[2]) == "columns" {
-					if len(a) < 4 {
-						panic("show schema tbl \"columns\" requires shard index as 4th argument")
-					}
+				// (show schema tbl true) → full table info {columns, meta, shards}
+				if a[2].IsBool() && a[2].Bool() {
 					shards := t.ActiveShards()
-					idx := int(scm.ToInt(a[3]))
-					if idx < 0 || idx >= len(shards) {
-						panic("shard index out of range")
+					shardRows := make([]scm.Scmer, 0, len(shards))
+					for i, s := range shards {
+						shardRows = append(shardRows, showBuildShardRow(t, i, s))
 					}
-					s := shards[idx]
-					if s == nil {
-						return scm.NewSlice([]scm.Scmer{})
-					}
-					s.mu.RLock()
-					deltaCount := len(s.inserts)
-					rows := make([]scm.Scmer, 0, len(t.Columns))
-					for _, col := range t.Columns {
-						cs := s.columns[col.Name]
-						var typStr string
-						var colSize uint
-						if cs != nil {
-							typStr = cs.String()
-							colSize = cs.ComputeSize()
-						} else {
-							typStr = "unloaded"
-							colSize = 0
-						}
-						var deltaSize uint
-						if dIdx, ok := s.deltaColumns[col.Name]; ok {
-							for _, row := range s.inserts {
-								if dIdx < len(row) {
-									deltaSize += row[dIdx].ComputeSize()
-								}
-							}
-						}
-						rows = append(rows, scm.NewSlice([]scm.Scmer{
-							scm.NewString("name"), scm.NewString(col.Name),
-							scm.NewString("compression"), scm.NewString(typStr),
-							scm.NewString("size_bytes"), scm.NewInt(int64(colSize)),
-							scm.NewString("delta_count"), scm.NewInt(int64(deltaCount)),
-							scm.NewString("delta_size_bytes"), scm.NewInt(int64(deltaSize)),
-						}))
-					}
-					s.mu.RUnlock()
-					return scm.NewSlice(rows)
-				}
-				if scm.String(a[2]) == "indexes" {
-					if len(a) < 4 {
-						panic("show schema tbl \"indexes\" requires shard index as 4th argument")
-					}
-					shards := t.ActiveShards()
-					idx := int(scm.ToInt(a[3]))
-					if idx < 0 || idx >= len(shards) {
-						panic("shard index out of range")
-					}
-					s := shards[idx]
-					if s == nil {
-						return scm.NewSlice([]scm.Scmer{})
-					}
-					s.mu.RLock()
-					indexes := s.Indexes
-					rows := make([]scm.Scmer, 0, len(indexes))
-					for _, ix := range indexes {
-						rows = append(rows, scm.NewSlice([]scm.Scmer{
-							scm.NewString("cols"), scm.NewString(ix.String()),
-							scm.NewString("active"), scm.NewBool(ix.active),
-							scm.NewString("native"), scm.NewBool(ix.Native),
-							scm.NewString("savings"), scm.NewFloat(ix.Savings),
-							scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
-						}))
-					}
-					s.mu.RUnlock()
-					return scm.NewSlice(rows)
-				}
-				// engine (lowercase to match dashboard dropdown values)
-				engine := "safe"
-				switch t.PersistencyMode {
-				case Logged:
-					engine = "logged"
-				case Sloppy:
-					engine = "sloppy"
-				case Memory:
-					engine = "memory"
-				}
-				// unique keys as list of (id, cols...)
-				uniques := make([]scm.Scmer, len(t.Unique))
-				for i, uk := range t.Unique {
-					cols := make([]scm.Scmer, len(uk.Cols))
-					for j, c := range uk.Cols {
-						cols[j] = scm.NewString(c)
-					}
-					uniques[i] = scm.NewSlice([]scm.Scmer{
-						scm.NewString("Id"), scm.NewString(uk.Id),
-						scm.NewString("Cols"), scm.NewSlice(cols),
+					return scm.NewSlice([]scm.Scmer{
+						scm.NewString("columns"), t.ShowColumns(),
+						scm.NewString("meta"), showBuildMeta(db, t),
+						scm.NewString("shards"), scm.NewSlice(shardRows),
 					})
 				}
-				// partition schema: list of (column, numPartitions) pairs
-				partitions := make([]scm.Scmer, 0)
-				if t.ShardMode == ShardModePartition {
-					for _, sd := range t.PDimensions {
-						partitions = append(partitions, scm.NewSlice([]scm.Scmer{
-							scm.NewString("Column"), scm.NewString(sd.Column),
-							scm.NewString("NumPartitions"), scm.NewInt(int64(sd.NumPartitions)),
-							scm.NewString("Pivots"), scm.NewSlice(sd.Pivots),
-						}))
+				// (show schema tbl N) → shard N overview
+				if a[2].IsInt() || a[2].IsFloat() {
+					shards := t.ActiveShards()
+					idx := int(scm.ToInt(a[2]))
+					if idx < 0 || idx >= len(shards) {
+						panic("shard index out of range")
 					}
+					return showBuildShardRow(t, idx, shards[idx])
 				}
-				return scm.NewSlice([]scm.Scmer{
-					scm.NewString("Name"), scm.NewString(t.Name),
-					scm.NewString("Engine"), scm.NewString(engine),
-					scm.NewString("Collation"), scm.NewString(t.Collation),
-					scm.NewString("Charset"), scm.NewString(t.Charset),
-					scm.NewString("Comment"), scm.NewString(t.Comment),
-					scm.NewString("Unique"), scm.NewSlice(uniques),
-					scm.NewString("Partitions"), scm.NewSlice(partitions),
-				})
+				panic("invalid call of show")
+			} else if len(a) == 4 {
+				// (show schema tbl N true) → full shard info with columns and indexes
+				if (a[2].IsInt() || a[2].IsFloat()) && a[3].IsBool() && a[3].Bool() {
+					db := GetDatabase(scm.String(a[0]))
+					if db == nil {
+						panic("database " + scm.String(a[0]) + " does not exist")
+					}
+					t := db.GetTable(scm.String(a[1]))
+					if t == nil {
+						panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+					}
+					shards := t.ActiveShards()
+					idx := int(scm.ToInt(a[2]))
+					if idx < 0 || idx >= len(shards) {
+						panic("shard index out of range")
+					}
+					s := shards[idx]
+					// build shard overview fields
+					overview := showBuildShardRow(t, idx, s)
+					// build columns detail
+					var colRows scm.Scmer
+					var indexRows scm.Scmer
+					if s == nil {
+						colRows = scm.NewSlice([]scm.Scmer{})
+						indexRows = scm.NewSlice([]scm.Scmer{})
+					} else {
+						s.mu.RLock()
+						deltaCount := len(s.inserts)
+						colSlice := make([]scm.Scmer, 0, len(t.Columns))
+						for _, col := range t.Columns {
+							cs := s.columns[col.Name]
+							var typStr string
+							var colSize uint
+							if cs != nil {
+								typStr = cs.String()
+								colSize = cs.ComputeSize()
+							} else {
+								typStr = "unloaded"
+								colSize = 0
+							}
+							var deltaSize uint
+							if dIdx, ok := s.deltaColumns[col.Name]; ok {
+								for _, row := range s.inserts {
+									if dIdx < len(row) {
+										deltaSize += row[dIdx].ComputeSize()
+									}
+								}
+							}
+							colSlice = append(colSlice, scm.NewSlice([]scm.Scmer{
+								scm.NewString("name"), scm.NewString(col.Name),
+								scm.NewString("compression"), scm.NewString(typStr),
+								scm.NewString("size_bytes"), scm.NewInt(int64(colSize)),
+								scm.NewString("delta_count"), scm.NewInt(int64(deltaCount)),
+								scm.NewString("delta_size_bytes"), scm.NewInt(int64(deltaSize)),
+							}))
+						}
+						colRows = scm.NewSlice(colSlice)
+						idxSlice := make([]scm.Scmer, 0, len(s.Indexes))
+						for _, ix := range s.Indexes {
+							idxSlice = append(idxSlice, scm.NewSlice([]scm.Scmer{
+								scm.NewString("cols"), scm.NewString(ix.String()),
+								scm.NewString("active"), scm.NewBool(ix.active),
+								scm.NewString("native"), scm.NewBool(ix.Native),
+								scm.NewString("savings"), scm.NewFloat(ix.Savings),
+								scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
+							}))
+						}
+						indexRows = scm.NewSlice(idxSlice)
+						s.mu.RUnlock()
+					}
+					// merge overview fields with columns and indexes
+					overviewSlice := overview.Slice()
+					result := make([]scm.Scmer, 0, len(overviewSlice)+4)
+					result = append(result, overviewSlice...)
+					result = append(result, scm.NewString("columns"), colRows)
+					result = append(result, scm.NewString("indexes"), indexRows)
+					return scm.NewSlice(result)
+				}
+				panic("invalid call of show")
 			}
 			panic("invalid call of show")
 		}, false, false, nil,
@@ -2430,5 +2412,83 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 			}),
 			scm.NewSymbol("NEW"),
 		})),
+	})
+}
+
+// showEngineStr returns the engine name string for a table (matches dashboard dropdown values).
+func showEngineStr(t *table) string {
+	switch t.PersistencyMode {
+	case Logged:
+		return "logged"
+	case Sloppy:
+		return "sloppy"
+	case Memory:
+		return "memory"
+	default:
+		return "safe"
+	}
+}
+
+// showBuildMeta builds the meta assoc for a table: Name, Engine, Collation, Charset, Comment, Unique, Partitions.
+func showBuildMeta(db *database, t *table) scm.Scmer {
+	engine := showEngineStr(t)
+	uniques := make([]scm.Scmer, len(t.Unique))
+	for i, uk := range t.Unique {
+		cols := make([]scm.Scmer, len(uk.Cols))
+		for j, c := range uk.Cols {
+			cols[j] = scm.NewString(c)
+		}
+		uniques[i] = scm.NewSlice([]scm.Scmer{
+			scm.NewString("Id"), scm.NewString(uk.Id),
+			scm.NewString("Cols"), scm.NewSlice(cols),
+		})
+	}
+	partitions := make([]scm.Scmer, 0)
+	if t.ShardMode == ShardModePartition {
+		for _, sd := range t.PDimensions {
+			partitions = append(partitions, scm.NewSlice([]scm.Scmer{
+				scm.NewString("Column"), scm.NewString(sd.Column),
+				scm.NewString("NumPartitions"), scm.NewInt(int64(sd.NumPartitions)),
+				scm.NewString("Pivots"), scm.NewSlice(sd.Pivots),
+			}))
+		}
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString("Name"), scm.NewString(t.Name),
+		scm.NewString("Engine"), scm.NewString(engine),
+		scm.NewString("Collation"), scm.NewString(t.Collation),
+		scm.NewString("Charset"), scm.NewString(t.Charset),
+		scm.NewString("Comment"), scm.NewString(t.Comment),
+		scm.NewString("Unique"), scm.NewSlice(uniques),
+		scm.NewString("Partitions"), scm.NewSlice(partitions),
+	})
+}
+
+// showBuildShardRow builds the overview assoc for a single shard (nil shard is represented as all-zero/nil state).
+func showBuildShardRow(t *table, i int, s *storageShard) scm.Scmer {
+	if s == nil {
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewString("shard"), scm.NewInt(int64(i)),
+			scm.NewString("state"), scm.NewString("nil"),
+			scm.NewString("main_count"), scm.NewInt(0),
+			scm.NewString("delta"), scm.NewInt(0),
+			scm.NewString("deletions"), scm.NewInt(0),
+			scm.NewString("size_bytes"), scm.NewInt(0),
+		})
+	}
+	s.mu.RLock()
+	mainCount := s.main_count
+	delta := len(s.inserts)
+	deletions := s.deletions.Count()
+	state := sharedStateStr(s.srState)
+	size := s.ComputeSize()
+	s.mu.RUnlock()
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString("shard"), scm.NewInt(int64(i)),
+		scm.NewString("state"), scm.NewString(state),
+		scm.NewString("main_count"), scm.NewInt(int64(mainCount)),
+		scm.NewString("delta"), scm.NewInt(int64(delta)),
+		scm.NewString("deletions"), scm.NewInt(int64(deletions)),
+		scm.NewString("size_bytes"), scm.NewInt(int64(size)),
 	})
 }
