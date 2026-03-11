@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "JOIN variations: multi-table, self-join, NULLs, filters"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS jc_orders"
