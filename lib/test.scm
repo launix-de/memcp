@@ -1323,10 +1323,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* dashboard metrics (metrics.go) */
 	(print "testing dashboard metrics ...")
-	(assert (> (total_memory) 0) true "total_memory returns positive")
-	(assert (> (available_memory) 0) true "available_memory returns positive")
-	(assert (<= (available_memory) (total_memory)) true "available_memory <= total_memory")
-	(assert (> (process_memory) 0) true "process_memory returns positive")
+	(define _stat (stat))
+	(assert (> (_stat "mem_total") 0) true "stat mem_total returns positive")
+	(assert (> (_stat "mem_available") 0) true "stat mem_available returns positive")
+	(assert (<= (_stat "mem_available") (_stat "mem_total")) true "stat mem_available <= mem_total")
+	(assert (> (_stat "process_memory") 0) true "stat process_memory returns positive")
 	(assert (>= (cpu_usage) 0) true "cpu_usage >= 0")
 	(assert (<= (cpu_usage) 100.1) true "cpu_usage <= 100")
 	(assert (>= (active_connections) 0) true "active_connections >= 0")

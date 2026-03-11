@@ -40,6 +40,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)
 )))
 
+/* build one INFORMATION_SCHEMA.TABLES row for (schema, tbl) */
+(define info_schema_table_row (lambda (schema tbl) (begin
+	(define meta (show schema tbl "meta"))
+	(define shards (show schema tbl "shards"))
+	(list
+		"table_catalog" "def"
+		"table_schema" schema
+		"table_name" tbl
+		"table_type" "BASE TABLE"
+		"engine" (meta "Engine")
+		"table_rows" (reduce shards (lambda (acc s) (+ acc (+ (s "main_count") (s "delta")) (- 0 (s "deletions")))) 0)
+		"data_length" (reduce shards (lambda (acc s) (+ acc (s "size_bytes"))) 0)
+		"table_collation" (meta "Collation")
+		"table_comment" (meta "Comment")
+	)
+)))
+
 /* emulate metadata tables */
 (define get_schema (lambda (schema tbl) (match '(schema tbl)
 	/* special tables */
@@ -57,6 +74,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'("Field" "table_schema")
 		'("Field" "table_name")
 		'("Field" "table_type")
+		'("Field" "engine")
+		'("Field" "table_rows" "Type" "bigint")
+		'("Field" "data_length" "Type" "bigint")
+		'("Field" "table_collation")
+		'("Field" "table_comment")
 	)
 	'((ignorecase "information_schema") (ignorecase "columns")) '(
 		'("Field" "table_catalog")
@@ -152,8 +174,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		'('map '('show) '('lambda '('schema) '('list "catalog_name" "def" "schema_name" 'schema "default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci" "sql_path" NULL "schema_comment" "")))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "tables"))
-	(merge '(scanfn schema 
-		'('merge '('map '('show) '('lambda '('schema) '('map '('show 'schema) '('lambda '('tbl) '('list "table_catalog" "def" "table_schema" 'schema "table_name" 'tbl "table_type" "BASE TABLE")))))) 
+	(merge '(scanfn schema
+		'('merge '('map '('show) '('lambda '('schema) '('map '('show 'schema) '('lambda '('tbl) '('info_schema_table_row 'schema 'tbl))))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge '(scanfn schema 
@@ -164,7 +186,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
 	(merge '(scanfn schema '(list)) rest) /* TODO: list constraints */
 	'((ignorecase "information_schema") (ignorecase "statistics"))
-	(merge '(scanfn schema '('show_statistics)) rest)
+	(merge '(scanfn schema '('merge '('map '('show) '('lambda '('schema) '('merge '('map '('show 'schema) '('lambda '('tbl) '('show 'schema 'tbl "statistics")))))))) rest)
 	'((ignorecase "information_schema") (ignorecase "files"))
 	(merge '(scanfn schema '(list)) rest) /* empty: MemCP has no tablespaces/undo logs */
 	'((ignorecase "information_schema") (ignorecase "partitions"))

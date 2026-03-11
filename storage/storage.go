@@ -1419,15 +1419,28 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"stat", "return memory statistics",
+		"stat", "return system statistics as assoc: mem_available, mem_total, process_memory, shard_memory, shard_budget, persisted_memory, persisted_budget, cache_entry_count, cache_entry_size.\n(stat schema) and (stat schema tbl) return a string with detailed memory usage.",
 		0, 2,
 		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database (optional: all databases)", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table (if table is set, print the detailled storage stats)", nil},
-		}, "string",
+			scm.DeclarationParameter{"schema", "string", "(optional) database name for detailed string output", nil},
+			scm.DeclarationParameter{"table", "string", "(optional) table name for detailed string output", nil},
+		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
-				return scm.NewString(PrintMemUsage())
+				memTotal, memAvail := ReadMemInfo()
+				processMem := ReadProcessRSS()
+				cs := GlobalCache.Stat()
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewString("mem_available"), scm.NewInt(memAvail),
+					scm.NewString("mem_total"), scm.NewInt(memTotal),
+					scm.NewString("process_memory"), scm.NewInt(processMem),
+					scm.NewString("shard_memory"), scm.NewInt(cs.CurrentMemory),
+					scm.NewString("shard_budget"), scm.NewInt(cs.MemoryBudget),
+					scm.NewString("persisted_memory"), scm.NewInt(cs.PersistedMemory),
+					scm.NewString("persisted_budget"), scm.NewInt(cs.PersistedBudget),
+					scm.NewString("cache_entry_count"), scm.NewInt(cs.CountByType[TypeCacheEntry]),
+					scm.NewString("cache_entry_size"), scm.NewInt(cs.SizeByType[TypeCacheEntry]),
+				})
 			} else if len(a) == 1 {
 				return scm.NewString(GetDatabase(scm.String(a[0])).PrintMemUsage())
 			} else if len(a) == 2 {
@@ -1447,7 +1460,7 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"show", "show databases/tables/columns/meta\n\n(show) lists databases\n(show schema) lists tables\n(show schema tbl) lists columns\n(show schema tbl \"meta\") returns table metadata dict",
+		"show", "show databases/tables/columns/meta/shards\n\n(show) lists databases\n(show schema) lists tables\n(show schema tbl) lists columns\n(show schema tbl \"meta\") returns table metadata dict\n(show schema tbl \"shards\") returns shard list",
 		0, 3,
 		[]scm.DeclarationParameter{
 			{"schema", "string", "(optional) database name", nil},
@@ -1482,7 +1495,7 @@ func Init(en scm.Env) {
 				}
 				return t.ShowColumns()
 			} else if len(a) == 3 {
-				// show table metadata
+				// show table metadata or shards
 				db := GetDatabase(scm.String(a[0]))
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
@@ -1490,6 +1503,65 @@ func Init(en scm.Env) {
 				t := db.GetTable(scm.String(a[1]))
 				if t == nil {
 					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				if scm.String(a[2]) == "statistics" {
+				var result []scm.Scmer
+				for _, uk := range t.Unique {
+					for seq, col := range uk.Cols {
+						result = append(result, scm.NewSlice([]scm.Scmer{
+							scm.NewString("table_catalog"), scm.NewString("def"),
+							scm.NewString("table_schema"), scm.NewString(db.Name),
+							scm.NewString("table_name"), scm.NewString(t.Name),
+							scm.NewString("non_unique"), scm.NewInt(0),
+							scm.NewString("index_schema"), scm.NewString(db.Name),
+							scm.NewString("index_name"), scm.NewString(uk.Id),
+							scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
+							scm.NewString("column_name"), scm.NewString(col),
+							scm.NewString("collation"), scm.NewString("A"),
+							scm.NewString("cardinality"), scm.NewNil(),
+							scm.NewString("sub_part"), scm.NewNil(),
+							scm.NewString("packed"), scm.NewNil(),
+							scm.NewString("nullable"), scm.NewString(""),
+							scm.NewString("index_type"), scm.NewString("BTREE"),
+							scm.NewString("comment"), scm.NewString(""),
+							scm.NewString("index_comment"), scm.NewString(""),
+						}))
+					}
+				}
+				return scm.NewSlice(result)
+			}
+			if scm.String(a[2]) == "shards" {
+					shards := t.ActiveShards()
+					rows := make([]scm.Scmer, 0, len(shards))
+					for i, s := range shards {
+						if s == nil {
+							rows = append(rows, scm.NewSlice([]scm.Scmer{
+								scm.NewString("shard"), scm.NewInt(int64(i)),
+								scm.NewString("state"), scm.NewString("nil"),
+								scm.NewString("main_count"), scm.NewInt(0),
+								scm.NewString("delta"), scm.NewInt(0),
+								scm.NewString("deletions"), scm.NewInt(0),
+								scm.NewString("size_bytes"), scm.NewInt(0),
+							}))
+							continue
+						}
+						s.mu.RLock()
+						mainCount := s.main_count
+						delta := len(s.inserts)
+						deletions := s.deletions.Count()
+						state := sharedStateStr(s.srState)
+						size := s.ComputeSize()
+						s.mu.RUnlock()
+						rows = append(rows, scm.NewSlice([]scm.Scmer{
+							scm.NewString("shard"), scm.NewInt(int64(i)),
+							scm.NewString("state"), scm.NewString(state),
+							scm.NewString("main_count"), scm.NewInt(int64(mainCount)),
+							scm.NewString("delta"), scm.NewInt(int64(delta)),
+							scm.NewString("deletions"), scm.NewInt(int64(deletions)),
+							scm.NewString("size_bytes"), scm.NewInt(int64(size)),
+						}))
+					}
+					return scm.NewSlice(rows)
 				}
 				// engine (lowercase to match dashboard dropdown values)
 				engine := "safe"
@@ -1539,99 +1611,6 @@ func Init(en scm.Env) {
 		nil,
 	})
 
-	// show_statistics(): returns INFORMATION_SCHEMA.STATISTICS rows for all unique constraints
-	scm.Declare(&en, &scm.Declaration{
-		"show_statistics", "returns INFORMATION_SCHEMA.STATISTICS rows for all unique constraints across all databases",
-		0, 0,
-		[]scm.DeclarationParameter{}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			var result []scm.Scmer
-			for _, db := range databases.GetAll() {
-				db.ensureLoaded()
-				for _, t := range db.tables.GetAll() {
-					for _, uk := range t.Unique {
-						for seq, col := range uk.Cols {
-							result = append(result, scm.NewSlice([]scm.Scmer{
-								scm.NewString("table_catalog"), scm.NewString("def"),
-								scm.NewString("table_schema"), scm.NewString(db.Name),
-								scm.NewString("table_name"), scm.NewString(t.Name),
-								scm.NewString("non_unique"), scm.NewInt(0),
-								scm.NewString("index_schema"), scm.NewString(db.Name),
-								scm.NewString("index_name"), scm.NewString(uk.Id),
-								scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
-								scm.NewString("column_name"), scm.NewString(col),
-								scm.NewString("collation"), scm.NewString("A"),
-								scm.NewString("cardinality"), scm.NewNil(),
-								scm.NewString("sub_part"), scm.NewNil(),
-								scm.NewString("packed"), scm.NewNil(),
-								scm.NewString("nullable"), scm.NewString(""),
-								scm.NewString("index_type"), scm.NewString("BTREE"),
-								scm.NewString("comment"), scm.NewString(""),
-								scm.NewString("index_comment"), scm.NewString(""),
-							}))
-						}
-					}
-				}
-			}
-			return scm.NewSlice(result)
-		}, false, false, nil,
-		nil,
-	})
-
-	// show_shards(schema, table): returns a list of rows describing shards for a table
-	scm.Declare(&en, &scm.Declaration{
-		"show_shards", "show shard information for a given table",
-		2, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database name", nil},
-			scm.DeclarationParameter{"table", "string", "table name", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-			// choose current shard list (partitioned or simple)
-			shards := t.ActiveShards()
-			rows := make([]scm.Scmer, 0, len(shards))
-			for i, s := range shards {
-				if s == nil {
-					rows = append(rows, scm.NewSlice([]scm.Scmer{
-						scm.NewString("shard"), scm.NewInt(int64(i)),
-						scm.NewString("state"), scm.NewString("nil"),
-						scm.NewString("main_count"), scm.NewInt(0),
-						scm.NewString("delta"), scm.NewInt(0),
-						scm.NewString("deletions"), scm.NewInt(0),
-						scm.NewString("size_bytes"), scm.NewInt(0),
-					}))
-					continue
-				}
-				// read counts under lock
-				s.mu.RLock()
-				mainCount := s.main_count
-				delta := len(s.inserts)
-				deletions := s.deletions.Count()
-				state := sharedStateStr(s.srState)
-				// compute size while holding read lock for a consistent snapshot
-				size := s.ComputeSize()
-				s.mu.RUnlock()
-				rows = append(rows, scm.NewSlice([]scm.Scmer{
-					scm.NewString("shard"), scm.NewInt(int64(i)),
-					scm.NewString("state"), scm.NewString(state),
-					scm.NewString("main_count"), scm.NewInt(int64(mainCount)),
-					scm.NewString("delta"), scm.NewInt(int64(delta)),
-					scm.NewString("deletions"), scm.NewInt(int64(deletions)),
-					scm.NewString("size_bytes"), scm.NewInt(int64(size)),
-				}))
-			}
-			return scm.NewSlice(rows)
-		}, false, false, nil,
-		nil,
-	})
 
 	// show_shard_columns(schema, table, shardIndex): returns per-column storage details for a shard
 	scm.Declare(&en, &scm.Declaration{
@@ -2007,6 +1986,7 @@ func Init(en scm.Env) {
 	initMySQLImport(en)
 	initPSQLImport(en)
 	initDashboard(en)
+	initMetricsDeclarations(en)
 	scm.DeclareInSection("Sync", &en, &scm.Declaration{
 		"newcachemap", "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
 		0, 0,
