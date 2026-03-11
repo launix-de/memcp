@@ -1775,7 +1775,7 @@ var lastDbList=[];
 document.getElementById("btn-create-table").addEventListener("click",function(){
 var db=_dbTabDb;
 if(!db)return;
-var q="CREATE TABLE `newtable` (\n  `id` INT,\n  `name` VARCHAR(255)\n)";
+var q="CREATE TABLE `newtable` (\n  `id` INT PRIMARY KEY,\n  `name` VARCHAR(255)\n)";
 _pendingDbConsoleQuery=q;
 location.hash="db/"+encodeURIComponent(db)+"/console";
 });
