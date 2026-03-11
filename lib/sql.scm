@@ -138,12 +138,13 @@ if the user is not allowed to access this property, the function will throw an e
 (define error_log (lambda (errmsg db usr qry) (begin
 	/* always print to stdout for system logs */
 	(print (if (equal? db "") "" (concat "[" db "] ")) errmsg)
+	/* always count errors regardless of ErrorQueryLog setting */
+	(error_log_counter "count" (+ (error_log_counter "count") 1))
 	(if (settings "ErrorQueryLog") (begin
 		(try (lambda () (begin
 			(insert "system_statistic" "errors"
 				'("datetime" "database" "user" "query" "error")
 				(list (list (now) db usr qry (concat errmsg))))
-			(error_log_counter "count" (+ (error_log_counter "count") 1))
 			/* truncate oldest rows when limit is set */
 			(define limit (settings "MaxErrorQueryLog"))
 			(if (> limit 0) (begin

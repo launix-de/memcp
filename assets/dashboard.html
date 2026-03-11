@@ -53,6 +53,10 @@ header a:hover{opacity:1;text-decoration:underline}
 .view{display:none}
 .view.active{display:block}
 .browse-wrap{padding:24px;max-width:1100px;margin:0 auto}
+.spark-card{background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:12px 16px}
+.spark-card h4{font-size:.75rem;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:400;margin-bottom:6px;display:flex;justify-content:space-between}
+.spark-card h4 span{color:#e0e0e0;font-weight:600}
+.spark-card svg{width:100%;height:60px;display:block}
 .browse-wrap h2{font-size:1.1rem;color:#aaa;margin-bottom:16px;font-weight:400;text-transform:uppercase;letter-spacing:.5px}
 .browse-table{width:100%;border-collapse:collapse;background:#16213e;border-radius:6px;overflow:hidden}
 .browse-table th{text-align:left;padding:10px 14px;color:#888;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #2a2a4a;font-weight:400}
@@ -193,6 +197,22 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 <div class="status-bar disconnected" id="status">Connecting...</div>
 <div style="text-align:center;padding:8px"><label style="color:#888;font-size:.8rem;cursor:pointer"><input type="checkbox" id="jitter" checked> gauge jitter</label></div>
+<!-- Metrics history (only shown when MetricsTracing is on) -->
+<div id="metrics-history" style="display:none;padding:8px 24px 24px" data-admin-only>
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+<h3 style="font-size:.85rem;color:#aaa;text-transform:uppercase;letter-spacing:.5px;font-weight:400;margin:0">Metrics History</h3>
+<select class="inline-select" id="metrics-range" style="font-size:.8rem">
+<option value="3600">Last hour</option>
+<option value="21600">Last 6 hours</option>
+<option value="86400" selected>Today (24h)</option>
+<option value="604800">This week</option>
+<option value="2592000">This month</option>
+<option value="0">All time</option>
+</select>
+<button class="btn-warn" id="btn-reload-metrics" style="font-size:.75rem">Reload</button>
+</div>
+<div id="metrics-charts" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px"></div>
+</div>
 </div>
 
 <div class="view" id="view-databases">
@@ -359,7 +379,6 @@ header a:hover{opacity:1;text-decoration:underline}
 <input type="number" id="el-setting-max" min="0" style="width:80px;background:#2a2a4a;border:1px solid #444;border-radius:3px;color:#e0e0e0;padding:2px 4px;font-size:.8rem">
 <span style="color:#666;font-size:.75rem">(0=unlimited)</span>
 </label>
-<button class="btn-warn" id="el-setting-save" style="font-size:.75rem">Save</button>
 <span id="el-setting-status" style="color:#76b512;font-size:.75rem"></span>
 </div>
 <div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -408,6 +427,14 @@ header a:hover{opacity:1;text-decoration:underline}
 <thead><tr><th>Username</th><th>Permissions</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
+</div>
+</div>
+
+<!-- Error detail modal -->
+<div id="error-detail-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;align-items:flex-start;justify-content:center;padding-top:60px;overflow-y:auto" onclick="if(event.target===this)this.style.display='none'">
+<div style="background:#16213e;border:1px solid #2a2a4a;border-radius:8px;padding:24px 28px;width:90%;max-width:760px;position:relative">
+<button onclick="document.getElementById('error-detail-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:none;border:none;color:#888;font-size:1.2rem;cursor:pointer;line-height:1">✕</button>
+<div id="error-detail-body"></div>
 </div>
 </div>
 
@@ -500,7 +527,7 @@ html+='<td style="font-size:.8rem">'+esc(r.user||"")+'</td>';
 html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#ccc;max-width:320px">'+esc(qShort)+'</pre></td>';
 html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#e74c3c;max-width:320px">'+esc(eShort)+'</pre>';
 if(r.query&&r.query.length>80||r.error&&r.error.length>120){
-html+='<button class="btn-warn" style="margin-top:4px;font-size:.7rem" onclick="showErrorDetail('+i+_errorsPage*_errorsPageSize+')">Detail</button>';
+html+='<button class="btn-warn" style="margin-top:4px;font-size:.7rem" onclick="showErrorDetail('+(i+_errorsPage*_errorsPageSize)+')">Detail</button>';
 }
 html+='</td></tr>';
 }
@@ -520,14 +547,14 @@ pag.innerHTML=ph;
 
 function showErrorDetail(idx){
 var r=_errorsAll[idx];if(!r)return;
-var w=window.open("","_blank","width=800,height=600");
-w.document.write('<html><head><title>Error Detail</title><style>body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;padding:20px}pre{background:#16213e;padding:12px;border-radius:4px;white-space:pre-wrap;word-break:break-all}.label{color:#888;font-size:.8rem;text-transform:uppercase;margin:12px 0 4px}</style></head><body>');
-w.document.write('<div class="label">Time</div><div>'+esc(fmtDateTime(r.datetime))+'</div>');
-w.document.write('<div class="label">Database</div><div>'+esc(r.database||"")+'</div>');
-w.document.write('<div class="label">User</div><div>'+esc(r.user||"")+'</div>');
-if(r.query)w.document.write('<div class="label">Query</div><pre style="color:#ccc">'+esc(r.query)+'</pre>');
-w.document.write('<div class="label" style="color:#e74c3c">Error</div><pre style="color:#e74c3c">'+esc(r.error||"")+'</pre>');
-w.document.write('</body></html>');
+var lbl='<div style="color:#888;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px">';
+var h=lbl+'Time</div><div style="font-size:.85rem">'+esc(fmtDateTime(r.datetime))+'</div>';
+h+=lbl+'Database</div><div style="font-size:.85rem">'+esc(r.database||"–")+'</div>';
+h+=lbl+'User</div><div style="font-size:.85rem">'+esc(r.user||"–")+'</div>';
+if(r.query)h+=lbl+'Query</div><pre style="background:#0d1b2e;padding:10px;border-radius:4px;font-size:.8rem;white-space:pre-wrap;word-break:break-all;color:#ccc;margin:0;max-height:300px;overflow-y:auto">'+esc(r.query)+'</pre>';
+h+=lbl+'Error</div><pre style="background:#1a0000;padding:10px;border-radius:4px;font-size:.8rem;white-space:pre-wrap;word-break:break-all;color:#e74c3c;margin:0">'+esc(r.error||"")+'</pre>';
+document.getElementById("error-detail-body").innerHTML=h;
+document.getElementById("error-detail-modal").style.display="flex";
 }
 
 function loadErrors(dbFilter){
@@ -560,18 +587,18 @@ fetch(base+"/dashboard/api/errors/clear",{method:"POST",credentials:"same-origin
 .then(function(){loadErrors()})
 .catch(function(e){alert("Error: "+e)});
 });
-/* Error Log inline settings */
-var saveBtn=document.getElementById("el-setting-save");
-if(saveBtn)saveBtn.addEventListener("click",function(){
-var enable=document.getElementById("el-setting-enable").checked;
-var max=parseInt(document.getElementById("el-setting-max").value)||0;
-var status=document.getElementById("el-setting-status");
-apiPost(base+"/dashboard/api/settings",{key:"ErrorQueryLog",value:enable},function(){
-apiPost(base+"/dashboard/api/settings",{key:"MaxErrorQueryLog",value:max},function(){
-status.textContent="Saved";setTimeout(function(){status.textContent=""},2000);
+/* Error Log inline settings — auto-save (checkbox: immediate, number: debounced) */
+var elStatus=document.getElementById("el-setting-status");
+function elSaved(){if(elStatus){elStatus.textContent="Saved";setTimeout(function(){elStatus.textContent=""},2000);}}
+var elEnableCb=document.getElementById("el-setting-enable");
+if(elEnableCb)elEnableCb.addEventListener("change",function(){
+apiPost(base+"/dashboard/api/settings",{key:"ErrorQueryLog",value:this.checked},elSaved);
 });
-});
-});
+var elMaxInp=document.getElementById("el-setting-max");
+if(elMaxInp){var elMaxTimer=null;elMaxInp.addEventListener("input",function(){
+if(elMaxTimer)clearTimeout(elMaxTimer);
+elMaxTimer=setTimeout(function(){apiPost(base+"/dashboard/api/settings",{key:"MaxErrorQueryLog",value:parseInt(elMaxInp.value)||0},elSaved);},500);
+});}
 });
 
 /* Admin detection */
@@ -723,6 +750,7 @@ if(!isAdmin){location.hash="databases";return}
 showView("view-gauges");
 showRootPwWarning("root-pw-warning-gauges");
 backLink.style.display="none";
+_metricsOnGauges();
 return;
 }
 if(hash==="databases"){
@@ -909,10 +937,16 @@ tbody.innerHTML=html;
 function renderDetail(data,dbname,tblname){
 /* meta cards */
 var meta=data.meta||{};
-var engines=["safe","logged","sloppy","memory"];
+/* engine: display name → SQL keyword (parser expects LOGGING, not logged) */
+var engines=[
+{v:"safe",sql:"SAFE"},
+{v:"logged",sql:"LOGGING"},
+{v:"sloppy",sql:"SLOPPY"},
+{v:"memory",sql:"MEMORY"}
+];
 var engSel="<select class='inline-select' id='engine-select'>";
 for(var i=0;i<engines.length;i++){
-engSel+="<option value='"+engines[i]+"'"+(meta.engine===engines[i]?" selected":"")+">"+engines[i]+"</option>";
+engSel+="<option value='"+engines[i].v+"'"+(meta.engine===engines[i].v?" selected":"")+">"+engines[i].v+"</option>";
 }
 engSel+="</select>";
 var mc="<div class='meta-card'><div class='label'>Engine</div><div class='val'>"+engSel+"</div></div>";
@@ -927,8 +961,10 @@ var engEl=document.getElementById("engine-select");
 var origEngine=engEl.value;
 engEl.addEventListener("change",function(){
 var eng=this.value;
+var engSpec=engines.filter(function(e){return e.v===eng})[0];
+var engSql=engSpec?engSpec.sql:eng.toUpperCase();
 var sel=this;
-fetch(base+"/dashboard/api/sql",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:dbname,sql:"ALTER TABLE `"+tblname+"` ENGINE="+eng})}).then(function(r){
+fetch(base+"/dashboard/api/sql",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:dbname,sql:"ALTER TABLE `"+tblname+"` ENGINE="+engSql})}).then(function(r){
 if(!r.ok)return r.text().then(function(t){throw new Error(t)});
 return r.json();
 }).then(function(){origEngine=eng}).catch(function(e){window.alert("Error: "+e.message);sel.value=origEngine});
@@ -1500,6 +1536,81 @@ apiFetch(base+"/dashboard/api/users",renderUsers);
 });
 });
 changePwInput.addEventListener("keydown",function(e){if(e.key==="Enter")document.getElementById("change-pw-ok").click();if(e.key==="Escape")document.getElementById("change-pw-cancel").click();});
+
+/* ---- Metrics history sparklines ---- */
+var metricsSpecs=[
+{key:"rps",  label:"Requests/sec", color:"#76b512", fmt:function(v){return v.toFixed(1)}},
+{key:"eps",  label:"Errors/sec",   color:"#e74c3c", fmt:function(v){return v.toFixed(1)}},
+{key:"cpu",  label:"CPU %",        color:"#3498db", fmt:function(v){return (v*100).toFixed(1)+"%"}},
+{key:"connections", label:"Connections", color:"#f39c12", fmt:function(v){return Math.round(v)+""}},
+{key:"mem_available", label:"RAM available", color:"#9b59b6", fmt:function(v){return fmt(v)}}
+];
+
+function drawSparkline(rows, key, color){
+var vals=rows.map(function(r){return parseFloat(r[key])||0});
+if(!vals.length)return'<svg viewBox="0 0 300 60"><text x="150" y="35" text-anchor="middle" fill="#555" font-size="11">no data</text></svg>';
+var mn=Math.min.apply(null,vals), mx=Math.max.apply(null,vals);
+var range=mx-mn||1;
+var W=300,H=60,pad=4;
+var pts=vals.map(function(v,i){
+var x=pad+(W-2*pad)*i/Math.max(vals.length-1,1);
+var y=H-pad-(H-2*pad)*(v-mn)/range;
+return x.toFixed(1)+","+y.toFixed(1);
+}).join(" ");
+return'<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none"><polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+}
+
+function loadMetricsHistory(){
+var sec=document.getElementById("metrics-history");
+var charts=document.getElementById("metrics-charts");
+if(!sec||!charts)return;
+var rangeEl=document.getElementById("metrics-range");
+var since=rangeEl?parseInt(rangeEl.value)||0:0;
+var nowTs=Math.floor(Date.now()/1000);
+var whereClause=since>0?"WHERE time >= '"+(nowTs-since)+"' OR time >= '"+fmtDateTime(nowTs-since)+"'":"";
+/* query perf_metrics sorted oldest-first */
+var sql="SELECT time,rps,eps,cpu,connections,mem_available FROM perf_metrics ORDER BY time ASC LIMIT 2000";
+fetch(base+"/dashboard/api/query",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:"system_statistic",sql:sql})})
+.then(function(r){if(!r.ok)throw new Error(r.status);return r.text()})
+.then(function(text){
+/* NDJSON: one JSON object per line */
+var rows=text.trim().split("\n").filter(Boolean).map(function(l){try{return JSON.parse(l)}catch(e){return null}}).filter(Boolean);
+/* client-side time filter */
+if(since>0){
+var cutoff=nowTs-since;
+rows=rows.filter(function(r){
+var ts=parseFloat(r.time);
+if(!isNaN(ts)&&/^\d+/.test(String(r.time)))return ts>=cutoff;
+/* formatted string: compare lexicographically (works for YYYY-MM-DD HH:MM:SS) */
+return r.time>=fmtDateTime(cutoff);
+});
+}
+if(!rows.length){sec.style.display="none";return;}
+sec.style.display="";
+var h="";
+for(var i=0;i<metricsSpecs.length;i++){
+var sp=metricsSpecs[i];
+var vals=rows.map(function(r){return parseFloat(r[sp.key])||0});
+var latest=vals[vals.length-1];
+h+='<div class="spark-card"><h4>'+esc(sp.label)+'<span>'+esc(sp.fmt(latest))+'</span></h4>'+drawSparkline(rows,sp.key,sp.color)+'</div>';
+}
+charts.innerHTML=h;
+})
+.catch(function(e){console.error("metrics history:",e)});
+}
+
+/* load metrics when gauges view is active */
+document.getElementById("btn-reload-metrics").addEventListener("click",loadMetricsHistory);
+document.getElementById("metrics-range").addEventListener("change",loadMetricsHistory);
+
+/* hook into gauges routing: load metrics history when gauges view shown */
+var _metricsOnGauges=function(){
+apiFetch(base+"/dashboard/api/settings",function(s){
+var sec=document.getElementById("metrics-history");
+if(s&&s.MetricsTracing&&sec){loadMetricsHistory();}
+else if(sec){sec.style.display="none";}
+});
+};
 
 })();
 </script>

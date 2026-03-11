@@ -419,7 +419,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* Metrics tracing: periodically insert rows into system_statistic.perf_metrics */
 (if (not (has? (show "system_statistic") "perf_metrics")) (begin
 	(print "creating table system_statistic.perf_metrics")
-	(eval (parse_sql "system_statistic" "CREATE TABLE perf_metrics(time text, cpu float, mem_available bigint, mem_total bigint, shard_memory bigint, shard_budget bigint, connections int, max_connections int, rps float) ENGINE=SLOPPY" (lambda (schema table write) true)))
+	(eval (parse_sql "system_statistic" "CREATE TABLE perf_metrics(time text, cpu float, mem_available bigint, mem_total bigint, shard_memory bigint, shard_budget bigint, connections int, max_connections int, rps float, eps float) ENGINE=SLOPPY" (lambda (schema table write) true)))
 ))
 
 /* self-scheduling tracing loop via setTimeout */
@@ -427,7 +427,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(if (settings "MetricsTracing") (begin
 		(set cs (cache_stat))
 		(insert "system_statistic" "perf_metrics"
-			'("time" "cpu" "mem_available" "mem_total" "shard_memory" "shard_budget" "connections" "max_connections" "rps")
+			'("time" "cpu" "mem_available" "mem_total" "shard_memory" "shard_budget" "connections" "max_connections" "rps" "eps")
 			(list (list
 				(now)
 				(cpu_usage)
@@ -438,6 +438,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(active_connections)
 				(max_connections)
 				(requests_per_second)
+				(eps_state "eps")
 			))
 		)
 	))
