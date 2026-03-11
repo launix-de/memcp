@@ -51,8 +51,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)
 )))
 
+/* rolling errors/sec: sample error_log_counter every 10 pushes (~1s) */
+(set eps_state (newsession))
+(eps_state "prev_count" 0)
+(eps_state "ticks" 0)
+(eps_state "eps" 0)
+
+(define eps_tick (lambda () (begin
+	(eps_state "ticks" (+ (eps_state "ticks") 1))
+	(if (>= (eps_state "ticks") 10) (begin
+		(define curr (error_log_counter "count"))
+		(eps_state "eps" (- curr (eps_state "prev_count")))
+		(eps_state "prev_count" curr)
+		(eps_state "ticks" 0)
+	) true)
+)))
+
 /* WebSocket push loop: send metrics JSON every 100ms */
 (define dashboard_push (lambda (send) (begin
+	(eps_tick)
 	(send 1 (json_encode_assoc (list
 		"cpu" (cpu_usage)
 		"mem_available" (available_memory)
@@ -62,6 +79,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"connections" (active_connections)
 		"max_connections" (max_connections)
 		"rps" (requests_per_second)
+		"eps" (eps_state "eps")
 	)))
 	(sleep 0.1)
 	(dashboard_push send)
