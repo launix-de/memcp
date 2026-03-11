@@ -747,6 +747,7 @@ consoleError.innerHTML="";
 consoleResult.innerHTML="";
 pendingConsoleState=null;
 }
+consoleTa.focus();
 });
 renderHistory();
 return;
@@ -1306,6 +1307,11 @@ var lastDbList=[];
 document.getElementById("btn-create-db-toggle").addEventListener("click",function(){
 createDbFormVisible=!createDbFormVisible;
 document.getElementById("create-db-form").style.display=createDbFormVisible?"":"none";
+if(createDbFormVisible)setTimeout(function(){document.getElementById("new-dbname").focus()},0);
+});
+document.getElementById("new-dbname").addEventListener("keydown",function(e){
+if(e.key==="Enter"){e.preventDefault();document.getElementById("btn-create-db").click();}
+if(e.key==="Escape"){createDbFormVisible=false;document.getElementById("create-db-form").style.display="none";}
 });
 document.getElementById("new-db-backend").addEventListener("change",function(){
 var v=this.value;
@@ -1368,6 +1374,15 @@ var createUserFormVisible=false;
 document.getElementById("btn-create-user-toggle").addEventListener("click",function(){
 createUserFormVisible=!createUserFormVisible;
 document.getElementById("create-user-form").style.display=createUserFormVisible?"":"none";
+if(createUserFormVisible)setTimeout(function(){document.getElementById("new-username").focus()},0);
+});
+document.getElementById("new-username").addEventListener("keydown",function(e){
+if(e.key==="Enter"){e.preventDefault();document.getElementById("new-password").focus();}
+if(e.key==="Escape"){createUserFormVisible=false;document.getElementById("create-user-form").style.display="none";}
+});
+document.getElementById("new-password").addEventListener("keydown",function(e){
+if(e.key==="Enter"){e.preventDefault();document.getElementById("btn-create-user").click();}
+if(e.key==="Escape"){createUserFormVisible=false;document.getElementById("create-user-form").style.display="none";}
 });
 document.getElementById("btn-create-user").addEventListener("click",function(){
 var u=document.getElementById("new-username").value.trim();
