@@ -45,6 +45,7 @@ type column struct {
 	sanitizer         func(scm.Scmer) scm.Scmer
 	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
 }
+
 // PersistencyMode controls the durability and persistence behaviour of a table.
 //
 // DATA SAFETY CONTRACT — each mode's guarantees and risks:

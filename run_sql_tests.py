@@ -266,13 +266,17 @@ class SQLTestRunner:
         except Exception:
             pass
 
-    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10) -> Optional[requests.Response]:
+    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None) -> Optional[requests.Response]:
         # proactively ensure database exists (works for connect-only too)
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
         normalized = self._normalize_syntax(syntax)
         route = "psql" if normalized == "postgresql" else "sql"
         url = f"{self.base_url}/{route}/{encoded_db}"
+        # Append positional params as v1=, v2=, ... query string
+        if params:
+            param_qs = "&".join(f"v{i+1}={quote(str(v), safe='')}" for i, v in enumerate(params))
+            url = f"{url}?{param_qs}"
         headers = dict(auth_header if auth_header is not None else self.auth_header)
         headers.setdefault("Content-Type", "text/plain; charset=utf-8")
         body = query.encode("utf-8") if isinstance(query, str) else query
@@ -464,6 +468,7 @@ class SQLTestRunner:
         active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
         session_id = test_case.get("session_id")
         sql_timeout = int(test_case.get("timeout", 10))
+        sql_params = test_case.get("params")
 
         # TTL preload if SPARQL
         if is_sparql and "ttl_data" in test_case:
@@ -511,7 +516,7 @@ class SQLTestRunner:
 
             # Execute query (with timing for perf tests)
             start_time = time.monotonic()
-            response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id, timeout=sql_timeout)
+            response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id, timeout=sql_timeout, params=sql_params)
             elapsed_ms = (time.monotonic() - start_time) * 1000
             elapsed_sec = elapsed_ms / 1000
 

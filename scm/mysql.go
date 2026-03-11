@@ -158,6 +158,25 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 	session.SetSchema(database)
 	return nil
 }
+func MySQLToScmer(v sqltypes.Value) Scmer {
+	if v.IsNull() {
+		return NewNil()
+	}
+	switch {
+	case v.IsIntegral():
+		n, err := v.ParseInt64()
+		if err == nil {
+			return NewInt(n)
+		}
+	case v.IsFloat():
+		f, err := v.ParseFloat64()
+		if err == nil {
+			return NewFloat(f)
+		}
+	}
+	return NewString(v.ToString())
+}
+
 func ScmerToMySQL(v Scmer) sqltypes.Value {
 	switch v.GetTag() {
 	case tagNil:
@@ -240,6 +259,17 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	// result from scheme
 	sessionFunc := scmSessionAny.(func(...Scmer) Scmer)
 	scmSessionScmer := NewFunc(sessionFunc)
+	// Populate bind variables (v1, v2, ...) from prepared-statement params into session
+	for name, bv := range bindVariables {
+		if bv == nil {
+			continue
+		}
+		val, err := sqltypes.BindVariableToValue(bv)
+		if err != nil {
+			continue
+		}
+		sessionFunc(NewString(name), MySQLToScmer(val))
+	}
 	rowcount := func() Scmer {
 		defer func() {
 			if r := recover(); r != nil {

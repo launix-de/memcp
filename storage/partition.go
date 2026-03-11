@@ -521,8 +521,8 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 	// and inserts count. This gives us a consistent baseline for reconciliation.
 	type shardSnapshot struct {
 		deletions   interface{ Get(uint) bool } // deletion bitmap copy
-		insertCount int                           // number of delta inserts at snapshot time
-		mainCount   uint32                        // main_count at snapshot time
+		insertCount int                         // number of delta inserts at snapshot time
+		mainCount   uint32                      // main_count at snapshot time
 	}
 	snapshots := make([]shardSnapshot, len(oldshards))
 	datasetids := make([][][]uint32, totalShards) // newshard -> oldshard -> []rowIdx

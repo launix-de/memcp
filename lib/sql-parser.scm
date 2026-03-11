@@ -104,6 +104,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 (define parse_sql (lambda (schema s policy) (begin
 
+	/* counter for positional ? placeholders: each ? compiles to (session "vN") */
+	(define placeholder_counter (newsession))
+	(placeholder_counter "n" 0)
 
 	/* derive the description of a column from its expression */
 	/* For single column: use raw column name (most apps rely on this) */
@@ -766,6 +769,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* window functions: parse OVER(...) clause and emit AST node */
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func (toUpper fn) args _over))
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
+		/* positional ? placeholder: compiles to (session "vN"), 1-indexed to match MySQL bind var naming */
+		(parser "?" (begin
+			(define n (placeholder_counter "n"))
+			(placeholder_counter "n" (+ n 1))
+			(list (quote session) (concat "v" (string (+ n 1))))))
 		sql_number
 		sql_string
 		sql_column
