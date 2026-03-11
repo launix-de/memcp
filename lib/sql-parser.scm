@@ -330,20 +330,22 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 													(define target (car (cdr stmt)))
 													(define tbls (car (cdr (cdr stmt))))
 													(define where_raw (car (cdr (cdr (cdr stmt)))))
-													(define transform_dml (lambda (expr) (match expr
-														'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-														'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-														(cons head tail) (cons (transform_dml head) (map tail transform_dml))
-														expr
-													)))
-													(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-													/* Build table defs: ((alias tbl) ...) -> ((alias schema tbl false nil) ...) */
+													/* Build table defs early so target_alias is known before transform_dml */
 													(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
 													(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
 														'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
 														acc)) nil))
 													(define target_alias (match target_def '(id _ _ _ _) id))
 													(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
+													(define transform_dml (lambda (expr) (match expr
+														'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+														'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+														/* unqualified column: assign to target table (avoids internal notation confusion) */
+														'('get_column nil _ col ci) (list (symbol "get_column") target_alias false col ci)
+														(cons head tail) (cons (transform_dml head) (map tail transform_dml))
+														expr
+													)))
+													(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
 													(define others (reduce all_defs (lambda (acc tdef) (match tdef
 														'(id _ _ _ _) (if (equal? id target_alias) acc (cons tdef acc))
 														acc)) '()))
@@ -366,20 +368,22 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 														(define tbls (car (cdr stmt)))
 														(define assignments_raw (merge (car (cdr (cdr stmt)))))
 														(define where_raw (car (cdr (cdr (cdr stmt)))))
-														(define transform_dml (lambda (expr) (match expr
-															'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-															'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-															(cons head tail) (cons (transform_dml head) (map tail transform_dml))
-															expr
-														)))
-														(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-														/* Build table defs: ((alias tbl) ...) -> ((alias schema tbl false nil) ...) */
+														/* Build table defs early so target_alias is known before transform_dml */
 														(define all_defs (map tbls (lambda (t) (match t '(alias tblname) (list alias schema tblname false nil)))))
 														/* First table is the target for UPDATE */
 														(define target_def (car all_defs))
 														(define target_alias (match target_def '(id _ _ _ _) id))
 														(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 														(define others (cdr all_defs))
+														(define transform_dml (lambda (expr) (match expr
+															'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+															'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+															/* unqualified column: assign to target table (avoids internal notation confusion) */
+															'('get_column nil _ col ci) (list (symbol "get_column") target_alias false col ci)
+															(cons head tail) (cons (transform_dml head) (map tail transform_dml))
+															expr
+														)))
+														(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
 														/* Build SET assignments - only columns for target table */
 														(define target_cols_filter (extract_columns_for_tblvar target_alias t_where))
 														(define target_cols_set (extract_assoc assignments_raw (lambda (col expr)
@@ -455,38 +459,38 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 	/* Simple trigger statements (non-IF) */
 	(define sql_trigger_simple_stmt (parser (or
-		/* SET NEW.col = expr; */
+		/* SET NEW.col = expr[;] */
 		(parser '(
 			(atom "SET" true)
 			(define assignments (+ (parser '(
 				(atom "NEW" true) "." (define col sql_identifier) "=" (define expr sql_expression)
 			) '(col expr)) ","))
-			(atom ";" false)
+			(? (atom ";" false))
 		) (cons '!set assignments))
-		/* SET @var = expr; (session variable assignment, ignored in trigger context) */
+		/* SET @var = expr[;] (session variable assignment, ignored in trigger context) */
 		(parser '(
 			(atom "SET" true)
 			(+ (parser '(
 				"@" sql_identifier "=" sql_expression
 			) true) ",")
-			(atom ";" false)
+			(? (atom ";" false))
 		) '!nop)
-		/* INSERT [IGNORE] INTO table (...) VALUES (...); */
+		/* INSERT [IGNORE] INTO table (...) VALUES (...)[;] */
 		(parser '(
 			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
 			"(" (define cols (+ sql_identifier ",")) ")"
 			(atom "VALUES" true)
 			(define values (+ (parser '("(" (define v (+ sql_expression ",")) ")") v) ","))
-			(atom ";" false)
+			(? (atom ";" false))
 		) (list '!insert tbl cols values ignore))
-		/* INSERT [IGNORE] INTO table (...) SELECT ... ; (full SELECT, handles FROM/WHERE/JOIN/etc.) */
+		/* INSERT [IGNORE] INTO table (...) SELECT ...[;] (full SELECT, handles FROM/WHERE/JOIN/etc.) */
 		(parser '(
 			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
 			"(" (define cols (+ sql_identifier ",")) ")"
 			(define inner sql_select)
-			(atom ";" false)
+			(? (atom ";" false))
 		) (list '!insert_select tbl cols inner ignore))
-		/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE ...; (multi-table in trigger) */
+		/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE ...[;] (multi-table in trigger) */
 		(parser '(
 			(atom "UPDATE" true)
 			(define tbls (+ (parser (or
@@ -499,17 +503,17 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(parser '((define col sql_identifier) "=" (define expr sql_expression)) '(col expr))
 			) ","))
 			(? (atom "WHERE" true) (define where sql_expression))
-			(atom ";" false)
+			(? (atom ";" false))
 		) (if (> (count tbls) 1)
 				(list '!update_multi tbls assignments where)
 				(list '!update (match (car tbls) '(alias _) alias) assignments where)))
-		/* DELETE FROM table WHERE condition; */
+		/* DELETE FROM table WHERE condition[;] */
 		(parser '(
 			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
 			(? (atom "WHERE" true) (define where sql_expression))
-			(atom ";" false)
+			(? (atom ";" false))
 		) (list '!delete tbl where))
-		/* DELETE FROM table USING table, table2 [AS alias] WHERE condition; (multi-table in trigger) */
+		/* DELETE FROM table USING table, table2 [AS alias] WHERE condition[;] (multi-table in trigger) */
 		(parser '(
 			(atom "DELETE" true) (atom "FROM" true) (define target sql_identifier)
 			(atom "USING" true)
@@ -518,14 +522,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(parser (define tbl sql_identifier) '(tbl tbl))
 			)) ","))
 			(? (atom "WHERE" true) (define where sql_expression))
-			(atom ";" false)
+			(? (atom ";" false))
 		) (list '!delete_using target tbls where))
 	)))
 
 	/* Full trigger statement parser including IF...THEN...[ELSE...]END IF */
 	/* IF body can contain nested IF statements recursively */
 	(define sql_trigger_stmt (parser (or
-		/* IF condition THEN stmts [ELSE stmts] END IF; */
+		/* IF condition THEN stmts [ELSE stmts] END IF[;] */
 		(parser '(
 			(atom "IF" true)
 			(define condition sql_expression)
@@ -533,7 +537,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(define then_stmts (* sql_trigger_stmt))
 			(? (atom "ELSE" true) (define else_stmts (* sql_trigger_stmt)))
 			(atom "END" true) (atom "IF" true)
-			(atom ";" false)
+			(? (atom ";" false))
 		) (list '!if condition then_stmts else_stmts))
 		sql_trigger_simple_stmt
 	)))
@@ -542,13 +546,16 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/* Uses (capture ...) to get both raw SQL text and parsed result */
 	/* Result is (raw_sql parsed_body) where parsed_body is the semantic representation */
 	(define sql_trigger_body (parser (capture (or
-		/* BEGIN...END block - statements must end with semicolon */
+		/* BEGIN...END block */
 		(parser '(
 			(atom "BEGIN" true)
 			(define stmts (* sql_trigger_stmt))
 			(atom "END" true)
 		) (cons '!begin stmts))
-		/* Single SET statement for BEFORE triggers (no semicolon needed) */
+		/* Single trigger statement without BEGIN/END (MySQL allows this for simple triggers) */
+		/* semicolon is already optional in sql_trigger_simple_stmt */
+		(parser (define stmt sql_trigger_simple_stmt) (list '!begin stmt))
+		/* Legacy: single SET NEW.col = expr without BEGIN/END and without semicolon */
 		(parser '(
 			(atom "SET" true)
 			(define assignments (+ (parser '(

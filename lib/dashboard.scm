@@ -161,7 +161,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_json res (dashboard_json_array items))
 				))
 			)
-				/* API: shard column detail with compression types */
+			/* API: shard column detail with compression types */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define sidx (simplify shardidx))
