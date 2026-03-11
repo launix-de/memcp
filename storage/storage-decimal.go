@@ -100,7 +100,7 @@ func (s *StorageDecimal) ComputeSize() uint {
 }
 
 func (s *StorageDecimal) String() string {
-	return fmt.Sprintf("decimal[1e%d]", s.scaleExp)
+	return fmt.Sprintf("decimal[1e%d %s]", s.scaleExp, s.inner.String())
 }
 
 func (s *StorageDecimal) GetCachedReader() ColumnReader { return s }

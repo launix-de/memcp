@@ -45,6 +45,7 @@ type column struct {
 	sanitizer         func(scm.Scmer) scm.Scmer
 	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
 }
+
 // PersistencyMode controls the durability and persistence behaviour of a table.
 //
 // DATA SAFETY CONTRACT — each mode's guarantees and risks:
@@ -479,12 +480,22 @@ func (c *column) UpdateSanitizer() {
 		inner = func(v scm.Scmer) scm.Scmer {
 			tag := v.GetTag()
 			if tag == scm.TagString || tag == scm.TagSymbol {
-				// try numeric string
-				if _, err := strconv.ParseInt(v.String(), 10, 64); err != nil {
-					if _, err2 := strconv.ParseFloat(v.String(), 64); err2 != nil {
-						panic("cannot convert string to INT for column " + name + ": " + v.String())
-					}
+				s := v.String()
+				// MySQL-compatible: parse leading integer part of string (e.g. "2026-03-11" -> 2026)
+				i := 0
+				if i < len(s) && (s[i] == '-' || s[i] == '+') {
+					i++
 				}
+				for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+					i++
+				}
+				if i == 0 || (i == 1 && (s[0] == '-' || s[0] == '+')) {
+					return scm.NewInt(0)
+				}
+				if n, err := strconv.ParseInt(s[:i], 10, 64); err == nil {
+					return scm.NewInt(n)
+				}
+				return scm.NewInt(0)
 			}
 			return scm.NewInt(int64(scm.ToInt(v)))
 		}

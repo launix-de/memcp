@@ -206,6 +206,8 @@ qry    — query text (pass "" when unknown) */
 						(if (equal? row last_row)
 							true
 							(begin (set last_row row) (original_resultrow row))))))
+					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session */
+					(extract_assoc (req "query") (lambda (k v) (session k v)))
 					/* Execute inside auto-commit tx (or existing explicit tx) */
 					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
@@ -261,6 +263,8 @@ qry    — query text (pass "" when unknown) */
 						false))
 					(define query_result (if handled nil (begin
 						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username")))
+						/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session */
+						(extract_assoc (req "query") (lambda (k v) (session k v)))
 						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
