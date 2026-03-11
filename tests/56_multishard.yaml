@@ -6,6 +6,7 @@
 # - cross-shard DELETE, UPDATE, aggregation
 
 metadata:
+  isolated: true
   version: "1.0"
   description: "Multi-shard scan, order, and DML coverage"
 

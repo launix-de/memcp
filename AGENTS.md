@@ -51,11 +51,11 @@ The test runner (`run_sql_tests.py`) starts the server exactly like this:
 To start a server manually for debugging:
 ```
 mkdir -p /tmp/memcp-manual-test
-./memcp -data /tmp/memcp-manual-test --api-port=4399 --no-repl lib/main.scm </dev/null &>/tmp/memcp_manual.log &
+./memcp -data /tmp/memcp-manual-test --api-port=[RANDOM_PORT] --disable-mysql --no-repl lib/main.scm </dev/null &>/tmp/memcp_manual.log &
 ```
 Then send queries via the HTTP API:
 ```
-curl -s -u root:admin "http://localhost:4399/sql/DBNAME" -d "SELECT 1"
+curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 ```
 - Auth: HTTP Basic `root:admin` (default password for fresh data dirs).
 - API endpoint: `/sql/<database-name>` (NOT `/schema` or bare root).
