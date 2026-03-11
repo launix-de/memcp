@@ -158,6 +158,12 @@ header a:hover{opacity:1;text-decoration:underline}
 	<div class="value" id="v-rps">--</div>
 	<div class="subval" id="s-rps"></div>
 </div>
+<div class="gauge-card">
+	<div class="gauge" id="g-eps" style="--from:0deg;--to:3deg"></div>
+	<h2>Errors/sec</h2>
+	<div class="value" id="v-eps">--</div>
+	<div class="subval" id="s-eps"></div>
+</div>
 </div>
 <div class="gauge-row">
 <div class="gauge-card">
@@ -232,6 +238,13 @@ header a:hover{opacity:1;text-decoration:underline}
 <thead><tr><th>Name</th><th>Engine</th><th class="r">Columns</th><th class="r">Shards</th><th class="r">Rows</th><th class="r">Size</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
+<div id="db-errors-section" style="display:none;margin-top:24px" data-admin-only>
+<h3 style="font-size:.9rem;color:#aaa;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Recent Errors</h3>
+<table class="browse-table" id="tbl-db-errors">
+<thead><tr><th>Time</th><th>User</th><th>Query</th><th>Error</th></tr></thead>
+<tbody id="db-errors-tbody"><tr><td colspan="4" style="color:#888;text-align:center;padding:20px">No errors.</td></tr></tbody>
+</table>
+</div>
 </div>
 </div>
 
@@ -336,12 +349,30 @@ header a:hover{opacity:1;text-decoration:underline}
 <div class="view" id="view-errors">
 <div class="browse-wrap">
 <h2>Error Log</h2>
+<div style="margin-bottom:8px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;background:#1e1e3a;border-radius:6px;padding:8px 12px;font-size:.8rem">
+<label style="display:flex;align-items:center;gap:6px;color:#aaa">
+<span>Enable logging</span>
+<label class="toggle" style="margin:0"><input type="checkbox" id="el-setting-enable"><span class="slider"></span></label>
+</label>
+<label style="display:flex;align-items:center;gap:6px;color:#aaa">
+<span>Max rows</span>
+<input type="number" id="el-setting-max" min="0" style="width:80px;background:#2a2a4a;border:1px solid #444;border-radius:3px;color:#e0e0e0;padding:2px 4px;font-size:.8rem">
+<span style="color:#666;font-size:.75rem">(0=unlimited)</span>
+</label>
+<button class="btn-warn" id="el-setting-save" style="font-size:.75rem">Save</button>
+<span id="el-setting-status" style="color:#76b512;font-size:.75rem"></span>
+</div>
 <div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+<select class="inline-select" id="errors-db-filter" style="min-width:160px"><option value="">All Databases</option></select>
 <button class="btn-warn" id="btn-reload-errors" onclick="loadErrors()">Reload</button>
 <button class="btn-danger" id="btn-clear-errors">Clear All</button>
 <span id="errors-status" style="color:#888;font-size:.8rem;margin-left:8px"></span>
 </div>
-<div id="errors-list"></div>
+<table class="browse-table" id="tbl-errors">
+<thead><tr><th>Time</th><th>Database</th><th>User</th><th>Query</th><th>Error</th></tr></thead>
+<tbody id="errors-tbody"></tbody>
+</table>
+<div style="display:flex;gap:8px;align-items:center;padding:10px 0" id="errors-pagination"></div>
 </div>
 </div>
 
@@ -424,39 +455,103 @@ function esc(s){var d=document.createElement("span");d.textContent=String(s);ret
 function truncName(s,n){n=n||30;return s.length>n?s.substring(0,n)+"\u2026":s}
 
 /* ---- Error log ---- */
-var errorsAutoRefresh=null;
-function loadErrors(){
-apiFetch(base+"/dashboard/api/errors",function(rows){
-var el=document.getElementById("errors-list");
+var _errorsAll=[];
+var _errorsPage=0;
+var _errorsPageSize=20;
+var _errorsDbFilter="";
+
+function fmtDateTime(ts){
+if(!ts&&ts!==0)return"";
+/* if it's a number (unix timestamp), convert; if already a string datetime, return as-is */
+if(typeof ts==="number"||(typeof ts==="string"&&/^\d+(\.\d+)?$/.test(ts.trim()))){
+var n=parseFloat(ts);
+var d=new Date(n*1000);
+var pad=function(x){return x<10?"0"+x:""+x};
+return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+" "+pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());
+}
+return ts;
+}
+
+function errorsFilteredRows(){
+if(!_errorsDbFilter)return _errorsAll;
+return _errorsAll.filter(function(r){return r.database===_errorsDbFilter});
+}
+
+function renderErrorsTable(){
+var rows=errorsFilteredRows();
+var total=rows.length;
+var pages=Math.max(1,Math.ceil(total/_errorsPageSize));
+if(_errorsPage>=pages)_errorsPage=pages-1;
+var start=_errorsPage*_errorsPageSize;
+var slice=rows.slice(start,start+_errorsPageSize);
 var status=document.getElementById("errors-status");
-if(!rows||rows.length===0){
-el.innerHTML='<p style="color:#888;padding:16px 0">No errors recorded.</p>';
-status.textContent="0 errors";
-return;
-}
-rows.sort(function(a,b){return a.datetime<b.datetime?1:-1});
-status.textContent=rows.length+" error"+(rows.length===1?"":"s");
+status.textContent=total+" error"+(total===1?"":"s")+(total>_errorsPageSize?" (page "+(_errorsPage+1)+"/"+pages+")":"");
+var tbody=document.getElementById("errors-tbody");
+if(!slice.length){tbody.innerHTML='<tr><td colspan="5" style="color:#888;text-align:center;padding:20px">No errors recorded.</td></tr>';return;}
 var html="";
-for(var i=0;i<rows.length;i++){
-var r=rows[i];
-html+='<div style="background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px;margin-bottom:12px">';
-html+='<div style="display:flex;gap:16px;margin-bottom:8px;font-size:.8rem;color:#888;flex-wrap:wrap">';
-html+='<span>'+esc(r.datetime||"")+'</span>';
-if(r.database)html+='<span>db: <b style="color:#ccc">'+esc(r.database)+'</b></span>';
-if(r.user)html+='<span>user: <b style="color:#ccc">'+esc(r.user)+'</b></span>';
-html+='</div>';
-if(r.query){
-html+='<div style="margin-bottom:8px"><div style="color:#888;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Query</div>';
-html+='<pre style="background:#1a1a2e;padding:10px;border-radius:4px;font-size:.8rem;overflow-x:auto;color:#ccc;border:1px solid #2a2a4a;white-space:pre-wrap;word-break:break-all">'+esc(r.query)+'</pre></div>';
+for(var i=0;i<slice.length;i++){
+var r=slice[i];
+var qShort=r.query?r.query.substring(0,80)+(r.query.length>80?"…":""):"";
+var eShort=r.error?r.error.substring(0,120)+(r.error.length>120?"…":""):"";
+html+='<tr>';
+html+='<td style="white-space:nowrap;font-size:.75rem;color:#888">'+esc(fmtDateTime(r.datetime))+'</td>';
+html+='<td style="font-size:.8rem">'+esc(r.database||"")+'</td>';
+html+='<td style="font-size:.8rem">'+esc(r.user||"")+'</td>';
+html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#ccc;max-width:320px">'+esc(qShort)+'</pre></td>';
+html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#e74c3c;max-width:320px">'+esc(eShort)+'</pre>';
+if(r.query&&r.query.length>80||r.error&&r.error.length>120){
+html+='<button class="btn-warn" style="margin-top:4px;font-size:.7rem" onclick="showErrorDetail('+i+_errorsPage*_errorsPageSize+')">Detail</button>';
 }
-html+='<div><div style="color:#e74c3c;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Error</div>';
-html+='<pre style="background:#1a1a2e;padding:10px;border-radius:4px;font-size:.8rem;overflow-x:auto;color:#e74c3c;border:1px solid #2a2a4a;white-space:pre-wrap;word-break:break-all">'+esc(r.error||"")+'</pre></div>';
-html+='</div>';
+html+='</td></tr>';
 }
-el.innerHTML=html;
+tbody.innerHTML=html;
+/* pagination */
+var pag=document.getElementById("errors-pagination");
+var ph="";
+if(pages>1){
+ph+='<button class="btn-warn" onclick="_errorsPage=0;renderErrorsTable()" '+((_errorsPage===0)?"disabled":"")+'>«</button>';
+ph+='<button class="btn-warn" onclick="_errorsPage--;renderErrorsTable()" '+((_errorsPage===0)?"disabled":"")+'>‹</button>';
+ph+='<span style="color:#888;font-size:.8rem;padding:0 8px">'+(_errorsPage+1)+' / '+pages+'</span>';
+ph+='<button class="btn-warn" onclick="_errorsPage++;renderErrorsTable()" '+((_errorsPage>=pages-1)?"disabled":"")+'>›</button>';
+ph+='<button class="btn-warn" onclick="_errorsPage='+( pages-1)+';renderErrorsTable()" '+((_errorsPage>=pages-1)?"disabled":"")+'>»</button>';
+}
+pag.innerHTML=ph;
+}
+
+function showErrorDetail(idx){
+var r=_errorsAll[idx];if(!r)return;
+var w=window.open("","_blank","width=800,height=600");
+w.document.write('<html><head><title>Error Detail</title><style>body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;padding:20px}pre{background:#16213e;padding:12px;border-radius:4px;white-space:pre-wrap;word-break:break-all}.label{color:#888;font-size:.8rem;text-transform:uppercase;margin:12px 0 4px}</style></head><body>');
+w.document.write('<div class="label">Time</div><div>'+esc(fmtDateTime(r.datetime))+'</div>');
+w.document.write('<div class="label">Database</div><div>'+esc(r.database||"")+'</div>');
+w.document.write('<div class="label">User</div><div>'+esc(r.user||"")+'</div>');
+if(r.query)w.document.write('<div class="label">Query</div><pre style="color:#ccc">'+esc(r.query)+'</pre>');
+w.document.write('<div class="label" style="color:#e74c3c">Error</div><pre style="color:#e74c3c">'+esc(r.error||"")+'</pre>');
+w.document.write('</body></html>');
+}
+
+function loadErrors(dbFilter){
+if(dbFilter!==undefined)_errorsDbFilter=dbFilter||"";
+apiFetch(base+"/dashboard/api/errors",function(rows){
+_errorsAll=rows||[];
+_errorsAll.sort(function(a,b){return a.datetime<b.datetime?1:-1});
+_errorsPage=0;
+/* populate db filter dropdown */
+var sel=document.getElementById("errors-db-filter");
+if(sel){
+var dbs={};_errorsAll.forEach(function(r){if(r.database)dbs[r.database]=1;});
+var cur=sel.value;
+sel.innerHTML='<option value="">All Databases</option>';
+Object.keys(dbs).sort().forEach(function(d){sel.innerHTML+='<option value="'+esc(d)+'">'+esc(d)+'</option>';});
+sel.value=cur;
+}
+renderErrorsTable();
 });
 }
+
 document.addEventListener("DOMContentLoaded",function(){
+var sel=document.getElementById("errors-db-filter");
+if(sel)sel.addEventListener("change",function(){_errorsDbFilter=this.value;_errorsPage=0;renderErrorsTable();});
 var btn=document.getElementById("btn-clear-errors");
 if(btn)btn.addEventListener("click",function(){
 if(!confirm("Clear all error log entries?"))return;
@@ -464,6 +559,18 @@ fetch(base+"/dashboard/api/errors/clear",{method:"POST",credentials:"same-origin
 .then(function(r){return r.json()})
 .then(function(){loadErrors()})
 .catch(function(e){alert("Error: "+e)});
+});
+/* Error Log inline settings */
+var saveBtn=document.getElementById("el-setting-save");
+if(saveBtn)saveBtn.addEventListener("click",function(){
+var enable=document.getElementById("el-setting-enable").checked;
+var max=parseInt(document.getElementById("el-setting-max").value)||0;
+var status=document.getElementById("el-setting-status");
+apiPost(base+"/dashboard/api/settings",{key:"ErrorQueryLog",value:enable},function(){
+apiPost(base+"/dashboard/api/settings",{key:"MaxErrorQueryLog",value:max},function(){
+status.textContent="Saved";setTimeout(function(){status.textContent=""},2000);
+});
+});
 });
 });
 
@@ -522,6 +629,9 @@ setGauge("g-conn",conn/maxC,conn+" / "+maxC,"active / max 10min");
 var rps=d.rps||0;
 var rpsMax=Math.max(100,Math.pow(10,Math.ceil(Math.log10(Math.max(rps,1)))));
 setGauge("g-rps",rps/rpsMax,rps.toFixed(1)+" req/s","scale: 0-"+rpsMax);
+var eps=d.eps||0;
+var epsMax=Math.max(1,Math.pow(10,Math.ceil(Math.log10(Math.max(eps,1)))));
+setGauge("g-eps",eps/epsMax,eps+" err/s",eps===0?"no errors":"scale: 0-"+epsMax);
 };
 ws.onclose=function(){
 statusEl.textContent="Disconnected - reconnecting...";
@@ -647,6 +757,13 @@ showView("view-errors");
 backLink.href="#gauges";
 backLink.style.display="inline";
 loadErrors();
+/* populate inline settings */
+apiFetch(base+"/dashboard/api/settings",function(data){
+var cb=document.getElementById("el-setting-enable");
+var inp=document.getElementById("el-setting-max");
+if(cb)cb.checked=data.ErrorQueryLog||false;
+if(inp)inp.value=data.MaxErrorQueryLog||0;
+});
 return;
 }
 if(hash==="settings"){
@@ -696,8 +813,17 @@ if(m){
 showView("view-tables");
 backLink.href="#databases";
 backLink.style.display="inline";
-document.getElementById("tables-title").textContent="Tables in "+decodeURIComponent(m[1]);
-apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(m[1]),function(data){renderTables(data,decodeURIComponent(m[1]))});
+var dbName=decodeURIComponent(m[1]);
+document.getElementById("tables-title").textContent="Tables in "+dbName;
+/* hide errors section until data arrives */
+var dbErrSec=document.getElementById("db-errors-section");
+if(dbErrSec)dbErrSec.style.display="none";
+apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(m[1]),function(data){renderTables(data,dbName)});
+if(isAdmin)apiFetch(base+"/dashboard/api/errors",function(rows){
+rows=(rows||[]).filter(function(r){return r.database===dbName});
+rows.sort(function(a,b){return a.datetime<b.datetime?1:-1});
+renderDbErrors(rows);
+});
 return;
 }
 location.hash=isAdmin?"gauges":"databases";
@@ -752,6 +878,31 @@ btn.onclick=function(e){e.stopPropagation();var tbl=btn.getAttribute("data-dropt
 tb.querySelectorAll("[data-querytbl]").forEach(function(btn){
 btn.onclick=function(e){e.stopPropagation();openConsole(dbname,"SELECT * FROM `"+btn.getAttribute("data-querytbl")+"` LIMIT 100")};
 });
+}
+
+function renderDbErrors(rows){
+var sec=document.getElementById("db-errors-section");
+var tbody=document.getElementById("db-errors-tbody");
+if(!sec||!tbody)return;
+if(!isAdmin){sec.style.display="none";return;}
+rows=rows||[];
+rows=rows.filter(function(r){return true}); /* already filtered by caller */
+if(!rows.length){sec.style.display="none";return;}
+sec.style.display="";
+var html="";
+for(var i=0;i<Math.min(rows.length,50);i++){
+var r=rows[i];
+var qShort=r.query?r.query.substring(0,100)+(r.query.length>100?"…":""):"";
+var eShort=r.error?r.error.substring(0,150)+(r.error.length>150?"…":""):"";
+html+='<tr>';
+html+='<td style="white-space:nowrap;font-size:.75rem;color:#888">'+esc(fmtDateTime(r.datetime))+'</td>';
+html+='<td style="font-size:.8rem">'+esc(r.user||"")+'</td>';
+html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#ccc;max-width:280px">'+esc(qShort)+'</pre></td>';
+html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#e74c3c;max-width:280px">'+esc(eShort)+'</pre></td>';
+html+='</tr>';
+}
+if(rows.length>50)html+='<tr><td colspan="4" style="color:#888;font-size:.75rem;text-align:center">…and '+(rows.length-50)+' more — see <a href="#errors" style="color:#76b512">Error Log</a></td></tr>';
+tbody.innerHTML=html;
 }
 
 function renderDetail(data,dbname,tblname){
