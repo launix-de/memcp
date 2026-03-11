@@ -1,0 +1,219 @@
+metadata:
+  version: "1.0"
+  description: "AUTO_INCREMENT correctness: sequential assignment, explicit ID coexistence, counter persistence"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ai_basic"
+  - sql: "DROP TABLE IF EXISTS ai_explicit"
+  - sql: "DROP TABLE IF EXISTS ai_mixed"
+  - sql: "DROP TABLE IF EXISTS ai_restart"
+  - sql: "CREATE TABLE ai_basic (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE ai_explicit (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE ai_mixed (id INT AUTO_INCREMENT PRIMARY KEY, val INT)"
+  - sql: "CREATE TABLE ai_restart (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ai_basic"
+  - sql: "DROP TABLE IF EXISTS ai_explicit"
+  - sql: "DROP TABLE IF EXISTS ai_restart"
+  - sql: "DROP TABLE IF EXISTS ai_mixed"
+
+test_cases:
+
+  # --- Basic AUTO_INCREMENT: sequential inserts without explicit ID ---
+
+  - name: "INSERT without ID assigns auto id (first row)"
+    sql: "INSERT INTO ai_basic (name) VALUES ('alpha')"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT without ID assigns auto id (second row)"
+    sql: "INSERT INTO ai_basic (name) VALUES ('beta')"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT without ID assigns auto id (third row)"
+    sql: "INSERT INTO ai_basic (name) VALUES ('gamma')"
+    expect:
+      affected_rows: 1
+
+  - name: "All three rows present with distinct IDs"
+    sql: "SELECT COUNT(DISTINCT id) AS cnt FROM ai_basic"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 3}
+
+  - name: "IDs are positive integers"
+    sql: "SELECT COUNT(*) AS cnt FROM ai_basic WHERE id > 0"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 3}
+
+  - name: "Names match inserted order"
+    sql: "SELECT name FROM ai_basic ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - {name: "alpha"}
+        - {name: "beta"}
+        - {name: "gamma"}
+
+  # --- Explicit ID insert followed by auto-insert (no collision) ---
+
+  - name: "INSERT with explicit high ID"
+    sql: "INSERT INTO ai_explicit (id, name) VALUES (100, 'explicit')"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT without ID after explicit high ID — no collision"
+    sql: "INSERT INTO ai_explicit (name) VALUES ('auto1')"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT without ID again — still no collision"
+    sql: "INSERT INTO ai_explicit (name) VALUES ('auto2')"
+    expect:
+      affected_rows: 1
+
+  - name: "All three rows present"
+    sql: "SELECT COUNT(*) AS cnt FROM ai_explicit"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 3}
+
+  - name: "Explicit row has ID=100"
+    sql: "SELECT id FROM ai_explicit WHERE name = 'explicit'"
+    expect:
+      rows: 1
+      data:
+        - {id: 100}
+
+  - name: "Auto rows have IDs distinct from 100 and from each other"
+    sql: "SELECT COUNT(DISTINCT id) AS cnt FROM ai_explicit WHERE name IN ('auto1', 'auto2')"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 2}
+
+  - name: "Auto IDs do not collide with explicit ID 100"
+    sql: "SELECT COUNT(*) AS cnt FROM ai_explicit WHERE name IN ('auto1', 'auto2') AND id = 100"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 0}
+
+  # --- Multiple inserts without ID on a fresh table (the FOP scenario) ---
+
+  - name: "Batch: insert 5 rows without ID"
+    sql: "INSERT INTO ai_mixed (val) VALUES (1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Batch: insert row 2"
+    sql: "INSERT INTO ai_mixed (val) VALUES (2)"
+    expect:
+      affected_rows: 1
+
+  - name: "Batch: insert row 3"
+    sql: "INSERT INTO ai_mixed (val) VALUES (3)"
+    expect:
+      affected_rows: 1
+
+  - name: "Batch: insert row 4"
+    sql: "INSERT INTO ai_mixed (val) VALUES (4)"
+    expect:
+      affected_rows: 1
+
+  - name: "Batch: insert row 5"
+    sql: "INSERT INTO ai_mixed (val) VALUES (5)"
+    expect:
+      affected_rows: 1
+
+  - name: "All 5 rows have unique IDs"
+    sql: "SELECT COUNT(DISTINCT id) AS cnt FROM ai_mixed"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 5}
+
+  - name: "No ID is NULL"
+    sql: "SELECT COUNT(*) AS cnt FROM ai_mixed WHERE id IS NULL"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 0}
+
+  # --- Duplicate explicit ID must fail ---
+
+  - name: "INSERT duplicate explicit ID must fail"
+    sql: "INSERT INTO ai_mixed (id, val) VALUES (1, 99)"
+    expect:
+      error: true
+
+  # --- Transaction scenario: INSERT in tx, commit, then new insert must not collide ---
+
+  - name: "TX: create table for tx test"
+    sql: "CREATE TABLE ai_tx (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
+    expect:
+      affected_rows: 1
+
+  - name: "TX: start transaction"
+    sql: "START TRANSACTION"
+    expect:
+      affected_rows: 0
+
+  - name: "TX: insert first row in transaction"
+    sql: "INSERT INTO ai_tx (name) VALUES ('first')"
+    expect:
+      affected_rows: 1
+
+  - name: "TX: commit"
+    sql: "COMMIT"
+    expect:
+      affected_rows: 0
+
+  - name: "TX: insert second row after commit — must not collide"
+    sql: "INSERT INTO ai_tx (name) VALUES ('second')"
+    expect:
+      affected_rows: 1
+
+  - name: "TX: both rows present with distinct IDs"
+    sql: "SELECT COUNT(DISTINCT id) AS cnt FROM ai_tx"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 2}
+
+  # --- Restart scenario: counter must survive server restart ---
+  # ai_restart table was created and seeded in setup (no inserts yet).
+  # Insert before restart, then restart, then insert after — must not collide.
+
+  - name: "Restart: insert first row before restart"
+    sql: "INSERT INTO ai_restart (name) VALUES ('before')"
+    expect:
+      affected_rows: 1
+
+  - name: "Restart: trigger server restart"
+    sql: "SHUTDOWN"
+
+  - name: "Restart: insert second row after restart — must not collide"
+    sql: "INSERT INTO ai_restart (name) VALUES ('after')"
+    expect:
+      affected_rows: 1
+
+  - name: "Restart: both rows present with distinct IDs"
+    sql: "SELECT COUNT(DISTINCT id) AS cnt FROM ai_restart"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 2}
+
+  - name: "Restart: no ID is NULL"
+    sql: "SELECT COUNT(*) AS cnt FROM ai_restart WHERE id IS NULL"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 0}
