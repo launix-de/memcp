@@ -261,23 +261,4 @@ func initMetricsDeclarations(en scm.Env) {
 			return scm.NewFloat(loadSnapshot().rps)
 		},
 	})
-
-	scm.Declare(&en, &scm.Declaration{
-		Name:         "readfile",
-		Desc:         "Reads a file from the working directory and returns its contents as a string",
-		MinParameter: 1,
-		MaxParameter: 1,
-		Params: []scm.DeclarationParameter{
-			{"filename", "string", "path to the file to read", nil},
-		},
-		Returns: "string",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			filename := scm.String(a[0])
-			data, err := os.ReadFile(filename)
-			if err != nil {
-				panic("readfile: " + err.Error())
-			}
-			return scm.NewString(string(data))
-		},
-	})
 }

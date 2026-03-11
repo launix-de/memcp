@@ -1460,12 +1460,13 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"show", "show databases/tables/columns/meta/shards\n\n(show) lists databases\n(show schema) lists tables\n(show schema tbl) lists columns\n(show schema tbl \"meta\") returns table metadata dict\n(show schema tbl \"shards\") returns shard list",
-		0, 3,
+		"show", "show databases/tables/columns/meta/shards\n\n(show) lists databases\n(show schema) lists tables\n(show schema tbl) lists columns\n(show schema tbl \"meta\") returns table metadata dict\n(show schema tbl \"shards\") returns shard list\n(show schema tbl \"columns\" shardIdx) returns per-column storage details for a shard\n(show schema tbl \"indexes\" shardIdx) returns index details for a shard",
+		0, 4,
 		[]scm.DeclarationParameter{
 			{"schema", "string", "(optional) database name", nil},
 			{"table", "string", "(optional) table name", nil},
-			{"property", "string", "(optional) \"meta\" for table metadata", nil},
+			{"property", "string", "(optional) \"meta\", \"shards\", \"statistics\", \"columns\", \"indexes\"", nil},
+			{"shard", "int", "(optional) shard index for \"columns\" and \"indexes\"", nil},
 		}, "any",
 		func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
@@ -1563,6 +1564,80 @@ func Init(en scm.Env) {
 					}
 					return scm.NewSlice(rows)
 				}
+				if scm.String(a[2]) == "columns" {
+					if len(a) < 4 {
+						panic("show schema tbl \"columns\" requires shard index as 4th argument")
+					}
+					shards := t.ActiveShards()
+					idx := int(scm.ToInt(a[3]))
+					if idx < 0 || idx >= len(shards) {
+						panic("shard index out of range")
+					}
+					s := shards[idx]
+					if s == nil {
+						return scm.NewSlice([]scm.Scmer{})
+					}
+					s.mu.RLock()
+					deltaCount := len(s.inserts)
+					rows := make([]scm.Scmer, 0, len(t.Columns))
+					for _, col := range t.Columns {
+						cs := s.columns[col.Name]
+						var typStr string
+						var colSize uint
+						if cs != nil {
+							typStr = cs.String()
+							colSize = cs.ComputeSize()
+						} else {
+							typStr = "unloaded"
+							colSize = 0
+						}
+						var deltaSize uint
+						if dIdx, ok := s.deltaColumns[col.Name]; ok {
+							for _, row := range s.inserts {
+								if dIdx < len(row) {
+									deltaSize += row[dIdx].ComputeSize()
+								}
+							}
+						}
+						rows = append(rows, scm.NewSlice([]scm.Scmer{
+							scm.NewString("name"), scm.NewString(col.Name),
+							scm.NewString("compression"), scm.NewString(typStr),
+							scm.NewString("size_bytes"), scm.NewInt(int64(colSize)),
+							scm.NewString("delta_count"), scm.NewInt(int64(deltaCount)),
+							scm.NewString("delta_size_bytes"), scm.NewInt(int64(deltaSize)),
+						}))
+					}
+					s.mu.RUnlock()
+					return scm.NewSlice(rows)
+				}
+				if scm.String(a[2]) == "indexes" {
+					if len(a) < 4 {
+						panic("show schema tbl \"indexes\" requires shard index as 4th argument")
+					}
+					shards := t.ActiveShards()
+					idx := int(scm.ToInt(a[3]))
+					if idx < 0 || idx >= len(shards) {
+						panic("shard index out of range")
+					}
+					s := shards[idx]
+					if s == nil {
+						return scm.NewSlice([]scm.Scmer{})
+					}
+					s.mu.RLock()
+					indexes := s.Indexes
+					rows := make([]scm.Scmer, 0, len(indexes))
+					for _, ix := range indexes {
+						rows = append(rows, scm.NewSlice([]scm.Scmer{
+							scm.NewString("cols"), scm.NewString(ix.String()),
+							scm.NewString("active"), scm.NewBool(ix.active),
+							scm.NewString("native"), scm.NewBool(ix.Native),
+							scm.NewString("savings"), scm.NewFloat(ix.Savings),
+							scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
+						}))
+					}
+					s.mu.RUnlock()
+					return scm.NewSlice(rows)
+				}
 				// engine (lowercase to match dashboard dropdown values)
 				engine := "safe"
 				switch t.PersistencyMode {
@@ -1610,117 +1685,6 @@ func Init(en scm.Env) {
 		}, false, false, nil,
 		nil,
 	})
-
-
-	// show_shard_columns(schema, table, shardIndex): returns per-column storage details for a shard
-	scm.Declare(&en, &scm.Declaration{
-		"show_shard_columns", "show per-column storage details for a specific shard",
-		3, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database name", nil},
-			scm.DeclarationParameter{"table", "string", "table name", nil},
-			scm.DeclarationParameter{"shard", "int", "shard index", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-			shards := t.ActiveShards()
-			idx := scm.ToInt(a[2])
-			if idx < 0 || idx >= len(shards) {
-				panic("shard index out of range")
-			}
-			s := shards[idx]
-			if s == nil {
-				return scm.NewSlice([]scm.Scmer{})
-			}
-			s.mu.RLock()
-			deltaCount := len(s.inserts)
-			rows := make([]scm.Scmer, 0, len(t.Columns))
-			for _, col := range t.Columns {
-				cs := s.columns[col.Name]
-				var typStr string
-				var colSize uint
-				if cs != nil {
-					typStr = cs.String()
-					colSize = cs.ComputeSize()
-				} else {
-					typStr = "unloaded"
-					colSize = 0
-				}
-				// compute delta size for this column
-				var deltaSize uint
-				if dIdx, ok := s.deltaColumns[col.Name]; ok {
-					for _, row := range s.inserts {
-						if dIdx < len(row) {
-							deltaSize += row[dIdx].ComputeSize()
-						}
-					}
-				}
-				rows = append(rows, scm.NewSlice([]scm.Scmer{
-					scm.NewString("name"), scm.NewString(col.Name),
-					scm.NewString("compression"), scm.NewString(typStr),
-					scm.NewString("size_bytes"), scm.NewInt(int64(colSize)),
-					scm.NewString("delta_count"), scm.NewInt(int64(deltaCount)),
-					scm.NewString("delta_size_bytes"), scm.NewInt(int64(deltaSize)),
-				}))
-			}
-			s.mu.RUnlock()
-			return scm.NewSlice(rows)
-		}, false, false, nil,
-		nil,
-	})
-
-	// show_shard_indexes(schema, table, shardIndex): returns per-index details for a shard
-	scm.Declare(&en, &scm.Declaration{
-		"show_shard_indexes", "show indexes for a specific shard",
-		3, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database name", nil},
-			scm.DeclarationParameter{"table", "string", "table name", nil},
-			scm.DeclarationParameter{"shard", "int", "shard index", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-			shards := t.ActiveShards()
-			idx := scm.ToInt(a[2])
-			if idx < 0 || idx >= len(shards) {
-				panic("shard index out of range")
-			}
-			s := shards[idx]
-			if s == nil {
-				return scm.NewSlice([]scm.Scmer{})
-			}
-			s.mu.RLock()
-			indexes := s.Indexes
-			rows := make([]scm.Scmer, 0, len(indexes))
-			for _, ix := range indexes {
-				rows = append(rows, scm.NewSlice([]scm.Scmer{
-					scm.NewString("cols"), scm.NewString(ix.String()),
-					scm.NewString("active"), scm.NewBool(ix.active),
-					scm.NewString("native"), scm.NewBool(ix.Native),
-					scm.NewString("savings"), scm.NewFloat(ix.Savings),
-					scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
-				}))
-			}
-			s.mu.RUnlock()
-			return scm.NewSlice(rows)
-		}, false, false, nil,
-		nil,
-	})
-
 	// show_triggers(schema, table): returns a list of triggers for a table (non-system triggers only)
 	scm.Declare(&en, &scm.Declaration{
 		"show_triggers", "show triggers for a given table",

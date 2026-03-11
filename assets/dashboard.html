@@ -1581,7 +1581,7 @@ h+="</div>";
 }
 grid.innerHTML=h;
 /* helper to save a setting */
-function saveSetting(el){
+function saveSettingEl(el){
 var key=el.getAttribute("data-key");
 var value;
 if(el.type==="checkbox")value=el.checked;
@@ -1596,14 +1596,14 @@ setTimeout(function(){statusEl.textContent=""},2000);
 }
 /* checkboxes and selects: immediate on change */
 grid.querySelectorAll("input[type='checkbox'],select").forEach(function(el){
-el.addEventListener("change",function(){saveSetting(el)});
+el.addEventListener("change",function(){saveSettingEl(el)});
 });
 /* number inputs: debounced on input */
 grid.querySelectorAll("input[type='number']").forEach(function(el){
 var timer=null;
 el.addEventListener("input",function(){
 if(timer)clearTimeout(timer);
-timer=setTimeout(function(){saveSetting(el)},500);
+timer=setTimeout(function(){saveSettingEl(el)},500);
 });
 });
 }

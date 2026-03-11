@@ -166,7 +166,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define sidx (simplify shardidx))
-					(define cols (show_shard_columns dbname tblname sidx))
+					(define cols (show dbname tblname "columns" sidx))
 					(define shards (show dbname tblname "shards"))
 					(define shard_info (if (nil? shards) nil (nth shards sidx)))
 					(define main_count (if (nil? shard_info) 0 (shard_info "main_count")))
@@ -181,7 +181,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							"size_bytes" (c "size_bytes")
 						))
 					)))
-					(define indexes (show_shard_indexes dbname tblname sidx))
+					(define indexes (show dbname tblname "indexes" sidx))
 					(define index_items (if (nil? indexes) "[]"
 						(dashboard_json_array (map indexes (lambda (ix)
 							(json_encode_assoc (list
