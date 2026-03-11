@@ -35,7 +35,6 @@ import subprocess
 import time
 import threading
 import multiprocessing
-import re
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
@@ -493,18 +492,6 @@ class SQLTestRunner:
 
             response = resp
         else:
-            if not is_sparql:
-                create_table = self._extract_create_table_name(query)
-                if create_table and not self._is_create_table_if_not_exists(query):
-                    self.execute_sql(
-                        database,
-                        f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}",
-                        auth_header,
-                        active_syntax,
-                        session_id=session_id,
-                        timeout=sql_timeout,
-                    )
-
             # Show query plan if PERF_EXPLAIN is enabled
             if is_perf_test and PERF_EXPLAIN and not is_sparql:
                 explain_resp = self.execute_sql(database, f"DESCRIBE {query}", auth_header, active_syntax)
@@ -598,9 +585,6 @@ class SQLTestRunner:
             self.setup_operations.append(step)
             expect_error = self._step_expects_error(step)
             if "sql" in step:
-                create_table = self._extract_create_table_name(step.get('sql'))
-                if create_table and not self._is_create_table_if_not_exists(step.get('sql')):
-                    self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(create_table)}", syntax=self.suite_syntax)
                 resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
                 if resp is None:
                     print(f"❌ Setup step {idx} failed: no response")
@@ -650,27 +634,6 @@ class SQLTestRunner:
         for step in cleanup_steps:
             self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
 
-    def _extract_create_table_name(self, sql: Any) -> Optional[str]:
-        if not isinstance(sql, str):
-            return None
-        m = re.search(r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:`[^`]+`|[A-Za-z0-9_.-])+)", sql, re.IGNORECASE)
-        if not m:
-            return None
-        raw = m.group(1).strip().strip(";").strip("(")
-        if "`.`" in raw:
-            raw = raw.rsplit("`.`", 1)[1]
-        elif "." in raw:
-            raw = raw.rsplit(".", 1)[1]
-        table = raw.strip("`")
-        if not table:
-            return None
-        return table
-
-    def _is_create_table_if_not_exists(self, sql: Any) -> bool:
-        if not isinstance(sql, str):
-            return False
-        return re.search(r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b", sql, re.IGNORECASE) is not None
-
     def _step_expects_error(self, step: Any) -> bool:
         if not isinstance(step, dict):
             return False
@@ -680,27 +643,6 @@ class SQLTestRunner:
         if isinstance(expect, dict) and expect.get("error") is True:
             return True
         return False
-
-    def _extract_created_tables(self, spec: Dict[str, Any]) -> List[str]:
-        # Keep cleanup scoped to tables this suite creates (no global DB cleanup).
-        tables = set()
-
-        def add_from_sql(sql: Any):
-            table = self._extract_create_table_name(sql)
-            if table:
-                tables.add(table)
-
-        for step in spec.get("setup", []) or []:
-            if isinstance(step, dict):
-                add_from_sql(step.get("sql"))
-        for tc in spec.get("test_cases", []) or []:
-            if isinstance(tc, dict):
-                add_from_sql(tc.get("sql"))
-        return sorted(tables)
-
-    def _drop_created_tables(self, database: str, tables: List[str]) -> None:
-        for tbl in tables:
-            self.execute_sql(database, f"DROP TABLE IF EXISTS {self._quote_ident(tbl)}", syntax=self.suite_syntax)
 
     # ----------------------
     # Parallel test groups
@@ -760,13 +702,8 @@ class SQLTestRunner:
         print(f"💾 Database: {database}")
 
         self.ensure_database(database)
-        created_tables = self._extract_created_tables(spec)
-        if created_tables:
-            self._drop_created_tables(database, created_tables)
 
         if spec.get('setup') and not self.run_setup(spec['setup'], database):
-            if created_tables:
-                self._drop_created_tables(database, created_tables)
             print("❌ Setup failed")
             print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
             return False
@@ -793,8 +730,6 @@ class SQLTestRunner:
 
         if spec.get('cleanup'):
             self.run_cleanup(spec['cleanup'], database)
-        if created_tables:
-            self._drop_created_tables(database, created_tables)
 
         print("="*60)
         total = self.test_count
