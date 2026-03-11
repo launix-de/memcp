@@ -174,7 +174,7 @@ test_cases:
     expect:
       error: true
 
-  # === INT sanitizer: string rejection ===
+  # === INT sanitizer: MySQL-compatible string coercion ===
 
   - name: "Insert int into INT column"
     sql: "INSERT INTO int_strict (id, n) VALUES (1, 42)"
@@ -193,15 +193,41 @@ test_cases:
       data:
         - { n: 7 }
 
-  - name: "Insert string into INT column must fail"
+  - name: "Insert non-numeric string into INT column yields 0 (MySQL-compatible)"
     sql: "INSERT INTO int_strict (id, n) VALUES (3, 'hello')"
     expect:
-      error: true
+      affected_rows: 1
 
-  - name: "UPDATE INT column with string must fail"
+  - name: "Readback non-numeric string → 0"
+    sql: "SELECT n FROM int_strict WHERE id = 3"
+    expect:
+      rows: 1
+      data:
+        - { n: 0 }
+
+  - name: "UPDATE INT column with non-numeric string yields 0 (MySQL-compatible)"
     sql: "UPDATE int_strict SET n = 'world' WHERE id = 1"
     expect:
-      error: true
+      affected_rows: 1
+
+  - name: "Readback updated value → 0"
+    sql: "SELECT n FROM int_strict WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - { n: 0 }
+
+  - name: "Insert date-like string into INT → leading integer part"
+    sql: "INSERT INTO int_strict (id, n) VALUES (4, '2026-03-11')"
+    expect:
+      affected_rows: 1
+
+  - name: "Readback date-like string → 2026"
+    sql: "SELECT n FROM int_strict WHERE id = 4"
+    expect:
+      rows: 1
+      data:
+        - { n: 2026 }
 
   # === FLOAT sanitizer: string rejection ===
 
