@@ -937,10 +937,10 @@ tbody.innerHTML=html;
 function renderDetail(data,dbname,tblname){
 /* meta cards */
 var meta=data.meta||{};
-/* engine: display name → SQL keyword (parser expects LOGGING, not logged) */
+/* engine: display name → SQL keyword */
 var engines=[
 {v:"safe",sql:"SAFE"},
-{v:"logged",sql:"LOGGING"},
+{v:"logged",sql:"LOGGED"},
 {v:"sloppy",sql:"SLOPPY"},
 {v:"memory",sql:"MEMORY"}
 ];
