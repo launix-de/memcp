@@ -31,10 +31,13 @@ except Exception as e:
     sys.exit(2)
 
 import json
+import socket
 import subprocess
 import time
 import threading
 import multiprocessing
+import re
+import random
 from pathlib import Path
 from base64 import b64encode
 from typing import Dict, List, Any, Optional, Tuple
@@ -839,13 +842,27 @@ def kill_memcp_by_port(port: int) -> None:
     except Exception:
         pass
 
+def find_free_port(start: int = 20000, end: int = 60000) -> int:
+    """Find a free TCP port in the given range, trying random candidates first."""
+    candidates = random.sample(range(start, end), min(200, end - start))
+    for port in candidates:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(('', port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError("No free port found in range %d-%d" % (start, end))
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 run_sql_tests.py <test_spec.yaml> [port] [--connect-only]")
         sys.exit(1)
 
     spec_file = sys.argv[1]
-    port = 4321
+    port = None
     connect_only = False
 
     for arg in sys.argv[2:]:
@@ -853,6 +870,12 @@ def main():
             connect_only = True
         elif arg.isdigit():
             port = int(arg)
+
+    if port is None:
+        if connect_only:
+            port = 4321  # fallback for --connect-only without explicit port
+        else:
+            port = find_free_port()
 
     base_url = f"http://localhost:{port}"
     global is_connect_only_mode

@@ -331,6 +331,88 @@ is_dedup=false: replace aggregates with column fetches (for normal group stages)
 	)
 ))
 
+/* replace_tblvar_with_dict: replace (get_column tv _ col _) refs for a specific tv
+with (list 'get_assoc dict_sym col) — for use in building trigger body S-expressions */
+(define replace_tblvar_with_dict (lambda (tv dict_sym expr)
+	(match expr
+		'((symbol get_column) tblvar _ col _)
+		(if (equal? tblvar tv)
+			(list 'get_assoc dict_sym col)
+			expr)
+		'((quote get_column) tblvar _ col _)
+		(if (equal? tblvar tv)
+			(list 'get_assoc dict_sym col)
+			expr)
+		(cons sym args) (cons sym (map args (lambda (a) (replace_tblvar_with_dict tv dict_sym a))))
+		expr
+	)
+))
+
+/* build_pj_insert_scan: build the nested-scan S-expression for an INSERT trigger on trigger_tv.
+Skips scanning trigger_tv (its cols come from (get_assoc NEW "col") at runtime),
+scans all other tables, and inserts matching rows into pj_schema/pjtbl.
+pj_schema, pjtbl, mat_cols, mat_col_names are passed explicitly to avoid free-variable capture issues.
+Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd, performs the insert. */
+(define build_pj_insert_scan (lambda (scan_tables scan_condition trigger_tv is_outermost pj_schema pjtbl mat_cols mat_col_names)
+	(match scan_tables
+		(cons '(tblvar schema tbl isOuter _) rest)
+		(if (equal? tblvar trigger_tv)
+			/* skip trigger table: replace its refs in condition with (get_assoc NEW col) and recurse */
+			(build_pj_insert_scan rest
+				(replace_tblvar_with_dict trigger_tv 'NEW scan_condition)
+				trigger_tv is_outermost pj_schema pjtbl mat_cols mat_col_names)
+			/* scan this other table */
+			(begin
+				(set cols (merge_unique (list
+					(extract_columns_for_tblvar tblvar scan_condition)
+					(merge_unique (map mat_cols (lambda (mc) (extract_columns_for_tblvar tblvar (cadr mc)))))
+					(extract_outer_columns_for_tblvar tblvar scan_condition)
+					(merge_unique (map mat_cols (lambda (mc) (extract_outer_columns_for_tblvar tblvar (cadr mc))))))))
+				(match (split_condition (coalesceNil scan_condition true) rest) '(now_condition later_condition) (begin
+					(set filtercols (merge_unique (list
+						(extract_columns_for_tblvar tblvar now_condition)
+						(extract_outer_columns_for_tblvar tblvar now_condition))))
+					(list 'scan schema tbl
+						(cons 'list filtercols)
+						/* filter lambda: (lambda (tv.col ...) compiled_condition) */
+						(list 'lambda (map filtercols (lambda (c) (symbol (concat tblvar "." c))))
+							(optimize (replace_columns_from_expr now_condition)))
+						(cons 'list cols)
+						/* map lambda: (lambda (tv.col ...) recursive_inner_scan) */
+						(list 'lambda (map cols (lambda (c) (symbol (concat tblvar "." c))))
+							(build_pj_insert_scan rest later_condition trigger_tv false pj_schema pjtbl mat_cols mat_col_names))
+						/* reduce: merge */
+						(list 'lambda (list 'acc 'sub) (list 'merge 'acc 'sub))
+						(list)
+						/* reduce2: outermost inserts into pjtbl, inner levels merge */
+						(if is_outermost
+							(list 'lambda (list 'acc 'shard_rows)
+								(list 'insert pj_schema pjtbl (cons 'list mat_col_names) 'shard_rows (list) (list 'lambda (list) true) true))
+							(list 'lambda (list 'acc 'shard_rows) (list 'merge 'acc 'shard_rows)))
+						isOuter)
+				))
+			)
+		)
+		/* base case: all tables processed. Produce one row with trigger_tv cols from NEW.
+		replace_columns_from_expr converts remaining (get_column ...) refs to symbol variable refs. */
+		(list 'if (optimize (replace_columns_from_expr (coalesceNil scan_condition true)))
+			(list 'list (cons 'list
+				(map mat_cols (lambda (mc)
+					(match (cadr mc)
+						'((symbol get_column) tv _ col _)
+						(if (equal? tv trigger_tv)
+							(list 'get_assoc 'NEW col)
+							(symbol (concat tv "." col)))
+						'((quote get_column) tv _ col _)
+						(if (equal? tv trigger_tv)
+							(list 'get_assoc 'NEW col)
+							(symbol (concat tv "." col)))
+						/* fallback: replace trigger_tv refs and convert to symbol */
+						(replace_tblvar_with_dict trigger_tv 'NEW (replace_columns_from_expr (cadr mc))))))))
+			(list))
+	)
+))
+
 /* recursively preprocess a query and return the flattened query. The returned parameterset will be passed to build_queryplan */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset) (begin
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
@@ -1650,8 +1732,9 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define prejointbl (concat ".prejoin:"
 					(map tables (lambda (t) (match t '(_ tschema ttbl _ _) (concat tschema "." ttbl)))
 					) ":" prejoin_col_names "|" prejoin_condition_name))
-				/* capture outer schema for temp table operations */
+				/* capture outer schema and table name for trigger code generation */
 				(define pj_schema schema)
+				(define pjtbl prejointbl)
 				/* create prejoin table at build time (needed for recursive build_queryplan -> make_keytable) */
 				(createtable schema prejointbl
 					(map mat_col_names (lambda (col) '("column" col "any" '() '())))
@@ -1710,6 +1793,51 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 					pj_all_groups
 					schemas
 					replace_find_column))
+				/* build per-source-table incremental trigger functions entirely in Scheme,
+				then register them via a thin Go wrapper */
+				(define pj_trigger_registrations
+					(map tables (lambda (trigger_tbl)
+						(match trigger_tbl '(trigger_tv src_schema src_tbl _ _)
+							(begin
+								/* collect (pj_col base_col) pairs for this source table */
+								(define ti_col_pairs
+									(reduce mat_cols (lambda (acc mc)
+										(match (cadr mc)
+											'((symbol get_column) tv _ col _)
+											(if (equal? tv trigger_tv)
+												(merge acc (list (list (car mc) col)))
+												acc)
+											'((quote get_column) tv _ col _)
+											(if (equal? tv trigger_tv)
+												(merge acc (list (list (car mc) col)))
+												acc)
+											acc)) (list)))
+								/* DELETE trigger: scan pjtbl, filter by OLD values for T_i cols, delete matching rows */
+								(define delete_fn
+									(eval (list 'lambda (list 'OLD 'NEW)
+										(list 'scan pj_schema pjtbl
+											(cons 'list (map ti_col_pairs car))
+											(list 'lambda (map ti_col_pairs (lambda (p) (symbol (concat "_pj." (car p)))))
+												(if (equal? 1 (count ti_col_pairs))
+													(list 'equal? (symbol (concat "_pj." (car (car ti_col_pairs))))
+														(list 'get_assoc 'OLD (cadr (car ti_col_pairs))))
+													(cons 'and (map ti_col_pairs (lambda (p)
+														(list 'equal? (symbol (concat "_pj." (car p)))
+															(list 'get_assoc 'OLD (cadr p))))))))
+											(list 'list "$update")
+											(list 'lambda (list '$update) (list '$update))
+											'+ 0 'nil 'false))))
+								/* INSERT trigger: scan other tables with T_i cols fixed to NEW, insert rows */
+								(define insert_fn
+									(eval (list 'lambda (list 'OLD 'NEW)
+										(build_pj_insert_scan tables condition trigger_tv true pj_schema pjtbl mat_cols mat_col_names))))
+								/* UPDATE trigger: delete old prejoin rows + insert new for any row change */
+								(define captured_delete_fn delete_fn)
+								(define captured_insert_fn insert_fn)
+								(define update_fn (lambda (OLD NEW) (begin (captured_delete_fn OLD NEW) (captured_insert_fn OLD NEW))))
+								/* emit the register call as an S-expression to be executed at query time */
+								(list 'register_prejoin_incremental src_schema src_tbl pj_schema pjtbl
+									delete_fn insert_fn update_fn))))))
 				/* assemble: create (if not exists) + materialize if empty + register triggers + grouped result */
 				(cons 'begin (merge
 					(list
@@ -1718,9 +1846,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							'(list "engine" "sloppy") true)
 						(list 'if (list 'equal? 0 (list 'scan_estimate pj_schema prejointbl))
 							'('time materialize_plan "materialize")))
-					(map tables (lambda (t)
-						(match t '(_ src_schema src_tbl _ _)
-							(list 'register_prejoin_invalidation src_schema src_tbl pj_schema prejointbl))))
+					pj_trigger_registrations
 					(list grouped_result)))
 			)
 		)

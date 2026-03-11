@@ -5,6 +5,7 @@
 metadata:
   version: "1.0"
   description: "GROUP BY cache invalidation: query, mutate base table, re-query"
+  isolated: true  # group-cache tests are order-sensitive; run sequentially
 
 test_cases:
   # --- Setup ---

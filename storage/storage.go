@@ -1324,6 +1324,97 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"register_prejoin_incremental", "registers incremental INSERT/DELETE/UPDATE triggers on a source table to maintain a prejoin table",
+		7, 7,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"src_schema", "string", "database of the source table", nil},
+			scm.DeclarationParameter{"src_table", "string", "name of the source table", nil},
+			scm.DeclarationParameter{"pj_schema", "string", "database of the prejoin table", nil},
+			scm.DeclarationParameter{"pj_table", "string", "name of the prejoin table", nil},
+			scm.DeclarationParameter{"delete_fn", "proc", "(lambda (OLD NEW) ...) compiled DELETE trigger body", nil},
+			scm.DeclarationParameter{"insert_fn", "proc", "(lambda (OLD NEW) ...) compiled INSERT trigger body", nil},
+			scm.DeclarationParameter{"update_fn", "proc", "(lambda (OLD NEW) ...) compiled UPDATE trigger body", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			srcSchemaName := scm.String(a[0])
+			srcTableName := scm.String(a[1])
+			pjSchemaName := scm.String(a[2])
+			pjTableName := scm.String(a[3])
+			deleteFn := a[4]
+			insertFn := a[5]
+			updateFn := a[6]
+
+			srcDB := GetDatabase(srcSchemaName)
+			if srcDB == nil {
+				return scm.NewBool(false)
+			}
+			srcTable := srcDB.GetTable(srcTableName)
+			if srcTable == nil {
+				return scm.NewBool(false)
+			}
+
+			// Register DML triggers (idempotent)
+			dmlTriggers := []struct {
+				timing TriggerTiming
+				fn     scm.Scmer
+			}{
+				{AfterDelete, deleteFn},
+				{AfterInsert, insertFn},
+				{AfterUpdate, updateFn},
+			}
+			for _, td := range dmlTriggers {
+				triggerName := ".pj_incr:" + pjTableName + "|" + srcTable.Name + "|" + td.timing.String()
+				exists := false
+				for _, tr := range srcTable.Triggers {
+					if tr.Name == triggerName {
+						exists = true
+						break
+					}
+				}
+				if exists {
+					continue
+				}
+				srcTable.AddTrigger(TriggerDescription{
+					Name:     triggerName,
+					Timing:   td.timing,
+					IsSystem: true,
+					Priority: 100,
+					Async:    false,
+					Func:     td.fn,
+				})
+			}
+			// Lifecycle triggers: DROP/schema-change → full invalidation
+			for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {
+				triggerName := ".pj_incr:" + pjTableName + "|" + srcTable.Name + "|" + timing.String()
+				exists := false
+				for _, tr := range srcTable.Triggers {
+					if tr.Name == triggerName {
+						exists = true
+						break
+					}
+				}
+				if exists {
+					continue
+				}
+				srcTable.AddTrigger(TriggerDescription{
+					Name:     triggerName,
+					Timing:   timing,
+					IsSystem: true,
+					Priority: 100,
+					Async:    true,
+					Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("droptable"),
+						scm.NewString(pjSchemaName),
+						scm.NewString(pjTableName),
+						scm.NewBool(true),
+					})),
+				})
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"get_fk_target", "returns (ref_table ref_column) if a single-column FK exists for the given column, nil otherwise",
 		3, 3,
 		[]scm.DeclarationParameter{
