@@ -71,12 +71,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* WebSocket push loop: send metrics JSON every 100ms */
 (define dashboard_push (lambda (send) (begin
 	(eps_tick)
+	(define s (stat))
 	(send 1 (json_encode_assoc (list
 		"cpu" (cpu_usage)
-		"mem_available" (available_memory)
-		"mem_total" (total_memory)
-		"shard" (cache_stat)
-		"process_memory" (process_memory)
+		"mem_available" (s "mem_available")
+		"mem_total" (s "mem_total")
+		"shard" (list "current_memory" (s "shard_memory") "persisted_budget" (s "persisted_budget") "memory_budget" (s "shard_budget") "persisted_memory" (s "persisted_memory") "cache_entry_count" (s "cache_entry_count") "cache_entry_size" (s "cache_entry_size"))
+		"process_memory" (s "process_memory")
 		"connections" (active_connections)
 		"max_connections" (max_connections)
 		"rps" (requests_per_second)
@@ -110,7 +111,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: sum size_bytes across all shards of a table */
 (define dashboard_table_size (lambda (db tbl)
-	(reduce (show_shards db tbl) (lambda (acc shard) (+ acc (shard "size_bytes"))) 0)
+	(reduce ((show db tbl true) "shards") (lambda (acc shard) (+ acc (shard "size_bytes"))) 0)
 ))
 
 /* helper: join list of JSON strings into a JSON array */
@@ -165,14 +166,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define sidx (simplify shardidx))
-					(define cols (show_shard_columns dbname tblname sidx))
-					(define shards (show_shards dbname tblname))
-					(define shard_info (if (nil? shards) nil (nth shards sidx)))
-					(define main_count (if (nil? shard_info) 0 (shard_info "main_count")))
-					(define delta_count (if (nil? shard_info) 0 (shard_info "delta")))
-					(define deletions (if (nil? shard_info) 0 (shard_info "deletions")))
-					(define shard_size (if (nil? shard_info) 0 (shard_info "size_bytes")))
-					(define shard_state (if (nil? shard_info) "" (shard_info "state")))
+					(define shardinfo (show dbname tblname sidx true))
+					(define cols (shardinfo "columns"))
+					(define indexes (shardinfo "indexes"))
+					(define main_count (shardinfo "main_count"))
+					(define delta_count (shardinfo "delta"))
+					(define deletions (shardinfo "deletions"))
+					(define shard_size (shardinfo "size_bytes"))
+					(define shard_state (shardinfo "state"))
 					(define items (map cols (lambda (c)
 						(json_encode_assoc (list
 							"name" (c "name")
@@ -180,7 +181,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							"size_bytes" (c "size_bytes")
 						))
 					)))
-					(define indexes (show_shard_indexes dbname tblname sidx))
 					(define index_items (if (nil? indexes) "[]"
 						(dashboard_json_array (map indexes (lambda (ix)
 							(json_encode_assoc (list
@@ -204,9 +204,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			/* API: table detail with columns, shards, meta */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)$" _ dbname tblname) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
-					(define cols (show dbname tblname))
-					(define shards (show_shards dbname tblname))
-					(define meta (show dbname tblname "meta"))
+					(define tblinfo (show dbname tblname true))
+					(define cols (tblinfo "columns"))
+					(define shards (tblinfo "shards"))
+					(define meta (tblinfo "meta"))
 					(define col_items (map cols (lambda (col)
 						(json_encode_assoc (list
 							"name" (col "Field")
@@ -269,9 +270,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define tables (show dbname))
 					(define items (if (nil? tables) nil (map tables (lambda (tbl) (begin
-						(define meta (show dbname tbl "meta"))
-						(define cols (show dbname tbl))
-						(define shards (show_shards dbname tbl))
+						(define tblinfo (show dbname tbl true))
+						(define meta (tblinfo "meta"))
+						(define cols (tblinfo "columns"))
+						(define shards (tblinfo "shards"))
 						(define col_count (if (nil? cols) 0 (count cols)))
 						(define shard_count (if (nil? shards) 0 (count shards)))
 						(define total_size (dashboard_table_size dbname tbl))
@@ -357,16 +359,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* self-scheduling tracing loop via setTimeout */
 (define metrics_trace_tick (lambda () (begin
 	(if (settings "MetricsTracing") (begin
-		(set cs (cache_stat))
+		(define s (stat))
 		(insert "system_statistic" "perf_metrics"
 			'("time" "cpu" "mem_available" "mem_total" "shard_memory" "shard_budget" "connections" "max_connections" "rps" "eps")
 			(list (list
 				(now)
 				(cpu_usage)
-				(available_memory)
-				(total_memory)
-				(cs "persisted_memory")
-				(cs "persisted_budget")
+				(s "mem_available")
+				(s "mem_total")
+				(s "persisted_memory")
+				(s "persisted_budget")
 				(active_connections)
 				(max_connections)
 				(requests_per_second)

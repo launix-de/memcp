@@ -75,14 +75,14 @@ test_cases:
   - name: "Only compound index exists (no prefix created)"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (if (equal? (count indexes) 1) "ok"
           (error (concat "expected 1 index, got " (count indexes)))))
 
   - name: "The single index is the compound (a|b)"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
         (if (equal? cols "a|b") "ok"
@@ -91,7 +91,7 @@ test_cases:
   - name: "Compound index has accumulated savings from prefix queries"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set savings (get_assoc idx "savings"))
         (if (> savings 5.0) "ok"
@@ -111,14 +111,14 @@ test_cases:
   - name: "Post-rebuild: index is preserved"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (if (equal? (count indexes) 1) "ok"
           (error (concat "expected 1 index after rebuild, got " (count indexes)))))
 
   - name: "Post-rebuild: index columns preserved"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
         (if (equal? cols "a|b") "ok"
@@ -127,7 +127,7 @@ test_cases:
   - name: "Post-rebuild: savings decayed (< pre-rebuild value)"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_nopfx" 0))
+        (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set savings (get_assoc idx "savings"))
         (if (> savings 2.0) "ok"
@@ -211,7 +211,7 @@ test_cases:
   - name: "Both indexes exist before rebuild"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_rev" 0))
+        (set indexes ((show "memcp-tests" "idx_rev" 0 true) "indexes"))
         (if (equal? (count indexes) 2) "ok"
           (error (concat "expected 2 indexes, got " (count indexes)))))
 
@@ -226,14 +226,14 @@ test_cases:
   - name: "Post-rebuild: only compound index remains"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_rev" 0))
+        (set indexes ((show "memcp-tests" "idx_rev" 0 true) "indexes"))
         (if (equal? (count indexes) 1) "ok"
           (error (concat "expected 1 index after prefix dedup, got " (count indexes)))))
 
   - name: "Post-rebuild: surviving index is p|q"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_rev" 0))
+        (set indexes ((show "memcp-tests" "idx_rev" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
         (if (equal? cols "p|q") "ok"
@@ -242,7 +242,7 @@ test_cases:
   - name: "Post-rebuild: merged savings from both indexes"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_rev" 0))
+        (set indexes ((show "memcp-tests" "idx_rev" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set savings (get_assoc idx "savings"))
         (if (> savings 3.0) "ok"
@@ -325,7 +325,7 @@ test_cases:
   - name: "Two non-overlapping indexes exist"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_nonoverlap" 0))
+        (set indexes ((show "memcp-tests" "idx_nonoverlap" 0 true) "indexes"))
         (if (equal? (count indexes) 2) "ok"
           (error (concat "expected 2 indexes, got " (count indexes)))))
 
@@ -336,7 +336,7 @@ test_cases:
       - scm: "(rebuild)"
     scm: |
       (begin
-        (set indexes (show_shard_indexes "memcp-tests" "idx_nonoverlap" 0))
+        (set indexes ((show "memcp-tests" "idx_nonoverlap" 0 true) "indexes"))
         (if (equal? (count indexes) 2) "ok"
           (error (concat "expected 2 non-overlapping indexes after rebuild, got " (count indexes)))))
 
