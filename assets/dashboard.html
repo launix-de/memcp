@@ -814,7 +814,7 @@ for(var j=0;j<tbls.length;j++){
 var t=tbls[j];
 if(t.charAt(0)===".") continue;
 var tActive=isActive&&_sidebarActiveTbl===t;
-h+='<div class="sb-tbl'+(tActive?" sactive":"")+'\" onclick="location.hash=\'db/'+encodeURIComponent(d.name)+"/"+encodeURIComponent(t)+'\'">'+esc(t)+'</div>';
+h+='<div class="sb-tbl'+(tActive?" sactive":"")+'\" onclick="location.hash=\'db/'+encodeURIComponent(d.name)+'/@'+encodeURIComponent(t)+'\'">'+esc(t)+'</div>';
 }
 }else{
 (function(dbName){
@@ -906,7 +906,7 @@ if(b)b.classList.toggle("active",tabs[i]===tab);
 }
 if(_dbTabDb){
 if(tab==="tables") location.hash="db/"+encodeURIComponent(_dbTabDb);
-else location.hash="db/"+encodeURIComponent(_dbTabDb)+"/"+tab;
+else location.hash="db/"+encodeURIComponent(_dbTabDb)+"/+"+tab;
 }
 if(tab==="errors") loadDbErrors();
 if(tab==="console"){
@@ -926,7 +926,7 @@ if(tab==="console"){
 /* Navigate to the db-level console with a pre-filled SELECT */
 if(_tblTabDb){
 _pendingDbConsoleQuery="SELECT * FROM `"+(_tblTabName||"").replace(/`/g,"``")+"` LIMIT 100";
-location.hash="db/"+encodeURIComponent(_tblTabDb)+"/console";
+location.hash="db/"+encodeURIComponent(_tblTabDb)+"/+console";
 }
 return;
 }
@@ -1056,7 +1056,7 @@ return JSON.stringify(String(v));
 function fetchSettings(cb){
 fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(json_encode_assoc (settings))"})
 .then(function(r){if(!r.ok)throw new Error(r.status);return r.text();})
-.then(function(t){cb(JSON.parse(t));})
+.then(function(t){var v=JSON.parse(t);if(typeof v==="string")v=JSON.parse(v);cb(v);})
 .catch(function(e){console.error("Settings error:",e);});
 }
 function saveSetting(key,value,cb){
@@ -1192,21 +1192,23 @@ showRootPwWarning("root-pw-warning-users");
 fetchUsers(renderUsers);
 return;
 }
-/* shard detail: db/NAME/TABLE/shard/N */
-m=hash.match(/^db\/([^/]+)\/([^/]+)\/shard\/(\d+)$/);
+/* shard detail: db/NAME/@TABLE/shard/N */
+m=hash.match(/^db\/([^/]+)\/@([^/]+)\/shard\/(\d+)$/);
 if(m){
 var db_=decodeURIComponent(m[1]),tbl_=decodeURIComponent(m[2]),si=m[3];
 showView("view-shard");
 _sidebarActiveDb=db_;_sidebarActiveTbl=tbl_;
 _sidebarOpen=true;_sidebarExpandedDbs[db_]=true;
 loadSidebar();
-setBreadcrumb([{label:"All Databases",href:"#databases"},{label:db_,href:"#db/"+encodeURIComponent(db_)},{label:tbl_,href:"#db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_)},{label:"Shard "+si}]);
+setBreadcrumb([{label:"All Databases",href:"#databases"},{label:db_,href:"#db/"+encodeURIComponent(db_)},{label:tbl_,href:"#db/"+encodeURIComponent(db_)+"/@"+encodeURIComponent(tbl_)},{label:"Shard "+si}]);
 document.getElementById("shard-title").textContent=db_+"."+tbl_+" - Shard #"+si;
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_)+"/shard/"+si,function(data){renderShardDetail(data,db_,tbl_,si)});
 return;
 }
-/* db/NAME/errors or db/NAME/console */
-m=hash.match(/^db\/([^/]+)\/(errors|console)$/);
+/* db/NAME/+errors or db/NAME/+console — literal + sigil for special tabs
+   Table routes use @ sigil (db/NAME/@TABLE); both + and @ are encoded by
+   encodeURIComponent (%2B / %40) so neither can appear literally from user data */
+m=hash.match(/^db\/([^/]+)\/\+(errors|console)$/);
 if(m){
 var dbX=decodeURIComponent(m[1]),tabX=m[2];
 showView("view-tables");
@@ -1231,8 +1233,8 @@ renderDbHistory();
 }
 return;
 }
-/* table detail: db/NAME/TABLE */
-m=hash.match(/^db\/([^/]+)\/([^/]+)$/);
+/* table detail: db/NAME/@TABLE */
+m=hash.match(/^db\/([^/]+)\/@([^/]+)$/);
 if(m){
 var db2=decodeURIComponent(m[1]),tbl2=decodeURIComponent(m[2]);
 showView("view-detail");
@@ -1348,7 +1350,7 @@ var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
 var dbn=esc(encodeURIComponent(dbname)),tn=esc(encodeURIComponent(d.name));
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/"+tn+"'\" title='"+esc(d.name)+"'>"+esc(truncName(d.name))+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/@"+tn+"'\" title='"+esc(d.name)+"'>"+esc(truncName(d.name))+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
 }
 tb.innerHTML=h||"<tr><td colspan='7' style='color:#888;text-align:center'>No tables</td></tr>";
 tb.querySelectorAll("[data-trunctbl]").forEach(function(btn){
@@ -1446,7 +1448,7 @@ var rangeStr=(fromVal===null?"-\u221e":fromVal)+" \u2013 "+(toVal===null?"+\u221
 if(hasNull)rangeStr+=" +NULL";
 rangeCells+="<td>"+esc(rangeStr)+"</td>";
 }
-sh+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(dbname))+"/"+esc(encodeURIComponent(tblname))+"/shard/"+s.shard+"'\"><td class='r'>"+s.shard+"</td><td>"+esc(s.state)+"</td><td class='r'>"+s.main_count+"</td><td class='r'>"+s.delta+"</td><td class='r'>"+s.deletions+"</td><td class='r'>"+fmt(s.size_bytes||0)+"</td>"+rangeCells+"</tr>";
+sh+="<tr class='clickable' onclick=\"location.hash='db/"+esc(encodeURIComponent(dbname))+"/@"+esc(encodeURIComponent(tblname))+"/shard/"+s.shard+"'\"><td class='r'>"+s.shard+"</td><td>"+esc(s.state)+"</td><td class='r'>"+s.main_count+"</td><td class='r'>"+s.delta+"</td><td class='r'>"+s.deletions+"</td><td class='r'>"+fmt(s.size_bytes||0)+"</td>"+rangeCells+"</tr>";
 }
 document.querySelector("#tbl-shards tbody").innerHTML=sh||"<tr><td colspan='"+totalCols+"' style='color:#888;text-align:center'>No shards</td></tr>";
 /* triggers */
@@ -1581,7 +1583,7 @@ h+="</div>";
 }
 grid.innerHTML=h;
 /* helper to save a setting */
-function saveSetting(el){
+function saveSettingEl(el){
 var key=el.getAttribute("data-key");
 var value;
 if(el.type==="checkbox")value=el.checked;
@@ -1596,14 +1598,14 @@ setTimeout(function(){statusEl.textContent=""},2000);
 }
 /* checkboxes and selects: immediate on change */
 grid.querySelectorAll("input[type='checkbox'],select").forEach(function(el){
-el.addEventListener("change",function(){saveSetting(el)});
+el.addEventListener("change",function(){saveSettingEl(el)});
 });
 /* number inputs: debounced on input */
 grid.querySelectorAll("input[type='number']").forEach(function(el){
 var timer=null;
 el.addEventListener("input",function(){
 if(timer)clearTimeout(timer);
-timer=setTimeout(function(){saveSetting(el)},500);
+timer=setTimeout(function(){saveSettingEl(el)},500);
 });
 });
 }
@@ -1809,7 +1811,7 @@ var db=_dbTabDb;
 if(!db)return;
 var q="CREATE TABLE `newtable` (\n  `id` INT AUTO_INCREMENT PRIMARY KEY,\n  `name` VARCHAR(255)\n)";
 _pendingDbConsoleQuery=q;
-location.hash="db/"+encodeURIComponent(db)+"/console";
+location.hash="db/"+encodeURIComponent(db)+"/+console";
 });
 document.getElementById("btn-create-db-toggle").addEventListener("click",function(){
 createDbFormVisible=!createDbFormVisible;
@@ -2076,7 +2078,7 @@ document.getElementById("metrics-range").addEventListener("change",loadMetricsHi
 
 /* hook into gauges routing: load metrics history when gauges view shown */
 var _metricsOnGauges=function(){
-apiFetch(base+"/dashboard/api/settings",function(s){
+fetchSettings(function(s){
 var sec=document.getElementById("metrics-history");
 if(s&&s.MetricsTracing&&sec){loadMetricsHistory();}
 else if(sec){sec.style.display="none";}

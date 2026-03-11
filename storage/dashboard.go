@@ -19,23 +19,4 @@ package storage
 import "github.com/launix-de/memcp/scm"
 
 func initDashboard(en scm.Env) {
-	scm.DeclareInSection("Sync", &en, &scm.Declaration{
-		Name:         "cache_stat",
-		Desc:         "Returns cache statistics as an associative list with current_memory, persisted_budget, memory_budget, persisted_memory",
-		MinParameter: 0,
-		MaxParameter: 0,
-		Params:       []scm.DeclarationParameter{},
-		Returns:      "list",
-		Fn: func(a ...scm.Scmer) scm.Scmer {
-			stat := GlobalCache.Stat()
-			return scm.NewSlice([]scm.Scmer{
-				scm.NewString("current_memory"), scm.NewInt(stat.CurrentMemory),
-				scm.NewString("persisted_budget"), scm.NewInt(stat.PersistedBudget),
-				scm.NewString("memory_budget"), scm.NewInt(stat.MemoryBudget),
-				scm.NewString("persisted_memory"), scm.NewInt(stat.PersistedMemory),
-				scm.NewString("cache_entry_count"), scm.NewInt(stat.CountByType[TypeCacheEntry]),
-				scm.NewString("cache_entry_size"), scm.NewInt(stat.SizeByType[TypeCacheEntry]),
-			})
-		},
-	})
 }
