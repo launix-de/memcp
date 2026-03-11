@@ -1414,6 +1414,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) schema id "engine" "cache")))
 			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) schema id "engine" "logged")))
 			(parser '((atom "ENGINE" true) "=" (atom "LOGGED" true)) (lambda (id) '((quote altertable) schema id "engine" "logged")))
+			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
 			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
 			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))
 			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) schema id "engine" "safe")))

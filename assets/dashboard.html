@@ -77,9 +77,6 @@ header a:hover{opacity:1;text-decoration:underline}
 .meta-card .val{color:#fff;font-size:1rem;font-weight:600;margin-top:4px}
 .detail-section{margin-bottom:24px}
 .detail-section h3{font-size:.9rem;color:#aaa;margin-bottom:10px;font-weight:400;text-transform:uppercase;letter-spacing:.5px}
-#link-back-wrap{max-width:1100px;margin:0 auto;padding:8px 24px}
-#link-back{display:none;color:#aaa;font-size:.85rem;text-decoration:none}
-#link-back:hover{color:#fff}
 .settings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
 .setting-card{background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px}
 .setting-card .info{flex:1;min-width:0}
@@ -105,12 +102,12 @@ header a:hover{opacity:1;text-decoration:underline}
 .inline-select:focus{outline:none;border-color:#76b512}
 .action-cell{white-space:nowrap}
 .action-cell button,.action-cell select{margin-left:4px}
-.console-wrap{display:flex;gap:20px;padding:24px;max-width:1400px;margin:0 auto}
-.console-left{flex:2;min-width:0}
-.console-right{flex:1;min-width:250px;max-height:calc(100vh - 120px);overflow-y:auto}
+.console-wrap{display:flex;gap:20px;padding:24px;flex:1;min-height:0}
+.console-left{flex:2;min-width:0;display:flex;flex-direction:column}
+.console-right{flex:1;min-width:200px;overflow-y:auto}
 .console-controls{display:flex;gap:8px;margin-bottom:10px;align-items:center}
-#console-textarea{font-family:monospace;background:#16213e;border:1px solid #2a2a4a;color:#e0e0e0;resize:vertical;width:100%;height:200px;padding:10px;font-size:.85rem;border-radius:4px}
-#console-textarea:focus{outline:none;border-color:#76b512}
+.console-ta{font-family:monospace;background:#16213e;border:1px solid #2a2a4a;color:#e0e0e0;resize:vertical;width:100%;height:200px;padding:10px;font-size:.85rem;border-radius:4px}
+.console-ta:focus{outline:none;border-color:#76b512}
 .console-send{background:#76b512;color:#fff;border:none;padding:8px 20px;border-radius:4px;font-size:.85rem;cursor:pointer;margin-top:8px}
 .console-send:hover{background:#8cd919}
 .console-error{color:#e74c3c;font-size:.85rem;padding:8px}
@@ -122,6 +119,29 @@ header a:hover{opacity:1;text-decoration:underline}
 .history-time{color:#888;font-size:.7rem}
 .history-syntax{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.65rem;font-weight:600;background:#2980b9;color:#fff;margin-left:6px}
 .history-query{color:#ccc;font-size:.8rem;font-family:monospace;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* === Sidebar layout === */
+body{display:flex;flex-direction:column}
+.view{display:none}
+.view.active{display:flex;flex:1;flex-direction:column}
+#sidebar-wrap{display:none;flex:1}
+#sidebar{width:240px;min-width:200px;background:#12122a;border-right:1px solid #2a2a4a;overflow-y:auto;flex-shrink:0}
+#sidebar-main{flex:1;min-width:0;display:flex;flex-direction:column;overflow-x:hidden}
+.sb-root{padding:10px 12px 6px;font-size:.75rem;color:#888;text-transform:uppercase;letter-spacing:.5px;display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+.sb-root:hover,.sb-root.sactive{color:#ccc}
+.sb-db{padding:6px 12px;display:flex;align-items:center;gap:6px;cursor:pointer;color:#bbb;font-size:.85rem;border-left:3px solid transparent}
+.sb-db:hover{background:#1a1a3e;color:#fff}
+.sb-db.sactive{border-left-color:#76b512;color:#fff;background:#1a1a3e}
+.sb-tbl{padding:4px 12px 4px 32px;cursor:pointer;color:#888;font-size:.8rem;border-left:3px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.sb-tbl:hover{background:#1a1a3e;color:#ccc}
+.sb-tbl.sactive{border-left-color:#76b512;color:#e0e0e0;background:#1a1a3e}
+.sb-toggle{display:inline-block;width:14px;font-size:.7rem;color:#555;flex-shrink:0;text-align:center}
+/* === Tab bar === */
+.tab-bar{display:flex;border-bottom:2px solid #2a2a4a;padding:0 24px;background:#16213e;flex-shrink:0}
+.tab-btn{padding:10px 18px;cursor:pointer;color:#888;font-size:.85rem;border:none;background:none;border-bottom:2px solid transparent;margin-bottom:-2px;transition:.15s;white-space:nowrap}
+.tab-btn:hover{color:#ccc}
+.tab-btn.active{color:#76b512;border-bottom-color:#76b512}
+.tab-panel{display:none;flex:1;flex-direction:column;overflow-y:auto;min-height:0}
+.tab-panel.active{display:flex}
 </style>
 </head>
 <body>
@@ -139,8 +159,6 @@ header a:hover{opacity:1;text-decoration:underline}
 <a href="https://github.com/launix-de/memcp" target="_blank">GitHub</a>
 </div>
 </header>
-<div id="link-back-wrap"><a href="#" id="link-back">&larr; Back</a></div>
-
 <div class="view active" id="view-gauges">
 <div class="browse-wrap"><div id="root-pw-warning-gauges" style="display:none;background:#c0392b;padding:16px 20px;border-radius:6px;margin-bottom:20px;font-size:1.1rem;font-weight:700;color:#fff">&#9888; Root password is still the default! <a href="#users" style="color:#ffd700;text-decoration:underline">Manage users</a></div></div>
 <div class="gauge-row">
@@ -215,9 +233,20 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 </div>
 
+<!-- Sidebar layout: wraps databases / db detail / console / errors views -->
+<div id="sidebar-wrap">
+<nav id="sidebar"><div id="sidebar-tree"></div></nav>
+<div id="sidebar-main">
+<div id="breadcrumb" style="display:none;padding:6px 24px;font-size:.8rem;color:#666;background:#16213e;border-bottom:1px solid #2a2a4a;flex-shrink:0"></div>
+
 <div class="view" id="view-databases">
+<div class="tab-bar">
+<button class="tab-btn" id="tabbtn-dbs-databases" onclick="_switchDbsTab('databases')">Databases</button>
+<button class="tab-btn" id="tabbtn-dbs-errors" onclick="_switchDbsTab('errors')" data-admin-only>Errors</button>
+<button class="tab-btn" id="tabbtn-dbs-console" onclick="_switchDbsTab('console')">Console</button>
+</div>
+<div class="tab-panel" id="tabpanel-dbs-databases">
 <div class="browse-wrap">
-<h2>Databases</h2>
 <div id="root-pw-warning-databases" style="display:none;background:#c0392b;padding:16px 20px;border-radius:6px;margin-bottom:20px;font-size:1.1rem;font-weight:700;color:#fff">&#9888; Root password is still the default! <a href="#users" style="color:#ffd700;text-decoration:underline">Manage users</a></div>
 <div style="margin-bottom:16px" data-admin-only>
 <button class="btn-warn" id="btn-create-db-toggle">Create Database</button>
@@ -245,56 +274,126 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 </div>
 <table class="browse-table" id="tbl-databases">
-<thead><tr><th>Name</th><th>Backend</th><th class="r">Tables</th><th class="r">Size</th><th>Actions</th></tr></thead>
+<thead><tr><th>Name</th><th>Backend</th><th class="r">Tables</th><th class="r">Size</th><th id="th-db-access">Access</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
 </div>
+</div><!-- end tabpanel-dbs-databases -->
+
+<div class="tab-panel" id="tabpanel-dbs-errors" data-admin-only>
+<div class="browse-wrap">
+<div style="margin-bottom:8px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;background:#1e1e3a;border-radius:6px;padding:8px 12px;font-size:.8rem">
+<label style="display:flex;align-items:center;gap:6px;color:#aaa"><span>Enable logging</span>
+<label class="toggle" style="margin:0"><input type="checkbox" id="el-setting-enable"><span class="slider"></span></label></label>
+<label style="display:flex;align-items:center;gap:6px;color:#aaa"><span>Max rows</span>
+<input type="number" id="el-setting-max" min="0" style="width:80px;background:#2a2a4a;border:1px solid #444;border-radius:3px;color:#e0e0e0;padding:2px 4px;font-size:.8rem">
+<span style="color:#666;font-size:.75rem">(0=unlimited)</span></label>
+<span id="el-setting-status" style="color:#76b512;font-size:.75rem"></span>
 </div>
+<div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+<select class="inline-select" id="errors-db-filter" style="min-width:160px"><option value="">All Databases</option></select>
+<button class="btn-warn" id="btn-reload-errors" onclick="loadErrors()">Reload</button>
+<button class="btn-danger" id="btn-clear-errors">Clear All</button>
+<span id="errors-status" style="color:#888;font-size:.8rem;margin-left:8px"></span>
+</div>
+<table class="browse-table" id="tbl-errors">
+<thead><tr><th>Time</th><th>Database</th><th>User</th><th>Query</th><th>Error</th></tr></thead>
+<tbody id="errors-tbody"></tbody>
+</table>
+<div style="display:flex;gap:8px;align-items:center;padding:10px 0" id="errors-pagination"></div>
+</div>
+</div><!-- end tabpanel-dbs-errors -->
+
+<div class="tab-panel" id="tabpanel-dbs-console">
+<div class="console-wrap">
+<div class="console-left">
+<div class="console-controls">
+<select class="inline-select" id="console-syntax">
+<option value="sql">SQL</option>
+<option value="psql">PostgreSQL</option>
+<option value="sparql">SPARQL</option>
+<option value="scheme">Scheme</option>
+</select>
+<select class="inline-select" id="console-db"></select>
+</div>
+<textarea class="console-ta" id="console-textarea" spellcheck="false">SELECT * FROM user LIMIT 25</textarea>
+<button class="console-send" id="console-send">Send (Ctrl+Enter)</button>
+<div id="console-error"></div>
+<div class="console-result" id="console-result"></div>
+</div>
+<div class="console-right">
+<h3 style="font-size:.85rem;color:#aaa;text-transform:uppercase;letter-spacing:.5px;font-weight:400;margin-bottom:4px">Query History</h3>
+<div class="history-list" id="console-history"></div>
+</div>
+</div>
+</div><!-- end tabpanel-dbs-console -->
+</div><!-- end view-databases -->
 
 <div class="view" id="view-tables">
+<div class="tab-bar">
+<button class="tab-btn" id="tabbtn-db-tables" onclick="_switchDbTab('tables')">Tables</button>
+<button class="tab-btn" id="tabbtn-db-errors" onclick="_switchDbTab('errors')" data-admin-only>Errors</button>
+<button class="tab-btn" id="tabbtn-db-console" onclick="_switchDbTab('console')">Console</button>
+</div>
+<div class="tab-panel" id="tabpanel-db-tables">
 <div class="browse-wrap">
-<h2 id="tables-title">Tables</h2>
+<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px">
+<h2 id="tables-title" style="margin:0">Tables</h2>
+<button class="btn-warn" id="btn-create-table">+ Create Table</button>
+</div>
 <table class="browse-table" id="tbl-tables">
 <thead><tr><th>Name</th><th>Engine</th><th class="r">Columns</th><th class="r">Shards</th><th class="r">Rows</th><th class="r">Size</th><th>Actions</th></tr></thead>
 <tbody></tbody>
 </table>
-<div id="db-errors-section" style="display:none;margin-top:24px" data-admin-only>
-<h3 style="font-size:.9rem;color:#aaa;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Recent Errors</h3>
+</div>
+</div><!-- end tabpanel-db-tables -->
+
+<div class="tab-panel" id="tabpanel-db-errors" data-admin-only>
+<div class="browse-wrap">
+<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+<span id="db-errors-status" style="color:#888;font-size:.8rem"></span>
+<button class="btn-warn" id="btn-reload-db-errors" onclick="loadDbErrors()">Reload</button>
+</div>
 <table class="browse-table" id="tbl-db-errors">
 <thead><tr><th>Time</th><th>User</th><th>Query</th><th>Error</th></tr></thead>
-<tbody id="db-errors-tbody"><tr><td colspan="4" style="color:#888;text-align:center;padding:20px">No errors.</td></tr></tbody>
+<tbody id="db-errors-tbody"></tbody>
 </table>
+<div style="display:flex;gap:8px;align-items:center;padding:10px 0" id="db-errors-pagination"></div>
+</div>
+</div><!-- end tabpanel-db-errors -->
+
+<div class="tab-panel" id="tabpanel-db-console">
+<div class="console-wrap">
+<div class="console-left">
+<div class="console-controls">
+<select class="inline-select" id="db-console-syntax"><option value="sql">SQL</option><option value="psql">PostgreSQL</option><option value="sparql">SPARQL</option></select>
+<span id="db-console-dbname" style="background:#16213e;border:1px solid #2a2a4a;color:#76b512;padding:3px 10px;border-radius:3px;font-size:.85rem"></span>
+</div>
+<textarea class="console-ta" id="db-console-textarea" spellcheck="false">SELECT * FROM user LIMIT 25</textarea>
+<button class="console-send" id="db-console-send">Send (Ctrl+Enter)</button>
+<div id="db-console-error"></div>
+<div class="console-result" id="db-console-result"></div>
+</div>
+<div class="console-right">
+<h3 style="font-size:.85rem;color:#aaa;text-transform:uppercase;letter-spacing:.5px;font-weight:400;margin-bottom:4px">History (this database)</h3>
+<div class="history-list" id="db-console-history"></div>
 </div>
 </div>
-</div>
+</div><!-- end tabpanel-db-console -->
+</div><!-- end view-tables -->
 
 <div class="view" id="view-detail">
+<div class="tab-bar">
+<button class="tab-btn active" id="tabbtn-tbl-data" onclick="_switchTblTab('data')">Data</button>
+<button class="tab-btn" id="tabbtn-tbl-structure" onclick="_switchTblTab('structure')">Structure</button>
+<button class="tab-btn" id="tabbtn-tbl-triggers" onclick="_switchTblTab('triggers')">Triggers</button>
+<button class="tab-btn" id="tabbtn-tbl-console" onclick="_switchTblTab('console')">Console</button>
+</div>
+<div class="tab-panel active" id="tabpanel-tbl-data">
 <div class="browse-wrap">
-<h2 id="detail-title">Table Detail</h2>
-<div class="meta-cards" id="detail-meta"></div>
-<div class="detail-section">
-<h3>Columns</h3>
-<table class="browse-table" id="tbl-columns">
-<thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Key</th><th>Actions</th></tr></thead>
-<tbody></tbody>
-</table>
+<div style="margin-bottom:10px;display:flex;align-items:center;gap:12px">
+<div class="meta-cards" id="detail-meta" style="margin-bottom:0;flex-wrap:nowrap"></div>
 </div>
-<div class="detail-section">
-<h3>Shards</h3>
-<table class="browse-table" id="tbl-shards">
-<thead id="tbl-shards-head"><tr><th class="r">#</th><th>State</th><th class="r">Main</th><th class="r">Delta</th><th class="r">Deletions</th><th class="r">Size</th></tr></thead>
-<tbody></tbody>
-</table>
-</div>
-<div class="detail-section" id="trigger-section">
-<h3>Triggers</h3>
-<table class="browse-table" id="tbl-triggers">
-<thead><tr><th>Name</th><th>Timing</th><th>Event</th><th>Body</th><th>Actions</th></tr></thead>
-<tbody></tbody>
-</table>
-</div>
-<div class="detail-section" id="data-section">
-<h3>Data</h3>
 <div style="margin-bottom:10px;display:flex;align-items:center;gap:12px">
 <label style="color:#888;font-size:.8rem">Rows per page:
 <select class="inline-select" id="data-limit">
@@ -318,6 +417,36 @@ header a:hover{opacity:1;text-decoration:underline}
 </table>
 </div>
 </div>
+</div><!-- end tabpanel-tbl-data -->
+<div class="tab-panel" id="tabpanel-tbl-structure">
+<div class="browse-wrap">
+<div class="detail-section">
+<h3>Columns</h3>
+<table class="browse-table" id="tbl-columns">
+<thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Key</th><th>Actions</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+<div class="detail-section">
+<h3>Shards</h3>
+<table class="browse-table" id="tbl-shards">
+<thead id="tbl-shards-head"><tr><th class="r">#</th><th>State</th><th class="r">Main</th><th class="r">Delta</th><th class="r">Deletions</th><th class="r">Size</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+</div><!-- end tabpanel-tbl-structure -->
+<div class="tab-panel" id="tabpanel-tbl-triggers">
+<div class="browse-wrap">
+<div class="detail-section">
+<h3>Triggers</h3>
+<table class="browse-table" id="tbl-triggers">
+<thead><tr><th>Name</th><th>Timing</th><th>Event</th><th>Body</th><th>Actions</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+</div><!-- end tabpanel-tbl-triggers -->
 </div>
 </div>
 
@@ -342,56 +471,14 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 </div>
 
-<div class="view" id="view-console">
-<div class="console-wrap">
-<div class="console-left">
-<div class="console-controls">
-<select class="inline-select" id="console-syntax">
-<option value="sql">SQL</option>
-<option value="psql">PostgreSQL</option>
-<option value="sparql">SPARQL</option>
-<option value="scheme">Scheme</option>
-</select>
-<select class="inline-select" id="console-db"></select>
-</div>
-<textarea id="console-textarea" spellcheck="false">SELECT * FROM user LIMIT 25</textarea>
-<button class="console-send" id="console-send">Send (Ctrl+Enter)</button>
-<div id="console-error"></div>
-<div class="console-result" id="console-result"></div>
-</div>
-<div class="console-right">
-<h3 style="font-size:.85rem;color:#aaa;text-transform:uppercase;letter-spacing:.5px;font-weight:400;margin-bottom:4px">Query History</h3>
-<div class="history-list" id="console-history"></div>
-</div>
-</div>
-</div>
+</div><!-- end sidebar-main -->
+</div><!-- end sidebar-wrap -->
 
-<div class="view" id="view-errors">
-<div class="browse-wrap">
-<h2>Error Log</h2>
-<div style="margin-bottom:8px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;background:#1e1e3a;border-radius:6px;padding:8px 12px;font-size:.8rem">
-<label style="display:flex;align-items:center;gap:6px;color:#aaa">
-<span>Enable logging</span>
-<label class="toggle" style="margin:0"><input type="checkbox" id="el-setting-enable"><span class="slider"></span></label>
-</label>
-<label style="display:flex;align-items:center;gap:6px;color:#aaa">
-<span>Max rows</span>
-<input type="number" id="el-setting-max" min="0" style="width:80px;background:#2a2a4a;border:1px solid #444;border-radius:3px;color:#e0e0e0;padding:2px 4px;font-size:.8rem">
-<span style="color:#666;font-size:.75rem">(0=unlimited)</span>
-</label>
-<span id="el-setting-status" style="color:#76b512;font-size:.75rem"></span>
-</div>
-<div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-<select class="inline-select" id="errors-db-filter" style="min-width:160px"><option value="">All Databases</option></select>
-<button class="btn-warn" id="btn-reload-errors" onclick="loadErrors()">Reload</button>
-<button class="btn-danger" id="btn-clear-errors">Clear All</button>
-<span id="errors-status" style="color:#888;font-size:.8rem;margin-left:8px"></span>
-</div>
-<table class="browse-table" id="tbl-errors">
-<thead><tr><th>Time</th><th>Database</th><th>User</th><th>Query</th><th>Error</th></tr></thead>
-<tbody id="errors-tbody"></tbody>
-</table>
-<div style="display:flex;gap:8px;align-items:center;padding:10px 0" id="errors-pagination"></div>
+<!-- Error detail modal -->
+<div id="error-detail-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;align-items:center;justify-content:center">
+<div style="background:#16213e;border:1px solid #2a2a4a;border-radius:8px;padding:24px 28px;min-width:360px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;position:relative">
+<button onclick="document.getElementById('error-detail-modal').style.display='none'" style="position:absolute;top:8px;right:12px;background:none;border:none;color:#888;font-size:1.4rem;cursor:pointer;line-height:1">&times;</button>
+<div id="error-detail-content"></div>
 </div>
 </div>
 
@@ -536,25 +623,17 @@ tbody.innerHTML=html;
 var pag=document.getElementById("errors-pagination");
 var ph="";
 if(pages>1){
-ph+='<button class="btn-warn" onclick="_errorsPage=0;renderErrorsTable()" '+((_errorsPage===0)?"disabled":"")+'>«</button>';
-ph+='<button class="btn-warn" onclick="_errorsPage--;renderErrorsTable()" '+((_errorsPage===0)?"disabled":"")+'>‹</button>';
+ph+='<button class="btn-warn" onclick="_gotoErrorsPage(0)" '+((_errorsPage===0)?"disabled":"")+'>«</button>';
+ph+='<button class="btn-warn" onclick="_gotoErrorsPage('+(_errorsPage-1)+')" '+((_errorsPage===0)?"disabled":"")+'>‹</button>';
 ph+='<span style="color:#888;font-size:.8rem;padding:0 8px">'+(_errorsPage+1)+' / '+pages+'</span>';
-ph+='<button class="btn-warn" onclick="_errorsPage++;renderErrorsTable()" '+((_errorsPage>=pages-1)?"disabled":"")+'>›</button>';
-ph+='<button class="btn-warn" onclick="_errorsPage='+( pages-1)+';renderErrorsTable()" '+((_errorsPage>=pages-1)?"disabled":"")+'>»</button>';
+ph+='<button class="btn-warn" onclick="_gotoErrorsPage('+(_errorsPage+1)+')" '+((_errorsPage>=pages-1)?"disabled":"")+'>›</button>';
+ph+='<button class="btn-warn" onclick="_gotoErrorsPage('+(pages-1)+')" '+((_errorsPage>=pages-1)?"disabled":"")+'>»</button>';
 }
 pag.innerHTML=ph;
 }
 
 function showErrorDetail(idx){
-var r=_errorsAll[idx];if(!r)return;
-var lbl='<div style="color:#888;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;margin:12px 0 4px">';
-var h=lbl+'Time</div><div style="font-size:.85rem">'+esc(fmtDateTime(r.datetime))+'</div>';
-h+=lbl+'Database</div><div style="font-size:.85rem">'+esc(r.database||"–")+'</div>';
-h+=lbl+'User</div><div style="font-size:.85rem">'+esc(r.user||"–")+'</div>';
-if(r.query)h+=lbl+'Query</div><pre style="background:#0d1b2e;padding:10px;border-radius:4px;font-size:.8rem;white-space:pre-wrap;word-break:break-all;color:#ccc;margin:0;max-height:300px;overflow-y:auto">'+esc(r.query)+'</pre>';
-h+=lbl+'Error</div><pre style="background:#1a0000;padding:10px;border-radius:4px;font-size:.8rem;white-space:pre-wrap;word-break:break-all;color:#e74c3c;margin:0">'+esc(r.error||"")+'</pre>';
-document.getElementById("error-detail-body").innerHTML=h;
-document.getElementById("error-detail-modal").style.display="flex";
+showErrorDetailForRow(_errorsAll[idx]);
 }
 
 function loadErrors(dbFilter){
@@ -587,17 +666,22 @@ fetch(base+"/dashboard/api/errors/clear",{method:"POST",credentials:"same-origin
 .then(function(){loadErrors()})
 .catch(function(e){alert("Error: "+e)});
 });
-/* Error Log inline settings — auto-save (checkbox: immediate, number: debounced) */
+/* Error Log inline settings — auto-save */
+var elEnable=document.getElementById("el-setting-enable");
+var elMax=document.getElementById("el-setting-max");
 var elStatus=document.getElementById("el-setting-status");
-function elSaved(){if(elStatus){elStatus.textContent="Saved";setTimeout(function(){elStatus.textContent=""},2000);}}
-var elEnableCb=document.getElementById("el-setting-enable");
-if(elEnableCb)elEnableCb.addEventListener("change",function(){
-apiPost(base+"/dashboard/api/settings",{key:"ErrorQueryLog",value:this.checked},elSaved);
+if(elEnable){elEnable.addEventListener("change",function(){
+apiPost(base+"/dashboard/api/settings",{key:"ErrorQueryLog",value:elEnable.checked},function(){
+if(elStatus){elStatus.textContent="Saved";setTimeout(function(){elStatus.textContent=""},2000);}
 });
-var elMaxInp=document.getElementById("el-setting-max");
-if(elMaxInp){var elMaxTimer=null;elMaxInp.addEventListener("input",function(){
+});}
+if(elMax){var elMaxTimer=null;elMax.addEventListener("input",function(){
 if(elMaxTimer)clearTimeout(elMaxTimer);
-elMaxTimer=setTimeout(function(){apiPost(base+"/dashboard/api/settings",{key:"MaxErrorQueryLog",value:parseInt(elMaxInp.value)||0},elSaved);},500);
+elMaxTimer=setTimeout(function(){
+apiPost(base+"/dashboard/api/settings",{key:"MaxErrorQueryLog",value:parseInt(elMax.value)||0},function(){
+if(elStatus){elStatus.textContent="Saved";setTimeout(function(){elStatus.textContent=""},2000);}
+});
+},500);
 });}
 });
 
@@ -609,7 +693,7 @@ var adminEls=document.querySelectorAll("[data-admin-only]");
 for(var i=0;i<adminEls.length;i++)adminEls[i].style.display=isAdmin?"":"none";
 /* hide Scheme option for non-admins */
 var schemeOpt=document.querySelector("#console-syntax option[value='scheme']");
-if(schemeOpt)schemeOpt.disabled=!isAdmin;
+if(schemeOpt)schemeOpt.style.display=isAdmin?"":"none";
 if(!isAdmin&&document.getElementById("console-syntax").value==="scheme")document.getElementById("console-syntax").value="sql";
 }
 /* Logo and title click → navigate to main page (gauges for admin, databases otherwise) */
@@ -670,13 +754,267 @@ ws.onerror=function(){ws.close()};
 }
 
 /* SPA hash routing */
-var views=document.querySelectorAll(".view");
-var backLink=document.getElementById("link-back");
+var views=document.querySelectorAll("#view-gauges,#view-users,#view-settings,#view-databases,#view-tables,#view-detail,#view-shard");
+var _sidebarViewIds=["view-databases","view-tables","view-detail","view-shard"];
 
 function showView(id){
 for(var i=0;i<views.length;i++)views[i].classList.remove("active");
+var sw=document.getElementById("sidebar-wrap");
+sw.style.display=_sidebarViewIds.indexOf(id)>=0?"flex":"none";
 var el=document.getElementById(id);
 if(el)el.classList.add("active");
+}
+
+function setBreadcrumb(parts){
+var bc=document.getElementById("breadcrumb");
+if(!bc)return;
+if(!parts||!parts.length){bc.style.display="none";return;}
+var h=parts.map(function(p){
+return p.href
+?'<a href="'+p.href+'" style="color:#76b512;text-decoration:none">'+esc(p.label)+'</a>'
+:'<span style="color:#aaa">'+esc(p.label)+'</span>';
+}).join('<span style="color:#444;padding:0 6px">›</span>');
+bc.innerHTML=h;
+bc.style.display="block";
+}
+
+/* Sidebar state */
+var _sidebarOpen=false;
+var _sidebarExpandedDbs={};
+var _sidebarDbCache=null;
+var _sidebarTableCache={};
+var _sidebarActiveDb=null;
+var _sidebarActiveTbl=null;
+
+function loadSidebar(cb){
+apiFetch(base+"/dashboard/api/databases",function(data){
+_sidebarDbCache=(data||[]).filter(function(d){return isAdmin||(d.name!=="system"&&d.name!=="system_statistic")}).sort(function(a,b){return a.name<b.name?-1:a.name>b.name?1:0});
+renderSidebar();
+if(cb)cb();
+});
+}
+
+function renderSidebar(){
+var h="";
+h+='<div class="sb-root'+ (_sidebarActiveDb===null?" sactive":"") +'" onclick="_sbToggleRoot(event)">';
+h+='<span class="sb-toggle" id="sb-root-toggle">'+(_sidebarOpen?"▼":"▶")+'</span>';
+h+='<span onclick="event.stopPropagation();location.hash=\'databases\'">All Databases</span>';
+h+='</div>';
+if(_sidebarOpen&&_sidebarDbCache){
+for(var i=0;i<_sidebarDbCache.length;i++){
+var d=_sidebarDbCache[i];
+var isActive=_sidebarActiveDb===d.name;
+var isExp=!!_sidebarExpandedDbs[d.name];
+var icon=(d.backend&&d.backend!=="filesystem")?" ☁":"";
+h+='<div class="sb-db'+(isActive?" sactive":"")+'" data-sbdb="'+esc(d.name)+'">';
+h+='<span class="sb-toggle" onclick="event.stopPropagation();_sbToggleDb(\''+esc(d.name)+'\')">'+(isExp?"▼":"▶")+'</span>';
+h+='<span onclick="location.hash=\'db/'+encodeURIComponent(d.name)+'\'">'+esc(d.name)+esc(icon)+'</span>';
+h+='</div>';
+if(isExp){
+var tbls=_sidebarTableCache[d.name];
+if(tbls){
+for(var j=0;j<tbls.length;j++){
+var t=tbls[j];
+if(t.charAt(0)===".") continue;
+var tActive=isActive&&_sidebarActiveTbl===t;
+h+='<div class="sb-tbl'+(tActive?" sactive":"")+'\" onclick="location.hash=\'db/'+encodeURIComponent(d.name)+"/"+encodeURIComponent(t)+'\'">'+esc(t)+'</div>';
+}
+}else{
+(function(dbName){
+apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(dbName),function(data){
+_sidebarTableCache[dbName]=(data||[]).map(function(t){return t.name}).filter(function(n){return n.charAt(0)!=="."}).sort();
+renderSidebar();
+});
+})(d.name);
+h+='<div class="sb-tbl" style="color:#555;font-style:italic">Loading…</div>';
+}
+}
+}
+}
+document.getElementById("sidebar-tree").innerHTML=h;
+}
+
+function _sbToggleRoot(e){
+if(e.target.tagName==="SPAN"&&e.target.textContent==="All Databases"){location.hash="databases";return;}
+_sidebarOpen=!_sidebarOpen;
+if(_sidebarOpen&&!_sidebarDbCache)loadSidebar();
+else renderSidebar();
+}
+
+function _sbToggleDb(dbName){
+if(_sidebarExpandedDbs[dbName])delete _sidebarExpandedDbs[dbName];
+else _sidebarExpandedDbs[dbName]=true;
+renderSidebar();
+}
+
+/* Tab switching */
+var _dbsTab="databases";
+function _switchDbsTab(tab){
+/* if coming from console, remember the selected DB to pass to Databases/Errors filter */
+var fromConsoleDb=(_dbsTab==="console"&&consoleSyntax&&consoleSyntax.value!=="scheme"&&consoleDb)?consoleDb.value:"";
+_dbsTab=tab;
+var tabs=["databases","errors","console"];
+for(var i=0;i<tabs.length;i++){
+var p=document.getElementById("tabpanel-dbs-"+tabs[i]);
+var b=document.getElementById("tabbtn-dbs-"+tabs[i]);
+if(p)p.classList.toggle("active",tabs[i]===tab);
+if(b)b.classList.toggle("active",tabs[i]===tab);
+}
+if(tab==="databases"){
+location.hash="databases";
+apiFetch(base+"/dashboard/api/databases",renderDatabases);
+}else if(tab==="errors"){
+location.hash="errors";
+loadErrors(fromConsoleDb||undefined);
+apiFetch(base+"/dashboard/api/settings",function(data){
+var cb=document.getElementById("el-setting-enable");
+var inp=document.getElementById("el-setting-max");
+if(cb)cb.checked=data.ErrorQueryLog||false;
+if(inp)inp.value=data.MaxErrorQueryLog||0;
+});
+}else if(tab==="console"){
+location.hash="console";
+/* default to Scheme when arriving fresh */
+if(!pendingConsoleState){
+consoleSyntax.value="scheme";
+consoleDb.style.display="none";
+consoleTa.value=defaultQueries.scheme;
+}
+loadConsoleDatabases(function(){consoleTa.focus();});
+renderHistory();
+}
+}
+function _switchDbsTabQuiet(tab){
+_dbsTab=tab;
+var tabs=["databases","errors","console"];
+for(var i=0;i<tabs.length;i++){
+var p=document.getElementById("tabpanel-dbs-"+tabs[i]);
+var b=document.getElementById("tabbtn-dbs-"+tabs[i]);
+if(p)p.classList.toggle("active",tabs[i]===tab);
+if(b)b.classList.toggle("active",tabs[i]===tab);
+}
+}
+
+var _dbTab="tables";
+var _dbTabDb=null;
+function _switchDbTab(tab){
+_dbTab=tab;
+var tabs=["tables","errors","console"];
+for(var i=0;i<tabs.length;i++){
+var p=document.getElementById("tabpanel-db-"+tabs[i]);
+var b=document.getElementById("tabbtn-db-"+tabs[i]);
+if(p)p.classList.toggle("active",tabs[i]===tab);
+if(b)b.classList.toggle("active",tabs[i]===tab);
+}
+if(_dbTabDb){
+if(tab==="tables") location.hash="db/"+encodeURIComponent(_dbTabDb);
+else location.hash="db/"+encodeURIComponent(_dbTabDb)+"/"+tab;
+}
+if(tab==="errors") loadDbErrors();
+if(tab==="console"){
+var lbl=document.getElementById("db-console-dbname");
+if(lbl)lbl.textContent=_dbTabDb||"";
+var dbt=document.getElementById("db-console-textarea");
+if(dbt)dbt.focus();
+renderDbHistory();
+}
+}
+var _tblTab="data";
+var _tblTabDb=null;
+var _tblTabName=null;
+var _pendingDbConsoleQuery=null;
+function _switchTblTab(tab){
+if(tab==="console"){
+/* Navigate to the db-level console with a pre-filled SELECT */
+if(_tblTabDb){
+_pendingDbConsoleQuery="SELECT * FROM `"+(_tblTabName||"").replace(/`/g,"``")+"` LIMIT 100";
+location.hash="db/"+encodeURIComponent(_tblTabDb)+"/console";
+}
+return;
+}
+_tblTab=tab;
+var tabs=["data","structure","triggers"];
+for(var i=0;i<tabs.length;i++){
+var p=document.getElementById("tabpanel-tbl-"+tabs[i]);
+var b=document.getElementById("tabbtn-tbl-"+tabs[i]);
+if(p)p.classList.toggle("active",tabs[i]===tab);
+if(b)b.classList.toggle("active",tabs[i]===tab);
+}
+}
+
+function _switchDbTabQuiet(tab){
+_dbTab=tab;
+var tabs=["tables","errors","console"];
+for(var i=0;i<tabs.length;i++){
+var p=document.getElementById("tabpanel-db-"+tabs[i]);
+var b=document.getElementById("tabbtn-db-"+tabs[i]);
+if(p)p.classList.toggle("active",tabs[i]===tab);
+if(b)b.classList.toggle("active",tabs[i]===tab);
+}
+}
+
+/* DB errors for view-tables Errors tab */
+var _dbErrorsAll=[];
+var _dbErrorsPage=0;
+var _dbErrorsPageSize=20;
+function loadDbErrors(){
+if(!_dbTabDb)return;
+apiFetch(base+"/dashboard/api/errors",function(rows){
+_dbErrorsAll=(rows||[]).filter(function(r){return r.database===_dbTabDb});
+_dbErrorsAll.sort(function(a,b){return a.datetime<b.datetime?1:-1});
+_dbErrorsPage=0;
+renderDbErrorsTable();
+});
+}
+function renderDbErrorsTable(){
+var rows=_dbErrorsAll;
+var total=rows.length;
+var pages=Math.max(1,Math.ceil(total/_dbErrorsPageSize));
+if(_dbErrorsPage>=pages)_dbErrorsPage=pages-1;
+var start=_dbErrorsPage*_dbErrorsPageSize;
+var slice=rows.slice(start,start+_dbErrorsPageSize);
+var status=document.getElementById("db-errors-status");
+if(status)status.textContent=total+" error"+(total===1?"":"s")+(total>_dbErrorsPageSize?" (page "+(_dbErrorsPage+1)+"/"+pages+")":"");
+var tbody=document.getElementById("db-errors-tbody");
+if(!tbody)return;
+if(!slice.length){tbody.innerHTML='<tr><td colspan="4" style="color:#888;text-align:center;padding:20px">No errors for this database.</td></tr>';
+document.getElementById("db-errors-pagination").innerHTML="";return;}
+var html="";
+for(var i=0;i<slice.length;i++){
+var r=slice[i];
+var idx=i+_dbErrorsPage*_dbErrorsPageSize;
+var qS=r.query?r.query.substring(0,80)+(r.query.length>80?"…":""):"";
+var eS=r.error?r.error.substring(0,120)+(r.error.length>120?"…":""):"";
+html+='<tr><td style="white-space:nowrap;font-size:.75rem;color:#888">'+esc(fmtDateTime(r.datetime))+'</td>';
+html+='<td style="font-size:.8rem">'+esc(r.user||"")+'</td>';
+html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#ccc;max-width:320px">'+esc(qS)+'</pre></td>';
+html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#e74c3c;max-width:320px">'+esc(eS)+'</pre>';
+if((r.query&&r.query.length>80)||(r.error&&r.error.length>120)){html+='<button class="btn-warn" style="margin-top:4px;font-size:.7rem" onclick="showErrorDetailForRow(_dbErrorsAll['+ idx +'])">Detail</button>';}
+html+='</td></tr>';}
+tbody.innerHTML=html;
+var pag=document.getElementById("db-errors-pagination");
+var ph="";
+if(pages>1){
+ph+='<button class="btn-warn" onclick="_gotoDbErrorsPage(0)" '+(_dbErrorsPage===0?"disabled":"")+'>«</button>';
+ph+='<button class="btn-warn" onclick="_gotoDbErrorsPage('+(_dbErrorsPage-1)+')" '+(_dbErrorsPage===0?"disabled":"")+'>‹</button>';
+ph+='<span style="color:#888;font-size:.8rem;padding:0 8px">'+(_dbErrorsPage+1)+' / '+pages+'</span>';
+ph+='<button class="btn-warn" onclick="_gotoDbErrorsPage('+(_dbErrorsPage+1)+')" '+(_dbErrorsPage>=pages-1?"disabled":"")+'>›</button>';
+ph+='<button class="btn-warn" onclick="_gotoDbErrorsPage('+(pages-1)+')" '+(_dbErrorsPage>=pages-1?"disabled":"")+'>»</button>';
+}
+pag.innerHTML=ph;
+}
+
+/* Error detail modal (inline, replaces window.open) */
+function showErrorDetailForRow(r){
+if(!r)return;
+var html='<div style="font-size:1rem;font-weight:700;color:#ccc;margin-bottom:16px">Error Detail</div>';
+html+='<div style="color:#888;font-size:.7rem;text-transform:uppercase;margin:10px 0 4px">Time</div><div>'+esc(fmtDateTime(r.datetime))+'</div>';
+html+='<div style="color:#888;font-size:.7rem;text-transform:uppercase;margin:10px 0 4px">Database</div><div>'+esc(r.database||"")+'</div>';
+html+='<div style="color:#888;font-size:.7rem;text-transform:uppercase;margin:10px 0 4px">User</div><div>'+esc(r.user||"")+'</div>';
+if(r.query)html+='<div style="color:#888;font-size:.7rem;text-transform:uppercase;margin:10px 0 4px">Query</div><pre style="color:#ccc;background:#1a1a2e;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;font-size:.85rem">'+esc(r.query)+'</pre>';
+html+='<div style="color:#e74c3c;font-size:.7rem;text-transform:uppercase;margin:10px 0 4px">Error</div><pre style="color:#e74c3c;background:#1a1a2e;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;font-size:.85rem">'+esc(r.error||"")+'</pre>';
+document.getElementById("error-detail-content").innerHTML=html;
+document.getElementById("error-detail-modal").style.display="flex";
 }
 
 function apiFetch(url,cb){
@@ -749,24 +1087,27 @@ if(hash==="gauges"){
 if(!isAdmin){location.hash="databases";return}
 showView("view-gauges");
 showRootPwWarning("root-pw-warning-gauges");
-backLink.style.display="none";
 _metricsOnGauges();
 return;
 }
 if(hash==="databases"){
 showView("view-databases");
-backLink.href="#gauges";
-backLink.style.display=isAdmin?"inline":"none";
+_sidebarActiveDb=null;_sidebarActiveTbl=null;
+setBreadcrumb([]);
+_switchDbsTabQuiet("databases");
 showRootPwWarning("root-pw-warning-databases");
-apiFetch(base+"/dashboard/api/databases",renderDatabases);
+apiFetch(base+"/dashboard/api/databases",function(data){renderDatabases(data);});
+loadSidebar();
 return;
 }
 if(hash==="console"){
-showView("view-console");
-backLink.href=isAdmin?"#gauges":"#databases";
-backLink.style.display="inline";
-loadConsoleDatabases(function(){
+showView("view-databases");
+_sidebarActiveDb=null;_sidebarActiveTbl=null;
+setBreadcrumb([]);
+_switchDbsTabQuiet("console");
 if(pendingConsoleState){
+/* called via openConsole(db, query) — switch to SQL for that DB */
+loadConsoleDatabases(function(){
 consoleSyntax.value="sql";
 consoleDb.style.display="";
 consoleDb.value=pendingConsoleState.db;
@@ -774,32 +1115,39 @@ consoleTa.value=pendingConsoleState.query;
 consoleError.innerHTML="";
 consoleResult.innerHTML="";
 pendingConsoleState=null;
-}
 consoleTa.focus();
 });
+}else{
+/* direct navigation to console: default to Scheme mode, no DB */
+consoleSyntax.value="scheme";
+consoleDb.style.display="none";
+consoleTa.value=defaultQueries.scheme;
+consoleError.innerHTML="";
+consoleTa.focus();
+}
 renderHistory();
+loadSidebar();
 return;
 }
 if(hash==="errors"){
 if(!isAdmin){location.hash="databases";return}
-showView("view-errors");
-backLink.href="#gauges";
-backLink.style.display="inline";
+showView("view-databases");
+_sidebarActiveDb=null;_sidebarActiveTbl=null;
+setBreadcrumb([]);
+_switchDbsTabQuiet("errors");
 loadErrors();
-/* populate inline settings */
 apiFetch(base+"/dashboard/api/settings",function(data){
 var cb=document.getElementById("el-setting-enable");
 var inp=document.getElementById("el-setting-max");
 if(cb)cb.checked=data.ErrorQueryLog||false;
 if(inp)inp.value=data.MaxErrorQueryLog||0;
 });
+loadSidebar();
 return;
 }
 if(hash==="settings"){
 if(!isAdmin){location.hash="databases";return}
 showView("view-settings");
-backLink.href="#gauges";
-backLink.style.display="inline";
 document.getElementById("root-pw-warning").style.display=defaultPassword?"":"none";
 apiFetch(base+"/dashboard/api/settings",renderSettings);
 apiFetch(base+"/dashboard/api/services",renderServices);
@@ -808,8 +1156,6 @@ return;
 if(hash==="users"){
 if(!isAdmin){location.hash="databases";return}
 showView("view-users");
-backLink.href="#settings";
-backLink.style.display="inline";
 showRootPwWarning("root-pw-warning-users");
 apiFetch(base+"/dashboard/api/users",renderUsers);
 return;
@@ -819,10 +1165,38 @@ m=hash.match(/^db\/([^/]+)\/([^/]+)\/shard\/(\d+)$/);
 if(m){
 var db_=decodeURIComponent(m[1]),tbl_=decodeURIComponent(m[2]),si=m[3];
 showView("view-shard");
-backLink.href="#db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_);
-backLink.style.display="inline";
+_sidebarActiveDb=db_;_sidebarActiveTbl=tbl_;
+_sidebarOpen=true;_sidebarExpandedDbs[db_]=true;
+loadSidebar();
+setBreadcrumb([{label:"All Databases",href:"#databases"},{label:db_,href:"#db/"+encodeURIComponent(db_)},{label:tbl_,href:"#db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_)},{label:"Shard "+si}]);
 document.getElementById("shard-title").textContent=db_+"."+tbl_+" - Shard #"+si;
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db_)+"/"+encodeURIComponent(tbl_)+"/shard/"+si,function(data){renderShardDetail(data,db_,tbl_,si)});
+return;
+}
+/* db/NAME/errors or db/NAME/console */
+m=hash.match(/^db\/([^/]+)\/(errors|console)$/);
+if(m){
+var dbX=decodeURIComponent(m[1]),tabX=m[2];
+showView("view-tables");
+_sidebarActiveDb=dbX;_sidebarActiveTbl=null;
+_sidebarOpen=true;_sidebarExpandedDbs[dbX]=true;
+loadSidebar();
+_dbTabDb=dbX;
+setBreadcrumb([{label:"All Databases",href:"#databases"},{label:dbX}]);
+document.getElementById("tables-title").textContent="Tables in "+dbX;
+_switchDbTabQuiet(tabX);
+if(tabX==="errors") loadDbErrors();
+if(tabX==="console"){
+var lbl=document.getElementById("db-console-dbname");
+if(lbl)lbl.textContent=dbX;
+var dbt2=document.getElementById("db-console-textarea");
+if(_pendingDbConsoleQuery){
+if(dbt2)dbt2.value=_pendingDbConsoleQuery;
+_pendingDbConsoleQuery=null;
+}
+if(dbt2)setTimeout(function(){dbt2.focus()},50);
+renderDbHistory();
+}
 return;
 }
 /* table detail: db/NAME/TABLE */
@@ -830,29 +1204,29 @@ m=hash.match(/^db\/([^/]+)\/([^/]+)$/);
 if(m){
 var db2=decodeURIComponent(m[1]),tbl2=decodeURIComponent(m[2]);
 showView("view-detail");
-backLink.href="#db/"+encodeURIComponent(db2);
-backLink.style.display="inline";
-document.getElementById("detail-title").textContent=db2+"."+tbl2;
+_sidebarActiveDb=db2;_sidebarActiveTbl=tbl2;
+_sidebarOpen=true;_sidebarExpandedDbs[db2]=true;
+loadSidebar();
+setBreadcrumb([{label:"All Databases",href:"#databases"},{label:db2,href:"#db/"+encodeURIComponent(db2)},{label:tbl2}]);
+var sameTable=(_tblTabDb===db2&&_tblTabName===tbl2);
+_tblTabDb=db2;_tblTabName=tbl2;
+_switchTblTab(sameTable?_tblTab:"data");
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db2)+"/"+encodeURIComponent(tbl2),function(data){renderDetail(data,db2,tbl2)});
 return;
 }
 /* tables in db: db/NAME */
 m=hash.match(/^db\/([^/]+)$/);
 if(m){
-showView("view-tables");
-backLink.href="#databases";
-backLink.style.display="inline";
 var dbName=decodeURIComponent(m[1]);
+showView("view-tables");
+_sidebarActiveDb=dbName;_sidebarActiveTbl=null;
+_sidebarOpen=true;_sidebarExpandedDbs[dbName]=true;
+loadSidebar();
+_dbTabDb=dbName;
+setBreadcrumb([{label:"All Databases",href:"#databases"},{label:dbName}]);
 document.getElementById("tables-title").textContent="Tables in "+dbName;
-/* hide errors section until data arrives */
-var dbErrSec=document.getElementById("db-errors-section");
-if(dbErrSec)dbErrSec.style.display="none";
+_switchDbTabQuiet("tables");
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(m[1]),function(data){renderTables(data,dbName)});
-if(isAdmin)apiFetch(base+"/dashboard/api/errors",function(rows){
-rows=(rows||[]).filter(function(r){return r.database===dbName});
-rows.sort(function(a,b){return a.datetime<b.datetime?1:-1});
-renderDbErrors(rows);
-});
 return;
 }
 location.hash=isAdmin?"gauges":"databases";
@@ -860,15 +1234,36 @@ location.hash=isAdmin?"gauges":"databases";
 
 function renderDatabases(data){
 lastDbList=data;
-data.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
+data.sort(function(a,b){return a.name<b.name?-1:a.name>b.name?1:0});
+/* fetch users for Access column — admin only */
+function _doRender(users){
+if(!Array.isArray(users))users=[];
+var nonAdmins=users.filter(function(u){return !u.admin});
+var thAccess=document.getElementById("th-db-access");
+if(thAccess)thAccess.style.display=isAdmin?"":"none";
 var tb=document.querySelector("#tbl-databases tbody");
 var h="";
-for(var i=0;i<data.length;i++){
-var d=data[i];
+var rows=isAdmin?data:data.filter(function(d){return d.name!=="system"&&d.name!=="system_statistic"});
+for(var i=0;i<rows.length;i++){
+var d=rows[i];
 var dn=esc(encodeURIComponent(d.name));
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td>"+esc(d.backend||"filesystem")+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querydb='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button></td></tr>";
+/* users who have access to this db */
+var withAccess=nonAdmins.filter(function(u){return (u.databases||[]).indexOf(d.name)>=0});
+var without=nonAdmins.filter(function(u){return (u.databases||[]).indexOf(d.name)<0});
+var accessHtml="";
+for(var j=0;j<withAccess.length;j++){
+accessHtml+="<span class='badge badge-uni' style='margin:2px'>"+esc(withAccess[j].username)
++" <a href='#' class='db-revoke-user' data-db='"+esc(d.name)+"' data-user='"+esc(withAccess[j].username)+"' style='color:#fff;text-decoration:none;margin-left:4px'>&times;</a></span>";
 }
-tb.innerHTML=h||"<tr><td colspan='5' style='color:#888;text-align:center'>No databases</td></tr>";
+if(without.length>0){
+accessHtml+=" <select class='inline-select db-grant-user' data-db='"+esc(d.name)+"'><option value=''>+ grant...</option>";
+for(var k=0;k<without.length;k++)accessHtml+="<option value='"+esc(without[k].username)+"'>"+esc(without[k].username)+"</option>";
+accessHtml+="</select>";
+}
+var accessCell=isAdmin?"<td>"+accessHtml+"</td>":"";
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td>"+esc(d.backend||"filesystem")+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td>"+accessCell+"<td class='action-cell'><button class='btn-warn' data-querydb='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button></td></tr>";
+}
+tb.innerHTML=h||"<tr><td colspan='"+(isAdmin?6:5)+"' style='color:#888;text-align:center'>No databases</td></tr>";
 tb.querySelectorAll("[data-truncdb]").forEach(function(btn){
 btn.onclick=function(e){e.stopPropagation();var db=btn.getAttribute("data-truncdb");if(window.confirm("Drop all tables in database '"+db+"'? All data will be deleted.")){
 apiFetch(base+"/dashboard/api/db/"+encodeURIComponent(db),function(tables){
@@ -886,10 +1281,36 @@ btn.onclick=function(e){e.stopPropagation();var db=btn.getAttribute("data-dropdb
 tb.querySelectorAll("[data-querydb]").forEach(function(btn){
 btn.onclick=function(e){e.stopPropagation();openConsole(btn.getAttribute("data-querydb"),"SELECT * FROM user LIMIT 25")};
 });
+tb.querySelectorAll(".db-revoke-user").forEach(function(a){
+a.addEventListener("click",function(e){
+e.preventDefault();e.stopPropagation();
+var db=a.getAttribute("data-db"),user=a.getAttribute("data-user");
+execSQL("system","REVOKE ALL ON "+sqlId(db)+".* FROM "+sqlId(user),function(){
+apiFetch(base+"/dashboard/api/databases",renderDatabases);
+});
+});
+});
+tb.querySelectorAll(".db-grant-user").forEach(function(sel){
+sel.addEventListener("change",function(e){
+e.stopPropagation();
+var db=sel.getAttribute("data-db"),user=sel.value;
+if(!user)return;
+execSQL("system","GRANT ALL ON "+sqlId(db)+".* TO "+sqlId(user),function(){
+apiFetch(base+"/dashboard/api/databases",renderDatabases);
+});
+});
+});
+}
+if(isAdmin){
+apiFetch(base+"/dashboard/api/users",_doRender);
+}else{
+_doRender([]);
+}
 }
 
 function renderTables(data,dbname){
-data.sort(function(a,b){return(b.size_bytes||0)-(a.size_bytes||0)});
+data=data.filter(function(d){return d.name.charAt(0)!=="."});
+data.sort(function(a,b){return a.name<b.name?-1:a.name>b.name?1:0});
 var tb=document.querySelector("#tbl-tables tbody");
 var h="";
 for(var i=0;i<data.length;i++){
@@ -907,31 +1328,6 @@ btn.onclick=function(e){e.stopPropagation();var tbl=btn.getAttribute("data-dropt
 tb.querySelectorAll("[data-querytbl]").forEach(function(btn){
 btn.onclick=function(e){e.stopPropagation();openConsole(dbname,"SELECT * FROM `"+btn.getAttribute("data-querytbl")+"` LIMIT 100")};
 });
-}
-
-function renderDbErrors(rows){
-var sec=document.getElementById("db-errors-section");
-var tbody=document.getElementById("db-errors-tbody");
-if(!sec||!tbody)return;
-if(!isAdmin){sec.style.display="none";return;}
-rows=rows||[];
-rows=rows.filter(function(r){return true}); /* already filtered by caller */
-if(!rows.length){sec.style.display="none";return;}
-sec.style.display="";
-var html="";
-for(var i=0;i<Math.min(rows.length,50);i++){
-var r=rows[i];
-var qShort=r.query?r.query.substring(0,100)+(r.query.length>100?"…":""):"";
-var eShort=r.error?r.error.substring(0,150)+(r.error.length>150?"…":""):"";
-html+='<tr>';
-html+='<td style="white-space:nowrap;font-size:.75rem;color:#888">'+esc(fmtDateTime(r.datetime))+'</td>';
-html+='<td style="font-size:.8rem">'+esc(r.user||"")+'</td>';
-html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#ccc;max-width:280px">'+esc(qShort)+'</pre></td>';
-html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#e74c3c;max-width:280px">'+esc(eShort)+'</pre></td>';
-html+='</tr>';
-}
-if(rows.length>50)html+='<tr><td colspan="4" style="color:#888;font-size:.75rem;text-align:center">…and '+(rows.length-50)+' more — see <a href="#errors" style="color:#76b512">Error Log</a></td></tr>';
-tbody.innerHTML=html;
 }
 
 function renderDetail(data,dbname,tblname){
@@ -1180,7 +1576,121 @@ timer=setTimeout(function(){saveSetting(el)},500);
 });
 }
 
-/* Query Console */
+/* ── Shared helpers ──────────────────────────────────────────────── */
+var HISTORY_KEY="memcp_query_history";
+var HISTORY_MAX=1000;
+function getHistory(){try{return JSON.parse(localStorage.getItem(HISTORY_KEY))||[]}catch(e){return[]}}
+function saveHistory(h){localStorage.setItem(HISTORY_KEY,JSON.stringify(h))}
+function addHistory(syn,db,query){
+var h=getHistory();
+if(h.length>0&&h[0].syntax===syn&&h[0].database===db&&h[0].query===query){
+h[0].time=new Date().toISOString();
+}else{
+h.unshift({time:new Date().toISOString(),syntax:syn,database:db,query:query});
+if(h.length>HISTORY_MAX)h=h.slice(0,HISTORY_MAX);
+}
+saveHistory(h);
+}
+
+function renderQueryResult(text,el){
+var lines=text.trim().split("\n").filter(function(l){return l.length>0});
+if(!lines.length){el.innerHTML="<pre>No results</pre>";return}
+var rows=[];
+for(var i=0;i<lines.length;i++){try{rows.push(JSON.parse(lines[i]))}catch(e){}}
+if(!rows.length){el.innerHTML="<pre>"+esc(text)+"</pre>";return}
+var keys=Object.keys(rows[0]);
+var h="<div style='overflow-x:auto'><table class='browse-table'><thead><tr>";
+for(var k=0;k<keys.length;k++)h+="<th>"+esc(keys[k])+"</th>";
+h+="</tr></thead><tbody>";
+for(var r=0;r<rows.length;r++){
+h+="<tr>";
+for(var k2=0;k2<keys.length;k2++){
+var v=rows[r][keys[k2]];var vs=v===null?"NULL":String(v);
+h+="<td>"+(vs.indexOf("\n")>=0?"<pre>"+esc(vs)+"</pre>":esc(vs))+"</td>";
+}
+h+="</tr>";
+}
+h+="</tbody></table></div>";
+el.innerHTML=h;
+}
+
+/*
+ * makeConsole(cfg) — wires up a query console instance.
+ * cfg: { ta, sendBtn, errorDiv, resultDiv,
+ *        getSyntax(),          // returns "sql"|"psql"|"sparql"|"scheme"
+ *        getDb(),              // returns db name (unused for scheme)
+ *        historyEl?,           // optional history list container
+ *        historyFilter?(item), // optional filter for history entries
+ *        onHistoryLoad?(item)  // called when history item is clicked
+ *      }
+ * returns { renderHistory }
+ */
+function makeConsole(cfg){
+function getSyn(){return cfg.getSyntax?cfg.getSyntax():"sql";}
+function exec(){
+var syn=getSyn(),db=cfg.getDb(),query=cfg.ta.value.trim();
+if(!query||(syn!=="scheme"&&!db))return;
+cfg.errorDiv.innerHTML="";cfg.resultDiv.innerHTML="";
+cfg.sendBtn.disabled=true;cfg.sendBtn.textContent="Running...";
+var url;
+if(syn==="sql")    url=base+"/sql/"+encodeURIComponent(db);
+else if(syn==="psql")   url=base+"/psql/"+encodeURIComponent(db);
+else if(syn==="sparql") url=base+"/rdf/"+encodeURIComponent(db);
+else                    url=base+"/scm";
+fetch(url,{method:"POST",credentials:"include",body:query})
+.then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});return r.text()})
+.then(function(text){
+cfg.sendBtn.disabled=false;cfg.sendBtn.textContent="Send (Ctrl+Enter)";
+cfg.ta.focus();
+addHistory(syn,syn==="scheme"?"":db,query);
+if(syn==="scheme"){
+var parsed;try{parsed=JSON.parse(text)}catch(e){}
+cfg.resultDiv.innerHTML="<pre>"+(typeof parsed==="string"?esc(parsed):esc(text))+"</pre>";
+}else{
+renderQueryResult(text,cfg.resultDiv);
+}
+if(cfg.historyEl)renderH();
+}).catch(function(e){
+cfg.sendBtn.disabled=false;cfg.sendBtn.textContent="Send (Ctrl+Enter)";
+cfg.ta.focus();
+cfg.errorDiv.innerHTML="<div class='console-error'>"+esc(e.message)+"</div>";
+});
+}
+function renderH(){
+if(!cfg.historyEl)return;
+var all=getHistory();
+var h=cfg.historyFilter?all.filter(cfg.historyFilter):all;
+var html="";
+for(var i=0;i<h.length;i++){
+var item=h[i],t=new Date(item.time);
+var ts=(t.getHours()<10?"0":"")+t.getHours()+":"+(t.getMinutes()<10?"0":"")+t.getMinutes();
+var short=item.query.length>25?item.query.substring(0,25)+"...":item.query;
+html+="<div class='history-item' data-idx='"+i+"'>"
++"<span class='history-time'>"+esc(ts)+"</span>"
++"<span class='history-syntax'>"+esc(item.syntax)+"</span>"
++"<div class='history-query'>"+esc(short)+"</div></div>";
+}
+var snap=h;
+cfg.historyEl.innerHTML=html||"<div style='color:#888;font-size:.8rem;padding:8px'>No history</div>";
+cfg.historyEl.querySelectorAll(".history-item").forEach(function(el){
+el.addEventListener("click",function(){
+var item=snap[parseInt(el.getAttribute("data-idx"))];
+if(!item)return;
+cfg.ta.value=item.query;
+if(cfg.onHistoryLoad)cfg.onHistoryLoad(item);
+cfg.errorDiv.innerHTML="";cfg.resultDiv.innerHTML="";
+cfg.ta.focus();
+});
+});
+}
+cfg.sendBtn.addEventListener("click",exec);
+cfg.ta.addEventListener("keydown",function(e){
+if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();exec();}
+});
+return{renderHistory:renderH};
+}
+
+/* ── Global console (All Databases view) ────────────────────────── */
 var consoleSyntax=document.getElementById("console-syntax");
 var consoleDb=document.getElementById("console-db");
 var consoleTa=document.getElementById("console-textarea");
@@ -1218,120 +1728,42 @@ consoleSyntax.addEventListener("change",function(){
 var syn=consoleSyntax.value;
 consoleTa.value=defaultQueries[syn]||"";
 consoleDb.style.display=(syn==="scheme")?"none":"";
-consoleError.innerHTML="";
-consoleResult.innerHTML="";
+consoleError.innerHTML="";consoleResult.innerHTML="";
 });
 
-function consoleExec(){
-var syn=consoleSyntax.value;
-var db=consoleDb.value;
-var query=consoleTa.value.trim();
-if(!query)return;
-consoleError.innerHTML="";
-consoleResult.innerHTML="";
-consoleSendBtn.disabled=true;
-consoleSendBtn.textContent="Running...";
-
-var url,opts;
-if(syn==="sql"){url=base+"/sql/"+encodeURIComponent(db)}
-else if(syn==="psql"){url=base+"/psql/"+encodeURIComponent(db)}
-else if(syn==="sparql"){url=base+"/rdf/"+encodeURIComponent(db)}
-else{url=base+"/scm"}
-
-fetch(url,{method:"POST",credentials:"include",body:query}).then(function(r){
-if(!r.ok)return r.text().then(function(t){throw new Error(t)});
-return r.text();
-}).then(function(text){
-consoleSendBtn.disabled=false;
-consoleSendBtn.textContent="Send (Ctrl+Enter)";
-consoleTa.focus();
-addHistory(syn,db,query);
-if(syn==="scheme"){
-var parsed;try{parsed=JSON.parse(text)}catch(e){}
-if(typeof parsed==="string"){consoleResult.innerHTML="<pre>"+esc(parsed)+"</pre>";}
-else{consoleResult.innerHTML="<pre>"+esc(text)+"</pre>";}
-}else{
-var lines=text.trim().split("\n").filter(function(l){return l.length>0});
-if(!lines.length){consoleResult.innerHTML="<pre>No results</pre>";return}
-var rows=[];
-for(var i=0;i<lines.length;i++){try{rows.push(JSON.parse(lines[i]))}catch(e){}}
-if(!rows.length){consoleResult.innerHTML="<pre>"+esc(text)+"</pre>";return}
-var keys=Object.keys(rows[0]);
-var h="<div style='overflow-x:auto'><table class='browse-table'><thead><tr>";
-for(var k=0;k<keys.length;k++)h+="<th>"+esc(keys[k])+"</th>";
-h+="</tr></thead><tbody>";
-for(var r=0;r<rows.length;r++){
-h+="<tr>";
-for(var k=0;k<keys.length;k++){
-var v=rows[r][keys[k]];
-var vs=v===null?"NULL":String(v);
-h+="<td>"+(vs.indexOf("\n")>=0?"<pre>"+esc(vs)+"</pre>":esc(vs))+"</td>";
-}
-h+="</tr>";
-}
-h+="</tbody></table></div>";
-consoleResult.innerHTML=h;
-}
-}).catch(function(e){
-consoleSendBtn.disabled=false;
-consoleSendBtn.textContent="Send (Ctrl+Enter)";
-consoleTa.focus();
-consoleError.innerHTML="<div class='console-error'>"+esc(e.message)+"</div>";
-});
-}
-
-consoleSendBtn.addEventListener("click",consoleExec);
-consoleTa.addEventListener("keydown",function(e){
-if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();consoleExec()}
-});
-
-/* History */
-var HISTORY_KEY="memcp_query_history";
-var HISTORY_MAX=1000;
-function getHistory(){try{return JSON.parse(localStorage.getItem(HISTORY_KEY))||[]}catch(e){return[]}}
-function saveHistory(h){localStorage.setItem(HISTORY_KEY,JSON.stringify(h))}
-function addHistory(syn,db,query){
-var h=getHistory();
-if(h.length>0&&h[0].syntax===syn&&h[0].database===db&&h[0].query===query){
-h[0].time=new Date().toISOString();
-}else{
-h.unshift({time:new Date().toISOString(),syntax:syn,database:db,query:query});
-if(h.length>HISTORY_MAX)h=h.slice(0,HISTORY_MAX);
-}
-saveHistory(h);
-renderHistory();
-}
-function renderHistory(){
-var h=getHistory();
-var html="";
-for(var i=0;i<h.length;i++){
-var item=h[i];
-var t=new Date(item.time);
-var ts=(t.getHours()<10?"0":"")+t.getHours()+":"+(t.getMinutes()<10?"0":"")+t.getMinutes();
-var short=item.query.length>25?item.query.substring(0,25)+"...":item.query;
-html+="<div class='history-item' data-idx='"+i+"'><span class='history-time'>"+esc(ts)+"</span><span class='history-syntax'>"+esc(item.syntax)+"</span><div class='history-query'>"+esc(short)+"</div></div>";
-}
-consoleHistoryEl.innerHTML=html||"<div style='color:#888;font-size:.8rem;padding:8px'>No history yet</div>";
-consoleHistoryEl.querySelectorAll(".history-item").forEach(function(el){
-el.addEventListener("click",function(){
-var idx=parseInt(el.getAttribute("data-idx"));
-var h=getHistory();
-if(h[idx]){
-consoleSyntax.value=h[idx].syntax;
-consoleDb.style.display=(h[idx].syntax==="scheme")?"none":"";
-if(h[idx].database){
-/* ensure the database option exists or select closest */
+var _globalCon=makeConsole({
+ta:consoleTa,sendBtn:consoleSendBtn,errorDiv:consoleError,resultDiv:consoleResult,
+getSyntax:function(){return consoleSyntax.value;},
+getDb:function(){return consoleDb.value;},
+historyEl:consoleHistoryEl,
+onHistoryLoad:function(item){
+consoleSyntax.value=item.syntax;
+consoleDb.style.display=(item.syntax==="scheme")?"none":"";
 for(var j=0;j<consoleDb.options.length;j++){
-if(consoleDb.options[j].value===h[idx].database){consoleDb.value=h[idx].database;break}
+if(consoleDb.options[j].value===item.database){consoleDb.value=item.database;break}
 }
-}
-consoleTa.value=h[idx].query;
-consoleError.innerHTML="";
-consoleResult.innerHTML="";
 }
 });
-});
+function renderHistory(){_globalCon.renderHistory();}
+
+/* ── DB console (DB detail view) ────────────────────────────────── */
+var dbConsoleTa=document.getElementById("db-console-textarea");
+var dbConsoleResult=document.getElementById("db-console-result");
+var dbConsoleError=document.getElementById("db-console-error");
+var dbConsoleSendBtn=document.getElementById("db-console-send");
+var dbConsoleSyntaxEl=document.getElementById("db-console-syntax");
+
+var _dbCon=makeConsole({
+ta:dbConsoleTa,sendBtn:dbConsoleSendBtn,errorDiv:dbConsoleError,resultDiv:dbConsoleResult,
+getSyntax:function(){return dbConsoleSyntaxEl?dbConsoleSyntaxEl.value:"sql";},
+getDb:function(){return _dbTabDb;},
+historyEl:document.getElementById("db-console-history"),
+historyFilter:function(item){return item.database===_dbTabDb;},
+onHistoryLoad:function(item){
+if(dbConsoleSyntaxEl)dbConsoleSyntaxEl.value=item.syntax;
 }
+});
+function renderDbHistory(){_dbCon.renderHistory();}
 
 /* SQL escaping helpers */
 function sqlStr(s){return "'"+String(s).replace(/'/g,"''")+"'"}
@@ -1340,10 +1772,17 @@ function sqlId(s){return "`"+String(s).replace(/`/g,"``")+"`"}
 /* Create database form */
 var createDbFormVisible=false;
 var lastDbList=[];
+document.getElementById("btn-create-table").addEventListener("click",function(){
+var db=_dbTabDb;
+if(!db)return;
+var q="CREATE TABLE `newtable` (\n  `id` INT,\n  `name` VARCHAR(255)\n)";
+_pendingDbConsoleQuery=q;
+location.hash="db/"+encodeURIComponent(db)+"/console";
+});
 document.getElementById("btn-create-db-toggle").addEventListener("click",function(){
 createDbFormVisible=!createDbFormVisible;
 document.getElementById("create-db-form").style.display=createDbFormVisible?"":"none";
-if(createDbFormVisible)setTimeout(function(){document.getElementById("new-dbname").focus()},0);
+if(createDbFormVisible)setTimeout(function(){document.getElementById("new-dbname").focus()},50);
 });
 document.getElementById("new-dbname").addEventListener("keydown",function(e){
 if(e.key==="Enter"){e.preventDefault();document.getElementById("btn-create-db").click();}
@@ -1410,7 +1849,7 @@ var createUserFormVisible=false;
 document.getElementById("btn-create-user-toggle").addEventListener("click",function(){
 createUserFormVisible=!createUserFormVisible;
 document.getElementById("create-user-form").style.display=createUserFormVisible?"":"none";
-if(createUserFormVisible)setTimeout(function(){document.getElementById("new-username").focus()},0);
+if(createUserFormVisible)setTimeout(function(){document.getElementById("new-username").focus()},50);
 });
 document.getElementById("new-username").addEventListener("keydown",function(e){
 if(e.key==="Enter"){e.preventDefault();document.getElementById("new-password").focus();}
@@ -1611,6 +2050,21 @@ if(s&&s.MetricsTracing&&sec){loadMetricsHistory();}
 else if(sec){sec.style.display="none";}
 });
 };
+
+/* Expose functions needed by inline onclick attributes (IIFE scope isolation fix) */
+window._sbToggleRoot=_sbToggleRoot;
+window._sbToggleDb=_sbToggleDb;
+window._switchDbsTab=_switchDbsTab;
+window._switchDbTab=_switchDbTab;
+window._switchTblTab=_switchTblTab;
+window.loadDbErrors=loadDbErrors;
+window.loadErrors=loadErrors;
+window.showErrorDetailForRow=showErrorDetailForRow;
+window.renderErrorsTable=renderErrorsTable;
+window.renderDbErrorsTable=renderDbErrorsTable;
+/* Pagination wrappers (primitives can't be shared across IIFE boundary) */
+window._gotoErrorsPage=function(p){_errorsPage=p;renderErrorsTable();};
+window._gotoDbErrorsPage=function(p){_dbErrorsPage=p;renderDbErrorsTable();};
 
 })();
 </script>
