@@ -1,0 +1,112 @@
+metadata:
+  version: "1.0"
+  description: "Prepared statement / parameterized query tests"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ps_unique"
+  - sql: "DROP TABLE IF EXISTS ps_test"
+  - sql: "CREATE TABLE ps_test (id int, name text, score float)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ps_unique"
+  - sql: "DROP TABLE IF EXISTS ps_test"
+
+test_cases:
+  # --- Basic ? placeholder (HTTP v1= binding) ---
+
+  - name: "INSERT with ? placeholders"
+    sql: "INSERT INTO ps_test (id, name, score) VALUES (?, ?, ?)"
+    params: [1, "alice", 9.5]
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT second row with ?"
+    sql: "INSERT INTO ps_test (id, name, score) VALUES (?, ?, ?)"
+    params: [2, "bob", 7.0]
+    expect:
+      affected_rows: 1
+
+  - name: "SELECT with ? in WHERE"
+    sql: "SELECT id, name FROM ps_test WHERE id = ?"
+    params: [1]
+    expect:
+      rows: 1
+      data:
+        - {id: 1, name: "alice"}
+
+  - name: "SELECT with two ? placeholders"
+    sql: "SELECT name FROM ps_test WHERE id >= ? AND score >= ?"
+    params: [1, 9.0]
+    expect:
+      rows: 1
+      data:
+        - {name: "alice"}
+
+  - name: "? with string value"
+    sql: "SELECT id FROM ps_test WHERE name = ?"
+    params: ["bob"]
+    expect:
+      rows: 1
+      data:
+        - {id: 2}
+
+  - name: "? placeholder: no match returns 0 rows"
+    sql: "SELECT id FROM ps_test WHERE id = ?"
+    params: [99]
+    expect:
+      rows: 0
+
+  # --- INSERT IGNORE with ? ---
+
+  - name: "setup ps_unique table"
+    sql: "CREATE TABLE ps_unique (id int, val text, UNIQUE KEY id_unique (id))"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT IGNORE with ? placeholders"
+    sql: "INSERT IGNORE INTO ps_unique (id, val) VALUES (?, ?)"
+    params: [1, "first"]
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT IGNORE duplicate with ? is silently skipped"
+    sql: "INSERT IGNORE INTO ps_unique (id, val) VALUES (?, ?)"
+    params: [1, "second"]
+    expect:
+      affected_rows: 0
+
+  # --- ? placeholder with type coercion ---
+
+  - name: "? placeholder string coerced to match int column"
+    sql: "SELECT id FROM ps_test WHERE id = ?"
+    params: ["1"]
+    expect:
+      rows: 1
+
+  # --- PostgreSQL $N placeholder ---
+
+  - name: "SELECT with $1 placeholder (psql syntax)"
+    sql: "SELECT id, name FROM ps_test WHERE id = $1"
+    syntax: postgresql
+    params: [2]
+    expect:
+      rows: 1
+      data:
+        - {id: 2, name: "bob"}
+
+  - name: "SELECT with $1 and $2 (psql)"
+    sql: "SELECT name FROM ps_test WHERE id = $1 OR id = $2 ORDER BY id"
+    syntax: postgresql
+    params: [1, 2]
+    expect:
+      rows: 2
+      data:
+        - {name: "alice"}
+        - {name: "bob"}
+
+  # --- Error cases ---
+
+  - name: "? without params returns no rows (session key unset = nil, no match)"
+    sql: "SELECT id FROM ps_test WHERE id = ?"
+    expect:
+      rows: 0

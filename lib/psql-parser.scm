@@ -102,6 +102,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (define parse_psql (lambda (schema s policy) (begin
 
+	/* counter for positional $N placeholders: each $N compiles to (session "vN") */
+	(define placeholder_counter (newsession))
+	(placeholder_counter "n" 0)
 
 	/* derive the description of a column from its expression */
 	(define extract_title (lambda (expr) (match expr
@@ -285,6 +288,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
 		(parser '((atom "RIGHT" true) "(" (define s psql_expression) "," (define n psql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* psql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
+		/* PostgreSQL positional $N placeholder: compiles to (session "vN"), 1-indexed */
+		(parser '((atom "$" false) (define n (regex "[0-9]+"))) (list (quote session) (concat "v" n)))
 		psql_number
 		psql_string
 		psql_column

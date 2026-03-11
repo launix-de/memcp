@@ -1,0 +1,128 @@
+metadata:
+  version: "1.0"
+  description: "Trigger body parsing compatibility tests (Bug 4a: backtick table names + BEGIN-less, Bug 4b: column notation)"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS trig_log"
+  - sql: "DROP TABLE IF EXISTS trig_items"
+  - sql: "DROP TABLE IF EXISTS `bill`"
+  - sql: "DROP TABLE IF EXISTS `billElement`"
+  - sql: "DROP TABLE IF EXISTS `fop_journal`"
+  - sql: "DROP TRIGGER IF EXISTS after_items_insert"
+  - sql: "DROP TRIGGER IF EXISTS after_bill_insert"
+  - sql: "DROP TRIGGER IF EXISTS trig_no_begin"
+  - sql: "CREATE TABLE trig_log (id int, msg text)"
+  - sql: "CREATE TABLE trig_items (id int, name text, val float)"
+  - sql: "CREATE TABLE `billElement` (id int, name text, amount float)"
+  - sql: "CREATE TABLE `fop_journal` (id int, ref text, amount float)"
+  - sql: "CREATE TABLE `bill` (id int, betrag float, ist float)"
+
+cleanup:
+  - sql: "DROP TRIGGER IF EXISTS after_items_insert"
+  - sql: "DROP TRIGGER IF EXISTS after_bill_insert"
+  - sql: "DROP TRIGGER IF EXISTS after_billelement_insert"
+  - sql: "DROP TRIGGER IF EXISTS trig_no_begin"
+  - sql: "DROP TABLE IF EXISTS trig_log"
+  - sql: "DROP TABLE IF EXISTS trig_items"
+  - sql: "DROP TABLE IF EXISTS `bill`"
+  - sql: "DROP TABLE IF EXISTS `billElement`"
+  - sql: "DROP TABLE IF EXISTS `fop_journal`"
+
+test_cases:
+
+  # --- Basic trigger with backtick-quoted table names (Bug 4a) ---
+
+  - name: "CREATE TRIGGER with backtick-quoted source table"
+    sql: |
+      CREATE TRIGGER after_items_insert
+      AFTER INSERT ON `trig_items`
+      FOR EACH ROW
+      BEGIN
+        INSERT INTO trig_log (id, msg) VALUES (NEW.id, NEW.name);
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT triggers after_items_insert"
+    sql: "INSERT INTO trig_items (id, name, val) VALUES (1, 'alpha', 10.0)"
+    expect:
+      affected_rows: 1
+
+  - name: "Trigger inserted into trig_log"
+    sql: "SELECT id, msg FROM trig_log WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - {id: 1, msg: "alpha"}
+
+  # --- Bug 4a: backtick-quoted destination table in trigger body ---
+
+  - name: "CREATE TRIGGER inserting into backtick-quoted table"
+    sql: |
+      CREATE TRIGGER after_billelement_insert
+      AFTER INSERT ON `bill`
+      FOR EACH ROW
+      BEGIN
+        INSERT INTO `fop_journal` (id, ref, amount) VALUES (NEW.id, 'journal', NEW.betrag);
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT into bill fires trigger to fop_journal"
+    sql: "INSERT INTO `bill` (id, betrag, ist) VALUES (10, 99.5, 80.0)"
+    expect:
+      affected_rows: 1
+
+  - name: "fop_journal received journal entry (Bug 4a: backtick table name in trigger body)"
+    sql: "SELECT id, ref, amount FROM `fop_journal` WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - {id: 10, ref: "journal", amount: 99.5}
+
+  # --- Bug 4b: column references in trigger body WHERE clause ---
+
+  - name: "CREATE TRIGGER with DELETE in body referencing another table"
+    sql: |
+      CREATE TRIGGER after_bill_insert
+      AFTER INSERT ON `billElement`
+      FOR EACH ROW
+      BEGIN
+        DELETE FROM `fop_journal` WHERE id = NEW.id;
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "Pre-insert journal entry for deletion test"
+    sql: "INSERT INTO `fop_journal` (id, ref, amount) VALUES (42, 'to-delete', 1.0)"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT into billElement fires delete trigger on fop_journal"
+    sql: "INSERT INTO `billElement` (id, name, amount) VALUES (42, 'elem', 5.0)"
+    expect:
+      affected_rows: 1
+
+  - name: "fop_journal entry was deleted by trigger (Bug 4b: column resolution)"
+    sql: "SELECT id FROM `fop_journal` WHERE id = 42"
+    expect:
+      rows: 0
+
+  # --- Bug 4a extra: BEGIN-less single-statement trigger body ---
+
+  - name: "CREATE TRIGGER without BEGIN/END (single INSERT statement)"
+    sql: "CREATE TRIGGER trig_no_begin AFTER INSERT ON trig_items FOR EACH ROW INSERT INTO trig_log (id, msg) VALUES (NEW.id, NEW.name)"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT fires BEGIN-less trigger"
+    sql: "INSERT INTO trig_items (id, name, val) VALUES (99, 'beta', 5.0)"
+    expect:
+      affected_rows: 1
+
+  - name: "BEGIN-less trigger wrote to trig_log"
+    sql: "SELECT COUNT(*) AS cnt FROM trig_log WHERE id = 99"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 2}

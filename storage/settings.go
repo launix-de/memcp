@@ -83,8 +83,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("LogJIT"), scm.NewBool(Settings.LogJIT),
 			scm.NewString("ScanDebugging"), scm.NewBool(Settings.ScanDebugging),
 			scm.NewString("ExplainWidth"), scm.NewInt(int64(Settings.ExplainWidth)),
-		scm.NewString("ErrorQueryLog"), scm.NewBool(Settings.ErrorQueryLog),
-		scm.NewString("MaxErrorQueryLog"), scm.NewInt(int64(Settings.MaxErrorQueryLog)),
+			scm.NewString("ErrorQueryLog"), scm.NewBool(Settings.ErrorQueryLog),
+			scm.NewString("MaxErrorQueryLog"), scm.NewInt(int64(Settings.MaxErrorQueryLog)),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
