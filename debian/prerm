@@ -6,6 +6,11 @@ case "$1" in
 		systemctl stop memcp 2>/dev/null || true
 		systemctl disable memcp 2>/dev/null || true
 		;;
+	upgrade)
+		# Stop the service before the new binary is installed so the
+		# old process can finish its shutdown rebuild cleanly.
+		systemctl stop memcp 2>/dev/null || true
+		;;
 esac
 
 exit 0
