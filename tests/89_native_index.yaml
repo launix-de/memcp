@@ -3,6 +3,7 @@
 # so no in-memory index structure is needed (zero memory cost).
 
 metadata:
+  isolated: true
   version: "1.0"
   description: "Physical sort by hottest index (Native index)"
 

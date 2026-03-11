@@ -6,6 +6,7 @@
 # Uses scm:(rebuild) and scm:(show_shard_indexes ...) to verify index state.
 
 metadata:
+  isolated: true
   version: "1.0"
   description: "Index prefix deduplication on rebuild and creation"
 

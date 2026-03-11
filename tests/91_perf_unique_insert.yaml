@@ -5,6 +5,7 @@
 # {rows} and {database} are template placeholders filled by the test runner
 
 metadata:
+  isolated: true
   version: "1.0"
   description: "Performance tests: unique key inserts"
 

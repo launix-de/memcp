@@ -6,6 +6,7 @@
 # Uses scm:"(rebuild)" to trigger main storage compaction between operations
 
 metadata:
+  isolated: true
   version: "1.0"
   description: "Unique constraint: main vs delta storage corner cases"
 
