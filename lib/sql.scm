@@ -149,10 +149,9 @@ if the user is not allowed to access this property, the function will throw an e
 			(define limit (settings "MaxErrorQueryLog"))
 			(if (> limit 0) (begin
 				(define cnt (scan "system_statistic" "errors" '() (lambda () true) '() (lambda () 1) + 0))
-				(if (> cnt limit) (begin
-					(define oldest (scan "system_statistic" "errors" '() (lambda () true) '("datetime") (lambda (dt) dt) (lambda (a b) (if (< b a) b a)) nil))
-					(if oldest (scan "system_statistic" "errors" '("datetime") (lambda (dt) (equal? dt oldest)) '("$delete") (lambda ($delete) ($delete))))
-				))
+				(if (> cnt limit)
+					(scan_order "system_statistic" "errors" '() (lambda () true) '("datetime") '(<) 0 (- cnt limit) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+				)
 			))
 		)) (lambda (e) true)) /* silently ignore logging errors to avoid infinite recursion */
 	) true)

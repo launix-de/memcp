@@ -490,7 +490,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(? '(
 			(atom "WHERE" true)
 			(define condition psql_expression)
-	))) (begin
+		))
+		/* ORDER BY + LIMIT + OFFSET for partial deletes */
+		(?
+			(atom "ORDER" true)
+			(atom "BY" true)
+			(define order (+
+				(parser '(
+					(define col psql_expression)
+					(? (atom "COLLATE" true) (define coll psql_identifier))
+					(define direction_desc (or
+						(parser (atom "DESC" true) >)
+						(parser (atom "ASC" true) <)
+						(parser empty <)
+					))
+				) (list col (if coll (collate coll (equal? direction_desc >)) direction_desc)))
+				(atom "," true)
+			))
+		)
+		(?
+			(atom "LIMIT" true)
+			(or
+				'((define limit psql_expression) (atom "OFFSET" true) (define offset psql_expression))
+				'((define limit psql_expression))
+			)
+		)
+		(? (atom "OFFSET" true) (define offset psql_expression))
+	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define replace_find_column (lambda (expr) (match expr
@@ -501,15 +527,38 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			replace_find_column /* workaround for optimizer bug: variable bindings in parsers */
 			(set condition (replace_find_column (coalesceNil condition true)))
 			(set filtercols (extract_columns_for_tblvar tbl condition))
-			'((quote scan)
-				(coalesce schema2 schema)
-				tbl
-				(cons list filtercols)
-				'((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition))
-				'(list "$update")
-				'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-				(quote +)
-				0
+			(define filterfn '((quote lambda) (map filtercols (lambda(col) (symbol (concat tbl "." col)))) (replace_columns_from_expr condition)))
+			(if (or (not (nil? order)) (not (nil? limit)))
+				(begin
+					(define ordercols (if (nil? order) '() (map order (lambda (x)
+						(car (cdr (cdr (cdr (replace_find_column (car x))))))
+					))))
+					(define dirs (if (nil? order) '() (map order (lambda (x) (car (cdr x))))))
+					'((quote scan_order)
+						(coalesce schema2 schema)
+						tbl
+						(cons list filtercols)
+						filterfn
+						(cons list ordercols)
+						(cons list dirs)
+						(coalesceNil offset 0)
+						(coalesceNil limit -1)
+						'(list "$update")
+						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						(quote +)
+						0
+					)
+				)
+				'((quote scan)
+					(coalesce schema2 schema)
+					tbl
+					(cons list filtercols)
+					filterfn
+					'(list "$update")
+					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+					(quote +)
+					0
+				)
 			)
 	)))
 

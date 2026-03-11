@@ -661,24 +661,21 @@ if(sel)sel.addEventListener("change",function(){_errorsDbFilter=this.value;_erro
 var btn=document.getElementById("btn-clear-errors");
 if(btn)btn.addEventListener("click",function(){
 if(!confirm("Clear all error log entries?"))return;
-fetch(base+"/dashboard/api/errors/clear",{method:"POST",credentials:"same-origin"})
-.then(function(r){return r.json()})
-.then(function(){loadErrors()})
-.catch(function(e){alert("Error: "+e)});
+scmFetch('(begin (scan "system_statistic" "errors" \'() (lambda () true) \'("$update") (lambda ($update) ($update))) (error_log_counter "count" 0) true)',function(){loadErrors()});
 });
 /* Error Log inline settings — auto-save */
 var elEnable=document.getElementById("el-setting-enable");
 var elMax=document.getElementById("el-setting-max");
 var elStatus=document.getElementById("el-setting-status");
 if(elEnable){elEnable.addEventListener("change",function(){
-apiPost(base+"/dashboard/api/settings",{key:"ErrorQueryLog",value:elEnable.checked},function(){
+saveSetting("ErrorQueryLog",elEnable.checked,function(){
 if(elStatus){elStatus.textContent="Saved";setTimeout(function(){elStatus.textContent=""},2000);}
 });
 });}
 if(elMax){var elMaxTimer=null;elMax.addEventListener("input",function(){
 if(elMaxTimer)clearTimeout(elMaxTimer);
 elMaxTimer=setTimeout(function(){
-apiPost(base+"/dashboard/api/settings",{key:"MaxErrorQueryLog",value:parseInt(elMax.value)||0},function(){
+saveSetting("MaxErrorQueryLog",parseInt(elMax.value)||0,function(){
 if(elStatus){elStatus.textContent="Saved";setTimeout(function(){elStatus.textContent=""},2000);}
 });
 },500);
@@ -866,7 +863,7 @@ apiFetch(base+"/dashboard/api/databases",renderDatabases);
 }else if(tab==="errors"){
 location.hash="errors";
 loadErrors(fromConsoleDb||undefined);
-apiFetch(base+"/dashboard/api/settings",function(data){
+fetchSettings(function(data){
 var cb=document.getElementById("el-setting-enable");
 var inp=document.getElementById("el-setting-max");
 if(cb)cb.checked=data.ErrorQueryLog||false;
@@ -874,11 +871,12 @@ if(inp)inp.value=data.MaxErrorQueryLog||0;
 });
 }else if(tab==="console"){
 location.hash="console";
-/* default to Scheme when arriving fresh */
+/* default to Scheme (admin) or SQL (non-admin) when arriving fresh */
 if(!pendingConsoleState){
-consoleSyntax.value="scheme";
-consoleDb.style.display="none";
-consoleTa.value=defaultQueries.scheme;
+var defSyn=isAdmin?"scheme":"sql";
+consoleSyntax.value=defSyn;
+consoleDb.style.display=(defSyn==="scheme")?"none":"";
+consoleTa.value=defaultQueries[defSyn]||"";
 }
 loadConsoleDatabases(function(){consoleTa.focus();});
 renderHistory();
@@ -1024,6 +1022,18 @@ return r.json();
 }).then(cb).catch(function(e){console.error("API error:",e)});
 }
 
+var SCM_SERVICES='(if (nil? service_registry) "[]" (dashboard_json_array (map (service_registry) (lambda (name) (begin (set v (service_registry name)) (json_encode_assoc (list "name" name "port" (car v) "route" (car (cdr v)) "protocols" (car (cdr (cdr v))))))))))';
+var SCM_USERS='(begin (set j (scan "system" "user" \'() (lambda () true) \'("username" "admin") (lambda (u adm) (begin (set dbs_str (scan "system" "access" \'("username") (lambda (au) (equal?? au u)) \'("database") (lambda (db) (json_encode db)) (lambda (a b) (if (equal? a "") b (concat a "," b))) "")) (concat "{\\"username\\":" (json_encode u) ",\\"admin\\":" (if (equal? adm 0) "false" "true") ",\\"databases\\":[" dbs_str "]}")) ) (lambda (acc item) (if (or (nil? item) (equal? item "")) acc (if (equal? acc "") item (concat acc "," item)))) "")) (concat "[" j "]"))';
+
+function scmFetch(expr,cb){
+fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:expr})
+.then(function(r){if(!r.ok)throw new Error(r.status);return r.text();})
+.then(function(t){var v=JSON.parse(t);if(typeof v==="string")v=JSON.parse(v);cb(v);})
+.catch(function(e){console.error("SCM error:",e);});
+}
+
+function fetchUsers(cb){scmFetch(SCM_USERS,cb);}
+
 function apiPost(url,body,cb){
 fetch(url,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){
 if(!r.ok)return r.text().then(function(t){throw new Error(t)});
@@ -1032,7 +1042,28 @@ return r.json();
 }
 
 function execSQL(db,sql,cb){
-apiPost(base+"/dashboard/api/sql",{database:db,sql:sql},cb);
+fetch(base+"/sql/"+encodeURIComponent(db),{method:"POST",credentials:"same-origin",body:sql})
+.then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});return r.text();})
+.then(function(t){var res;try{res=JSON.parse(t);}catch(e){res={};}if(cb)cb(res);})
+.catch(function(e){window.alert("Error: "+e.message);});
+}
+
+function scmLiteral(v){
+if(typeof v==="boolean")return v?"true":"false";
+if(typeof v==="number")return String(v);
+return JSON.stringify(String(v));
+}
+function fetchSettings(cb){
+fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(json_encode_assoc (settings))"})
+.then(function(r){if(!r.ok)throw new Error(r.status);return r.text();})
+.then(function(t){cb(JSON.parse(t));})
+.catch(function(e){console.error("Settings error:",e);});
+}
+function saveSetting(key,value,cb){
+fetch(base+"/scm",{method:"POST",credentials:"same-origin",body:"(settings "+JSON.stringify(key)+" "+scmLiteral(value)+")"})
+.then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t)});return r.text();})
+.then(function(){if(cb)cb();})
+.catch(function(e){window.alert("Error: "+e.message);});
 }
 
 /* settings grouped by topic */
@@ -1118,12 +1149,13 @@ pendingConsoleState=null;
 consoleTa.focus();
 });
 }else{
-/* direct navigation to console: default to Scheme mode, no DB */
-consoleSyntax.value="scheme";
-consoleDb.style.display="none";
-consoleTa.value=defaultQueries.scheme;
+/* direct navigation to console: default to Scheme (admin) or SQL (non-admin) */
+var defSyn=isAdmin?"scheme":"sql";
+consoleSyntax.value=defSyn;
+consoleDb.style.display=(defSyn==="scheme")?"none":"";
+consoleTa.value=defaultQueries[defSyn]||"";
 consoleError.innerHTML="";
-consoleTa.focus();
+loadConsoleDatabases(function(){consoleTa.focus();});
 }
 renderHistory();
 loadSidebar();
@@ -1136,7 +1168,7 @@ _sidebarActiveDb=null;_sidebarActiveTbl=null;
 setBreadcrumb([]);
 _switchDbsTabQuiet("errors");
 loadErrors();
-apiFetch(base+"/dashboard/api/settings",function(data){
+fetchSettings(function(data){
 var cb=document.getElementById("el-setting-enable");
 var inp=document.getElementById("el-setting-max");
 if(cb)cb.checked=data.ErrorQueryLog||false;
@@ -1149,15 +1181,15 @@ if(hash==="settings"){
 if(!isAdmin){location.hash="databases";return}
 showView("view-settings");
 document.getElementById("root-pw-warning").style.display=defaultPassword?"":"none";
-apiFetch(base+"/dashboard/api/settings",renderSettings);
-apiFetch(base+"/dashboard/api/services",renderServices);
+fetchSettings(renderSettings);
+scmFetch(SCM_SERVICES,renderServices);
 return;
 }
 if(hash==="users"){
 if(!isAdmin){location.hash="databases";return}
 showView("view-users");
 showRootPwWarning("root-pw-warning-users");
-apiFetch(base+"/dashboard/api/users",renderUsers);
+fetchUsers(renderUsers);
 return;
 }
 /* shard detail: db/NAME/TABLE/shard/N */
@@ -1302,7 +1334,7 @@ apiFetch(base+"/dashboard/api/databases",renderDatabases);
 });
 }
 if(isAdmin){
-apiFetch(base+"/dashboard/api/users",_doRender);
+fetchUsers(_doRender);
 }else{
 _doRender([]);
 }
@@ -1362,7 +1394,7 @@ var engSql=engSpec?engSpec.sql:eng.toUpperCase();
 var sel=this;
 fetch(base+"/dashboard/api/sql",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:dbname,sql:"ALTER TABLE `"+tblname+"` ENGINE="+engSql})}).then(function(r){
 if(!r.ok)return r.text().then(function(t){throw new Error(t)});
-return r.json();
+return r.text();
 }).then(function(){origEngine=eng}).catch(function(e){window.alert("Error: "+e.message);sel.value=origEngine});
 });
 document.getElementById("btn-query-tbl").addEventListener("click",function(){
@@ -1433,7 +1465,7 @@ var dataOffset=0;
 var dataLimit=parseInt(document.getElementById("data-limit").value)||25;
 function loadData(){
 var sql="SELECT * FROM `"+tblname+"` LIMIT "+dataLimit+" OFFSET "+dataOffset;
-fetch(base+"/dashboard/api/query",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({database:dbname,sql:sql})}).then(function(r){
+fetch(base+"/sql/"+encodeURIComponent(dbname),{method:"POST",credentials:"same-origin",body:sql}).then(function(r){
 if(!r.ok)return r.text().then(function(t){throw new Error(t)});
 return r.text();
 }).then(function(text){
@@ -1557,7 +1589,7 @@ else if(el.type==="number")value=Number(el.value);
 else value=el.value;
 var statusEl=document.getElementById("settings-status");
 statusEl.textContent="Saving "+key+"...";
-apiPost(base+"/dashboard/api/settings",{key:key,value:value},function(){
+saveSetting(key,value,function(){
 statusEl.textContent=key+" saved";
 setTimeout(function(){statusEl.textContent=""},2000);
 });
@@ -1868,7 +1900,7 @@ document.getElementById("new-username").value="";
 document.getElementById("new-password").value="";
 createUserFormVisible=false;
 document.getElementById("create-user-form").style.display="none";
-apiFetch(base+"/dashboard/api/users",renderUsers);
+fetchUsers(renderUsers);
 });
 });
 
@@ -1910,21 +1942,21 @@ a.addEventListener("click",function(e){
 e.preventDefault();
 var user=a.getAttribute("data-user"),db=a.getAttribute("data-db");
 if(window.confirm("Revoke access to '"+db+"' from user '"+user+"'?"))
-execSQL("system","REVOKE ALL ON "+sqlId(db)+".* FROM "+sqlId(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+execSQL("system","REVOKE ALL ON "+sqlId(db)+".* FROM "+sqlId(user),function(){fetchUsers(renderUsers)});
 });
 });
 tb.querySelectorAll(".grant-db").forEach(function(sel){
 sel.addEventListener("change",function(){
 var user=sel.getAttribute("data-user"),db=sel.value;
 if(!db)return;
-execSQL("system","GRANT ALL ON "+sqlId(db)+".* TO "+sqlId(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+execSQL("system","GRANT ALL ON "+sqlId(db)+".* TO "+sqlId(user),function(){fetchUsers(renderUsers)});
 });
 });
 tb.querySelectorAll(".make-admin").forEach(function(btn){
 btn.addEventListener("click",function(){
 var user=btn.getAttribute("data-user");
 if(window.confirm("Grant admin privileges to '"+user+"'?"))
-execSQL("system","GRANT ALL ON *.* TO "+sqlId(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+execSQL("system","GRANT ALL ON *.* TO "+sqlId(user),function(){fetchUsers(renderUsers)});
 });
 });
 tb.querySelectorAll(".revoke-admin").forEach(function(a){
@@ -1932,7 +1964,7 @@ a.addEventListener("click",function(e){
 e.preventDefault();
 var user=a.getAttribute("data-user");
 if(window.confirm("Revoke admin privileges from '"+user+"'?"))
-execSQL("system","REVOKE ALL ON *.* FROM "+sqlId(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+execSQL("system","REVOKE ALL ON *.* FROM "+sqlId(user),function(){fetchUsers(renderUsers)});
 });
 });
 tb.querySelectorAll(".change-pw").forEach(function(btn){
@@ -1950,7 +1982,7 @@ tb.querySelectorAll(".remove-user").forEach(function(btn){
 btn.addEventListener("click",function(){
 var user=btn.getAttribute("data-user");
 if(window.confirm("Remove user '"+user+"'? This cannot be undone!"))
-execSQL("system","DELETE FROM user WHERE username="+sqlStr(user),function(){apiFetch(base+"/dashboard/api/users",renderUsers)});
+execSQL("system","DELETE FROM user WHERE username="+sqlStr(user),function(){fetchUsers(renderUsers)});
 });
 });
 });
@@ -1971,7 +2003,7 @@ changePwModal.style.display="none";
 changePwInput.value="";
 execSQL("system","ALTER USER "+sqlId(user)+" IDENTIFIED BY "+sqlStr(pw),function(){
 if(user==="root"){defaultPassword=false;["root-pw-warning","root-pw-warning-gauges","root-pw-warning-databases","root-pw-warning-users"].forEach(function(id){var el=document.getElementById(id);if(el)el.style.display="none";});}
-apiFetch(base+"/dashboard/api/users",renderUsers);
+fetchUsers(renderUsers);
 });
 });
 changePwInput.addEventListener("keydown",function(e){if(e.key==="Enter")document.getElementById("change-pw-ok").click();if(e.key==="Escape")document.getElementById("change-pw-cancel").click();});
