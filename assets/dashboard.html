@@ -129,6 +129,7 @@ header a:hover{opacity:1;text-decoration:underline}
 <a href="#databases">Databases</a>
 <a href="#console">Console</a>
 <a href="#users" data-admin-only>Users</a>
+<a href="#errors" data-admin-only>Errors</a>
 <a href="#settings" data-admin-only>Settings</a>
 <a href="https://memcp.org" target="_blank">memcp.org</a>
 <a href="https://github.com/launix-de/memcp" target="_blank">GitHub</a>
@@ -332,6 +333,18 @@ header a:hover{opacity:1;text-decoration:underline}
 </div>
 </div>
 
+<div class="view" id="view-errors">
+<div class="browse-wrap">
+<h2>Error Log</h2>
+<div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+<button class="btn-warn" id="btn-reload-errors" onclick="loadErrors()">Reload</button>
+<button class="btn-danger" id="btn-clear-errors">Clear All</button>
+<span id="errors-status" style="color:#888;font-size:.8rem;margin-left:8px"></span>
+</div>
+<div id="errors-list"></div>
+</div>
+</div>
+
 <div class="view" id="view-settings">
 <div class="browse-wrap">
 <h2>Settings</h2>
@@ -409,6 +422,50 @@ return bytes+" B";
 }
 function esc(s){var d=document.createElement("span");d.textContent=String(s);return d.innerHTML}
 function truncName(s,n){n=n||30;return s.length>n?s.substring(0,n)+"\u2026":s}
+
+/* ---- Error log ---- */
+var errorsAutoRefresh=null;
+function loadErrors(){
+apiFetch(base+"/dashboard/api/errors",function(rows){
+var el=document.getElementById("errors-list");
+var status=document.getElementById("errors-status");
+if(!rows||rows.length===0){
+el.innerHTML='<p style="color:#888;padding:16px 0">No errors recorded.</p>';
+status.textContent="0 errors";
+return;
+}
+rows.sort(function(a,b){return a.datetime<b.datetime?1:-1});
+status.textContent=rows.length+" error"+(rows.length===1?"":"s");
+var html="";
+for(var i=0;i<rows.length;i++){
+var r=rows[i];
+html+='<div style="background:#16213e;border:1px solid #2a2a4a;border-radius:6px;padding:16px;margin-bottom:12px">';
+html+='<div style="display:flex;gap:16px;margin-bottom:8px;font-size:.8rem;color:#888;flex-wrap:wrap">';
+html+='<span>'+esc(r.datetime||"")+'</span>';
+if(r.database)html+='<span>db: <b style="color:#ccc">'+esc(r.database)+'</b></span>';
+if(r.user)html+='<span>user: <b style="color:#ccc">'+esc(r.user)+'</b></span>';
+html+='</div>';
+if(r.query){
+html+='<div style="margin-bottom:8px"><div style="color:#888;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Query</div>';
+html+='<pre style="background:#1a1a2e;padding:10px;border-radius:4px;font-size:.8rem;overflow-x:auto;color:#ccc;border:1px solid #2a2a4a;white-space:pre-wrap;word-break:break-all">'+esc(r.query)+'</pre></div>';
+}
+html+='<div><div style="color:#e74c3c;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Error</div>';
+html+='<pre style="background:#1a1a2e;padding:10px;border-radius:4px;font-size:.8rem;overflow-x:auto;color:#e74c3c;border:1px solid #2a2a4a;white-space:pre-wrap;word-break:break-all">'+esc(r.error||"")+'</pre></div>';
+html+='</div>';
+}
+el.innerHTML=html;
+});
+}
+document.addEventListener("DOMContentLoaded",function(){
+var btn=document.getElementById("btn-clear-errors");
+if(btn)btn.addEventListener("click",function(){
+if(!confirm("Clear all error log entries?"))return;
+fetch(base+"/dashboard/api/errors/clear",{method:"POST",credentials:"same-origin"})
+.then(function(r){return r.json()})
+.then(function(){loadErrors()})
+.catch(function(e){alert("Error: "+e)});
+});
+});
 
 /* Admin detection */
 var isAdmin=false;
@@ -525,6 +582,10 @@ var settingsGroups=[
 {key:"MetricsTracing",desc:"Periodically record metrics to system_statistic.perf_metrics",type:"bool"},
 {key:"MetricsTracingInterval",desc:"Metrics sampling interval in seconds (0=60s)",type:"number"}
 ]},
+{group:"Error Log",items:[
+{key:"ErrorQueryLog",desc:"Log failed queries to system_statistic.errors (view in Errors tab)",type:"bool"},
+{key:"MaxErrorQueryLog",desc:"Max rows to keep in error log (0=unlimited)",type:"number"}
+]},
 {group:"Shutdown",items:[
 {key:"ShutdownDrainSeconds",desc:"Seconds to wait for in-flight requests during shutdown (0=10s)",type:"number"}
 ]},
@@ -578,6 +639,14 @@ pendingConsoleState=null;
 }
 });
 renderHistory();
+return;
+}
+if(hash==="errors"){
+if(!isAdmin){location.hash="databases";return}
+showView("view-errors");
+backLink.href="#gauges";
+backLink.style.display="inline";
+loadErrors();
 return;
 }
 if(hash==="settings"){

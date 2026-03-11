@@ -120,6 +120,43 @@ if the user is not allowed to access this property, the function will throw an e
 		true)
 )) (lambda (e) true))
 
+/* error query log table */
+(if (not (has? (show "system_statistic") "errors")) (begin
+	(print "creating table system_statistic.errors")
+	(eval (parse_sql "system_statistic" "CREATE TABLE errors(datetime text, database text, user text, query text, error text) ENGINE=SLOPPY" (lambda (schema table write) true)))
+))
+
+/* global counter incremented on each logged error — used by dashboard WebSocket to trigger refresh */
+(set error_log_counter (newsession))
+(error_log_counter "count" 0)
+
+/* error_log: insert a failed query into system_statistic.errors (no-op when ErrorQueryLog is off)
+   errmsg — error message (required)
+   db     — database name (pass "" when unknown)
+   usr    — username (pass "" when unknown)
+   qry    — query text (pass "" when unknown) */
+(define error_log (lambda (errmsg db usr qry) (begin
+	/* always print to stdout for system logs */
+	(print (if (equal? db "") "" (concat "[" db "] ")) errmsg)
+	(if (settings "ErrorQueryLog") (begin
+		(try (lambda () (begin
+			(insert "system_statistic" "errors"
+				'("datetime" "database" "user" "query" "error")
+				(list (list (now) db usr qry (concat errmsg))))
+			(error_log_counter "count" (+ (error_log_counter "count") 1))
+			/* truncate oldest rows when limit is set */
+			(define limit (settings "MaxErrorQueryLog"))
+			(if (> limit 0) (begin
+				(define cnt (scan "system_statistic" "errors" '() (lambda () true) '() (lambda () 1) + 0))
+				(if (> cnt limit) (begin
+					(define oldest (scan "system_statistic" "errors" '() (lambda () true) '("datetime") (lambda (dt) dt) (lambda (a b) (if (< b a) b a)) nil))
+					(if oldest (scan "system_statistic" "errors" '("datetime") (lambda (dt) (equal? dt oldest)) '("$delete") (lambda ($delete) ($delete))))
+				))
+			))
+		)) (lambda (e) true)) /* silently ignore logging errors to avoid infinite recursion */
+	) true)
+)))
+
 /* access control: which user can access which database */
 (if (has? (show "system") "access") true (begin
 	(print "creating table system.access")
@@ -176,8 +213,7 @@ if the user is not allowed to access this property, the function will throw an e
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
-						(print "SQL query: " query)
-						(print "error: " e)
+						(error_log (concat e) schema (req "username") query)
 						((res "header") "Content-Type" "text/plain")
 						((res "status") 500)
 						((res "print") "SQL Error: " e)
@@ -232,8 +268,7 @@ if the user is not allowed to access this property, the function will throw an e
 						(original_resultrow '("affected_rows" query_result))
 					))
 				) query)) (lambda(e) (begin
-						(print "SQL query: " query)
-						(print "error: " e)
+						(error_log (concat e) schema (req "username") query)
 						((res "header") "Content-Type" "text/plain")
 						((res "status") 500)
 						((res "print") "SQL Error: " e)
@@ -259,8 +294,7 @@ if the user is not allowed to access this property, the function will throw an e
 					(set result (eval (scheme code)))
 					((res "print") (json_encode result))
 				)) (lambda(e) (begin
-						(print "SCM code: " code)
-						(print "error: " e)
+						(error_log (concat e) "" (req "username") code)
 						((res "header") "Content-Type" "text/plain")
 						((res "status") 500)
 						((res "print") "SCM Error: " e)
@@ -322,20 +356,25 @@ if the user is not allowed to access this property, the function will throw an e
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 (set mysql_handler (lambda (schema sql resultrow_sql session) (begin
 	(define resultrow resultrow_sql)
-	(if (equal? (session "syntax") "scheme") (begin
-		/* scheme syntax mode */
-		(set print (lambda args (resultrow '("result" (concat args)))))
-		(resultrow '("result" (eval (scheme sql))))
-	) (time (begin
-			/* SQL syntax mode */
-			/* tolerate an optional trailing ';' - must be at end of string */
-			(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
-			(define mysql_username (coalesce (session "username") "root"))
-			(define formula (if (equal? (session "syntax") "postgresql")
-				(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username)
-				(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username)))
-			(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
-		) sql))
+	(try (lambda () (begin
+		(if (equal? (session "syntax") "scheme") (begin
+			/* scheme syntax mode */
+			(set print (lambda args (resultrow '("result" (concat args)))))
+			(resultrow '("result" (eval (scheme sql))))
+		) (time (begin
+				/* SQL syntax mode */
+				/* tolerate an optional trailing ';' - must be at end of string */
+				(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
+				(define mysql_username (coalesce (session "username") "root"))
+				(define formula (if (equal? (session "syntax") "postgresql")
+					(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username)
+					(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username)))
+				(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
+			) sql))
+	)) (lambda (e) (begin
+		(error_log (concat e) schema (coalesce (session "username") "root") sql)
+		(error e) /* re-throw so MySQL protocol sends proper error packet */
+	)))
 )))
 
 /* dedicated mysql protocol listening at specified port */

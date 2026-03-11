@@ -323,6 +323,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_json res (dashboard_json_array items))
 				)))
 			)
+			/* API: error query log — list entries (admin only) */
+			"/dashboard/api/errors" (begin
+				(if (dashboard_check_admin req) (begin
+					(define items (scan "system_statistic" "errors"
+						'() (lambda () true)
+						'("datetime" "database" "user" "query" "error")
+						(lambda (dt db usr qry err) (json_encode_assoc (list "datetime" dt "database" db "user" usr "query" qry "error" err)))
+						(lambda (acc item) (if (equal? acc "") item (concat acc "," item)))
+						""))
+					(dashboard_send_json res (concat "[" items "]"))
+				) (dashboard_send_401 res))
+			)
+			/* API: clear all error log entries (admin only) */
+			"/dashboard/api/errors/clear" (begin
+				(if (dashboard_check_admin req) (begin
+					(scan "system_statistic" "errors" '() (lambda () true) '("$delete") (lambda ($delete) ($delete)))
+					(error_log_counter "count" 0)
+					(dashboard_send_json res "{\"ok\":true}")
+				) (dashboard_send_401 res))
+			)
 			/* API: list all users with their database access (admin only) */
 			"/dashboard/api/users" (begin
 				(if (dashboard_check_admin req) (begin
