@@ -51,8 +51,25 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)
 )))
 
+/* rolling errors/sec: sample error_log_counter every 10 pushes (~1s) */
+(set eps_state (newsession))
+(eps_state "prev_count" 0)
+(eps_state "ticks" 0)
+(eps_state "eps" 0)
+
+(define eps_tick (lambda () (begin
+	(eps_state "ticks" (+ (eps_state "ticks") 1))
+	(if (>= (eps_state "ticks") 10) (begin
+		(define curr (error_log_counter "count"))
+		(eps_state "eps" (- curr (eps_state "prev_count")))
+		(eps_state "prev_count" curr)
+		(eps_state "ticks" 0)
+	) true)
+)))
+
 /* WebSocket push loop: send metrics JSON every 100ms */
 (define dashboard_push (lambda (send) (begin
+	(eps_tick)
 	(send 1 (json_encode_assoc (list
 		"cpu" (cpu_usage)
 		"mem_available" (available_memory)
@@ -62,6 +79,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"connections" (active_connections)
 		"max_connections" (max_connections)
 		"rps" (requests_per_second)
+		"eps" (eps_state "eps")
 	)))
 	(sleep 0.1)
 	(dashboard_push send)
@@ -322,6 +340,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					)))))
 					(dashboard_send_json res (dashboard_json_array items))
 				)))
+			)
+			/* API: error query log — list entries (admin only) */
+			"/dashboard/api/errors" (begin
+				(if (dashboard_check_admin req) (begin
+					(define items (scan "system_statistic" "errors"
+						'() (lambda () true)
+						'("datetime" "database" "user" "query" "error")
+						(lambda (dt db usr qry err) (json_encode_assoc (list "datetime" dt "database" db "user" usr "query" qry "error" err)))
+						(lambda (acc item) (if (equal? acc "") item (concat acc "," item)))
+						""))
+					(dashboard_send_json res (concat "[" items "]"))
+				) (dashboard_send_401 res))
+			)
+			/* API: clear all error log entries (admin only) */
+			"/dashboard/api/errors/clear" (begin
+				(if (dashboard_check_admin req) (begin
+					(scan "system_statistic" "errors" '() (lambda () true) '("$delete") (lambda ($delete) ($delete)))
+					(error_log_counter "count" 0)
+					(dashboard_send_json res "{\"ok\":true}")
+				) (dashboard_send_401 res))
 			)
 			/* API: list all users with their database access (admin only) */
 			"/dashboard/api/users" (begin

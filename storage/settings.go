@@ -45,9 +45,11 @@ type SettingsT struct {
 	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
 	ScanDebugging          bool  // when true, log every scan/scan_order: db+table+boundaries+index; also overrides AnalyzeMinItems for scan statistics
 	ExplainWidth           int   // max chars before EXPLAIN pretty-prints a sub-expression on multiple lines (0 = default 20)
+	ErrorQueryLog          bool  // when true, log failed queries to system_statistic.errors
+	MaxErrorQueryLog       int   // max rows in error log (0 = unlimited)
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, false, 0}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -81,6 +83,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("LogJIT"), scm.NewBool(Settings.LogJIT),
 			scm.NewString("ScanDebugging"), scm.NewBool(Settings.ScanDebugging),
 			scm.NewString("ExplainWidth"), scm.NewInt(int64(Settings.ExplainWidth)),
+		scm.NewString("ErrorQueryLog"), scm.NewBool(Settings.ErrorQueryLog),
+		scm.NewString("MaxErrorQueryLog"), scm.NewInt(int64(Settings.MaxErrorQueryLog)),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -120,6 +124,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(Settings.ScanDebugging)
 		case "ExplainWidth":
 			return scm.NewInt(int64(Settings.ExplainWidth))
+		case "ErrorQueryLog":
+			return scm.NewBool(Settings.ErrorQueryLog)
+		case "MaxErrorQueryLog":
+			return scm.NewInt(int64(Settings.MaxErrorQueryLog))
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -173,6 +181,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.ScanDebugging = scm.ToBool(a[1])
 		case "ExplainWidth":
 			Settings.ExplainWidth = scm.ToInt(a[1])
+		case "ErrorQueryLog":
+			Settings.ErrorQueryLog = scm.ToBool(a[1])
+		case "MaxErrorQueryLog":
+			Settings.MaxErrorQueryLog = scm.ToInt(a[1])
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
