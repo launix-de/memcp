@@ -26,7 +26,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* check any authenticated user (returns admin flag or false) */
 (define dashboard_check_user (lambda (req) (begin
 	(set pw (scan "system" "user" '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
-	(if (and pw (equal? (car pw) (password (req "password")))) (car (cdr pw)) nil)
+	(if (and pw (equal? (car pw) (password (req "password")))) (equal? (car (cdr pw)) 1) nil)
 )))
 
 /* send 401 with WWW-Authenticate header */
@@ -41,12 +41,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define dashboard_user_databases (lambda (username is_admin) (begin
 	(if is_admin (show)
 		(begin
-			(define access_set (scan "system" "access"
+			/* build list of db names the user has access to; nil neutral avoids pre-call quirk */
+			(define allowed (scan "system" "access"
 				'("username" "database") (lambda (u db) (equal?? u username))
 				'("database") (lambda (db) db)
-				(lambda (acc db) (set_assoc acc db true))
-				(list)))
-			(filter (show) (lambda (db) (has? access_set db)))
+				(lambda (acc db) (if (nil? db) acc (cons db (if (nil? acc) (list) acc))))
+				nil))
+			(filter (show) (lambda (db) (has? allowed db)))
 		)
 	)
 )))
@@ -145,19 +146,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	))
 	(lambda (req res) (begin
 		(match (req "path")
-			/* API: list running services */
-			"/dashboard/api/services" (begin
-				(if (nil? (dashboard_check_user req)) (dashboard_send_401 res) (begin
-					(if (not (nil? service_registry)) (begin
-						(define svc_keys (service_registry))
-						(define items (map svc_keys (lambda (name) (begin
-							(define val (service_registry name))
-							(json_encode_assoc (list "name" name "port" (car val) "route" (car (cdr val)) "protocols" (car (cdr (cdr val)))))
-						))))
-						(dashboard_send_json res (dashboard_json_array items))
-					) (dashboard_send_json res "[]"))
-				))
-			)
 			/* API: list databases (admin: all, non-admin: filtered by system.access) */
 			"/dashboard/api/databases" (begin
 				(define is_admin (dashboard_check_user req))
@@ -173,44 +161,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_json res (dashboard_json_array items))
 				))
 			)
-			/* API: read all settings */
-			"/dashboard/api/settings" (begin
-				(if (dashboard_check_admin req) (begin
-					(if (equal? (req "method") "POST") (begin
-						/* write a single setting: body is JSON {"key":"...", "value":...} */
-						(define body (json_decode ((req "body"))))
-						(settings (body "key") (body "value"))
-						(dashboard_send_json res "{\"ok\":true}")
-					) (begin
-							/* read all settings as assoc object */
-							(dashboard_send_json res (json_encode_assoc (settings)))
-					))
-				) (dashboard_send_401 res))
-			)
-			/* API: execute admin SQL (ALTER, DROP, etc.) */
-			"/dashboard/api/sql" (begin
-				(if (dashboard_check_admin req) (begin
-					(define body (json_decode ((req "body"))))
-					(define db (body "database"))
-					(define sql (body "sql"))
-					(eval (parse_sql db sql (lambda (schema table write) true)))
-					(dashboard_send_json res "{\"ok\":true}")
-				) (dashboard_send_401 res))
-			)
-			/* API: read-only query, streams NDJSON (same auth realm as dashboard) */
-			"/dashboard/api/query" (begin
-				(define is_admin (dashboard_check_user req))
-				(if (nil? is_admin) (dashboard_send_401 res) (begin
-					(define body (json_decode ((req "body"))))
-					(define db (body "database"))
-					(define sql (body "sql"))
-					(define policy (if is_admin (lambda (schema table write) (not write)) (sql_policy (req "username"))))
-					((res "header") "Content-Type" "application/x-ndjson")
-					(define resultrow (res "jsonl"))
-					(eval (parse_sql db sql policy))
-				))
-			)
-			/* API: shard column detail with compression types */
+				/* API: shard column detail with compression types */
 			(regex "^/dashboard/api/db/([^/]+)/([^/]+)/shard/([0-9]+)$" _ dbname tblname shardidx) (begin
 				(dashboard_check_db req res dbname (lambda (is_admin) (begin
 					(define sidx (simplify shardidx))
@@ -351,25 +302,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(lambda (acc item) (if (equal? acc "") item (concat acc "," item)))
 						""))
 					(dashboard_send_json res (concat "[" items "]"))
-				) (dashboard_send_401 res))
-			)
-			/* API: clear all error log entries (admin only) */
-			"/dashboard/api/errors/clear" (begin
-				(if (dashboard_check_admin req) (begin
-					(scan "system_statistic" "errors" '() (lambda () true) '("$delete") (lambda ($delete) ($delete)))
-					(error_log_counter "count" 0)
-					(dashboard_send_json res "{\"ok\":true}")
-				) (dashboard_send_401 res))
-			)
-			/* API: list all users with their database access (admin only) */
-			"/dashboard/api/users" (begin
-				(if (dashboard_check_admin req) (begin
-					/* build JSON per user directly in scan reduce (avoids multi-param lambda optimizer bug) */
-					(set json_str (scan "system" "user" '() (lambda () true) '("username")
-						(lambda (u) (dashboard_build_user_json u))
-						(lambda (acc item) (if (equal? acc "") item (concat acc "," item)))
-						""))
-					(dashboard_send_json res (concat "[" json_str "]"))
 				) (dashboard_send_401 res))
 			)
 			/* API: check current user's admin status */
