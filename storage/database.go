@@ -89,8 +89,17 @@ func Rebuild(all bool, repartition bool) string {
 					fmt.Println("error: rebuild/save failed for database", db.Name, ":", r)
 				}
 			}()
-			db.rebuild(all, repartition)
+			replaced := db.rebuild(all, repartition)
+			// Save schema BEFORE deleting old column files.
+			// This ensures schema.json always references files that exist on disk:
+			// if the process is killed after save but before cleanup, old files
+			// are orphaned (wasted space) but data is never lost.  Reversing the
+			// order (delete then save) creates a window where schema.json still
+			// points to already-deleted UUIDs, causing empty tables on restart.
 			db.save()
+			for _, s := range replaced {
+				s.RemoveFromDisk()
+			}
 		}(db)
 	}
 	return fmt.Sprint(time.Since(start))
@@ -254,10 +263,10 @@ func (db *database) ShowTables() scm.Scmer {
 	return scm.NewSlice(result)
 }
 
-func (db *database) rebuild(all bool, repartition bool) {
+func (db *database) rebuild(all bool, repartition bool) []*storageShard {
 	if db.srState == COLD {
 		// do nothing for cold databases; avoid loading during rebuild
-		return
+		return nil
 	}
 	var done sync.WaitGroup
 	// Collect pre-rebuild shards that were superseded. Their cleanup
@@ -418,12 +427,13 @@ func (db *database) rebuild(all bool, repartition bool) {
 	}
 	done.Wait()
 
-	// All table rebuilds (including .blobs) are complete. Safe to clean up
-	// replaced pre-rebuild shards without risk of deadlocking with repartition.
-	// rebuild() already deregistered old shards from GlobalCache; just clean disk.
-	for _, s := range allReplaced {
-		s.RemoveFromDisk()
-	}
+	// Return replaced shards to the caller (Rebuild) so it can delete their
+	// on-disk files AFTER db.save() has written the new schema.json.
+	// Deleting old column files before saving the schema creates a window
+	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
+	// The finalizer set in shard.rebuild() provides a safety net: if the
+	// caller never calls RemoveFromDisk (e.g. on panic), GC will clean up.
+	return allReplaced
 }
 
 func GetDatabase(schema string) *database {
