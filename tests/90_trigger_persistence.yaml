@@ -1,0 +1,163 @@
+# Trigger persistence tests
+# Verifies that triggers (user-visible and internal hidden) survive server restarts.
+# Internal prejoin triggers use the code-generator pattern: values are baked into the
+# quoted lambda body at code-gen time (not captured via closures), so they serialize
+# cleanly as self-contained Scheme expressions and reload correctly from schema.json.
+
+metadata:
+  version: "1.0"
+  description: "Trigger persistence across server restarts"
+  isolated: true
+
+cleanup:
+  - action: "Drop test tables"
+    sql: "DROP TABLE IF EXISTS tp_orders"
+  - action: "Drop test tables"
+    sql: "DROP TABLE IF EXISTS tp_customers"
+  - action: "Drop trigger test table"
+    sql: "DROP TABLE IF EXISTS tp_vals"
+
+test_cases:
+  # ----------------------------------------------------------------
+  # Part 1: user-visible trigger persistence (CREATE TRIGGER ... visible=true)
+  # Verifies that a standard SQL trigger with a literal value embedded in its
+  # body survives a server restart.
+  # ----------------------------------------------------------------
+
+  - name: "Create table for user-trigger persistence test"
+    sql: "CREATE TABLE tp_vals (id INT PRIMARY KEY, val INT)"
+
+  - name: "Insert baseline row"
+    sql: "INSERT INTO tp_vals VALUES (1, 10)"
+    expect:
+      affected_rows: 1
+
+  - name: "Create AFTER INSERT trigger with embedded literal"
+    sql: |
+      CREATE TRIGGER tp_add100 AFTER INSERT ON tp_vals FOR EACH ROW
+      BEGIN
+        UPDATE tp_vals SET val = val + 100 WHERE id = NEW.id;
+      END
+    expect:
+      rows: 0
+
+  - name: "Verify trigger fires before restart"
+    sql: "INSERT INTO tp_vals VALUES (2, 5)"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify inserted row has trigger-applied value"
+    sql: "SELECT val FROM tp_vals WHERE id = 2"
+    expect:
+      data:
+        - val: 105
+
+  # ----------------------------------------------------------------
+  # Part 2: prejoin incremental trigger persistence
+  # Verifies that the internal (hidden) triggers registered by the prejoin
+  # mechanism survive restart and maintain the prejoin table correctly.
+  # ----------------------------------------------------------------
+
+  - name: "Create customers table for prejoin persistence"
+    sql: "CREATE TABLE tp_customers (id INT PRIMARY KEY, name VARCHAR(50))"
+
+  - name: "Create orders table for prejoin persistence"
+    sql: "CREATE TABLE tp_orders (id INT PRIMARY KEY, customer_id INT, amount INT)"
+
+  - name: "Insert customers"
+    sql: "INSERT INTO tp_customers VALUES (1, 'Alice'), (2, 'Bob')"
+    expect:
+      affected_rows: 2
+
+  - name: "Insert orders"
+    sql: "INSERT INTO tp_orders VALUES (1, 1, 100), (2, 1, 200), (3, 2, 150)"
+    expect:
+      affected_rows: 3
+
+  - name: "Run GROUP BY to materialize prejoin and register internal triggers"
+    sql: "SELECT c.name, SUM(o.amount) AS total FROM tp_orders o JOIN tp_customers c ON o.customer_id = c.id GROUP BY c.name ORDER BY c.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+          total: 300
+        - name: "Bob"
+          total: 150
+
+  - name: "Verify SHOW TRIGGERS does not expose internal prejoin triggers"
+    sql: "SHOW TRIGGERS"
+    expect:
+      # Only the user-visible tp_add100 trigger should appear; hidden prejoin triggers must not
+      rows: 1
+
+  # ----------------------------------------------------------------
+  # SHUTDOWN — server will restart; subsequent tests run against fresh instance
+  # ----------------------------------------------------------------
+
+  - name: "SHUTDOWN for persistence test"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  # ----------------------------------------------------------------
+  # After restart: user trigger must still fire
+  # ----------------------------------------------------------------
+
+  - name: "After restart: user trigger still fires (literal 100 survived)"
+    sql: "INSERT INTO tp_vals VALUES (3, 7)"
+    expect:
+      affected_rows: 1
+
+  - name: "After restart: verify trigger-applied value is correct"
+    sql: "SELECT val FROM tp_vals WHERE id = 3"
+    expect:
+      data:
+        - val: 107
+
+  # ----------------------------------------------------------------
+  # After restart: internal prejoin trigger must still fire
+  # (trigger body with baked-in table names survived as serialized Scheme expr)
+  # ----------------------------------------------------------------
+
+  - name: "After restart: INSERT into orders (internal trigger fires from schema.json)"
+    sql: "INSERT INTO tp_orders VALUES (4, 2, 50)"
+    expect:
+      affected_rows: 1
+
+  - name: "After restart: GROUP BY reflects INSERT via persisted internal trigger"
+    sql: "SELECT c.name, SUM(o.amount) AS total FROM tp_orders o JOIN tp_customers c ON o.customer_id = c.id GROUP BY c.name ORDER BY c.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+          total: 300
+        - name: "Bob"
+          total: 200
+
+  - name: "After restart: UPDATE propagated by persisted trigger"
+    sql: "UPDATE tp_orders SET amount = 250 WHERE id = 3"
+    expect:
+      affected_rows: 1
+
+  - name: "After restart: GROUP BY reflects UPDATE"
+    sql: "SELECT c.name, SUM(o.amount) AS total FROM tp_orders o JOIN tp_customers c ON o.customer_id = c.id GROUP BY c.name ORDER BY c.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+          total: 300
+        - name: "Bob"
+          total: 300
+
+  # ----------------------------------------------------------------
+  # Cleanup
+  # ----------------------------------------------------------------
+
+  - name: "Cleanup tp_orders"
+    sql: "DROP TABLE tp_orders"
+
+  - name: "Cleanup tp_customers"
+    sql: "DROP TABLE tp_customers"
+
+  - name: "Cleanup tp_vals"
+    sql: "DROP TABLE tp_vals"

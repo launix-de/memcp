@@ -1002,6 +1002,25 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	var from func(any) Scmer
+	// fromBody is like from but does NOT pre-compile nested lambda forms into Procs.
+	// Used for deserializing Proc bodies so that inner (lambda ...) forms are kept as
+	// raw S-expression slices. This preserves the env chain: when the outer Proc fires,
+	// inner lambdas are compiled by the evaluator with the correct enclosing env, so
+	// symbol lookup (e.g. OLD/NEW) and (outer NthLocalVar(N)) resolve correctly.
+	var fromBody func(any) Scmer
+	fromBody = func(x any) Scmer {
+		switch t := x.(type) {
+		case []any:
+			// Keep all arrays as raw slices — lambda forms included.
+			out := make([]Scmer, len(t))
+			for i := range t {
+				out[i] = fromBody(t[i])
+			}
+			return NewSlice(out)
+		default:
+			return from(x)
+		}
+	}
 	from = func(x any) Scmer {
 		switch t := x.(type) {
 		case nil:
@@ -1063,7 +1082,7 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 					if sym, ok2 := head["symbol"]; ok2 {
 						if name, ok3 := sym.(string); ok3 && name == "lambda" {
 							params := from(t[1])
-							body := from(t[2])
+							body := fromBody(t[2])
 							proc := Proc{Params: params, Body: body, En: &Globalenv}
 							if len(t) > 3 {
 								switch nv := t[3].(type) {
