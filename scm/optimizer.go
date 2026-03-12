@@ -573,6 +573,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
+		if scmerIsSymbol(v[0], "!begin") && len(v) == 1 {
+			return NewNil(), true, true
+		}
 		if scmerIsSymbol(v[0], "!begin") && len(v) == 2 {
 			return OptimizeEx(v[1], env, &ome2, useResult)
 		}

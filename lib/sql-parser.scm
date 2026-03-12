@@ -438,12 +438,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 					/* BEFORE trigger: wrap with changed_rows handling */
 					/* Use outer begin for define, inner !begin (no new scope) for statements */
 					/* Wrap in begin: define changed_rows, execute stmts, return changed_rows */
-					(list (symbol "lambda") params
-						(list (symbol "begin")
-							session_bind
-							(list (symbol "define") changed_rows_sym (symbol "NEW"))
-							(cons '!begin valid_stmts)
-							changed_rows_sym)))
+					(if (> (count valid_stmts) 0)
+						(list (symbol "lambda") params
+							(list (symbol "begin")
+								session_bind
+								(list (symbol "define") changed_rows_sym (symbol "NEW"))
+								(cons '!begin valid_stmts)
+								changed_rows_sym))
+						/* empty BEFORE trigger: return nil (row used as-is) */
+						(list (symbol "lambda") params nil)))
 			)
 			/* SET assignments (legacy format) - body is AST (list (col1 expr1) ...), eval to get actual list */
 			(cons (symbol list) assignments) (begin
@@ -1676,8 +1679,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
 			(define body sql_trigger_body)
 		) (begin
-				(define compiled (compile_trigger_body schema timing (car (cdr body))))
-				(list 'createtrigger schema tbl name timing (car body) (eval compiled) true)
+				/* wrap compile+eval in try: if trigger body fails to compile (e.g. missing table),
+				   still register the trigger as a no-op rather than failing CREATE TRIGGER */
+				(define trigger_fn (try
+					(lambda () (eval (compile_trigger_body schema timing (car (cdr body)))))
+					(lambda (err) (begin (print (concat "WARNING: trigger " name " body compile failed: " (string err))) (lambda (row) nil)))))
+				(list 'createtrigger schema tbl name timing (car body) trigger_fn)
 		))
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
