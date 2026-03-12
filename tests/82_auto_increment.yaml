@@ -1,6 +1,7 @@
 metadata:
   version: "1.0"
   description: "AUTO_INCREMENT correctness: sequential assignment, explicit ID coexistence, counter persistence"
+  isolated: true
 
 setup:
   - sql: "DROP TABLE IF EXISTS ai_basic"

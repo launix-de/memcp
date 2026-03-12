@@ -472,7 +472,11 @@ func Init(en scm.Env) {
 			t.Collation = collation
 			t.Charset = charset
 			t.Comment = comment
-			t.Auto_increment = autoIncrement
+			if created {
+				t.Auto_increment = autoIncrement // new table: use specified value (0 = start from scratch)
+			} else if autoIncrement > t.Auto_increment {
+				t.Auto_increment = autoIncrement // existing table: only advance, never reset
+			}
 			if created {
 				for _, coldef := range mustScmerSlice(a[2], "columns") {
 					def := mustScmerSlice(coldef, "column definition")
