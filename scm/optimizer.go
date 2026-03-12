@@ -893,6 +893,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 // wrapConstListForCode wraps a constant-folded Scmer value so it can safely
 // be embedded in generated code. Raw list/slice values would be misinterpreted
 // as function calls by Eval, so they are wrapped as (list ...) calls recursively.
+// Symbols are wrapped in (quote sym) so they evaluate to the symbol value rather
+// than being looked up as variable references.
 // Only wraps plain slices — FastDicts are left as-is since they are self-evaluating.
 func wrapConstListForCode(val Scmer) Scmer {
 	if val.IsSlice() {
@@ -903,6 +905,9 @@ func wrapConstListForCode(val Scmer) Scmer {
 			packed = append(packed, wrapConstListForCode(elem))
 		}
 		return NewSlice(packed)
+	}
+	if val.IsSymbol() {
+		return NewSlice([]Scmer{NewSymbol("quote"), val})
 	}
 	return val
 }
