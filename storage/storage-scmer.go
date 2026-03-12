@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -207,6 +207,12 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
+	// const: all values identical — store only the single value (beats everything incl. sparse)
+	if s.enumK == 1 && s.longStrings <= 2 {
+		c := new(StorageConst)
+		c.value = s.enumVals[0]
+		return c
+	}
 	if s.null*100 > uint(i)*13 {
 		// sparse payoff against bitcompressed is at ~13%
 		if s.longStrings > 2 {

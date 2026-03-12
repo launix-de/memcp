@@ -796,9 +796,10 @@ def start_memcp_process(port: int) -> subprocess.Popen | None:
         datadir = os.environ.get("MEMCP_TEST_DATADIR", f"/tmp/memcp-sql-tests-{port}")
         _memcp_log_file = f"/tmp/memcp-test-{port}.log"
         env = os.environ.copy()
+        memcp_bin = os.environ.get("MEMCP_BINARY", "./memcp")
         logfile = open(_memcp_log_file, 'w')
         proc = subprocess.Popen([
-            "./memcp", "-data", datadir,
+            memcp_bin, "-data", datadir,
             f"--api-port={port}", f"--mysql-port={port+1000}",
             "--disable-mysql", "lib/main.scm"
         ], cwd=os.path.dirname(os.path.abspath(__file__)),
