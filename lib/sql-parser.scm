@@ -754,6 +754,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DATE_ADD" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_add e n unit))
 		/* DATE_SUB(expr, INTERVAL n UNIT) */
 		(parser '((atom "DATE_SUB" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_sub e n unit))
+		/* TIMESTAMPDIFF(unit, expr1, expr2) */
+		(parser '((atom "TIMESTAMPDIFF" true) "(" (define unit sql_identifier_unquoted) "," (define e1 sql_expression) "," (define e2 sql_expression) ")") '('timestampdiff unit e1 e2))
 
 		/* SUBSTRING(expr FROM start FOR len) - SQL standard syntax */
 		(parser '((atom "SUBSTRING" true) "(" (define s sql_expression) (atom "FROM" true) (define start sql_expression) (atom "FOR" true) (define len sql_expression) ")") '((quote sql_substr) s start len))
@@ -1294,7 +1296,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				","))
 			")")
 		(atom "VALUES" true)
-		(define datasets (* (parser '(
+		(define datasets (+ (parser '(
 			"("
 			(define dataset (* sql_expression ","))
 			")"
@@ -1331,6 +1333,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				sql_identifier
 				","))
 			")")
+		(? (atom "VALUES" true)) /* MySQL extension: INSERT INTO t (cols) VALUES SELECT ... treated as INSERT INTO t (cols) SELECT ... */
 		(define inner sql_select) /* INNER SELECT */
 		(define datasets (* (parser '(
 			"("
