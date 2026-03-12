@@ -1025,56 +1025,6 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
-		"register_prejoin_invalidation", "registers triggers on a source table to drop a prejoin table when source data changes",
-		4, 4,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"src_schema", "string", "database of the source table", nil},
-			scm.DeclarationParameter{"src_table", "string", "name of the source table", nil},
-			scm.DeclarationParameter{"pj_schema", "string", "database of the prejoin table", nil},
-			scm.DeclarationParameter{"pj_table", "string", "name of the prejoin table", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			srcDB := GetDatabase(scm.String(a[0]))
-			if srcDB == nil {
-				return scm.NewBool(false)
-			}
-			srcTable := srcDB.GetTable(scm.String(a[1]))
-			if srcTable == nil {
-				return scm.NewBool(false)
-			}
-			pjSchema := scm.String(a[2])
-			pjTable := scm.String(a[3])
-			for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete, AfterDropTable, AfterDropColumn} {
-				triggerName := ".prejoin:" + pjTable + "|" + srcTable.Name + "|" + timing.String()
-				exists := false
-				for _, tr := range srcTable.Triggers {
-					if tr.Name == triggerName {
-						exists = true
-						break
-					}
-				}
-				if exists {
-					continue
-				}
-				srcTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   timing,
-					IsSystem: true,
-					Priority: 100,
-					Async:    true, // fire-and-forget: runs in background goroutine to avoid blocking source DML
-					Func: buildFKProc(scm.NewSlice([]scm.Scmer{
-						scm.NewSymbol("droptable"),
-						scm.NewString(pjSchema),
-						scm.NewString(pjTable),
-						scm.NewBool(true),
-					})),
-				})
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
 		"register_keytable_cleanup", "registers triggers on a base table to maintain keytable entries (insert/delete group keys)",
 		6, 6,
 		[]scm.DeclarationParameter{
@@ -1318,97 +1268,6 @@ func Init(en scm.Env) {
 				if c.IsTemp {
 					atomic.StoreInt64(&c.lastAccessed, now.UnixNano())
 				}
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"register_prejoin_incremental", "registers incremental INSERT/DELETE/UPDATE triggers on a source table to maintain a prejoin table",
-		7, 7,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"src_schema", "string", "database of the source table", nil},
-			scm.DeclarationParameter{"src_table", "string", "name of the source table", nil},
-			scm.DeclarationParameter{"pj_schema", "string", "database of the prejoin table", nil},
-			scm.DeclarationParameter{"pj_table", "string", "name of the prejoin table", nil},
-			scm.DeclarationParameter{"delete_fn", "proc", "(lambda (OLD NEW) ...) compiled DELETE trigger body", nil},
-			scm.DeclarationParameter{"insert_fn", "proc", "(lambda (OLD NEW) ...) compiled INSERT trigger body", nil},
-			scm.DeclarationParameter{"update_fn", "proc", "(lambda (OLD NEW) ...) compiled UPDATE trigger body", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			srcSchemaName := scm.String(a[0])
-			srcTableName := scm.String(a[1])
-			pjSchemaName := scm.String(a[2])
-			pjTableName := scm.String(a[3])
-			deleteFn := a[4]
-			insertFn := a[5]
-			updateFn := a[6]
-
-			srcDB := GetDatabase(srcSchemaName)
-			if srcDB == nil {
-				return scm.NewBool(false)
-			}
-			srcTable := srcDB.GetTable(srcTableName)
-			if srcTable == nil {
-				return scm.NewBool(false)
-			}
-
-			// Register DML triggers (idempotent)
-			dmlTriggers := []struct {
-				timing TriggerTiming
-				fn     scm.Scmer
-			}{
-				{AfterDelete, deleteFn},
-				{AfterInsert, insertFn},
-				{AfterUpdate, updateFn},
-			}
-			for _, td := range dmlTriggers {
-				triggerName := ".pj_incr:" + pjTableName + "|" + srcTable.Name + "|" + td.timing.String()
-				exists := false
-				for _, tr := range srcTable.Triggers {
-					if tr.Name == triggerName {
-						exists = true
-						break
-					}
-				}
-				if exists {
-					continue
-				}
-				srcTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   td.timing,
-					IsSystem: true,
-					Priority: 100,
-					Async:    false,
-					Func:     td.fn,
-				})
-			}
-			// Lifecycle triggers: DROP/schema-change → full invalidation
-			for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {
-				triggerName := ".pj_incr:" + pjTableName + "|" + srcTable.Name + "|" + timing.String()
-				exists := false
-				for _, tr := range srcTable.Triggers {
-					if tr.Name == triggerName {
-						exists = true
-						break
-					}
-				}
-				if exists {
-					continue
-				}
-				srcTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   timing,
-					IsSystem: true,
-					Priority: 100,
-					Async:    true,
-					Func: buildFKProc(scm.NewSlice([]scm.Scmer{
-						scm.NewSymbol("droptable"),
-						scm.NewString(pjSchemaName),
-						scm.NewString(pjTableName),
-						scm.NewBool(true),
-					})),
-				})
 			}
 			return scm.NewBool(true)
 		}, false, false, nil,
@@ -1783,8 +1642,8 @@ func Init(en scm.Env) {
 					continue
 				}
 				for _, tr := range t.Triggers {
-					// Skip system triggers
-					if tr.IsSystem {
+					// Skip system/internal triggers — only show user-visible ones
+					if tr.IsSystem || tr.Hidden {
 						continue
 					}
 					// MySQL SHOW TRIGGERS format:
@@ -1928,7 +1787,7 @@ func Init(en scm.Env) {
 	// Trigger management
 	scm.Declare(&en, &scm.Declaration{
 		"createtrigger", "creates a new trigger on a table",
-		6, 6,
+		7, 7,
 		[]scm.DeclarationParameter{
 			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
 			scm.DeclarationParameter{"table", "string", "name of the table", nil},
@@ -1936,6 +1795,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"timing", "string", "one of: before_insert, after_insert, before_update, after_update, before_delete, after_delete", nil},
 			scm.DeclarationParameter{"source_sql", "string", "original SQL body text (for SHOW TRIGGERS)", nil},
 			scm.DeclarationParameter{"body", "any", "trigger body (parsed Scheme expression)", nil},
+			scm.DeclarationParameter{"visible", "bool", "true = user trigger (shown in SHOW TRIGGERS), false = internal trigger (hidden)", nil},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
@@ -1972,16 +1832,17 @@ func Init(en scm.Env) {
 			}
 
 			sourceSQL := scm.String(a[4])
-			// For now, store body as-is (can be SQL string or Scheme expr)
-			// TODO: compile SQL body to Scheme procedure
 			body := a[5]
+			visible := scm.ToBool(a[6])
 
+			// Idempotent: replace any existing trigger with the same name
+			t.RemoveTrigger(name)
 			trigger := TriggerDescription{
 				Name:      name,
 				Timing:    timing,
 				Func:      body,
 				SourceSQL: sourceSQL,
-				IsSystem:  false,
+				Hidden:    !visible,
 				Priority:  0,
 			}
 			t.AddTrigger(trigger)

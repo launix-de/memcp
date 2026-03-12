@@ -127,7 +127,8 @@ type TriggerDescription struct {
 	Timing    TriggerTiming `json:"timing"`               // BEFORE/AFTER INSERT/UPDATE/DELETE
 	Func      scm.Scmer     `json:"func"`                 // The trigger function (compiled Scheme procedure)
 	SourceSQL string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
-	IsSystem  bool          `json:"is_system,omitempty"`  // True for auto-generated triggers (hidden from SHOW TRIGGERS)
+	IsSystem  bool          `json:"is_system,omitempty"`  // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
+	Hidden    bool          `json:"hidden,omitempty"`     // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
 	Priority  int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
 	Async     bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
 }

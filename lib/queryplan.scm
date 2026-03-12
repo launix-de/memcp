@@ -48,6 +48,33 @@ if there is a group function, create a temporary preaggregate table
 
 */
 
+/* Registers invalidation triggers on src_table to drop pj_table on any DML.
+Uses code-generator pattern: values baked into quoted lambda body at register time,
+so no closure capture — the trigger body serializes cleanly as a self-contained expression. */
+(define register_prejoin_invalidation (lambda (src_schema src_table pj_schema pj_table) (begin
+	(define prefix (concat ".prejoin:" pj_table "|" src_table "|"))
+	(define drop_body (eval (list 'lambda (list 'OLD 'NEW) (list 'droptable pj_schema pj_table true))))
+	(createtrigger src_schema src_table (concat prefix "after_insert")     "after_insert"     "" drop_body false)
+	(createtrigger src_schema src_table (concat prefix "after_update")     "after_update"     "" drop_body false)
+	(createtrigger src_schema src_table (concat prefix "after_delete")     "after_delete"     "" drop_body false)
+	(createtrigger src_schema src_table (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
+	(createtrigger src_schema src_table (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
+	true)))
+
+/* Registers incremental maintenance triggers on src_table to keep pj_table in sync.
+delete_fn/insert_fn/update_fn are code-generator-produced lambda expressions (no closures).
+Lifecycle triggers use code-generator pattern for the drop body as well.
+update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure capture). */
+(define register_prejoin_incremental (lambda (src_schema src_table pj_schema pj_table delete_fn insert_fn update_fn) (begin
+	(define prefix (concat ".pj_incr:" pj_table "|" src_table "|"))
+	(createtrigger src_schema src_table (concat prefix "after_delete") "after_delete" "" delete_fn false)
+	(createtrigger src_schema src_table (concat prefix "after_insert") "after_insert" "" insert_fn false)
+	(createtrigger src_schema src_table (concat prefix "after_update") "after_update" "" update_fn false)
+	(define drop_body (eval (list 'lambda (list 'OLD 'NEW) (list 'droptable pj_schema pj_table true))))
+	(createtrigger src_schema src_table (concat prefix "after_drop_table") "after_drop_table" "" drop_body false)
+	(createtrigger src_schema src_table (concat prefix "after_drop_column") "after_drop_column" "" drop_body false)
+	true)))
+
 /* returns a list of '(string...) */
 (define extract_columns_for_tblvar (lambda (tblvar expr)
 	(match expr
@@ -1831,10 +1858,10 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 								(define insert_fn
 									(eval (list 'lambda (list 'OLD 'NEW)
 										(build_pj_insert_scan tables condition trigger_tv true pj_schema pjtbl mat_cols mat_col_names))))
-								/* UPDATE trigger: delete old prejoin rows + insert new for any row change */
-								(define captured_delete_fn delete_fn)
-								(define captured_insert_fn insert_fn)
-								(define update_fn (lambda (OLD NEW) (begin (captured_delete_fn OLD NEW) (captured_insert_fn OLD NEW))))
+								/* UPDATE trigger: delete old prejoin rows + insert new for any row change.
+							Code-generator pattern: embed delete_fn/insert_fn as proc literals in body
+							so no closure capture — serializes cleanly for persistence. */
+								(define update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list insert_fn 'OLD 'NEW)))))
 								/* emit the register call as an S-expression to be executed at query time */
 								(list 'register_prejoin_incremental src_schema src_tbl pj_schema pjtbl
 									delete_fn insert_fn update_fn))))))
