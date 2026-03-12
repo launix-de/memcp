@@ -156,6 +156,29 @@ func (u *storageShard) load(t *table) {
 		if numEntriesRestored > 0 {
 			fmt.Println("restoring delta storage from database "+u.t.schema.Name+" shard "+u.uuid.String()+":", numEntriesRestored, "entries")
 		}
+		// Reconstruct Auto_increment counter from replayed delta rows so that
+		// cross-connection INSERT sequences never re-use IDs after server restart.
+		for _, col := range t.Columns {
+			if !col.AutoIncrement {
+				continue
+			}
+			colIdx, ok := u.deltaColumns[col.Name]
+			if !ok {
+				break
+			}
+			var maxVal uint64
+			for _, row := range u.inserts {
+				if colIdx < len(row) && !row[colIdx].IsNil() {
+					if v := uint64(scm.ToInt(row[colIdx])); v > maxVal {
+						maxVal = v
+					}
+				}
+			}
+			if maxVal+1 > t.Auto_increment {
+				t.Auto_increment = maxVal + 1
+			}
+			break // only one AUTO_INCREMENT column per table
+		}
 	}
 }
 
@@ -1389,6 +1412,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	}
 	var Auto_increment uint64
 	var hasAI bool
+	var aiColIdx int = -1
 	for _, c := range t.t.Columns {
 		if c.AutoIncrement {
 			hasAI = true
@@ -1405,6 +1429,9 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				cidx = len(t.deltaColumns)
 				t.deltaColumns[c.Name] = cidx
 				colidx = append(colidx, cidx)
+			}
+			if c.AutoIncrement {
+				aiColIdx = cidx
 			}
 		}
 	}
@@ -1465,6 +1492,28 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				index.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
 			}
 			index.mu.Unlock()
+		}
+	}
+	// If any row had an explicit AI value exceeding the reserved range, bump the counter.
+	// Auto_increment (local) holds the base before reservation; auto-assigned IDs are
+	// in [Auto_increment+1 .. Auto_increment+len(values)]. Any stored value beyond that
+	// range was explicitly provided by the caller and must advance the counter.
+	if hasAI && aiColIdx >= 0 {
+		reservedTop := Auto_increment + uint64(len(values))
+		var maxExplicit uint64
+		for _, row := range t.inserts[len(t.inserts)-len(values):] {
+			if aiColIdx < len(row) && !row[aiColIdx].IsNil() {
+				if v := uint64(scm.ToInt(row[aiColIdx])); v > reservedTop && v > maxExplicit {
+					maxExplicit = v
+				}
+			}
+		}
+		if maxExplicit > 0 {
+			t.t.mu.Lock()
+			if maxExplicit+1 > t.t.Auto_increment {
+				t.t.Auto_increment = maxExplicit + 1
+			}
+			t.t.mu.Unlock()
 		}
 	}
 	// Size tracking happens on rebuild only (computeSizeLocked gives accurate malloc-aware size).
