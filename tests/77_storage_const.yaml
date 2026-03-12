@@ -1,0 +1,275 @@
+# StorageConst compression test suite
+# Verifies that columns with a single distinct value are compressed to StorageConst
+# after rebuild. Uses scm:(rebuild) and (show ... 0 true) to inspect storage type.
+
+metadata:
+  version: "1.0"
+  description: "StorageConst: single-value column compression, correctness, and persistence"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS sc_int"
+  - sql: "DROP TABLE IF EXISTS sc_str"
+  - sql: "DROP TABLE IF EXISTS sc_null"
+  - sql: "DROP TABLE IF EXISTS sc_mixed"
+
+test_cases:
+
+  # === 1. Integer constant column ===
+  - name: "Create integer-const table"
+    sql: "CREATE TABLE sc_int (id INT, val TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert 50 rows with identical integer value"
+    sql: |
+      INSERT INTO sc_int VALUES
+        (0,42),(1,42),(2,42),(3,42),(4,42),(5,42),(6,42),(7,42),(8,42),(9,42),
+        (10,42),(11,42),(12,42),(13,42),(14,42),(15,42),(16,42),(17,42),(18,42),(19,42),
+        (20,42),(21,42),(22,42),(23,42),(24,42),(25,42),(26,42),(27,42),(28,42),(29,42),
+        (30,42),(31,42),(32,42),(33,42),(34,42),(35,42),(36,42),(37,42),(38,42),(39,42),
+        (40,42),(41,42),(42,42),(43,42),(44,42),(45,42),(46,42),(47,42),(48,42),(49,42)
+    expect:
+      affected_rows: 50
+
+  - name: "Int-const: verify value before rebuild"
+    sql: "SELECT val FROM sc_int WHERE id = 25"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Int-const: rebuild to trigger StorageConst"
+    scm: "(rebuild)"
+
+  - name: "Int-const: verify val column is const[42] after rebuild"
+    scm: |
+      (begin
+        (set shard (show "memcp-tests" "sc_int" 0 true))
+        (set cols (get_assoc shard "columns"))
+        (set col (nth (filter cols (lambda (c) (equal? (get_assoc c "name") "val"))) 0))
+        (set compr (get_assoc col "compression"))
+        (if (equal? compr "const[42]") "ok"
+          (error (concat "expected const[42], got " compr))))
+
+  - name: "Int-const: read first row after rebuild"
+    sql: "SELECT val FROM sc_int WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Int-const: read last row after rebuild"
+    sql: "SELECT val FROM sc_int WHERE id = 49"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Int-const: aggregate after rebuild"
+    sql: "SELECT SUM(val) AS s, COUNT(*) AS cnt FROM sc_int"
+    expect:
+      rows: 1
+      data:
+        - s: 2100
+          cnt: 50
+
+  # === 2. String constant column ===
+  - name: "Create string-const table"
+    sql: "CREATE TABLE sc_str (id INT, label VARCHAR(10))"
+    expect:
+      rows: 0
+
+  - name: "Insert 40 rows with identical string value"
+    sql: |
+      INSERT INTO sc_str VALUES
+        (0,'ok'),(1,'ok'),(2,'ok'),(3,'ok'),(4,'ok'),(5,'ok'),(6,'ok'),(7,'ok'),(8,'ok'),(9,'ok'),
+        (10,'ok'),(11,'ok'),(12,'ok'),(13,'ok'),(14,'ok'),(15,'ok'),(16,'ok'),(17,'ok'),(18,'ok'),(19,'ok'),
+        (20,'ok'),(21,'ok'),(22,'ok'),(23,'ok'),(24,'ok'),(25,'ok'),(26,'ok'),(27,'ok'),(28,'ok'),(29,'ok'),
+        (30,'ok'),(31,'ok'),(32,'ok'),(33,'ok'),(34,'ok'),(35,'ok'),(36,'ok'),(37,'ok'),(38,'ok'),(39,'ok')
+    expect:
+      affected_rows: 40
+
+  - name: "Str-const: rebuild"
+    scm: "(rebuild)"
+
+  - name: "Str-const: verify label column is const[ok] after rebuild"
+    scm: |
+      (begin
+        (set shard (show "memcp-tests" "sc_str" 0 true))
+        (set cols (get_assoc shard "columns"))
+        (set col (nth (filter cols (lambda (c) (equal? (get_assoc c "name") "label"))) 0))
+        (set compr (get_assoc col "compression"))
+        (if (equal? compr "const[ok]") "ok"
+          (error (concat "expected const[ok], got " compr))))
+
+  - name: "Str-const: read value after rebuild"
+    sql: "SELECT label FROM sc_str WHERE id = 20"
+    expect:
+      rows: 1
+      data:
+        - label: "ok"
+
+  # === 3. NULL constant column ===
+  - name: "Create null-const table"
+    sql: "CREATE TABLE sc_null (id INT, val TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert 30 rows all NULL"
+    sql: |
+      INSERT INTO sc_null VALUES
+        (0,NULL),(1,NULL),(2,NULL),(3,NULL),(4,NULL),(5,NULL),(6,NULL),(7,NULL),(8,NULL),(9,NULL),
+        (10,NULL),(11,NULL),(12,NULL),(13,NULL),(14,NULL),(15,NULL),(16,NULL),(17,NULL),(18,NULL),(19,NULL),
+        (20,NULL),(21,NULL),(22,NULL),(23,NULL),(24,NULL),(25,NULL),(26,NULL),(27,NULL),(28,NULL),(29,NULL)
+    expect:
+      affected_rows: 30
+
+  - name: "Null-const: rebuild"
+    scm: "(rebuild)"
+
+  - name: "Null-const: verify val column is const[nil] after rebuild"
+    scm: |
+      (begin
+        (set shard (show "memcp-tests" "sc_null" 0 true))
+        (set cols (get_assoc shard "columns"))
+        (set col (nth (filter cols (lambda (c) (equal? (get_assoc c "name") "val"))) 0))
+        (set compr (get_assoc col "compression"))
+        (if (equal? compr "const[nil]") "ok"
+          (error (concat "expected const[nil], got " compr))))
+
+  - name: "Null-const: read value after rebuild"
+    sql: "SELECT val FROM sc_null WHERE id = 15"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Null-const: count NULLs after rebuild"
+    sql: "SELECT COUNT(*) AS cnt FROM sc_null WHERE val IS NULL"
+    expect:
+      rows: 1
+      data:
+        - cnt: 30
+
+  # === 4. DML and persistence ===
+  - name: "Create mixed table for DML test"
+    sql: "CREATE TABLE sc_mixed (id INT, tag VARCHAR(10), score TINYINT)"
+    expect:
+      rows: 0
+
+  - name: "Insert 30 rows with constant tag and score"
+    sql: |
+      INSERT INTO sc_mixed VALUES
+        (0,'x',5),(1,'x',5),(2,'x',5),(3,'x',5),(4,'x',5),
+        (5,'x',5),(6,'x',5),(7,'x',5),(8,'x',5),(9,'x',5),
+        (10,'x',5),(11,'x',5),(12,'x',5),(13,'x',5),(14,'x',5),
+        (15,'x',5),(16,'x',5),(17,'x',5),(18,'x',5),(19,'x',5),
+        (20,'x',5),(21,'x',5),(22,'x',5),(23,'x',5),(24,'x',5),
+        (25,'x',5),(26,'x',5),(27,'x',5),(28,'x',5),(29,'x',5)
+    expect:
+      affected_rows: 30
+
+  - name: "Mixed: rebuild"
+    scm: "(rebuild)"
+
+  - name: "Mixed: verify score is const[5]"
+    scm: |
+      (begin
+        (set shard (show "memcp-tests" "sc_mixed" 0 true))
+        (set cols (get_assoc shard "columns"))
+        (set col (nth (filter cols (lambda (c) (equal? (get_assoc c "name") "score"))) 0))
+        (set compr (get_assoc col "compression"))
+        (if (equal? compr "const[5]") "ok"
+          (error (concat "expected const[5], got " compr))))
+
+  - name: "Mixed: UPDATE one row"
+    sql: "UPDATE sc_mixed SET score = 99 WHERE id = 10"
+    expect:
+      affected_rows: 1
+
+  - name: "Mixed: verify updated row"
+    sql: "SELECT score FROM sc_mixed WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - score: 99
+
+  - name: "Mixed: verify unchanged row"
+    sql: "SELECT score FROM sc_mixed WHERE id = 11"
+    expect:
+      rows: 1
+      data:
+        - score: 5
+
+  - name: "Mixed: DELETE one row"
+    sql: "DELETE FROM sc_mixed WHERE id = 0"
+    expect:
+      affected_rows: 1
+
+  - name: "Mixed: count after DELETE"
+    sql: "SELECT COUNT(*) AS cnt FROM sc_mixed"
+    expect:
+      rows: 1
+      data:
+        - cnt: 29
+
+  - name: "Mixed: SHUTDOWN to serialize StorageConst"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Int-const: read after persistence"
+    sql: "SELECT val FROM sc_int WHERE id = 25"
+    expect:
+      rows: 1
+      data:
+        - val: 42
+
+  - name: "Int-const: count after persistence"
+    sql: "SELECT COUNT(*) AS cnt FROM sc_int"
+    expect:
+      rows: 1
+      data:
+        - cnt: 50
+
+  - name: "Str-const: read after persistence"
+    sql: "SELECT label FROM sc_str WHERE id = 5"
+    expect:
+      rows: 1
+      data:
+        - label: "ok"
+
+  - name: "Null-const: read after persistence"
+    sql: "SELECT val FROM sc_null WHERE id = 0"
+    expect:
+      rows: 1
+      data:
+        - val: null
+
+  - name: "Mixed: updated row survives persistence"
+    sql: "SELECT score FROM sc_mixed WHERE id = 10"
+    expect:
+      rows: 1
+      data:
+        - score: 99
+
+  - name: "Mixed: unchanged row survives persistence"
+    sql: "SELECT score FROM sc_mixed WHERE id = 11"
+    expect:
+      rows: 1
+      data:
+        - score: 5
+
+  - name: "Mixed: count after persistence"
+    sql: "SELECT COUNT(*) AS cnt FROM sc_mixed"
+    expect:
+      rows: 1
+      data:
+        - cnt: 29
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS sc_int"
+  - sql: "DROP TABLE IF EXISTS sc_str"
+  - sql: "DROP TABLE IF EXISTS sc_null"
+  - sql: "DROP TABLE IF EXISTS sc_mixed"

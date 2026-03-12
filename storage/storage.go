@@ -104,6 +104,7 @@ type ColumnStorage interface {
 //	21  StoragePrefix  – prefix-compressed string (experimental)
 //	31  OverlayBlob    – large binary/blob overlay
 //	40  StorageEnum    – rANS-entropy-coded enum         (no version byte — see above)
+//	41  StorageConst   – single constant value column
 //	50  StorageComputeProxy – computed/cached column
 var storages = map[uint8]reflect.Type{
 	1:  reflect.TypeOf(StorageSCMER{}),
@@ -117,6 +118,7 @@ var storages = map[uint8]reflect.Type{
 	//30: reflect.TypeOf(OverlaySCMER{}),
 	31: reflect.TypeOf(OverlayBlob{}),
 	40: reflect.TypeOf(StorageEnum{}),
+	41: reflect.TypeOf(StorageConst{}),
 	50: reflect.TypeOf(StorageComputeProxy{}),
 }
 
