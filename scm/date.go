@@ -325,6 +325,74 @@ func init_date() {
 		nil,
 	})
 
+	// TIMESTAMPDIFF(unit, datetime1, datetime2) - returns datetime2 - datetime1 in the given unit
+	Declare(&Globalenv, &Declaration{
+		"timestampdiff", "returns the difference between two datetime values in the specified unit (datetime2 - datetime1)",
+		3, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"unit", "string", "unit: MICROSECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR", nil},
+			DeclarationParameter{"datetime1", "any", "first datetime value", nil},
+			DeclarationParameter{"datetime2", "any", "second datetime value", nil},
+		}, "int",
+		func(a ...Scmer) Scmer {
+			if a[1].IsNil() || a[2].IsNil() {
+				return NewNil()
+			}
+			t1, ok1 := toTime(a[1])
+			t2, ok2 := toTime(a[2])
+			if !ok1 || !ok2 {
+				return NewNil()
+			}
+			unit := strings.ToUpper(a[0].String())
+			switch unit {
+			case "MICROSECOND":
+				return NewInt(t2.Sub(t1).Microseconds())
+			case "SECOND":
+				return NewInt(int64(t2.Sub(t1).Seconds()))
+			case "MINUTE":
+				return NewInt(int64(t2.Sub(t1).Minutes()))
+			case "HOUR":
+				return NewInt(int64(t2.Sub(t1).Hours()))
+			case "DAY":
+				d1 := time.Date(t1.Year(), t1.Month(), t1.Day(), 0, 0, 0, 0, time.UTC)
+				d2 := time.Date(t2.Year(), t2.Month(), t2.Day(), 0, 0, 0, 0, time.UTC)
+				return NewInt(int64(d2.Sub(d1).Hours() / 24))
+			case "WEEK":
+				d1 := time.Date(t1.Year(), t1.Month(), t1.Day(), 0, 0, 0, 0, time.UTC)
+				d2 := time.Date(t2.Year(), t2.Month(), t2.Day(), 0, 0, 0, 0, time.UTC)
+				return NewInt(int64(d2.Sub(d1).Hours() / 24 / 7))
+			case "MONTH":
+				years := int64(t2.Year() - t1.Year())
+				months := int64(t2.Month() - t1.Month())
+				total := years*12 + months
+				// adjust if day of month hasn't been reached yet
+				if t2.Day() < t1.Day() {
+					total--
+				}
+				return NewInt(total)
+			case "QUARTER":
+				years := int64(t2.Year() - t1.Year())
+				months := int64(t2.Month() - t1.Month())
+				total := years*12 + months
+				if t2.Day() < t1.Day() {
+					total--
+				}
+				return NewInt(total / 3)
+			case "YEAR":
+				years := int64(t2.Year() - t1.Year())
+				// adjust if month/day hasn't been reached yet
+				if t2.Month() < t1.Month() || (t2.Month() == t1.Month() && t2.Day() < t1.Day()) {
+					years--
+				}
+				return NewInt(years)
+			default:
+				panic("unknown TIMESTAMPDIFF unit: " + unit)
+			}
+		},
+		true, false, nil,
+		nil,
+	})
+
 	// DATEDIFF(date1, date2) - returns number of days between two dates
 	Declare(&Globalenv, &Declaration{
 		"datediff", "returns number of days between two dates (date1 - date2)",
