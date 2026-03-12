@@ -1131,12 +1131,30 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 	{
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))
+		skipConstraint := false // true if a key col is auto-assigned (auto-increment/default) and not in columns
 		for i, col := range uniq.Cols {
+			found := false
 			for j, col2 := range columns {
 				if col == col2 {
 					keyIdx[i] = j
+					found = true
 				}
 			}
+			if !found {
+				// Column not provided by the caller — check if it's auto-assigned.
+				// If so, the auto-increment/default mechanism guarantees a unique value,
+				// so there is no point checking (and no safe value to check against).
+				for _, tc := range t.Columns {
+					if tc.Name == col && (tc.AutoIncrement || !tc.Default.IsNil()) {
+						skipConstraint = true
+						break
+					}
+				}
+			}
+		}
+		if skipConstraint {
+			success(values)
+			return
 		}
 
 		shardlist := t.ActiveShards()
