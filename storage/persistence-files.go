@@ -22,6 +22,7 @@ import "fmt"
 import "bufio"
 import "bytes"
 import "strings"
+import "path/filepath"
 import "crypto/sha256"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
@@ -121,6 +122,39 @@ func (s *FileStorage) WriteBlob(hash string) io.WriteCloser {
 
 func (s *FileStorage) DeleteBlob(hash string) {
 	os.Remove(s.blobPath(hash))
+}
+
+func (s *FileStorage) WalkBlobs(fn func(hash string) error) error {
+	return filepath.Walk(s.path+"blob/", func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		return fn(info.Name())
+	})
+}
+
+func (s *FileStorage) WalkShardFiles(fn func(name string) error) error {
+	entries, err := os.ReadDir(s.path)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if n == "schema.json" || n == "schema.json.old" {
+			continue
+		}
+		if err := fn(n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *FileStorage) DeleteShardFile(name string) {
+	os.Remove(s.path + name)
 }
 
 func (s *FileStorage) OpenLog(shard string) PersistenceLogfile {
