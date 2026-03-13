@@ -229,6 +229,18 @@ func init_processlist() {
 		false, false, nil, nil,
 	})
 	Declare(&Globalenv, &Declaration{
+		"connection_id", "returns the process-list ID of the current session (MySQL CONNECTION_ID() equivalent)",
+		0, 0,
+		[]DeclarationParameter{}, "int",
+		func(a ...Scmer) Scmer {
+			if ss := GetCurrentSessionState(); ss != nil {
+				return NewInt(int64(ss.ID))
+			}
+			return NewInt(0)
+		},
+		false, false, nil, nil,
+	})
+	Declare(&Globalenv, &Declaration{
 		"kill_query", "cancel the running query in session id; returns true if a query was killed",
 		1, 1,
 		[]DeclarationParameter{{"id", "int", "session ID from SHOW PROCESSLIST", nil}},

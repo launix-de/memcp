@@ -73,7 +73,8 @@ type scanResult struct {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
-	if ss := scm.GetCurrentSessionState(); ss != nil && ss.IsKilled() {
+	ss := scm.GetCurrentSessionState()
+	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
 	hasMutationCallback := false
@@ -118,6 +119,11 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	var inputCount int64
 	gls.Go(func() {
 		t.iterateShards(boundaries, func(s *storageShard) {
+			// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
+			// This keeps the worker pool draining quickly on tables with many shards.
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
+			}
 			// parallel scan over shards
 			defer func() {
 				if r := recover(); r != nil {

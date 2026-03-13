@@ -140,7 +140,8 @@ func (s *globalqueue) Pop() any {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
-	if ss := scm.GetCurrentSessionState(); ss != nil && ss.IsKilled() {
+	ss := scm.GetCurrentSessionState()
+	if ss != nil && ss.IsKilled() {
 		panic("query killed")
 	}
 	// touch temp columns so CacheManager knows they're still in use
@@ -298,6 +299,10 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	var inputCount int64
 	gls.Go(func() {
 		t.iterateShards(boundaries, func(s *storageShard) {
+			// Kill check at shard-scheduling point using closure-captured ss (no GLS lookup).
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
+			}
 			// parallel scan over shards
 			defer func() {
 				if r := recover(); r != nil {

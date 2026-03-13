@@ -205,7 +205,130 @@ test_cases:
     expect:
       rows: 0
 
+  # ── owner mutation under READ lock must fail ──────────────────────────────
+
+  - name: "owner cannot DELETE while holding READ lock"
+    steps:
+      - session_id: "lock-readdelete"
+        sql: "LOCK TABLES lock_test READ"
+      - session_id: "lock-readdelete"
+        sql: "DELETE FROM lock_test WHERE id = 9999"
+        expect:
+          error: true
+      - session_id: "lock-readdelete"
+        sql: "UNLOCK TABLES"
+
+  # ── multi-table LOCK TABLES ────────────────────────────────────────────────
+
+  - name: "LOCK TABLES on multiple tables grants all locks atomically"
+    setup:
+      - sql: "DROP TABLE IF EXISTS lock_test2"
+      - sql: "CREATE TABLE lock_test2 (id INT, v INT)"
+    steps:
+      - session_id: "lock-multi"
+        sql: "LOCK TABLES lock_test WRITE, lock_test2 WRITE"
+      - session_id: "lock-multi"
+        sql: "INSERT INTO lock_test VALUES (77, 'multi')"
+      - session_id: "lock-multi"
+        sql: "INSERT INTO lock_test2 VALUES (77, 1)"
+      - session_id: "lock-multi"
+        sql: "UNLOCK TABLES"
+      - session_id: "lock-multi"
+        sql: "SELECT val FROM lock_test WHERE id = 77"
+        expect:
+          rows: 1
+          contains: "multi"
+      - session_id: "lock-multi"
+        sql: "SELECT COUNT(*) AS n FROM lock_test2 WHERE id = 77"
+        expect:
+          rows: 1
+          contains: "1"
+
+  # ── concurrent: WRITE lock blocks UPDATE from another session ─────────────
+
+  - name: "WRITE lock blocks UPDATE from another session until UNLOCK"
+    steps:
+      - session_id: "lock-upd-writer"
+        sql: "DELETE FROM lock_test WHERE id = 88"
+      - session_id: "lock-upd-writer"
+        sql: "INSERT INTO lock_test VALUES (88, 'orig')"
+      - session_id: "lock-upd-writer"
+        sql: "LOCK TABLES lock_test WRITE"
+      - session_id: "lock-upd-updater"
+        sql: "UPDATE lock_test SET val = 'updated' WHERE id = 88"
+        background: true
+        expect:
+          rows: 1
+      - session_id: "lock-upd-writer"
+        sql: "SELECT 1"
+      - session_id: "lock-upd-writer"
+        sql: "UNLOCK TABLES"
+      - session_id: "lock-upd-writer"
+        sql: "SELECT val FROM lock_test WHERE id = 88"
+        expect:
+          rows: 1
+          contains: "updated"
+
+  # ── SHOW PROCESSLIST state during lock wait ────────────────────────────────
+
+  - name: "SHOW PROCESSLIST shows Waiting for table lock state"
+    steps:
+      - session_id: "lock-state-writer"
+        sql: "LOCK TABLES lock_test WRITE"
+      # background SELECT blocks until writer releases; sets State = "Waiting for table lock"
+      - session_id: "lock-state-reader"
+        sql: "SELECT id FROM lock_test WHERE id = 1"
+        background: true
+        expect:
+          rows: 1
+      # one sync step lets the background request reach the lock wait
+      - session_id: "lock-state-writer"
+        sql: "SELECT 1"
+      - session_id: "lock-state-writer"
+        sql: "SHOW PROCESSLIST"
+        expect:
+          contains: "Waiting for table lock"
+      - session_id: "lock-state-writer"
+        sql: "UNLOCK TABLES"
+
+  # ── KILL QUERY stops a running slow query ─────────────────────────────────
+
+  - name: "KILL QUERY stops a running slow query"
+    setup:
+      - sql: "DROP TABLE IF EXISTS kill_ctrl"
+      - sql: "DROP TABLE IF EXISTS kill_big"
+      - sql: "CREATE TABLE kill_ctrl (id BIGINT)"
+      - sql: "CREATE TABLE kill_big (id INT)"
+      - sql: "INSERT INTO kill_big VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16),(17),(18),(19),(20),(21),(22),(23),(24),(25),(26),(27),(28),(29),(30),(31),(32),(33),(34),(35),(36),(37),(38),(39),(40),(41),(42),(43),(44),(45),(46),(47),(48),(49),(50),(51),(52),(53),(54),(55),(56),(57),(58),(59),(60),(61),(62),(63),(64),(65),(66),(67),(68),(69),(70),(71),(72),(73),(74),(75),(76),(77),(78),(79),(80),(81),(82),(83),(84),(85),(86),(87),(88),(89),(90),(91),(92),(93),(94),(95),(96),(97),(98),(99),(100),(101),(102),(103),(104),(105),(106),(107),(108),(109),(110),(111),(112),(113),(114),(115),(116),(117),(118),(119),(120),(121),(122),(123),(124),(125),(126),(127),(128),(129),(130),(131),(132),(133),(134),(135),(136),(137),(138),(139),(140),(141),(142),(143),(144),(145),(146),(147),(148),(149),(150),(151),(152),(153),(154),(155),(156),(157),(158),(159),(160),(161),(162),(163),(164),(165),(166),(167),(168),(169),(170),(171),(172),(173),(174),(175),(176),(177),(178),(179),(180),(181),(182),(183),(184),(185),(186),(187),(188),(189),(190),(191),(192),(193),(194),(195),(196),(197),(198),(199),(200)"
+    steps:
+      # store victim session's connection ID in kill_ctrl
+      - session_id: "kill-victim"
+        sql: "INSERT INTO kill_ctrl VALUES (CONNECTION_ID())"
+      # start slow CROSS JOIN in background — 200×200 = 40 000 row combinations
+      - session_id: "kill-victim"
+        sql: "SELECT COUNT(*) AS n FROM kill_big a, kill_big b"
+        background: true
+        expect:
+          error: true
+      # two sync steps let the background request get established and start scanning
+      - session_id: "kill-attacker"
+        sql: "SELECT 1"
+      - session_id: "kill-attacker"
+        sql: "SELECT 1"
+      # kill the victim's running query
+      - session_id: "kill-attacker"
+        sql: "SELECT KILL_QUERY(id) FROM kill_ctrl LIMIT 1"
+
   # ── cleanup ────────────────────────────────────────────────────────────────
 
-  - name: "cleanup: drop lock_test table"
+  - name: "cleanup: drop lock test tables"
     sql: "DROP TABLE IF EXISTS lock_test"
+
+  - name: "cleanup: drop kill test tables"
+    sql: "DROP TABLE IF EXISTS kill_ctrl"
+
+  - name: "cleanup: drop kill_big table"
+    sql: "DROP TABLE IF EXISTS kill_big"
+
+  - name: "cleanup: drop lock_test2 table"
+    sql: "DROP TABLE IF EXISTS lock_test2"

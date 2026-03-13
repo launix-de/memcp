@@ -16,3 +16,42 @@ test_cases:
 
   - name: "KILL CONNECTION with unknown id completes without error"
     sql: "KILL CONNECTION 999999999"
+
+  # ── column structure ───────────────────────────────────────────────────────
+
+  - name: "SHOW PROCESSLIST returns expected column names"
+    sql: "SHOW PROCESSLIST"
+    expect:
+      contains:
+        - "Id"
+        - "User"
+        - "Command"
+        - "Time"
+        - "State"
+        - "Info"
+
+  - name: "SHOW PROCESSLIST includes the running query itself"
+    sql: "SHOW PROCESSLIST"
+    expect:
+      contains: "SHOW PROCESSLIST"
+
+  # ── CONNECTION_ID ──────────────────────────────────────────────────────────
+
+  - name: "CONNECTION_ID() returns a positive integer"
+    sql: "SELECT CONNECTION_ID() AS id"
+    expect:
+      rows: 1
+
+  - name: "CONNECTION_ID() is stable within a session"
+    steps:
+      - session_id: "cid-stable"
+        sql: "CREATE TABLE IF NOT EXISTS cid_tmp (id BIGINT)"
+      - session_id: "cid-stable"
+        sql: "INSERT INTO cid_tmp VALUES (CONNECTION_ID())"
+      - session_id: "cid-stable"
+        sql: "SELECT COUNT(*) AS n FROM cid_tmp WHERE id = CONNECTION_ID()"
+        expect:
+          rows: 1
+          contains: "1"
+      - session_id: "cid-stable"
+        sql: "DROP TABLE IF EXISTS cid_tmp"
