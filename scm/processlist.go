@@ -38,8 +38,13 @@ type SessionState struct {
 
 	startedAt atomic.Int64 // unix nanos of last command start
 
-	cancel context.CancelFunc // called by KILL QUERY; nil if not cancellable
-	cancelMu sync.Mutex        // protects cancel assignment
+	killed atomic.Bool // set by Kill(); checked at scan entry points
+
+	cancel   context.CancelFunc // called by KILL QUERY; nil if not cancellable
+	cancelMu sync.Mutex         // protects cancel assignment
+
+	heldLocks   []func()   // unlock callbacks for LOCK TABLES
+	heldLocksMu sync.Mutex // protects heldLocks slice
 }
 
 // ElapsedSeconds returns seconds since the last command started.
@@ -82,9 +87,15 @@ func (s *SessionState) ClearCancel() {
 	s.cancelMu.Unlock()
 }
 
-// Kill fires the cancel function if one is set.
+// IsKilled returns true if this session has been killed.
+func (s *SessionState) IsKilled() bool {
+	return s.killed.Load()
+}
+
+// Kill marks the session as killed and fires the cancel function if set.
 // Returns true if a running query was cancelled.
 func (s *SessionState) Kill() bool {
+	s.killed.Store(true)
 	s.cancelMu.Lock()
 	fn := s.cancel
 	s.cancelMu.Unlock()
@@ -93,6 +104,24 @@ func (s *SessionState) Kill() bool {
 		return true
 	}
 	return false
+}
+
+// AddLock registers an unlock callback for a LOCK TABLES lock.
+func (s *SessionState) AddLock(unlock func()) {
+	s.heldLocksMu.Lock()
+	s.heldLocks = append(s.heldLocks, unlock)
+	s.heldLocksMu.Unlock()
+}
+
+// ReleaseAllLocks releases all table locks held by this session.
+func (s *SessionState) ReleaseAllLocks() {
+	s.heldLocksMu.Lock()
+	fns := s.heldLocks
+	s.heldLocks = nil
+	s.heldLocksMu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
 }
 
 // strPtr is a helper to load an atomic string pointer safely.
@@ -135,6 +164,20 @@ func EvictHTTPSession(key string) bool {
 // LastUsedNano returns the unix nanosecond timestamp of the last command start.
 func (s *SessionState) LastUsedNano() int64 {
 	return s.startedAt.Load()
+}
+
+// GetCurrentSessionState returns the *SessionState for the current goroutine's
+// GLS context, or nil if none is set.
+func GetCurrentSessionState() *SessionState {
+	if mgr == nil {
+		return nil
+	}
+	v, ok := mgr.GetValue("sessionStatePtr")
+	if !ok {
+		return nil
+	}
+	ss, _ := v.(*SessionState)
+	return ss
 }
 
 func init_processlist() {

@@ -294,25 +294,28 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		ss = RegisterSession(user, req.RemoteAddr, "")
 		defer UnregisterSession(ss.ID)
 	}
+	defer ss.ReleaseAllLocks()
 	ss.SetCommand("Query", req.Method+" "+req.URL.Path)
-	NewContext(req.Context(), func() {
-		// catch panics and print out 500 Internal Server Error
-		defer func() {
-			if r := recover(); r != nil {
-				if fmt.Sprint(r) != "websocket closed" {
-					PrintError("error in http handler: " + fmt.Sprint(r))
+	SetValues(map[string]any{"sessionStatePtr": ss}, func() {
+		NewContext(req.Context(), func() {
+			// catch panics and print out 500 Internal Server Error
+			defer func() {
+				if r := recover(); r != nil {
+					if fmt.Sprint(r) != "websocket closed" {
+						PrintError("error in http handler: " + fmt.Sprint(r))
+					}
+					// try to write error response; silently ignore if connection was hijacked (e.g. websocket)
+					func() {
+						defer func() { recover() }()
+						res.Header().Set("Content-Type", "text/plain")
+						res.WriteHeader(500)
+						io.WriteString(res, "500 Internal Server Error: ")
+						io.WriteString(res, fmt.Sprint(r))
+					}()
 				}
-				// try to write error response; silently ignore if connection was hijacked (e.g. websocket)
-				func() {
-					defer func() { recover() }()
-					res.Header().Set("Content-Type", "text/plain")
-					res.WriteHeader(500)
-					io.WriteString(res, "500 Internal Server Error: ")
-					io.WriteString(res, fmt.Sprint(r))
-				}()
-			}
-		}()
-		Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
+			}()
+			Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
+		})
 	})
 }
 

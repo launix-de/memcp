@@ -144,6 +144,38 @@ func scmerSliceToStrings(list []scm.Scmer) []string {
 	return out
 }
 
+// lockTable acquires a user-level read or write lock on the named table.
+// The session's State is updated while waiting, and the unlock callback is
+// registered with the session so that ReleaseAllLocks() can free it later.
+func lockTable(schema, name string, write bool, ss *scm.SessionState) {
+	db := GetDatabase(schema)
+	if db == nil {
+		panic("LOCK TABLES: unknown database: " + schema)
+	}
+	t := db.GetTable(name)
+	if t == nil {
+		panic("LOCK TABLES: unknown table: " + schema + "." + name)
+	}
+	if ss != nil {
+		ss.SetState("Waiting for table lock")
+	}
+	if write {
+		t.userLock.Lock()
+		unlock := func() { t.userLock.Unlock() }
+		if ss != nil {
+			ss.SetState("")
+			ss.AddLock(unlock)
+		}
+	} else {
+		t.userLock.RLock()
+		unlock := func() { t.userLock.RUnlock() }
+		if ss != nil {
+			ss.SetState("")
+			ss.AddLock(unlock)
+		}
+	}
+}
+
 func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
@@ -1270,6 +1302,39 @@ func Init(en scm.Env) {
 				if c.IsTemp {
 					atomic.StoreInt64(&c.lastAccessed, now.UnixNano())
 				}
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"locktables", "acquires WRITE or READ user-level locks on a list of tables (LOCK TABLES); implicitly releases any previously held locks",
+		1, 1,
+		[]scm.DeclarationParameter{
+			{"locks", "list", "flat list of schema, table, write? triples", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			ss := scm.GetCurrentSessionState()
+			if ss != nil {
+				ss.ReleaseAllLocks() // LOCK TABLES implicitly releases prior locks
+			}
+			for _, item := range a[0].Slice() {
+				triple := item.Slice()
+				schema := scm.String(triple[0])
+				tbl := scm.String(triple[1])
+				write := triple[2].Bool()
+				lockTable(schema, tbl, write, ss)
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"unlocktables", "releases all user-level table locks held by this session",
+		0, 0, nil, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			if ss := scm.GetCurrentSessionState(); ss != nil {
+				ss.ReleaseAllLocks()
 			}
 			return scm.NewBool(true)
 		}, false, false, nil,

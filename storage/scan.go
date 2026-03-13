@@ -73,6 +73,9 @@ type scanResult struct {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
+	if ss := scm.GetCurrentSessionState(); ss != nil && ss.IsKilled() {
+		panic("query killed")
+	}
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {

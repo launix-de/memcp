@@ -1,0 +1,56 @@
+# KILL QUERY and LOCK TABLES functional tests
+
+metadata:
+  version: "1.0"
+  description: "Tests for KILL QUERY (panic-based cancel) and LOCK TABLES session locks"
+
+test_cases:
+  # --- LOCK TABLES basic smoke tests ---
+
+  - name: "setup: create test table for lock tests"
+    sql: "CREATE TABLE IF NOT EXISTS lock_test (id INT, val VARCHAR(50))"
+    setup:
+      - "DROP TABLE IF EXISTS lock_test"
+      - "CREATE TABLE lock_test (id INT, val VARCHAR(50))"
+
+  - name: "LOCK TABLE write lock and unlock"
+    sql: "LOCK TABLES lock_test WRITE"
+    expect:
+      rows: 0
+
+  - name: "UNLOCK TABLES releases locks"
+    sql: "UNLOCK TABLES"
+    expect:
+      rows: 0
+
+  - name: "LOCK TABLE read lock and unlock"
+    sql: "LOCK TABLES lock_test READ"
+    expect:
+      rows: 0
+
+  - name: "UNLOCK TABLES after read lock"
+    sql: "UNLOCK TABLES"
+    expect:
+      rows: 0
+
+  - name: "LOCK TABLE unknown table raises error"
+    sql: "LOCK TABLES nonexistent_table_xyz WRITE"
+    expect:
+      error: true
+
+  - name: "cleanup: drop lock test table"
+    sql: "DROP TABLE IF EXISTS lock_test"
+    cleanup:
+      - "DROP TABLE IF EXISTS lock_test"
+
+  # --- LOCK TABLES in processlist state ---
+
+  - name: "SHOW PROCESSLIST still works after lock/unlock cycle"
+    sql: "SHOW PROCESSLIST"
+
+  # --- KILL QUERY on unknown session ---
+
+  - name: "KILL QUERY with nonexistent id returns false gracefully"
+    sql: "KILL QUERY 999999999"
+    expect:
+      rows: 0

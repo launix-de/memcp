@@ -135,7 +135,9 @@ func (m *MySQLWrapper) SessionClosed(session *driver.Session) {
 	m.log.Info("%s", "Closed Session "+session.User()+" from "+session.Addr())
 	mysqlsessions.Delete(session.ID())
 	if v, ok := mysqlStates.LoadAndDelete(session.ID()); ok {
-		UnregisterSession(v.(*SessionState).ID)
+		st := v.(*SessionState)
+		st.ReleaseAllLocks()
+		UnregisterSession(st.ID)
 	}
 }
 func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
@@ -344,7 +346,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		// the session (and its TxContext) via GetCurrentTx().
 		var rc Scmer
 		SetValues(map[string]any{
-			"session": scmSessionScmer,
+			"session":         scmSessionScmer,
+			"sessionStatePtr": ss,
 		}, func() {
 			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)
 		})

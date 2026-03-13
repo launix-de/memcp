@@ -140,6 +140,9 @@ func (s *globalqueue) Pop() any {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+	if ss := scm.GetCurrentSessionState(); ss != nil && ss.IsKilled() {
+		panic("query killed")
+	}
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time

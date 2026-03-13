@@ -204,6 +204,7 @@ type table struct {
 	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
 	mu              sync.Mutex           // schema/sharding lock
 	uniquelock      sync.Mutex           // unique insert lock
+	userLock        sync.RWMutex         // LOCK TABLES: explicit user-requested table lock
 	Auto_increment  uint64               // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 	Collation       string
 	Charset         string

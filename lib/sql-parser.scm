@@ -588,10 +588,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	)))
 
 	(define sql_lock_table_mode (parser (or
-		(parser '((atom "READ" true) (? (atom "LOCAL" true))) true)
 		(parser '((atom "LOW_PRIORITY" true) (atom "WRITE" true)) true)
 		(parser (atom "WRITE" true) true)
-		(parser (atom "READ" true) true)
+		(parser '((atom "READ" true) (? (atom "LOCAL" true))) nil)
 	)))
 
 	(define sql_expression (parser (or
@@ -770,7 +769,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
 		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var
-		   @@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
+		@@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
 		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var sql_identifier_unquoted)) '('globalvars var))
 		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var sql_identifier_unquoted)) '('session_globalvar var))
 		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('session_globalvar var))
@@ -1645,8 +1644,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons '!begin vars))
 
-		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (? sql_lock_table_mode)) tbl) ",")) "ignore")
-		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
+		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
+			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))
+			(list (quote locktables) (cons (quote list) (map locks (lambda (l) (cons (quote list) (list schema (nth l 0) (nth l 1))))))))
+		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) '((quote unlocktables)))
 
 		/* CREATE INDEX syntax acceptance (no-op unless UNIQUE; MemCP auto-indexes) */
 		(parser '((atom "CREATE" true)
