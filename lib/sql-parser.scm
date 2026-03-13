@@ -493,7 +493,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				"@" sql_identifier "=" sql_expression
 			) true) ",")
 			(? (atom ";" false))
-		) '!nop)
+		) nil)
+		/* DO expr[;] - MySQL no-op (evaluates expression for side effects, result discarded) */
+		(parser '(
+			(atom "DO" true)
+			sql_expression
+			(? (atom ";" false))
+		) nil)
 		/* INSERT [IGNORE] INTO table (...) VALUES (...)[;] */
 		(parser '(
 			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
@@ -526,13 +532,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		) (if (> (count tbls) 1)
 				(list '!update_multi tbls assignments where)
 				(list '!update (match (car tbls) '(alias _) alias) assignments where)))
-		/* DELETE FROM table WHERE condition[;] */
-		(parser '(
-			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
-			(? (atom "WHERE" true) (define where sql_expression))
-			(? (atom ";" false))
-		) (list '!delete tbl where))
 		/* DELETE FROM table USING table, table2 [AS alias] WHERE condition[;] (multi-table in trigger) */
+		/* Must come before simple DELETE to avoid consuming just "DELETE FROM tbl" leaving USING unparsed */
 		(parser '(
 			(atom "DELETE" true) (atom "FROM" true) (define target sql_identifier)
 			(atom "USING" true)
@@ -543,6 +544,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(? (atom "WHERE" true) (define where sql_expression))
 			(? (atom ";" false))
 		) (list '!delete_using target tbls where))
+		/* DELETE FROM table WHERE condition[;] */
+		(parser '(
+			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
+			(? (atom "WHERE" true) (define where sql_expression))
+			(? (atom ";" false))
+		) (list '!delete tbl where))
 	)))
 
 	/* Full trigger statement parser including IF...THEN...[ELSE...]END IF */
@@ -1767,12 +1774,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
 			(define body sql_trigger_body)
 		) (begin
-				/* wrap compile+eval in try: if trigger body fails to compile (e.g. missing table),
-				   still register the trigger as a no-op rather than failing CREATE TRIGGER */
-				(define trigger_fn (try
-					(lambda () (eval (compile_trigger_body schema timing (car (cdr body)))))
-					(lambda (err) (begin (print (concat "WARNING: trigger " name " body compile failed: " (string err))) (lambda (row) nil)))))
-				(list 'createtrigger schema tbl name timing (car body) trigger_fn)
+				(list 'createtrigger schema tbl name timing (car body) (eval (compile_trigger_body schema timing (car (cdr body)))) true)
 		))
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
