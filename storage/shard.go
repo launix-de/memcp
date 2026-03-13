@@ -1307,12 +1307,11 @@ func (m *ShardMapReducer) Close() {
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) {
-	// Check table-level user lock (LOCK TABLES): writes block under any lock
-	if owner := t.t.tableLockOwner.Load(); owner != nil {
-		ss := scm.GetCurrentSessionState()
-		if owner != ss {
-			t.t.waitTableLock(ss, true)
-		}
+	// Check table-level user lock (LOCK TABLES): writes block under any lock.
+	// Always call waitTableLock — it handles other-session blocking and
+	// owner-write-under-READ-lock error in one place.
+	if t.t.tableLockOwner.Load() != nil {
+		t.t.waitTableLock(scm.GetCurrentSessionState(), true)
 	}
 	// Execute BEFORE INSERT triggers (can modify values; isIgnore skips failing rows)
 	if len(t.t.Triggers) > 0 {

@@ -312,11 +312,13 @@ func (t *table) getTableLockCond() *sync.Cond {
 // isWrite=true means the caller wants to write (blocked by ANY lock from another session).
 // isWrite=false means the caller wants to read (blocked only by WRITE lock from another session).
 // Sets State to "Waiting for table lock" while blocking.
+// Panics if the owning session tries to write while holding a READ lock (MySQL semantics).
 func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	cond := t.getTableLockCond()
 	if ss != nil {
 		ss.SetState("Waiting for table lock")
 	}
+	var errMsg string
 	t.tableLockMu.Lock()
 	for {
 		owner := t.tableLockOwner.Load()
@@ -324,16 +326,24 @@ func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 			break
 		}
 		if owner == ss {
-			break // we own the lock
+			if !isWrite || t.tableLockWrite.Load() {
+				break // owner can always read; owner can write under WRITE lock
+			}
+			// Owner trying to write while holding a READ lock: MySQL returns an error.
+			errMsg = "Can't write to table '" + t.Name + "' while it has a READ lock"
+			break
 		}
 		if !isWrite && !t.tableLockWrite.Load() {
-			break // READ lock doesn't block reads
+			break // READ lock doesn't block reads from other sessions
 		}
 		cond.Wait()
 	}
 	t.tableLockMu.Unlock()
 	if ss != nil {
 		ss.SetState("")
+	}
+	if errMsg != "" {
+		panic(errMsg)
 	}
 }
 

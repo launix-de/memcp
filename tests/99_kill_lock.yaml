@@ -5,167 +5,207 @@ metadata:
   description: "Tests for KILL QUERY (panic-based cancel) and LOCK TABLES session locks"
 
 test_cases:
-  # --- LOCK TABLES basic smoke tests ---
 
-  - name: "setup: create test table for lock tests"
+  # ── setup ──────────────────────────────────────────────────────────────────
+
+  - name: "setup: create lock_test table"
     sql: "CREATE TABLE IF NOT EXISTS lock_test (id INT, val VARCHAR(50))"
     setup:
       - sql: "DROP TABLE IF EXISTS lock_test"
       - sql: "CREATE TABLE lock_test (id INT, val VARCHAR(50))"
+      - sql: "INSERT INTO lock_test VALUES (1, 'alpha'), (2, 'beta')"
 
-  - name: "LOCK TABLE write lock and unlock"
-    sql: "LOCK TABLES lock_test WRITE"
-    expect:
-      rows: 0
+  # ── basic WRITE lock ───────────────────────────────────────────────────────
 
-  - name: "UNLOCK TABLES releases locks"
-    sql: "UNLOCK TABLES"
-    expect:
-      rows: 0
+  - name: "WRITE lock and unlock (same session)"
+    steps:
+      - session_id: "lock-basic-w"
+        sql: "LOCK TABLES lock_test WRITE"
+      - session_id: "lock-basic-w"
+        sql: "INSERT INTO lock_test VALUES (3, 'gamma')"
+      - session_id: "lock-basic-w"
+        sql: "UNLOCK TABLES"
+      - session_id: "lock-basic-w"
+        sql: "SELECT COUNT(*) AS n FROM lock_test"
+        expect:
+          rows: 1
+          contains: "3"
 
-  - name: "LOCK TABLE read lock and unlock"
-    sql: "LOCK TABLES lock_test READ"
-    expect:
-      rows: 0
+  # ── basic READ lock ────────────────────────────────────────────────────────
 
-  - name: "UNLOCK TABLES after read lock"
-    sql: "UNLOCK TABLES"
-    expect:
-      rows: 0
+  - name: "READ lock allows reads from same session"
+    steps:
+      - session_id: "lock-basic-r"
+        sql: "LOCK TABLES lock_test READ"
+      - session_id: "lock-basic-r"
+        sql: "SELECT COUNT(*) AS n FROM lock_test"
+        expect:
+          rows: 1
+      - session_id: "lock-basic-r"
+        sql: "UNLOCK TABLES"
+
+  # ── owner write under READ lock must fail ──────────────────────────────────
+
+  - name: "owner cannot INSERT while holding READ lock"
+    steps:
+      - session_id: "lock-readwrite"
+        sql: "LOCK TABLES lock_test READ"
+      - session_id: "lock-readwrite"
+        sql: "INSERT INTO lock_test VALUES (99, 'forbidden')"
+        expect:
+          error: true
+      - session_id: "lock-readwrite"
+        sql: "UNLOCK TABLES"
+
+  - name: "owner cannot UPDATE while holding READ lock"
+    steps:
+      - session_id: "lock-readupdate"
+        sql: "LOCK TABLES lock_test READ"
+      - session_id: "lock-readupdate"
+        sql: "UPDATE lock_test SET val = 'x' WHERE id = 1"
+        expect:
+          error: true
+      - session_id: "lock-readupdate"
+        sql: "UNLOCK TABLES"
+
+  # ── implicit unlock on second LOCK TABLES ─────────────────────────────────
+
+  - name: "second LOCK TABLES implicitly releases first lock"
+    steps:
+      - session_id: "lock-implicit"
+        sql: "LOCK TABLES lock_test WRITE"
+      - session_id: "lock-implicit"
+        sql: "LOCK TABLES lock_test READ"
+      # now held as READ: INSERT must fail
+      - session_id: "lock-implicit"
+        sql: "INSERT INTO lock_test VALUES (100, 'should-fail')"
+        expect:
+          error: true
+      - session_id: "lock-implicit"
+        sql: "UNLOCK TABLES"
+
+  # ── concurrent: WRITE lock blocks SELECT from another session ─────────────
+
+  - name: "WRITE lock blocks SELECT from another session until UNLOCK"
+    steps:
+      - session_id: "lock-conc-writer"
+        sql: "LOCK TABLES lock_test WRITE"
+      # other session's SELECT runs in background — blocks until UNLOCK
+      - session_id: "lock-conc-reader"
+        sql: "SELECT id FROM lock_test WHERE id = 1"
+        background: true
+        expect:
+          rows: 1
+          contains: "1"
+      # brief no-op so background query reaches the lock wait before UNLOCK
+      - session_id: "lock-conc-writer"
+        sql: "SELECT 1"
+      - session_id: "lock-conc-writer"
+        sql: "UNLOCK TABLES"
+      # background thread joins here: SELECT must have completed with correct data
+
+  # ── concurrent: WRITE lock blocks INSERT from another session ─────────────
+
+  - name: "WRITE lock blocks INSERT from another session until UNLOCK"
+    steps:
+      - session_id: "lock-conc-w2"
+        sql: "DELETE FROM lock_test WHERE id = 50"
+      - session_id: "lock-conc-w2"
+        sql: "LOCK TABLES lock_test WRITE"
+      - session_id: "lock-conc-ins"
+        sql: "INSERT INTO lock_test VALUES (50, 'concurrent')"
+        background: true
+        # INSERT returns {"affected_rows":1} = 1 JSONL row on success
+        expect:
+          rows: 1
+      - session_id: "lock-conc-w2"
+        sql: "SELECT 1"
+      - session_id: "lock-conc-w2"
+        sql: "UNLOCK TABLES"
+      # after join: verify the INSERT committed
+      - session_id: "lock-conc-w2"
+        sql: "SELECT val FROM lock_test WHERE id = 50"
+        expect:
+          rows: 1
+          contains: "concurrent"
+
+  # ── concurrent: READ lock blocks INSERT from another session ──────────────
+
+  - name: "READ lock blocks INSERT from another session until UNLOCK"
+    steps:
+      - session_id: "lock-conc-r2"
+        sql: "DELETE FROM lock_test WHERE id = 51"
+      - session_id: "lock-conc-r2"
+        sql: "LOCK TABLES lock_test READ"
+      - session_id: "lock-conc-ins2"
+        sql: "INSERT INTO lock_test VALUES (51, 'blocked-write')"
+        background: true
+        expect:
+          rows: 1
+      - session_id: "lock-conc-r2"
+        sql: "SELECT 1"
+      - session_id: "lock-conc-r2"
+        sql: "UNLOCK TABLES"
+      # after join: verify the INSERT committed
+      - session_id: "lock-conc-r2"
+        sql: "SELECT val FROM lock_test WHERE id = 51"
+        expect:
+          rows: 1
+          contains: "blocked-write"
+
+  # ── concurrent: READ lock allows parallel reads from other sessions ────────
+
+  - name: "READ lock allows SELECT from another session without blocking"
+    steps:
+      - session_id: "lock-conc-r3"
+        sql: "LOCK TABLES lock_test READ"
+      # other session reads concurrently — must NOT block
+      - session_id: "lock-conc-r3-other"
+        sql: "SELECT COUNT(*) AS n FROM lock_test"
+        background: true
+        expect:
+          rows: 1
+      - session_id: "lock-conc-r3"
+        sql: "UNLOCK TABLES"
+
+  # ── data integrity after concurrent lock cycle ────────────────────────────
+
+  - name: "data written under WRITE lock is visible after UNLOCK"
+    steps:
+      - session_id: "lock-integrity"
+        sql: "DELETE FROM lock_test WHERE id >= 200"
+      - session_id: "lock-integrity"
+        sql: "LOCK TABLES lock_test WRITE"
+      - session_id: "lock-integrity"
+        sql: "INSERT INTO lock_test VALUES (200, 'locked-insert')"
+      - session_id: "lock-integrity"
+        sql: "UNLOCK TABLES"
+      - session_id: "lock-integrity-reader"
+        sql: "SELECT val FROM lock_test WHERE id = 200"
+        expect:
+          rows: 1
+          contains: "locked-insert"
+
+  # ── unknown table raises error ─────────────────────────────────────────────
 
   - name: "LOCK TABLE unknown table raises error"
     sql: "LOCK TABLES nonexistent_table_xyz WRITE"
     expect:
       error: true
 
-  # --- LOCK TABLES: owner session can still read while holding WRITE lock ---
+  # ── SHOW PROCESSLIST still works ──────────────────────────────────────────
 
-  - name: "session A acquires WRITE lock on lock_test"
-    sql: "LOCK TABLES lock_test WRITE"
-    session_id: "lock-owner"
-    expect:
-      rows: 0
-
-  - name: "session A can SELECT from locked table (owner)"
-    sql: "SELECT COUNT(*) AS cnt FROM lock_test"
-    session_id: "lock-owner"
-    expect:
-      rows: 1
-
-  - name: "session A can INSERT into locked table (owner)"
-    sql: "INSERT INTO lock_test (id, val) VALUES (1, 'locked-insert')"
-    session_id: "lock-owner"
-    expect:
-      affected_rows: 1
-
-  - name: "session A releases WRITE lock"
-    sql: "UNLOCK TABLES"
-    session_id: "lock-owner"
-    expect:
-      rows: 0
-
-  - name: "after unlock: other session can SELECT normally"
-    sql: "SELECT COUNT(*) AS cnt FROM lock_test"
-    expect:
-      rows: 1
-      data:
-        - cnt: 1
-
-  # --- LOCK TABLES: READ lock allows reads but blocks writes from same owner ---
-
-  - name: "session B acquires READ lock on lock_test"
-    sql: "LOCK TABLES lock_test READ"
-    session_id: "lock-reader"
-    expect:
-      rows: 0
-
-  - name: "session B can SELECT from read-locked table (owner)"
-    sql: "SELECT COUNT(*) AS cnt FROM lock_test"
-    session_id: "lock-reader"
-    expect:
-      rows: 1
-
-  - name: "session B releases READ lock"
-    sql: "UNLOCK TABLES"
-    session_id: "lock-reader"
-    expect:
-      rows: 0
-
-  # --- Implicit UNLOCK on second LOCK TABLES call ---
-
-  - name: "first lock on lock_test WRITE"
-    sql: "LOCK TABLES lock_test WRITE"
-    session_id: "lock-implicit"
-    expect:
-      rows: 0
-
-  - name: "second LOCK TABLES call implicitly releases previous lock"
-    sql: "LOCK TABLES lock_test READ"
-    session_id: "lock-implicit"
-    expect:
-      rows: 0
-
-  - name: "explicit unlock after implicit re-lock"
-    sql: "UNLOCK TABLES"
-    session_id: "lock-implicit"
-    expect:
-      rows: 0
-
-  # --- LOCK WRITE actually blocks another connection's SELECT ---
-  # Session C holds WRITE lock; session D attempts SELECT in parallel.
-  # Because session D is parallel but must complete (not deadlock),
-  # session C holds the lock briefly then releases it, and session D
-  # should complete successfully after the lock is dropped.
-
-  - name: "session C acquires WRITE lock"
-    sql: "LOCK TABLES lock_test WRITE"
-    session_id: "lock-write-c"
-    expect:
-      rows: 0
-
-  - name: "session C releases WRITE lock so other sessions can proceed"
-    sql: "UNLOCK TABLES"
-    session_id: "lock-write-c"
-    expect:
-      rows: 0
-
-  - name: "session D can SELECT after lock is released"
-    sql: "SELECT id FROM lock_test WHERE id = 1"
-    session_id: "lock-read-d"
-    expect:
-      rows: 1
-      data:
-        - id: 1
-
-  # --- Verify data integrity after lock/unlock cycles ---
-
-  - name: "insert second row after all lock cycles"
-    sql: "INSERT INTO lock_test (id, val) VALUES (2, 'post-lock')"
-    expect:
-      affected_rows: 1
-
-  - name: "verify both rows visible after lock/unlock cycles"
-    sql: "SELECT COUNT(*) AS cnt FROM lock_test"
-    expect:
-      rows: 1
-      data:
-        - cnt: 2
-
-  # --- LOCK TABLES in processlist state ---
-
-  - name: "SHOW PROCESSLIST still works after lock/unlock cycle"
+  - name: "SHOW PROCESSLIST after lock/unlock cycle"
     sql: "SHOW PROCESSLIST"
 
-  # --- KILL QUERY on unknown session ---
+  # ── KILL QUERY ─────────────────────────────────────────────────────────────
 
   - name: "KILL QUERY with nonexistent id returns false gracefully"
     sql: "KILL QUERY 999999999"
     expect:
       rows: 0
 
-  # --- cleanup ---
+  # ── cleanup ────────────────────────────────────────────────────────────────
 
-  - name: "cleanup: drop lock test table"
+  - name: "cleanup: drop lock_test table"
     sql: "DROP TABLE IF EXISTS lock_test"
-    cleanup:
-      - sql: "DROP TABLE IF EXISTS lock_test"

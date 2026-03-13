@@ -89,12 +89,11 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		t.enterMutationOwner()
 		defer t.exitMutationOwner()
 	}
-	// Check table-level user lock (LOCK TABLES)
-	if owner := t.tableLockOwner.Load(); owner != nil {
-		ss := scm.GetCurrentSessionState()
-		if owner != ss {
-			t.waitTableLock(ss, hasMutationCallback)
-		}
+	// Check table-level user lock (LOCK TABLES).
+	// Always call waitTableLock when a lock is held — it handles both the
+	// other-session blocking case and the owner-write-under-READ-lock error.
+	if t.tableLockOwner.Load() != nil {
+		t.waitTableLock(scm.GetCurrentSessionState(), hasMutationCallback)
 	}
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)

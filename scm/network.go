@@ -293,8 +293,8 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	} else {
 		ss = RegisterSession(user, req.RemoteAddr, "")
 		defer UnregisterSession(ss.ID)
+		defer ss.ReleaseAllLocks() // non-persistent: release locks when request ends
 	}
-	defer ss.ReleaseAllLocks()
 	// Reset killed flag in case this session was killed in a previous request
 	ss.ResetKilled()
 	ss.SetCommand("Query", req.Method+" "+req.URL.Path)
