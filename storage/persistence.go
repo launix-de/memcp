@@ -48,9 +48,18 @@ type PersistenceEngine interface {
 	ReadBlob(hash string) io.ReadCloser
 	WriteBlob(hash string) io.WriteCloser
 	DeleteBlob(hash string)
+	// WalkBlobs calls fn for every blob hash stored on disk, one at a time.
+	// fn may return an error to stop iteration early.
+	WalkBlobs(fn func(hash string) error) error
 	OpenLog(shard string) PersistenceLogfile                       // open for writing
 	ReplayLog(shard string) (chan interface{}, PersistenceLogfile) // replay existing log
 	RemoveLog(shard string)
+	// WalkShardFiles calls fn for every shard-related file (column files, log files)
+	// stored on disk, one at a time. The name passed to fn is exactly the value
+	// expected by DeleteShardFile. fn may return an error to stop iteration early.
+	WalkShardFiles(fn func(name string) error) error
+	// DeleteShardFile deletes a file previously yielded by WalkShardFiles.
+	DeleteShardFile(name string)
 	Remove()             // delete from storage
 	BackendName() string // returns the backend type name (e.g. "filesystem", "s3", "ceph")
 }

@@ -277,6 +277,61 @@ func (s *S3Storage) DeleteBlob(hash string) {
 	})
 }
 
+func (s *S3Storage) WalkBlobs(fn func(hash string) error) error {
+	s.ensureOpen()
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.factory.Bucket),
+		Prefix: aws.String(s.prefix + "/blob/"),
+	})
+	blobPrefix := s.prefix + "/blob/"
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(context.Background())
+		if err != nil {
+			return err
+		}
+		for _, obj := range page.Contents {
+			hash := strings.TrimPrefix(*obj.Key, blobPrefix)
+			if err := fn(hash); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *S3Storage) WalkShardFiles(fn func(name string) error) error {
+	s.ensureOpen()
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.factory.Bucket),
+		Prefix: aws.String(s.prefix + "/"),
+	})
+	pfx := s.prefix + "/"
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(context.Background())
+		if err != nil {
+			return err
+		}
+		for _, obj := range page.Contents {
+			name := strings.TrimPrefix(*obj.Key, pfx)
+			if name == "schema.json" || name == "schema.json.old" || strings.HasPrefix(name, "blob/") {
+				continue
+			}
+			if err := fn(name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *S3Storage) DeleteShardFile(name string) {
+	s.ensureOpen()
+	_, _ = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+		Bucket: aws.String(s.factory.Bucket),
+		Key:    aws.String(s.key(name)),
+	})
+}
+
 func (s *S3Storage) BackendName() string {
 	return "s3"
 }

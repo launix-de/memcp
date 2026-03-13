@@ -243,6 +243,56 @@ func (s *CephStorage) DeleteBlob(hash string) {
 	_ = s.ioctx.Delete(s.obj("blob/" + hash))
 }
 
+func (s *CephStorage) WalkBlobs(fn func(hash string) error) error {
+	s.ensureOpen()
+	blobPrefix := s.prefix + "/blob/"
+	iter, err := s.ioctx.Iter()
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	for iter.Next() {
+		name := iter.Value()
+		if !strings.HasPrefix(name, blobPrefix) {
+			continue
+		}
+		if err := fn(strings.TrimPrefix(name, blobPrefix)); err != nil {
+			return err
+		}
+	}
+	return iter.Err()
+}
+
+func (s *CephStorage) WalkShardFiles(fn func(name string) error) error {
+	s.ensureOpen()
+	pfx := s.prefix + "/"
+	blobPfx := pfx + "blob/"
+	iter, err := s.ioctx.Iter()
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	for iter.Next() {
+		obj := iter.Value()
+		if !strings.HasPrefix(obj, pfx) {
+			continue
+		}
+		name := strings.TrimPrefix(obj, pfx)
+		if name == "schema.json" || name == "schema.json.old" || strings.HasPrefix(obj, blobPfx) {
+			continue
+		}
+		if err := fn(name); err != nil {
+			return err
+		}
+	}
+	return iter.Err()
+}
+
+func (s *CephStorage) DeleteShardFile(name string) {
+	s.ensureOpen()
+	_ = s.ioctx.Delete(s.obj(name))
+}
+
 func (s *CephStorage) BackendName() string {
 	return "ceph"
 }
