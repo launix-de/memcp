@@ -601,7 +601,7 @@ func main() {
 	gls.Go(func() {
 		defer close(initDone)
 		storage.LoadDatabases()
-		storage.Clean() // remove crash-orphaned blobs and shard files
+		go storage.Clean() // remove crash-orphaned blobs and shard files in background
 		// scripts initialization
 		if len(imports) == 0 {
 			// search for lib/main.scm in well-known locations
