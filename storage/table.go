@@ -206,11 +206,15 @@ type table struct {
 	uniquelock      sync.Mutex           // unique insert lock
 	// LOCK TABLES: variable-based lock that is cheap for scans to check but
 	// expensive to acquire (drains shard readers first via waitTableLock).
+	// tableLockOwner and tableLockWrite are read from every shard goroutine on
+	// every scan; isolate them on their own cache line to prevent false sharing
+	// with Auto_increment (written on every INSERT).
 	tableLockMu    sync.Mutex                       // guards cond waits + acquisition
 	tableLockOnce  sync.Once                        // lazy-inits tableLockCond
 	tableLockCond  *sync.Cond                       // broadcast on unlock
 	tableLockOwner atomic.Pointer[scm.SessionState] // nil = no lock; points to owning *SessionState
 	tableLockWrite atomic.Bool                      // true = WRITE lock, false = READ lock
+	_              [55]byte                         // pad to cache-line boundary
 	Auto_increment uint64                           // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
 	Collation      string
 	Charset        string

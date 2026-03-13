@@ -577,10 +577,25 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	var maxInsertIndex int
 	var visibleUpper uint32
 	func() {
+		shardLocked := false
 		if !skipShardReadLock {
-			t.mu.RLock()         // lock whole shard for reading since we frequently read deletions
-			defer t.mu.RUnlock() // finished reading
+			t.mu.RLock()
+			shardLocked = true
+			// Table lock check must happen AFTER shard RLock — race-safe synchronization
+			// point (mirrors storageShard.scan logic for the TOCTOU fix).
+			if t.t.tableLockOwner.Load() != nil {
+				t.mu.RUnlock()
+				shardLocked = false
+				t.t.waitTableLock(scm.GetCurrentSessionState(), false)
+				t.mu.RLock()
+				shardLocked = true
+			}
 		}
+		defer func() {
+			if shardLocked {
+				t.mu.RUnlock()
+			}
+		}()
 		// remember current insert status (so don't scan things that are inserted during map)
 		maxInsertIndex = len(t.inserts)
 		visibleUpper = t.main_count + uint32(maxInsertIndex)

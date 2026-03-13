@@ -89,12 +89,6 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		t.enterMutationOwner()
 		defer t.exitMutationOwner()
 	}
-	// Check table-level user lock (LOCK TABLES).
-	// Always call waitTableLock when a lock is held — it handles both the
-	// other-session blocking case and the owner-write-under-READ-lock error.
-	if t.tableLockOwner.Load() != nil {
-		t.waitTableLock(scm.GetCurrentSessionState(), hasMutationCallback)
-	}
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time (boundary extraction, sharding hints)
@@ -247,6 +241,12 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			currentTx.EnterShardWrite(t)
 			defer currentTx.ExitShardWrite(t)
 		}
+		// Table lock check for mutation path: lockTable() stores owner while holding
+		// all shard write locks, so checking after our own t.mu.Lock() is TOCTOU-safe.
+		// waitTableLock only uses tableLockMu (not t.mu), so no deadlock.
+		if t.t.tableLockOwner.Load() != nil {
+			t.t.waitTableLock(scm.GetCurrentSessionState(), true)
+		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
 	t.ensureMainCount(skipShardReadLock)
@@ -266,6 +266,17 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
+		// Table lock check must happen AFTER shard RLock to close the TOCTOU window:
+		// lockTable() sets tableLockOwner while holding shard write locks, so any
+		// scan that gets past RLock is guaranteed to see a non-nil owner if a
+		// LOCK TABLES was issued before this scan acquired the shard read lock.
+		if t.t.tableLockOwner.Load() != nil {
+			t.mu.RUnlock()
+			locked = false
+			t.t.waitTableLock(scm.GetCurrentSessionState(), hasMutationCallback)
+			t.mu.RLock()
+			locked = true
+		}
 	}
 	defer func() {
 		if locked {

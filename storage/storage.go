@@ -160,14 +160,19 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	}
 	// Wait for any existing lock to be released, then claim ownership
 	t.waitTableLock(ss, true) // acquiring any lock requires exclusive wait
-	// Drain in-flight shard readers: briefly acquire each shard's write lock
-	for _, s := range t.ActiveShards() {
+	// Drain in-flight shard readers by acquiring each shard's write lock.
+	// We MUST set tableLockOwner while still holding the last shard write lock
+	// so that any new scan that does RLock → tableLockOwner.Load() sees the
+	// owner set before it can proceed past its own RLock.
+	shards := t.ActiveShards()
+	for _, s := range shards {
 		s.mu.Lock()
-		s.mu.Unlock()
 	}
-	// Set the lock (atomic writes are visible to scan's cheap check)
 	t.tableLockWrite.Store(write)
 	t.tableLockOwner.Store(ss)
+	for _, s := range shards {
+		s.mu.Unlock()
+	}
 	if ss != nil {
 		ss.SetState("")
 		ss.AddLock(t.unlockTable)
