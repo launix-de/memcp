@@ -136,13 +136,25 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		close(values) // last scan is finished
 	})
 	// collect values from parallel scan
+	// Drain the entire channel before acting on any error: this guarantees that
+	// all shard goroutines have finished (and therefore all LogInsert/LogDelete
+	// calls are complete) before a panic propagates to WithAutocommit's rollback.
+	// Exiting the loop early would leave goroutines blocked on a full channel
+	// (goroutine leak) and create a race between rollback and ongoing mutations.
 	akkumulator := neutral
 	hadValue := false
+	var scanErr scanError
 	if !aggregate2.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate2)
 		for msg := range values {
 			if msg.err.r != nil {
-				panic(msg.err)
+				if scanErr.r == nil {
+					scanErr = msg.err
+				}
+				continue
+			}
+			if scanErr.r != nil {
+				continue
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
@@ -151,7 +163,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 				hadValue = true
 			}
 		}
-		if !hadValue && isOuter {
+		if scanErr.r == nil && !hadValue && isOuter {
 			nullRow := make([]scm.Scmer, len(callbackCols))
 			for i := range nullRow {
 				nullRow[i] = scm.NewNil()
@@ -162,7 +174,13 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
 		for msg := range values {
 			if msg.err.r != nil {
-				panic(msg.err)
+				if scanErr.r == nil {
+					scanErr = msg.err
+				}
+				continue
+			}
+			if scanErr.r != nil {
+				continue
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
@@ -171,7 +189,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 				hadValue = true
 			}
 		}
-		if !hadValue && isOuter {
+		if scanErr.r == nil && !hadValue && isOuter {
 			nullRow := make([]scm.Scmer, len(callbackCols))
 			for i := range nullRow {
 				nullRow[i] = scm.NewNil()
@@ -181,19 +199,28 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	} else {
 		for msg := range values {
 			if msg.err.r != nil {
-				panic(msg.err)
+				if scanErr.r == nil {
+					scanErr = msg.err
+				}
+				continue
+			}
+			if scanErr.r != nil {
+				continue
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
 			hadValue = hadValue || msg.outCount > 0
 		}
-		if !hadValue && isOuter {
+		if scanErr.r == nil && !hadValue && isOuter {
 			nullRow := make([]scm.Scmer, len(callbackCols))
 			for i := range nullRow {
 				nullRow[i] = scm.NewNil()
 			}
 			scm.Apply(callback, nullRow...) // outer join: push one NULL row
 		}
+	}
+	if scanErr.r != nil {
+		panic(scanErr)
 	}
 	// log statistics (best-effort, async so it doesn't add latency)
 	execNs := time.Since(execStart).Nanoseconds()

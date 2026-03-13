@@ -315,15 +315,25 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		})
 		close(q_)
 	})
-	// collect all subchans
+	// collect all subchans — drain fully before acting on errors (see scan.go for rationale)
+	var scanErr scanError
 	for msg := range q_ {
 		if msg.err.r != nil {
-			panic(msg.err) // propagate errors that occur inside inner scan
+			if scanErr.r == nil {
+				scanErr = msg.err
+			}
+			continue
+		}
+		if scanErr.r != nil {
+			continue
 		}
 		if msg.res != nil && len(msg.res.items) > 0 {
 			heap.Push(&q, msg.res) // add to heap
 		}
 		inputCount += msg.inputCount
+	}
+	if scanErr.r != nil {
+		panic(scanErr)
 	}
 
 	// collect values from parallel scan
