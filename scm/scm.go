@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"github.com/jtolds/gls"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -109,7 +110,13 @@ restart:
 		return en.FindRead(mustSymbol(expression)).Vars[mustSymbol(expression)]
 	case tagNthLocalVar:
 		// get numbered variable
-		return en.VarsNumbered[expression.NthLocalVar()]
+		idx := int(expression.NthLocalVar())
+		if idx >= len(en.VarsNumbered) {
+			buf := make([]byte, 8192)
+			n := runtime.Stack(buf, false)
+			panic(fmt.Sprintf("NthLocalVar(%d) out of range (len=%d)\n%s", idx, len(en.VarsNumbered), buf[:n]))
+		}
+		return en.VarsNumbered[idx]
 	case tagSlice:
 		// slice -> function call
 		list := expression.Slice()
@@ -254,6 +261,11 @@ restart:
 			case "setN":
 				val := Eval(list[2], en)
 				idx := mustNthLocalVar(list[1])
+				if int(idx) >= len(en.VarsNumbered) {
+					buf := make([]byte, 8192)
+					n := runtime.Stack(buf, false)
+					panic(fmt.Sprintf("setN(%d) out of range (len=%d)\n%s", int(idx), len(en.VarsNumbered), buf[:n]))
+				}
 				en.VarsNumbered[int(idx)] = val
 				return val
 			case "parser":
@@ -293,6 +305,11 @@ restart:
 				// a slice view. The slice MUST NOT escape the current lambda frame.
 				start := int(list[1].NthLocalVar())
 				count := int(ToInt(list[2]))
+				if start+count > len(en.VarsNumbered) {
+					buf := make([]byte, 8192)
+					n := runtime.Stack(buf, false)
+					panic(fmt.Sprintf("!list start=%d count=%d out of range (len=%d)\n%s", start, count, len(en.VarsNumbered), buf[:n]))
+				}
 				for i := 0; i < count && i+3 < len(list); i++ {
 					en.VarsNumbered[start+i] = Eval(list[i+3], en)
 				}
@@ -372,9 +389,6 @@ restart:
 		case tagSlice:
 			// Associative list
 			p := procedure.Slice()
-			if operands[0].IsNthLocalVar() { // optimized indexed access
-				return p[int(operands[0].NthLocalVar())]
-			}
 			arg := Eval(operands[0], en)
 			i := 0
 			for i < len(p)-1 {
@@ -569,9 +583,6 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 	// Assoc list
 	case tagSlice:
 		p := procedure.Slice()
-		if idx, ok := args[0].Any().(NthLocalVar); ok {
-			return p[int(idx)]
-		}
 		i := 0
 		for i < len(p)-1 {
 			if Equal(args[0], p[i]) {

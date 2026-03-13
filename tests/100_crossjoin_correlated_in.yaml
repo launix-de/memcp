@@ -1,0 +1,45 @@
+metadata:
+  version: "1.0"
+  description: "Cross-join with correlated IN subquery"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS ta"
+  - sql: "DROP TABLE IF EXISTS tb"
+  - sql: "DROP TABLE IF EXISTS tc"
+  - sql: "CREATE TABLE ta (ID INT, x TEXT, kunde INT)"
+  - sql: "CREATE TABLE tb (ID INT, y INT, account TEXT)"
+  - sql: "CREATE TABLE tc (ID INT, z INT, crdtAccount TEXT)"
+  - sql: "INSERT INTO ta VALUES (1, NULL, 10)"
+  - sql: "INSERT INTO ta VALUES (2, 'notnull', 20)"
+  - sql: "INSERT INTO tb VALUES (1, 5, 'acct-A')"
+  - sql: "INSERT INTO tb VALUES (2, 99, 'acct-B')"
+  - sql: "INSERT INTO tc VALUES (10, 5, 'acct-A')"
+  - sql: "INSERT INTO tc VALUES (20, 5, 'acct-B')"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ta"
+  - sql: "DROP TABLE IF EXISTS tb"
+  - sql: "DROP TABLE IF EXISTS tc"
+
+test_cases:
+  - name: "cross-join with correlated IN subquery - should return 1 row"
+    sql: "SELECT ta.ID AS aid, tb.ID AS bid FROM ta, tb WHERE ta.x IS NULL AND ta.kunde IN (SELECT ID FROM tc WHERE tb.y = tc.z)"
+    expect:
+      rows: 1
+      data:
+        - {aid: 1, bid: 1}
+
+  - name: "cross-join correlated IN - no match case"
+    sql: "SELECT ta.ID AS aid, tb.ID AS bid FROM ta, tb WHERE ta.x IS NULL AND ta.kunde IN (SELECT ID FROM tc WHERE tb.account = tc.crdtAccount)"
+    expect:
+      rows: 1
+      data:
+        - {aid: 1, bid: 1}
+
+  - name: "cross-join non-correlated IN - baseline"
+    sql: "SELECT ta.ID AS aid FROM ta WHERE ta.x IS NULL AND ta.kunde IN (SELECT ID FROM tc)"
+    expect:
+      rows: 1
+      data:
+        - {aid: 1}
