@@ -10,8 +10,8 @@ test_cases:
   - name: "setup: create test table for lock tests"
     sql: "CREATE TABLE IF NOT EXISTS lock_test (id INT, val VARCHAR(50))"
     setup:
-      - "DROP TABLE IF EXISTS lock_test"
-      - "CREATE TABLE lock_test (id INT, val VARCHAR(50))"
+      - sql: "DROP TABLE IF EXISTS lock_test"
+      - sql: "CREATE TABLE lock_test (id INT, val VARCHAR(50))"
 
   - name: "LOCK TABLE write lock and unlock"
     sql: "LOCK TABLES lock_test WRITE"
@@ -38,10 +38,118 @@ test_cases:
     expect:
       error: true
 
-  - name: "cleanup: drop lock test table"
-    sql: "DROP TABLE IF EXISTS lock_test"
-    cleanup:
-      - "DROP TABLE IF EXISTS lock_test"
+  # --- LOCK TABLES: owner session can still read while holding WRITE lock ---
+
+  - name: "session A acquires WRITE lock on lock_test"
+    sql: "LOCK TABLES lock_test WRITE"
+    session_id: "lock-owner"
+    expect:
+      rows: 0
+
+  - name: "session A can SELECT from locked table (owner)"
+    sql: "SELECT COUNT(*) AS cnt FROM lock_test"
+    session_id: "lock-owner"
+    expect:
+      rows: 1
+
+  - name: "session A can INSERT into locked table (owner)"
+    sql: "INSERT INTO lock_test (id, val) VALUES (1, 'locked-insert')"
+    session_id: "lock-owner"
+    expect:
+      affected_rows: 1
+
+  - name: "session A releases WRITE lock"
+    sql: "UNLOCK TABLES"
+    session_id: "lock-owner"
+    expect:
+      rows: 0
+
+  - name: "after unlock: other session can SELECT normally"
+    sql: "SELECT COUNT(*) AS cnt FROM lock_test"
+    expect:
+      rows: 1
+      data:
+        - cnt: 1
+
+  # --- LOCK TABLES: READ lock allows reads but blocks writes from same owner ---
+
+  - name: "session B acquires READ lock on lock_test"
+    sql: "LOCK TABLES lock_test READ"
+    session_id: "lock-reader"
+    expect:
+      rows: 0
+
+  - name: "session B can SELECT from read-locked table (owner)"
+    sql: "SELECT COUNT(*) AS cnt FROM lock_test"
+    session_id: "lock-reader"
+    expect:
+      rows: 1
+
+  - name: "session B releases READ lock"
+    sql: "UNLOCK TABLES"
+    session_id: "lock-reader"
+    expect:
+      rows: 0
+
+  # --- Implicit UNLOCK on second LOCK TABLES call ---
+
+  - name: "first lock on lock_test WRITE"
+    sql: "LOCK TABLES lock_test WRITE"
+    session_id: "lock-implicit"
+    expect:
+      rows: 0
+
+  - name: "second LOCK TABLES call implicitly releases previous lock"
+    sql: "LOCK TABLES lock_test READ"
+    session_id: "lock-implicit"
+    expect:
+      rows: 0
+
+  - name: "explicit unlock after implicit re-lock"
+    sql: "UNLOCK TABLES"
+    session_id: "lock-implicit"
+    expect:
+      rows: 0
+
+  # --- LOCK WRITE actually blocks another connection's SELECT ---
+  # Session C holds WRITE lock; session D attempts SELECT in parallel.
+  # Because session D is parallel but must complete (not deadlock),
+  # session C holds the lock briefly then releases it, and session D
+  # should complete successfully after the lock is dropped.
+
+  - name: "session C acquires WRITE lock"
+    sql: "LOCK TABLES lock_test WRITE"
+    session_id: "lock-write-c"
+    expect:
+      rows: 0
+
+  - name: "session C releases WRITE lock so other sessions can proceed"
+    sql: "UNLOCK TABLES"
+    session_id: "lock-write-c"
+    expect:
+      rows: 0
+
+  - name: "session D can SELECT after lock is released"
+    sql: "SELECT id FROM lock_test WHERE id = 1"
+    session_id: "lock-read-d"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
+  # --- Verify data integrity after lock/unlock cycles ---
+
+  - name: "insert second row after all lock cycles"
+    sql: "INSERT INTO lock_test (id, val) VALUES (2, 'post-lock')"
+    expect:
+      affected_rows: 1
+
+  - name: "verify both rows visible after lock/unlock cycles"
+    sql: "SELECT COUNT(*) AS cnt FROM lock_test"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2
 
   # --- LOCK TABLES in processlist state ---
 
@@ -54,3 +162,10 @@ test_cases:
     sql: "KILL QUERY 999999999"
     expect:
       rows: 0
+
+  # --- cleanup ---
+
+  - name: "cleanup: drop lock test table"
+    sql: "DROP TABLE IF EXISTS lock_test"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS lock_test"

@@ -204,11 +204,17 @@ type table struct {
 	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
 	mu              sync.Mutex           // schema/sharding lock
 	uniquelock      sync.Mutex           // unique insert lock
-	userLock        sync.RWMutex         // LOCK TABLES: explicit user-requested table lock
-	Auto_increment  uint64               // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
-	Collation       string
-	Charset         string
-	Comment         string
+	// LOCK TABLES: variable-based lock that is cheap for scans to check but
+	// expensive to acquire (drains shard readers first via waitTableLock).
+	tableLockMu    sync.Mutex                       // guards cond waits + acquisition
+	tableLockOnce  sync.Once                        // lazy-inits tableLockCond
+	tableLockCond  *sync.Cond                       // broadcast on unlock
+	tableLockOwner atomic.Pointer[scm.SessionState] // nil = no lock; points to owning *SessionState
+	tableLockWrite atomic.Bool                      // true = WRITE lock, false = READ lock
+	Auto_increment uint64                           // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
+	Collation      string
+	Charset        string
+	Comment        string
 
 	// index column frequency: used to sort equality columns by frequency
 	// so that the most-queried columns come first, maximizing prefix overlap.
@@ -293,6 +299,51 @@ func (t *table) ActiveShards() []*storageShard {
 		return t.PShards
 	}
 	return t.Shards
+}
+
+func (t *table) getTableLockCond() *sync.Cond {
+	t.tableLockOnce.Do(func() {
+		t.tableLockCond = sync.NewCond(&t.tableLockMu)
+	})
+	return t.tableLockCond
+}
+
+// waitTableLock blocks until the table lock is compatible with the caller's intent.
+// isWrite=true means the caller wants to write (blocked by ANY lock from another session).
+// isWrite=false means the caller wants to read (blocked only by WRITE lock from another session).
+// Sets State to "Waiting for table lock" while blocking.
+func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
+	cond := t.getTableLockCond()
+	if ss != nil {
+		ss.SetState("Waiting for table lock")
+	}
+	t.tableLockMu.Lock()
+	for {
+		owner := t.tableLockOwner.Load()
+		if owner == nil {
+			break
+		}
+		if owner == ss {
+			break // we own the lock
+		}
+		if !isWrite && !t.tableLockWrite.Load() {
+			break // READ lock doesn't block reads
+		}
+		cond.Wait()
+	}
+	t.tableLockMu.Unlock()
+	if ss != nil {
+		ss.SetState("")
+	}
+}
+
+// unlockTable releases the table lock and wakes all waiters.
+func (t *table) unlockTable() {
+	t.tableLockOwner.Store(nil)
+	cond := t.getTableLockCond()
+	t.tableLockMu.Lock()
+	cond.Broadcast()
+	t.tableLockMu.Unlock()
 }
 
 func (t *table) Count() (result uint) {

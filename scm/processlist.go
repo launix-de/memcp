@@ -46,8 +46,8 @@ type SessionState struct {
 	heldLocks   []func()   // unlock callbacks for LOCK TABLES
 	heldLocksMu sync.Mutex // protects heldLocks slice
 
-	scmSession     Scmer      // persistent Scheme session for HTTP connections
-	scmSessionOnce sync.Once  // ensures scmSession is initialized exactly once
+	scmSession     Scmer     // persistent Scheme session for HTTP connections
+	scmSessionOnce sync.Once // ensures scmSession is initialized exactly once
 }
 
 // GetOrCreateScmSession returns the persistent Scheme session for this SessionState,
@@ -102,6 +102,11 @@ func (s *SessionState) ClearCancel() {
 // IsKilled returns true if this session has been killed.
 func (s *SessionState) IsKilled() bool {
 	return s.killed.Load()
+}
+
+// ResetKilled clears the killed flag, e.g. at the start of a new request on a reused session.
+func (s *SessionState) ResetKilled() {
+	s.killed.Store(false)
 }
 
 // Kill marks the session as killed and fires the cancel function if set.

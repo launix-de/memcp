@@ -147,6 +147,8 @@ func scmerSliceToStrings(list []scm.Scmer) []string {
 // lockTable acquires a user-level read or write lock on the named table.
 // The session's State is updated while waiting, and the unlock callback is
 // registered with the session so that ReleaseAllLocks() can free it later.
+// Acquiring any lock requires an exclusive wait (drain other owners), then
+// drains in-flight shard readers by briefly acquiring each shard's write lock.
 func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	db := GetDatabase(schema)
 	if db == nil {
@@ -156,23 +158,19 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	if t == nil {
 		panic("LOCK TABLES: unknown table: " + schema + "." + name)
 	}
-	if ss != nil {
-		ss.SetState("Waiting for table lock")
+	// Wait for any existing lock to be released, then claim ownership
+	t.waitTableLock(ss, true) // acquiring any lock requires exclusive wait
+	// Drain in-flight shard readers: briefly acquire each shard's write lock
+	for _, s := range t.ActiveShards() {
+		s.mu.Lock()
+		s.mu.Unlock()
 	}
-	if write {
-		t.userLock.Lock()
-		unlock := func() { t.userLock.Unlock() }
-		if ss != nil {
-			ss.SetState("")
-			ss.AddLock(unlock)
-		}
-	} else {
-		t.userLock.RLock()
-		unlock := func() { t.userLock.RUnlock() }
-		if ss != nil {
-			ss.SetState("")
-			ss.AddLock(unlock)
-		}
+	// Set the lock (atomic writes are visible to scan's cheap check)
+	t.tableLockWrite.Store(write)
+	t.tableLockOwner.Store(ss)
+	if ss != nil {
+		ss.SetState("")
+		ss.AddLock(t.unlockTable)
 	}
 }
 

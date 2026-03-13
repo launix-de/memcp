@@ -295,7 +295,19 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		defer UnregisterSession(ss.ID)
 	}
 	defer ss.ReleaseAllLocks()
+	// Reset killed flag in case this session was killed in a previous request
+	ss.ResetKilled()
 	ss.SetCommand("Query", req.Method+" "+req.URL.Path)
+	// Watch for HTTP client disconnect and propagate to session kill
+	reqDone := make(chan struct{})
+	defer close(reqDone)
+	go func() {
+		select {
+		case <-req.Context().Done():
+			ss.Kill()
+		case <-reqDone:
+		}
+	}()
 	SetValues(map[string]any{"sessionStatePtr": ss}, func() {
 		contextFn := func() {
 			// catch panics and print out 500 Internal Server Error
