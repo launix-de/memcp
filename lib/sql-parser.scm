@@ -1774,7 +1774,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
 			(define body sql_trigger_body)
 		) (begin
-				(list 'createtrigger schema tbl name timing (car body) (eval (compile_trigger_body schema timing (car (cdr body)))) true)
+				(define trigger_fn (try
+					(lambda () (eval (compile_trigger_body schema timing (car (cdr body)))))
+					(lambda (err) (begin (print (concat "WARNING: trigger " name " body compile failed: " (string err))) (lambda (row) nil)))))
+				(list 'createtrigger schema tbl name timing (car body) trigger_fn true)
 		))
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
