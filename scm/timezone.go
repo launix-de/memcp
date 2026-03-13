@@ -19,7 +19,9 @@ package scm
 import (
 	_ "time/tzdata" // embed IANA timezone database
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -45,9 +47,24 @@ var tzAbbrevMap = map[string]string{
 	"NZST": "Pacific/Auckland", "NZDT": "Pacific/Auckland",
 }
 
+// tzLocationCache caches resolved *time.Location values by name to avoid repeated IANA parsing.
+var tzLocationCache sync.Map // map[string]*time.Location
+
 // ResolveLocation resolves a timezone name string to a *time.Location.
 // Accepts: "UTC", "SYSTEM", "+HH:MM" / "-HH:MM" offsets, IANA names, abbreviations.
+// Results are cached to avoid repeated parsing of the embedded IANA timezone database.
 func ResolveLocation(name string) (*time.Location, error) {
+	if v, ok := tzLocationCache.Load(name); ok {
+		return v.(*time.Location), nil
+	}
+	loc, err := resolveLocationUncached(name)
+	if err == nil {
+		tzLocationCache.Store(name, loc)
+	}
+	return loc, err
+}
+
+func resolveLocationUncached(name string) (*time.Location, error) {
 	switch strings.ToUpper(name) {
 	case "UTC", "UTC+0", "UTC-0", "+00:00", "-00:00", "+0:00", "-0:00":
 		return time.UTC, nil
@@ -72,7 +89,7 @@ func ResolveLocation(name string) (*time.Location, error) {
 	return nil, fmt.Errorf("unknown timezone: %q", name)
 }
 
-// parseFixedOffset parses "+HH:MM" or "-HH:MM" into a fixed-offset location.
+// parseFixedOffset parses "+HH:MM", "+H:MM", or "+HH" into a fixed-offset location.
 func parseFixedOffset(s string) (*time.Location, error) {
 	sign := 1
 	if s[0] == '-' {
@@ -80,15 +97,25 @@ func parseFixedOffset(s string) (*time.Location, error) {
 	}
 	s = s[1:]
 	var h, m int
+	var err error
 	switch {
 	case len(s) == 5 && s[2] == ':':
-		fmt.Sscanf(s, "%d:%d", &h, &m)
+		h, err = strconv.Atoi(s[0:2])
+		if err == nil {
+			m, err = strconv.Atoi(s[3:5])
+		}
 	case len(s) == 4 && s[2] == ':':
-		fmt.Sscanf(s, "%d:%d", &h, &m)
+		h, err = strconv.Atoi(s[0:2])
+		if err == nil {
+			m, err = strconv.Atoi(s[3:4])
+		}
 	case len(s) == 2:
-		fmt.Sscanf(s, "%d", &h)
+		h, err = strconv.Atoi(s)
 	default:
 		return nil, fmt.Errorf("cannot parse offset %q", s)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse offset %q: %w", s, err)
 	}
 	offset := sign * (h*3600 + m*60)
 	name := fmt.Sprintf("%+03d:%02d", sign*h, m)
@@ -371,7 +398,7 @@ func init_timezone() {
 				y2, _, _ := t2.Date()
 				return NewInt(int64(y2 - y1))
 			default:
-				panic("unknown TIMESTAMPDIFF unit: " + unit)
+				return NewNil() // unknown unit → NULL (MySQL compatible)
 			}
 		},
 		true, false, nil, nil,
