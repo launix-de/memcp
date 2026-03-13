@@ -926,6 +926,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* SHOW PLUGINS: return empty set (ok for most clients) */
 		(parser '((atom "SHOW" true) (atom "PLUGINS" true)) (quote true))
 
+		/* SHOW [FULL] PROCESSLIST */
+		(parser '((atom "SHOW" true) (atom "PROCESSLIST" true))
+			'((quote map) '((quote show_processlist)) '((quote lambda) '((quote row)) '((quote resultrow) (quote row)))))
+		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "PROCESSLIST" true))
+			'((quote map) '((quote show_processlist) true) '((quote lambda) '((quote row)) '((quote resultrow) (quote row)))))
+
+		/* KILL [QUERY|CONNECTION] id */
+		(parser '((atom "KILL" true) (? (or (atom "QUERY" true) (atom "CONNECTION" true))) (define id psql_expression))
+			'((quote kill_query) id))
+
 		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] */
 		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern psql_expression))) (cons '!begin '(
 			'((quote resultrow) '((quote list) "Variable_name" "version"               "Value" "0.9"))

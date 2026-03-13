@@ -1062,6 +1062,7 @@ Patterns can be any of:
 	init_sync()
 	init_scheduler()
 	init_window()
+	init_processlist()
 	init_jit()
 	RunJitTest()
 }

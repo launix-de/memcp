@@ -278,6 +278,9 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			})
 		}),
 	}
+	ss := RegisterSession(user, req.RemoteAddr, "")
+	ss.SetCommand("Query", req.Method+" "+req.URL.Path)
+	defer UnregisterSession(ss.ID)
 	NewContext(req.Context(), func() {
 		// catch panics and print out 500 Internal Server Error
 		defer func() {

@@ -1,0 +1,18 @@
+# SHOW [FULL] PROCESSLIST and KILL QUERY
+
+metadata:
+  version: "1.0"
+  description: "SHOW PROCESSLIST lists active sessions; KILL QUERY cancels a running query"
+
+test_cases:
+  - name: "SHOW PROCESSLIST parses and executes without error"
+    sql: "SHOW PROCESSLIST"
+
+  - name: "SHOW FULL PROCESSLIST parses and executes without error"
+    sql: "SHOW FULL PROCESSLIST"
+
+  - name: "KILL QUERY with unknown id completes without error"
+    sql: "KILL QUERY 999999999"
+
+  - name: "KILL CONNECTION with unknown id completes without error"
+    sql: "KILL CONNECTION 999999999"
