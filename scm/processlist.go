@@ -45,6 +45,18 @@ type SessionState struct {
 
 	heldLocks   []func()   // unlock callbacks for LOCK TABLES
 	heldLocksMu sync.Mutex // protects heldLocks slice
+
+	scmSession     Scmer      // persistent Scheme session for HTTP connections
+	scmSessionOnce sync.Once  // ensures scmSession is initialized exactly once
+}
+
+// GetOrCreateScmSession returns the persistent Scheme session for this SessionState,
+// creating it on first call. Used by HTTP sessions to persist @variables across requests.
+func (s *SessionState) GetOrCreateScmSession() Scmer {
+	s.scmSessionOnce.Do(func() {
+		s.scmSession = NewSession()
+	})
+	return s.scmSession
 }
 
 // ElapsedSeconds returns seconds since the last command started.

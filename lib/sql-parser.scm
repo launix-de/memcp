@@ -145,10 +145,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
 	/* (get_column "OLD" _ col _) -> (get_assoc OLD col) */
 	/* (get_column nil _ col _) -> (get_assoc NEW col) for unqualified columns in trigger context */
+	/* ('session var) -> ((context "session") var) — always read @var from GLS session, not lexical scope */
 	(define transform_trigger_expr (lambda (expr) (match expr
 		'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 		'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
 		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+		'('session var) (list (list (symbol "context") "session") var)
+		'('session var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
 		(cons head tail) (cons (transform_trigger_expr head) (map tail transform_trigger_expr))
 		expr
 	)))

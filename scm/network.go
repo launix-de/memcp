@@ -297,7 +297,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	defer ss.ReleaseAllLocks()
 	ss.SetCommand("Query", req.Method+" "+req.URL.Path)
 	SetValues(map[string]any{"sessionStatePtr": ss}, func() {
-		NewContext(req.Context(), func() {
+		contextFn := func() {
 			// catch panics and print out 500 Internal Server Error
 			defer func() {
 				if r := recover(); r != nil {
@@ -315,7 +315,14 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 				}
 			}()
 			Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
-		})
+		}
+		// Persistent HTTP sessions reuse the same Scheme session so that
+		// @variables set in one request are visible in subsequent requests.
+		if req.Header.Get("X-Session-Id") != "" {
+			NewContextWithSession(req.Context(), ss.GetOrCreateScmSession(), contextFn)
+		} else {
+			NewContext(req.Context(), contextFn)
+		}
 	})
 }
 

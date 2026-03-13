@@ -1309,7 +1309,7 @@ func (m *ShardMapReducer) Close() {
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) {
 	// Execute BEFORE INSERT triggers (can modify values; isIgnore skips failing rows)
 	if len(t.t.Triggers) > 0 {
-		values = t.t.ExecuteBeforeInsertTriggers(columns, values, isIgnore)
+		columns, values = t.t.ExecuteBeforeInsertTriggers(columns, values, isIgnore)
 		if len(values) == 0 {
 			return // all rows skipped by triggers
 		}

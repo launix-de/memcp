@@ -17,10 +17,10 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import (
-	_ "time/tzdata" // embed IANA timezone database
 	"fmt"
 	"strings"
 	"time"
+	_ "time/tzdata" // embed IANA timezone database
 )
 
 // tzAbbrevMap maps common timezone abbreviations to IANA zone names.
@@ -36,12 +36,12 @@ var tzAbbrevMap = map[string]string{
 	"MST": "America/Denver", "MDT": "America/Denver",
 	"PST": "America/Los_Angeles", "PDT": "America/Los_Angeles",
 	"AKST": "America/Anchorage", "AKDT": "America/Anchorage",
-	"HST": "Pacific/Honolulu",
-	"IST": "Asia/Kolkata",
-	"JST": "Asia/Tokyo",
-	"KST": "Asia/Seoul",
+	"HST":    "Pacific/Honolulu",
+	"IST":    "Asia/Kolkata",
+	"JST":    "Asia/Tokyo",
+	"KST":    "Asia/Seoul",
 	"CST_CN": "Asia/Shanghai",
-	"AEST": "Australia/Sydney", "AEDT": "Australia/Sydney",
+	"AEST":   "Australia/Sydney", "AEDT": "Australia/Sydney",
 	"NZST": "Pacific/Auckland", "NZDT": "Pacific/Auckland",
 }
 

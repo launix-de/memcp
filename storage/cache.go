@@ -75,11 +75,11 @@ type expiryEntry struct {
 // expiryHeap is a min-heap on estimatedExpiry (soonest expiry at top).
 type expiryHeap []expiryEntry
 
-func (h expiryHeap) Len() int            { return len(h) }
-func (h expiryHeap) Less(i, j int) bool  { return h[i].estimatedExpiry < h[j].estimatedExpiry }
-func (h expiryHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *expiryHeap) Push(x any)         { *h = append(*h, x.(expiryEntry)) }
-func (h *expiryHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h expiryHeap) Len() int           { return len(h) }
+func (h expiryHeap) Less(i, j int) bool { return h[i].estimatedExpiry < h[j].estimatedExpiry }
+func (h expiryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *expiryHeap) Push(x any)        { *h = append(*h, x.(expiryEntry)) }
+func (h *expiryHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 
 // softItemHeap implements container/heap.Interface as a max-heap on evictionScore.
 type softItemHeap []*softItem
@@ -166,7 +166,7 @@ type CacheManager struct {
 	countByType [numEvictableTypes]int64
 
 	h       softItemHeap
-	expH    expiryHeap   // min-heap for maxIdleTime expiry; lazy-deletion (stale entries discarded on pop)
+	expH    expiryHeap // min-heap for maxIdleTime expiry; lazy-deletion (stale entries discarded on pop)
 	itemMap map[any]*softItem
 
 	opChan  chan cacheOp
