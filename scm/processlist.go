@@ -107,8 +107,35 @@ func strPtr(p *atomic.Pointer[string]) string {
 
 var (
 	processList   sync.Map      // map[uint64]*SessionState
-	nextSessionID atomic.Uint64 // monotonic counter for HTTP sessions
+	nextSessionID atomic.Uint64 // monotonic counter for session IDs
+	httpStates    sync.Map      // map[string]*SessionState for persistent HTTP sessions (X-Session-Id)
 )
+
+// HTTPSessionAddHook is called when a new persistent HTTP session is created.
+// The storage package wires in GlobalCache registration via SetHTTPSessionAddHook.
+var httpSessionAddHook func(key string, ss *SessionState)
+
+// SetHTTPSessionAddHook wires in a callback for when a new persistent HTTP session is created.
+// Intended to be called once from storage after GlobalCache.Init().
+func SetHTTPSessionAddHook(fn func(key string, ss *SessionState)) {
+	httpSessionAddHook = fn
+}
+
+// EvictHTTPSession removes a persistent HTTP session from the processlist.
+// Called by the cache manager's cleanup callback.
+func EvictHTTPSession(key string) bool {
+	v, ok := httpStates.LoadAndDelete(key)
+	if !ok {
+		return false
+	}
+	UnregisterSession(v.(*SessionState).ID)
+	return true
+}
+
+// LastUsedNano returns the unix nanosecond timestamp of the last command start.
+func (s *SessionState) LastUsedNano() int64 {
+	return s.startedAt.Load()
+}
 
 func init_processlist() {
 	nextSessionID.Store(1)

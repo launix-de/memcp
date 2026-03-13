@@ -60,6 +60,8 @@ type softItem struct {
 	heapIndex     int                       // position in heap (-1 if not in heap)
 	dynamicScore  float64                   // scratch field for Phase 2
 	registeredAt  int64                     // UnixNano; set once in addInternal as fallback for items whose lastAccessed starts at zero
+	minLifetime   int64                     // minimum idle nanos before eviction (0 = default 1s)
+	maxIdleTime   int64                     // force-evict if idle for this many nanos (0 = no limit)
 }
 
 // softItemHeap implements container/heap.Interface as a max-heap on evictionScore.
@@ -234,6 +236,39 @@ func (cm *CacheManager) AddItem(
 	<-done
 }
 
+// AddItemEx is like AddItem but allows specifying per-item lifetimes.
+// minLifetime: minimum idle duration before this item is eligible for eviction (0 = default 1s).
+// maxIdleTime: force-evict the item if it has been idle for longer than this (0 = no limit).
+func (cm *CacheManager) AddItemEx(
+	pointer any,
+	size int64,
+	evictType EvictableType,
+	cleanup func(pointer any, freedByType *[numEvictableTypes]int64) bool,
+	getLastUsed func(pointer any) time.Time,
+	getScore func(pointer any) float64,
+	minLifetime, maxIdleTime time.Duration,
+) {
+	if cm.opChan == nil || cm.stopped.Load() {
+		return
+	}
+	factor := evictableFactors[evictType]
+	item := &softItem{
+		pointer:       pointer,
+		size:          size,
+		evictType:     evictType,
+		evictionScore: size / factor,
+		cleanup:       cleanup,
+		getLastUsed:   getLastUsed,
+		getScore:      getScore,
+		heapIndex:     -1,
+		minLifetime:   int64(minLifetime),
+		maxIdleTime:   int64(maxIdleTime),
+	}
+	done := make(chan struct{})
+	cm.opChan <- cacheOp{add: item, done: done}
+	<-done
+}
+
 // Remove deregisters an item WITHOUT calling cleanup.
 // For normal lifecycle destruction (DropTable, DropColumn, Rebuild).
 // Safe to call for pointers not in the map (no-op).
@@ -347,34 +382,71 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
 
 // run is the single-threaded goroutine handling all operations.
 func (cm *CacheManager) run() {
-	for op := range cm.opChan {
-		if op.add != nil {
-			cm.addInternal(op.add)
-		} else if op.del != nil {
-			cm.removeByPointer(op.del)
-		} else if op.updatePtr != nil {
-			cm.updateSizeInternal(op.updatePtr, op.updateDelta)
-		} else if op.budgetUpdate {
-			cm.memoryBudget = op.budgetVal
-			cm.persistedBudget = op.persistedBudgetVal
-		} else if op.pressureSize > 0 {
-			cm.runEvictionChecks(op.pressureSize)
-		} else if op.statResult != nil {
-			op.statResult <- CacheStat{
-				SizeByType:      cm.sizeByType,
-				CountByType:     cm.countByType,
-				CurrentMemory:   cm.currentMemory,
-				MemoryBudget:    cm.memoryBudget,
-				PersistedBudget: cm.persistedBudget,
-				PersistedMemory: cm.persistedMemory(),
+	expireTicker := time.NewTicker(time.Minute)
+	defer expireTicker.Stop()
+	for {
+		select {
+		case op, ok := <-cm.opChan:
+			if !ok {
+				return
 			}
-			close(op.statResult)
+			if op.add != nil {
+				cm.addInternal(op.add)
+			} else if op.del != nil {
+				cm.removeByPointer(op.del)
+			} else if op.updatePtr != nil {
+				cm.updateSizeInternal(op.updatePtr, op.updateDelta)
+			} else if op.budgetUpdate {
+				cm.memoryBudget = op.budgetVal
+				cm.persistedBudget = op.persistedBudgetVal
+			} else if op.pressureSize > 0 {
+				cm.runEvictionChecks(op.pressureSize)
+			} else if op.statResult != nil {
+				op.statResult <- CacheStat{
+					SizeByType:      cm.sizeByType,
+					CountByType:     cm.countByType,
+					CurrentMemory:   cm.currentMemory,
+					MemoryBudget:    cm.memoryBudget,
+					PersistedBudget: cm.persistedBudget,
+					PersistedMemory: cm.persistedMemory(),
+				}
+				close(op.statResult)
+			}
+			if op.done != nil {
+				close(op.done)
+			}
+			// check if we need cleanup after add or updateSize
+			cm.runEvictionChecks(0)
+		case <-expireTicker.C:
+			cm.evictExpired()
 		}
-		if op.done != nil {
-			close(op.done)
+	}
+}
+
+// evictExpired removes items whose maxIdleTime has been exceeded.
+func (cm *CacheManager) evictExpired() {
+	now := time.Now()
+	var expired []*softItem
+	for _, item := range cm.itemMap {
+		if item.maxIdleTime == 0 {
+			continue
 		}
-		// check if we need cleanup after add or updateSize
-		cm.runEvictionChecks(0)
+		lastActive := item.registeredAt
+		if lu := item.getLastUsed(item.pointer).UnixNano(); lu > lastActive {
+			lastActive = lu
+		}
+		if now.UnixNano()-lastActive > item.maxIdleTime {
+			expired = append(expired, item)
+		}
+	}
+	var freedByType [numEvictableTypes]int64
+	for _, item := range expired {
+		if _, ok := cm.itemMap[item.pointer]; !ok {
+			continue // already freed by a previous cleanup in this loop
+		}
+		if item.cleanup(item.pointer, &freedByType) {
+			cm.removeInternal(item.pointer, &freedByType)
+		}
 	}
 }
 
@@ -522,12 +594,17 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		if _, ok := cm.itemMap[c.pointer]; !ok {
 			continue
 		}
-		// guarantee minimum lifetime of 1s: use the later of registeredAt and getLastUsed
+		// guarantee minimum lifetime before eviction: use the later of registeredAt and getLastUsed
 		lastActive := c.registeredAt
 		if lu := c.getLastUsed(c.pointer).UnixNano(); lu > lastActive {
 			lastActive = lu
 		}
-		if now.UnixNano()-lastActive < int64(time.Second) {
+		minLT := c.minLifetime
+		if minLT == 0 {
+			minLT = int64(time.Second)
+		}
+		idleNanos := now.UnixNano() - lastActive
+		if idleNanos < minLT {
 			heap.Push(&cm.h, c)
 			continue
 		}

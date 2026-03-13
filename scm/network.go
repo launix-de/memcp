@@ -278,9 +278,23 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			})
 		}),
 	}
-	ss := RegisterSession(user, req.RemoteAddr, "")
+	var ss *SessionState
+	if sid := req.Header.Get("X-Session-Id"); sid != "" {
+		// Persistent HTTP session: reuse or create a long-lived SessionState.
+		if v, ok := httpStates.Load(sid); ok {
+			ss = v.(*SessionState)
+		} else {
+			ss = RegisterSession(user, req.RemoteAddr, "")
+			httpStates.Store(sid, ss)
+			if httpSessionAddHook != nil {
+				httpSessionAddHook(sid, ss)
+			}
+		}
+	} else {
+		ss = RegisterSession(user, req.RemoteAddr, "")
+		defer UnregisterSession(ss.ID)
+	}
 	ss.SetCommand("Query", req.Method+" "+req.URL.Path)
-	defer UnregisterSession(ss.ID)
 	NewContext(req.Context(), func() {
 		// catch panics and print out 500 Internal Server Error
 		defer func() {

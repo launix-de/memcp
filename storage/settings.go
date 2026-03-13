@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dc0d/onexit"
 	"github.com/launix-de/memcp/scm"
@@ -254,4 +255,19 @@ func InitCacheManager() {
 	if total > 0 || persisted > 0 {
 		GlobalCache.Init(total, persisted)
 	}
+	// Register persistent HTTP sessions in the cache so they are evicted after 30 min idle.
+	scm.SetHTTPSessionAddHook(func(key string, ss *scm.SessionState) {
+		GlobalCache.AddItemEx(
+			key, 512, TypeCacheEntry,
+			func(p any, _ *[numEvictableTypes]int64) bool {
+				return scm.EvictHTTPSession(p.(string))
+			},
+			func(p any) time.Time {
+				return time.Unix(0, ss.LastUsedNano())
+			},
+			nil,
+			5*time.Minute,  // minLifetime: keep session alive for at least 5 min under memory pressure
+			30*time.Minute, // maxIdleTime: evict after 30 min of no requests
+		)
+	})
 }
