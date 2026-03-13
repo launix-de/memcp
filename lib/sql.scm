@@ -168,6 +168,12 @@ qry    — query text (pass "" when unknown) */
 (globalvars "lower_case_table_names" 0)
 (globalvars "character_set_server" "utf8mb4")
 (globalvars "collation_server" "utf8mb4_general_ci")
+(globalvars "time_zone" "UTC")
+(globalvars "system_time_zone" (system_time_zone))
+
+/* session_globalvar: reads from session first, falls back to globalvars.
+   Used for @@var resolution so per-session SET affects @@var reads. */
+(define session_globalvar (lambda (key) (coalesceNil ((context "session") key) (globalvars key))))
 
 
 /* persistent HTTP sessions for transaction support */

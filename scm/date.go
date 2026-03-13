@@ -17,7 +17,6 @@ Copyright (C) 2024  Carl-Philip Hänsch
 package scm
 
 import (
-	"fmt"
 	"strings"
 	"time"
 )
@@ -81,11 +80,12 @@ func init_date() {
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{
-		"current_date", "returns the current date (midnight UTC)",
+		"current_date", "returns the current date (midnight in session timezone)",
 		0, 0,
 		[]DeclarationParameter{}, "date",
 		func(a ...Scmer) Scmer {
-			now := time.Now().UTC()
+			loc := GetCurrentSessionLocation()
+			now := time.Now().In(loc)
 			midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
@@ -131,38 +131,9 @@ func init_date() {
 			if !ok {
 				return NewNil()
 			}
-			format := String(a[1])
-			// replace MySQL format specifiers manually to avoid Go magic number collisions
-			var buf strings.Builder
-			for i := 0; i < len(format); i++ {
-				if format[i] == '%' && i+1 < len(format) {
-					switch format[i+1] {
-					case 'Y':
-						buf.WriteString(fmt.Sprintf("%04d", t.Year()))
-					case 'm':
-						buf.WriteString(fmt.Sprintf("%02d", t.Month()))
-					case 'd':
-						buf.WriteString(fmt.Sprintf("%02d", t.Day()))
-					case 'H':
-						buf.WriteString(fmt.Sprintf("%02d", t.Hour()))
-					case 'i':
-						buf.WriteString(fmt.Sprintf("%02d", t.Minute()))
-					case 's':
-						buf.WriteString(fmt.Sprintf("%02d", t.Second()))
-					case 'T':
-						buf.WriteString(fmt.Sprintf("%02d:%02d:%02d", t.Hour(), t.Minute(), t.Second()))
-					case '%':
-						buf.WriteByte('%')
-					default:
-						buf.WriteByte('%')
-						buf.WriteByte(format[i+1])
-					}
-					i++ // skip format char
-				} else {
-					buf.WriteByte(format[i])
-				}
-			}
-			return NewString(buf.String())
+			// apply session timezone for display
+			t = t.In(GetCurrentSessionLocation())
+			return NewString(formatDateMySQL(t, String(a[1])))
 		},
 		true, false, nil,
 		nil,
@@ -184,6 +155,7 @@ func init_date() {
 			if !ok {
 				return NewNil()
 			}
+			t = t.In(GetCurrentSessionLocation())
 			field := strings.ToUpper(a[1].String())
 			switch field {
 			case "YEAR":

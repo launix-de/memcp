@@ -26,7 +26,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -145,8 +144,43 @@ func NewInt(i int64) Scmer {
 	return Scmer{&scmerIntSentinel, uint64(i)}
 }
 
+// tagDate bit layout (56-bit val field of aux, after the 8-bit tag):
+//
+//	bits 55:45  zone_id  (11 bits) — 0 = UTC / no zone
+//	bits 44:0   unix     (45 bits, signed 2's complement) — seconds since epoch
+//
+// Range: ±2^44 seconds ≈ ±557,000 years. Zone IDs 1..2047 index system.timezones.
+const (
+	tagDateUnixBits = 45
+	tagDateZoneBits = 11
+	tagDateUnixMask = (uint64(1) << tagDateUnixBits) - 1
+	tagDateZoneMask = (uint64(1) << tagDateZoneBits) - 1
+)
+
+// TagDateEncodeVal encodes a unix timestamp and zone_id into the 56-bit val for tagDate.
+func TagDateEncodeVal(unix int64, zoneID int) uint64 {
+	return (uint64(zoneID)&tagDateZoneMask)<<tagDateUnixBits | (uint64(unix) & tagDateUnixMask)
+}
+
+// TagDateDecodeUnix extracts the unix timestamp (signed, seconds since epoch) from a tagDate val.
+func TagDateDecodeUnix(val uint64) int64 {
+	raw := val & tagDateUnixMask
+	// sign-extend from bit 44
+	return int64(raw<<(64-tagDateUnixBits)) >> (64 - tagDateUnixBits)
+}
+
+// TagDateDecodeZone extracts the zone_id from a tagDate val.
+func TagDateDecodeZone(val uint64) int {
+	return int((val >> tagDateUnixBits) & tagDateZoneMask)
+}
+
 func NewDate(unixts int64) Scmer {
-	return Scmer{nil, makeAux(tagDate, uint64(unixts))}
+	return Scmer{nil, makeAux(tagDate, TagDateEncodeVal(unixts, 0))}
+}
+
+// NewDateWithZone creates a tagDate value with an explicit zone_id (1..2047 = index in system.timezones).
+func NewDateWithZone(unixts int64, zoneID int) Scmer {
+	return Scmer{nil, makeAux(tagDate, TagDateEncodeVal(unixts, zoneID))}
 }
 
 // signExtend56 sign-extends a 56-bit two's complement value to int64.
@@ -506,7 +540,7 @@ func (s Scmer) Int() int64 {
 		}
 		return v
 	case tagDate:
-		return signExtend56(auxVal(s.aux))
+		return TagDateDecodeUnix(auxVal(s.aux))
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1
@@ -535,7 +569,7 @@ func (s Scmer) Float() float64 {
 		}
 		return v
 	case tagDate:
-		return float64(signExtend56(auxVal(s.aux)))
+		return float64(TagDateDecodeUnix(auxVal(s.aux)))
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1.0
@@ -593,7 +627,7 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		}
 		return "false", dst
 	case tagDate:
-		return time.Unix(signExtend56(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"), dst
+		return DateToDisplay(s, GetCurrentSessionLocation()), dst
 	case tagNil:
 		return "nil", dst
 	case tagFunc:
@@ -849,7 +883,7 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagFloat:
 			return v.Float()
 		case tagDate:
-			return time.Unix(signExtend56(auxVal(v.aux)), 0).UTC().Format("2006-01-02 15:04:05")
+			return DateToDisplay(v, GetCurrentSessionLocation())
 		case tagString:
 			s := v.String()
 			if !utf8.ValidString(s) {
@@ -949,7 +983,7 @@ func (s *Scmer) Write(w io.Writer) {
 		b := strconv.AppendFloat(buf[:0], f, 'g', -1, 64)
 		w.Write(b)
 	case tagDate:
-		io.WriteString(w, time.Unix(signExtend56(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"))
+		io.WriteString(w, DateToDisplay(*s, GetCurrentSessionLocation()))
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
 	case tagFunc:

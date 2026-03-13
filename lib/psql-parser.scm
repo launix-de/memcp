@@ -97,6 +97,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define psql_type (parser (or
 	(parser '((atom "character" true) (atom "varying" true)) "varying")
 	(parser '((atom "double" true) (atom "precision" true)) "double")
+	/* PostgreSQL timezone-aware types */
+	(parser '((atom "TIMESTAMP" true) (atom "WITH" true) (atom "TIME" true) (atom "ZONE" true)) "TIMESTAMP")
+	(parser '((atom "TIMESTAMP" true) (atom "WITHOUT" true) (atom "TIME" true) (atom "ZONE" true)) "DATETIME")
+	(parser (atom "TIMESTAMPTZ" true) "TIMESTAMP")
+	(parser '((atom "TIME" true) (atom "WITH" true) (atom "TIME" true) (atom "ZONE" true)) "TIME")
+	(parser (atom "TIMETZ" true) "TIME")
 	psql_identifier
 )))
 
@@ -227,8 +233,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s psql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a "," 'b))) nil))
 
 		(parser '((atom "DATABASE" true) "(" ")") schema)
-		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
-		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p psql_expression) ")") '('parse_date p))
+		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('unix_timestamp))
+		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p psql_expression) ")") '('unix_timestamp p))
 		/* CURRENT_DATE / CURRENT_DATE() */
 		(parser '((atom "CURRENT_DATE" true) "(" ")") '('current_date))
 		(parser (atom "CURRENT_DATE" true) '('current_date))
@@ -237,6 +243,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (atom "CURRENT_TIMESTAMP" true) '('now))
 		/* EXTRACT(field FROM expr) */
 		(parser '((atom "EXTRACT" true) "(" (define field psql_identifier_unquoted) (atom "FROM" true) (define e psql_expression) ")") '('extract_date e field))
+		/* TIMESTAMPDIFF(unit, dt1, dt2) — unit is a keyword, not a column */
+		(parser '((atom "TIMESTAMPDIFF" true) "(" (define unit psql_identifier_unquoted) "," (define dt1 psql_expression) "," (define dt2 psql_expression) ")") '('timestampdiff unit dt1 dt2))
 		/* DATE_ADD(expr, INTERVAL n UNIT) / DATE_SUB(expr, INTERVAL n UNIT) */
 		(parser '((atom "DATE_ADD" true) "(" (define e psql_expression) "," (atom "INTERVAL" true) (define n psql_expression) (define unit psql_identifier_unquoted) ")") '('date_add e n unit))
 		(parser '((atom "DATE_SUB" true) "(" (define e psql_expression) "," (atom "INTERVAL" true) (define n psql_expression) (define unit psql_identifier_unquoted) ")") '('date_sub e n unit))
@@ -280,9 +288,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (atom "ON" true) true)
 		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var psql_identifier_unquoted)) '('session var))
-		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var */
-		(parser '((atom "@@" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true)) (? (atom "." true))) (define var psql_identifier_unquoted)) '('globalvars var))
-		(parser '((atom "@@" true) (define var psql_identifier_unquoted)) '('globalvars var))
+		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var
+		   @@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
+		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var psql_identifier_unquoted)) '('globalvars var))
+		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var psql_identifier_unquoted)) '('session_globalvar var))
+		(parser '((atom "@@" true) (define var psql_identifier_unquoted)) '('session_globalvar var))
 		/* LEFT(str, n) -- special case because LEFT is a reserved keyword (LEFT JOIN) */
 		(parser '((atom "LEFT" true) "(" (define s psql_expression) "," (define n psql_expression) ")") '((quote sql_substr) s 1 n))
 		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
@@ -308,7 +318,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser '((define a psql_expression7) "::" (atom "boolean" true)) '('simplify a))
 		(parser '((define a psql_expression7) "::" (atom "date" true)) '('concat a))
 		(parser '((define a psql_expression7) "::" (atom "timestamp" true)) '('concat a))
+		(parser '((define a psql_expression7) "::" (atom "timestamptz" true)) '('parse_date a))
 		(parser '((define a psql_expression7) "::" psql_identifier) a) /* unknown cast types: pass through */
+		/* PostgreSQL AT TIME ZONE postfix operator */
+		(parser '((define a psql_expression7) (atom "AT" true) (atom "TIME" true) (atom "ZONE" true) (define tz psql_expression7)) '('at_time_zone a tz))
 		psql_expression7
 	)))
 
@@ -922,6 +935,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		)))
 		(parser '((atom "SHOW" true) (atom "VARIABLES" true)) '((quote map_assoc) '((quote list) "version" "0.9") '((quote lambda) '((quote key) (quote value)) '((quote resultrow) '((quote list) "Variable_name" (quote key) "Value" (quote value))))))
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset psql_expression)) (quote true)) /* ignore */
+		/* PostgreSQL SET TIME ZONE / SET timezone syntax */
+		(parser '((atom "SET" true) (atom "TIME" true) (atom "ZONE" true) (atom "LOCAL" true)) '((quote session) "time_zone" "SYSTEM"))
+		(parser '((atom "SET" true) (atom "TIME" true) (atom "ZONE" true) (atom "DEFAULT" true)) '((quote session) "time_zone" (globalvars "time_zone")))
+		(parser '((atom "SET" true) (atom "TIME" true) (atom "ZONE" true) (define tz psql_expression)) '((quote session) "time_zone" tz))
+		/* SET timezone = 'value' — PostgreSQL GUC style */
+		(parser '((atom "SET" true) (atom "timezone" true) (or "=" (atom "TO" true)) (define tz psql_expression)) '((quote session) "time_zone" tz))
 
 
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id)))

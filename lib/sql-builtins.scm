@@ -4,18 +4,28 @@
 /*(sql_builtins "HELLO" (lambda () "Hello world"))*/
 
 /* time */
-(sql_builtins "UNIX_TIMESTAMP" now)
-(sql_builtins "UNIX_TIMESTAMP" parse_date)
+(sql_builtins "UNIX_TIMESTAMP" unix_timestamp)
 (sql_builtins "CURRENT_TIMESTAMP" now)
 (sql_builtins "NOW" now)
 
 /* time */
-(sql_builtins "FROM_UNIXTIME" (lambda (ts) (if (nil? ts) nil (format_date (simplify ts) "%Y-%m-%d %H:%i:%s"))))
+(sql_builtins "FROM_UNIXTIME" from_unixtime)
 (sql_builtins "DATE_FORMAT" format_date)
 (sql_builtins "STR_TO_DATE" str_to_date)
 (sql_builtins "DATE" date_trunc_day)
 (sql_builtins "CURRENT_DATE" current_date)
 (sql_builtins "DATEDIFF" datediff)
+(sql_builtins "TIMESTAMPDIFF" timestampdiff)
+/* timezone functions */
+(sql_builtins "CONVERT_TZ" convert_tz)
+(sql_builtins "UTC_TIMESTAMP" utc_timestamp)
+(sql_builtins "UTC_DATE" utc_date)
+(sql_builtins "UTC_TIME" utc_time)
+(sql_builtins "SYSDATE" sysdate)
+/* PostgreSQL aliases */
+(sql_builtins "TO_TIMESTAMP" from_unixtime)
+(sql_builtins "CLOCK_TIMESTAMP" now) /* approximation: same as now() */
+(sql_builtins "TRANSACTION_TIMESTAMP" now)
 /* MySQL-style date part extraction shortcuts */
 (sql_builtins "YEAR" (lambda (d) (extract_date d "YEAR")))
 (sql_builtins "MONTH" (lambda (d) (extract_date d "MONTH")))

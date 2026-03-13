@@ -1056,6 +1056,7 @@ Patterns can be any of:
 	init_streams()
 	init_list()
 	init_date()
+	init_timezone()
 	init_vector()
 	init_parser()
 	init_sync()

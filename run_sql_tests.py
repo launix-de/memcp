@@ -389,6 +389,9 @@ class SQLTestRunner:
                 self.test_count -= 1  # don't count skipped perf tests
                 return True
 
+        # session_id must be resolved before setup steps so setup runs in the same session
+        session_id = test_case.get("session_id")
+
         # Per-test setup steps (SQL and/or Scheme, e.g. perf data generation)
         # Supports {rows} and {database} template placeholders for perf tests
         test_setup_steps = test_case.get("setup")
@@ -399,7 +402,7 @@ class SQLTestRunner:
                     sql_code = step["sql"]
                     if is_perf_test:
                         sql_code = sql_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
-                    resp = self.execute_sql(database, sql_code, syntax=self.suite_syntax)
+                    resp = self.execute_sql(database, sql_code, syntax=self.suite_syntax, session_id=session_id)
                     expect_error = self._step_expects_error(step)
                     if resp is None:
                         return self._record_fail(name, "Setup SQL failed: no response", sql_code, None, None, is_noncritical)
@@ -469,7 +472,6 @@ class SQLTestRunner:
         auth_header = {"Authorization": f"Basic {b64encode(creds).decode()}"}
         test_syntax = test_case.get("syntax")
         active_syntax = self._normalize_syntax(test_syntax) if test_syntax is not None else self.suite_syntax
-        session_id = test_case.get("session_id")
         sql_timeout = int(test_case.get("timeout", 10))
         sql_params = test_case.get("params")
 

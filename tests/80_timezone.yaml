@@ -1,0 +1,335 @@
+metadata:
+  version: "1.0"
+  description: "Timezone: SET time_zone, CONVERT_TZ, UNIX_TIMESTAMP, FROM_UNIXTIME, UTC_*, TIMESTAMP vs DATETIME, DST"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS tz_ts"
+  - sql: "DROP TABLE IF EXISTS tz_dt"
+
+test_cases:
+
+  # === SET time_zone / @@time_zone ===
+
+  - name: "Default time_zone is UTC"
+    sql: "SELECT @@time_zone AS tz"
+    expect:
+      rows: 1
+      data:
+        - tz: "UTC"
+
+  - name: "SET time_zone to fixed offset"
+    sql: "SET time_zone = '+02:00'"
+    session_id: "tz-seq-a"
+    expect:
+      rows: 0
+
+  - name: "@@time_zone reflects new value"
+    sql: "SELECT @@time_zone AS tz"
+    session_id: "tz-seq-a"
+    expect:
+      rows: 1
+      data:
+        - tz: "+02:00"
+
+  - name: "SET time_zone to IANA zone"
+    sql: "SET time_zone = 'Europe/Berlin'"
+    session_id: "tz-seq-a"
+    expect:
+      rows: 0
+
+  - name: "@@time_zone reflects IANA zone"
+    sql: "SELECT @@time_zone AS tz"
+    session_id: "tz-seq-a"
+    expect:
+      rows: 1
+      data:
+        - tz: "Europe/Berlin"
+
+  - name: "Reset to UTC"
+    sql: "SET time_zone = 'UTC'"
+    session_id: "tz-seq-a"
+    expect:
+      rows: 0
+
+  # === SHOW VARIABLES for time_zone ===
+
+  - name: "SHOW VARIABLES contains time_zone"
+    sql: "SHOW VARIABLES LIKE '%time_zone%'"
+    expect:
+      rows: 2
+
+  # === CONVERT_TZ ===
+
+  - name: "CONVERT_TZ UTC to +02:00"
+    sql: "SELECT CONVERT_TZ('2024-01-15 12:00:00', 'UTC', '+02:00') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-01-15 14:00:00"
+
+  - name: "CONVERT_TZ +02:00 to UTC"
+    sql: "SELECT CONVERT_TZ('2024-01-15 14:00:00', '+02:00', 'UTC') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-01-15 12:00:00"
+
+  - name: "CONVERT_TZ half-hour offset +05:30"
+    sql: "SELECT CONVERT_TZ('2024-06-01 00:00:00', 'UTC', '+05:30') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-06-01 05:30:00"
+
+  - name: "CONVERT_TZ named zone winter (CET = UTC+1)"
+    sql: "SELECT CONVERT_TZ('2024-01-15 11:00:00', 'UTC', 'Europe/Berlin') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-01-15 12:00:00"
+
+  - name: "CONVERT_TZ named zone summer (CEST = UTC+2)"
+    sql: "SELECT CONVERT_TZ('2024-07-15 10:00:00', 'UTC', 'Europe/Berlin') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-07-15 12:00:00"
+
+  - name: "CONVERT_TZ NULL input returns NULL"
+    sql: "SELECT CONVERT_TZ(NULL, 'UTC', '+02:00') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  - name: "CONVERT_TZ invalid zone returns NULL"
+    sql: "SELECT CONVERT_TZ('2024-01-01 00:00:00', 'UTC', 'Not/AZone') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  # === UNIX_TIMESTAMP ===
+
+  - name: "UNIX_TIMESTAMP of known UTC datetime"
+    sql: "SELECT UNIX_TIMESTAMP('2024-01-01 00:00:00') AS u"
+    expect:
+      rows: 1
+      data:
+        - u: 1704067200
+
+  - name: "UNIX_TIMESTAMP without arg returns a positive number"
+    sql: "SELECT UNIX_TIMESTAMP() > 0 AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  # === FROM_UNIXTIME ===
+
+  - name: "FROM_UNIXTIME epoch in UTC"
+    sql: "SELECT FROM_UNIXTIME(0) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "1970-01-01 00:00:00"
+
+  - name: "FROM_UNIXTIME known value in UTC"
+    sql: "SELECT FROM_UNIXTIME(1704067200) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-01-01 00:00:00"
+
+  - name: "FROM_UNIXTIME with session TZ +02:00 shifts output"
+    sql: "SELECT FROM_UNIXTIME(1704067200) AS r"
+    session_id: "tz-from-unixtime-b"
+    setup:
+      - sql: "SET time_zone = '+02:00'"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-01-01 02:00:00"
+
+  - name: "FROM_UNIXTIME NULL returns NULL"
+    sql: "SELECT FROM_UNIXTIME(NULL) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: null
+
+  # === UTC_TIMESTAMP / UTC_DATE / UTC_TIME ===
+
+  - name: "UTC_TIMESTAMP is not null"
+    sql: "SELECT UTC_TIMESTAMP() IS NOT NULL AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  - name: "UTC_DATE is not null"
+    sql: "SELECT UTC_DATE() IS NOT NULL AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  - name: "UTC_TIME is not null"
+    sql: "SELECT UTC_TIME() IS NOT NULL AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  - name: "SYSDATE is not null"
+    sql: "SELECT SYSDATE() IS NOT NULL AS ok"
+    expect:
+      rows: 1
+      data:
+        - ok: 1
+
+  # === TIMESTAMPDIFF ===
+
+  - name: "TIMESTAMPDIFF SECOND"
+    sql: "SELECT TIMESTAMPDIFF(SECOND, '2024-01-01 00:00:00', '2024-01-01 00:01:30') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: 90
+
+  - name: "TIMESTAMPDIFF MINUTE"
+    sql: "SELECT TIMESTAMPDIFF(MINUTE, '2024-01-01 10:00:00', '2024-01-01 11:30:00') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: 90
+
+  - name: "TIMESTAMPDIFF HOUR"
+    sql: "SELECT TIMESTAMPDIFF(HOUR, '2024-01-01 00:00:00', '2024-01-02 12:00:00') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: 36
+
+  - name: "TIMESTAMPDIFF DAY"
+    sql: "SELECT TIMESTAMPDIFF(DAY, '2024-01-01', '2024-01-15') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: 14
+
+  - name: "TIMESTAMPDIFF MONTH"
+    sql: "SELECT TIMESTAMPDIFF(MONTH, '2024-01-01', '2024-07-01') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: 6
+
+  - name: "TIMESTAMPDIFF YEAR"
+    sql: "SELECT TIMESTAMPDIFF(YEAR, '2020-01-01', '2024-01-01') AS d"
+    expect:
+      rows: 1
+      data:
+        - d: 4
+
+  # === DST transitions: Europe/Berlin 2024 ===
+  # Spring forward: 2024-03-31 01:00 UTC -> clocks jump 02:00->03:00
+  # Fall back:      2024-10-27 01:00 UTC -> clocks repeat 03:00->02:00
+
+  - name: "DST spring-forward: just before (CET = UTC+1)"
+    sql: "SELECT CONVERT_TZ('2024-03-31 00:59:59', 'UTC', 'Europe/Berlin') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-03-31 01:59:59"
+
+  - name: "DST spring-forward: just after (CEST = UTC+2)"
+    sql: "SELECT CONVERT_TZ('2024-03-31 01:00:00', 'UTC', 'Europe/Berlin') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-03-31 03:00:00"
+
+  - name: "DST fall-back: just before (CEST = UTC+2)"
+    sql: "SELECT CONVERT_TZ('2024-10-27 00:59:59', 'UTC', 'Europe/Berlin') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-10-27 02:59:59"
+
+  - name: "DST fall-back: just after (CET = UTC+1)"
+    sql: "SELECT CONVERT_TZ('2024-10-27 01:00:00', 'UTC', 'Europe/Berlin') AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-10-27 02:00:00"
+
+  - name: "DST overlap: two UTC instants map to same local time"
+    sql: |
+      SELECT
+        CONVERT_TZ('2024-10-27 00:30:00', 'UTC', 'Europe/Berlin') AS before_fb,
+        CONVERT_TZ('2024-10-27 01:30:00', 'UTC', 'Europe/Berlin') AS after_fb
+    expect:
+      rows: 1
+      data:
+        - before_fb: "2024-10-27 02:30:00"
+          after_fb: "2024-10-27 02:30:00"
+
+  # === Date display with session TZ ===
+
+  - name: "SELECT datetime literal respects UTC session"
+    sql: "SELECT FROM_UNIXTIME(1704067200) AS r"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-01-01 00:00:00"
+
+  - name: "FROM_UNIXTIME in Europe/Berlin (winter = UTC+1)"
+    sql: "SELECT FROM_UNIXTIME(1704067200) AS r"
+    session_id: "tz-from-unixtime-c"
+    setup:
+      - sql: "SET time_zone = 'Europe/Berlin'"
+    expect:
+      rows: 1
+      data:
+        - r: "2024-01-01 01:00:00"
+
+  # === DATETIME table: no TZ conversion ===
+
+  - name: "Create DATETIME table"
+    sql: "CREATE TABLE tz_dt (id INT, dt DATETIME)"
+    expect:
+      rows: 0
+
+  - name: "Insert datetime"
+    sql: "INSERT INTO tz_dt VALUES (1, '2024-06-15 12:00:00')"
+    expect:
+      affected_rows: 1
+
+  - name: "DATETIME unchanged with UTC session"
+    sql: "SELECT dt FROM tz_dt WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - dt: "2024-06-15 12:00:00"
+
+  - name: "DATETIME with TZ switch to +02:00"
+    sql: "SELECT dt FROM tz_dt WHERE id = 1"
+    session_id: "tz-datetime-d"
+    setup:
+      - sql: "SET time_zone = '+02:00'"
+    expect:
+      rows: 1
+      data:
+        - dt: "2024-06-15 14:00:00"
+
+  - name: "Reset to UTC before cleanup"
+    sql: "SET time_zone = 'UTC'"
+    expect:
+      rows: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS tz_ts"
+  - sql: "DROP TABLE IF EXISTS tz_dt"
+  - sql: "SET time_zone = 'UTC'"

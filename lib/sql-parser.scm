@@ -703,8 +703,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a "," 'b))) nil))
 
 		(parser '((atom "DATABASE" true) "(" ")") schema)
-		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('now))
-		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('parse_date p))
+		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('unix_timestamp))
+		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('unix_timestamp p))
 
 		/* DATE literal: DATE 'yyyy-mm-dd' */
 		(parser '((atom "DATE" true) (define s sql_string)) '('parse_date s))
@@ -715,6 +715,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 
 		/* EXTRACT(field FROM expr) */
 		(parser '((atom "EXTRACT" true) "(" (define field sql_identifier_unquoted) (atom "FROM" true) (define e sql_expression) ")") '('extract_date e field))
+
+		/* TIMESTAMPDIFF(unit, dt1, dt2) — unit is a keyword, not a column */
+		(parser '((atom "TIMESTAMPDIFF" true) "(" (define unit sql_identifier_unquoted) "," (define dt1 sql_expression) "," (define dt2 sql_expression) ")") '('timestampdiff unit dt1 dt2))
 
 		/* DATE_ADD(expr, INTERVAL n UNIT) */
 		(parser '((atom "DATE_ADD" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_add e n unit))
@@ -766,9 +769,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (atom "ON" true) true)
 		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
-		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var */
-		(parser '((atom "@@" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true)) (? (atom "." true))) (define var sql_identifier_unquoted)) '('globalvars var))
-		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('globalvars var))
+		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var
+		   @@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
+		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var sql_identifier_unquoted)) '('globalvars var))
+		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var sql_identifier_unquoted)) '('session_globalvar var))
+		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('session_globalvar var))
 		/* LEFT(str, n) -- special case because LEFT is a reserved keyword (LEFT JOIN) */
 		(parser '((atom "LEFT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote sql_substr) s 1 n))
 		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
@@ -1599,13 +1604,28 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* SHOW PLUGINS: return empty set (ok for most clients) */
 		(parser '((atom "SHOW" true) (atom "PLUGINS" true)) (quote true))
 
-		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] */
-		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern sql_expression))) (cons '!begin '(
-			'((quote resultrow) '((quote list) "Variable_name" "version"               "Value" "0.9"))
-			'((quote resultrow) '((quote list) "Variable_name" "character_set_server" "Value" "utf8mb4"))
-			'((quote resultrow) '((quote list) "Variable_name" "collation_server"     "Value" "utf8mb4_general_ci"))
-			'((quote resultrow) '((quote list) "Variable_name" "lower_case_table_names" "Value" 0))
-		)))
+		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] — filter at parse time, dynamic values at query time */
+		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern sql_expression)))
+			(begin
+				(define all_rows (list
+					(list "version"                 "0.9")
+					(list "character_set_server"    "utf8mb4")
+					(list "collation_server"        "utf8mb4_general_ci")
+					(list "lower_case_table_names"  0)
+					(list "time_zone"               (list (quote session_globalvar) "time_zone"))
+					(list "system_time_zone"        (list (quote session_globalvar) "system_time_zone"))
+				))
+				(define pat (coalesce likepattern "%"))
+				(define filtered (filter all_rows (lambda (row) (strlike (nth row 0) pat "utf8mb4_general_ci"))))
+				(cons (quote !begin) (map filtered (lambda (row)
+					(list (quote resultrow) (list (quote list) "Variable_name" (nth row 0) "Value" (nth row 1)))
+				)))
+			)
+		)
+		/* SHOW timezone — PostgreSQL syntax */
+		(parser '((atom "SHOW" true) (atom "timezone" true)) (list (quote resultrow) (list (quote list) "TimeZone" (list (quote session_globalvar) "time_zone"))))
+		/* SET GLOBAL time_zone */
+		(parser '((atom "SET" true) (atom "GLOBAL" true) (define key sql_identifier) "=" (define value sql_expression)) '((quote globalvars) key value))
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression)) (quote true)) /* ignore */
 
 
