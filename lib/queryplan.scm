@@ -627,7 +627,11 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 		(define wrap_outer_leaves (lambda (expr) (match expr
 			(cons sym args) (if (is_get_column_sym sym)
 				(match args
-					'(tblvar _ col _) (if (nil? tblvar) expr (list (quote outer) (symbol (concat tblvar "." col))))
+					'(tblvar _ col _) (if (nil? tblvar)
+						expr
+						(begin
+							(define outer_col (coalesce (canonical_column_in_schema _o tblvar false col true) col))
+							(list (quote outer) (symbol (concat tblvar "." outer_col)))))
 					_ (cons (wrap_outer_leaves sym) (map args wrap_outer_leaves))
 				)
 				(cons (wrap_outer_leaves sym) (map args wrap_outer_leaves))
@@ -726,7 +730,10 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 								(cons alias acc)
 								acc)) '()))
 						(match matches
-							(cons only '()) '('get_column (concat id ":" only) ti col ci)
+							(cons only '()) (begin
+								(define matched_cols (schemas2 only))
+								(define matched_coldef (find matched_cols (lambda (coldef) ((if ci equal?? equal?) (coldef "Field") col))))
+								'('get_column (concat id ":" only) false (if matched_coldef (matched_coldef "Field") col) false))
 							'() (begin
 								/* column not in schemas2 - check if it's a SELECT alias in fields2 */
 								(define field_match (find_assoc fields2 (lambda (field_name field_expr) ((if ci equal?? equal?) field_name col))))
@@ -751,7 +758,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 						(define matched_coldef (if matched_cols
 							(find matched_cols (lambda (coldef) ((if ci equal?? equal?) (coldef "Field") col)))
 							nil))
-						'('get_column (concat id ":" alias_) ti (if matched_coldef (matched_coldef "Field") col) ci))
+						'('get_column (concat id ":" (coalesce matched_alias alias_)) false (if matched_coldef (matched_coldef "Field") col) false))
 					'((symbol outer) outer_arg) (begin
 						/* prefix outer variable reference if it refers to a table in schemas2 */
 						(define s (string outer_arg))
@@ -797,6 +804,15 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 						(match (car tablesPrefixed) '(a s t io je) (list a s t isOuter joinexpr2))
 						(cdr tablesPrefixed)))
 				)
+				(define wrap_outer_join_projection (lambda (expr)
+					(if (and isOuter
+						(not (equal? joinexpr true))
+						(not (nil? joinexpr2))
+						(not (equal? joinexpr2 true)))
+						(list (quote if) joinexpr2 expr nil)
+						expr
+					)
+				))
 				/* window functions in subquery require materialization (cannot flatten because window needs its own ordering) */
 				(define subquery_has_window (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_window_funcs v)))) '())))
 				/* TODO: group+order+limit+offset -> ordered scan list with aggregation layers (to avoid materialization) */
@@ -848,7 +864,13 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 						/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
 						/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
 						(set globalFilter (if isOuter true (replace_column_alias condition2)))
-						(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
+						(list tablesPrefixed
+							(list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v)))))
+							globalFilter
+							(merge
+								(list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (wrap_outer_join_projection (replace_column_alias v))))))
+								(merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v)))))
+						)
 					)
 				)
 			) (error "non matching return value for untangle_query"))
@@ -870,6 +892,23 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 			(reduce args (lambda (a b) (or a (expr_contains_inner_select b))) false)
 			true)
 		false)))
+	(define expr_references_outer_alias (lambda (expr outer_schemas) (match expr
+		'((symbol get_column) tblvar ti col ci) (and
+			(not (nil? tblvar))
+			(reduce_assoc outer_schemas (lambda (acc alias cols) (or acc (equal?? tblvar alias))) false))
+		(cons sym args) (reduce args (lambda (a b) (or a (expr_references_outer_alias b outer_schemas))) false)
+		false)))
+	(define subquery_references_outer_alias (lambda (subquery outer_schemas)
+		(and (list? subquery)
+			(>= (count subquery) 9)
+			(or
+				(reduce_assoc (nth subquery 2) (lambda (a k v) (or a (expr_references_outer_alias v outer_schemas))) false)
+				(expr_references_outer_alias (nth subquery 3) outer_schemas)
+				(reduce (coalesceNil (nth subquery 4) '()) (lambda (a b) (or a (expr_references_outer_alias b outer_schemas))) false)
+				(expr_references_outer_alias (nth subquery 5) outer_schemas)
+				(reduce (coalesceNil (nth subquery 6) '()) (lambda (a b) (or a (match b '(col dir) (expr_references_outer_alias col outer_schemas)))) false)
+			)
+	)))
 	(define scalar_subquery_flattenable (lambda (subquery outer_schemas)
 		(and (list? subquery)
 			(>= (count subquery) 9)
@@ -880,7 +919,9 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(reduce (coalesceNil (nth subquery 4) '()) (lambda (a b) (or a (expr_contains_inner_select b))) false)
 				(expr_contains_inner_select (nth subquery 5))
 				(reduce (coalesceNil (nth subquery 6) '()) (lambda (a b) (or a (match b '(col dir) (expr_contains_inner_select col)))) false)
-				(> (count (extract_assoc outer_schemas (lambda (k v) k))) 1)
+				(and
+					(subquery_references_outer_alias subquery outer_schemas)
+					(> (count (extract_assoc outer_schemas (lambda (k v) k))) 1))
 			)
 	)))
 	(define register_scalar_subquery (lambda (subquery outer_schemas) (begin
@@ -1025,17 +1066,8 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 									(sq_cache _sq_hash)
 									/* first occurrence: generate full setup+subplan */
 									(begin
-										(define replace_resultrow (lambda (expr) (match expr
-											(cons sym args) (if (equal? sym (quote resultrow))
-												(cons (symbol _sq_rr_name) (map args replace_resultrow))
-												(if (and (equal? sym (quote symbol)) (equal? args '("resultrow")))
-													(list (quote symbol) _sq_rr_name)
-													(cons (replace_resultrow sym) (map args replace_resultrow))
-												)
-											)
-											expr
-										)))
-										(define subplan (replace_resultrow (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect)))
+										(define _sq_saved_rr_name (concat "__scalar_saved_resultrow_" _sq_hash))
+										(define subplan (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect))
 										/* cache the read expression so duplicate subqueries skip the subplan */
 										(sq_cache _sq_hash (list (quote if) (list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral) nil (list (symbol _sq_acc_name) "acc")))
 										(list (quote !begin)
@@ -1052,7 +1084,10 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 													)
 												)
 											)
+											(list (quote set) (symbol _sq_saved_rr_name) (symbol "resultrow"))
+											(list (quote set) (symbol "resultrow") (symbol _sq_rr_name))
 											subplan
+											(list (quote set) (symbol "resultrow") (symbol _sq_saved_rr_name))
 											(list (quote if)
 												(list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral)
 												nil
@@ -1470,6 +1505,28 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 			/* set group to 1 if fields contain aggregates even if not */
 			(define group (coalesce group (if (reduce_assoc fields (lambda (a key v) (or a (expr_find_aggregate v))) false) '(1) nil)))
 
+			(define canonical_bound_column (lambda (schemas alias_name table_insensitive column_name column_insensitive prefer_main) (begin
+				(define col_cmp (if column_insensitive equal?? equal?))
+				(define tbl_cmp (if table_insensitive equal?? equal?))
+				(define find_in_aliases (lambda (main_only) (reduce_assoc schemas (lambda (acc alias cols)
+					(if acc acc
+						(begin
+							(define alias_ok (or (nil? alias_name) (tbl_cmp alias_name alias)))
+							(define main_ok (or (not main_only) (not (strlike (string alias) "%:%"))))
+							(define coldef (if (and alias_ok main_ok)
+								(find cols (lambda (item) (col_cmp (item "Field") column_name)))
+								nil))
+							(if coldef
+								(list alias (coldef "Field"))
+								nil)
+						)
+					)
+				) nil)))
+				(if prefer_main
+					(coalesce (find_in_aliases true) (find_in_aliases false))
+					(find_in_aliases false))
+			)))
+
 			/* find those columns that have no table */
 			(define replace_find_column (lambda (expr) (match expr
 				/* Ensure MySQL LIKE uses a collation at compile time:
@@ -1516,19 +1573,19 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				)
 				/* Unqualified column: prefer main tables (no ':' prefix) over subquery tables (prefixed with ':') */
 				'((symbol get_column) nil _ col ci) (begin
-					/* First try main tables (aliases without ':') */
-					(define main_match (reduce_assoc schemas (lambda (a alias cols)
-						(if (and (not (strlike (string alias) "%:%")) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
-							alias a)) nil))
-					/* If not found in main tables, try subquery tables (aliases with ':') */
-					(define any_match (if (nil? main_match)
-						(reduce_assoc schemas (lambda (a alias cols)
-							(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
-								alias a)) nil)
-						main_match))
-					'((quote get_column) (coalesce any_match (error (concat "column " col " does not exist in tables"))) false col false)
+					(define resolved (canonical_bound_column schemas nil false col ci true))
+					(if resolved
+						(list (quote get_column) (car resolved) false (nth resolved 1) false)
+						(error (concat "column " col " does not exist in tables")))
 				)
-				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
+				'((symbol get_column) alias_ ti col ci) (if (or ti ci)
+					(begin
+						(define resolved (canonical_bound_column schemas alias_ ti col ci false))
+						(if resolved
+							(list (quote get_column) (car resolved) false (nth resolved 1) false)
+							(error (concat "column " alias_ "." col " does not exist in tables")))
+					)
+					expr) /* omit false false, otherwise freshly created columns wont be found */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 				expr
 			)))

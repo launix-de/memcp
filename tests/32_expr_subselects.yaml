@@ -198,6 +198,22 @@ test_cases:
       data:
         - badgeDoc: 1
 
+  - name: "Sibling scalar subselects in outer projection stay isolated"
+    sql: >
+      SELECT
+      (SELECT COUNT(1) FROM doc
+      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((doc.type) IS NULL))
+      OR ((doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
+      AND (NOT (doc.archive))
+      LIMIT 1) AS badgeDoc,
+      (SELECT SUM(1) FROM t2 WHERE owner = 2 LIMIT 1) AS siblingCount
+      FROM login WHERE ID = 1
+    expect:
+      rows: 1
+      data:
+        - badgeDoc: 1
+          siblingCount: 2
+
   - name: "Derived table star keeps aliases built from doubly nested scalar subselects"
     sql: >
       SELECT t.* FROM (
@@ -352,7 +368,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - id: 2
+        - ID: 2
           file: 3
           filename: sample.pdf
           operation::60832d378812d11989e4915f: true
