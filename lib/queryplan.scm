@@ -541,6 +541,11 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define sq_cache (newsession))
+	(define untangle_subquery_with_outer (lambda (query outer_chain)
+		(untangle_query
+			(nth query 0) (nth query 1) (nth query 2) (nth query 3)
+			(nth query 4) (nth query 5) (nth query 6) (nth query 7)
+			(nth query 8) outer_chain)))
 
 	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
 	(define _cd_is_subquery (lambda (sym) (match sym
@@ -599,6 +604,18 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(cons only _) only
 			)
 		)))
+		(define canonical_column_in_schema (lambda (schemas alias_name table_insensitive column_name column_insensitive) (begin
+			(define matched_alias (column_exists_in_schema schemas alias_name table_insensitive column_name column_insensitive))
+			(if (nil? matched_alias)
+				nil
+				(begin
+					(define col_cmp (if column_insensitive equal?? equal?))
+					(define cols (schemas matched_alias))
+					(define coldef (find cols (lambda (item) (col_cmp (item "Field") column_name))))
+					(if coldef (coldef "Field") nil)
+				)
+			)
+		)))
 		/* wrap_outer_leaves: replace get_column leaf nodes with (outer tblvar.col) symbol references
 		so that derived-table computed columns are accessible via the optimizer's outer-scope mechanism */
 		(define is_get_column_sym (lambda (sym)
@@ -619,15 +636,17 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 		)))
 		(define replace_get_column_subselect (lambda (alias_name table_insensitive column_name column_insensitive expr) (begin
 			(define inner_alias (column_exists_in_schema _s alias_name table_insensitive column_name column_insensitive))
+			(define inner_column (canonical_column_in_schema _s alias_name table_insensitive column_name column_insensitive))
 			(define inner_alias_exists (and (not (nil? alias_name)) (alias_exists_in_schema _s alias_name table_insensitive)))
 			(if (and inner_alias_exists (nil? inner_alias))
 				(error (concat "column " alias_name "." column_name " does not exist in subquery"))
 				(if (not (nil? inner_alias))
 					(if (or (nil? alias_name) table_insensitive column_insensitive)
-						'((quote get_column) inner_alias false column_name false)
+						'((quote get_column) inner_alias false (coalesce inner_column column_name) false)
 						expr)
 					(begin
 						(define outer_alias (column_exists_in_schema _o alias_name table_insensitive column_name column_insensitive))
+						(define outer_column (canonical_column_in_schema _o alias_name table_insensitive column_name column_insensitive))
 						(if (nil? outer_alias)
 							(if (nil? alias_name)
 								(error (concat "column " column_name " does not exist in outer query"))
@@ -635,14 +654,14 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 							(begin
 								/* check if the outer column is a computed expression (derived table) */
 								(define outer_cols (_o outer_alias))
-								(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") column_name)) coldef a)) nil))
+								(define outer_coldef (find outer_cols (lambda (coldef) (equal? (coldef "Field") (coalesce outer_column column_name)))))
 								(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
 								(if outer_expr
 									/* derived table computed column: inline expression with leaf get_column
 									nodes replaced by (outer sym) references for optimizer resolution */
 									(wrap_outer_leaves outer_expr)
 									/* real table column: symbol lookup in outer scope */
-									(list (quote outer) (symbol (concat outer_alias "." column_name))))))
+									(list (quote outer) (symbol (concat outer_alias "." (coalesce outer_column column_name)))))))
 					)
 				)
 			)
@@ -691,7 +710,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 					(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
 				)
 			))
-			(match (apply untangle_query (append subquery subquery_outer_schemas)) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+			(match (untangle_subquery_with_outer subquery subquery_outer_schemas) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
 				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 subquery_outer_schemas))
 				(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
 				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
@@ -710,16 +729,29 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 							(cons only '()) '('get_column (concat id ":" only) ti col ci)
 							'() (begin
 								/* column not in schemas2 - check if it's a SELECT alias in fields2 */
-								(if (nil? (fields2 col))
+								(define field_match (find_assoc fields2 (lambda (field_name field_expr) ((if ci equal?? equal?) field_name col))))
+								(if (nil? field_match)
 									(error (concat "column " col " does not exist in subquery"))
 									/* found in fields2 - resolve to the underlying expression */
-									(replace_column_alias (fields2 col))
+									(replace_column_alias (nth field_match 1))
 								)
 							)
 							(cons _ _) (error (concat "ambiguous column " col " in subquery"))
 						)
 					)
-					'((symbol get_column) alias_ ti col ci) '('get_column (concat id ":" alias_) ti col ci)
+					'((symbol get_column) alias_ ti col ci) (begin
+						(define matched_alias (reduce_assoc schemas2 (lambda (a inner_alias cols)
+							(if (and (nil? a)
+								((if ti equal?? equal?) alias_ inner_alias)
+								(find cols (lambda (coldef) ((if ci equal?? equal?) (coldef "Field") col))))
+								inner_alias
+								a)
+						) nil))
+						(define matched_cols (if matched_alias (schemas2 matched_alias) nil))
+						(define matched_coldef (if matched_cols
+							(find matched_cols (lambda (coldef) ((if ci equal?? equal?) (coldef "Field") col)))
+							nil))
+						'('get_column (concat id ":" alias_) ti (if matched_coldef (matched_coldef "Field") col) ci))
 					'((symbol outer) outer_arg) (begin
 						/* prefix outer variable reference if it refers to a table in schemas2 */
 						(define s (string outer_arg))
@@ -884,7 +916,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (apply untangle_query (append subquery outer_schemas))
+				(match (untangle_subquery_with_outer subquery outer_schemas)
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -1056,7 +1088,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (apply untangle_query (append subquery outer_schemas))
+				(match (untangle_subquery_with_outer subquery outer_schemas)
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -1215,7 +1247,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (apply untangle_query (append subquery outer_schemas))
+				(match (untangle_subquery_with_outer subquery outer_schemas)
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -1513,10 +1545,19 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 			(set schemas (merge schemas (pending_scalar_schemas "data")))
 
 			/* apply renamelist (assoc of assoc of expr) */
+			(define renamelist_lookup (lambda (rename_fn col ci)
+				(if ci
+					(begin
+						(define pair (find_assoc rename_fn (lambda (key value) (equal?? key col))))
+						(if pair (nth pair 1) nil)
+					)
+					(rename_fn col)
+				)
+			))
 			(define replace_rename (lambda (expr) (match expr
 				'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
 					/* no tblalias -> search the field in all tables */
-					(reduce_assoc renamelist (lambda (a k v) (coalesce (v col) a)) expr)
+					(reduce_assoc renamelist (lambda (a k v) (coalesce (renamelist_lookup v col ci) a)) expr)
 					/* tblalias -> look up the field */
 					(begin
 						(define alias_str (string alias_))
@@ -1528,7 +1569,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 								(if (has_assoc? renamelist alias_sym)
 									(renamelist alias_sym)
 									nil))))
-						(if (nil? rename_fn) expr (rename_fn col))
+						(if (nil? rename_fn) expr (coalesce (renamelist_lookup rename_fn col ci) expr))
 					)
 				)
 				(cons sym args) /* function call */ (cons sym (map args replace_rename))
