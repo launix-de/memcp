@@ -11,14 +11,17 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS nc_doc"
   - sql: "DROP TABLE IF EXISTS nc_revision"
   - sql: "DROP TABLE IF EXISTS nc_files"
+  - sql: "DROP TABLE IF EXISTS nc_config"
 
 setup:
   - sql: "CREATE TABLE nc_doc (ID INT PRIMARY KEY)"
   - sql: "CREATE TABLE nc_revision (id INT, doc INT, file INT, created INT)"
   - sql: "CREATE TABLE nc_files (ID INT, filename VARCHAR(100))"
+  - sql: "CREATE TABLE nc_config (ID INT PRIMARY KEY, default_file INT)"
   - sql: "INSERT INTO nc_doc VALUES (10)"
   - sql: "INSERT INTO nc_revision VALUES (1, 10, 99, 1000)"
   - sql: "INSERT INTO nc_files VALUES (99, 'report.pdf')"
+  - sql: "INSERT INTO nc_config VALUES (1, 99)"
 
 test_cases:
   - name: "Single-level correlated subquery works"
@@ -41,3 +44,10 @@ test_cases:
       rows: 1
       data:
         - {filename: "report.pdf"}
+
+  - name: "Simple LIMIT 1 scalar subquery with multiple outer tables remains scalar"
+    sql: "SELECT d.ID FROM nc_doc d JOIN nc_revision r ON r.doc = d.ID WHERE ((((SELECT c.default_file FROM nc_config c WHERE c.ID = 1 LIMIT 1)) IS NULL) AND ((r.file) IS NULL)) OR ((r.file) = ((SELECT c.default_file FROM nc_config c WHERE c.ID = 1 LIMIT 1)))"
+    expect:
+      rows: 1
+      data:
+        - {ID: 10}

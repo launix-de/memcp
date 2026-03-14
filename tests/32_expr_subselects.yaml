@@ -9,10 +9,16 @@ setup:
   - sql: "DROP TABLE IF EXISTS t2"
   - sql: "DROP TABLE IF EXISTS t3"
   - sql: "DROP TABLE IF EXISTS t4"
+  - sql: "DROP TABLE IF EXISTS doc"
+  - sql: "DROP TABLE IF EXISTS login"
+  - sql: "DROP TABLE IF EXISTS userconfig"
   - sql: "CREATE TABLE t1 (id INT PRIMARY KEY)"
   - sql: "CREATE TABLE t2 (owner INT, val INT)"
   - sql: "CREATE TABLE t3 (id INT PRIMARY KEY, ref INT)"
   - sql: "CREATE TABLE t4 (id INT PRIMARY KEY, description VARCHAR(20))"
+  - sql: "CREATE TABLE doc (id INT PRIMARY KEY, type INT, archive BOOL)"
+  - sql: "CREATE TABLE login (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE userconfig (ID INT PRIMARY KEY, Tables_Doc_defaultDoctype INT)"
   - sql: "INSERT INTO t1 (id) VALUES (4)"
   - sql: "INSERT INTO t2 (owner, val) VALUES (1, 42)"
   - sql: "INSERT INTO t2 (owner, val) VALUES (2, 41)"
@@ -26,6 +32,10 @@ setup:
   - sql: "INSERT INTO t3 (id, ref) VALUES (4, NULL)"
   - sql: "INSERT INTO t4 (id, description) VALUES (10, 'alpha')"
   - sql: "INSERT INTO t4 (id, description) VALUES (11, 'beta')"
+  - sql: "INSERT INTO doc (id, type, archive) VALUES (1, 7, FALSE)"
+  - sql: "INSERT INTO doc (id, type, archive) VALUES (2, NULL, FALSE)"
+  - sql: "INSERT INTO login (ID) VALUES (1)"
+  - sql: "INSERT INTO userconfig (ID, Tables_Doc_defaultDoctype) VALUES (1, 7)"
 
 test_cases:
   - name: "IN subselect simple"
@@ -151,6 +161,32 @@ test_cases:
         - x: 4
           cnt: 1
 
+  - name: "Scalar subselect in boolean NULL-or-equals expression"
+    sql: >
+      SELECT COUNT(1) AS cnt
+      FROM doc
+      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((doc.type) IS NULL))
+      OR ((doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
+      AND (NOT (doc.archive))
+    expect:
+      rows: 1
+      data:
+        - cnt: 1
+
+  - name: "Scalar COUNT subselect in SELECT list with outer FROM table"
+    sql: >
+      SELECT 1,
+      (SELECT COUNT(1) FROM doc
+      WHERE (((((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1)) IS NULL) AND ((doc.type) IS NULL))
+      OR ((doc.type) = ((SELECT Tables_Doc_defaultDoctype FROM userconfig WHERE userconfig.ID = 1 LIMIT 1))))
+      AND (NOT (doc.archive))
+      LIMIT 1) AS badgeDoc
+      FROM login WHERE ID = 1
+    expect:
+      rows: 1
+      data:
+        - badgeDoc: 1
+
   - name: "Scalar subselect multiple rows errors"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:
@@ -190,6 +226,9 @@ test_cases:
         - id: 4
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS userconfig"
+  - sql: "DROP TABLE IF EXISTS login"
+  - sql: "DROP TABLE IF EXISTS doc"
   - sql: "DROP TABLE IF EXISTS t4"
   - sql: "DROP TABLE IF EXISTS t3"
   - sql: "DROP TABLE IF EXISTS t2"
