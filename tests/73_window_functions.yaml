@@ -339,5 +339,60 @@ test_cases:
         - {id: 1, amount: 500, rn: 1}
     ignore_order: true
 
+  # ==========================================================================
+  # Case 13: RANK and DENSE_RANK — ties handling
+  # ==========================================================================
+
+  - name: "Create rank test table with ties"
+    sql: |
+      CREATE TABLE win_rank (id INT PRIMARY KEY, score INT)
+
+  - name: "Insert rank data with ties"
+    sql: |
+      INSERT INTO win_rank VALUES
+      (1, 100), (2, 200), (3, 200), (4, 300), (5, 300), (6, 400)
+
+  - name: "Case 13: RANK with ties"
+    noncritical: true
+    sql: "SELECT id, score, RANK() OVER (ORDER BY score) AS rnk FROM win_rank ORDER BY score, id"
+    expect:
+      rows: 6
+      data:
+        - {id: 1, score: 100, rnk: 1}
+        - {id: 2, score: 200, rnk: 2}
+        - {id: 3, score: 200, rnk: 2}
+        - {id: 4, score: 300, rnk: 4}
+        - {id: 5, score: 300, rnk: 4}
+        - {id: 6, score: 400, rnk: 6}
+
+  - name: "Case 13b: DENSE_RANK with ties"
+    noncritical: true
+    sql: "SELECT id, score, DENSE_RANK() OVER (ORDER BY score) AS drnk FROM win_rank ORDER BY score, id"
+    expect:
+      rows: 6
+      data:
+        - {id: 1, score: 100, drnk: 1}
+        - {id: 2, score: 200, drnk: 2}
+        - {id: 3, score: 200, drnk: 2}
+        - {id: 4, score: 300, drnk: 3}
+        - {id: 5, score: 300, drnk: 3}
+        - {id: 6, score: 400, drnk: 4}
+
+  - name: "Case 13c: RANK with conflicting ORDER BY"
+    noncritical: true
+    sql: "SELECT id, score, RANK() OVER (ORDER BY score) AS rnk FROM win_rank ORDER BY id"
+    expect:
+      rows: 6
+      data:
+        - {id: 1, score: 100, rnk: 1}
+        - {id: 2, score: 200, rnk: 2}
+        - {id: 3, score: 200, rnk: 2}
+        - {id: 4, score: 300, rnk: 4}
+        - {id: 5, score: 300, rnk: 4}
+        - {id: 6, score: 400, rnk: 6}
+
+  - name: "Drop rank test table"
+    sql: "DROP TABLE IF EXISTS win_rank"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS win_emp"

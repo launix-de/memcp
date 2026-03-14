@@ -1893,40 +1893,90 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define stage_order_resolved (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
 				(define wf_resolved (map window_funcs_all (lambda (wf) (match wf '(fn args over)
 					(list fn (map args replace_find_column) over)))))
-				/* classify: all ROW_NUMBER vs LAG/LEAD */
-				(define all_row_number (reduce wf_resolved (lambda (acc wf) (match wf '(fn _ _) (and acc (equal? fn "ROW_NUMBER")))) true))
-				(if all_row_number
+				/* ========= ORC window function descriptors ========= */
+				/* Build a mapfn that passes $set + sort key values through as (list $set composite_key).
+				   For 1 sort col: key = scalar; for N>1: key = (list k0 k1 ...). */
+				(define build_key_mapfn (lambda (sort_col_names) (begin
+					(define key_params (map (produceN (count sort_col_names) (lambda (i) i)) (lambda (i) (symbol (concat "__k" i)))))
+					(define key_expr (if (equal? (count key_params) 1) (car key_params) (cons (quote list) key_params)))
+					(define mapfn_params (cons (symbol "$set") key_params))
+					(define mapfn_body (list (quote list) (symbol "$set") key_expr))
+					(eval (list (quote lambda) mapfn_params mapfn_body)))))
+				/* orc_window_descriptor: fn × args × sort_col_names → (extra_mapcols mapfn reducefn reduceinit)
+				   Returns nil for non-ORC functions (LAG/LEAD stay on window_mut path). */
+				(define orc_window_descriptor (lambda (fn wf_args sort_col_names)
+					(match fn
+						"ROW_NUMBER" (list '()
+							(lambda ($set) (list $set))
+							(lambda (acc mapped) (begin ((car mapped) (+ acc 1)) (+ acc 1)))
+							0)
+						"RANK" (list sort_col_names
+							(build_key_mapfn sort_col_names)
+							(lambda (acc mapped)
+								(begin
+									(define setter (car mapped))
+									(define key (cadr mapped))
+									(define prev_rank (nth acc 0))
+									(define prev_rownum (nth acc 1))
+									(define new_rownum (+ prev_rownum 1))
+									(define new_rank (if (equal? key (nth acc 2)) prev_rank new_rownum))
+									(setter new_rank)
+									(list new_rank new_rownum key)))
+							(list 0 0 nil))
+						"DENSE_RANK" (list sort_col_names
+							(build_key_mapfn sort_col_names)
+							(lambda (acc mapped)
+								(begin
+									(define setter (car mapped))
+									(define key (cadr mapped))
+									(define prev_rank (car acc))
+									(define new_rank (if (equal? key (cadr acc)) prev_rank (+ prev_rank 1)))
+									(setter new_rank)
+									(list new_rank key)))
+							(list 0 nil))
+						nil)))
+				(define is_orc_window (lambda (wf) (match wf '(fn _ _) (not (nil? (orc_window_descriptor fn '() '()))))))
+				(define all_orc_window (reduce wf_resolved (lambda (acc wf) (and acc (is_orc_window wf))) true))
+				(if all_orc_window
 				(match tables
-					/* ========= ROW_NUMBER → ORC materialization ========= */
+					/* ========= ORC materialization (ROW_NUMBER, RANK, DENSE_RANK, ...) ========= */
 					'('(tblvar schema tbl isOuter _)) (begin
-						/* extract ORC sort column names from OVER ORDER BY */
+						/* extract ORC sort columns from OVER ORDER BY */
 						(define orc_sort_col_names (map over_order (lambda (o) (match o '(col dir) (match col
 							'((symbol get_column) _ _ c _) c
 							'((quote get_column) _ _ c _) c
-							_ (match (replace_find_column col) /* retry after resolution */
+							_ (match (replace_find_column col)
 								'((symbol get_column) _ _ c _) c
 								'((quote get_column) _ _ c _) c
 								_ (error (concat "unsupported ORC sort expression: " col))))))))
 						(define orc_sort_dirs_vals (map over_order (lambda (o) (match o '(col dir)
 							(if (equal? dir >) true false)))))
+						/* get descriptor for the first window function (all share same OVER) */
+						(define first_wf (car wf_resolved))
+						(define wf_fn (car first_wf))
+						(define wf_args (cadr first_wf))
+						(define descriptor (orc_window_descriptor wf_fn wf_args orc_sort_col_names))
+						(define extra_mapcols (nth descriptor 0))
+						(define orc_mapfn (nth descriptor 1))
+						(define orc_reducefn (nth descriptor 2))
+						(define orc_reduceinit (nth descriptor 3))
 						/* unique temp column name */
-						(define orc_col_name (concat ".orc_rn_" tbl))
+						(define orc_col_name (concat ".orc_" wf_fn "_" tbl))
 						/* compile time: add bare column so the scan plan can reference it */
-						(createcolumn schema tbl orc_col_name "INT" '() '("temp" true))
-						/* replace ROW_NUMBER() references with ORC column read */
-						(define replace_rn (lambda (expr) (match expr
+						(createcolumn schema tbl orc_col_name "any" '() '("temp" true))
+						/* replace window_func references with ORC column read */
+						(define replace_wf (lambda (expr) (match expr
 							(cons (symbol window_func) _) '((quote get_column) (eval tblvar) false (eval orc_col_name) false)
-							(cons sym args_) (cons sym (map args_ replace_rn))
+							(cons sym args_) (cons sym (map args_ replace_wf))
 							expr)))
-						(define new_fields (map_assoc fields (lambda (k v) (replace_rn v))))
+						(define new_fields (map_assoc fields (lambda (k v) (replace_wf v))))
 						/* runtime plan: createcolumn with ORC params, then the actual scan */
 						(define orc_setup (lambda ()
-							(createcolumn schema tbl orc_col_name "INT" '()
+							(createcolumn schema tbl orc_col_name "any" '()
 								(list "sortcols" orc_sort_col_names "sortdirs" orc_sort_dirs_vals
-									"partitioncount" 0 "mapcols" '()
-									"mapfn" (lambda ($set) (list $set))
-									"reducefn" (lambda (acc mapped) (begin ((car mapped) (+ acc 1)) (+ acc 1)))
-									"reduceinit" 0 "temp" true))))
+									"partitioncount" 0 "mapcols" extra_mapcols
+									"mapfn" orc_mapfn "reducefn" orc_reducefn
+									"reduceinit" orc_reduceinit "temp" true))))
 						(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
 						(list (quote begin) (list orc_setup) scan_plan)
 					)
@@ -1938,7 +1988,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(error "window ORDER BY with outer ORDER BY not yet supported"))
 					(if (reduce wf_resolved (lambda (acc wf) (match wf '(fn _ _)
 						(or acc (and (not (equal? fn "LAG")) (not (equal? fn "LEAD")))))) false)
-						(error "only LAG, LEAD and ROW_NUMBER window functions are currently supported"))
+						(error (concat "unsupported window function in LAG/LEAD context: " (car (car wf_resolved)))))
 					/* single table only */
 					(match tables
 					'('(tblvar schema tbl isOuter _)) (begin
