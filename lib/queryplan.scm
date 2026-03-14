@@ -194,15 +194,17 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 
 (define extract_outer_columns_for_tblvar (lambda (tblvar expr) (match expr
 	(cons sym args) (if (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))
-		(match args
-			'(symname) (begin
-				(define parts (split (string symname) "."))
-				(match parts
-					(list tbl col) (if (equal?? tbl (string tblvar)) (list col) '())
-					_ '()
+		(begin
+			(match args
+				'(symname) (begin
+					(define parts (split (string symname) "."))
+					(match parts
+						(list tbl col) (if (equal?? tbl (string tblvar)) (list col) '())
+						_ '()
+					)
 				)
+				_ '()
 			)
-			_ '()
 		)
 		(merge_unique (map args (lambda (arg) (extract_outer_columns_for_tblvar tblvar arg))))
 	)
@@ -534,7 +536,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 ))
 
 /* recursively preprocess a query and return the flattened query. The returned parameterset will be passed to build_queryplan */
-(define untangle_query (lambda (schema tables fields condition group having order limit offset) (begin
+(define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_chain) (begin
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
@@ -672,7 +674,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (apply untangle_query subquery)
+				(match (apply untangle_query (append subquery outer_schemas))
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -844,7 +846,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (apply untangle_query subquery)
+				(match (apply untangle_query (append subquery outer_schemas))
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -1003,7 +1005,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (apply untangle_query subquery)
+				(match (apply untangle_query (append subquery outer_schemas))
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -1224,7 +1226,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 								(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
 							)
 						))
-						(match (apply untangle_query subquery) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+						(match (apply untangle_query (append subquery '())) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
 							/* helper function add prefix to tblalias of every expression */
 							(define replace_column_alias (lambda (expr) (match expr
 								'((symbol get_column) nil ti col ci) (begin
@@ -1445,11 +1447,12 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				expr
 			)))
 
-			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v schemas))))
-			(set condition (replace_inner_selects condition schemas))
-			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
-			(set having (replace_inner_selects having schemas))
-			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
+			(define _outer_schemas_merged (merge_assoc schemas outer_schemas_chain))
+			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v _outer_schemas_merged))))
+			(set condition (replace_inner_selects condition _outer_schemas_merged))
+			(set group (map group (lambda (g) (replace_inner_selects g _outer_schemas_merged))))
+			(set having (replace_inner_selects having _outer_schemas_merged))
+			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col _outer_schemas_merged) dir)))))
 
 			/* apply renamelist (assoc of assoc of expr) */
 			(define replace_rename (lambda (expr) (match expr
@@ -1519,7 +1522,7 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(apply build_queryplan (apply untangle_query query))
+			(apply build_queryplan (apply untangle_query (append query '())))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
