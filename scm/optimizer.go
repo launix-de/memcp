@@ -162,12 +162,25 @@ func Optimize(val Scmer, env *Env) Scmer {
 	return v
 }
 
+// localLambdaInfo tracks a locally-defined lambda for ownership inference.
+// If the lambda does not escape its defining scope (only called directly),
+// the optimizer re-runs its body with the AND-accumulated param ownership.
+type localLambdaInfo struct {
+	lambdaAST  []Scmer // full (lambda params body [NumVars]) slice; body at index 2
+	slotStart  int     // first NthLocalVar slot for this lambda's params (always 0)
+	nParams    int
+	paramOwned []bool // AND-accumulator: true means ALL callsites pass a fresh value
+	escaped    bool   // set when sym appears outside a direct call head
+}
+
 type optimizerMetainfo struct {
 	variableReplacement  map[Symbol]Scmer
 	setBlacklist         []Symbol
 	nextSlot             *int            // pointer to lambda's slot counter; nil outside lambda
 	ownedVars            map[Symbol]bool // variables known to hold exclusively owned values (e.g. reduce accumulators)
 	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
+	ownedSlots           map[int]bool    // NthLocalVar slot → owned; used in second-pass re-opt
+	localLambdas         map[Symbol]*localLambdaInfo
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -197,8 +210,10 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 		}
 	}
 	result.setBlacklist = ome.setBlacklist
-	result.nextSlot = ome.nextSlot   // shared scope shares VarsNumbered
-	result.ownedVars = ome.ownedVars // shared scope inherits ownership info
+	result.nextSlot = ome.nextSlot         // shared scope shares VarsNumbered
+	result.ownedVars = ome.ownedVars       // shared scope inherits ownership info
+	result.localLambdas = ome.localLambdas // shared scope can call same local lambdas
+	result.ownedSlots = ome.ownedSlots
 	return
 }
 
@@ -359,6 +374,12 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (re
 			return FromAny(v), true, true
 		}
 		return val, transferOwnership, false
+	case tagNthLocalVar:
+		idx := int(val.NthLocalVar())
+		if ome.ownedSlots != nil && ome.ownedSlots[idx] {
+			return val, true, false
+		}
+		return val, false, false
 	default:
 		return val, transferOwnership, false
 	}
@@ -677,6 +698,33 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			ome.pendingCallbackOwned = nil // consumed
 		}
 		v[2], transferOwnership, _ = OptimizeEx(v[2], env, &ome2, true)
+		// Second pass: re-optimize non-escaped local lambdas with collected param ownership
+		if ome2.localLambdas != nil {
+			for _, info := range ome2.localLambdas {
+				if info.escaped {
+					continue
+				}
+				anyOwned := false
+				for _, owned := range info.paramOwned {
+					if owned {
+						anyOwned = true
+						break
+					}
+				}
+				if !anyOwned {
+					continue
+				}
+				ome3 := optimizerMetainfo{
+					ownedSlots: make(map[int]bool, info.nParams),
+				}
+				for i, owned := range info.paramOwned {
+					if owned {
+						ome3.ownedSlots[info.slotStart+i] = true
+					}
+				}
+				info.lambdaAST[2], _, _ = OptimizeEx(info.lambdaAST[2], env, &ome3, true)
+			}
+		}
 		// Set NumVars (may have grown due to !list allocations)
 		if slotIndex > 0 {
 			v = append(v[:len(v):len(v)], NewInt(int64(slotIndex)))
@@ -703,6 +751,33 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			v[0] = NewSymbol("setN")
 		}
 		v[2], transferOwnership, _ = OptimizeEx(v[2], env, ome, true)
+		// Register local non-escaping lambda for second-pass ownership inference
+		if sym, ok2 := scmerSymbol(v[1]); ok2 {
+			if lambdaAST, ok3 := scmerSlice(v[2]); ok3 && len(lambdaAST) >= 3 && scmerIsSymbol(lambdaAST[0], "lambda") {
+				nParams := 0
+				if paramList, ok4 := scmerSlice(lambdaAST[1]); ok4 {
+					for _, p := range paramList {
+						if sym2, ok5 := scmerSymbol(p); ok5 && sym2 != Symbol("_") {
+							nParams++
+						}
+					}
+				}
+				if nParams > 0 {
+					if ome.localLambdas == nil {
+						ome.localLambdas = make(map[Symbol]*localLambdaInfo)
+					}
+					owned := make([]bool, nParams)
+					for i := range owned {
+						owned[i] = true
+					}
+					ome.localLambdas[sym] = &localLambdaInfo{
+						lambdaAST:  lambdaAST,
+						nParams:    nParams,
+						paramOwned: owned,
+					}
+				}
+			}
+		}
 	case headOk && (headSym == Symbol("match") || headSym == Symbol("match_mut")):
 		value, valueTransfer, _ := OptimizeEx(v[1], env, ome, true)
 		v[1] = value
@@ -786,6 +861,13 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		callDecl = DeclarationForValue(v[0])
 	}
 
+	// Resolve head symbol for local lambda tracking
+	headSym, headSymOk := scmerSymbol(v[0])
+	var headLocalLambda *localLambdaInfo
+	if headSymOk && ome.localLambdas != nil {
+		headLocalLambda = ome.localLambdas[headSym]
+	}
+
 	// Optimize all args with callback ownership propagation
 	for i := 0; i < len(v); i++ {
 		if i > 0 && callDecl != nil {
@@ -809,10 +891,25 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 				}
 			}
 		}
+		// Mark local lambda escaped if passed as argument (before optimization)
+		if i > 0 && ome.localLambdas != nil {
+			if argSym, ok := scmerSymbol(v[i]); ok {
+				if info, ok2 := ome.localLambdas[argSym]; ok2 {
+					info.escaped = true
+				}
+			}
+		}
 		var constant bool
 		v[i], transferOwnership, constant = OptimizeEx(v[i], env, ome, true)
 		if i > 0 && !constant {
 			allConstArgs = false
+		}
+		// Track param ownership for local lambda callsites
+		if i > 0 && headLocalLambda != nil && !headLocalLambda.escaped {
+			pi := i - 1
+			if pi < len(headLocalLambda.paramOwned) {
+				headLocalLambda.paramOwned[pi] = headLocalLambda.paramOwned[pi] && transferOwnership
+			}
 		}
 	}
 
