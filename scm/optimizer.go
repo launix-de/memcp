@@ -181,7 +181,7 @@ type optimizerMetainfo struct {
 	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
 	ownedSlots           map[int]bool    // NthLocalVar slot → owned; used in second-pass re-opt
 	localLambdas         map[Symbol]*localLambdaInfo
-	funcReturnsFresh     map[Symbol]bool // Scheme-defined functions whose return is always a fresh alloc
+	funcTypeInfo         map[Symbol]*TypeDescriptor // type info for Scheme-defined functions (e.g. Transfer: true for fresh returns)
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -195,7 +195,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	}
 	result.setBlacklist = ome.setBlacklist
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
-	result.funcReturnsFresh = ome.funcReturnsFresh // lambdas see outer fresh-return knowledge
+	result.funcTypeInfo = ome.funcTypeInfo // lambdas see outer type knowledge
 	return
 }
 
@@ -216,7 +216,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.ownedVars = ome.ownedVars       // shared scope inherits ownership info
 	result.localLambdas = ome.localLambdas // shared scope can call same local lambdas
 	result.ownedSlots = ome.ownedSlots
-	result.funcReturnsFresh = ome.funcReturnsFresh // inherit fresh-return knowledge
+	result.funcTypeInfo = ome.funcTypeInfo // inherit type knowledge
 	return
 }
 
@@ -754,13 +754,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			v[0] = NewSymbol("setN")
 		}
 		v[2], transferOwnership, _ = OptimizeEx(v[2], env, ome, true)
-		// Track fresh-return Scheme functions for cross-call transferOwnership propagation
+		// Track return type info for Scheme-defined functions
 		if sym, ok2 := scmerSymbol(v[1]); ok2 {
 			if transferOwnership {
-				if ome.funcReturnsFresh == nil {
-					ome.funcReturnsFresh = make(map[Symbol]bool)
+				if ome.funcTypeInfo == nil {
+					ome.funcTypeInfo = make(map[Symbol]*TypeDescriptor)
 				}
-				ome.funcReturnsFresh[sym] = true
+				ome.funcTypeInfo[sym] = &TypeDescriptor{Transfer: true}
 			}
 		}
 		// Register local non-escaping lambda for second-pass ownership inference
@@ -942,12 +942,10 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	}
 
 	// If the called function is known to always return a fresh alloc, mark result as owned.
-	// This covers Scheme-defined functions (not just Go builtins with FreshAlloc declarations).
-	if headOk && ome.funcReturnsFresh != nil && ome.funcReturnsFresh[headSym] {
-		transferOwnership = true
-	} else if headOk {
-		// Also check Declaration.Type.Return.Transfer for Go builtins
-		if d := DeclarationForValue(v[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
+	if headOk {
+		if ti := ome.funcTypeInfo[headSym]; ti != nil && ti.Transfer {
+			transferOwnership = true
+		} else if d := DeclarationForValue(v[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
 			transferOwnership = true
 		}
 	}
@@ -1245,10 +1243,12 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 	if headOk && (headSym == Symbol("*") || headSym == Symbol("+")) {
 		transferOwnership = true
 	}
-	// Sub-parser symbol reference: check funcReturnsFresh
+	// Sub-parser symbol reference: check funcTypeInfo
 	if !ok {
-		if sym, ok2 := scmerSymbol(val); ok2 && ome.funcReturnsFresh != nil && ome.funcReturnsFresh[sym] {
-			transferOwnership = true
+		if sym, ok2 := scmerSymbol(val); ok2 && ome.funcTypeInfo != nil {
+			if ti := ome.funcTypeInfo[sym]; ti != nil && ti.Transfer {
+				transferOwnership = true
+			}
 		}
 	}
 
