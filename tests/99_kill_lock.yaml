@@ -319,6 +319,61 @@ test_cases:
       - session_id: "kill-attacker"
         sql: "SELECT KILL_QUERY(id) FROM kill_ctrl LIMIT 1"
 
+  # ── KILL mid-INSERT rollback: no partial state ────────────────────────────
+  #
+  # Validates the kill→drain→rollback path introduced alongside the
+  # goroutine-leak / rollback-race fixes in scan.go / scan_order.go:
+  #
+  #   kill fires → shard goroutines drain to channel close
+  #             → ALL LogInsert calls complete
+  #             → WithAutocommit.defer catches panic
+  #             → rollbackCursorStability() undoes every inserted row
+  #             → error response returned
+  #
+  # Invariant: after kill, kill_dst contains either 0 rows (kill fired
+  # before INSERT completed + rollback) or 40000 rows (INSERT completed
+  # before kill arrived, no rollback needed).  Never a value in between.
+  #
+  # The check enforces 0 rows because the kill is sent well before the
+  # 200×200=40000-row INSERT SELECT finishes (~89 ms on typical hardware).
+
+  - name: "KILL mid-INSERT leaves target table empty (rollback correctness)"
+    setup:
+      - sql: "DROP TABLE IF EXISTS kill_dst"
+      - sql: "DROP TABLE IF EXISTS kill_ctrl2"
+      - sql: "CREATE TABLE kill_dst (a INT, b INT)"
+      - sql: "CREATE TABLE kill_ctrl2 (id BIGINT)"
+    steps:
+      # record victim session ID so the attacker can retrieve it
+      - session_id: "rb-kill-victim"
+        sql: "INSERT INTO kill_ctrl2 VALUES (CONNECTION_ID())"
+      # slow INSERT SELECT: 200×200 = 40 000 row combinations (~89 ms)
+      - session_id: "rb-kill-victim"
+        sql: "INSERT INTO kill_dst SELECT a.id, b.id FROM kill_big a, kill_big b"
+        background: true
+        expect:
+          error: true
+      # two sync steps let the background request start scanning
+      - session_id: "rb-kill-attacker2"
+        sql: "SELECT 1"
+      - session_id: "rb-kill-attacker2"
+        sql: "SELECT 1"
+      # kill the running INSERT SELECT
+      - session_id: "rb-kill-attacker2"
+        sql: "SELECT KILL_QUERY(id) FROM kill_ctrl2 LIMIT 1"
+      # two more sync steps: rollback completes before the background
+      # HTTP response is sent, so by the time we check, state is stable
+      - session_id: "rb-kill-attacker2"
+        sql: "SELECT 1"
+      - session_id: "rb-kill-attacker2"
+        sql: "SELECT 1"
+      # after rollback: target must be empty (all partial inserts undone)
+      - session_id: "rb-kill-check"
+        sql: "SELECT COUNT(*) AS n FROM kill_dst"
+        expect:
+          rows: 1
+          contains: "0"
+
   # ── cleanup ────────────────────────────────────────────────────────────────
 
   - name: "cleanup: drop lock test tables"
@@ -329,6 +384,12 @@ test_cases:
 
   - name: "cleanup: drop kill_big table"
     sql: "DROP TABLE IF EXISTS kill_big"
+
+  - name: "cleanup: drop kill_dst table"
+    sql: "DROP TABLE IF EXISTS kill_dst"
+
+  - name: "cleanup: drop kill_ctrl2 table"
+    sql: "DROP TABLE IF EXISTS kill_ctrl2"
 
   - name: "cleanup: drop lock_test2 table"
     sql: "DROP TABLE IF EXISTS lock_test2"
