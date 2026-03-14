@@ -181,7 +181,7 @@ type optimizerMetainfo struct {
 	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
 	ownedSlots           map[int]bool    // NthLocalVar slot → owned; used in second-pass re-opt
 	localLambdas         map[Symbol]*localLambdaInfo
-	funcTypeInfo         map[Symbol]*TypeDescriptor // type info for Scheme-defined functions (e.g. Transfer: true for fresh returns)
+	funcTypeInfo         map[Symbol]TypeInfo // type info for Scheme-defined functions (e.g. Transfer for fresh returns)
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -783,9 +783,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if sym, ok2 := scmerSymbol(v[1]); ok2 {
 			if ti.Transfer() {
 				if ome.funcTypeInfo == nil {
-					ome.funcTypeInfo = make(map[Symbol]*TypeDescriptor)
+					ome.funcTypeInfo = make(map[Symbol]TypeInfo)
 				}
-				ome.funcTypeInfo[sym] = &TypeDescriptor{Transfer: true}
+				ome.funcTypeInfo[sym] = TypeInfo{}.WithTransfer()
 			}
 		}
 		// Register local non-escaping lambda for second-pass ownership inference
@@ -972,7 +972,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	// If the called function is known to always return a fresh alloc, mark result as owned.
 	if headOk {
-		if ti := ome.funcTypeInfo[headSym]; ti != nil && ti.Transfer {
+		if ti := ome.funcTypeInfo[headSym]; ti.Transfer() {
 			transferOwnership = true
 		} else if d := DeclarationForValue(v[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
 			transferOwnership = true
@@ -1277,7 +1277,7 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 	// Sub-parser symbol reference: check funcTypeInfo
 	if !ok {
 		if sym, ok2 := scmerSymbol(val); ok2 && ome.funcTypeInfo != nil {
-			if ti := ome.funcTypeInfo[sym]; ti != nil && ti.Transfer {
+			if ti := ome.funcTypeInfo[sym]; ti.Transfer() {
 				transferOwnership = true
 			}
 		}
