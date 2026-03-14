@@ -960,6 +960,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 						}
 					}
 				}
+			} else if sym, ok := scmerSymbol(arg1); ok && ome.ownedVars != nil && ome.ownedVars[sym] {
+				firstArgFresh = true
 			}
 		}
 		if firstArgFresh && len(v) >= 2 {
@@ -1194,10 +1196,23 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 		}
 		val = NewSlice(slice)
 	} else if headOk && headSym == Symbol("define") {
+		origSubExpr := slice[2] // save before optimization to detect kleene star
 		slice[2] = OptimizeParser(slice[2], env, ome, false)
 		if sym, ok := scmerSymbol(slice[1]); ok {
 			if _, present := ome.variableReplacement[sym]; present {
 				delete(ome.variableReplacement, sym)
+			}
+			// Kleene star (*) always produces a fresh list → mark variable as owned
+			// so that map/match in the generator body can be promoted to map_mut/match_mut
+			if origSubSlice, ok2 := scmerSlice(origSubExpr); ok2 {
+				if len(origSubSlice) > 0 {
+					if head, ok3 := scmerSymbol(origSubSlice[0]); ok3 && head == Symbol("*") {
+						if ome.ownedVars == nil {
+							ome.ownedVars = make(map[Symbol]bool)
+						}
+						ome.ownedVars[sym] = true
+					}
+				}
 			}
 		}
 		val = NewSlice(slice)
