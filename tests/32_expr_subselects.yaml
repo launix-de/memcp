@@ -377,6 +377,69 @@ test_cases:
           operation::edit: true
           operation::view: true
 
+  - name: "Wrapped derived view keeps nested scalar file metadata with inner LEFT JOIN"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_wrap_src"
+      - sql: "DROP TABLE IF EXISTS expr32_wrap_rev"
+      - sql: "DROP TABLE IF EXISTS expr32_wrap_file"
+      - sql: "DROP TABLE IF EXISTS expr32_wrap_kind"
+      - sql: "CREATE TABLE expr32_wrap_src (ID INT PRIMARY KEY, kind INT, archive BOOL)"
+      - sql: "CREATE TABLE expr32_wrap_rev (id INT PRIMARY KEY, src INT, created INT, file INT)"
+      - sql: "CREATE TABLE expr32_wrap_file (id INT PRIMARY KEY, filename VARCHAR(255), mime VARCHAR(255))"
+      - sql: "CREATE TABLE expr32_wrap_kind (ID INT PRIMARY KEY, name VARCHAR(255))"
+      - sql: "INSERT INTO expr32_wrap_src (ID, kind, archive) VALUES (1, 7, FALSE), (2, NULL, FALSE)"
+      - sql: "INSERT INTO expr32_wrap_file (id, filename, mime) VALUES (100, 'one.pdf', 'application/pdf'), (101, 'two.pdf', 'application/pdf')"
+      - sql: "INSERT INTO expr32_wrap_rev (id, src, created, file) VALUES (1, 1, 1000, 100), (2, 2, 2000, 101)"
+      - sql: "INSERT INTO expr32_wrap_kind (ID, name) VALUES (7, 'General')"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_wrap_src"
+      - sql: "DROP TABLE IF EXISTS expr32_wrap_rev"
+      - sql: "DROP TABLE IF EXISTS expr32_wrap_file"
+      - sql: "DROP TABLE IF EXISTS expr32_wrap_kind"
+    sql: >
+      SELECT t.ID, t.file, t.filename, t.`operation::pdf`, t.`type::description`, t.`type::canView`
+      FROM (
+        SELECT
+          expr32_wrap_src.ID AS ID,
+          expr32_wrap_src.archive AS archive,
+          (SELECT r.file FROM expr32_wrap_rev r WHERE r.src = expr32_wrap_src.ID ORDER BY r.created DESC LIMIT 1) AS file,
+          (SELECT f.filename FROM expr32_wrap_file f
+            WHERE f.ID = (
+              SELECT r.file FROM expr32_wrap_rev r WHERE r.src = expr32_wrap_src.ID ORDER BY r.created DESC LIMIT 1
+            )
+            LIMIT 1) AS filename,
+          (((SELECT f.mime FROM expr32_wrap_file f
+            WHERE f.ID = (
+              SELECT r.file FROM expr32_wrap_rev r WHERE r.src = expr32_wrap_src.ID ORDER BY r.created DESC LIMIT 1
+            )
+            LIMIT 1)) = ('application/pdf')) AS `operation::pdf`,
+          ref_type.`type:description` AS `type::description`,
+          ref_type.`type:canView` AS `type::canView`
+        FROM expr32_wrap_src
+        LEFT JOIN (
+          SELECT ID AS `type:ID`, name AS `type:description`, TRUE AS `type:canView`
+          FROM expr32_wrap_kind
+        ) AS ref_type ON ref_type.`type:ID` = expr32_wrap_src.kind
+        WHERE TRUE
+      ) AS t
+      WHERE COALESCE(t.archive, FALSE) IN (FALSE, NULL)
+      ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+          file: 100
+          filename: one.pdf
+          operation::pdf: true
+          type::description: General
+          type::canView: true
+        - ID: 2
+          file: 101
+          filename: two.pdf
+          operation::pdf: true
+          type::description: null
+          type::canView: null
+
   - name: "Scalar subselect multiple rows errors"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:

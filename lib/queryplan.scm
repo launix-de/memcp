@@ -536,6 +536,28 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 ))
 
 /* recursively preprocess a query and return the flattened query. The returned parameterset will be passed to build_queryplan */
+/*
+SOFTWARE CONTRACT: untangle_query
+---------------------------------
+
+untangle_query is the semantic boundary between SQL syntax and physical plan building.
+Its job is to untangle a SELECT into a relational intermediate form with these properties:
+
+- a flat FROM-list (`tables`)
+- a flat WHERE condition list (`condition` plus `conditionList` contributions)
+- a group-stage list (`groups`) that carries GROUP BY / HAVING / ORDER / LIMIT / OFFSET
+- a projection map (`fields`) whose expressions are bound against that flattened relational input
+
+The result of untangle_query must still be purely relational/logical. In particular:
+
+- no physical materialization strategy is chosen here
+- no nested scan shape is chosen here
+- no later wrapper around `SELECT t.* FROM (...)` may change the semantics of already projected fields
+- derived tables may rename/project fields, but must not reintroduce hidden query nesting semantics
+
+After untangle_query, later stages may only decide execution strategy for this flattened form.
+They must not reinterpret the query as syntactically nested again.
+*/
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_chain) (begin
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
 	/* TODO: multiple group levels, limit+offset for each group level */
@@ -714,7 +736,10 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 					(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
 				)
 			))
+			(define old_projection_scalar_flatten (projection_scalar_flatten "value"))
+			(projection_scalar_flatten "value" (projection_scalar_flatten_safe subquery))
 			(match (untangle_subquery_with_outer subquery subquery_outer_schemas) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+				(projection_scalar_flatten "value" old_projection_scalar_flatten)
 				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 subquery_outer_schemas))
 				(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
 				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
@@ -873,7 +898,9 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 						)
 					)
 				)
-			) (error "non matching return value for untangle_query"))
+			) (begin
+					(projection_scalar_flatten "value" old_projection_scalar_flatten)
+					(error "non matching return value for untangle_query")))
 		)
 	)))
 
@@ -882,11 +909,13 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 	(define pending_scalar_conditions (newsession))
 	(define pending_scalar_schemas (newsession))
 	(define pending_scalar_counter (newsession))
+	(define projection_scalar_flatten (newsession))
 	(pending_scalar_tables "data" '())
 	(pending_scalar_renames "data" '())
 	(pending_scalar_conditions "data" '())
 	(pending_scalar_schemas "data" '())
 	(pending_scalar_counter "value" 0)
+	(projection_scalar_flatten "value" false)
 	(define expr_contains_inner_select (lambda (expr) (match expr
 		(cons sym args) (if (nil? (inner_select_kind sym))
 			(reduce args (lambda (a b) (or a (expr_contains_inner_select b))) false)
@@ -898,6 +927,21 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 			(reduce_assoc outer_schemas (lambda (acc alias cols) (or acc (equal?? tblvar alias))) false))
 		(cons sym args) (reduce args (lambda (a b) (or a (expr_references_outer_alias b outer_schemas))) false)
 		false)))
+	(define projection_scalar_flatten_safe (lambda (subquery)
+		(and (list? subquery)
+			(>= (count subquery) 2)
+			(match (nth subquery 1)
+				(cons first_table '()) (match first_table
+					'(alias schema (string? tbl) false nil) true
+					'(alias schema (string? tbl) false true) true
+					_ false)
+				_ false))))
+	(define schema_has_projected_fields (lambda (cols)
+		(not (nil? (find cols (lambda (coldef) (not (nil? (coldef "Expr"))))))))
+	)
+	(define outer_schemas_simple (lambda (outer_schemas)
+		(reduce_assoc outer_schemas (lambda (acc alias cols) (and acc (not (schema_has_projected_fields cols)))) true)
+	))
 	(define subquery_references_outer_alias (lambda (subquery outer_schemas)
 		(and (list? subquery)
 			(>= (count subquery) 9)
@@ -919,9 +963,15 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(reduce (coalesceNil (nth subquery 4) '()) (lambda (a b) (or a (expr_contains_inner_select b))) false)
 				(expr_contains_inner_select (nth subquery 5))
 				(reduce (coalesceNil (nth subquery 6) '()) (lambda (a b) (or a (match b '(col dir) (expr_contains_inner_select col)))) false)
+			)
+			(or
 				(and
 					(subquery_references_outer_alias subquery outer_schemas)
-					(> (count (extract_assoc outer_schemas (lambda (k v) k))) 1))
+					(> (count (extract_assoc outer_schemas (lambda (k v) k))) 1)
+					(outer_schemas_simple outer_schemas))
+				(and
+					(projection_scalar_flatten "value")
+					(subquery_references_outer_alias subquery outer_schemas))
 			)
 	)))
 	(define register_scalar_subquery (lambda (subquery outer_schemas) (begin
