@@ -432,7 +432,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list that has to be filtered", NoEscape},
-			DeclarationParameter{"condition", "func", "filter condition func(any)->bool", nil},
+			DeclarationParameter{"condition", "func", "filter condition func(any)->bool", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "filter")
@@ -453,7 +453,7 @@ func init_list() {
 		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list to search", NoEscape},
-			DeclarationParameter{"condition", "func", "predicate func(any)->bool that is applied until the first match", nil},
+			DeclarationParameter{"condition", "func", "predicate func(any)->bool that is applied until the first match", NoEscape},
 			DeclarationParameter{"default", "any", "optional default value if nothing matches", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
@@ -477,7 +477,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list that has to be mapped", NoEscape},
-			DeclarationParameter{"map", "func", "map function func(any)->any that is applied to each item", nil},
+			DeclarationParameter{"map", "func", "map function func(any)->any that is applied to each item", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "map")
@@ -496,7 +496,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list that has to be mapped", NoEscape},
-			DeclarationParameter{"map", "func", "map function func(i, any)->any that is applied to each item", nil},
+			DeclarationParameter{"map", "func", "map function func(i, any)->any that is applied to each item", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "mapIndex")
@@ -515,7 +515,7 @@ func init_list() {
 		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"list", "list", "list that has to be reduced", NoEscape},
-			DeclarationParameter{"reduce", "func", "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Transfer: true}, nil}}},
+			DeclarationParameter{"reduce", "func", "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", &TypeDescriptor{Kind: "func", Escape: false, Params: []*TypeDescriptor{{Transfer: true}, nil}}},
 			DeclarationParameter{"neutral", "any", "(optional) initial value of the accumulator, defaults to nil", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
@@ -544,8 +544,8 @@ func init_list() {
 		3, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"startstate", "any", "start state to begin with", nil},
-			DeclarationParameter{"condition", "func", "func that returns true whether the state will be inserted into the result or the loop is stopped", nil},
-			DeclarationParameter{"iterator", "func", "func that produces the next state", nil},
+			DeclarationParameter{"condition", "func", "func that returns true whether the state will be inserted into the result or the loop is stopped", NoEscape},
+			DeclarationParameter{"iterator", "func", "func that produces the next state", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			result := make([]Scmer, 0)
@@ -566,7 +566,7 @@ func init_list() {
 		1, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"n", "number", "number of elements to produce", nil},
-			DeclarationParameter{"fn", "func", "(optional) map function applied to each index", nil},
+			DeclarationParameter{"fn", "func", "(optional) map function applied to each index", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			n := int(a[0].Int())
@@ -595,7 +595,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"n", "number", "number of elements to produce", nil},
-			DeclarationParameter{"fn", "func", "map function applied to each index in parallel", nil},
+			DeclarationParameter{"fn", "func", "map function applied to each index in parallel", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			n := int(a[0].Int())
@@ -660,7 +660,7 @@ func init_list() {
 		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"n", "number", "number of elements to produce", nil},
-			DeclarationParameter{"fn", "func", "map function applied to each index", nil},
+			DeclarationParameter{"fn", "func", "map function applied to each index", NoEscape},
 			DeclarationParameter{"target", "list", "(optional) preallocated target list", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
@@ -693,7 +693,7 @@ func init_list() {
 		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"n", "number", "number of elements to produce", nil},
-			DeclarationParameter{"fn", "func", "map function applied to each index in parallel", nil},
+			DeclarationParameter{"fn", "func", "map function applied to each index in parallel", NoEscape},
 			DeclarationParameter{"target", "list", "(optional) preallocated target list", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
@@ -834,7 +834,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"dict", "list", "dictionary that has to be filtered", NoEscape},
-			DeclarationParameter{"condition", "func", "filter function func(string any)->bool where the first parameter is the key, the second is the value", nil},
+			DeclarationParameter{"condition", "func", "filter function func(string any)->bool where the first parameter is the key, the second is the value", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			result := make([]Scmer, 0)
@@ -863,7 +863,7 @@ func init_list() {
 		2, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"dict", "list", "dictionary to search", NoEscape},
-			DeclarationParameter{"condition", "func", "predicate func(string any)->bool that is applied until the first match", nil},
+			DeclarationParameter{"condition", "func", "predicate func(string any)->bool that is applied until the first match", NoEscape},
 			DeclarationParameter{"default", "any", "optional default value if nothing matches", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
@@ -902,7 +902,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"dict", "list", "dictionary that has to be mapped", NoEscape},
-			DeclarationParameter{"map", "func", "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value.", nil},
+			DeclarationParameter{"map", "func", "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value.", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -935,7 +935,7 @@ func init_list() {
 		3, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"dict", "list", "dictionary that has to be reduced", NoEscape},
-			DeclarationParameter{"reduce", "func", "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Transfer: true}, nil, nil}}},
+			DeclarationParameter{"reduce", "func", "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", &TypeDescriptor{Kind: "func", Escape: false, Params: []*TypeDescriptor{{Transfer: true}, nil, nil}}},
 			DeclarationParameter{"neutral", "any", "initial value for the accumulator", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
@@ -1011,7 +1011,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			DeclarationParameter{"dict", "list", "dictionary that has to be checked", NoEscape},
-			DeclarationParameter{"map", "func", "func(string any)->any that flattens down each element", nil},
+			DeclarationParameter{"map", "func", "func(string any)->any that flattens down each element", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -1045,7 +1045,7 @@ func init_list() {
 			DeclarationParameter{"dict", "list", "input dictionary", nil},
 			DeclarationParameter{"key", "string", "key that has to be set", nil},
 			DeclarationParameter{"value", "any", "new value to set", nil},
-			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be physically stored in the new dictionary.", nil},
+			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be physically stored in the new dictionary.", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
@@ -1091,7 +1091,7 @@ func init_list() {
 		[]DeclarationParameter{
 			DeclarationParameter{"dict1", "list", "first input dictionary that has to be changed. You must not use this value again.", nil},
 			DeclarationParameter{"dict2", "list", "input dictionary that contains the new values that have to be added", nil},
-			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", nil},
+			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
@@ -1125,7 +1125,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			{"list", "list", "owned list to map in-place", nil},
-			{"map", "func", "map function", nil},
+			{"map", "func", "map function", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := a[0].Slice()
@@ -1144,7 +1144,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			{"list", "list", "owned list to map in-place", nil},
-			{"map", "func", "map function func(i, any)->any", nil},
+			{"map", "func", "map function func(i, any)->any", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			list := a[0].Slice()
@@ -1163,7 +1163,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			{"dict", "list", "owned dictionary to map in-place", nil},
-			{"map", "func", "map function func(key, value)->value", nil},
+			{"map", "func", "map function func(key, value)->value", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -1198,7 +1198,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			{"list", "list", "owned list to filter in-place", nil},
-			{"condition", "func", "filter condition func(any)->bool", nil},
+			{"condition", "func", "filter condition func(any)->bool", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			input := a[0].Slice()
@@ -1221,7 +1221,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			{"dict", "list", "owned dictionary to filter in-place", nil},
-			{"condition", "func", "filter function func(key, value)->bool", nil},
+			{"condition", "func", "filter function func(key, value)->bool", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -1255,7 +1255,7 @@ func init_list() {
 		2, 2,
 		[]DeclarationParameter{
 			{"dict", "list", "owned dictionary to extract from in-place", nil},
-			{"map", "func", "func(key, value)->any that extracts each element", nil},
+			{"map", "func", "func(key, value)->any that extracts each element", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -1286,7 +1286,7 @@ func init_list() {
 			{"dict", "list", "owned dictionary to mutate", nil},
 			{"key", "string", "key to set", nil},
 			{"value", "any", "new value", nil},
-			{"merge", "func", "(optional) merge function", nil},
+			{"merge", "func", "(optional) merge function", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
@@ -1373,7 +1373,7 @@ func init_list() {
 		[]DeclarationParameter{
 			{"dict1", "list", "owned first dictionary", nil},
 			{"dict2", "list", "dictionary with new values", nil},
-			{"merge", "func", "(optional) merge function", nil},
+			{"merge", "func", "(optional) merge function", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc_mut"])

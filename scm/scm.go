@@ -877,8 +877,8 @@ func init() {
 		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"func", "func", "function with no parameters that will be called", nil},
-			DeclarationParameter{"errorhandler", "func", "function that takes the error as parameter", nil},
+			DeclarationParameter{"func", "func", "function with no parameters that will be called", NoEscape},
+			DeclarationParameter{"errorhandler", "func", "function that takes the error as parameter", NoEscape},
 		}, "any",
 		func(a ...Scmer) (result Scmer) {
 			defer func() {
@@ -896,7 +896,7 @@ func init() {
 		"apply", "runs the function with its arguments",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"function", "func", "function to execute", nil},
+			DeclarationParameter{"function", "func", "function to execute", NoEscape},
 			DeclarationParameter{"arguments", "list", "list of arguments to apply", nil},
 		}, "any",
 		func(a ...Scmer) Scmer {
@@ -908,7 +908,7 @@ func init() {
 		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
 		2, 2,
 		[]DeclarationParameter{
-			DeclarationParameter{"function", "func", "function to execute (must be a lambda)", nil},
+			DeclarationParameter{"function", "func", "function to execute (must be a lambda)", NoEscape},
 			DeclarationParameter{"arguments", "list", "assoc list of arguments to apply", nil},
 		}, "symbol",
 		func(a ...Scmer) Scmer {
@@ -941,8 +941,8 @@ func init() {
 		3, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"init", "list", "initial state as a list", nil},
-			DeclarationParameter{"condition", "func", "func that receives the current state as parameters and must return true if the loop shall be continued", nil},
-			DeclarationParameter{"step", "func", "step func that returns the next state as a list", nil},
+			DeclarationParameter{"condition", "func", "func that receives the current state as parameters and must return true if the loop shall be continued", NoEscape},
+			DeclarationParameter{"step", "func", "step func that returns the next state as a list", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			state := append([]Scmer{}, asSlice(a[0], "for init")...)
@@ -965,8 +965,8 @@ func init() {
 		3, 3,
 		[]DeclarationParameter{
 			DeclarationParameter{"init", "list", "owned initial state", nil},
-			DeclarationParameter{"condition", "func", "func(state...) -> bool", nil},
-			DeclarationParameter{"step", "func", "step func returning next state as list", nil},
+			DeclarationParameter{"condition", "func", "func(state...) -> bool", NoEscape},
+			DeclarationParameter{"step", "func", "step func returning next state as list", NoEscape},
 		}, "list",
 		func(a ...Scmer) Scmer {
 			state := asSlice(a[0], "for_mut init")

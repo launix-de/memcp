@@ -903,11 +903,26 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 				}
 			}
 		}
-		// Mark local lambda escaped if passed as argument (before optimization)
+		// Mark local lambda escaped if passed as argument (before optimization),
+		// unless the callee's parameter is annotated Escape:false (e.g. map's callback)
 		if i > 0 && ome.localLambdas != nil {
 			if argSym, ok := scmerSymbol(v[i]); ok {
 				if info, ok2 := ome.localLambdas[argSym]; ok2 {
-					info.escaped = true
+					paramEscapes := true
+					if callDecl != nil {
+						paramIdx := i - 1
+						if paramIdx >= len(callDecl.Params) {
+							paramIdx = len(callDecl.Params) - 1
+						}
+						if paramIdx >= 0 {
+							if ti := callDecl.Params[paramIdx].TypeInfo; ti != nil && !ti.Escape {
+								paramEscapes = false
+							}
+						}
+					}
+					if paramEscapes {
+						info.escaped = true
+					}
 				}
 			}
 		}
@@ -1202,11 +1217,12 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 			if _, present := ome.variableReplacement[sym]; present {
 				delete(ome.variableReplacement, sym)
 			}
-			// Kleene star (*) always produces a fresh list → mark variable as owned
-			// so that map/match in the generator body can be promoted to map_mut/match_mut
+			// Kleene star (*) and one-or-more (+) always produce a fresh list →
+			// mark variable as owned so that map/match in the generator body
+			// can be promoted to map_mut/match_mut
 			if origSubSlice, ok2 := scmerSlice(origSubExpr); ok2 {
 				if len(origSubSlice) > 0 {
-					if head, ok3 := scmerSymbol(origSubSlice[0]); ok3 && head == Symbol("*") {
+					if head, ok3 := scmerSymbol(origSubSlice[0]); ok3 && (head == Symbol("*") || head == Symbol("+")) {
 						if ome.ownedVars == nil {
 							ome.ownedVars = make(map[Symbol]bool)
 						}
