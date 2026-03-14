@@ -278,24 +278,63 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			})
 		}),
 	}
-	NewContext(req.Context(), func() {
-		// catch panics and print out 500 Internal Server Error
-		defer func() {
-			if r := recover(); r != nil {
-				if fmt.Sprint(r) != "websocket closed" {
-					PrintError("error in http handler: " + fmt.Sprint(r))
-				}
-				// try to write error response; silently ignore if connection was hijacked (e.g. websocket)
-				func() {
-					defer func() { recover() }()
-					res.Header().Set("Content-Type", "text/plain")
-					res.WriteHeader(500)
-					io.WriteString(res, "500 Internal Server Error: ")
-					io.WriteString(res, fmt.Sprint(r))
-				}()
+	var ss *SessionState
+	if sid := req.Header.Get("X-Session-Id"); sid != "" {
+		// Persistent HTTP session: reuse or create a long-lived SessionState.
+		if v, ok := httpStates.Load(sid); ok {
+			ss = v.(*SessionState)
+		} else {
+			ss = RegisterSession(user, req.RemoteAddr, "")
+			httpStates.Store(sid, ss)
+			if httpSessionAddHook != nil {
+				httpSessionAddHook(sid, ss)
 			}
-		}()
-		Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
+		}
+	} else {
+		ss = RegisterSession(user, req.RemoteAddr, "")
+		defer UnregisterSession(ss.ID)
+		defer ss.ReleaseAllLocks() // non-persistent: release locks when request ends
+	}
+	// Reset killed flag in case this session was killed in a previous request
+	ss.ResetKilled()
+	ss.SetCommand("Query", req.Method+" "+req.URL.Path)
+	// Watch for HTTP client disconnect and propagate to session kill
+	reqDone := make(chan struct{})
+	defer close(reqDone)
+	go func() {
+		select {
+		case <-req.Context().Done():
+			ss.Kill()
+		case <-reqDone:
+		}
+	}()
+	SetValues(map[string]any{"sessionStatePtr": ss}, func() {
+		contextFn := func() {
+			// catch panics and print out 500 Internal Server Error
+			defer func() {
+				if r := recover(); r != nil {
+					if fmt.Sprint(r) != "websocket closed" {
+						PrintError("error in http handler: " + fmt.Sprint(r))
+					}
+					// try to write error response; silently ignore if connection was hijacked (e.g. websocket)
+					func() {
+						defer func() { recover() }()
+						res.Header().Set("Content-Type", "text/plain")
+						res.WriteHeader(500)
+						io.WriteString(res, "500 Internal Server Error: ")
+						io.WriteString(res, fmt.Sprint(r))
+					}()
+				}
+			}()
+			Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
+		}
+		// Persistent HTTP sessions reuse the same Scheme session so that
+		// @variables set in one request are visible in subsequent requests.
+		if req.Header.Get("X-Session-Id") != "" {
+			NewContextWithSession(req.Context(), ss.GetOrCreateScmSession(), contextFn)
+		} else {
+			NewContext(req.Context(), contextFn)
+		}
 	})
 }
 
@@ -335,35 +374,81 @@ func scmerToGo(v Scmer) any {
 	}
 }
 
-// ShutdownServers gracefully shuts down all HTTP and MySQL servers.
-// drainSeconds controls how long to wait for in-flight HTTP requests (0 = 10s default).
+// hasActiveMySQLQueries returns true if any MySQL session is currently executing a query.
+func hasActiveMySQLQueries() bool {
+	active := false
+	mysqlStates.Range(func(_, v any) bool {
+		if strPtr(&v.(*SessionState).Command) == "Query" {
+			active = true
+			return false
+		}
+		return true
+	})
+	return active
+}
+
+// ShutdownServers stops all servers, drains in-flight requests, kills remaining sessions,
+// waits for all kills to propagate, then returns so the caller can proceed with cleanup.
+//
+// Sequence:
+//  1. Stop accepting new connections (MySQL listeners closed, HTTP listeners closed via Shutdown).
+//  2. Drain: wait up to drainSeconds for in-flight requests to finish on their own.
+//  3. Kill: send Kill() to every registered session.
+//  4. Wait: poll until all MySQL queries have exited their panic-recovery paths (max 5 s).
+//  5. HTTP: wait for HTTP handlers to finish (they exit quickly after Kill).
 func ShutdownServers(drainSeconds int) {
 	if drainSeconds <= 0 {
 		drainSeconds = 10
 	}
+	drainDeadline := time.Now().Add(time.Duration(drainSeconds) * time.Second)
 
-	// Close MySQL listeners immediately (causes Accept to return)
+	// Phase 1: stop accepting new connections.
 	mysqlListenersMu.Lock()
 	listeners := mysqlListeners
 	mysqlListeners = nil
 	mysqlListenersMu.Unlock()
 	for _, l := range listeners {
-		func() {
-			defer func() { recover() }()
-			l.Close()
-		}()
+		func() { defer func() { recover() }(); l.Close() }()
 	}
-
-	// Gracefully shut down HTTP servers with deadline
 	httpServersMu.Lock()
 	servers := httpServers
 	httpServers = nil
 	httpServersMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(drainSeconds)*time.Second)
-	defer cancel()
-	for _, srv := range servers {
-		srv.Shutdown(ctx)
+	// HTTP Shutdown runs concurrently: stops new accepts and drains handlers.
+	httpDone := make(chan struct{})
+	go func() {
+		defer close(httpDone)
+		ctx, cancel := context.WithDeadline(context.Background(), drainDeadline)
+		defer cancel()
+		for _, srv := range servers {
+			srv.Shutdown(ctx)
+		}
+	}()
+
+	// Phase 2: drain — wait for in-flight MySQL queries to finish voluntarily.
+	for time.Now().Before(drainDeadline) {
+		if !hasActiveMySQLQueries() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+
+	// Phase 3: kill all remaining sessions.
+	for _, ss := range Snapshot() {
+		ss.Kill()
+	}
+
+	// Phase 4: wait for kills to propagate through panic-recovery paths (max 5 s).
+	killDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(killDeadline) {
+		if !hasActiveMySQLQueries() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Phase 5: wait for HTTP handlers to exit (Kill already caused them to panic out).
+	<-httpDone
 }
 
 func mustSliceNet(ctx string, v Scmer) []Scmer {

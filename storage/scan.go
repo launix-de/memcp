@@ -73,6 +73,10 @@ type scanResult struct {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
+	ss := scm.GetCurrentSessionState()
+	if ss != nil && ss.IsKilled() {
+		panic("query killed")
+	}
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -115,6 +119,11 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	var inputCount int64
 	gls.Go(func() {
 		t.iterateShards(boundaries, func(s *storageShard) {
+			// Kill check at shard-scheduling point: ss is a closure variable, no GLS lookup needed.
+			// This keeps the worker pool draining quickly on tables with many shards.
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
+			}
 			// parallel scan over shards
 			defer func() {
 				if r := recover(); r != nil {
@@ -127,13 +136,25 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		close(values) // last scan is finished
 	})
 	// collect values from parallel scan
+	// Drain the entire channel before acting on any error: this guarantees that
+	// all shard goroutines have finished (and therefore all LogInsert/LogDelete
+	// calls are complete) before a panic propagates to WithAutocommit's rollback.
+	// Exiting the loop early would leave goroutines blocked on a full channel
+	// (goroutine leak) and create a race between rollback and ongoing mutations.
 	akkumulator := neutral
 	hadValue := false
+	var scanErr scanError
 	if !aggregate2.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(aggregate2)
 		for msg := range values {
 			if msg.err.r != nil {
-				panic(msg.err)
+				if scanErr.r == nil {
+					scanErr = msg.err
+				}
+				continue
+			}
+			if scanErr.r != nil {
+				continue
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
@@ -142,7 +163,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 				hadValue = true
 			}
 		}
-		if !hadValue && isOuter {
+		if scanErr.r == nil && !hadValue && isOuter {
 			nullRow := make([]scm.Scmer, len(callbackCols))
 			for i := range nullRow {
 				nullRow[i] = scm.NewNil()
@@ -153,7 +174,13 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 		fn := scm.OptimizeProcToSerialFunction(aggregate)
 		for msg := range values {
 			if msg.err.r != nil {
-				panic(msg.err)
+				if scanErr.r == nil {
+					scanErr = msg.err
+				}
+				continue
+			}
+			if scanErr.r != nil {
+				continue
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
@@ -162,7 +189,7 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 				hadValue = true
 			}
 		}
-		if !hadValue && isOuter {
+		if scanErr.r == nil && !hadValue && isOuter {
 			nullRow := make([]scm.Scmer, len(callbackCols))
 			for i := range nullRow {
 				nullRow[i] = scm.NewNil()
@@ -172,19 +199,28 @@ func (t *table) scan(conditionCols []string, condition scm.Scmer, callbackCols [
 	} else {
 		for msg := range values {
 			if msg.err.r != nil {
-				panic(msg.err)
+				if scanErr.r == nil {
+					scanErr = msg.err
+				}
+				continue
+			}
+			if scanErr.r != nil {
+				continue
 			}
 			inputCount += msg.inputCount
 			outCount += msg.outCount
 			hadValue = hadValue || msg.outCount > 0
 		}
-		if !hadValue && isOuter {
+		if scanErr.r == nil && !hadValue && isOuter {
 			nullRow := make([]scm.Scmer, len(callbackCols))
 			for i := range nullRow {
 				nullRow[i] = scm.NewNil()
 			}
 			scm.Apply(callback, nullRow...) // outer join: push one NULL row
 		}
+	}
+	if scanErr.r != nil {
+		panic(scanErr)
 	}
 	// log statistics (best-effort, async so it doesn't add latency)
 	execNs := time.Since(execStart).Nanoseconds()
@@ -238,6 +274,12 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			currentTx.EnterShardWrite(t)
 			defer currentTx.ExitShardWrite(t)
 		}
+		// Table lock check for mutation path: lockTable() stores owner while holding
+		// all shard write locks, so checking after our own t.mu.Lock() is TOCTOU-safe.
+		// waitTableLock only uses tableLockMu (not t.mu), so no deadlock.
+		if t.t.tableLockOwner.Load() != nil {
+			t.t.waitTableLock(scm.GetCurrentSessionState(), true)
+		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
 	t.ensureMainCount(skipShardReadLock)
@@ -257,6 +299,17 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	if !skipShardReadLock {
 		t.mu.RLock()
 		locked = true
+		// Table lock check must happen AFTER shard RLock to close the TOCTOU window:
+		// lockTable() sets tableLockOwner while holding shard write locks, so any
+		// scan that gets past RLock is guaranteed to see a non-nil owner if a
+		// LOCK TABLES was issued before this scan acquired the shard read lock.
+		if t.t.tableLockOwner.Load() != nil {
+			t.mu.RUnlock()
+			locked = false
+			t.t.waitTableLock(scm.GetCurrentSessionState(), hasMutationCallback)
+			t.mu.RLock()
+			locked = true
+		}
 	}
 	defer func() {
 		if locked {

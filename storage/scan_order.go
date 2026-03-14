@@ -140,6 +140,10 @@ func (s *globalqueue) Pop() any {
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool) scm.Scmer {
+	ss := scm.GetCurrentSessionState()
+	if ss != nil && ss.IsKilled() {
+		panic("query killed")
+	}
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
 	// Measure analysis time
@@ -295,6 +299,10 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	var inputCount int64
 	gls.Go(func() {
 		t.iterateShards(boundaries, func(s *storageShard) {
+			// Kill check at shard-scheduling point using closure-captured ss (no GLS lookup).
+			if ss != nil && ss.IsKilled() {
+				panic("query killed")
+			}
 			// parallel scan over shards
 			defer func() {
 				if r := recover(); r != nil {
@@ -307,15 +315,25 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		})
 		close(q_)
 	})
-	// collect all subchans
+	// collect all subchans — drain fully before acting on errors (see scan.go for rationale)
+	var scanErr scanError
 	for msg := range q_ {
 		if msg.err.r != nil {
-			panic(msg.err) // propagate errors that occur inside inner scan
+			if scanErr.r == nil {
+				scanErr = msg.err
+			}
+			continue
+		}
+		if scanErr.r != nil {
+			continue
 		}
 		if msg.res != nil && len(msg.res.items) > 0 {
 			heap.Push(&q, msg.res) // add to heap
 		}
 		inputCount += msg.inputCount
+	}
+	if scanErr.r != nil {
+		panic(scanErr)
 	}
 
 	// collect values from parallel scan
@@ -574,10 +592,25 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	var maxInsertIndex int
 	var visibleUpper uint32
 	func() {
+		shardLocked := false
 		if !skipShardReadLock {
-			t.mu.RLock()         // lock whole shard for reading since we frequently read deletions
-			defer t.mu.RUnlock() // finished reading
+			t.mu.RLock()
+			shardLocked = true
+			// Table lock check must happen AFTER shard RLock — race-safe synchronization
+			// point (mirrors storageShard.scan logic for the TOCTOU fix).
+			if t.t.tableLockOwner.Load() != nil {
+				t.mu.RUnlock()
+				shardLocked = false
+				t.t.waitTableLock(scm.GetCurrentSessionState(), false)
+				t.mu.RLock()
+				shardLocked = true
+			}
 		}
+		defer func() {
+			if shardLocked {
+				t.mu.RUnlock()
+			}
+		}()
 		// remember current insert status (so don't scan things that are inserted during map)
 		maxInsertIndex = len(t.inserts)
 		visibleUpper = t.main_count + uint32(maxInsertIndex)

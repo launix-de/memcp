@@ -289,7 +289,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var psql_identifier_unquoted)) '('session var))
 		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var
-		   @@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
+		@@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
 		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var psql_identifier_unquoted)) '('globalvars var))
 		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var psql_identifier_unquoted)) '('session_globalvar var))
 		(parser '((atom "@@" true) (define var psql_identifier_unquoted)) '('session_globalvar var))
@@ -926,6 +926,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		/* SHOW PLUGINS: return empty set (ok for most clients) */
 		(parser '((atom "SHOW" true) (atom "PLUGINS" true)) (quote true))
 
+		/* SHOW [FULL] PROCESSLIST */
+		(parser '((atom "SHOW" true) (atom "PROCESSLIST" true))
+			'((quote map) '((quote show_processlist)) '((quote lambda) '((quote row)) '((quote resultrow) (quote row)))))
+		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "PROCESSLIST" true))
+			'((quote map) '((quote show_processlist) true) '((quote lambda) '((quote row)) '((quote resultrow) (quote row)))))
+
+		/* KILL [QUERY|CONNECTION] id */
+		(parser '((atom "KILL" true) (? (or (atom "QUERY" true) (atom "CONNECTION" true))) (define id psql_expression))
+			'((quote kill_query) id))
+
 		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] */
 		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern psql_expression))) (cons '!begin '(
 			'((quote resultrow) '((quote list) "Variable_name" "version"               "Value" "0.9"))
@@ -954,8 +964,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			psql_expression
 		))) '((quote session) key value)) ","))) (cons '!begin vars))
 
-		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (or psql_identifier '(psql_identifier (atom "AS" true) psql_identifier)) ",") (? (atom "READ" true)) (? (atom "LOCAL" true)) (? (atom "LOW_PRIORITY" true)) (? (atom "WRITE" true))) "ignore")
-		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
+		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
+			(define locks (+ (parser '((define tbl psql_identifier) (? (atom "AS" true) (define alias psql_identifier)) (define mode (or (parser (atom "WRITE" true) true) (parser '((atom "LOW_PRIORITY" true) (atom "WRITE" true)) true) (parser '((atom "READ" true) (? (atom "LOCAL" true))) nil)))) (list tbl (not (nil? mode)))) ",")))
+			(list (quote locktables) (cons (quote list) (map locks (lambda (l) (cons (quote list) (list schema (nth l 0) (nth l 1))))))))
+		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) '((quote unlocktables)))
 
 		/* SHOW INDEXES FROM t / SHOW INDEX FROM t / SHOW KEYS FROM t (no-op, returns empty) */
 		(parser '((atom "SHOW" true) (or (atom "INDEXES" true) (atom "INDEX" true) (atom "KEYS" true)) (atom "FROM" true) psql_identifier (? (atom "WHERE" true) psql_expression)) "ignore")

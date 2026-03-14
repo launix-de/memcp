@@ -144,6 +144,41 @@ func scmerSliceToStrings(list []scm.Scmer) []string {
 	return out
 }
 
+// lockTable acquires a user-level read or write lock on the named table.
+// The session's State is updated while waiting, and the unlock callback is
+// registered with the session so that ReleaseAllLocks() can free it later.
+// Acquiring any lock requires an exclusive wait (drain other owners), then
+// drains in-flight shard readers by briefly acquiring each shard's write lock.
+func lockTable(schema, name string, write bool, ss *scm.SessionState) {
+	db := GetDatabase(schema)
+	if db == nil {
+		panic("LOCK TABLES: unknown database: " + schema)
+	}
+	t := db.GetTable(name)
+	if t == nil {
+		panic("LOCK TABLES: unknown table: " + schema + "." + name)
+	}
+	// Wait for any existing lock to be released, then claim ownership
+	t.waitTableLock(ss, true) // acquiring any lock requires exclusive wait
+	// Drain in-flight shard readers by acquiring each shard's write lock.
+	// We MUST set tableLockOwner while still holding the last shard write lock
+	// so that any new scan that does RLock → tableLockOwner.Load() sees the
+	// owner set before it can proceed past its own RLock.
+	shards := t.ActiveShards()
+	for _, s := range shards {
+		s.mu.Lock()
+	}
+	t.tableLockWrite.Store(write)
+	t.tableLockOwner.Store(ss)
+	for _, s := range shards {
+		s.mu.Unlock()
+	}
+	if ss != nil {
+		ss.SetState("")
+		ss.AddLock(t.unlockTable)
+	}
+}
+
 func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
@@ -1270,6 +1305,39 @@ func Init(en scm.Env) {
 				if c.IsTemp {
 					atomic.StoreInt64(&c.lastAccessed, now.UnixNano())
 				}
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"locktables", "acquires WRITE or READ user-level locks on a list of tables (LOCK TABLES); implicitly releases any previously held locks",
+		1, 1,
+		[]scm.DeclarationParameter{
+			{"locks", "list", "flat list of schema, table, write? triples", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			ss := scm.GetCurrentSessionState()
+			if ss != nil {
+				ss.ReleaseAllLocks() // LOCK TABLES implicitly releases prior locks
+			}
+			for _, item := range a[0].Slice() {
+				triple := item.Slice()
+				schema := scm.String(triple[0])
+				tbl := scm.String(triple[1])
+				write := triple[2].Bool()
+				lockTable(schema, tbl, write, ss)
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"unlocktables", "releases all user-level table locks held by this session",
+		0, 0, nil, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			if ss := scm.GetCurrentSessionState(); ss != nil {
+				ss.ReleaseAllLocks()
 			}
 			return scm.NewBool(true)
 		}, false, false, nil,

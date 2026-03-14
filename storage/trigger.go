@@ -303,14 +303,22 @@ func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming) {
 }
 
 // ExecuteBeforeInsertTriggers executes BEFORE INSERT triggers and returns modified rows.
-// The trigger function can modify NEW values by returning a modified dict.
+// The trigger function can modify NEW values by returning a modified dict, including
+// columns not present in the original INSERT. The returned columns slice is expanded to
+// ALL table columns so trigger-set values are not discarded.
 // When isIgnore is true, rows whose triggers panic are silently skipped
 // and any partial transaction effects are rolled back via savepoints.
 // When isIgnore is false, trigger panics propagate to the caller.
-func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer, isIgnore bool) [][]scm.Scmer {
+func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer, isIgnore bool) ([]string, [][]scm.Scmer) {
 	triggers := t.GetTriggers(BeforeInsert)
 	if len(triggers) == 0 {
-		return values
+		return columns, values
+	}
+
+	// Expand output to all table columns so trigger-set columns are preserved.
+	allColumns := make([]string, len(t.Columns))
+	for i, col := range t.Columns {
+		allColumns[i] = col.Name
 	}
 
 	result := make([][]scm.Scmer, 0, len(values))
@@ -375,11 +383,12 @@ func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scm
 			}
 		}
 		if triggerOk {
-			// Convert modified dict back to row using same columns
-			result = append(result, t.dictToRow(newDict, columns))
+			// Convert modified dict back to row using ALL table columns
+			// so trigger-set values on columns not in the INSERT are preserved.
+			result = append(result, t.dictToRow(newDict, allColumns))
 		}
 	}
-	return result
+	return allColumns, result
 }
 
 // ExecuteBeforeUpdateTriggers executes BEFORE UPDATE triggers.

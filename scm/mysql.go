@@ -111,6 +111,9 @@ type MySQLWrapper struct {
 /* session storage -> map from session id to SCM session object */
 var mysqlsessions sync.Map
 
+// mysqlStates maps driver session ID -> *SessionState for SHOW PROCESSLIST
+var mysqlStates sync.Map
+
 func (m *MySQLWrapper) ServerVersion() string {
 	return "MemCP"
 }
@@ -118,8 +121,9 @@ func (m *MySQLWrapper) SetServerVersion() {
 }
 func (m *MySQLWrapper) NewSession(session *driver.Session) {
 	m.log.Info("%s", "New Session from "+session.Addr())
-	// initialize something??
 	mysqlsessions.Store(session.ID(), NewSession().Func())
+	ss := RegisterSession(session.User(), session.Addr(), session.Schema())
+	mysqlStates.Store(session.ID(), ss)
 }
 func (m *MySQLWrapper) SessionInc(session *driver.Session) {
 	// I think we can skip session counting
@@ -130,6 +134,11 @@ func (m *MySQLWrapper) SessionDec(session *driver.Session) {
 func (m *MySQLWrapper) SessionClosed(session *driver.Session) {
 	m.log.Info("%s", "Closed Session "+session.User()+" from "+session.Addr())
 	mysqlsessions.Delete(session.ID())
+	if v, ok := mysqlStates.LoadAndDelete(session.ID()); ok {
+		st := v.(*SessionState)
+		st.ReleaseAllLocks()
+		UnregisterSession(st.ID)
+	}
 }
 func (m *MySQLWrapper) SessionCheck(session *driver.Session) error {
 	// we could reject clients here when server load is too full
@@ -237,6 +246,18 @@ func isSelectQuery(query string) bool {
 }
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
 	atomic.AddInt64(&TotalHTTPRequests, 1)
+	var ss *SessionState
+	if v, ok := mysqlStates.Load(session.ID()); ok {
+		ss = v.(*SessionState)
+		ss.SetCommand("Query", query)
+		ss.SetDB(session.Schema())
+	}
+	defer func() {
+		if ss != nil {
+			ss.SetCommand("Sleep", "")
+			ss.SetDB(session.Schema())
+		}
+	}()
 	if query == "select @@version_comment limit 1" {
 		callback(&sqltypes.Result{
 			Fields: []*querypb.Field{
@@ -325,7 +346,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		// the session (and its TxContext) via GetCurrentTx().
 		var rc Scmer
 		SetValues(map[string]any{
-			"session": scmSessionScmer,
+			"session":         scmSessionScmer,
+			"sessionStatePtr": ss,
 		}, func() {
 			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)
 		})

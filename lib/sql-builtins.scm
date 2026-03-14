@@ -114,4 +114,8 @@
 (sql_builtins "VECTOR_TO_STRING" json_encode)
 (sql_builtins "VECTOR_DIM" json_encode)
 
+/* session / processlist */
+(sql_builtins "CONNECTION_ID" connection_id)
+(sql_builtins "KILL_QUERY" kill_query)
+
 /* management: use SQL statements instead (REBUILD, SHOW SHARDS, etc.) */

@@ -1859,8 +1859,8 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									(eval (list 'lambda (list 'OLD 'NEW)
 										(build_pj_insert_scan tables condition trigger_tv true pj_schema pjtbl mat_cols mat_col_names))))
 								/* UPDATE trigger: delete old prejoin rows + insert new for any row change.
-							Code-generator pattern: embed delete_fn/insert_fn as proc literals in body
-							so no closure capture — serializes cleanly for persistence. */
+								Code-generator pattern: embed delete_fn/insert_fn as proc literals in body
+								so no closure capture — serializes cleanly for persistence. */
 								(define update_fn (eval (list 'lambda (list 'OLD 'NEW) (list 'begin (list delete_fn 'OLD 'NEW) (list insert_fn 'OLD 'NEW)))))
 								/* emit the register call as an S-expression to be executed at query time */
 								(list 'register_prejoin_incremental src_schema src_tbl pj_schema pjtbl

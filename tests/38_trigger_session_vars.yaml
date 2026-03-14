@@ -1,0 +1,98 @@
+# Trigger + Session Variable Tests
+# Tests that @session_vars set before INSERT are accessible inside BEFORE/AFTER trigger bodies.
+# All cases must run in the same session (session_id) so @vars persist between statements.
+
+metadata:
+  version: "1.0"
+  description: "Session variables in triggers - vars set before INSERT must be readable in trigger body"
+  isolated: true
+
+cleanup:
+  - action: "Drop trigger"
+    sql: "DROP TRIGGER IF EXISTS trig_session_var"
+  - action: "Drop test table"
+    sql: "DROP TABLE IF EXISTS trig_sv_test"
+
+setup:
+  - action: "Create test table with auto-stamped column"
+    sql: "CREATE TABLE trig_sv_test (id INT, last_modified INT DEFAULT 0)"
+
+test_cases:
+
+  # --- Basic: @var set before INSERT readable inside BEFORE trigger ---
+
+  - name: "Create BEFORE INSERT trigger that stamps @ts onto new row"
+    sql: >
+      CREATE TRIGGER trig_session_var BEFORE INSERT ON trig_sv_test
+      FOR EACH ROW SET NEW.last_modified = @ts
+    session_id: "trig-sv-session-1"
+    expect:
+      affected_rows: 0
+
+  - name: "Set session variable @ts before INSERT"
+    sql: "SET @ts = 12345"
+    session_id: "trig-sv-session-1"
+
+  - name: "INSERT row - trigger should pick up @ts = 12345"
+    sql: "INSERT INTO trig_sv_test (id) VALUES (1)"
+    session_id: "trig-sv-session-1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify last_modified was stamped with @ts value 12345"
+    sql: "SELECT last_modified FROM trig_sv_test WHERE id = 1"
+    session_id: "trig-sv-session-1"
+    expect:
+      rows: 1
+      data:
+        - last_modified: 12345
+
+  # --- Change @var between inserts - trigger must see latest value ---
+
+  - name: "Update @ts to a new value"
+    sql: "SET @ts = 99999"
+    session_id: "trig-sv-session-1"
+
+  - name: "INSERT second row - trigger should pick up new @ts = 99999"
+    sql: "INSERT INTO trig_sv_test (id) VALUES (2)"
+    session_id: "trig-sv-session-1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify second row stamped with new @ts value 99999"
+    sql: "SELECT last_modified FROM trig_sv_test WHERE id = 2"
+    session_id: "trig-sv-session-1"
+    expect:
+      rows: 1
+      data:
+        - last_modified: 99999
+
+  # --- @var set via SELECT @var := expr ---
+
+  - name: "Set @ts via SELECT @ts := expr syntax"
+    sql: "SELECT @ts := 77777"
+    session_id: "trig-sv-session-1"
+    expect:
+      rows: 1
+
+  - name: "INSERT third row - trigger should pick up @ts = 77777"
+    sql: "INSERT INTO trig_sv_test (id) VALUES (3)"
+    session_id: "trig-sv-session-1"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify third row stamped with @ts from SELECT assignment"
+    sql: "SELECT last_modified FROM trig_sv_test WHERE id = 3"
+    session_id: "trig-sv-session-1"
+    expect:
+      rows: 1
+      data:
+        - last_modified: 77777
+
+  # --- Cleanup ---
+
+  - name: "Drop trigger"
+    sql: "DROP TRIGGER IF EXISTS trig_session_var"
+    session_id: "trig-sv-session-1"
+    expect:
+      affected_rows: 0

@@ -145,10 +145,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
 	/* (get_column "OLD" _ col _) -> (get_assoc OLD col) */
 	/* (get_column nil _ col _) -> (get_assoc NEW col) for unqualified columns in trigger context */
+	/* ('session var) -> ((context "session") var) — always read @var from GLS session, not lexical scope */
 	(define transform_trigger_expr (lambda (expr) (match expr
 		'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
 		'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
 		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+		'('session var) (list (list (symbol "context") "session") var)
+		'('session var value) (list (list (symbol "context") "session") var (transform_trigger_expr value))
 		(cons head tail) (cons (transform_trigger_expr head) (map tail transform_trigger_expr))
 		expr
 	)))
@@ -588,10 +591,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	)))
 
 	(define sql_lock_table_mode (parser (or
-		(parser '((atom "READ" true) (? (atom "LOCAL" true))) true)
 		(parser '((atom "LOW_PRIORITY" true) (atom "WRITE" true)) true)
 		(parser (atom "WRITE" true) true)
-		(parser (atom "READ" true) true)
+		(parser '((atom "READ" true) (? (atom "LOCAL" true))) nil)
 	)))
 
 	(define sql_expression (parser (or
@@ -770,7 +772,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser (atom "OFF" true) false)
 		(parser '((atom "@" true) (define var sql_identifier_unquoted)) '('session var))
 		/* MySQL system variables: @@var, @@GLOBAL.var, @@SESSION.var
-		   @@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
+		@@GLOBAL.var reads globalvars directly; @@SESSION.var / @@var check session first */
 		(parser '((atom "@@" true) (atom "GLOBAL" true) (atom "." true) (define var sql_identifier_unquoted)) '('globalvars var))
 		(parser '((atom "@@" true) (? (atom "SESSION" true) (? (atom "." true))) (define var sql_identifier_unquoted)) '('session_globalvar var))
 		(parser '((atom "@@" true) (define var sql_identifier_unquoted)) '('session_globalvar var))
@@ -1604,6 +1606,16 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* SHOW PLUGINS: return empty set (ok for most clients) */
 		(parser '((atom "SHOW" true) (atom "PLUGINS" true)) (quote true))
 
+		/* SHOW [FULL] PROCESSLIST */
+		(parser '((atom "SHOW" true) (atom "PROCESSLIST" true))
+			'((quote map) '((quote show_processlist)) '((quote lambda) '((quote row)) '((quote resultrow) (quote row)))))
+		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "PROCESSLIST" true))
+			'((quote map) '((quote show_processlist) true) '((quote lambda) '((quote row)) '((quote resultrow) (quote row)))))
+
+		/* KILL [QUERY|CONNECTION] id */
+		(parser '((atom "KILL" true) (? (or (atom "QUERY" true) (atom "CONNECTION" true))) (define id sql_expression))
+			'((quote kill_query) id))
+
 		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] — filter at parse time, dynamic values at query time */
 		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern sql_expression)))
 			(begin
@@ -1635,8 +1647,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) "=" (define value sql_expression)) '((quote session) key value)) ","))) (cons '!begin vars))
 
-		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true)) (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (? sql_lock_table_mode)) tbl) ",")) "ignore")
-		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) "ignore")
+		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
+			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))
+			(list (quote locktables) (cons (quote list) (map locks (lambda (l) (cons (quote list) (list schema (nth l 0) (nth l 1))))))))
+		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) '((quote unlocktables)))
 
 		/* CREATE INDEX syntax acceptance (no-op unless UNIQUE; MemCP auto-indexes) */
 		(parser '((atom "CREATE" true)

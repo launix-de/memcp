@@ -172,7 +172,7 @@ qry    — query text (pass "" when unknown) */
 (globalvars "system_time_zone" (system_time_zone))
 
 /* session_globalvar: reads from session first, falls back to globalvars.
-   Used for @@var resolution so per-session SET affects @@var reads. */
+Used for @@var resolution so per-session SET affects @@var reads. */
 (define session_globalvar (lambda (key) (coalesceNil ((context "session") key) (globalvars key))))
 
 

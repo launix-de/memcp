@@ -461,6 +461,77 @@ class SQLTestRunner:
             self._record_success(name, is_noncritical)
             return True
 
+        # Multi-step test case: steps list with per-step session_id + optional background
+        steps = test_case.get("steps")
+        if steps:
+            import threading
+            bg_results: list = []  # [(step_dict, response_or_exception)]
+            bg_threads: list = []
+
+            def run_bg_step(step, out: list):
+                try:
+                    r = self.execute_sql(database, step["sql"],
+                                        session_id=step.get("session_id"),
+                                        timeout=int(step.get("timeout", 30)))
+                    out.append((step, r))
+                except Exception as exc:
+                    out.append((step, exc))
+
+            for step in steps:
+                step_sql = step.get("sql", "")
+                step_sid = step.get("session_id")
+                step_timeout = int(step.get("timeout", 30))
+                step_expect = step.get("expect", {})
+                if step.get("background"):
+                    t = threading.Thread(target=run_bg_step, args=(step, bg_results), daemon=True)
+                    t.start()
+                    bg_threads.append(t)
+                else:
+                    resp = self.execute_sql(database, step_sql, session_id=step_sid, timeout=step_timeout)
+                    if step_expect:
+                        if step_expect.get("error"):
+                            if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
+                                return self._record_fail(name, f"Step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
+                        else:
+                            if resp is None or resp.status_code != 200 or "Error" in resp.text:
+                                return self._record_fail(name, f"Step '{step_sql[:60]}' failed", step_sql, resp, step_expect, is_noncritical)
+                            rows = self.parse_jsonl_response(resp)
+                            if "rows" in step_expect and len(rows) != step_expect["rows"]:
+                                return self._record_fail(name, f"Step '{step_sql[:60]}' expected {step_expect['rows']} rows, got {len(rows)}", step_sql, resp, step_expect, is_noncritical)
+                            if "contains" in step_expect:
+                                flat = " ".join(str(r) for r in rows)
+                                for needle in (step_expect["contains"] if isinstance(step_expect["contains"], list) else [step_expect["contains"]]):
+                                    if str(needle) not in flat:
+                                        return self._record_fail(name, f"Step '{step_sql[:60]}' missing '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
+
+            # Wait for background threads to finish
+            for t in bg_threads:
+                t.join(timeout=60)
+            for step, resp in bg_results:
+                step_expect = step.get("expect", {})
+                step_sql = step.get("sql", "")
+                if isinstance(resp, Exception):
+                    if step_expect.get("error"):
+                        continue
+                    return self._record_fail(name, f"Background step '{step_sql[:60]}' raised: {resp}", step_sql, None, step_expect, is_noncritical)
+                if step_expect:
+                    if step_expect.get("error"):
+                        if resp is not None and resp.status_code == 200 and "Error" not in resp.text:
+                            return self._record_fail(name, f"Background step '{step_sql[:60]}' expected error but succeeded", step_sql, resp, step_expect, is_noncritical)
+                    else:
+                        if resp is None or resp.status_code != 200 or "Error" in resp.text:
+                            return self._record_fail(name, f"Background step '{step_sql[:60]}' failed", step_sql, resp, step_expect, is_noncritical)
+                        rows = self.parse_jsonl_response(resp)
+                        if "rows" in step_expect and len(rows) != step_expect["rows"]:
+                            return self._record_fail(name, f"Background step '{step_sql[:60]}' expected {step_expect['rows']} rows, got {len(rows)}", step_sql, resp, step_expect, is_noncritical)
+                        if "contains" in step_expect:
+                            flat = " ".join(str(r) for r in rows)
+                            for needle in (step_expect["contains"] if isinstance(step_expect["contains"], list) else [step_expect["contains"]]):
+                                if str(needle) not in flat:
+                                    return self._record_fail(name, f"Background step '{step_sql[:60]}' missing '{needle}' in result", step_sql, resp, step_expect, is_noncritical)
+            self._record_success(name, is_noncritical)
+            return True
+
         query = test_case.get("sql") or test_case.get("sparql")
         if query and is_perf_test:
             query = query.replace("{rows}", str(perf_rows)).replace("{database}", database)
