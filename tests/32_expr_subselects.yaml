@@ -10,6 +10,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS t3"
   - sql: "DROP TABLE IF EXISTS t4"
   - sql: "DROP TABLE IF EXISTS doc"
+  - sql: "DROP TABLE IF EXISTS doc_revision"
+  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: "DROP TABLE IF EXISTS docType"
   - sql: "DROP TABLE IF EXISTS login"
   - sql: "DROP TABLE IF EXISTS userconfig"
   - sql: "CREATE TABLE t1 (id INT PRIMARY KEY)"
@@ -17,6 +20,9 @@ setup:
   - sql: "CREATE TABLE t3 (id INT PRIMARY KEY, ref INT)"
   - sql: "CREATE TABLE t4 (id INT PRIMARY KEY, description VARCHAR(20))"
   - sql: "CREATE TABLE doc (id INT PRIMARY KEY, type INT, archive BOOL)"
+  - sql: "CREATE TABLE doc_revision (id INT PRIMARY KEY, doc INT, created INT, file INT)"
+  - sql: "CREATE TABLE fop_files (id INT PRIMARY KEY, filename VARCHAR(255), type VARCHAR(255))"
+  - sql: "CREATE TABLE docType (ID INT PRIMARY KEY, name VARCHAR(255))"
   - sql: "CREATE TABLE login (ID INT PRIMARY KEY)"
   - sql: "CREATE TABLE userconfig (ID INT PRIMARY KEY, Tables_Doc_defaultDoctype INT)"
   - sql: "INSERT INTO t1 (id) VALUES (4)"
@@ -34,6 +40,11 @@ setup:
   - sql: "INSERT INTO t4 (id, description) VALUES (11, 'beta')"
   - sql: "INSERT INTO doc (id, type, archive) VALUES (1, 7, FALSE)"
   - sql: "INSERT INTO doc (id, type, archive) VALUES (2, NULL, FALSE)"
+  - sql: "INSERT INTO fop_files (id, filename, type) VALUES (1, 'Basics.pdf', 'application/pdf')"
+  - sql: "INSERT INTO fop_files (id, filename, type) VALUES (3, 'Angebot.pdf', 'application/pdf')"
+  - sql: "INSERT INTO doc_revision (id, doc, created, file) VALUES (1, 1, 1000, 1)"
+  - sql: "INSERT INTO doc_revision (id, doc, created, file) VALUES (2, 2, 2000, 3)"
+  - sql: "INSERT INTO docType (ID, name) VALUES (7, 'General')"
   - sql: "INSERT INTO login (ID) VALUES (1)"
   - sql: "INSERT INTO userconfig (ID, Tables_Doc_defaultDoctype) VALUES (1, 7)"
 
@@ -187,6 +198,169 @@ test_cases:
       data:
         - badgeDoc: 1
 
+  - name: "Derived table star keeps aliases built from doubly nested scalar subselects"
+    sql: >
+      SELECT t.* FROM (
+        SELECT
+          id,
+          (SELECT file FROM doc_revision WHERE doc = doc.id ORDER BY created DESC LIMIT 1) AS file,
+          (SELECT filename FROM fop_files
+            WHERE id = (
+              SELECT file FROM doc_revision WHERE doc = doc.id ORDER BY created DESC LIMIT 1
+            )
+          ) AS filename
+        FROM doc
+      ) AS t
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          file: 1
+          filename: Basics.pdf
+        - id: 2
+          file: 3
+          filename: Angebot.pdf
+
+  - name: "Raw lowercase columns resolve on derived table aliases with uppercase fields"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_alias_src"
+      - sql: "CREATE TABLE expr32_alias_src (id INT PRIMARY KEY, kind INT)"
+      - sql: "INSERT INTO expr32_alias_src (id, kind) VALUES (1, 7), (2, NULL)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_alias_src"
+    sql: >
+      SELECT x.id, x.type
+      FROM (
+        SELECT ID AS ID, kind AS TYPE
+        FROM expr32_alias_src
+      ) AS x
+      WHERE x.id = 2
+    expect:
+      rows: 1
+      data:
+        - id: 2
+          type: null
+
+  - name: "Qualified uppercase column resolves in nested scalar subselect"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_src"
+      - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_rev"
+      - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_file"
+      - sql: "CREATE TABLE expr32_ns_cmp_src (id INT PRIMARY KEY)"
+      - sql: "CREATE TABLE expr32_ns_cmp_rev (id INT PRIMARY KEY, src INT, created INT, file INT)"
+      - sql: "CREATE TABLE expr32_ns_cmp_file (id INT PRIMARY KEY, mime VARCHAR(255))"
+      - sql: "INSERT INTO expr32_ns_cmp_src (id) VALUES (2)"
+      - sql: "INSERT INTO expr32_ns_cmp_file (id, mime) VALUES (3, 'application/pdf')"
+      - sql: "INSERT INTO expr32_ns_cmp_rev (id, src, created, file) VALUES (1, 2, 2000, 3)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_src"
+      - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_rev"
+      - sql: "DROP TABLE IF EXISTS expr32_ns_cmp_file"
+    sql: >
+      SELECT
+        (((SELECT f.mime FROM expr32_ns_cmp_file f
+        WHERE f.ID = (
+          SELECT r.file FROM expr32_ns_cmp_rev r WHERE r.src = expr32_ns_cmp_src.ID ORDER BY r.created DESC LIMIT 1
+        )
+        LIMIT 1)) = ('application/pdf')) AS is_pdf
+      FROM expr32_ns_cmp_src
+      WHERE ID = 2
+    expect:
+      rows: 1
+      data:
+        - is_pdf: true
+
+  - name: "Qualified uppercase column resolves in nested scalar and sibling projection"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_ns_proj_src"
+      - sql: "DROP TABLE IF EXISTS expr32_ns_proj_rev"
+      - sql: "DROP TABLE IF EXISTS expr32_ns_proj_file"
+      - sql: "CREATE TABLE expr32_ns_proj_src (id INT PRIMARY KEY)"
+      - sql: "CREATE TABLE expr32_ns_proj_rev (id INT PRIMARY KEY, src INT, created INT, file INT)"
+      - sql: "CREATE TABLE expr32_ns_proj_file (id INT PRIMARY KEY, filename VARCHAR(255), mime VARCHAR(255))"
+      - sql: "INSERT INTO expr32_ns_proj_src (id) VALUES (2)"
+      - sql: "INSERT INTO expr32_ns_proj_file (id, filename, mime) VALUES (3, 'sample.pdf', 'application/pdf')"
+      - sql: "INSERT INTO expr32_ns_proj_rev (id, src, created, file) VALUES (1, 2, 2000, 3)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_ns_proj_src"
+      - sql: "DROP TABLE IF EXISTS expr32_ns_proj_rev"
+      - sql: "DROP TABLE IF EXISTS expr32_ns_proj_file"
+    sql: >
+      SELECT
+        (((SELECT f.mime FROM expr32_ns_proj_file f
+        WHERE f.ID = (
+          SELECT r.file FROM expr32_ns_proj_rev r WHERE r.src = expr32_ns_proj_src.ID ORDER BY r.created DESC LIMIT 1
+        )
+        LIMIT 1)) = ('application/pdf')) AS is_pdf,
+        (SELECT f.filename FROM expr32_ns_proj_file f
+        WHERE f.ID = (
+          SELECT r.file FROM expr32_ns_proj_rev r WHERE r.src = expr32_ns_proj_src.ID ORDER BY r.created DESC LIMIT 1
+        )
+        LIMIT 1) AS filename
+      FROM expr32_ns_proj_src
+      WHERE ID = 2
+    expect:
+      rows: 1
+      data:
+        - is_pdf: true
+          filename: sample.pdf
+
+  - name: "Derived join view subset keeps nested scalar file metadata"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_view_src"
+      - sql: "DROP TABLE IF EXISTS expr32_view_rev"
+      - sql: "DROP TABLE IF EXISTS expr32_view_file"
+      - sql: "DROP TABLE IF EXISTS expr32_view_kind"
+      - sql: "CREATE TABLE expr32_view_src (ID INT PRIMARY KEY, kind INT)"
+      - sql: "CREATE TABLE expr32_view_rev (id INT PRIMARY KEY, src INT, created INT, file INT)"
+      - sql: "CREATE TABLE expr32_view_file (id INT PRIMARY KEY, filename VARCHAR(255), mime VARCHAR(255))"
+      - sql: "CREATE TABLE expr32_view_kind (ID INT PRIMARY KEY, name VARCHAR(255))"
+      - sql: "INSERT INTO expr32_view_src (ID, kind) VALUES (2, NULL)"
+      - sql: "INSERT INTO expr32_view_file (id, filename, mime) VALUES (3, 'sample.pdf', 'application/pdf')"
+      - sql: "INSERT INTO expr32_view_rev (id, src, created, file) VALUES (1, 2, 2000, 3)"
+      - sql: "INSERT INTO expr32_view_kind (ID, name) VALUES (7, 'General')"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_view_src"
+      - sql: "DROP TABLE IF EXISTS expr32_view_rev"
+      - sql: "DROP TABLE IF EXISTS expr32_view_file"
+      - sql: "DROP TABLE IF EXISTS expr32_view_kind"
+    sql: >
+      SELECT
+        expr32_view_src.ID AS ID,
+        (SELECT r.file FROM expr32_view_rev r WHERE r.src = expr32_view_src.ID ORDER BY r.created DESC LIMIT 1) AS file,
+        (SELECT f.filename FROM expr32_view_file f
+          WHERE f.ID = (
+            SELECT r.file FROM expr32_view_rev r WHERE r.src = expr32_view_src.ID ORDER BY r.created DESC LIMIT 1
+          )
+          LIMIT 1) AS filename,
+        (((SELECT f.mime FROM expr32_view_file f
+          WHERE f.ID = (
+            SELECT r.file FROM expr32_view_rev r WHERE r.src = expr32_view_src.ID ORDER BY r.created DESC LIMIT 1
+          )
+          LIMIT 1)) = ('application/pdf')) AS `operation::60832d378812d11989e4915f`,
+        ref_type.`type:description` AS `type::description`,
+        ref_type.`type:canView` AS `type::canView`,
+        TRUE AS `operation::edit`,
+        TRUE AS `operation::view`
+      FROM expr32_view_src
+      LEFT JOIN (
+        SELECT ID AS `type:ID`, name AS `type:description`, TRUE AS `type:canView`
+        FROM expr32_view_kind
+      ) AS ref_type ON ref_type.`type:ID` = expr32_view_src.kind
+      WHERE ID = 2
+    expect:
+      rows: 1
+      data:
+        - id: 2
+          file: 3
+          filename: sample.pdf
+          operation::60832d378812d11989e4915f: true
+          type::description: null
+          type::canView: null
+          operation::edit: true
+          operation::view: true
+
   - name: "Scalar subselect multiple rows errors"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:
@@ -228,6 +402,8 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS userconfig"
   - sql: "DROP TABLE IF EXISTS login"
+  - sql: "DROP TABLE IF EXISTS fop_files"
+  - sql: "DROP TABLE IF EXISTS doc_revision"
   - sql: "DROP TABLE IF EXISTS doc"
   - sql: "DROP TABLE IF EXISTS t4"
   - sql: "DROP TABLE IF EXISTS t3"
