@@ -814,6 +814,37 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define mtx (mutex))
 	(assert (equal? (mtx (lambda () 42)) 42) true "mutex executes inner function")
 
+	/* Promise */
+	(print "testing promise ...")
+	/* 1. unresolved promise returns nil */
+	(define p1 (newpromise))
+	(assert (nil? (p1 "value")) true "unresolved promise value is nil")
+	(assert (nil? (p1 "state")) true "unresolved promise state is nil")
+	/* 2. resolved promise returns stored value */
+	(define p2 (newpromise))
+	(p2 "value" 42)
+	(assert (equal? (p2 "value") 42) true "resolved promise returns stored value")
+	(assert (equal? (p2 "state") true) true "resolved promise state is true")
+	/* 3. second resolution overwrites */
+	(define p3 (newpromise))
+	(p3 "value" 1)
+	(p3 "value" 2)
+	(assert (equal? (p3 "value") 2) true "second resolution overwrites first")
+	/* 4. fail state */
+	(define p4 (newpromise))
+	(p4 "fail")
+	(assert (equal? (p4 "state") false) true "failed promise state is false")
+	(assert (nil? (p4 "value")) true "failed promise value is nil")
+	/* 5. promise works inside context */
+	(define p5 (newpromise))
+	(context (lambda () (p5 "value" 99)))
+	(assert (equal? (p5 "value") 99) true "promise resolves from inside context")
+	/* 6. promise is safe from async/setTimeout callback */
+	(define p6 (newpromise))
+	(setTimeout (lambda () (p6 "value" "async")) 1)
+	(context (lambda () (sleep 0.02)))
+	(assert (equal? (p6 "value") "async") true "promise resolves from async callback")
+
 	/* Scheduler */
 	(print "testing scheduler ...")
 	(define sched (newsession))

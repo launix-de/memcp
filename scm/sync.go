@@ -63,6 +63,64 @@ func AdjustMemStats(delta int64) {
 	cachedStatsMu.Unlock()
 }
 
+/* threadsafe single-value promise */
+
+type promise struct {
+	mu    sync.RWMutex
+	Value Scmer
+	State Scmer // nil=pending, NewBool(true)=success, NewBool(false)=fail
+}
+
+// NewPromise creates a thread-safe single-value promise represented as a callable function.
+// API: (p "value") -> current value or nil if pending
+//
+//	(p "value" v) -> resolve with v, return v
+//	(p "state") -> current state (nil/true/false)
+//	(p "fail") -> set fail state
+func NewPromise(a ...Scmer) Scmer {
+	p := &promise{State: NewNil()}
+	return NewFunc(func(a ...Scmer) Scmer {
+		if len(a) == 0 {
+			panic("promise: at least 1 argument required")
+		}
+		key := a[0].String()
+		switch len(a) {
+		case 1:
+			switch key {
+			case "value":
+				p.mu.RLock()
+				defer p.mu.RUnlock()
+				if p.State.IsNil() {
+					return NewNil()
+				}
+				return p.Value
+			case "state":
+				p.mu.RLock()
+				defer p.mu.RUnlock()
+				return p.State
+			case "fail":
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				p.State = NewBool(false)
+				return NewBool(false)
+			default:
+				panic("promise: unknown operation: " + key)
+			}
+		case 2:
+			if key == "value" {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				p.Value = a[1]
+				p.State = NewBool(true)
+				return a[1]
+			}
+			panic("promise: unknown operation: " + key)
+		default:
+			panic("promise: too many arguments")
+		}
+	})
+}
+
 /* threadsafe session storage */
 
 type session struct {
@@ -222,6 +280,13 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 
 func init_sync() {
 	DeclareTitle("Sync")
+	Declare(&Globalenv, &Declaration{
+		"newpromise", "Creates a new promise which is a threadsafe single-value container. Returns a function p where: (p \"value\") reads current value (nil if unresolved), (p \"value\" v) resolves with v, (p \"state\") returns state (nil=pending, true=resolved, false=failed), (p \"fail\") sets failed state.",
+		0, 0,
+		[]DeclarationParameter{}, "func",
+		NewPromise, false, false, nil,
+		nil,
+	})
 	Declare(&Globalenv, &Declaration{
 		"newsession", "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
 		0, 0,
