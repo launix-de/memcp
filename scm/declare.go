@@ -69,6 +69,60 @@ type DeclarationParameter struct {
 	TypeInfo *TypeDescriptor // rich type info (nil = unknown / no annotation)
 }
 
+// TypeInfo is a compact, stack-allocated type descriptor returned by OptimizeEx.
+// No heap allocation for the common case (Kind + Flags). Extra info (sub-structure
+// types, function signatures) is stored in an optional *TypeDescriptor pointer.
+type TypeInfo struct {
+	kind  uint8
+	flags uint8
+	Extra *TypeDescriptor // nil in common case; only allocated for sub-structure info
+}
+
+// Kind constants for TypeInfo
+const (
+	KindAny    uint8 = iota // 0: unknown
+	KindString              // 1
+	KindInt                 // 2
+	KindFloat               // 3
+	KindBool                // 4
+	KindNil                 // 5
+	KindSymbol              // 6
+	KindFunc                // 7
+	KindList                // 8
+	KindAssoc               // 9
+)
+
+// Flag bits for TypeInfo
+const (
+	FlagTransfer uint8 = 1 << iota // callee receives ownership
+	FlagConst                      // compile-time constant
+	FlagEscape                     // value may outlive scope
+)
+
+func (ti TypeInfo) Transfer() bool { return ti.flags&FlagTransfer != 0 }
+func (ti TypeInfo) Const() bool    { return ti.flags&FlagConst != 0 }
+func (ti TypeInfo) Escape() bool   { return ti.flags&FlagEscape != 0 }
+func (ti TypeInfo) Kind() uint8    { return ti.kind }
+
+func (ti TypeInfo) WithTransfer() TypeInfo { ti.flags |= FlagTransfer; return ti }
+func (ti TypeInfo) WithConst() TypeInfo    { ti.flags |= FlagConst; return ti }
+func (ti TypeInfo) WithKind(k uint8) TypeInfo { ti.kind = k; return ti }
+
+// ToTypeDescriptor converts to a heap-allocated TypeDescriptor (for APIs that need it).
+func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
+	if ti.kind == KindAny && ti.flags == 0 && ti.Extra == nil {
+		return nil
+	}
+	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), Escape: ti.Escape()}
+	if ti.Extra != nil {
+		*td = *ti.Extra
+		td.Transfer = ti.Transfer()
+		td.Const = ti.Const()
+		td.Escape = ti.Escape()
+	}
+	return td
+}
+
 // NoEscape is a reusable TypeDescriptor annotation for parameters that
 // the callee reads but never stores — safe to back with stack-allocated !list.
 var NoEscape = &TypeDescriptor{Kind: "any", Escape: false}
