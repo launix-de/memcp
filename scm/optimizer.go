@@ -717,6 +717,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					if pi < len(ome.pendingCallbackOwned) && ome.pendingCallbackOwned[pi] {
 						if sym, ok := scmerSymbol(param); ok {
 							ome2.ownedVars[sym] = true
+							// Also set ownedSlots so NthLocalVar lookup finds it
+							if repl, ok2 := ome2.variableReplacement[sym]; ok2 && repl.IsNthLocalVar() {
+								if ome2.ownedSlots == nil {
+									ome2.ownedSlots = make(map[int]bool)
+								}
+								ome2.ownedSlots[int(repl.NthLocalVar())] = true
+							}
 						}
 					}
 				}
