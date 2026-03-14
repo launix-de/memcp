@@ -9,6 +9,14 @@ setup:
     expect: {}
   - sql: "DELETE FROM `system`.`user` WHERE username='alice'"
     expect: {}
+  - sql: "DELETE FROM `system`.`access` WHERE username='psqlalice'"
+    expect: {}
+  - sql: "DELETE FROM `system`.`user` WHERE username='psqlalice'"
+    expect: {}
+  - sql: "DELETE FROM `system`.`access` WHERE username='psqlrole'"
+    expect: {}
+  - sql: "DELETE FROM `system`.`user` WHERE username='psqlrole'"
+    expect: {}
 
 test_cases:
   - name: "CREATE USER alice"
@@ -91,6 +99,118 @@ test_cases:
   - name: "revoke db access from alice"
     sql: "REVOKE SELECT ON `memcp-tests`.* FROM alice"
     expect: { affected_rows: 1 }
+
+  # === PostgreSQL user/role management via psql parser ===
+  - name: "psql CREATE USER WITH PASSWORD"
+    syntax: postgresql
+    sql: "CREATE USER psqlalice WITH PASSWORD 'pw'"
+    expect:
+      affected_rows: 1
+
+  - name: "psql user exists after CREATE"
+    sql: "SELECT username FROM system.user WHERE username='psqlalice'"
+    expect:
+      rows: 1
+      data:
+        - { username: psqlalice }
+
+  - name: "psql ALTER USER WITH PASSWORD"
+    syntax: postgresql
+    sql: "ALTER USER psqlalice WITH PASSWORD 'newpw'"
+    expect: {}
+
+  - name: "psql ALTER USER SUPERUSER sets admin"
+    syntax: postgresql
+    sql: "ALTER USER psqlalice SUPERUSER"
+    expect: {}
+
+  - name: "admin is true after SUPERUSER"
+    sql: "SELECT admin FROM system.user WHERE username='psqlalice'"
+    expect:
+      rows: 1
+      data:
+        - { admin: true }
+
+  - name: "psql ALTER USER NOSUPERUSER clears admin"
+    syntax: postgresql
+    sql: "ALTER USER psqlalice NOSUPERUSER"
+    expect: {}
+
+  - name: "admin is false after NOSUPERUSER"
+    sql: "SELECT admin FROM system.user WHERE username='psqlalice'"
+    expect:
+      rows: 1
+      data:
+        - { admin: false }
+
+  - name: "psql GRANT ALL ON *.* sets admin"
+    syntax: postgresql
+    sql: "GRANT ALL PRIVILEGES ON *.* TO psqlalice"
+    expect: {}
+
+  - name: "admin is true after psql GRANT ALL ON *.*"
+    sql: "SELECT admin FROM system.user WHERE username='psqlalice'"
+    expect:
+      rows: 1
+      data:
+        - { admin: true }
+
+  - name: "psql REVOKE ALL ON *.* clears admin"
+    syntax: postgresql
+    sql: "REVOKE ALL PRIVILEGES ON *.* FROM psqlalice"
+    expect: {}
+
+  - name: "admin is false after psql REVOKE ALL ON *.*"
+    sql: "SELECT admin FROM system.user WHERE username='psqlalice'"
+    expect:
+      rows: 1
+      data:
+        - { admin: false }
+
+  - name: "psql DROP USER cascades to access"
+    sql: "GRANT ALL PRIVILEGES ON `memcp-tests`.* TO psqlalice"
+    expect: {}
+
+  - name: "psql DROP USER (via psql parser)"
+    syntax: postgresql
+    sql: "DROP USER psqlalice"
+    expect: {}
+
+  - name: "access entry gone after psql DROP USER"
+    sql: "SELECT COUNT(*) AS cnt FROM system.access WHERE username='psqlalice'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 0 }
+
+  - name: "user row gone after psql DROP USER"
+    sql: "SELECT COUNT(*) AS cnt FROM system.user WHERE username='psqlalice'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 0 }
+
+  - name: "psql CREATE ROLE"
+    syntax: postgresql
+    sql: "CREATE ROLE psqlrole WITH LOGIN PASSWORD 'pw'"
+    expect:
+      affected_rows: 1
+
+  - name: "psql DROP ROLE cascades to access"
+    sql: "GRANT ALL PRIVILEGES ON `memcp-tests`.* TO psqlrole"
+    expect: {}
+
+  - name: "psql DROP ROLE (via psql parser)"
+    syntax: postgresql
+    sql: "DROP ROLE psqlrole"
+    expect: {}
+
+  - name: "role and access gone after DROP ROLE"
+    sql: "SELECT COUNT(*) AS cnt FROM system.user WHERE username='psqlrole'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 0 }
 
   # === PostgreSQL permissions syntax (no-ops beyond db access) ===
   - name: "psql grant connect on database (db access)"
@@ -197,4 +317,6 @@ test_cases:
 cleanup:
   - sql: "DROP USER IF EXISTS alice"
   - sql: "DROP USER IF EXISTS bob"
+  - sql: "DROP USER IF EXISTS psqlalice"
+  - sql: "DROP USER IF EXISTS psqlrole"
   - sql: "DROP DATABASE IF EXISTS drop_test_db"
