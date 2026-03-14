@@ -807,7 +807,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		return NewSlice(v), transferOwnership, false
 	case headOk && headSym == Symbol("parser"):
-		return OptimizeParser(NewSlice(v), env, ome, false), true, false
+		result, parserFresh := OptimizeParser(NewSlice(v), env, ome, false)
+		return result, parserFresh, false
 	case !headOk || headSym != Symbol("quote"):
 		// Look up declaration for hook dispatch
 		if callDecl := DeclarationForValue(v[0]); callDecl != nil && callDecl.Type != nil && callDecl.Type.Optimize != nil {
@@ -1185,15 +1186,17 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 	return pattern
 }
 
-func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) Scmer {
+func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) (Scmer, bool) {
 	if stripped, ok := scmerStripSourceInfo(val); ok {
 		val = stripped
 	}
 
 	slice, ok := scmerSlice(val)
 	if !ok || len(slice) == 0 {
-		return val
+		return val, false
 	}
+
+	transferOwnership := false
 
 	headSym, headOk := scmerSymbol(slice[0])
 	if headOk && headSym == Symbol("parser") {
@@ -1202,52 +1205,58 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 			ign2 = true // result of parser can be ignored when expr is executed
 		}
 		ome2 := ome.Copy()
-		slice[1] = OptimizeParser(slice[1], env, &ome2, ign2) // syntax expr -> collect new variables
+		slice[1], _ = OptimizeParser(slice[1], env, &ome2, ign2) // syntax expr -> collect new variables
 		if len(slice) > 2 {
-			slice[2], _, _ = OptimizeEx(slice[2], env, &ome2, !ignoreResult) // generator expr -> use variables
+			slice[2], transferOwnership, _ = OptimizeEx(slice[2], env, &ome2, !ignoreResult) // generator expr -> use variables
 		}
 		if len(slice) > 3 {
 			slice[3], _, _ = OptimizeEx(slice[3], env, ome, true) // delimiter expr
 		}
 		val = NewSlice(slice)
 	} else if headOk && headSym == Symbol("define") {
-		origSubExpr := slice[2] // save before optimization to detect kleene star
-		slice[2] = OptimizeParser(slice[2], env, ome, false)
+		var subParserFresh bool
+		slice[2], subParserFresh = OptimizeParser(slice[2], env, ome, false)
 		if sym, ok := scmerSymbol(slice[1]); ok {
 			if _, present := ome.variableReplacement[sym]; present {
 				delete(ome.variableReplacement, sym)
 			}
-			// Kleene star (*) and one-or-more (+) always produce a fresh list →
-			// mark variable as owned so that map/match in the generator body
-			// can be promoted to map_mut/match_mut
-			if origSubSlice, ok2 := scmerSlice(origSubExpr); ok2 {
-				if len(origSubSlice) > 0 {
-					if head, ok3 := scmerSymbol(origSubSlice[0]); ok3 && (head == Symbol("*") || head == Symbol("+")) {
-						if ome.ownedVars == nil {
-							ome.ownedVars = make(map[Symbol]bool)
-						}
-						ome.ownedVars[sym] = true
-					}
+			// Sub-parser produces a fresh value → mark variable as owned
+			// so that map/match in the generator body can be promoted to map_mut/match_mut
+			if subParserFresh {
+				if ome.ownedVars == nil {
+					ome.ownedVars = make(map[Symbol]bool)
 				}
+				ome.ownedVars[sym] = true
 			}
 		}
 		val = NewSlice(slice)
 	} else if headOk && headSym == Symbol("capture") {
 		// capture wrapper - optimize sub-parser but keep capture structure
-		slice[1] = OptimizeParser(slice[1], env, ome, false)
+		slice[1], _ = OptimizeParser(slice[1], env, ome, false)
 		val = NewSlice(slice)
 	} else {
 		for i := 1; i < len(slice); i++ {
-			slice[i] = OptimizeParser(slice[i], env, ome, ignoreResult)
+			slice[i], _ = OptimizeParser(slice[i], env, ome, ignoreResult)
 		}
 		val = NewSlice(slice)
 	}
 
+	// Kleene star (*) and one-or-more (+) always produce a fresh list
+	if headOk && (headSym == Symbol("*") || headSym == Symbol("+")) {
+		transferOwnership = true
+	}
+	// Sub-parser symbol reference: check funcReturnsFresh
+	if !ok {
+		if sym, ok2 := scmerSymbol(val); ok2 && ome.funcReturnsFresh != nil && ome.funcReturnsFresh[sym] {
+			transferOwnership = true
+		}
+	}
+
 	p := parseSyntax(val, env, ome, ignoreResult)
 	if p != nil {
-		return NewAny(p)
+		return NewAny(p), transferOwnership
 	}
-	return val
+	return val, transferOwnership
 }
 
 // deoptimizeExpr rewrites optimizer-produced special forms back to plain equivalents
