@@ -390,6 +390,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define df (filter_assoc dmap (lambda (k v) (> v 10))))
 	(assert (has_assoc? df "x") true "filter keeps x")
 	(assert (has_assoc? df "z") false "filter drops z")
+	(assert (equal? (find_assoc df (lambda (k v) (equal? k "x"))) '("x" 11)) true "find_assoc finds slice pair")
+	(assert (equal? (find_assoc df (lambda (k v) (equal? k "missing")) '("fallback" 0)) '("fallback" 0)) true "find_assoc default on slice")
 
 	/* big assoc to test auto switch to FastDict */
 	(define big (reduce (produceN 2000) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
@@ -415,6 +417,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define bigf (filter_assoc biginc (lambda (k v) (> v 1000))))
 	(assert (has_assoc? bigf "k1500") true "filter keeps large values")
 	(assert (has_assoc? bigf "k1") false "filter drops small values")
+	(assert (equal? (find_assoc bigf (lambda (k v) (equal? k "k1500"))) '("k1500" 1501)) true "find_assoc finds FastDict pair")
 
 	/* set_assoc immutability: original must not be modified */
 	(define orig '("a" 1 "b" 2))
@@ -816,34 +819,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* Promise */
 	(print "testing promise ...")
-	/* 1. unresolved promise returns nil */
 	(define p1 (newpromise))
 	(assert (nil? (p1 "value")) true "unresolved promise value is nil")
 	(assert (nil? (p1 "state")) true "unresolved promise state is nil")
-	/* 2. resolved promise returns stored value */
 	(define p2 (newpromise))
 	(p2 "value" 42)
 	(assert (equal? (p2 "value") 42) true "resolved promise returns stored value")
 	(assert (equal? (p2 "state") true) true "resolved promise state is true")
-	/* 3. second resolution overwrites */
 	(define p3 (newpromise))
 	(p3 "value" 1)
 	(p3 "value" 2)
 	(assert (equal? (p3 "value") 2) true "second resolution overwrites first")
-	/* 4. fail state */
 	(define p4 (newpromise))
+	(p4 "value" 5)
 	(p4 "fail")
 	(assert (equal? (p4 "state") false) true "failed promise state is false")
-	(assert (nil? (p4 "value")) true "failed promise value is nil")
-	/* 5. promise works inside context */
+	(assert (nil? (p4 "value")) true "failed promise without payload clears value")
 	(define p5 (newpromise))
-	(context (lambda () (p5 "value" 99)))
-	(assert (equal? (p5 "value") 99) true "promise resolves from inside context")
-	/* 6. promise is safe from async/setTimeout callback */
+	(p5 "fail" "boom")
+	(assert (equal? (p5 "state") false) true "failed promise with payload keeps failed state")
+	(assert (equal? (p5 "value") "boom") true "failed promise stores payload")
 	(define p6 (newpromise))
-	(setTimeout (lambda () (p6 "value" "async")) 1)
+	(context (lambda () (p6 "value" 99)))
+	(assert (equal? (p6 "value") 99) true "promise resolves from inside context")
+	(define p7 (newpromise))
+	(setTimeout (lambda () (p7 "value" "async")) 1)
 	(context (lambda () (sleep 0.02)))
-	(assert (equal? (p6 "value") "async") true "promise resolves from async callback")
+	(assert (equal? (p7 "value") "async") true "promise resolves from async callback")
 
 	/* Scheduler */
 	(print "testing scheduler ...")
@@ -1078,6 +1080,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (nil? (reduce '() (lambda (acc x) (+ acc x)))) true "reduce empty list no neutral returns nil")
 	(assert (equal? (merge '(1 2) '(3 4)) '(1 2 3 4)) true "merge multi-arg")
 	(assert (equal? (merge_unique '(1 2) '(2 3)) '(1 2 3)) true "merge_unique multi-arg")
+	(assert (equal? (find '(10 20 30) (lambda (x) (> x 15))) 20) true "find returns first matching element")
+	(assert (equal? (find '(10 20 30) (lambda (x) (> x 100)) 99) 99) true "find default when missing")
 	(assert (has_assoc? nil "key") false "has_assoc? on nil returns false")
 	(assert (nil? (get_assoc nil "key")) true "get_assoc on nil returns nil")
 

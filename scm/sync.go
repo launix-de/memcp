@@ -66,28 +66,23 @@ func AdjustMemStats(delta int64) {
 
 /* promise: single-value cell */
 
-// NOTE: current implementation uses plain shared state — not fully thread-safe.
-// For concurrent use, a CAS-based READLOCK/LOCK state would be needed to ensure
-// .value is exchanged atomically (read-lock state to prevent torn reads while a
-// write is in progress). For now, promise is safe only with a single writer and
-// a single reader that synchronizes externally (e.g. sequential query plan execution).
-
-// NewPromise creates a tagPromise Scmer.
-// (newpromise)      — allocates a fresh [2]Scmer backing: cells[0]=value, cells[1]=state.
-// (newpromise list) — reuses an existing ≥2-element slice as backing (zero extra alloc).
-// ptr always points to cells[0] of the backing.
+// NOTE: current implementation is intentionally not thread-safe.
+// It is sufficient for sequential query-plan execution. Fresh promises use a
+// dedicated [2]Scmer backing; (newpromise list) reuses an existing >=2-element
+// slice with zero extra allocation.
 func NewPromise(a ...Scmer) Scmer {
 	var cells []Scmer
 	if len(a) == 0 {
 		cells = make([]Scmer, 2)
-	} else {
-		cells = a[0].Slice()
-		if len(cells) < 2 {
-			panic("newpromise: list backing requires at least 2 elements")
-		}
+		cells[1] = NewNil()
+		return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 0)}
 	}
-	cells[1] = NewNil() // state = pending
-	return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 0)}
+	cells = a[0].Slice()
+	if len(cells) < 2 {
+		panic("newpromise: list backing requires at least 2 elements")
+	}
+	cells[1] = NewNil()
+	return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 1)}
 }
 
 // ApplyPromise dispatches a tagPromise call. Called from ApplyEx.
@@ -108,6 +103,7 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 		case "state":
 			return cells[1]
 		case "fail":
+			cells[0] = NewNil()
 			cells[1] = NewBool(false)
 			return NewBool(false)
 		default:
@@ -117,6 +113,11 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 		if key == "value" {
 			cells[0] = args[1]
 			cells[1] = NewBool(true)
+			return args[1]
+		}
+		if key == "fail" {
+			cells[0] = args[1]
+			cells[1] = NewBool(false)
 			return args[1]
 		}
 		panic("promise: unknown operation: " + key)
@@ -285,7 +286,7 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 func init_sync() {
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
-		"newpromise", "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing (zero extra alloc). API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed.",
+		"newpromise", "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
 		0, 1,
 		[]DeclarationParameter{
 			{"list", "any", "optional: ≥2-element slice to use as backing", nil},

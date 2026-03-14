@@ -72,7 +72,7 @@ const (
 	tagRegex   // *regexp.Regexp
 	tagCString // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
 	tagBString // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
-	tagPromise // tagPromise Scmer; ptr=*promiseBacking (auxVal==0) or *[2]Scmer slice element (auxVal==1)
+	tagPromise // tagPromise Scmer; ptr points to cells[0] of a [2]Scmer backing (auxVal==0 heap, auxVal==1 list-backed)
 	// custom tags >= 100
 )
 
