@@ -747,369 +747,372 @@ func init() {
 
 	// system
 	DeclareTitle("SCM Builtins")
-	Declare(&Globalenv, &Declaration{
-		"quote", "returns a symbol or list without evaluating it",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"symbol", "symbol", "symbol to quote", nil},
-		}, "symbol", nil, true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "quote",
+		Desc: "returns a symbol or list without evaluating it",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "symbol", ParamName: "symbol", ParamDesc: "symbol to quote"}},
+			Return: &TypeDescriptor{Kind: "symbol"},
+			Const: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"eval", "executes the given scheme program in the current environment",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"code", "list", "list with head and optional parameters", nil},
-		}, "any", nil, false, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "eval",
+		Desc: "executes the given scheme program in the current environment",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"}},
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"size", "compute the memory size of a value",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "value to examine", nil},
-		}, "int", func(a ...Scmer) Scmer {
-			return NewInt(int64(ComputeSize(a[0])))
-		}, true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "size",
+		Desc: "compute the memory size of a value",
+		Fn: func(a ...Scmer) Scmer {
+				return NewInt(int64(ComputeSize(a[0])))
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to examine"}},
+			Return: &TypeDescriptor{Kind: "int"},
+			Const: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"optimize", "optimize the given scheme program",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"code", "list", "list with head and optional parameters", nil},
-		}, "any", func(a ...Scmer) Scmer {
-			return Optimize(a[0], &Globalenv)
-		}, true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "optimize",
+		Desc: "optimize the given scheme program",
+		Fn: func(a ...Scmer) Scmer {
+				return Optimize(a[0], &Globalenv)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"}},
+			Const: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"time", "measures the time it takes to compute the first argument",
-		1, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"code", "any", "code to execute", nil},
-			DeclarationParameter{"label", "string", "label to print in the log or trace", nil},
-		}, "any", nil, false, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "time",
+		Desc: "measures the time it takes to compute the first argument",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "code", ParamDesc: "code to execute"}, &TypeDescriptor{Kind: "string", ParamName: "label", ParamDesc: "label to print in the log or trace", Optional: true}},
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"if", "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
-		2, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"condition...", "any", "condition to evaluate", nil},
-			DeclarationParameter{"true-branch...", "returntype", "code to evaluate if condition is true", nil},
-			DeclarationParameter{"false-branch", "any", "code to evaluate if condition is false", nil},
-		}, "returntype", nil, true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "if",
+		Desc: "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "condition...", ParamDesc: "condition to evaluate", Variadic: true}, &TypeDescriptor{Kind: "returntype", ParamName: "true-branch...", ParamDesc: "code to evaluate if condition is true", Variadic: true}, &TypeDescriptor{Kind: "any", ParamName: "false-branch", ParamDesc: "code to evaluate if condition is false", Optional: true}},
+			Return: &TypeDescriptor{Kind: "returntype"},
+			Const: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"and", "returns true if all conditions evaluate to true",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"condition", "bool", "condition to evaluate", nil},
-		}, "bool", nil, true, false, &TypeDescriptor{Optimize: optimizeAnd},
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "and",
+		Desc: "returns true if all conditions evaluate to true",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "bool", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const: true,
+			Optimize: optimizeAnd,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"or", "returns true if at least one condition evaluates to true",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"condition", "any", "condition to evaluate", nil},
-		}, "bool", nil, true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "or",
+		Desc: "returns true if at least one condition evaluates to true",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"coalesce", "returns the first value that has a non-zero value",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"value", "returntype", "value to examine", nil},
-		}, "returntype", nil, true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "coalesce",
+		Desc: "returns the first value that has a non-zero value",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "returntype", ParamName: "value", ParamDesc: "value to examine", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "returntype"},
+			Const: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"coalesceNil", "returns the first value that has a non-nil value",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"value", "returntype", "value to examine", nil},
-		}, "returntype", nil, true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "coalesceNil",
+		Desc: "returns the first value that has a non-nil value",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "returntype", ParamName: "value", ParamDesc: "value to examine", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "returntype"},
+			Const: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"define", "defines or sets a variable in the current environment",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"variable", "symbol", "variable to set", nil},
-			DeclarationParameter{"value", "returntype", "value to set the variable to", nil},
-		}, "bool", nil, false, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "define",
+		Desc: "defines or sets a variable in the current environment",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "symbol", ParamName: "variable", ParamDesc: "variable to set"}, &TypeDescriptor{Kind: "returntype", ParamName: "value", ParamDesc: "value to set the variable to"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"set", "defines or sets a variable in the current environment",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"variable", "symbol", "variable to set", nil},
-			DeclarationParameter{"value", "returntype", "value to set the variable to", nil},
-		}, "bool", nil, false, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "set",
+		Desc: "defines or sets a variable in the current environment",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "symbol", ParamName: "variable", ParamDesc: "variable to set"}, &TypeDescriptor{Kind: "returntype", ParamName: "value", ParamDesc: "value to set the variable to"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+		},
 	})
 
 	// basic
-	Declare(&Globalenv, &Declaration{
-		"error", "halts the whole execution thread and throws an error message",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"value...", "any", "value or message to throw", nil},
-		}, "string",
-		func(a ...Scmer) Scmer {
-			if len(a) == 1 {
-				panic(a[0])
-			} else {
-				var b strings.Builder
-				for _, v := range a {
-					b.WriteString(String(v))
+		Declare(&Globalenv, &Declaration{
+		Name: "error",
+		Desc: "halts the whole execution thread and throws an error message",
+		Fn: func(a ...Scmer) Scmer {
+				if len(a) == 1 {
+					panic(a[0])
+				} else {
+					var b strings.Builder
+					for _, v := range a {
+						b.WriteString(String(v))
+					}
+					panic(b.String())
 				}
-				panic(b.String())
-			}
-		}, false, false, nil,
-		nil,
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value...", ParamDesc: "value or message to throw", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "string"},
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"try", "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"func", "func", "function with no parameters that will be called", NoEscape},
-			DeclarationParameter{"errorhandler", "func", "function that takes the error as parameter", NoEscape},
-		}, "any",
-		func(a ...Scmer) (result Scmer) {
-			defer func() {
-				err := recover()
-				if err != nil {
-					result = Apply(a[1], FromAny(err))
+		Declare(&Globalenv, &Declaration{
+		Name: "try",
+		Desc: "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
+		Fn: func(a ...Scmer) (result Scmer) {
+				defer func() {
+					err := recover()
+					if err != nil {
+						result = Apply(a[1], FromAny(err))
+					}
+				}()
+				result = Apply(a[0])
+				return
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", ParamName: "func", ParamDesc: "function with no parameters that will be called"}, &TypeDescriptor{Kind: "func", ParamName: "errorhandler", ParamDesc: "function that takes the error as parameter"}},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "apply",
+		Desc: "runs the function with its arguments",
+		Fn: func(a ...Scmer) Scmer {
+				return Apply(a[0], asSlice(a[1], "apply")...)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", ParamName: "function", ParamDesc: "function to execute"}, &TypeDescriptor{Kind: "list", ParamName: "arguments", ParamDesc: "list of arguments to apply"}},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "apply_assoc",
+		Desc: "runs the function with its arguments but arguments is a assoc list",
+		Fn: func(a ...Scmer) Scmer {
+				return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", ParamName: "function", ParamDesc: "function to execute (must be a lambda)"}, &TypeDescriptor{Kind: "list", ParamName: "arguments", ParamDesc: "assoc list of arguments to apply"}},
+			Return: &TypeDescriptor{Kind: "symbol"},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "symbol",
+		Desc: "returns a symbol built from that string",
+		Fn: func(a ...Scmer) Scmer {
+				return NewSymbol(String(a[0]))
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string value that will be converted into a symbol"}},
+			Return: &TypeDescriptor{Kind: "symbol"},
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "list",
+		Desc: "returns a list containing the parameters as alements",
+		Fn: nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value...", ParamDesc: "value for the list", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list"},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "for",
+		Desc: "Sequential loop over a list state; applies a condition and step function and returns the final state list.\nUse only when iterations have strong data dependencies and must run sequentially.\n\nExamples:\n- Count to 10: (for '(0) (lambda (x) (< x 10)) (lambda (x) (list (+ x 1))))  => '(10)\n- Sum 0..9:   (for '(0 0) (lambda (x sum) (< x 10)) (lambda (x sum) (list (+ x 1) (+ sum x)))) => '(10 45)",
+		Fn: func(a ...Scmer) Scmer {
+				state := append([]Scmer{}, asSlice(a[0], "for init")...)
+				cond := OptimizeProcToSerialFunction(a[1])
+				next := OptimizeProcToSerialFunction(a[2])
+				for ToBool(cond(state...)) {
+					v := next(state...)
+					if v.IsNil() {
+						state = []Scmer{}
+						continue
+					}
+					state = append([]Scmer{}, asSlice(v, "for step")...)
 				}
-			}()
-			result = Apply(a[0])
-			return
-		}, true, false, nil,
-		nil,
+				return NewSlice(state)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "init", ParamDesc: "initial state as a list"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "func that receives the current state as parameters and must return true if the loop shall be continued"}, &TypeDescriptor{Kind: "func", ParamName: "step", ParamDesc: "step func that returns the next state as a list"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("for_mut"),
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"apply", "runs the function with its arguments",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"function", "func", "function to execute", NoEscape},
-			DeclarationParameter{"arguments", "list", "list of arguments to apply", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			return Apply(a[0], asSlice(a[1], "apply")...)
-		}, true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"apply_assoc", "runs the function with its arguments but arguments is a assoc list",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"function", "func", "function to execute (must be a lambda)", NoEscape},
-			DeclarationParameter{"arguments", "list", "assoc list of arguments to apply", nil},
-		}, "symbol",
-		func(a ...Scmer) Scmer {
-			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
-		}, true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"symbol", "returns a symbol built from that string",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"value", "string", "string value that will be converted into a symbol", nil},
-		}, "symbol",
-		func(a ...Scmer) Scmer {
-			return NewSymbol(String(a[0]))
-		}, false, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"list", "returns a list containing the parameters as alements",
-		0, 10000,
-		[]DeclarationParameter{
-			DeclarationParameter{"value...", "any", "value for the list", nil},
-		}, "list",
-		nil, true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"for", "Sequential loop over a list state; applies a condition and step function and returns the final state list.\nUse only when iterations have strong data dependencies and must run sequentially.\n\nExamples:\n- Count to 10: (for '(0) (lambda (x) (< x 10)) (lambda (x) (list (+ x 1))))  => '(10)\n- Sum 0..9:   (for '(0 0) (lambda (x sum) (< x 10)) (lambda (x sum) (list (+ x 1) (+ sum x)))) => '(10 45)",
-		3, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"init", "list", "initial state as a list", nil},
-			DeclarationParameter{"condition", "func", "func that receives the current state as parameters and must return true if the loop shall be continued", NoEscape},
-			DeclarationParameter{"step", "func", "step func that returns the next state as a list", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			state := append([]Scmer{}, asSlice(a[0], "for init")...)
-			cond := OptimizeProcToSerialFunction(a[1])
-			next := OptimizeProcToSerialFunction(a[2])
-			for ToBool(cond(state...)) {
-				v := next(state...)
-				if v.IsNil() {
-					state = []Scmer{}
-					continue
+		Declare(&Globalenv, &Declaration{
+		Name: "for_mut",
+		Desc: "in-place for loop (optimizer-only, skips defensive state copy)",
+		Fn: func(a ...Scmer) Scmer {
+				state := asSlice(a[0], "for_mut init")
+				cond := OptimizeProcToSerialFunction(a[1])
+				next := OptimizeProcToSerialFunction(a[2])
+				for ToBool(cond(state...)) {
+					v := next(state...)
+					if v.IsNil() {
+						state = []Scmer{}
+						continue
+					}
+					state = asSlice(v, "for_mut step")
 				}
-				state = append([]Scmer{}, asSlice(v, "for step")...)
-			}
-			return NewSlice(state)
-		}, true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("for_mut")},
-		nil,
+				return NewSlice(state)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "init", ParamDesc: "owned initial state"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "func(state...) -> bool"}, &TypeDescriptor{Kind: "func", ParamName: "step", ParamDesc: "step func returning next state as list"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"for_mut", "in-place for loop (optimizer-only, skips defensive state copy)",
-		3, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"init", "list", "owned initial state", nil},
-			DeclarationParameter{"condition", "func", "func(state...) -> bool", NoEscape},
-			DeclarationParameter{"step", "func", "step func returning next state as list", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			state := asSlice(a[0], "for_mut init")
-			cond := OptimizeProcToSerialFunction(a[1])
-			next := OptimizeProcToSerialFunction(a[2])
-			for ToBool(cond(state...)) {
-				v := next(state...)
-				if v.IsNil() {
-					state = []Scmer{}
-					continue
+		Declare(&Globalenv, &Declaration{
+		Name: "string",
+		Desc: "converts the given value into string",
+		Fn: func(a ...Scmer) Scmer {
+				return NewString(String(a[0]))
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "any value"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "match",
+		Desc: `takes a value evaluates the branch that first matches the given pattern
+	Patterns can be any of:
+	 - symbol matches any value and stores is into a variable
+	 - "string" (matches only this string)
+	 - number (matches only this value)
+	 - (symbol "something") will only match the symbol 'something'
+	 - '(subpattern subpattern...) matches a list with exactly these subpatterns
+	 - (concat str1 str2 str3) will decompose a string into one of the following patterns: "prefix" variable, variable "postfix", variable "infix" variable
+	 - (cons a b) will reverse the cons function, so it will match the head of the list with a and the rest with b
+	 - (regex "pattern" text var1 var2...) will match the given regex pattern, store the whole string into text and all capture groups into var1, var2...
+	`,
+		Fn: // TODO: returntype as soon as repead validate is implemented */
+			nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to evaluate"}, &TypeDescriptor{Kind: "any", ParamName: "pattern...", ParamDesc: "pattern", Variadic: true}, &TypeDescriptor{Kind: "returntype", ParamName: "result...", ParamDesc: "result value when the pattern matches; this code can use the variables matched in the pattern", Variadic: true}, &TypeDescriptor{Kind: "any", ParamName: "default", ParamDesc: "(optional) value that is returned when no pattern matches", Optional: true}},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "lambda",
+		Desc: "returns a function (func) constructed from the given code",
+		Fn: // TODO: func(...)->returntype as soon as function types are implemented
+			nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "symbol|list|nil", ParamName: "parameters", ParamDesc: "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"}, &TypeDescriptor{Kind: "any", ParamName: "code", ParamDesc: "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"}, &TypeDescriptor{Kind: "number", ParamName: "numvars", ParamDesc: "number of unnamed variables that can be accessed via (var 0) (var 1) etc.", Optional: true}},
+			Return: &TypeDescriptor{Kind: "func"},
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "begin",
+		Desc: "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
+		Fn: // TODO: returntype as soon as repeat is implemented
+			nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "expression...", ParamDesc: "expressions to evaluate", Variadic: true}},
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "parallel",
+		Desc: "executes all parameters in parallel and returns nil if they are finished",
+		Fn: // TODO: returntype as soon as repeat is implemented
+			nil,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "expression...", ParamDesc: "expressions to evaluate in parallel", Variadic: true}},
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "source",
+		Desc: "annotates the node with filename and line information for better backtraces",
+		Fn: func(a ...Scmer) Scmer {
+				return NewSourceInfo(SourceInfo{
+					String(a[0]),
+					ToInt(a[1]),
+					ToInt(a[2]),
+					a[3],
+				})
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "filename", ParamDesc: "Filename of the code"}, &TypeDescriptor{Kind: "number", ParamName: "line", ParamDesc: "Line of the code"}, &TypeDescriptor{Kind: "number", ParamName: "column", ParamDesc: "Column of the code"}, &TypeDescriptor{Kind: "returntype", ParamName: "code", ParamDesc: "code"}},
+			Return: &TypeDescriptor{Kind: "returntype"},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "scheme",
+		Desc: "parses a scheme expression into a list",
+		Fn: func(a ...Scmer) Scmer {
+				filename := "eval"
+				if len(a) > 1 {
+					filename = String(a[1])
 				}
-				state = asSlice(v, "for_mut step")
-			}
-			return NewSlice(state)
-		}, true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
+				return Read(filename, String(a[0]))
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "code", ParamDesc: "Scheme code"}, &TypeDescriptor{Kind: "string", ParamName: "filename", ParamDesc: "optional filename", Optional: true}},
+			Const: true,
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"string", "converts the given value into string",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "any value", nil},
-		}, "string",
-		func(a ...Scmer) Scmer {
-			return NewString(String(a[0]))
-		}, true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "serialize",
+		Desc: "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
+		Fn: func(a ...Scmer) Scmer {
+				return NewString(SerializeToString(a[0], &Globalenv))
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "code", ParamDesc: "Scheme code"}},
+			Return: &TypeDescriptor{Kind: "string"},
+		},
 	})
-	Declare(&Globalenv, &Declaration{
-		"match", `takes a value evaluates the branch that first matches the given pattern
-Patterns can be any of:
- - symbol matches any value and stores is into a variable
- - "string" (matches only this string)
- - number (matches only this value)
- - (symbol "something") will only match the symbol 'something'
- - '(subpattern subpattern...) matches a list with exactly these subpatterns
- - (concat str1 str2 str3) will decompose a string into one of the following patterns: "prefix" variable, variable "postfix", variable "infix" variable
- - (cons a b) will reverse the cons function, so it will match the head of the list with a and the rest with b
- - (regex "pattern" text var1 var2...) will match the given regex pattern, store the whole string into text and all capture groups into var1, var2...
-`,
-		3, 10000,
-		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "value to evaluate", nil},
-			DeclarationParameter{"pattern...", "any", "pattern", nil},
-			DeclarationParameter{"result...", "returntype", "result value when the pattern matches; this code can use the variables matched in the pattern", nil},
-			DeclarationParameter{"default", "any", "(optional) value that is returned when no pattern matches", nil}, /* TODO: turn to returntype as soon as pattern+result are properly repeaded in Validate */
-		}, "any", // TODO: returntype as soon as repead validate is implemented */
-		nil, true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"lambda", "returns a function (func) constructed from the given code",
-		2, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"parameters", "symbol|list|nil", "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol", nil},
-			DeclarationParameter{"code", "any", "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above", nil},
-			DeclarationParameter{"numvars", "number", "number of unnamed variables that can be accessed via (var 0) (var 1) etc.", nil},
-		}, "func", // TODO: func(...)->returntype as soon as function types are implemented
-		nil, false, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"begin", "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
-		0, 10000,
-		[]DeclarationParameter{
-			DeclarationParameter{"expression...", "any", "expressions to evaluate", nil},
-			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
-		}, "any", // TODO: returntype as soon as repeat is implemented
-		nil, false, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"parallel", "executes all parameters in parallel and returns nil if they are finished",
-		1, 10000,
-		[]DeclarationParameter{
-			DeclarationParameter{"expression...", "any", "expressions to evaluate in parallel", nil},
-			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
-		}, "any", // TODO: returntype as soon as repeat is implemented
-		nil, false, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"source", "annotates the node with filename and line information for better backtraces",
-		4, 4,
-		[]DeclarationParameter{
-			DeclarationParameter{"filename", "string", "Filename of the code", nil},
-			DeclarationParameter{"line", "number", "Line of the code", nil},
-			DeclarationParameter{"column", "number", "Column of the code", nil},
-			DeclarationParameter{"code", "returntype", "code", nil},
-			/* TODO: lastexpression = returntype as soon as expression... is properly repeated */
-		}, "returntype",
-		func(a ...Scmer) Scmer {
-			return NewSourceInfo(SourceInfo{
-				String(a[0]),
-				ToInt(a[1]),
-				ToInt(a[2]),
-				a[3],
-			})
-		}, true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"scheme", "parses a scheme expression into a list",
-		1, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"code", "string", "Scheme code", nil},
-			DeclarationParameter{"filename", "string", "optional filename", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			filename := "eval"
-			if len(a) > 1 {
-				filename = String(a[1])
-			}
-			return Read(filename, String(a[0]))
-		}, true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"serialize", "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"code", "list", "Scheme code", nil},
-		}, "string",
-		func(a ...Scmer) Scmer {
-			return NewString(SerializeToString(a[0], &Globalenv))
-		}, false, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"pretty_print", "formats Scheme code as an indented, human-readable string; expressions up to width characters are kept on one line, longer ones are expanded with one argument per line",
-		1, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"code", "list", "Scheme code to format", nil},
-			DeclarationParameter{"width", "int", "max characters before expanding (default 20)", nil},
-		}, "string",
-		func(a ...Scmer) Scmer {
-			width := 20
-			if len(a) >= 2 {
-				width = ToInt(a[1])
-			}
-			return NewString(PrettyPrint(a[0], &Globalenv, width))
-		}, false, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "pretty_print",
+		Desc: "formats Scheme code as an indented, human-readable string; expressions up to width characters are kept on one line, longer ones are expanded with one argument per line",
+		Fn: func(a ...Scmer) Scmer {
+				width := 20
+				if len(a) >= 2 {
+					width = ToInt(a[1])
+				}
+				return NewString(PrettyPrint(a[0], &Globalenv, width))
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "code", ParamDesc: "Scheme code to format"}, &TypeDescriptor{Kind: "int", ParamName: "width", ParamDesc: "max characters before expanding (default 20)", Optional: true}},
+			Return: &TypeDescriptor{Kind: "string"},
+		},
 	})
 
 	init_alu()

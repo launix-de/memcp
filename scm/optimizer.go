@@ -918,13 +918,13 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	// Optimize all args with callback ownership propagation
 	for i := 0; i < len(v); i++ {
-		if i > 0 && callDecl != nil {
+		if i > 0 && callDecl != nil && callDecl.Type != nil {
 			paramIdx := i - 1
-			if paramIdx >= len(callDecl.Params) {
-				paramIdx = len(callDecl.Params) - 1
+			if paramIdx >= len(callDecl.Type.Params) {
+				paramIdx = len(callDecl.Type.Params) - 1
 			}
 			if paramIdx >= 0 {
-				if ti := callDecl.Params[paramIdx].TypeInfo; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
+				if ti := callDecl.Type.Params[paramIdx]; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
 					owned := make([]bool, len(ti.Params))
 					hasAny := false
 					for pi, pt := range ti.Params {
@@ -947,11 +947,11 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 					paramEscapes := true
 					if callDecl != nil {
 						paramIdx := i - 1
-						if paramIdx >= len(callDecl.Params) {
-							paramIdx = len(callDecl.Params) - 1
+						if paramIdx >= len(callDecl.Type.Params) {
+							paramIdx = len(callDecl.Type.Params) - 1
 						}
 						if paramIdx >= 0 {
-							if ti := callDecl.Params[paramIdx].TypeInfo; ti != nil && !ti.Escape {
+							if ti := callDecl.Type.Params[paramIdx]; ti != nil && !ti.Escape {
 								paramEscapes = false
 							}
 						}
@@ -1027,14 +1027,16 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		if decl := DeclarationForValue(v[0]); decl != nil {
 			for i := 1; i < len(v); i++ {
 				paramIdx := i - 1
-				if paramIdx >= len(decl.Params) {
-					paramIdx = len(decl.Params) - 1 // variadic: use last param
+				if decl.Type == nil {
+					continue
+				}
+				if paramIdx >= len(decl.Type.Params) {
+					paramIdx = len(decl.Type.Params) - 1 // variadic: use last param
 				}
 				if paramIdx < 0 {
 					continue
 				}
-				ti := decl.Params[paramIdx].TypeInfo
-				if ti == nil || ti.Escape {
+				if decl.Type == nil || paramIdx >= len(decl.Type.Params) || decl.Type.Params[paramIdx] == nil || decl.Type.Params[paramIdx].Escape {
 					continue // unknown or escaping parameter
 				}
 				// Check if this argument is a (list ...) call
@@ -1059,7 +1061,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	if scmerIsSymbol(v[0], "!begin") && allConstArgs {
 		return v[len(v)-1], &TypeDescriptor{Transfer: true, Const: true}
 	}
-	if d := DeclarationForValue(v[0]); d != nil && d.Foldable && allConstArgs && d.Fn != nil {
+	if d := DeclarationForValue(v[0]); d != nil && d.IsFoldable() && allConstArgs && d.Fn != nil {
 		for i := range v {
 			v[i] = unwrapConstListFromCode(v[i])
 		}

@@ -133,592 +133,473 @@ func init_list() {
 
 	// list is already in Globalenv.Vars (scm.go init); register it
 	// in declarations so serialization can resolve the function pointer.
-	Declare(&Globalenv, &Declaration{
-		"list", "constructs a list from its arguments",
-		0, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"items", "any", "items to put into the list", nil},
-		}, "list",
-		List,
-		true, false, nil,
-		nil,
+		Declare(&Globalenv, &Declaration{
+		Name: "list",
+		Desc: "constructs a list from its arguments",
+		Fn: List,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "items...", ParamDesc: "items to put into the list", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list"},
+			Const: true,
+		},
 	})
 
-	Declare(&Globalenv, &Declaration{
-		"count", "counts the number of elements in the list",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list", NoEscape},
-		}, "int",
-		func(a ...Scmer) Scmer {
-			if a[0].GetTag() == tagSlice {
-				return NewInt(int64(len(a[0].Slice())))
-			}
-			if a[0].GetTag() == tagFastDict {
-				fd := a[0].FastDict()
-				if fd == nil {
-					return NewInt(0)
+		Declare(&Globalenv, &Declaration{
+		Name: "count",
+		Desc: "counts the number of elements in the list",
+		Fn: func(a ...Scmer) Scmer {
+				if a[0].GetTag() == tagSlice {
+					return NewInt(int64(len(a[0].Slice())))
 				}
-				return NewInt(int64(len(fd.Pairs)))
-			}
-			panic("count expects a list")
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"nth", "get the nth item of a list",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list", NoEscape},
-			DeclarationParameter{"index", "number", "index beginning from 0", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "nth")
-			idx := int(a[1].Int())
-			if idx < 0 || idx >= len(list) {
-				panic("nth index out of range")
-			}
-			return list[idx]
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"slice", "extract a sublist from start (inclusive) to end (exclusive).\n(slice list start end) returns elements list[start..end).",
-		3, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list", NoEscape},
-			DeclarationParameter{"start", "number", "start index (inclusive)", nil},
-			DeclarationParameter{"end", "number", "end index (exclusive)", nil},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "slice")
-			start := int(a[1].Int())
-			end := int(a[2].Int())
-			if start < 0 {
-				start = 0
-			}
-			if end > len(list) {
-				end = len(list)
-			}
-			if start >= end {
-				return NewSlice([]Scmer{})
-			}
-			result := make([]Scmer, end-start)
-			copy(result, list[start:end])
-			return NewSlice(result)
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"append", "appends items to a list and return the extended list.\nThe original list stays unharmed.",
-		2, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list", nil},
-			DeclarationParameter{"item...", "any", "items to add", nil},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			base := append([]Scmer{}, asSlice(a[0], "append")...)
-			base = append(base, a[1:]...)
-			return NewSlice(base)
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_mut")},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"append_unique", "appends items to a list but only if they are new.\nThe original list stays unharmed.",
-		2, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "base list", nil},
-			DeclarationParameter{"item...", "any", "items to add", nil},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			list := append([]Scmer{}, asSlice(a[0], "append_unique")...)
-			for _, el := range a[1:] {
-				for _, el2 := range list {
-					if Equal(el, el2) {
-						// ignore duplicates
-						goto skipItem
+				if a[0].GetTag() == tagFastDict {
+					fd := a[0].FastDict()
+					if fd == nil {
+						return NewInt(0)
 					}
+					return NewInt(int64(len(fd.Pairs)))
 				}
-				list = append(list, el)
-			skipItem:
-			}
-			return NewSlice(list)
+				panic("count expects a list")
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}},
+			Return: &TypeDescriptor{Kind: "int"},
+			Const: true,
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("append_unique_mut")},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"cons", "constructs a list from a head and a tail list",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"car", "any", "new head element", nil},
-			DeclarationParameter{"cdr", "list", "tail that is appended after car", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			car := a[0]
-			if a[1].GetTag() == tagSlice {
-				return NewSlice(append([]Scmer{car}, a[1].Slice()...))
-			}
-			return NewSlice([]Scmer{car, a[1]})
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"car", "extracts the head of a list",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list", NoEscape},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "car")
-			if len(list) == 0 {
-				panic("car on empty list")
-			}
-			return list[0]
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"cdr", "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list", NoEscape},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "cdr")
-			if len(list) == 0 {
-				return NewSlice([]Scmer{})
-			}
-			return NewSlice(list[1:])
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"cadr", "extracts the second element of a list.\nEquivalent to (car (cdr x)).",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list", NoEscape},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "cadr")
-			if len(list) < 2 {
-				panic("cadr on list with fewer than 2 elements")
-			}
-			return list[1]
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"zip", "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "any", "list of lists of items", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			lists := a
-			if len(a) == 1 {
-				lists = asSlice(a[0], "zip")
-			}
-			if len(lists) == 0 {
-				return NewSlice([]Scmer{})
-			}
-			first := asSlice(lists[0], "zip element")
-			size := len(first)
-			result := make([]Scmer, size)
-			for i := 0; i < size; i++ {
-				subresult := make([]Scmer, len(lists))
-				for j, v := range lists {
-					current := asSlice(v, "zip item")
-					if i >= len(current) {
-						panic("zip expects lists of equal length")
-					}
-					subresult[j] = current[i]
+		Declare(&Globalenv, &Declaration{
+		Name: "nth",
+		Desc: "get the nth item of a list",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "nth")
+				idx := int(a[1].Int())
+				if idx < 0 || idx >= len(list) {
+					panic("nth index out of range")
 				}
-				result[i] = NewSlice(subresult)
-			}
-			return NewSlice(result)
+				return list[idx]
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}, &TypeDescriptor{Kind: "number", ParamName: "index", ParamDesc: "index beginning from 0"}},
+			Const: true,
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"merge", "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "any", "list of lists of items", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			lists := a
-			if len(a) == 1 {
-				lists = asSlice(a[0], "merge")
-			}
-			size := 0
-			for _, v := range lists {
-				size += len(asSlice(v, "merge item"))
-			}
-			result := make([]Scmer, 0, size)
-			for _, v := range lists {
-				result = append(result, asSlice(v, "merge item")...)
-			}
-			return NewSlice(result)
+		Declare(&Globalenv, &Declaration{
+		Name: "slice",
+		Desc: "extract a sublist from start (inclusive) to end (exclusive).\n(slice list start end) returns elements list[start..end).",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "slice")
+				start := int(a[1].Int())
+				end := int(a[2].Int())
+				if start < 0 {
+					start = 0
+				}
+				if end > len(list) {
+					end = len(list)
+				}
+				if start >= end {
+					return NewSlice([]Scmer{})
+				}
+				result := make([]Scmer, end-start)
+				copy(result, list[start:end])
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}, &TypeDescriptor{Kind: "number", ParamName: "start", ParamDesc: "start index (inclusive)"}, &TypeDescriptor{Kind: "number", ParamName: "end", ParamDesc: "end index (exclusive)"}},
+			Return: &TypeDescriptor{Kind: "list"},
+			Const: true,
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"merge_unique", "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
-		1, 1000,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list of lists of items", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			lists := a
-			if len(a) == 1 {
-				lists = asSlice(a[0], "merge_unique")
-			}
-			size := 0
-			for _, v := range lists {
-				size += len(asSlice(v, "merge_unique item"))
-			}
-			result := make([]Scmer, 0, size)
-			for _, v := range lists {
-				for _, el := range asSlice(v, "merge_unique item") {
-					duplicate := false
-					for _, existing := range result {
-						if Equal(el, existing) {
-							duplicate = true
-							break
+		Declare(&Globalenv, &Declaration{
+		Name: "append",
+		Desc: "appends items to a list and return the extended list.\nThe original list stays unharmed.",
+		Fn: func(a ...Scmer) Scmer {
+				base := append([]Scmer{}, asSlice(a[0], "append")...)
+				base = append(base, a[1:]...)
+				return NewSlice(base)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}, &TypeDescriptor{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("append_mut"),
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "append_unique",
+		Desc: "appends items to a list but only if they are new.\nThe original list stays unharmed.",
+		Fn: func(a ...Scmer) Scmer {
+				list := append([]Scmer{}, asSlice(a[0], "append_unique")...)
+				for _, el := range a[1:] {
+					for _, el2 := range list {
+						if Equal(el, el2) {
+							// ignore duplicates
+							goto skipItem
 						}
 					}
-					if !duplicate {
-						result = append(result, el)
+					list = append(list, el)
+				skipItem:
+				}
+				return NewSlice(list)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "base list"}, &TypeDescriptor{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("append_unique_mut"),
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "cons",
+		Desc: "constructs a list from a head and a tail list",
+		Fn: func(a ...Scmer) Scmer {
+				car := a[0]
+				if a[1].GetTag() == tagSlice {
+					return NewSlice(append([]Scmer{car}, a[1].Slice()...))
+				}
+				return NewSlice([]Scmer{car, a[1]})
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "car", ParamDesc: "new head element"}, &TypeDescriptor{Kind: "list", ParamName: "cdr", ParamDesc: "tail that is appended after car"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "car",
+		Desc: "extracts the head of a list",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "car")
+				if len(list) == 0 {
+					panic("car on empty list")
+				}
+				return list[0]
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list"}},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "cdr",
+		Desc: "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "cdr")
+				if len(list) == 0 {
+					return NewSlice([]Scmer{})
+				}
+				return NewSlice(list[1:])
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list"}},
+			Return: FreshAlloc,
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "cadr",
+		Desc: "extracts the second element of a list.\nEquivalent to (car (cdr x)).",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "cadr")
+				if len(list) < 2 {
+					panic("cadr on list with fewer than 2 elements")
+				}
+				return list[1]
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list"}},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "zip",
+		Desc: "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
+		Fn: func(a ...Scmer) Scmer {
+				lists := a
+				if len(a) == 1 {
+					lists = asSlice(a[0], "zip")
+				}
+				if len(lists) == 0 {
+					return NewSlice([]Scmer{})
+				}
+				first := asSlice(lists[0], "zip element")
+				size := len(first)
+				result := make([]Scmer, size)
+				for i := 0; i < size; i++ {
+					subresult := make([]Scmer, len(lists))
+					for j, v := range lists {
+						current := asSlice(v, "zip item")
+						if i >= len(current) {
+							panic("zip expects lists of equal length")
+						}
+						subresult[j] = current[i]
+					}
+					result[i] = NewSlice(subresult)
+				}
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "list", ParamDesc: "list of lists of items", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "merge",
+		Desc: "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
+		Fn: func(a ...Scmer) Scmer {
+				lists := a
+				if len(a) == 1 {
+					lists = asSlice(a[0], "merge")
+				}
+				size := 0
+				for _, v := range lists {
+					size += len(asSlice(v, "merge item"))
+				}
+				result := make([]Scmer, 0, size)
+				for _, v := range lists {
+					result = append(result, asSlice(v, "merge item")...)
+				}
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "list", ParamDesc: "list of lists of items", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "merge_unique",
+		Desc: "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
+		Fn: func(a ...Scmer) Scmer {
+				lists := a
+				if len(a) == 1 {
+					lists = asSlice(a[0], "merge_unique")
+				}
+				size := 0
+				for _, v := range lists {
+					size += len(asSlice(v, "merge_unique item"))
+				}
+				result := make([]Scmer, 0, size)
+				for _, v := range lists {
+					for _, el := range asSlice(v, "merge_unique item") {
+						duplicate := false
+						for _, existing := range result {
+							if Equal(el, existing) {
+								duplicate = true
+								break
+							}
+						}
+						if !duplicate {
+							result = append(result, el)
+						}
 					}
 				}
-			}
-			return NewSlice(result)
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list of lists of items", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"has?", "checks if a list has a certain item (equal?)",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"haystack", "list", "list to search in", NoEscape},
-			DeclarationParameter{"needle", "any", "item to search for", nil},
-		}, "bool",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "has?")
-			for _, v := range list {
-				if Equal(a[1], v) {
-					return NewBool(true)
+		Declare(&Globalenv, &Declaration{
+		Name: "has?",
+		Desc: "checks if a list has a certain item (equal?)",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "has?")
+				for _, v := range list {
+					if Equal(a[1], v) {
+						return NewBool(true)
+					}
 				}
-			}
-			return NewBool(false)
+				return NewBool(false)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "haystack", ParamDesc: "list to search in"}, &TypeDescriptor{Kind: "any", ParamName: "needle", ParamDesc: "item to search for"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const: true,
 		},
-		true, false, nil,
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"filter", "returns a list that only contains elements that pass the filter function",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list that has to be filtered", NoEscape},
-			DeclarationParameter{"condition", "func", "filter condition func(any)->bool", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			input := asSlice(a[0], "filter")
-			result := make([]Scmer, 0, len(input))
-			fn := OptimizeProcToSerialFunction(a[1])
-			for _, v := range input {
-				if fn(v).Bool() {
-					result = append(result, v)
-				}
-			}
-			return NewSlice(result)
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_mut")},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"find", "returns the first list element that passes the condition function, or nil/default if none matches",
-		2, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list to search", NoEscape},
-			DeclarationParameter{"condition", "func", "predicate func(any)->bool that is applied until the first match", NoEscape},
-			DeclarationParameter{"default", "any", "optional default value if nothing matches", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			input := asSlice(a[0], "find")
-			fn := OptimizeProcToSerialFunction(a[1])
-			for _, v := range input {
-				if fn(v).Bool() {
-					return v
-				}
-			}
-			if len(a) >= 3 {
-				return a[2]
-			}
-			return NewNil()
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"map", "returns a list that contains the results of a map function that is applied to the list",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list that has to be mapped", NoEscape},
-			DeclarationParameter{"map", "func", "map function func(any)->any that is applied to each item", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "map")
-			result := make([]Scmer, len(list))
-			fn := OptimizeProcToSerialFunction(a[1])
-			for i, v := range list {
-				result[i] = fn(v)
-			}
-			return NewSlice(result)
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeMap},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"mapIndex", "returns a list that contains the results of a map function that is applied to the list",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list that has to be mapped", NoEscape},
-			DeclarationParameter{"map", "func", "map function func(i, any)->any that is applied to each item", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "mapIndex")
-			result := make([]Scmer, len(list))
-			fn := OptimizeProcToSerialFunction(a[1])
-			for i, v := range list {
-				result[i] = fn(NewInt(int64(i)), v)
-			}
-			return NewSlice(result)
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("mapIndex_mut")},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"reduce", "returns a list that contains the result of a map function",
-		2, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list that has to be reduced", NoEscape},
-			DeclarationParameter{"reduce", "func", "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", &TypeDescriptor{Kind: "func", Escape: false, Params: []*TypeDescriptor{{Transfer: true}, nil}}},
-			DeclarationParameter{"neutral", "any", "(optional) initial value of the accumulator, defaults to nil", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "reduce")
-			fn := OptimizeProcToSerialFunction(a[1])
-			result := NewNil()
-			i := 0
-			if len(a) > 2 {
-				result = a[2]
-			} else if len(list) > 0 {
-				result = list[0]
-				i = 1
-			}
-			for i < len(list) {
-				result = fn(result, list[i])
-				i++
-			}
-			return result
-		},
-		true, false, nil,
-		nil,
-	})
-
-	Declare(&Globalenv, &Declaration{
-		"produce", "returns a list that contains produced items - it works like for(state = startstate, condition(state), state = iterator(state)) {yield state}",
-		3, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"startstate", "any", "start state to begin with", nil},
-			DeclarationParameter{"condition", "func", "func that returns true whether the state will be inserted into the result or the loop is stopped", NoEscape},
-			DeclarationParameter{"iterator", "func", "func that produces the next state", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			result := make([]Scmer, 0)
-			state := a[0]
-			condition := OptimizeProcToSerialFunction(a[1])
-			iterator := OptimizeProcToSerialFunction(a[2])
-			for condition(state).Bool() {
-				result = append(result, state)
-				state = iterator(state)
-			}
-			return NewSlice(result)
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"produceN", "returns a list with numbers from 0..n-1, optionally mapped through a function",
-		1, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"n", "number", "number of elements to produce", nil},
-			DeclarationParameter{"fn", "func", "(optional) map function applied to each index", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			n := int(a[0].Int())
-			if n < 0 {
-				n = 0
-			}
-			result := make([]Scmer, n)
-			if len(a) > 1 && !a[1].IsNil() {
-				// fused produceN+map: generate and transform in one pass
+		Declare(&Globalenv, &Declaration{
+		Name: "filter",
+		Desc: "returns a list that only contains elements that pass the filter function",
+		Fn: func(a ...Scmer) Scmer {
+				input := asSlice(a[0], "filter")
+				result := make([]Scmer, 0, len(input))
 				fn := OptimizeProcToSerialFunction(a[1])
-				for i := 0; i < n; i++ {
-					result[i] = fn(NewInt(int64(i)))
-				}
-			} else {
-				for i := 0; i < n; i++ {
-					result[i] = NewInt(int64(i))
-				}
-			}
-			return NewSlice(result)
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeProduceN},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"parallelN", "returns a list with numbers from 0..n-1 mapped in parallel through a function",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"n", "number", "number of elements to produce", nil},
-			DeclarationParameter{"fn", "func", "map function applied to each index in parallel", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			n := int(a[0].Int())
-			if n < 0 {
-				n = 0
-			}
-			result := make([]Scmer, n)
-			fn := a[1]
-			needsSerializedCall := fn.GetTag() == tagFunc || fn.GetTag() == tagFuncEnv
-			var fnMu sync.Mutex
-			callFn := func(i int) Scmer {
-				if needsSerializedCall {
-					fnMu.Lock()
-					defer fnMu.Unlock()
-				}
-				return Apply(fn, NewInt(int64(i)))
-			}
-			workers := runtime.NumCPU()
-			if workers < 1 {
-				workers = 1
-			}
-			if workers > n {
-				workers = n
-			}
-			jobs := make(chan int, workers)
-			errs := make(chan any, workers)
-			var wg sync.WaitGroup
-			for w := 0; w < workers; w++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for i := range jobs {
-						func() {
-							defer func() {
-								if r := recover(); r != nil {
-									errs <- r
-								}
-							}()
-							result[i] = callFn(i)
-						}()
+				for _, v := range input {
+					if fn(v).Bool() {
+						result = append(result, v)
 					}
-				}()
-			}
-			for i := 0; i < n; i++ {
-				jobs <- i
-			}
-			close(jobs)
-			wg.Wait()
-			close(errs)
-			for err := range errs {
-				if err != nil {
-					panic(err)
 				}
-			}
-			return NewSlice(result)
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list that has to be filtered"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "filter condition func(any)->bool"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("filter_mut"),
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: optimizeParallelN},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"produceN_mut", "in-place produceN variant (optimizer-only)",
-		2, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"n", "number", "number of elements to produce", nil},
-			DeclarationParameter{"fn", "func", "map function applied to each index", NoEscape},
-			DeclarationParameter{"target", "list", "(optional) preallocated target list", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			n := int(a[0].Int())
-			if n < 0 {
-				n = 0
-			}
-			fn := OptimizeProcToSerialFunction(a[1])
-			if len(a) < 3 || a[2].IsNil() {
-				for i := 0; i < n; i++ {
-					fn(NewInt(int64(i)))
+		Declare(&Globalenv, &Declaration{
+		Name: "find",
+		Desc: "returns the first list element that passes the condition function, or nil/default if none matches",
+		Fn: func(a ...Scmer) Scmer {
+				input := asSlice(a[0], "find")
+				fn := OptimizeProcToSerialFunction(a[1])
+				for _, v := range input {
+					if fn(v).Bool() {
+						return v
+					}
+				}
+				if len(a) >= 3 {
+					return a[2]
 				}
 				return NewNil()
-			}
-			result := asSlice(a[2], "produceN_mut target")
-			if len(result) < n {
-				panic("produceN_mut target too small")
-			}
-			result = result[:n]
-			for i := 0; i < n; i++ {
-				result[i] = fn(NewInt(int64(i)))
-			}
-			return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list to search"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "predicate func(any)->bool that is applied until the first match"}, &TypeDescriptor{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Variadic: true}},
+			Const: true,
 		},
-		true, true, &TypeDescriptor{},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"parallelN_mut", "in-place parallelN variant (optimizer-only)",
-		2, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"n", "number", "number of elements to produce", nil},
-			DeclarationParameter{"fn", "func", "map function applied to each index in parallel", NoEscape},
-			DeclarationParameter{"target", "list", "(optional) preallocated target list", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			n := int(a[0].Int())
-			if n < 0 {
-				n = 0
-			}
-			fn := a[1]
-			needsSerializedCall := fn.GetTag() == tagFunc || fn.GetTag() == tagFuncEnv
-			var fnMu sync.Mutex
-			callFn := func(i int) Scmer {
-				if needsSerializedCall {
-					fnMu.Lock()
-					defer fnMu.Unlock()
+		Declare(&Globalenv, &Declaration{
+		Name: "map",
+		Desc: "returns a list that contains the results of a map function that is applied to the list",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "map")
+				result := make([]Scmer, len(list))
+				fn := OptimizeProcToSerialFunction(a[1])
+				for i, v := range list {
+					result[i] = fn(v)
 				}
-				return Apply(fn, NewInt(int64(i)))
-			}
-			workers := runtime.NumCPU()
-			if workers < 1 {
-				workers = 1
-			}
-			if workers > n {
-				workers = n
-			}
-			if len(a) < 3 || a[2].IsNil() {
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped"}, &TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "map function func(any)->any that is applied to each item"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: optimizeMap,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "mapIndex",
+		Desc: "returns a list that contains the results of a map function that is applied to the list",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "mapIndex")
+				result := make([]Scmer, len(list))
+				fn := OptimizeProcToSerialFunction(a[1])
+				for i, v := range list {
+					result[i] = fn(NewInt(int64(i)), v)
+				}
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped"}, &TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "map function func(i, any)->any that is applied to each item"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("mapIndex_mut"),
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "reduce",
+		Desc: "returns a list that contains the result of a map function",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "reduce")
+				fn := OptimizeProcToSerialFunction(a[1])
+				result := NewNil()
+				i := 0
+				if len(a) > 2 {
+					result = a[2]
+				} else if len(list) > 0 {
+					result = list[0]
+					i = 1
+				}
+				for i < len(list) {
+					result = fn(result, list[i])
+					i++
+				}
+				return result
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced"}, &TypeDescriptor{Kind: "func", ParamName: "reduce", ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", Params: []*TypeDescriptor{{Transfer: true}, nil}}, &TypeDescriptor{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true}},
+			Const: true,
+		},
+	})
+
+		Declare(&Globalenv, &Declaration{
+		Name: "produce",
+		Desc: "returns a list that contains produced items - it works like for(state = startstate, condition(state), state = iterator(state)) {yield state}",
+		Fn: func(a ...Scmer) Scmer {
+				result := make([]Scmer, 0)
+				state := a[0]
+				condition := OptimizeProcToSerialFunction(a[1])
+				iterator := OptimizeProcToSerialFunction(a[2])
+				for condition(state).Bool() {
+					result = append(result, state)
+					state = iterator(state)
+				}
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "startstate", ParamDesc: "start state to begin with"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "func that returns true whether the state will be inserted into the result or the loop is stopped"}, &TypeDescriptor{Kind: "func", ParamName: "iterator", ParamDesc: "func that produces the next state"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "produceN",
+		Desc: "returns a list with numbers from 0..n-1, optionally mapped through a function",
+		Fn: func(a ...Scmer) Scmer {
+				n := int(a[0].Int())
+				if n < 0 {
+					n = 0
+				}
+				result := make([]Scmer, n)
+				if len(a) > 1 && !a[1].IsNil() {
+					// fused produceN+map: generate and transform in one pass
+					fn := OptimizeProcToSerialFunction(a[1])
+					for i := 0; i < n; i++ {
+						result[i] = fn(NewInt(int64(i)))
+					}
+				} else {
+					for i := 0; i < n; i++ {
+						result[i] = NewInt(int64(i))
+					}
+				}
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"}, &TypeDescriptor{Kind: "func", ParamName: "fn", ParamDesc: "(optional) map function applied to each index", Optional: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: optimizeProduceN,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "parallelN",
+		Desc: "returns a list with numbers from 0..n-1 mapped in parallel through a function",
+		Fn: func(a ...Scmer) Scmer {
+				n := int(a[0].Int())
+				if n < 0 {
+					n = 0
+				}
+				result := make([]Scmer, n)
+				fn := a[1]
+				needsSerializedCall := fn.GetTag() == tagFunc || fn.GetTag() == tagFuncEnv
+				var fnMu sync.Mutex
+				callFn := func(i int) Scmer {
+					if needsSerializedCall {
+						fnMu.Lock()
+						defer fnMu.Unlock()
+					}
+					return Apply(fn, NewInt(int64(i)))
+				}
+				workers := runtime.NumCPU()
+				if workers < 1 {
+					workers = 1
+				}
+				if workers > n {
+					workers = n
+				}
 				jobs := make(chan int, workers)
 				errs := make(chan any, workers)
 				var wg sync.WaitGroup
@@ -733,7 +614,7 @@ func init_list() {
 										errs <- r
 									}
 								}()
-								callFn(i)
+								result[i] = callFn(i)
 							}()
 						}
 					}()
@@ -749,653 +630,737 @@ func init_list() {
 						panic(err)
 					}
 				}
-				return NewNil()
-			}
-			result := asSlice(a[2], "parallelN_mut target")
-			if len(result) < n {
-				panic("parallelN_mut target too small")
-			}
-			result = result[:n]
-			jobs := make(chan int, workers)
-			errs := make(chan any, workers)
-			var wg sync.WaitGroup
-			for w := 0; w < workers; w++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for i := range jobs {
-						func() {
-							defer func() {
-								if r := recover(); r != nil {
-									errs <- r
-								}
-							}()
-							result[i] = callFn(i)
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"}, &TypeDescriptor{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: optimizeParallelN,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "produceN_mut",
+		Desc: "in-place produceN variant (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				n := int(a[0].Int())
+				if n < 0 {
+					n = 0
+				}
+				fn := OptimizeProcToSerialFunction(a[1])
+				if len(a) < 3 || a[2].IsNil() {
+					for i := 0; i < n; i++ {
+						fn(NewInt(int64(i)))
+					}
+					return NewNil()
+				}
+				result := asSlice(a[2], "produceN_mut target")
+				if len(result) < n {
+					panic("produceN_mut target too small")
+				}
+				result = result[:n]
+				for i := 0; i < n; i++ {
+					result[i] = fn(NewInt(int64(i)))
+				}
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"}, &TypeDescriptor{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index"}, &TypeDescriptor{Kind: "list", ParamName: "target", ParamDesc: "(optional) preallocated target list", Optional: true}},
+			Return: &TypeDescriptor{Kind: "list"},
+			Const: true,
+			Forbidden: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "parallelN_mut",
+		Desc: "in-place parallelN variant (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				n := int(a[0].Int())
+				if n < 0 {
+					n = 0
+				}
+				fn := a[1]
+				needsSerializedCall := fn.GetTag() == tagFunc || fn.GetTag() == tagFuncEnv
+				var fnMu sync.Mutex
+				callFn := func(i int) Scmer {
+					if needsSerializedCall {
+						fnMu.Lock()
+						defer fnMu.Unlock()
+					}
+					return Apply(fn, NewInt(int64(i)))
+				}
+				workers := runtime.NumCPU()
+				if workers < 1 {
+					workers = 1
+				}
+				if workers > n {
+					workers = n
+				}
+				if len(a) < 3 || a[2].IsNil() {
+					jobs := make(chan int, workers)
+					errs := make(chan any, workers)
+					var wg sync.WaitGroup
+					for w := 0; w < workers; w++ {
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							for i := range jobs {
+								func() {
+									defer func() {
+										if r := recover(); r != nil {
+											errs <- r
+										}
+									}()
+									callFn(i)
+								}()
+							}
 						}()
 					}
-				}()
-			}
-			for i := 0; i < n; i++ {
-				jobs <- i
-			}
-			close(jobs)
-			wg.Wait()
-			close(errs)
-			for err := range errs {
-				if err != nil {
-					panic(err)
+					for i := 0; i < n; i++ {
+						jobs <- i
+					}
+					close(jobs)
+					wg.Wait()
+					close(errs)
+					for err := range errs {
+						if err != nil {
+							panic(err)
+						}
+					}
+					return NewNil()
 				}
-			}
-			return NewSlice(result)
+				result := asSlice(a[2], "parallelN_mut target")
+				if len(result) < n {
+					panic("parallelN_mut target too small")
+				}
+				result = result[:n]
+				jobs := make(chan int, workers)
+				errs := make(chan any, workers)
+				var wg sync.WaitGroup
+				for w := 0; w < workers; w++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for i := range jobs {
+							func() {
+								defer func() {
+									if r := recover(); r != nil {
+										errs <- r
+									}
+								}()
+								result[i] = callFn(i)
+							}()
+						}
+					}()
+				}
+				for i := 0; i < n; i++ {
+					jobs <- i
+				}
+				close(jobs)
+				wg.Wait()
+				close(errs)
+				for err := range errs {
+					if err != nil {
+						panic(err)
+					}
+				}
+				return NewSlice(result)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"}, &TypeDescriptor{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel"}, &TypeDescriptor{Kind: "list", ParamName: "target", ParamDesc: "(optional) preallocated target list", Optional: true}},
+			Return: &TypeDescriptor{Kind: "list"},
+			Const: true,
+			Forbidden: true,
 		},
-		true, true, &TypeDescriptor{},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"list?", "checks if a value is a list",
-		1, 1,
-		[]DeclarationParameter{
-			DeclarationParameter{"value", "any", "value to check", nil},
-		}, "bool",
-		func(a ...Scmer) Scmer {
-			if a[0].IsSlice() {
-				return NewBool(true)
-			}
-			return NewBool(false)
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"contains?", "checks if a value is in a list; uses the equal?? operator",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"list", "list", "list to check", NoEscape},
-			DeclarationParameter{"value", "any", "value to check", nil},
-		}, "bool",
-		func(a ...Scmer) Scmer {
-			arr := asSlice(a[0], "contains?")
-			for _, v := range arr {
-				if Equal(v, a[1]) {
+		Declare(&Globalenv, &Declaration{
+		Name: "list?",
+		Desc: "checks if a value is a list",
+		Fn: func(a ...Scmer) Scmer {
+				if a[0].IsSlice() {
 					return NewBool(true)
 				}
-			}
-			return NewBool(false)
+				return NewBool(false)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to check"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const: true,
 		},
-		true, false, nil,
-		nil,
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "contains?",
+		Desc: "checks if a value is in a list; uses the equal?? operator",
+		Fn: func(a ...Scmer) Scmer {
+				arr := asSlice(a[0], "contains?")
+				for _, v := range arr {
+					if Equal(v, a[1]) {
+						return NewBool(true)
+					}
+				}
+				return NewBool(false)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "list to check"}, &TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to check"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const: true,
+		},
 	})
 
 	// dictionary functions
 	DeclareTitle("Associative Lists / Dictionaries")
 
-	Declare(&Globalenv, &Declaration{
-		"filter_assoc", "returns a filtered dictionary according to a filter function",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be filtered", NoEscape},
-			DeclarationParameter{"condition", "func", "filter function func(string any)->bool where the first parameter is the key, the second is the value", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			result := make([]Scmer, 0)
-			fn := OptimizeProcToSerialFunction(a[1])
-			if slice, fd := asAssoc(a[0], "filter_assoc"); fd == nil {
-				for i := 0; i < len(slice); i += 2 {
-					if fn(slice[i], slice[i+1]).Bool() {
-						result = append(result, slice[i], slice[i+1])
+		Declare(&Globalenv, &Declaration{
+		Name: "filter_assoc",
+		Desc: "returns a filtered dictionary according to a filter function",
+		Fn: func(a ...Scmer) Scmer {
+				result := make([]Scmer, 0)
+				fn := OptimizeProcToSerialFunction(a[1])
+				if slice, fd := asAssoc(a[0], "filter_assoc"); fd == nil {
+					for i := 0; i < len(slice); i += 2 {
+						if fn(slice[i], slice[i+1]).Bool() {
+							result = append(result, slice[i], slice[i+1])
+						}
 					}
-				}
-			} else {
-				fd.Iterate(func(k, v Scmer) bool {
-					if fn(k, v).Bool() {
-						result = append(result, k, v)
-					}
-					return true
-				})
-			}
-			return NewSlice(result)
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_assoc_mut")},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"find_assoc", "returns the first key/value pair that passes the condition function, or nil/default if none matches",
-		2, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary to search", NoEscape},
-			DeclarationParameter{"condition", "func", "predicate func(string any)->bool that is applied until the first match", NoEscape},
-			DeclarationParameter{"default", "any", "optional default value if nothing matches", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			fn := OptimizeProcToSerialFunction(a[1])
-			if slice, fd := asAssoc(a[0], "find_assoc"); fd == nil {
-				for i := 0; i < len(slice); i += 2 {
-					if fn(slice[i], slice[i+1]).Bool() {
-						return NewSlice([]Scmer{slice[i], slice[i+1]})
-					}
-				}
-			} else {
-				var result Scmer
-				found := false
-				fd.Iterate(func(k, v Scmer) bool {
-					if fn(k, v).Bool() {
-						result = NewSlice([]Scmer{k, v})
-						found = true
-						return false
-					}
-					return true
-				})
-				if found {
-					return result
-				}
-			}
-			if len(a) >= 3 {
-				return a[2]
-			}
-			return NewNil()
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"map_assoc", "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be mapped", NoEscape},
-			DeclarationParameter{"map", "func", "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value.", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			fn := OptimizeProcToSerialFunction(a[1])
-			if slice, fd := asAssoc(a[0], "map_assoc"); fd == nil {
-				result := make([]Scmer, len(slice))
-				var key Scmer
-				for i, v := range slice {
-					if i%2 == 0 {
-						result[i] = v
-						key = v
-					} else {
-						result[i] = fn(key, v)
-					}
+				} else {
+					fd.Iterate(func(k, v Scmer) bool {
+						if fn(k, v).Bool() {
+							result = append(result, k, v)
+						}
+						return true
+					})
 				}
 				return NewSlice(result)
-			} else {
-				result := make([]Scmer, 0, len(fd.Pairs))
-				fd.Iterate(func(k, v Scmer) bool {
-					result = append(result, k, fn(k, v))
-					return true
-				})
-				return NewSlice(result)
-			}
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be filtered"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "filter function func(string any)->bool where the first parameter is the key, the second is the value"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("filter_assoc_mut"),
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("map_assoc_mut")},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"reduce_assoc", "reduces a dictionary according to a reduce function",
-		3, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be reduced", NoEscape},
-			DeclarationParameter{"reduce", "func", "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", &TypeDescriptor{Kind: "func", Escape: false, Params: []*TypeDescriptor{{Transfer: true}, nil, nil}}},
-			DeclarationParameter{"neutral", "any", "initial value for the accumulator", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			result := a[2]
-			reduce := OptimizeProcToSerialFunction(a[1])
-			if slice, fd := asAssoc(a[0], "reduce_assoc"); fd == nil {
-				for i := 0; i < len(slice); i += 2 {
-					result = reduce(result, slice[i], slice[i+1])
+		Declare(&Globalenv, &Declaration{
+		Name: "find_assoc",
+		Desc: "returns the first key/value pair that passes the condition function, or nil/default if none matches",
+		Fn: func(a ...Scmer) Scmer {
+				fn := OptimizeProcToSerialFunction(a[1])
+				if slice, fd := asAssoc(a[0], "find_assoc"); fd == nil {
+					for i := 0; i < len(slice); i += 2 {
+						if fn(slice[i], slice[i+1]).Bool() {
+							return NewSlice([]Scmer{slice[i], slice[i+1]})
+						}
+					}
+				} else {
+					var result Scmer
+					found := false
+					fd.Iterate(func(k, v Scmer) bool {
+						if fn(k, v).Bool() {
+							result = NewSlice([]Scmer{k, v})
+							found = true
+							return false
+						}
+						return true
+					})
+					if found {
+						return result
+					}
 				}
-			} else {
-				fd.Iterate(func(k, v Scmer) bool { result = reduce(result, k, v); return true })
-			}
-			return result
+				if len(a) >= 3 {
+					return a[2]
+				}
+				return NewNil()
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "dictionary to search"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "predicate func(string any)->bool that is applied until the first match"}, &TypeDescriptor{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Optional: true}},
+			Const: true,
 		},
-		true, false, nil,
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"has_assoc?", "checks if a dictionary has a key present",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be checked", NoEscape},
-			DeclarationParameter{"key", "string", "key to test", nil},
-		}, "bool",
-		func(a ...Scmer) Scmer {
-			if slice, fd := asAssoc(a[0], "has_assoc?"); fd == nil {
-				for i := 0; i < len(slice); i += 2 {
-					if Equal(slice[i], a[1]) {
+		Declare(&Globalenv, &Declaration{
+		Name: "map_assoc",
+		Desc: "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
+		Fn: func(a ...Scmer) Scmer {
+				fn := OptimizeProcToSerialFunction(a[1])
+				if slice, fd := asAssoc(a[0], "map_assoc"); fd == nil {
+					result := make([]Scmer, len(slice))
+					var key Scmer
+					for i, v := range slice {
+						if i%2 == 0 {
+							result[i] = v
+							key = v
+						} else {
+							result[i] = fn(key, v)
+						}
+					}
+					return NewSlice(result)
+				} else {
+					result := make([]Scmer, 0, len(fd.Pairs))
+					fd.Iterate(func(k, v Scmer) bool {
+						result = append(result, k, fn(k, v))
+						return true
+					})
+					return NewSlice(result)
+				}
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be mapped"}, &TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value."}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("map_assoc_mut"),
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "reduce_assoc",
+		Desc: "reduces a dictionary according to a reduce function",
+		Fn: func(a ...Scmer) Scmer {
+				result := a[2]
+				reduce := OptimizeProcToSerialFunction(a[1])
+				if slice, fd := asAssoc(a[0], "reduce_assoc"); fd == nil {
+					for i := 0; i < len(slice); i += 2 {
+						result = reduce(result, slice[i], slice[i+1])
+					}
+				} else {
+					fd.Iterate(func(k, v Scmer) bool { result = reduce(result, k, v); return true })
+				}
+				return result
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be reduced"}, &TypeDescriptor{Kind: "func", ParamName: "reduce", ParamDesc: "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", Params: []*TypeDescriptor{{Transfer: true}, nil, nil}}, &TypeDescriptor{Kind: "any", ParamName: "neutral", ParamDesc: "initial value for the accumulator"}},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "has_assoc?",
+		Desc: "checks if a dictionary has a key present",
+		Fn: func(a ...Scmer) Scmer {
+				if slice, fd := asAssoc(a[0], "has_assoc?"); fd == nil {
+					for i := 0; i < len(slice); i += 2 {
+						if Equal(slice[i], a[1]) {
+							return NewBool(true)
+						}
+					}
+				} else {
+					if _, ok := fd.Get(a[1]); ok {
 						return NewBool(true)
 					}
 				}
-			} else {
-				if _, ok := fd.Get(a[1]); ok {
-					return NewBool(true)
-				}
-			}
-			return NewBool(false)
+				return NewBool(false)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be checked"}, &TypeDescriptor{Kind: "string", ParamName: "key", ParamDesc: "key to test"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const: true,
 		},
-		true, false, nil,
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"get_assoc", "gets a value from a dictionary by key, returns nil if not found",
-		2, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary to look up", NoEscape},
-			DeclarationParameter{"key", "any", "key to look up", nil},
-			DeclarationParameter{"default", "any", "optional default value if key not found", nil},
-		}, "any",
-		func(a ...Scmer) Scmer {
-			if slice, fd := asAssoc(a[0], "get_assoc"); fd == nil {
-				for i := 0; i < len(slice); i += 2 {
-					if Equal(slice[i], a[1]) {
-						return slice[i+1]
-					}
-				}
-			} else {
-				if v, ok := fd.Get(a[1]); ok {
-					return v
-				}
-			}
-			// Return default value if provided, otherwise nil
-			if len(a) >= 3 {
-				return a[2]
-			}
-			return NewNil()
-		},
-		true, false, nil,
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"extract_assoc", "applies a function (key value) on the dictionary and returns the results as a flat list",
-		2, 2,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "dictionary that has to be checked", NoEscape},
-			DeclarationParameter{"map", "func", "func(string any)->any that flattens down each element", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			fn := OptimizeProcToSerialFunction(a[1])
-			if slice, fd := asAssoc(a[0], "extract_assoc"); fd == nil {
-				result := make([]Scmer, len(slice)/2)
-				var key Scmer
-				for i, v := range slice {
-					if i%2 == 0 {
-						key = v
-					} else {
-						result[i/2] = fn(key, v)
-					}
-				}
-				return NewSlice(result)
-			} else {
-				result := make([]Scmer, 0, len(fd.Pairs)/2)
-				fd.Iterate(func(k, v Scmer) bool {
-					result = append(result, fn(k, v))
-					return true
-				})
-				return NewSlice(result)
-			}
-		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("extract_assoc_mut")},
-		nil,
-	})
-	Declare(&Globalenv, &Declaration{
-		"set_assoc", "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
-		3, 4,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict", "list", "input dictionary", nil},
-			DeclarationParameter{"key", "string", "key that has to be set", nil},
-			DeclarationParameter{"value", "any", "new value to set", nil},
-			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be physically stored in the new dictionary.", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			var mergeFn func(Scmer, Scmer) Scmer
-			if len(a) > 3 {
-				mfn := OptimizeProcToSerialFunction(a[3])
-				mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
-			}
-			slice, fd := asAssoc(a[0], "set_assoc")
-			if fd == nil {
-				// defensive copy — set_assoc must not mutate the original
-				list := append([]Scmer{}, slice...)
-				for i := 0; i < len(list); i += 2 {
-					if Equal(list[i], a[1]) {
-						if mergeFn != nil {
-							list[i+1] = mergeFn(list[i+1], a[2])
-						} else {
-							list[i+1] = a[2]
+		Declare(&Globalenv, &Declaration{
+		Name: "get_assoc",
+		Desc: "gets a value from a dictionary by key, returns nil if not found",
+		Fn: func(a ...Scmer) Scmer {
+				if slice, fd := asAssoc(a[0], "get_assoc"); fd == nil {
+					for i := 0; i < len(slice); i += 2 {
+						if Equal(slice[i], a[1]) {
+							return slice[i+1]
 						}
-						return NewSlice(list)
+					}
+				} else {
+					if v, ok := fd.Get(a[1]); ok {
+						return v
 					}
 				}
-				list = append(list, a[1], a[2])
-				if len(list) >= 10 {
-					fd := NewFastDictValue(len(list)/2 + 4)
-					for i := 0; i < len(list); i += 2 {
-						fd.Set(list[i], list[i+1], nil)
+				// Return default value if provided, otherwise nil
+				if len(a) >= 3 {
+					return a[2]
+				}
+				return NewNil()
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "dictionary to look up"}, &TypeDescriptor{Kind: "any", ParamName: "key", ParamDesc: "key to look up"}, &TypeDescriptor{Kind: "any", ParamName: "default", ParamDesc: "optional default value if key not found", Optional: true}},
+			Const: true,
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "extract_assoc",
+		Desc: "applies a function (key value) on the dictionary and returns the results as a flat list",
+		Fn: func(a ...Scmer) Scmer {
+				fn := OptimizeProcToSerialFunction(a[1])
+				if slice, fd := asAssoc(a[0], "extract_assoc"); fd == nil {
+					result := make([]Scmer, len(slice)/2)
+					var key Scmer
+					for i, v := range slice {
+						if i%2 == 0 {
+							key = v
+						} else {
+							result[i/2] = fn(key, v)
+						}
 					}
+					return NewSlice(result)
+				} else {
+					result := make([]Scmer, 0, len(fd.Pairs)/2)
+					fd.Iterate(func(k, v Scmer) bool {
+						result = append(result, fn(k, v))
+						return true
+					})
+					return NewSlice(result)
+				}
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be checked"}, &TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "func(string any)->any that flattens down each element"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("extract_assoc_mut"),
+		},
+	})
+		Declare(&Globalenv, &Declaration{
+		Name: "set_assoc",
+		Desc: "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
+		Fn: func(a ...Scmer) Scmer {
+				var mergeFn func(Scmer, Scmer) Scmer
+				if len(a) > 3 {
+					mfn := OptimizeProcToSerialFunction(a[3])
+					mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
+				}
+				slice, fd := asAssoc(a[0], "set_assoc")
+				if fd == nil {
+					// defensive copy — set_assoc must not mutate the original
+					list := append([]Scmer{}, slice...)
+					for i := 0; i < len(list); i += 2 {
+						if Equal(list[i], a[1]) {
+							if mergeFn != nil {
+								list[i+1] = mergeFn(list[i+1], a[2])
+							} else {
+								list[i+1] = a[2]
+							}
+							return NewSlice(list)
+						}
+					}
+					list = append(list, a[1], a[2])
+					if len(list) >= 10 {
+						fd := NewFastDictValue(len(list)/2 + 4)
+						for i := 0; i < len(list); i += 2 {
+							fd.Set(list[i], list[i+1], nil)
+						}
+						return NewFastDict(fd)
+					}
+					return NewSlice(list)
+				} else {
+					fd = fd.Copy()
+					fd.Set(a[1], a[2], mergeFn)
 					return NewFastDict(fd)
 				}
-				return NewSlice(list)
-			} else {
-				fd = fd.Copy()
-				fd.Set(a[1], a[2], mergeFn)
-				return NewFastDict(fd)
-			}
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "input dictionary"}, &TypeDescriptor{Kind: "string", ParamName: "key", ParamDesc: "key that has to be set"}, &TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "new value to set"}, &TypeDescriptor{Kind: "func", ParamName: "merge", ParamDesc: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be physically stored in the new dictionary.", Optional: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("set_assoc_mut"),
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("set_assoc_mut")},
-		nil,
 	})
-	Declare(&Globalenv, &Declaration{
-		"merge_assoc", "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
-		2, 3,
-		[]DeclarationParameter{
-			DeclarationParameter{"dict1", "list", "first input dictionary that has to be changed. You must not use this value again.", nil},
-			DeclarationParameter{"dict2", "list", "input dictionary that contains the new values that have to be added", nil},
-			DeclarationParameter{"merge", "func", "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
-			dst := a[0]
-			if slice, fd := asAssoc(a[1], "merge_assoc"); fd == nil {
-				for i := 0; i < len(slice); i += 2 {
+		Declare(&Globalenv, &Declaration{
+		Name: "merge_assoc",
+		Desc: "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
+		Fn: func(a ...Scmer) Scmer {
+				setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
+				dst := a[0]
+				if slice, fd := asAssoc(a[1], "merge_assoc"); fd == nil {
+					for i := 0; i < len(slice); i += 2 {
+						if len(a) > 2 {
+							dst = setAssoc(dst, slice[i], slice[i+1], a[2])
+						} else {
+							dst = setAssoc(dst, slice[i], slice[i+1])
+						}
+					}
+				} else {
 					if len(a) > 2 {
-						dst = setAssoc(dst, slice[i], slice[i+1], a[2])
+						fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v, a[2]); return true })
 					} else {
-						dst = setAssoc(dst, slice[i], slice[i+1])
+						fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v); return true })
 					}
 				}
-			} else {
-				if len(a) > 2 {
-					fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v, a[2]); return true })
-				} else {
-					fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v); return true })
-				}
-			}
-			return dst
+				return dst
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict1", ParamDesc: "first input dictionary that has to be changed. You must not use this value again."}, &TypeDescriptor{Kind: "list", ParamName: "dict2", ParamDesc: "input dictionary that contains the new values that have to be added"}, &TypeDescriptor{Kind: "func", ParamName: "merge", ParamDesc: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Optimize: FirstParameterMutable("merge_assoc_mut"),
 		},
-		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("merge_assoc_mut")},
-		nil,
 	})
 
 	// _mut variants: optimizer-only, forbidden from .scm code
 	// Tier 1: same-length, zero-copy
 
-	Declare(&Globalenv, &Declaration{
-		"map_mut", "in-place map (optimizer-only)",
-		2, 2,
-		[]DeclarationParameter{
-			{"list", "list", "owned list to map in-place", nil},
-			{"map", "func", "map function", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			list := a[0].Slice()
-			fn := OptimizeProcToSerialFunction(a[1])
-			for i, v := range list {
-				list[i] = fn(v)
-			}
-			return NewSlice(list)
-		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
-	})
-
-	Declare(&Globalenv, &Declaration{
-		"mapIndex_mut", "in-place mapIndex (optimizer-only)",
-		2, 2,
-		[]DeclarationParameter{
-			{"list", "list", "owned list to map in-place", nil},
-			{"map", "func", "map function func(i, any)->any", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			list := a[0].Slice()
-			fn := OptimizeProcToSerialFunction(a[1])
-			for i, v := range list {
-				list[i] = fn(NewInt(int64(i)), v)
-			}
-			return NewSlice(list)
-		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
-	})
-
-	Declare(&Globalenv, &Declaration{
-		"map_assoc_mut", "in-place map_assoc (optimizer-only, slice path only)",
-		2, 2,
-		[]DeclarationParameter{
-			{"dict", "list", "owned dictionary to map in-place", nil},
-			{"map", "func", "map function func(key, value)->value", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			fn := OptimizeProcToSerialFunction(a[1])
-			if slice, fd := asAssoc(a[0], "map_assoc_mut"); fd == nil {
-				var key Scmer
-				for i, v := range slice {
-					if i%2 == 0 {
-						key = v
-					} else {
-						slice[i] = fn(key, v)
-					}
+		Declare(&Globalenv, &Declaration{
+		Name: "map_mut",
+		Desc: "in-place map (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				list := a[0].Slice()
+				fn := OptimizeProcToSerialFunction(a[1])
+				for i, v := range list {
+					list[i] = fn(v)
 				}
-				return NewSlice(slice)
-			} else {
-				// FastDict path: cannot mutate in-place, fall back to allocating
-				result := make([]Scmer, 0, len(fd.Pairs))
-				fd.Iterate(func(k, v Scmer) bool {
-					result = append(result, k, fn(k, v))
-					return true
-				})
-				return NewSlice(result)
-			}
+				return NewSlice(list)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "owned list to map in-place"}, &TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "map function"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
 		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
+	})
+
+		Declare(&Globalenv, &Declaration{
+		Name: "mapIndex_mut",
+		Desc: "in-place mapIndex (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				list := a[0].Slice()
+				fn := OptimizeProcToSerialFunction(a[1])
+				for i, v := range list {
+					list[i] = fn(NewInt(int64(i)), v)
+				}
+				return NewSlice(list)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "owned list to map in-place"}, &TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "map function func(i, any)->any"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
+		},
+	})
+
+		Declare(&Globalenv, &Declaration{
+		Name: "map_assoc_mut",
+		Desc: "in-place map_assoc (optimizer-only, slice path only)",
+		Fn: func(a ...Scmer) Scmer {
+				fn := OptimizeProcToSerialFunction(a[1])
+				if slice, fd := asAssoc(a[0], "map_assoc_mut"); fd == nil {
+					var key Scmer
+					for i, v := range slice {
+						if i%2 == 0 {
+							key = v
+						} else {
+							slice[i] = fn(key, v)
+						}
+					}
+					return NewSlice(slice)
+				} else {
+					// FastDict path: cannot mutate in-place, fall back to allocating
+					result := make([]Scmer, 0, len(fd.Pairs))
+					fd.Iterate(func(k, v Scmer) bool {
+						result = append(result, k, fn(k, v))
+						return true
+					})
+					return NewSlice(result)
+				}
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to map in-place"}, &TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "map function func(key, value)->value"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
+		},
 	})
 
 	// Tier 2: shrinking, write-cursor
 
-	Declare(&Globalenv, &Declaration{
-		"filter_mut", "in-place filter (optimizer-only)",
-		2, 2,
-		[]DeclarationParameter{
-			{"list", "list", "owned list to filter in-place", nil},
-			{"condition", "func", "filter condition func(any)->bool", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			input := a[0].Slice()
-			fn := OptimizeProcToSerialFunction(a[1])
-			w := 0
-			for _, v := range input {
-				if fn(v).Bool() {
-					input[w] = v
-					w++
-				}
-			}
-			return NewSlice(input[:w])
-		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
-	})
-
-	Declare(&Globalenv, &Declaration{
-		"filter_assoc_mut", "in-place filter_assoc (optimizer-only)",
-		2, 2,
-		[]DeclarationParameter{
-			{"dict", "list", "owned dictionary to filter in-place", nil},
-			{"condition", "func", "filter function func(key, value)->bool", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			fn := OptimizeProcToSerialFunction(a[1])
-			if slice, fd := asAssoc(a[0], "filter_assoc_mut"); fd == nil {
+		Declare(&Globalenv, &Declaration{
+		Name: "filter_mut",
+		Desc: "in-place filter (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				input := a[0].Slice()
+				fn := OptimizeProcToSerialFunction(a[1])
 				w := 0
-				for i := 0; i < len(slice); i += 2 {
-					if fn(slice[i], slice[i+1]).Bool() {
-						slice[w] = slice[i]
-						slice[w+1] = slice[i+1]
-						w += 2
+				for _, v := range input {
+					if fn(v).Bool() {
+						input[w] = v
+						w++
 					}
 				}
-				return NewSlice(slice[:w])
-			} else {
-				result := make([]Scmer, 0)
-				fd.Iterate(func(k, v Scmer) bool {
-					if fn(k, v).Bool() {
-						result = append(result, k, v)
-					}
-					return true
-				})
-				return NewSlice(result)
-			}
+				return NewSlice(input[:w])
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "owned list to filter in-place"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "filter condition func(any)->bool"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
 		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
 	})
 
-	Declare(&Globalenv, &Declaration{
-		"extract_assoc_mut", "in-place extract_assoc (optimizer-only)",
-		2, 2,
-		[]DeclarationParameter{
-			{"dict", "list", "owned dictionary to extract from in-place", nil},
-			{"map", "func", "func(key, value)->any that extracts each element", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			fn := OptimizeProcToSerialFunction(a[1])
-			if slice, fd := asAssoc(a[0], "extract_assoc_mut"); fd == nil {
-				w := 0
-				for i := 0; i < len(slice); i += 2 {
-					slice[w] = fn(slice[i], slice[i+1])
-					w++
-				}
-				return NewSlice(slice[:w])
-			} else {
-				result := make([]Scmer, 0, len(fd.Pairs)/2)
-				fd.Iterate(func(k, v Scmer) bool {
-					result = append(result, fn(k, v))
-					return true
-				})
-				return NewSlice(result)
-			}
-		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
-	})
-
-	Declare(&Globalenv, &Declaration{
-		"set_assoc_mut", "in-place set_assoc (optimizer-only, mutates input directly)",
-		3, 4,
-		[]DeclarationParameter{
-			{"dict", "list", "owned dictionary to mutate", nil},
-			{"key", "string", "key to set", nil},
-			{"value", "any", "new value", nil},
-			{"merge", "func", "(optional) merge function", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			var mergeFn func(Scmer, Scmer) Scmer
-			if len(a) > 3 {
-				mfn := OptimizeProcToSerialFunction(a[3])
-				mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
-			}
-			slice, fd := asAssoc(a[0], "set_assoc_mut")
-			if fd == nil {
-				list := slice
-				for i := 0; i < len(list); i += 2 {
-					if Equal(list[i], a[1]) {
-						if mergeFn != nil {
-							list[i+1] = mergeFn(list[i+1], a[2])
-						} else {
-							list[i+1] = a[2]
+		Declare(&Globalenv, &Declaration{
+		Name: "filter_assoc_mut",
+		Desc: "in-place filter_assoc (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				fn := OptimizeProcToSerialFunction(a[1])
+				if slice, fd := asAssoc(a[0], "filter_assoc_mut"); fd == nil {
+					w := 0
+					for i := 0; i < len(slice); i += 2 {
+						if fn(slice[i], slice[i+1]).Bool() {
+							slice[w] = slice[i]
+							slice[w+1] = slice[i+1]
+							w += 2
 						}
-						return NewSlice(list)
 					}
+					return NewSlice(slice[:w])
+				} else {
+					result := make([]Scmer, 0)
+					fd.Iterate(func(k, v Scmer) bool {
+						if fn(k, v).Bool() {
+							result = append(result, k, v)
+						}
+						return true
+					})
+					return NewSlice(result)
 				}
-				list = append(list, a[1], a[2])
-				if len(list) >= 10 {
-					fd := NewFastDictValue(len(list)/2 + 4)
-					for i := 0; i < len(list); i += 2 {
-						fd.Set(list[i], list[i+1], nil)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to filter in-place"}, &TypeDescriptor{Kind: "func", ParamName: "condition", ParamDesc: "filter function func(key, value)->bool"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
+		},
+	})
+
+		Declare(&Globalenv, &Declaration{
+		Name: "extract_assoc_mut",
+		Desc: "in-place extract_assoc (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				fn := OptimizeProcToSerialFunction(a[1])
+				if slice, fd := asAssoc(a[0], "extract_assoc_mut"); fd == nil {
+					w := 0
+					for i := 0; i < len(slice); i += 2 {
+						slice[w] = fn(slice[i], slice[i+1])
+						w++
 					}
+					return NewSlice(slice[:w])
+				} else {
+					result := make([]Scmer, 0, len(fd.Pairs)/2)
+					fd.Iterate(func(k, v Scmer) bool {
+						result = append(result, fn(k, v))
+						return true
+					})
+					return NewSlice(result)
+				}
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to extract from in-place"}, &TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "func(key, value)->any that extracts each element"}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
+		},
+	})
+
+		Declare(&Globalenv, &Declaration{
+		Name: "set_assoc_mut",
+		Desc: "in-place set_assoc (optimizer-only, mutates input directly)",
+		Fn: func(a ...Scmer) Scmer {
+				var mergeFn func(Scmer, Scmer) Scmer
+				if len(a) > 3 {
+					mfn := OptimizeProcToSerialFunction(a[3])
+					mergeFn = func(oldV, newV Scmer) Scmer { return mfn(oldV, newV) }
+				}
+				slice, fd := asAssoc(a[0], "set_assoc_mut")
+				if fd == nil {
+					list := slice
+					for i := 0; i < len(list); i += 2 {
+						if Equal(list[i], a[1]) {
+							if mergeFn != nil {
+								list[i+1] = mergeFn(list[i+1], a[2])
+							} else {
+								list[i+1] = a[2]
+							}
+							return NewSlice(list)
+						}
+					}
+					list = append(list, a[1], a[2])
+					if len(list) >= 10 {
+						fd := NewFastDictValue(len(list)/2 + 4)
+						for i := 0; i < len(list); i += 2 {
+							fd.Set(list[i], list[i+1], nil)
+						}
+						return NewFastDict(fd)
+					}
+					return NewSlice(list)
+				} else {
+					fd.Set(a[1], a[2], mergeFn)
 					return NewFastDict(fd)
 				}
-				return NewSlice(list)
-			} else {
-				fd.Set(a[1], a[2], mergeFn)
-				return NewFastDict(fd)
-			}
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to mutate"}, &TypeDescriptor{Kind: "string", ParamName: "key", ParamDesc: "key to set"}, &TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "new value"}, &TypeDescriptor{Kind: "func", ParamName: "merge", ParamDesc: "(optional) merge function", Optional: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
 		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
 	})
 
 	// Tier 3: append/grow
 
-	Declare(&Globalenv, &Declaration{
-		"append_mut", "in-place append (optimizer-only)",
-		2, 1000,
-		[]DeclarationParameter{
-			{"list", "list", "owned base list", nil},
-			{"item...", "any", "items to add", nil},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			base := asSlice(a[0], "append_mut")
-			base = append(base, a[1:]...)
-			return NewSlice(base)
+		Declare(&Globalenv, &Declaration{
+		Name: "append_mut",
+		Desc: "in-place append (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				base := asSlice(a[0], "append_mut")
+				base = append(base, a[1:]...)
+				return NewSlice(base)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "owned base list"}, &TypeDescriptor{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
 		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
 	})
 
-	Declare(&Globalenv, &Declaration{
-		"append_unique_mut", "in-place append_unique (optimizer-only)",
-		2, 1000,
-		[]DeclarationParameter{
-			{"list", "list", "owned base list", nil},
-			{"item...", "any", "items to add", nil},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			list := asSlice(a[0], "append_unique_mut")
-			for _, el := range a[1:] {
-				for _, el2 := range list {
-					if Equal(el, el2) {
-						goto skipItem
+		Declare(&Globalenv, &Declaration{
+		Name: "append_unique_mut",
+		Desc: "in-place append_unique (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				list := asSlice(a[0], "append_unique_mut")
+				for _, el := range a[1:] {
+					for _, el2 := range list {
+						if Equal(el, el2) {
+							goto skipItem
+						}
 					}
+					list = append(list, el)
+				skipItem:
 				}
-				list = append(list, el)
-			skipItem:
-			}
-			return NewSlice(list)
+				return NewSlice(list)
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "list", ParamDesc: "owned base list"}, &TypeDescriptor{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
 		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
 	})
 
-	Declare(&Globalenv, &Declaration{
-		"merge_assoc_mut", "in-place merge_assoc (optimizer-only)",
-		2, 3,
-		[]DeclarationParameter{
-			{"dict1", "list", "owned first dictionary", nil},
-			{"dict2", "list", "dictionary with new values", nil},
-			{"merge", "func", "(optional) merge function", NoEscape},
-		}, "list",
-		func(a ...Scmer) Scmer {
-			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc_mut"])
-			dst := a[0]
-			if slice, fd := asAssoc(a[1], "merge_assoc_mut"); fd == nil {
-				for i := 0; i < len(slice); i += 2 {
-					if len(a) > 2 {
-						dst = setAssoc(dst, slice[i], slice[i+1], a[2])
-					} else {
-						dst = setAssoc(dst, slice[i], slice[i+1])
+		Declare(&Globalenv, &Declaration{
+		Name: "merge_assoc_mut",
+		Desc: "in-place merge_assoc (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+				setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc_mut"])
+				dst := a[0]
+				if slice, fd := asAssoc(a[1], "merge_assoc_mut"); fd == nil {
+					for i := 0; i < len(slice); i += 2 {
+						if len(a) > 2 {
+							dst = setAssoc(dst, slice[i], slice[i+1], a[2])
+						} else {
+							dst = setAssoc(dst, slice[i], slice[i+1])
+						}
 					}
-				}
-			} else {
-				if len(a) > 2 {
-					fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v, a[2]); return true })
 				} else {
-					fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v); return true })
+					if len(a) > 2 {
+						fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v, a[2]); return true })
+					} else {
+						fd.Iterate(func(k, v Scmer) bool { dst = setAssoc(dst, k, v); return true })
+					}
 				}
-			}
-			return dst
+				return dst
+			},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "dict1", ParamDesc: "owned first dictionary"}, &TypeDescriptor{Kind: "list", ParamName: "dict2", ParamDesc: "dictionary with new values"}, &TypeDescriptor{Kind: "func", ParamName: "merge", ParamDesc: "(optional) merge function", Variadic: true}},
+			Return: &TypeDescriptor{Kind: "list", Transfer: true},
+			Const: true,
+			Forbidden: true,
 		},
-		true, true, &TypeDescriptor{Return: FreshAlloc},
-		nil,
 	})
 }

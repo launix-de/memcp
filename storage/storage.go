@@ -182,1373 +182,738 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 func Init(en scm.Env) {
 	scm.DeclareTitle("Storage")
 
-	scm.Declare(&en, &scm.Declaration{
-		"scan_estimate", "estimate output row count for a table scan",
-		2, 2,
-		[]scm.DeclarationParameter{
-			{"schema", "string", "database where the table is located", nil},
-			{"table", "string", "name of the table", nil},
-		}, "int",
-		func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			table := scm.String(a[1])
-			db := GetDatabase(schema)
-			if db == nil {
-				return scm.NewInt(0)
-			}
-			t := db.GetTable(table)
-			if t == nil {
-				return scm.NewInt(0)
-			}
-			return scm.NewInt(int64(t.CountEstimate()))
+		scm.Declare(&en, &scm.Declaration{
+		Name: "scan_estimate",
+		Desc: "estimate output row count for a table scan",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				schema := scm.String(a[0])
+				table := scm.String(a[1])
+				db := GetDatabase(schema)
+				if db == nil {
+					return scm.NewInt(0)
+				}
+				t := db.GetTable(table)
+				if t == nil {
+					return scm.NewInt(0)
+				}
+				return scm.NewInt(int64(t.CountEstimate()))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}},
+			Return: &scm.TypeDescriptor{Kind: "int"},
 		},
-		false, false, nil,
-		nil,
 	})
 
-	scm.Declare(&en, &scm.Declaration{
-		"scan", "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
-		6, 10,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string|nil", "database where the table is located", nil},
-			scm.DeclarationParameter{"table", "string|list", "name of the table to scan (or a list if you have temporary data)", nil},
-			scm.DeclarationParameter{"filterColumns", "list", "list of columns that are fed into filter", nil},
-			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", nil},
-			scm.DeclarationParameter{"mapColumns", "list", "list of columns that are fed into map", nil},
-			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", nil},
-			scm.DeclarationParameter{"reduce", "func", "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}}},
-			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed", nil},
-			scm.DeclarationParameter{"reduce2", "func", "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{{Transfer: true}, nil}}},
-			scm.DeclarationParameter{"isOuter", "bool", "(optional) if true, in case of no hits, call map once anyway with NULL values", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
-			mapcols := scmerSliceToStrings(mustScmerSlice(a[4], "mapColumns"))
-			isOuter := len(a) > 9 && scm.ToBool(a[9])
-
-			if list, ok := scmerSlice(a[1]); ok {
+		scm.Declare(&en, &scm.Declaration{
+		Name: "scan",
+		Desc: "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+				mapcols := scmerSliceToStrings(mustScmerSlice(a[4], "mapColumns"))
+				isOuter := len(a) > 9 && scm.ToBool(a[9])
+	
+				if list, ok := scmerSlice(a[1]); ok {
+					neutral := scm.NewNil()
+					if len(a) > 7 {
+						neutral = a[7]
+					}
+					result := neutral
+					filterfn := scm.OptimizeProcToSerialFunction(a[3])
+					filterparams := make([]scm.Scmer, len(filtercols))
+					mapfn := scm.OptimizeProcToSerialFunction(a[5])
+					mapparams := make([]scm.Scmer, len(mapcols))
+					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+					if len(a) > 6 {
+						reducefn = scm.OptimizeProcToSerialFunction(a[6])
+					}
+					hadValue := false
+					for _, val := range list {
+						row := mustScmerSlice(val, "scan list row")
+						ds := dataset(row)
+						for i, col := range filtercols {
+							filterparams[i], _ = ds.GetI(col)
+						}
+						if !scm.ToBool(filterfn(filterparams...)) {
+							continue
+						}
+						hadValue = true
+						for i, col := range mapcols {
+							mapparams[i], _ = ds.GetI(col)
+						}
+						result = reducefn(result, mapfn(mapparams...))
+					}
+					if !hadValue && isOuter {
+						for i := range mapparams {
+							mapparams[i] = scm.NewNil()
+						}
+						result = reducefn(result, mapfn(mapparams...))
+					}
+					if len(a) > 8 && !a[8].IsNil() {
+						reduce2fn := scm.OptimizeProcToSerialFunction(a[8])
+						base := neutral
+						if len(a) > 7 {
+							base = a[7]
+						}
+						result = reduce2fn(base, result)
+					}
+					return result
+				}
+	
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+	
+				aggregate := scm.NewNil()
+				if len(a) > 6 {
+					aggregate = a[6]
+				}
 				neutral := scm.NewNil()
 				if len(a) > 7 {
 					neutral = a[7]
 				}
-				result := neutral
-				filterfn := scm.OptimizeProcToSerialFunction(a[3])
-				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[5])
-				mapparams := make([]scm.Scmer, len(mapcols))
-				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-				if len(a) > 6 {
-					reducefn = scm.OptimizeProcToSerialFunction(a[6])
+				reduce2 := scm.NewNil()
+				if len(a) > 8 {
+					reduce2 = a[8]
 				}
-				hadValue := false
-				for _, val := range list {
-					row := mustScmerSlice(val, "scan list row")
-					ds := dataset(row)
-					for i, col := range filtercols {
-						filterparams[i], _ = ds.GetI(col)
-					}
-					if !scm.ToBool(filterfn(filterparams...)) {
-						continue
-					}
-					hadValue = true
-					for i, col := range mapcols {
-						mapparams[i], _ = ds.GetI(col)
-					}
-					result = reducefn(result, mapfn(mapparams...))
-				}
-				if !hadValue && isOuter {
-					for i := range mapparams {
-						mapparams[i] = scm.NewNil()
-					}
-					result = reducefn(result, mapfn(mapparams...))
-				}
-				if len(a) > 8 && !a[8].IsNil() {
-					reduce2fn := scm.OptimizeProcToSerialFunction(a[8])
-					base := neutral
-					if len(a) > 7 {
-						base = a[7]
-					}
-					result = reduce2fn(base, result)
-				}
-				return result
-			}
-
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-
-			aggregate := scm.NewNil()
-			if len(a) > 6 {
-				aggregate = a[6]
-			}
-			neutral := scm.NewNil()
-			if len(a) > 7 {
-				neutral = a[7]
-			}
-			reduce2 := scm.NewNil()
-			if len(a) > 8 {
-				reduce2 = a[8]
-			}
-			return t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
-		}, false, false, &scm.TypeDescriptor{Optimize: optimizeScan},
-		nil,
+				return t.scan(filtercols, a[3], mapcols, a[5], aggregate, neutral, reduce2, isOuter)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string|nil", ParamName: "schema", ParamDesc: "database where the table is located"}, &scm.TypeDescriptor{Kind: "string|list", ParamName: "table", ParamDesc: "name of the table to scan (or a list if you have temporary data)"}, &scm.TypeDescriptor{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"}, &scm.TypeDescriptor{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"}, &scm.TypeDescriptor{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"}, &scm.TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."}, &scm.TypeDescriptor{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true, Params: []*scm.TypeDescriptor{{Transfer: true}, nil}}, &scm.TypeDescriptor{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true}, &scm.TypeDescriptor{Kind: "func", ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true, Params: []*scm.TypeDescriptor{{Transfer: true}, nil}}, &scm.TypeDescriptor{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true}},
+			Optimize: optimizeScan,
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"scan_order", "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
-		10, 13,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database where the table is located", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table to scan", nil},
-			scm.DeclarationParameter{"filterColumns", "list", "list of columns that are fed into filter", nil},
-			scm.DeclarationParameter{"filter", "func", "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", nil},
-			scm.DeclarationParameter{"sortcols", "list", "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value", nil},
-			scm.DeclarationParameter{"sortdirs", "list", "list of column directions to sort. Must be same length as sortcols. < means ascending, > means descending, (collate ...) will add collations", nil},
-			scm.DeclarationParameter{"offset", "number", "number of items to skip before the first one is fed into map", nil},
-			scm.DeclarationParameter{"limit", "number", "max number of items to read", nil},
-			scm.DeclarationParameter{"mapColumns", "list", "list of columns that are fed into map", nil},
-			scm.DeclarationParameter{"map", "func", "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", nil},
-			scm.DeclarationParameter{"reduce", "func", "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", nil},
-			scm.DeclarationParameter{"neutral", "any", "(optional) neutral element for the reduce phase, otherwise nil is assumed", nil},
-			scm.DeclarationParameter{"isOuter", "bool", "(optional) if true, in case of no hits, call map once anyway with NULL values", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
-			sortcolsVals := mustScmerSlice(a[4], "sortcols")
-			sortdirsVals := mustScmerSlice(a[5], "sortdirs")
-			mapcols := scmerSliceToStrings(mustScmerSlice(a[8], "mapColumns"))
-
-			aggregate := scm.NewNil()
-			if len(a) > 10 {
-				aggregate = a[10]
-			}
-			neutral := scm.NewNil()
-			if len(a) > 11 {
-				neutral = a[11]
-			}
-
-			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcolsVals))
-			for i, dir := range sortdirsVals {
-				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
-			}
-
-			isOuter := len(a) > 12 && scm.ToBool(a[12])
-
-			if list, ok := scmerSlice(a[1]); ok {
-				result := neutral
-				filterfn := scm.OptimizeProcToSerialFunction(a[3])
-				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[9])
-				mapparams := make([]scm.Scmer, len(mapcols))
-				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-				if !aggregate.IsNil() {
-					reducefn = scm.OptimizeProcToSerialFunction(aggregate)
+		scm.Declare(&en, &scm.Declaration{
+		Name: "scan_order",
+		Desc: "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+				sortcolsVals := mustScmerSlice(a[4], "sortcols")
+				sortdirsVals := mustScmerSlice(a[5], "sortdirs")
+				mapcols := scmerSliceToStrings(mustScmerSlice(a[8], "mapColumns"))
+	
+				aggregate := scm.NewNil()
+				if len(a) > 10 {
+					aggregate = a[10]
 				}
-				var filtered []scm.Scmer
-				for _, val := range list {
-					row := mustScmerSlice(val, "scan_order list row")
-					ds := dataset(row)
-					for i, col := range filtercols {
-						filterparams[i], _ = ds.GetI(col)
-					}
-					if scm.ToBool(filterfn(filterparams...)) {
-						filtered = append(filtered, val)
-					}
+				neutral := scm.NewNil()
+				if len(a) > 11 {
+					neutral = a[11]
 				}
-				scols := make([]func(uint32) scm.Scmer, len(sortcolsVals))
-				for i, scol := range sortcolsVals {
-					if scol.IsString() {
-						colname := scol.String()
+	
+				sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcolsVals))
+				for i, dir := range sortdirsVals {
+					sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
+				}
+	
+				isOuter := len(a) > 12 && scm.ToBool(a[12])
+	
+				if list, ok := scmerSlice(a[1]); ok {
+					result := neutral
+					filterfn := scm.OptimizeProcToSerialFunction(a[3])
+					filterparams := make([]scm.Scmer, len(filtercols))
+					mapfn := scm.OptimizeProcToSerialFunction(a[9])
+					mapparams := make([]scm.Scmer, len(mapcols))
+					reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
+					if !aggregate.IsNil() {
+						reducefn = scm.OptimizeProcToSerialFunction(aggregate)
+					}
+					var filtered []scm.Scmer
+					for _, val := range list {
+						row := mustScmerSlice(val, "scan_order list row")
+						ds := dataset(row)
+						for i, col := range filtercols {
+							filterparams[i], _ = ds.GetI(col)
+						}
+						if scm.ToBool(filterfn(filterparams...)) {
+							filtered = append(filtered, val)
+						}
+					}
+					scols := make([]func(uint32) scm.Scmer, len(sortcolsVals))
+					for i, scol := range sortcolsVals {
+						if scol.IsString() {
+							colname := scol.String()
+							scols[i] = func(idx uint32) scm.Scmer {
+								row := mustScmerSlice(filtered[idx], "sort row")
+								ds := dataset(row)
+								val, _ := ds.GetI(colname)
+								return val
+							}
+							continue
+						}
+						proc := scm.OptimizeProcToSerialFunction(scol)
+						var params []scm.Scmer
+						if slice, ok := scmerSlice(scol); ok {
+							params = slice
+						}
 						scols[i] = func(idx uint32) scm.Scmer {
 							row := mustScmerSlice(filtered[idx], "sort row")
 							ds := dataset(row)
-							val, _ := ds.GetI(colname)
-							return val
+							args := make([]scm.Scmer, len(params))
+							for j, p := range params {
+								args[j], _ = ds.GetI(scm.String(p))
+							}
+							return proc(args...)
 						}
-						continue
 					}
-					proc := scm.OptimizeProcToSerialFunction(scol)
-					var params []scm.Scmer
-					if slice, ok := scmerSlice(scol); ok {
-						params = slice
-					}
-					scols[i] = func(idx uint32) scm.Scmer {
-						row := mustScmerSlice(filtered[idx], "sort row")
+					sort.Slice(filtered, func(i, j int) bool {
+						for c := 0; c < len(scols); c++ {
+							a := scols[c](uint32(i))
+							b := scols[c](uint32(j))
+							if scm.ToBool(sortdirs[c](a, b)) {
+								return false
+							} else if scm.ToBool(sortdirs[c](b, a)) {
+								return true
+							}
+						}
+						return false
+					})
+					offset := int(scm.ToInt(a[6]))
+					limit := int(scm.ToInt(a[7]))
+					hadValue := false
+					count := 0
+					for idx, val := range filtered {
+						if idx < offset {
+							continue
+						}
+						if limit >= 0 && count >= limit {
+							break
+						}
+						row := mustScmerSlice(val, "scan_order row")
 						ds := dataset(row)
-						args := make([]scm.Scmer, len(params))
-						for j, p := range params {
-							args[j], _ = ds.GetI(scm.String(p))
+						for i, col := range mapcols {
+							mapparams[i], _ = ds.GetI(col)
 						}
-						return proc(args...)
+						result = reducefn(result, mapfn(mapparams...))
+						hadValue = true
+						count++
 					}
-				}
-				sort.Slice(filtered, func(i, j int) bool {
-					for c := 0; c < len(scols); c++ {
-						a := scols[c](uint32(i))
-						b := scols[c](uint32(j))
-						if scm.ToBool(sortdirs[c](a, b)) {
-							return false
-						} else if scm.ToBool(sortdirs[c](b, a)) {
-							return true
+					if !hadValue && isOuter {
+						for i := range mapparams {
+							mapparams[i] = scm.NewNil()
 						}
+						result = reducefn(result, mapfn(mapparams...))
 					}
-					return false
-				})
-				offset := int(scm.ToInt(a[6]))
-				limit := int(scm.ToInt(a[7]))
-				hadValue := false
-				count := 0
-				for idx, val := range filtered {
-					if idx < offset {
-						continue
-					}
-					if limit >= 0 && count >= limit {
-						break
-					}
-					row := mustScmerSlice(val, "scan_order row")
-					ds := dataset(row)
-					for i, col := range mapcols {
-						mapparams[i], _ = ds.GetI(col)
-					}
-					result = reducefn(result, mapfn(mapparams...))
-					hadValue = true
-					count++
+					return result
 				}
-				if !hadValue && isOuter {
-					for i := range mapparams {
-						mapparams[i] = scm.NewNil()
-					}
-					result = reducefn(result, mapfn(mapparams...))
+	
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-				return result
-			}
-
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-
-			return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
-		}, false, false, &scm.TypeDescriptor{Optimize: optimizeScanOrder},
-		nil,
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+	
+				return t.scan_order(filtercols, a[3], sortcolsVals, sortdirs, scm.ToInt(a[6]), scm.ToInt(a[7]), mapcols, a[9], aggregate, neutral, isOuter)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "database where the table is located"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table to scan"}, &scm.TypeDescriptor{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"}, &scm.TypeDescriptor{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan"}, &scm.TypeDescriptor{Kind: "list", ParamName: "sortcols", ParamDesc: "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"}, &scm.TypeDescriptor{Kind: "list", ParamName: "sortdirs", ParamDesc: "list of column directions to sort. Must be same length as sortcols. < means ascending, > means descending, (collate ...) will add collations"}, &scm.TypeDescriptor{Kind: "number", ParamName: "offset", ParamDesc: "number of items to skip before the first one is fed into map"}, &scm.TypeDescriptor{Kind: "number", ParamName: "limit", ParamDesc: "max number of items to read"}, &scm.TypeDescriptor{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"}, &scm.TypeDescriptor{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns."}, &scm.TypeDescriptor{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true}, &scm.TypeDescriptor{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true}, &scm.TypeDescriptor{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true}},
+			Optimize: optimizeScanOrder,
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"createdatabase", "creates a new database",
-		1, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the new database", nil},
-			scm.DeclarationParameter{"ignoreexists", "bool", "if true, return false instead of throwing an error", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			ignoreexists := len(a) > 1 && scm.ToBool(a[1])
-			return scm.NewBool(CreateDatabase(scm.String(a[0]), ignoreexists))
-		}, false, false, nil,
-		nil,
+		scm.Declare(&en, &scm.Declaration{
+		Name: "createdatabase",
+		Desc: "creates a new database",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				ignoreexists := len(a) > 1 && scm.ToBool(a[1])
+				return scm.NewBool(CreateDatabase(scm.String(a[0]), ignoreexists))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the new database"}, &scm.TypeDescriptor{Kind: "bool", ParamName: "ignoreexists", ParamDesc: "if true, return false instead of throwing an error", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"dropdatabase", "drops a database",
-		1, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"ifexists", "bool", "if true, don't throw an error if it doesn't exist", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			ifexists := len(a) > 1 && scm.ToBool(a[1])
-			return scm.NewBool(DropDatabase(scm.String(a[0]), ifexists))
-		}, false, false, nil,
-		nil,
+		scm.Declare(&en, &scm.Declaration{
+		Name: "dropdatabase",
+		Desc: "drops a database",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				ifexists := len(a) > 1 && scm.ToBool(a[1])
+				return scm.NewBool(DropDatabase(scm.String(a[0]), ifexists))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "bool", ParamName: "ifexists", ParamDesc: "if true, don't throw an error if it doesn't exist", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"createtable", "creates a new database",
-		4, 5,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the new table", nil},
-			scm.DeclarationParameter{"cols", "list", "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2 updatemode deletemode of 'restrict'|'cascade'|'set null')", nil},
-			scm.DeclarationParameter{"options", "list", "further options like engine=safe|sloppy|memory", nil},
-			scm.DeclarationParameter{"ifnotexists", "bool", "don't throw an error if table already exists", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			// parse options
-			options := mustScmerSlice(a[3], "options")
-			var autoIncrement uint64
-			engine := Settings.DefaultEngine
-			collation := ""
-			charset := ""
-			comment := ""
-			for i := 0; i+1 < len(options); i += 2 {
-				key := scm.String(options[i])
-				val := options[i+1]
-				switch key {
-				case "engine":
-					engine = scm.String(val)
-				case "collation":
-					collation = scm.String(val)
-				case "charset":
-					charset = scm.String(val)
-				case "comment":
-					comment = scm.String(val)
-				case "auto_increment":
-					autoIncrement, _ = strconv.ParseUint(scm.String(val), 0, 64)
-				default:
-					panic("unknown option: " + key)
-				}
-			}
-			pm := parsePersistencyMode(engine)
-
-			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
-			t, created := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
-			t.Collation = collation
-			t.Charset = charset
-			t.Comment = comment
-			if created {
-				t.Auto_increment = autoIncrement // new table: use specified value (0 = start from scratch)
-			} else if autoIncrement > t.Auto_increment {
-				t.Auto_increment = autoIncrement // existing table: only advance, never reset
-			}
-			if created {
-				for _, coldef := range mustScmerSlice(a[2], "columns") {
-					def := mustScmerSlice(coldef, "column definition")
-					if len(def) == 0 {
-						continue
-					}
-					head := scm.String(def[0])
-					switch head {
-					case "unique":
-						cols := scmerSliceToStrings(mustScmerSlice(def[2], "unique columns"))
-						t.Unique = append(t.Unique, uniqueKey{scm.String(def[1]), cols})
-					case "foreign":
-						cols1 := scmerSliceToStrings(mustScmerSlice(def[2], "foreign cols1"))
-						cols2 := scmerSliceToStrings(mustScmerSlice(def[4], "foreign cols2"))
-						t2name := scm.String(def[3])
-						t2 := t.schema.GetTable(t2name)
-						var updatemode foreignKeyMode
-						if len(def) > 5 {
-							updatemode = getForeignKeyMode(def[5])
-						}
-						var deletemode foreignKeyMode
-						if len(def) > 6 {
-							deletemode = getForeignKeyMode(def[6])
-						}
-						fk := foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode}
-						t.Foreign = append(t.Foreign, fk)
-						if t2 != nil {
-							t2.Foreign = append(t2.Foreign, fk)
-							installFKTriggers(t.schema, t, t2, fk)
-						}
-					case "column":
-						colname := scm.String(def[1])
-						typename := scm.String(def[2])
-						dimVals := mustScmerSlice(def[3], "column dimensions")
-						dimensions := make([]int, len(dimVals))
-						for i, d := range dimVals {
-							dimensions[i] = scm.ToInt(d)
-						}
-						typeparams := mustScmerSlice(def[4], "column typeparams")
-						t.CreateColumn(colname, typename, dimensions, typeparams)
+		scm.Declare(&en, &scm.Declaration{
+		Name: "createtable",
+		Desc: "creates a new database",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				// parse options
+				options := mustScmerSlice(a[3], "options")
+				var autoIncrement uint64
+				engine := Settings.DefaultEngine
+				collation := ""
+				charset := ""
+				comment := ""
+				for i := 0; i+1 < len(options); i += 2 {
+					key := scm.String(options[i])
+					val := options[i+1]
+					switch key {
+					case "engine":
+						engine = scm.String(val)
+					case "collation":
+						collation = scm.String(val)
+					case "charset":
+						charset = scm.String(val)
+					case "comment":
+						comment = scm.String(val)
+					case "auto_increment":
+						autoIncrement, _ = strconv.ParseUint(scm.String(val), 0, 64)
 					default:
-						panic("unknown column definition: " + head)
+						panic("unknown option: " + key)
 					}
 				}
-				// add constraints that are added onto us (forward-declared FKs)
-				for _, t2 := range t.schema.tables.GetAll() {
-					if t2 != t {
-						for _, foreign := range t2.Foreign {
-							if foreign.Tbl2 == t.Name {
-								// copy forward declaration to our definition list
-								t.Foreign = append(t.Foreign, foreign)
-								// install FK triggers now that parent table exists
-								installFKTriggers(t.schema, t2, t, foreign)
+				pm := parsePersistencyMode(engine)
+	
+				ifnotexists := len(a) > 4 && scm.ToBool(a[4])
+				t, created := CreateTable(scm.String(a[0]), scm.String(a[1]), pm, ifnotexists)
+				t.Collation = collation
+				t.Charset = charset
+				t.Comment = comment
+				if created {
+					t.Auto_increment = autoIncrement // new table: use specified value (0 = start from scratch)
+				} else if autoIncrement > t.Auto_increment {
+					t.Auto_increment = autoIncrement // existing table: only advance, never reset
+				}
+				if created {
+					for _, coldef := range mustScmerSlice(a[2], "columns") {
+						def := mustScmerSlice(coldef, "column definition")
+						if len(def) == 0 {
+							continue
+						}
+						head := scm.String(def[0])
+						switch head {
+						case "unique":
+							cols := scmerSliceToStrings(mustScmerSlice(def[2], "unique columns"))
+							t.Unique = append(t.Unique, uniqueKey{scm.String(def[1]), cols})
+						case "foreign":
+							cols1 := scmerSliceToStrings(mustScmerSlice(def[2], "foreign cols1"))
+							cols2 := scmerSliceToStrings(mustScmerSlice(def[4], "foreign cols2"))
+							t2name := scm.String(def[3])
+							t2 := t.schema.GetTable(t2name)
+							var updatemode foreignKeyMode
+							if len(def) > 5 {
+								updatemode = getForeignKeyMode(def[5])
+							}
+							var deletemode foreignKeyMode
+							if len(def) > 6 {
+								deletemode = getForeignKeyMode(def[6])
+							}
+							fk := foreignKey{scm.String(def[1]), t.Name, cols1, t2name, cols2, updatemode, deletemode}
+							t.Foreign = append(t.Foreign, fk)
+							if t2 != nil {
+								t2.Foreign = append(t2.Foreign, fk)
+								installFKTriggers(t.schema, t, t2, fk)
+							}
+						case "column":
+							colname := scm.String(def[1])
+							typename := scm.String(def[2])
+							dimVals := mustScmerSlice(def[3], "column dimensions")
+							dimensions := make([]int, len(dimVals))
+							for i, d := range dimVals {
+								dimensions[i] = scm.ToInt(d)
+							}
+							typeparams := mustScmerSlice(def[4], "column typeparams")
+							t.CreateColumn(colname, typename, dimensions, typeparams)
+						default:
+							panic("unknown column definition: " + head)
+						}
+					}
+					// add constraints that are added onto us (forward-declared FKs)
+					for _, t2 := range t.schema.tables.GetAll() {
+						if t2 != t {
+							for _, foreign := range t2.Foreign {
+								if foreign.Tbl2 == t.Name {
+									// copy forward declaration to our definition list
+									t.Foreign = append(t.Foreign, foreign)
+									// install FK triggers now that parent table exists
+									installFKTriggers(t.schema, t2, t, foreign)
+								}
 							}
 						}
 					}
 				}
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"createcolumn", "creates a new column in table",
-		6, 8,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the new table", nil},
-			scm.DeclarationParameter{"colname", "string", "name of the new column", nil},
-			scm.DeclarationParameter{"type", "string", "name of the basetype", nil},
-			scm.DeclarationParameter{"dimensions", "list", "dimensions of the type (e.g. for decimal)", nil},
-			scm.DeclarationParameter{"options", "list", "assoc list with one of the following options: primary true, unique true, auto_increment true, null bool, comment string default string collate identifier", nil},
-			scm.DeclarationParameter{"computorCols", "list", "list of columns that is passed into params of computor", nil},
-			scm.DeclarationParameter{"computor", "func", "lambda expression that can take other column values and computes the value of that column", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-
-			// normal column
-			colname := scm.String(a[2])
-			typename := scm.String(a[3])
-			dimensionsVals := mustScmerSlice(a[4], "dimensions")
-			dimensions := make([]int, len(dimensionsVals))
-			for i, d := range dimensionsVals {
-				dimensions[i] = scm.ToInt(d)
-			}
-			typeparams := mustScmerSlice(a[5], "typeparams")
-			ok := t.CreateColumn(colname, typename, dimensions, typeparams)
-
-			if len(a) > 7 && !a[7].IsNil() {
-				paramNames := scmerSliceToStrings(mustScmerSlice(a[6], "computor param names"))
-				// extract filter from options
-				var filterCols []string
-				var filter scm.Scmer
-				for i := 0; i < len(typeparams); i += 2 {
-					key := scm.String(typeparams[i])
-					if key == "filtercols" {
-						filterCols = scmerSliceToStrings(mustScmerSlice(typeparams[i+1], "filter column names"))
-					} else if key == "filter" {
-						filter = typeparams[i+1]
-					}
-				}
-				t.ComputeColumn(colname, paramNames, a[7], filterCols, filter)
-			}
-
-			return scm.NewBool(ok)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"createkey", "creates a new key on a table",
-		5, 5,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the new table", nil},
-			scm.DeclarationParameter{"keyname", "string", "name of the new key", nil},
-			scm.DeclarationParameter{"unique", "bool", "whether the key is unique", nil},
-			scm.DeclarationParameter{"columns", "list", "list of columns to include", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-
-			if !scm.ToBool(a[3]) {
 				return scm.NewBool(true)
-			}
-
-			cols := scmerSliceToStrings(mustScmerSlice(a[4], "unique columns"))
-			name := scm.String(a[2])
-
-			db.schemalock.Lock()
-			defer db.schemalock.Unlock()
-			for _, u := range t.Unique {
-				if u.Id == name {
-					return scm.NewBool(false)
-				}
-			}
-
-			t.Unique = append(t.Unique, uniqueKey{name, cols})
-			db.save()
-
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"}, &scm.TypeDescriptor{Kind: "list", ParamName: "cols", ParamDesc: "list of columns and constraints, each '(\"column\" colname typename dimensions typeparams) where dimensions is a list of 0-2 numeric items or '(\"primary\" cols) or '(\"unique\" cols) or '(\"foreign\" cols tbl2 cols2 updatemode deletemode of 'restrict'|'cascade'|'set null')"}, &scm.TypeDescriptor{Kind: "list", ParamName: "options", ParamDesc: "further options like engine=safe|sloppy|memory"}, &scm.TypeDescriptor{Kind: "bool", ParamName: "ifnotexists", ParamDesc: "don't throw an error if table already exists", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"createforeignkey", "creates a new foreign key on a table",
-		8, 8,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"keyname", "string", "name of the new key", nil},
-			scm.DeclarationParameter{"table1", "string", "name of the first table", nil},
-			scm.DeclarationParameter{"columns1", "list", "list of columns to include", nil},
-			scm.DeclarationParameter{"table2", "string", "name of the second table", nil},
-			scm.DeclarationParameter{"columns2", "list", "list of columns to include", nil},
-			scm.DeclarationParameter{"updatemode", "string", "restrict|cascade|set null", nil},
-			scm.DeclarationParameter{"deletemode", "string", "restrict|cascade|set null", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			id := scm.String(a[1])
-			t1 := db.GetTable(scm.String(a[2]))
-			if t1 == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[2]) + " does not exist")
-			}
-			t2 := db.GetTable(scm.String(a[4]))
-			if t2 == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[4]) + " does not exist")
-			}
-
-			cols1 := scmerSliceToStrings(mustScmerSlice(a[3], "foreign cols1"))
-			cols2 := scmerSliceToStrings(mustScmerSlice(a[5], "foreign cols2"))
-
-			db.schemalock.Lock()
-			defer db.schemalock.Unlock()
-			for _, u := range t1.Foreign {
-				if u.Id == id {
-					return scm.NewBool(false)
+		scm.Declare(&en, &scm.Declaration{
+		Name: "createcolumn",
+		Desc: "creates a new column in table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				// get tbl
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-			}
-
-			k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[6]), getForeignKeyMode(a[7])}
-			t1.Foreign = append(t1.Foreign, k)
-			t2.Foreign = append(t2.Foreign, k)
-
-			// auto-generate system triggers for FK enforcement
-			installFKTriggers(db, t1, t2, k)
-
-			db.save()
-
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"shardcolumn", "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
-		3, 4,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the new table", nil},
-			scm.DeclarationParameter{"colname", "string", "name of the column", nil},
-			scm.DeclarationParameter{"numpartitions", "number", "number of partitions; optional. leave 0 if you want to detect the partiton number automatically or copy the partition schema of the table", nil},
-		}, "list",
-		func(a ...scm.Scmer) scm.Scmer {
-			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-			numPartitions := 0
-			if len(a) > 3 {
-				numPartitions = scm.ToInt(a[3])
-			}
-			if numPartitions == 0 {
-				// check if that paritition dimension already exists
-				if t.ShardMode == ShardModePartition {
-					for _, sd := range t.PDimensions {
-						if sd.Column == scm.String(a[2]) {
-							return scm.NewSlice(sd.Pivots) // found the column in partition schema: return exactly the same pivots as we found already
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+	
+				// normal column
+				colname := scm.String(a[2])
+				typename := scm.String(a[3])
+				dimensionsVals := mustScmerSlice(a[4], "dimensions")
+				dimensions := make([]int, len(dimensionsVals))
+				for i, d := range dimensionsVals {
+					dimensions[i] = scm.ToInt(d)
+				}
+				typeparams := mustScmerSlice(a[5], "typeparams")
+				ok := t.CreateColumn(colname, typename, dimensions, typeparams)
+	
+				if len(a) > 7 && !a[7].IsNil() {
+					paramNames := scmerSliceToStrings(mustScmerSlice(a[6], "computor param names"))
+					// extract filter from options
+					var filterCols []string
+					var filter scm.Scmer
+					for i := 0; i < len(typeparams); i += 2 {
+						key := scm.String(typeparams[i])
+						if key == "filtercols" {
+							filterCols = scmerSliceToStrings(mustScmerSlice(typeparams[i+1], "filter column names"))
+						} else if key == "filter" {
+							filter = typeparams[i+1]
 						}
 					}
+					t.ComputeColumn(colname, paramNames, a[7], filterCols, filter)
 				}
-				// otherwise: no partition schema yet: find out the best number of partitions
-				// normally, we put ~60,000 items per shard, but to parallelize grouping, we should do less?
-				numPartitions = int(1 + ((2 * t.Count()) / Settings.ShardSize))
-			}
-			// calculate them anew
-			return scm.NewSlice(t.NewShardDimension(scm.String(a[2]), numPartitions).Pivots)
-
-		}, false, false, nil,
-		nil,
+	
+				return scm.NewBool(ok)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "colname", ParamDesc: "name of the new column"}, &scm.TypeDescriptor{Kind: "string", ParamName: "type", ParamDesc: "name of the basetype"}, &scm.TypeDescriptor{Kind: "list", ParamName: "dimensions", ParamDesc: "dimensions of the type (e.g. for decimal)"}, &scm.TypeDescriptor{Kind: "list", ParamName: "options", ParamDesc: "assoc list with one of the following options: primary true, unique true, auto_increment true, null bool, comment string default string collate identifier"}, &scm.TypeDescriptor{Kind: "list", ParamName: "computorCols", ParamDesc: "list of columns that is passed into params of computor", Optional: true}, &scm.TypeDescriptor{Kind: "func", ParamName: "computor", ParamDesc: "lambda expression that can take other column values and computes the value of that column", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"partitiontable", "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
-		3, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the new table", nil},
-			scm.DeclarationParameter{"columns", "list", "associative list of string -> list representing column name -> pivots. You can compute pivots by (shardcolumn ...)", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-			cols := dataset(mustScmerSlice(a[2], "partition columns"))
-			if t.ShardMode == ShardModeFree {
-				// apply partitioning schema
-				ps := make([]shardDimension, len(cols)/2)
-				for i := 0; i < len(ps); i++ {
-					ps[i].Column = scm.String(cols[2*i])
-					ps[i].Pivots = mustScmerSlice(cols[2*i+1], "partition pivots")
-					ps[i].NumPartitions = len(ps[i].Pivots) + 1
+		scm.Declare(&en, &scm.Declaration{
+		Name: "createkey",
+		Desc: "creates a new key on a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-				if len(ps) > Settings.PartitionMaxDimensions {
-					ps = ps[:Settings.PartitionMaxDimensions]
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
-				t.repartition(ps) // perform repartitioning immediately
+	
+				if !scm.ToBool(a[3]) {
+					return scm.NewBool(true)
+				}
+	
+				cols := scmerSliceToStrings(mustScmerSlice(a[4], "unique columns"))
+				name := scm.String(a[2])
+	
+				db.schemalock.Lock()
+				defer db.schemalock.Unlock()
+				for _, u := range t.Unique {
+					if u.Id == name {
+						return scm.NewBool(false)
+					}
+				}
+	
+				t.Unique = append(t.Unique, uniqueKey{name, cols})
+				db.save()
+	
 				return scm.NewBool(true)
-			} else {
-				// early exit if all requested columns are already partitioned
-				allPresent := true
-				for i := 0; i < len(cols)/2; i++ {
-					colName := scm.String(cols[2*i])
-					found := false
-					for _, dim := range t.PDimensions {
-						if dim.Column == colName {
-							found = true
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "keyname", ParamDesc: "name of the new key"}, &scm.TypeDescriptor{Kind: "bool", ParamName: "unique", ParamDesc: "whether the key is unique"}, &scm.TypeDescriptor{Kind: "list", ParamName: "columns", ParamDesc: "list of columns to include"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "createforeignkey",
+		Desc: "creates a new foreign key on a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				id := scm.String(a[1])
+				t1 := db.GetTable(scm.String(a[2]))
+				if t1 == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[2]) + " does not exist")
+				}
+				t2 := db.GetTable(scm.String(a[4]))
+				if t2 == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[4]) + " does not exist")
+				}
+	
+				cols1 := scmerSliceToStrings(mustScmerSlice(a[3], "foreign cols1"))
+				cols2 := scmerSliceToStrings(mustScmerSlice(a[5], "foreign cols2"))
+	
+				db.schemalock.Lock()
+				defer db.schemalock.Unlock()
+				for _, u := range t1.Foreign {
+					if u.Id == id {
+						return scm.NewBool(false)
+					}
+				}
+	
+				k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[6]), getForeignKeyMode(a[7])}
+				t1.Foreign = append(t1.Foreign, k)
+				t2.Foreign = append(t2.Foreign, k)
+	
+				// auto-generate system triggers for FK enforcement
+				installFKTriggers(db, t1, t2, k)
+	
+				db.save()
+	
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "keyname", ParamDesc: "name of the new key"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table1", ParamDesc: "name of the first table"}, &scm.TypeDescriptor{Kind: "list", ParamName: "columns1", ParamDesc: "list of columns to include"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table2", ParamDesc: "name of the second table"}, &scm.TypeDescriptor{Kind: "list", ParamName: "columns2", ParamDesc: "list of columns to include"}, &scm.TypeDescriptor{Kind: "string", ParamName: "updatemode", ParamDesc: "restrict|cascade|set null"}, &scm.TypeDescriptor{Kind: "string", ParamName: "deletemode", ParamDesc: "restrict|cascade|set null"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "shardcolumn",
+		Desc: "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				// get tbl
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				numPartitions := 0
+				if len(a) > 3 {
+					numPartitions = scm.ToInt(a[3])
+				}
+				if numPartitions == 0 {
+					// check if that paritition dimension already exists
+					if t.ShardMode == ShardModePartition {
+						for _, sd := range t.PDimensions {
+							if sd.Column == scm.String(a[2]) {
+								return scm.NewSlice(sd.Pivots) // found the column in partition schema: return exactly the same pivots as we found already
+							}
+						}
+					}
+					// otherwise: no partition schema yet: find out the best number of partitions
+					// normally, we put ~60,000 items per shard, but to parallelize grouping, we should do less?
+					numPartitions = int(1 + ((2 * t.Count()) / Settings.ShardSize))
+				}
+				// calculate them anew
+				return scm.NewSlice(t.NewShardDimension(scm.String(a[2]), numPartitions).Pivots)
+	
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "colname", ParamDesc: "name of the column"}, &scm.TypeDescriptor{Kind: "number", ParamName: "numpartitions", ParamDesc: "number of partitions; optional. leave 0 if you want to detect the partiton number automatically or copy the partition schema of the table", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "list"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "partitiontable",
+		Desc: "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				// get tbl
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				cols := dataset(mustScmerSlice(a[2], "partition columns"))
+				if t.ShardMode == ShardModeFree {
+					// apply partitioning schema
+					ps := make([]shardDimension, len(cols)/2)
+					for i := 0; i < len(ps); i++ {
+						ps[i].Column = scm.String(cols[2*i])
+						ps[i].Pivots = mustScmerSlice(cols[2*i+1], "partition pivots")
+						ps[i].NumPartitions = len(ps[i].Pivots) + 1
+					}
+					if len(ps) > Settings.PartitionMaxDimensions {
+						ps = ps[:Settings.PartitionMaxDimensions]
+					}
+					t.repartition(ps) // perform repartitioning immediately
+					return scm.NewBool(true)
+				} else {
+					// early exit if all requested columns are already partitioned
+					allPresent := true
+					for i := 0; i < len(cols)/2; i++ {
+						colName := scm.String(cols[2*i])
+						found := false
+						for _, dim := range t.PDimensions {
+							if dim.Column == colName {
+								found = true
+								break
+							}
+						}
+						if !found {
+							allPresent = false
 							break
 						}
 					}
-					if !found {
-						allPresent = false
-						break
+					if allPresent {
+						return scm.NewBool(false)
 					}
-				}
-				if allPresent {
+					// increase partitioning scores
+					for i, c := range t.Columns {
+						if pivots, ok := cols.Get(c.Name); ok {
+							// that column is in the parititoning schema -> increase score
+							t.Columns[i].PartitioningScore = c.PartitioningScore + len(mustScmerSlice(pivots, "partition pivots"))
+						}
+					}
 					return scm.NewBool(false)
 				}
-				// increase partitioning scores
-				for i, c := range t.Columns {
-					if pivots, ok := cols.Get(c.Name); ok {
-						// that column is in the parititoning schema -> increase score
-						t.Columns[i].PartitioningScore = c.PartitioningScore + len(mustScmerSlice(pivots, "partition pivots"))
-					}
-				}
-				return scm.NewBool(false)
-			}
-		}, false, false, nil,
-		nil,
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the new table"}, &scm.TypeDescriptor{Kind: "list", ParamName: "columns", ParamDesc: "associative list of string -> list representing column name -> pivots. You can compute pivots by (shardcolumn ...)"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"altertable", "alters a table",
-		4, 4,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table", nil},
-			scm.DeclarationParameter{"operation", "string", "one of owner|drop|engine|collation", nil},
-			scm.DeclarationParameter{"parameter", "any", "name of the column to drop or value of the parameter", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-
-			switch scm.String(a[2]) {
-			case "drop":
-				return scm.NewBool(t.DropColumn(scm.String(a[3])))
-			case "engine":
-				newMode := parsePersistencyMode(scm.String(a[3]))
-				oldMode := t.PersistencyMode
-				if oldMode == newMode {
-					return scm.NewBool(true) // no-op
+		scm.Declare(&en, &scm.Declaration{
+		Name: "altertable",
+		Desc: "alters a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				// get tbl
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-
-				t.mu.Lock()
-
-				if (oldMode == Memory || oldMode == Cache) && newMode != Memory && newMode != Cache {
-					// Memory → Persisted: ensure all columns are loaded
-					// while PersistencyMode is still Memory (so they get
-					// initialized as StorageSparse instead of reading
-					// non-existent disk files). Then switch mode and
-					// rebuild to flush everything to disk.
-					shards := t.ActiveShards()
-					for _, s := range shards {
-						s.mu.Lock()
-						for _, col := range t.Columns {
-							s.ensureColumnLoaded(col.Name, true)
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+	
+				switch scm.String(a[2]) {
+				case "drop":
+					return scm.NewBool(t.DropColumn(scm.String(a[3])))
+				case "engine":
+					newMode := parsePersistencyMode(scm.String(a[3]))
+					oldMode := t.PersistencyMode
+					if oldMode == newMode {
+						return scm.NewBool(true) // no-op
+					}
+	
+					t.mu.Lock()
+	
+					if (oldMode == Memory || oldMode == Cache) && newMode != Memory && newMode != Cache {
+						// Memory → Persisted: ensure all columns are loaded
+						// while PersistencyMode is still Memory (so they get
+						// initialized as StorageSparse instead of reading
+						// non-existent disk files). Then switch mode and
+						// rebuild to flush everything to disk.
+						shards := t.ActiveShards()
+						for _, s := range shards {
+							s.mu.Lock()
+							for _, col := range t.Columns {
+								s.ensureColumnLoaded(col.Name, true)
+							}
+							s.mu.Unlock()
 						}
-						s.mu.Unlock()
+						t.PersistencyMode = newMode
+						t.mu.Unlock()
+						for i, s := range shards {
+							shards[i] = s.rebuild(true)
+						}
+					} else {
+						t.PersistencyMode = newMode
+						// All other transitions can be done in-place.
+						for _, s := range t.ActiveShards() {
+							s.mu.Lock()
+							transitionShardEngine(s, oldMode, newMode)
+							s.mu.Unlock()
+						}
+						t.mu.Unlock()
 					}
-					t.PersistencyMode = newMode
-					t.mu.Unlock()
-					for i, s := range shards {
-						shards[i] = s.rebuild(true)
-					}
-				} else {
-					t.PersistencyMode = newMode
-					// All other transitions can be done in-place.
-					for _, s := range t.ActiveShards() {
-						s.mu.Lock()
-						transitionShardEngine(s, oldMode, newMode)
-						s.mu.Unlock()
-					}
-					t.mu.Unlock()
+	
+					db.save()
+					return scm.NewBool(true)
+				case "owner":
+					return scm.NewBool(false) // ignore
+				default:
+					panic("unimplemented alter table operation: " + scm.String(a[2]))
 				}
-
-				db.save()
-				return scm.NewBool(true)
-			case "owner":
-				return scm.NewBool(false) // ignore
-			default:
-				panic("unimplemented alter table operation: " + scm.String(a[2]))
-			}
-		}, false, false, nil,
-		nil,
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "operation", ParamDesc: "one of owner|drop|engine|collation"}, &scm.TypeDescriptor{Kind: "any", ParamName: "parameter", ParamDesc: "name of the column to drop or value of the parameter"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"altercolumn", "alters a column",
-		5, 5,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table", nil},
-			scm.DeclarationParameter{"column", "string", "name of the column", nil},
-			scm.DeclarationParameter{"operation", "string", "one of drop|type|collation|auto_increment|comment", nil},
-			scm.DeclarationParameter{"parameter", "any", "name of the column to drop or value of the parameter", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			// get tbl
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-			for i, c := range t.Columns {
-				if c.Name == scm.String(a[2]) {
-					switch scm.String(a[3]) {
-					case "drop":
-						ok := t.DropColumn(scm.String(a[2]))
-						db.save()
-						return scm.NewBool(ok)
-					case "auto_increment":
-						ai := scm.ToInt(a[4])
-						if ai > 1 {
-							// set ai value
-							t.Auto_increment = uint64(ai)
+		scm.Declare(&en, &scm.Declaration{
+		Name: "altercolumn",
+		Desc: "alters a column",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				// get tbl
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				for i, c := range t.Columns {
+					if c.Name == scm.String(a[2]) {
+						switch scm.String(a[3]) {
+						case "drop":
+							ok := t.DropColumn(scm.String(a[2]))
+							db.save()
+							return scm.NewBool(ok)
+						case "auto_increment":
+							ai := scm.ToInt(a[4])
+							if ai > 1 {
+								// set ai value
+								t.Auto_increment = uint64(ai)
+								db.save()
+								return scm.NewBool(true)
+							}
+							// set ai flag for column
+							t.Columns[i].AutoIncrement = scm.ToBool(a[4])
 							db.save()
 							return scm.NewBool(true)
+						default:
+							ok := t.Columns[i].Alter(scm.String(a[3]), a[4])
+							db.save()
+							return scm.NewBool(scm.ToBool(ok))
 						}
-						// set ai flag for column
-						t.Columns[i].AutoIncrement = scm.ToBool(a[4])
-						db.save()
-						return scm.NewBool(true)
-					default:
-						ok := t.Columns[i].Alter(scm.String(a[3]), a[4])
-						db.save()
-						return scm.NewBool(scm.ToBool(ok))
 					}
 				}
-			}
-			panic("column " + scm.String(a[0]) + "." + scm.String(a[1]) + "." + scm.String(a[2]) + " does not exist")
-		}, false, false, nil,
-		nil,
+				panic("column " + scm.String(a[0]) + "." + scm.String(a[1]) + "." + scm.String(a[2]) + " does not exist")
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "column", ParamDesc: "name of the column"}, &scm.TypeDescriptor{Kind: "string", ParamName: "operation", ParamDesc: "one of drop|type|collation|auto_increment|comment"}, &scm.TypeDescriptor{Kind: "any", ParamName: "parameter", ParamDesc: "name of the column to drop or value of the parameter"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"droptable", "removes a table",
-		2, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table", nil},
-			scm.DeclarationParameter{"ifexists", "bool", "if true, don't throw an error if it already exists", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			if len(a) > 2 {
-				DropTable(scm.String(a[0]), scm.String(a[1]), scm.ToBool(a[2]))
-			} else {
-				DropTable(scm.String(a[0]), scm.String(a[1]), false)
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
+		scm.Declare(&en, &scm.Declaration{
+		Name: "droptable",
+		Desc: "removes a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				if len(a) > 2 {
+					DropTable(scm.String(a[0]), scm.String(a[1]), scm.ToBool(a[2]))
+				} else {
+					DropTable(scm.String(a[0]), scm.String(a[1]), false)
+				}
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}, &scm.TypeDescriptor{Kind: "bool", ParamName: "ifexists", ParamDesc: "if true, don't throw an error if it already exists", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"dropcolumn", "drops a column from a table",
-		3, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table", nil},
-			scm.DeclarationParameter{"column", "string", "name of the column to drop", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-			return scm.NewBool(t.DropColumn(scm.String(a[2])))
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"invalidatecolumn", "marks all values of a computed column as stale",
-		3, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table", nil},
-			scm.DeclarationParameter{"column", "string", "name of the computed column", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				return scm.NewBool(false)
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				return scm.NewBool(false)
-			}
-			colName := scm.String(a[2])
-			for _, s := range t.ActiveShards() {
-				s.mu.RLock()
-				col := s.columns[colName]
-				s.mu.RUnlock()
-				if proxy, ok := col.(*StorageComputeProxy); ok {
-					proxy.InvalidateAll()
-				}
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"canonical_expr_name", "builds a canonical string for an expression; maps var(n)/lambda params to column names and can normalize aliases",
-		1, 4,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"expr", "any", "expression to normalize", nil},
-			scm.DeclarationParameter{"columns", "list", "optional list of column names for var(n) mapping", nil},
-			scm.DeclarationParameter{"params", "list", "optional list of lambda parameter symbols", nil},
-			scm.DeclarationParameter{"alias_map", "list", "optional list of (alias canonical) pairs", nil},
-		}, "string",
-		func(a ...scm.Scmer) scm.Scmer {
-			expr := a[0]
-
-			columns := []string{}
-			if len(a) >= 2 && !a[1].IsNil() {
-				for _, item := range mustScmerSlice(a[1], "columns") {
-					columns = append(columns, scm.String(item))
-				}
-			}
-
-			params := []scm.Scmer{}
-			if len(a) >= 3 && !a[2].IsNil() {
-				params = mustScmerSlice(a[2], "params")
-			}
-
-			aliasMap := map[string]string{}
-			if len(a) >= 4 && !a[3].IsNil() {
-				for _, pair := range mustScmerSlice(a[3], "alias_map") {
-					pp := mustScmerSlice(pair, "alias_map pair")
-					if len(pp) != 2 {
-						continue
-					}
-					aliasMap[strings.ToLower(scm.String(pp[0]))] = scm.String(pp[1])
-				}
-			}
-
-			return scm.NewString(canonicalizeScmerToString(expr, columns, params, aliasMap))
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"register_keytable_cleanup", "registers triggers on a base table to maintain keytable entries (insert/delete group keys)",
-		6, 6,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"base_schema", "string", "database of the base table", nil},
-			scm.DeclarationParameter{"base_table", "string", "name of the base table", nil},
-			scm.DeclarationParameter{"kt_schema", "string", "database of the keytable", nil},
-			scm.DeclarationParameter{"kt_name", "string", "name of the keytable", nil},
-			scm.DeclarationParameter{"tblvar", "string", "table alias used in scan column prefixes", nil},
-			scm.DeclarationParameter{"key_pairs", "list", "list of (base_col kt_col) pairs", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			baseDB := GetDatabase(scm.String(a[0]))
-			if baseDB == nil {
-				return scm.NewBool(false)
-			}
-			baseTable := baseDB.GetTable(scm.String(a[1]))
-			if baseTable == nil {
-				return scm.NewBool(false)
-			}
-			ktSchema := scm.String(a[2])
-			ktName := scm.String(a[3])
-			tblvar := scm.String(a[4])
-			pairs := a[5].Slice()
-
-			// Extract column name pairs
-			var baseCols, ktCols []string
-			for _, p := range pairs {
-				pp := p.Slice()
-				baseCols = append(baseCols, scm.String(pp[0]))
-				ktCols = append(ktCols, scm.String(pp[1]))
-			}
-
-			baseSchema := scm.String(a[0])
-
-			// Helper: build (and (equal? x1 y1) (equal? x2 y2) ...) or just (equal? x y) for single key
-			buildAndEquals := func(xs, ys []scm.Scmer) scm.Scmer {
-				if len(xs) == 1 {
-					return scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), xs[0], ys[0]})
-				}
-				parts := make([]scm.Scmer, 1+len(xs))
-				parts[0] = scm.NewSymbol("and")
-				for i := range xs {
-					parts[1+i] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), xs[i], ys[i]})
-				}
-				return scm.NewSlice(parts)
-			}
-
-			// Helper: build scan filter lambda params as tblvar.col symbols
-			scanFilterParams := func(prefix string, cols []string) scm.Scmer {
-				params := make([]scm.Scmer, len(cols))
-				for i, col := range cols {
-					params[i] = scm.NewSymbol(prefix + "." + col)
-				}
-				return scm.NewSlice(params)
-			}
-
-			// Helper: build scan filter column list (list "col1" "col2" ...)
-			scanFilterCols := func(cols []string) scm.Scmer {
-				elems := make([]scm.Scmer, 1+len(cols))
-				elems[0] = scm.NewSymbol("list")
-				for i, col := range cols {
-					elems[1+i] = scm.NewString(col)
-				}
-				return scm.NewSlice(elems)
-			}
-
-			// Helper: build symbols for scan param references
-			scanParamSyms := func(prefix string, cols []string) []scm.Scmer {
-				syms := make([]scm.Scmer, len(cols))
-				for i, col := range cols {
-					syms[i] = scm.NewSymbol(prefix + "." + col)
-				}
-				return syms
-			}
-
-			// Helper: build (get_assoc <sym> "col") list
-			getAssocs := func(sym string, cols []string) []scm.Scmer {
-				result := make([]scm.Scmer, len(cols))
-				for i, col := range cols {
-					result[i] = fkGetAssocExpr(sym, col)
-				}
-				return result
-			}
-
-			// Build count-scan: (scan base_schema base_table (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
-			buildCountScan := func(dictSym string) scm.Scmer {
-				return scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("scan"),
-					scm.NewString(baseSchema), scm.NewString(baseTable.Name),
-					scanFilterCols(baseCols),
-					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
-						buildAndEquals(scanParamSyms(tblvar, baseCols), getAssocs(dictSym, baseCols)))),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewInt(1)}),
-					scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
-				})
-			}
-
-			// Build delete-scan: (scan kt_schema kt_name (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
-			buildDeleteScan := func(dictSym string) scm.Scmer {
-				return scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("scan"),
-					scm.NewString(ktSchema), scm.NewString(ktName),
-					scanFilterCols(ktCols),
-					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
-						buildAndEquals(scanParamSyms(ktName, ktCols), getAssocs(dictSym, baseCols)))),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$update")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}),
-						scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")})}),
-					scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
-				})
-			}
-
-			// Build insert: (insert kt_schema kt_name (list kt_cols...) (list (list vals...)) (list) (lambda () true) true)
-			buildInsert := func(dictSym string) scm.Scmer {
-				return scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("insert"),
-					scm.NewString(ktSchema), scm.NewString(ktName),
-					scanFilterCols(ktCols),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"),
-						fkValListExpr(dictSym, baseCols)}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewBool(true)}),
-					scm.NewBool(true),
-				})
-			}
-
-			// AfterDelete body: if count=0 then delete from keytable
-			deleteBody := scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("if"),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewInt(0), buildCountScan("OLD")}),
-				buildDeleteScan("OLD"),
-			})
-
-			// AfterInsert body: insert new key into keytable (INSERT IGNORE)
-			insertBody := buildInsert("NEW")
-
-			// AfterUpdate body: if key changed, clean up old + insert new
-			keyChangedCheck := buildAndEquals(getAssocs("OLD", baseCols), getAssocs("NEW", baseCols))
-			updateBody := scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("if"),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("not"), keyChangedCheck}),
-				scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("begin"),
-					scm.NewSlice([]scm.Scmer{
-						scm.NewSymbol("if"),
-						scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewInt(0), buildCountScan("OLD")}),
-						buildDeleteScan("OLD"),
-					}),
-					buildInsert("NEW"),
-				}),
-			})
-
-			// Register DML triggers with idempotency
-			triggerDefs := []struct {
-				timing TriggerTiming
-				body   scm.Scmer
-			}{
-				{AfterDelete, deleteBody},
-				{AfterInsert, insertBody},
-				{AfterUpdate, updateBody},
-			}
-			for _, td := range triggerDefs {
-				triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + td.timing.String()
-				exists := false
-				for _, tr := range baseTable.Triggers {
-					if tr.Name == triggerName {
-						exists = true
-						break
-					}
-				}
-				if exists {
-					continue
-				}
-				baseTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   td.timing,
-					IsSystem: true,
-					Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
-					Func:     buildFKProc(td.body),
-				})
-			}
-			// Lifecycle cleanup: when the base table is dropped/shape-changed, the keytable
-			// must be dropped as well, otherwise stale keytables can be reused by a later
-			// table recreation with the same name and cause cross-suite flakes.
-			dropBody := scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("droptable"),
-				scm.NewString(ktSchema),
-				scm.NewString(ktName),
-				scm.NewBool(true),
-			})
-			for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {
-				triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + timing.String()
-				exists := false
-				for _, tr := range baseTable.Triggers {
-					if tr.Name == triggerName {
-						exists = true
-						break
-					}
-				}
-				if exists {
-					continue
-				}
-				baseTable.AddTrigger(TriggerDescription{
-					Name:     triggerName,
-					Timing:   timing,
-					IsSystem: true,
-					Priority: 90,
-					Func:     buildFKProc(dropBody),
-				})
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"touch_keytable", "extends the lease on a keytable so CacheManager defers eviction",
-		2, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database name", nil},
-			scm.DeclarationParameter{"table", "string", "keytable name", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				return scm.NewBool(false)
-			}
-			tbl := db.GetTable(scm.String(a[1]))
-			if tbl == nil {
-				return scm.NewBool(false)
-			}
-			now := time.Now()
-			nowNs := uint64(now.UnixNano())
-			for _, s := range tbl.Shards {
-				atomic.StoreUint64(&s.lastAccessed, nowNs)
-			}
-			for _, s := range tbl.PShards {
-				atomic.StoreUint64(&s.lastAccessed, nowNs)
-			}
-			for _, c := range tbl.Columns {
-				if c.IsTemp {
-					atomic.StoreInt64(&c.lastAccessed, now.UnixNano())
-				}
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"locktables", "acquires WRITE or READ user-level locks on a list of tables (LOCK TABLES); implicitly releases any previously held locks",
-		1, 1,
-		[]scm.DeclarationParameter{
-			{"locks", "list", "flat list of schema, table, write? triples", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			ss := scm.GetCurrentSessionState()
-			if ss != nil {
-				ss.ReleaseAllLocks() // LOCK TABLES implicitly releases prior locks
-			}
-			for _, item := range a[0].Slice() {
-				triple := item.Slice()
-				schema := scm.String(triple[0])
-				tbl := scm.String(triple[1])
-				write := triple[2].Bool()
-				lockTable(schema, tbl, write, ss)
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"unlocktables", "releases all user-level table locks held by this session",
-		0, 0, nil, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			if ss := scm.GetCurrentSessionState(); ss != nil {
-				ss.ReleaseAllLocks()
-			}
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"get_fk_target", "returns (ref_table ref_column) if a single-column FK exists for the given column, nil otherwise",
-		3, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database name", nil},
-			scm.DeclarationParameter{"table", "string", "table name", nil},
-			scm.DeclarationParameter{"column", "string", "column name", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				return scm.NewNil()
-			}
-			tbl := db.GetTable(scm.String(a[1]))
-			if tbl == nil {
-				return scm.NewNil()
-			}
-			col := scm.String(a[2])
-			for _, fk := range tbl.Foreign {
-				if fk.Tbl1 == tbl.Name && len(fk.Cols1) == 1 && fk.Cols1[0] == col {
-					return scm.NewSlice([]scm.Scmer{scm.NewString(fk.Tbl2), scm.NewString(fk.Cols2[0])})
-				}
-			}
-			return scm.NewNil()
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"renametable", "renames a table",
-		3, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"oldname", "string", "current name of the table", nil},
-			scm.DeclarationParameter{"newname", "string", "new name of the table", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			RenameTable(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"insert", "inserts a new dataset into table and returns the number of successful items",
-		4, 8,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table", nil},
-			scm.DeclarationParameter{"columns", "list", "list of column names, e.g. '(\"ID\", \"value\")", nil},
-			scm.DeclarationParameter{"datasets", "list", "list of list of column values, e.g. '('(1 10) '(2 15))", nil},
-			scm.DeclarationParameter{"onCollisionCols", "list", "list of columns of the old dataset that have to be passed to onCollision. Can also request $update.", nil},
-			scm.DeclarationParameter{"onCollision", "func", "the function that is called on each collision dataset. The first parameter is filled with the $update function, the second parameter is the dataset as associative list. If not set, an error is thrown in case of a collision.", nil},
-			scm.DeclarationParameter{"mergeNull", "bool", "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)", nil},
-			scm.DeclarationParameter{"onInsertid", "func", "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT", nil},
-		}, "number",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			var onCollisionCols []string
-			onCollision := scm.NewNil()
-			if len(a) > 5 {
-				onCollisionColsVals := mustScmerSlice(a[4], "onCollision columns")
-				onCollisionCols = make([]string, len(onCollisionColsVals))
-				for i, c := range onCollisionColsVals {
-					onCollisionCols[i] = scm.String(c)
-				}
-				onCollision = a[5]
-			}
-			mergeNull := len(a) > 6 && scm.ToBool(a[6])
-			// optional onInsertid callback
-			var onFirst func(int64)
-			if len(a) > 7 && !a[7].IsNil() {
-				cb := a[7]
-				var once sync.Once
-				onFirst = func(id int64) {
-					once.Do(func() { scm.Apply(cb, scm.NewInt(id)) })
-				}
-			}
-			colsVals := mustScmerSlice(a[2], "column names")
-			cols := make([]string, len(colsVals))
-			for i, col := range colsVals {
-				cols[i] = scm.String(col)
-			}
-			rowVals := mustScmerSlice(a[3], "dataset rows")
-			rows := make([][]scm.Scmer, len(rowVals))
-			for i, row := range rowVals {
-				rows[i] = mustScmerSlice(row, "insert row")
-			}
-			// perform insert
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
-			return scm.NewInt(int64(inserted))
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"stat", "return system statistics as assoc: mem_available, mem_total, process_memory, shard_memory, shard_budget, persisted_memory, persisted_budget, cache_entry_count, cache_entry_size.\n(stat schema) and (stat schema tbl) return a string with detailed memory usage.",
-		0, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "(optional) database name for detailed string output", nil},
-			scm.DeclarationParameter{"table", "string", "(optional) table name for detailed string output", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			if len(a) == 0 {
-				memTotal, memAvail := ReadMemInfo()
-				processMem := ReadProcessRSS()
-				cs := GlobalCache.Stat()
-				return scm.NewSlice([]scm.Scmer{
-					scm.NewString("mem_available"), scm.NewInt(memAvail),
-					scm.NewString("mem_total"), scm.NewInt(memTotal),
-					scm.NewString("process_memory"), scm.NewInt(processMem),
-					scm.NewString("shard_memory"), scm.NewInt(cs.CurrentMemory),
-					scm.NewString("shard_budget"), scm.NewInt(cs.MemoryBudget),
-					scm.NewString("persisted_memory"), scm.NewInt(cs.PersistedMemory),
-					scm.NewString("persisted_budget"), scm.NewInt(cs.PersistedBudget),
-					scm.NewString("cache_entry_count"), scm.NewInt(cs.CountByType[TypeCacheEntry]),
-					scm.NewString("cache_entry_size"), scm.NewInt(cs.SizeByType[TypeCacheEntry]),
-				})
-			} else if len(a) == 1 {
-				return scm.NewString(GetDatabase(scm.String(a[0])).PrintMemUsage())
-			} else if len(a) == 2 {
-				return scm.NewString(GetDatabase(scm.String(a[0])).GetTable(scm.String(a[1])).PrintMemUsage())
-			}
-			return scm.NewNil()
-		}, false, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"totalmem", "Returns total physical memory in bytes (from /proc/meminfo)",
-		0, 0,
-		[]scm.DeclarationParameter{}, "number",
-		func(a ...scm.Scmer) scm.Scmer {
-			return scm.NewInt(totalMemoryBytes())
-		}, true, false, nil,
-		nil,
-	})
-	scm.Declare(&en, &scm.Declaration{
-		"show", "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
-		0, 4,
-		[]scm.DeclarationParameter{
-			{"schema", "string", "(optional) database name", nil},
-			{"table", "string|bool", "(optional) table name, or true for full table listing", nil},
-			{"property", "int|bool", "(optional) shard index (int), true for full table info, or \"statistics\"", nil},
-			{"full", "bool", "(optional) true to include columns and indexes in shard detail", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			if len(a) == 0 {
-				// list databases
-				dbs := databases.GetAll()
-				result := make([]scm.Scmer, len(dbs))
-				for i, db := range dbs {
-					result[i] = scm.NewString(db.Name)
-				}
-				return scm.NewSlice(result)
-			} else if len(a) == 1 {
-				// list table names
-				db := GetDatabase(scm.String(a[0]))
-				if db == nil {
-					return scm.NewNil() // use this to check if a database exists
-				}
-				return db.ShowTables()
-			} else if len(a) == 2 {
-				db := GetDatabase(scm.String(a[0]))
-				if db == nil {
-					panic("database " + scm.String(a[0]) + " does not exist")
-				}
-				// (show schema true) → full table listing
-				if a[1].IsBool() && a[1].Bool() {
-					db.ensureLoaded()
-					tables := db.tables.GetAll()
-					rows := make([]scm.Scmer, 0, len(tables))
-					for _, t := range tables {
-						engine := showEngineStr(t)
-						var rowCount int64
-						var sizeBytes int64
-						for _, s := range t.ActiveShards() {
-							if s == nil {
-								continue
-							}
-							s.mu.RLock()
-							rowCount += int64(s.main_count) + int64(len(s.inserts)) - int64(s.deletions.Count())
-							sizeBytes += int64(s.ComputeSize())
-							s.mu.RUnlock()
-						}
-						rows = append(rows, scm.NewSlice([]scm.Scmer{
-							scm.NewString("name"), scm.NewString(t.Name),
-							scm.NewString("engine"), scm.NewString(engine),
-							scm.NewString("row_count"), scm.NewInt(rowCount),
-							scm.NewString("size_bytes"), scm.NewInt(sizeBytes),
-							scm.NewString("collation"), scm.NewString(t.Collation),
-							scm.NewString("comment"), scm.NewString(t.Comment),
-						}))
-					}
-					return scm.NewSlice(rows)
-				}
-				// (show schema tbl) → column defs
-				t := db.GetTable(scm.String(a[1]))
-				if t == nil {
-					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-				}
-				return t.ShowColumns()
-			} else if len(a) == 3 {
+		scm.Declare(&en, &scm.Declaration{
+		Name: "dropcolumn",
+		Desc: "drops a column from a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
 				db := GetDatabase(scm.String(a[0]))
 				if db == nil {
 					panic("database " + scm.String(a[0]) + " does not exist")
@@ -1557,59 +922,543 @@ func Init(en scm.Env) {
 				if t == nil {
 					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
-				// (show schema tbl "statistics") → index statistics (INFORMATION_SCHEMA)
-				if a[2].IsString() && scm.String(a[2]) == "statistics" {
-					var result []scm.Scmer
-					for _, uk := range t.Unique {
-						for seq, col := range uk.Cols {
-							result = append(result, scm.NewSlice([]scm.Scmer{
-								scm.NewString("table_catalog"), scm.NewString("def"),
-								scm.NewString("table_schema"), scm.NewString(db.Name),
-								scm.NewString("table_name"), scm.NewString(t.Name),
-								scm.NewString("non_unique"), scm.NewInt(0),
-								scm.NewString("index_schema"), scm.NewString(db.Name),
-								scm.NewString("index_name"), scm.NewString(uk.Id),
-								scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
-								scm.NewString("column_name"), scm.NewString(col),
-								scm.NewString("collation"), scm.NewString("A"),
-								scm.NewString("cardinality"), scm.NewNil(),
-								scm.NewString("sub_part"), scm.NewNil(),
-								scm.NewString("packed"), scm.NewNil(),
-								scm.NewString("nullable"), scm.NewString(""),
-								scm.NewString("index_type"), scm.NewString("BTREE"),
-								scm.NewString("comment"), scm.NewString(""),
-								scm.NewString("index_comment"), scm.NewString(""),
-							}))
-						}
-					}
-					return scm.NewSlice(result)
+				return scm.NewBool(t.DropColumn(scm.String(a[2])))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "column", ParamDesc: "name of the column to drop"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "invalidatecolumn",
+		Desc: "marks all values of a computed column as stale",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					return scm.NewBool(false)
 				}
-				// (show schema tbl true) → full table info {columns, meta, shards}
-				if a[2].IsBool() && a[2].Bool() {
-					shards := t.ActiveShards()
-					shardRows := make([]scm.Scmer, 0, len(shards))
-					for i, s := range shards {
-						shardRows = append(shardRows, showBuildShardRow(t, i, s))
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					return scm.NewBool(false)
+				}
+				colName := scm.String(a[2])
+				for _, s := range t.ActiveShards() {
+					s.mu.RLock()
+					col := s.columns[colName]
+					s.mu.RUnlock()
+					if proxy, ok := col.(*StorageComputeProxy); ok {
+						proxy.InvalidateAll()
 					}
+				}
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "column", ParamDesc: "name of the computed column"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "canonical_expr_name",
+		Desc: "builds a canonical string for an expression; maps var(n)/lambda params to column names and can normalize aliases",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				expr := a[0]
+	
+				columns := []string{}
+				if len(a) >= 2 && !a[1].IsNil() {
+					for _, item := range mustScmerSlice(a[1], "columns") {
+						columns = append(columns, scm.String(item))
+					}
+				}
+	
+				params := []scm.Scmer{}
+				if len(a) >= 3 && !a[2].IsNil() {
+					params = mustScmerSlice(a[2], "params")
+				}
+	
+				aliasMap := map[string]string{}
+				if len(a) >= 4 && !a[3].IsNil() {
+					for _, pair := range mustScmerSlice(a[3], "alias_map") {
+						pp := mustScmerSlice(pair, "alias_map pair")
+						if len(pp) != 2 {
+							continue
+						}
+						aliasMap[strings.ToLower(scm.String(pp[0]))] = scm.String(pp[1])
+					}
+				}
+	
+				return scm.NewString(canonicalizeScmerToString(expr, columns, params, aliasMap))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "any", ParamName: "expr", ParamDesc: "expression to normalize"}, &scm.TypeDescriptor{Kind: "list", ParamName: "columns", ParamDesc: "optional list of column names for var(n) mapping", Optional: true}, &scm.TypeDescriptor{Kind: "list", ParamName: "params", ParamDesc: "optional list of lambda parameter symbols", Optional: true}, &scm.TypeDescriptor{Kind: "list", ParamName: "alias_map", ParamDesc: "optional list of (alias canonical) pairs", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "string"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "register_keytable_cleanup",
+		Desc: "registers triggers on a base table to maintain keytable entries (insert/delete group keys)",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				baseDB := GetDatabase(scm.String(a[0]))
+				if baseDB == nil {
+					return scm.NewBool(false)
+				}
+				baseTable := baseDB.GetTable(scm.String(a[1]))
+				if baseTable == nil {
+					return scm.NewBool(false)
+				}
+				ktSchema := scm.String(a[2])
+				ktName := scm.String(a[3])
+				tblvar := scm.String(a[4])
+				pairs := a[5].Slice()
+	
+				// Extract column name pairs
+				var baseCols, ktCols []string
+				for _, p := range pairs {
+					pp := p.Slice()
+					baseCols = append(baseCols, scm.String(pp[0]))
+					ktCols = append(ktCols, scm.String(pp[1]))
+				}
+	
+				baseSchema := scm.String(a[0])
+	
+				// Helper: build (and (equal? x1 y1) (equal? x2 y2) ...) or just (equal? x y) for single key
+				buildAndEquals := func(xs, ys []scm.Scmer) scm.Scmer {
+					if len(xs) == 1 {
+						return scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), xs[0], ys[0]})
+					}
+					parts := make([]scm.Scmer, 1+len(xs))
+					parts[0] = scm.NewSymbol("and")
+					for i := range xs {
+						parts[1+i] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), xs[i], ys[i]})
+					}
+					return scm.NewSlice(parts)
+				}
+	
+				// Helper: build scan filter lambda params as tblvar.col symbols
+				scanFilterParams := func(prefix string, cols []string) scm.Scmer {
+					params := make([]scm.Scmer, len(cols))
+					for i, col := range cols {
+						params[i] = scm.NewSymbol(prefix + "." + col)
+					}
+					return scm.NewSlice(params)
+				}
+	
+				// Helper: build scan filter column list (list "col1" "col2" ...)
+				scanFilterCols := func(cols []string) scm.Scmer {
+					elems := make([]scm.Scmer, 1+len(cols))
+					elems[0] = scm.NewSymbol("list")
+					for i, col := range cols {
+						elems[1+i] = scm.NewString(col)
+					}
+					return scm.NewSlice(elems)
+				}
+	
+				// Helper: build symbols for scan param references
+				scanParamSyms := func(prefix string, cols []string) []scm.Scmer {
+					syms := make([]scm.Scmer, len(cols))
+					for i, col := range cols {
+						syms[i] = scm.NewSymbol(prefix + "." + col)
+					}
+					return syms
+				}
+	
+				// Helper: build (get_assoc <sym> "col") list
+				getAssocs := func(sym string, cols []string) []scm.Scmer {
+					result := make([]scm.Scmer, len(cols))
+					for i, col := range cols {
+						result[i] = fkGetAssocExpr(sym, col)
+					}
+					return result
+				}
+	
+				// Build count-scan: (scan base_schema base_table (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
+				buildCountScan := func(dictSym string) scm.Scmer {
 					return scm.NewSlice([]scm.Scmer{
-						scm.NewString("columns"), t.ShowColumns(),
-						scm.NewString("meta"), showBuildMeta(db, t),
-						scm.NewString("shards"), scm.NewSlice(shardRows),
+						scm.NewSymbol("scan"),
+						scm.NewString(baseSchema), scm.NewString(baseTable.Name),
+						scanFilterCols(baseCols),
+						scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
+							buildAndEquals(scanParamSyms(tblvar, baseCols), getAssocs(dictSym, baseCols)))),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewInt(1)}),
+						scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
 					})
 				}
-				// (show schema tbl N) → shard N overview
-				if a[2].IsInt() || a[2].IsFloat() {
-					shards := t.ActiveShards()
-					idx := int(scm.ToInt(a[2]))
-					if idx < 0 || idx >= len(shards) {
-						panic("shard index out of range")
-					}
-					return showBuildShardRow(t, idx, shards[idx])
+	
+				// Build delete-scan: (scan kt_schema kt_name (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
+				buildDeleteScan := func(dictSym string) scm.Scmer {
+					return scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("scan"),
+						scm.NewString(ktSchema), scm.NewString(ktName),
+						scanFilterCols(ktCols),
+						scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
+							buildAndEquals(scanParamSyms(ktName, ktCols), getAssocs(dictSym, baseCols)))),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$update")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}),
+							scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")})}),
+						scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
+					})
 				}
-				panic("invalid call of show")
-			} else if len(a) == 4 {
-				// (show schema tbl N true) → full shard info with columns and indexes
-				if (a[2].IsInt() || a[2].IsFloat()) && a[3].IsBool() && a[3].Bool() {
+	
+				// Build insert: (insert kt_schema kt_name (list kt_cols...) (list (list vals...)) (list) (lambda () true) true)
+				buildInsert := func(dictSym string) scm.Scmer {
+					return scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("insert"),
+						scm.NewString(ktSchema), scm.NewString(ktName),
+						scanFilterCols(ktCols),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"),
+							fkValListExpr(dictSym, baseCols)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewBool(true)}),
+						scm.NewBool(true),
+					})
+				}
+	
+				// AfterDelete body: if count=0 then delete from keytable
+				deleteBody := scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("if"),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewInt(0), buildCountScan("OLD")}),
+					buildDeleteScan("OLD"),
+				})
+	
+				// AfterInsert body: insert new key into keytable (INSERT IGNORE)
+				insertBody := buildInsert("NEW")
+	
+				// AfterUpdate body: if key changed, clean up old + insert new
+				keyChangedCheck := buildAndEquals(getAssocs("OLD", baseCols), getAssocs("NEW", baseCols))
+				updateBody := scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("if"),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("not"), keyChangedCheck}),
+					scm.NewSlice([]scm.Scmer{
+						scm.NewSymbol("begin"),
+						scm.NewSlice([]scm.Scmer{
+							scm.NewSymbol("if"),
+							scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), scm.NewInt(0), buildCountScan("OLD")}),
+							buildDeleteScan("OLD"),
+						}),
+						buildInsert("NEW"),
+					}),
+				})
+	
+				// Register DML triggers with idempotency
+				triggerDefs := []struct {
+					timing TriggerTiming
+					body   scm.Scmer
+				}{
+					{AfterDelete, deleteBody},
+					{AfterInsert, insertBody},
+					{AfterUpdate, updateBody},
+				}
+				for _, td := range triggerDefs {
+					triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + td.timing.String()
+					exists := false
+					for _, tr := range baseTable.Triggers {
+						if tr.Name == triggerName {
+							exists = true
+							break
+						}
+					}
+					if exists {
+						continue
+					}
+					baseTable.AddTrigger(TriggerDescription{
+						Name:     triggerName,
+						Timing:   td.timing,
+						IsSystem: true,
+						Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
+						Func:     buildFKProc(td.body),
+					})
+				}
+				// Lifecycle cleanup: when the base table is dropped/shape-changed, the keytable
+				// must be dropped as well, otherwise stale keytables can be reused by a later
+				// table recreation with the same name and cause cross-suite flakes.
+				dropBody := scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("droptable"),
+					scm.NewString(ktSchema),
+					scm.NewString(ktName),
+					scm.NewBool(true),
+				})
+				for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {
+					triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + timing.String()
+					exists := false
+					for _, tr := range baseTable.Triggers {
+						if tr.Name == triggerName {
+							exists = true
+							break
+						}
+					}
+					if exists {
+						continue
+					}
+					baseTable.AddTrigger(TriggerDescription{
+						Name:     triggerName,
+						Timing:   timing,
+						IsSystem: true,
+						Priority: 90,
+						Func:     buildFKProc(dropBody),
+					})
+				}
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "base_schema", ParamDesc: "database of the base table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "base_table", ParamDesc: "name of the base table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "kt_schema", ParamDesc: "database of the keytable"}, &scm.TypeDescriptor{Kind: "string", ParamName: "kt_name", ParamDesc: "name of the keytable"}, &scm.TypeDescriptor{Kind: "string", ParamName: "tblvar", ParamDesc: "table alias used in scan column prefixes"}, &scm.TypeDescriptor{Kind: "list", ParamName: "key_pairs", ParamDesc: "list of (base_col kt_col) pairs"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "touch_keytable",
+		Desc: "extends the lease on a keytable so CacheManager defers eviction",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					return scm.NewBool(false)
+				}
+				tbl := db.GetTable(scm.String(a[1]))
+				if tbl == nil {
+					return scm.NewBool(false)
+				}
+				now := time.Now()
+				nowNs := uint64(now.UnixNano())
+				for _, s := range tbl.Shards {
+					atomic.StoreUint64(&s.lastAccessed, nowNs)
+				}
+				for _, s := range tbl.PShards {
+					atomic.StoreUint64(&s.lastAccessed, nowNs)
+				}
+				for _, c := range tbl.Columns {
+					if c.IsTemp {
+						atomic.StoreInt64(&c.lastAccessed, now.UnixNano())
+					}
+				}
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "database name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "keytable name"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "locktables",
+		Desc: "acquires WRITE or READ user-level locks on a list of tables (LOCK TABLES); implicitly releases any previously held locks",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				ss := scm.GetCurrentSessionState()
+				if ss != nil {
+					ss.ReleaseAllLocks() // LOCK TABLES implicitly releases prior locks
+				}
+				for _, item := range a[0].Slice() {
+					triple := item.Slice()
+					schema := scm.String(triple[0])
+					tbl := scm.String(triple[1])
+					write := triple[2].Bool()
+					lockTable(schema, tbl, write, ss)
+				}
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "list", ParamName: "locks", ParamDesc: "flat list of schema, table, write? triples"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "unlocktables",
+		Desc: "releases all user-level table locks held by this session",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				if ss := scm.GetCurrentSessionState(); ss != nil {
+					ss.ReleaseAllLocks()
+				}
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "get_fk_target",
+		Desc: "returns (ref_table ref_column) if a single-column FK exists for the given column, nil otherwise",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					return scm.NewNil()
+				}
+				tbl := db.GetTable(scm.String(a[1]))
+				if tbl == nil {
+					return scm.NewNil()
+				}
+				col := scm.String(a[2])
+				for _, fk := range tbl.Foreign {
+					if fk.Tbl1 == tbl.Name && len(fk.Cols1) == 1 && fk.Cols1[0] == col {
+						return scm.NewSlice([]scm.Scmer{scm.NewString(fk.Tbl2), scm.NewString(fk.Cols2[0])})
+					}
+				}
+				return scm.NewNil()
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "database name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "table name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "column", ParamDesc: "column name"}},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "renametable",
+		Desc: "renames a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				RenameTable(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "oldname", ParamDesc: "current name of the table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "newname", ParamDesc: "new name of the table"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "insert",
+		Desc: "inserts a new dataset into table and returns the number of successful items",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				var onCollisionCols []string
+				onCollision := scm.NewNil()
+				if len(a) > 5 {
+					onCollisionColsVals := mustScmerSlice(a[4], "onCollision columns")
+					onCollisionCols = make([]string, len(onCollisionColsVals))
+					for i, c := range onCollisionColsVals {
+						onCollisionCols[i] = scm.String(c)
+					}
+					onCollision = a[5]
+				}
+				mergeNull := len(a) > 6 && scm.ToBool(a[6])
+				// optional onInsertid callback
+				var onFirst func(int64)
+				if len(a) > 7 && !a[7].IsNil() {
+					cb := a[7]
+					var once sync.Once
+					onFirst = func(id int64) {
+						once.Do(func() { scm.Apply(cb, scm.NewInt(id)) })
+					}
+				}
+				colsVals := mustScmerSlice(a[2], "column names")
+				cols := make([]string, len(colsVals))
+				for i, col := range colsVals {
+					cols[i] = scm.String(col)
+				}
+				rowVals := mustScmerSlice(a[3], "dataset rows")
+				rows := make([][]scm.Scmer, len(rowVals))
+				for i, row := range rowVals {
+					rows[i] = mustScmerSlice(row, "insert row")
+				}
+				// perform insert
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+				inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
+				return scm.NewInt(int64(inserted))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}, &scm.TypeDescriptor{Kind: "list", ParamName: "columns", ParamDesc: "list of column names, e.g. '(\"ID\", \"value\")"}, &scm.TypeDescriptor{Kind: "list", ParamName: "datasets", ParamDesc: "list of list of column values, e.g. '('(1 10) '(2 15))"}, &scm.TypeDescriptor{Kind: "list", ParamName: "onCollisionCols", ParamDesc: "list of columns of the old dataset that have to be passed to onCollision. Can also request $update.", Optional: true}, &scm.TypeDescriptor{Kind: "func", ParamName: "onCollision", ParamDesc: "the function that is called on each collision dataset. The first parameter is filled with the $update function, the second parameter is the dataset as associative list. If not set, an error is thrown in case of a collision.", Optional: true}, &scm.TypeDescriptor{Kind: "bool", ParamName: "mergeNull", ParamDesc: "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)", Optional: true}, &scm.TypeDescriptor{Kind: "func", ParamName: "onInsertid", ParamDesc: "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "number"},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "stat",
+		Desc: "return system statistics as assoc: mem_available, mem_total, process_memory, shard_memory, shard_budget, persisted_memory, persisted_budget, cache_entry_count, cache_entry_size.\n(stat schema) and (stat schema tbl) return a string with detailed memory usage.",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				if len(a) == 0 {
+					memTotal, memAvail := ReadMemInfo()
+					processMem := ReadProcessRSS()
+					cs := GlobalCache.Stat()
+					return scm.NewSlice([]scm.Scmer{
+						scm.NewString("mem_available"), scm.NewInt(memAvail),
+						scm.NewString("mem_total"), scm.NewInt(memTotal),
+						scm.NewString("process_memory"), scm.NewInt(processMem),
+						scm.NewString("shard_memory"), scm.NewInt(cs.CurrentMemory),
+						scm.NewString("shard_budget"), scm.NewInt(cs.MemoryBudget),
+						scm.NewString("persisted_memory"), scm.NewInt(cs.PersistedMemory),
+						scm.NewString("persisted_budget"), scm.NewInt(cs.PersistedBudget),
+						scm.NewString("cache_entry_count"), scm.NewInt(cs.CountByType[TypeCacheEntry]),
+						scm.NewString("cache_entry_size"), scm.NewInt(cs.SizeByType[TypeCacheEntry]),
+					})
+				} else if len(a) == 1 {
+					return scm.NewString(GetDatabase(scm.String(a[0])).PrintMemUsage())
+				} else if len(a) == 2 {
+					return scm.NewString(GetDatabase(scm.String(a[0])).GetTable(scm.String(a[1])).PrintMemUsage())
+				}
+				return scm.NewNil()
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "(optional) database name for detailed string output", Optional: true}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "(optional) table name for detailed string output", Optional: true}},
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "totalmem",
+		Desc: "Returns total physical memory in bytes (from /proc/meminfo)",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				return scm.NewInt(totalMemoryBytes())
+			},
+		Type: &scm.TypeDescriptor{
+			Return: &scm.TypeDescriptor{Kind: "number"},
+			Const: true,
+		},
+	})
+		scm.Declare(&en, &scm.Declaration{
+		Name: "show",
+		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				if len(a) == 0 {
+					// list databases
+					dbs := databases.GetAll()
+					result := make([]scm.Scmer, len(dbs))
+					for i, db := range dbs {
+						result[i] = scm.NewString(db.Name)
+					}
+					return scm.NewSlice(result)
+				} else if len(a) == 1 {
+					// list table names
+					db := GetDatabase(scm.String(a[0]))
+					if db == nil {
+						return scm.NewNil() // use this to check if a database exists
+					}
+					return db.ShowTables()
+				} else if len(a) == 2 {
+					db := GetDatabase(scm.String(a[0]))
+					if db == nil {
+						panic("database " + scm.String(a[0]) + " does not exist")
+					}
+					// (show schema true) → full table listing
+					if a[1].IsBool() && a[1].Bool() {
+						db.ensureLoaded()
+						tables := db.tables.GetAll()
+						rows := make([]scm.Scmer, 0, len(tables))
+						for _, t := range tables {
+							engine := showEngineStr(t)
+							var rowCount int64
+							var sizeBytes int64
+							for _, s := range t.ActiveShards() {
+								if s == nil {
+									continue
+								}
+								s.mu.RLock()
+								rowCount += int64(s.main_count) + int64(len(s.inserts)) - int64(s.deletions.Count())
+								sizeBytes += int64(s.ComputeSize())
+								s.mu.RUnlock()
+							}
+							rows = append(rows, scm.NewSlice([]scm.Scmer{
+								scm.NewString("name"), scm.NewString(t.Name),
+								scm.NewString("engine"), scm.NewString(engine),
+								scm.NewString("row_count"), scm.NewInt(rowCount),
+								scm.NewString("size_bytes"), scm.NewInt(sizeBytes),
+								scm.NewString("collation"), scm.NewString(t.Collation),
+								scm.NewString("comment"), scm.NewString(t.Comment),
+							}))
+						}
+						return scm.NewSlice(rows)
+					}
+					// (show schema tbl) → column defs
+					t := db.GetTable(scm.String(a[1]))
+					if t == nil {
+						panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+					}
+					return t.ShowColumns()
+				} else if len(a) == 3 {
 					db := GetDatabase(scm.String(a[0]))
 					if db == nil {
 						panic("database " + scm.String(a[0]) + " does not exist")
@@ -1618,334 +1467,379 @@ func Init(en scm.Env) {
 					if t == nil {
 						panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 					}
-					shards := t.ActiveShards()
-					idx := int(scm.ToInt(a[2]))
-					if idx < 0 || idx >= len(shards) {
-						panic("shard index out of range")
-					}
-					s := shards[idx]
-					// build shard overview fields
-					overview := showBuildShardRow(t, idx, s)
-					// build columns detail
-					var colRows scm.Scmer
-					var indexRows scm.Scmer
-					if s == nil {
-						colRows = scm.NewSlice([]scm.Scmer{})
-						indexRows = scm.NewSlice([]scm.Scmer{})
-					} else {
-						s.mu.RLock()
-						deltaCount := len(s.inserts)
-						colSlice := make([]scm.Scmer, 0, len(t.Columns))
-						for _, col := range t.Columns {
-							cs := s.columns[col.Name]
-							var typStr string
-							var colSize uint
-							if cs != nil {
-								typStr = cs.String()
-								colSize = cs.ComputeSize()
-							} else {
-								typStr = "unloaded"
-								colSize = 0
+					// (show schema tbl "statistics") → index statistics (INFORMATION_SCHEMA)
+					if a[2].IsString() && scm.String(a[2]) == "statistics" {
+						var result []scm.Scmer
+						for _, uk := range t.Unique {
+							for seq, col := range uk.Cols {
+								result = append(result, scm.NewSlice([]scm.Scmer{
+									scm.NewString("table_catalog"), scm.NewString("def"),
+									scm.NewString("table_schema"), scm.NewString(db.Name),
+									scm.NewString("table_name"), scm.NewString(t.Name),
+									scm.NewString("non_unique"), scm.NewInt(0),
+									scm.NewString("index_schema"), scm.NewString(db.Name),
+									scm.NewString("index_name"), scm.NewString(uk.Id),
+									scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
+									scm.NewString("column_name"), scm.NewString(col),
+									scm.NewString("collation"), scm.NewString("A"),
+									scm.NewString("cardinality"), scm.NewNil(),
+									scm.NewString("sub_part"), scm.NewNil(),
+									scm.NewString("packed"), scm.NewNil(),
+									scm.NewString("nullable"), scm.NewString(""),
+									scm.NewString("index_type"), scm.NewString("BTREE"),
+									scm.NewString("comment"), scm.NewString(""),
+									scm.NewString("index_comment"), scm.NewString(""),
+								}))
 							}
-							var deltaSize uint
-							if dIdx, ok := s.deltaColumns[col.Name]; ok {
-								for _, row := range s.inserts {
-									if dIdx < len(row) {
-										deltaSize += row[dIdx].ComputeSize()
+						}
+						return scm.NewSlice(result)
+					}
+					// (show schema tbl true) → full table info {columns, meta, shards}
+					if a[2].IsBool() && a[2].Bool() {
+						shards := t.ActiveShards()
+						shardRows := make([]scm.Scmer, 0, len(shards))
+						for i, s := range shards {
+							shardRows = append(shardRows, showBuildShardRow(t, i, s))
+						}
+						return scm.NewSlice([]scm.Scmer{
+							scm.NewString("columns"), t.ShowColumns(),
+							scm.NewString("meta"), showBuildMeta(db, t),
+							scm.NewString("shards"), scm.NewSlice(shardRows),
+						})
+					}
+					// (show schema tbl N) → shard N overview
+					if a[2].IsInt() || a[2].IsFloat() {
+						shards := t.ActiveShards()
+						idx := int(scm.ToInt(a[2]))
+						if idx < 0 || idx >= len(shards) {
+							panic("shard index out of range")
+						}
+						return showBuildShardRow(t, idx, shards[idx])
+					}
+					panic("invalid call of show")
+				} else if len(a) == 4 {
+					// (show schema tbl N true) → full shard info with columns and indexes
+					if (a[2].IsInt() || a[2].IsFloat()) && a[3].IsBool() && a[3].Bool() {
+						db := GetDatabase(scm.String(a[0]))
+						if db == nil {
+							panic("database " + scm.String(a[0]) + " does not exist")
+						}
+						t := db.GetTable(scm.String(a[1]))
+						if t == nil {
+							panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+						}
+						shards := t.ActiveShards()
+						idx := int(scm.ToInt(a[2]))
+						if idx < 0 || idx >= len(shards) {
+							panic("shard index out of range")
+						}
+						s := shards[idx]
+						// build shard overview fields
+						overview := showBuildShardRow(t, idx, s)
+						// build columns detail
+						var colRows scm.Scmer
+						var indexRows scm.Scmer
+						if s == nil {
+							colRows = scm.NewSlice([]scm.Scmer{})
+							indexRows = scm.NewSlice([]scm.Scmer{})
+						} else {
+							s.mu.RLock()
+							deltaCount := len(s.inserts)
+							colSlice := make([]scm.Scmer, 0, len(t.Columns))
+							for _, col := range t.Columns {
+								cs := s.columns[col.Name]
+								var typStr string
+								var colSize uint
+								if cs != nil {
+									typStr = cs.String()
+									colSize = cs.ComputeSize()
+								} else {
+									typStr = "unloaded"
+									colSize = 0
+								}
+								var deltaSize uint
+								if dIdx, ok := s.deltaColumns[col.Name]; ok {
+									for _, row := range s.inserts {
+										if dIdx < len(row) {
+											deltaSize += row[dIdx].ComputeSize()
+										}
 									}
 								}
+								colSlice = append(colSlice, scm.NewSlice([]scm.Scmer{
+									scm.NewString("name"), scm.NewString(col.Name),
+									scm.NewString("compression"), scm.NewString(typStr),
+									scm.NewString("size_bytes"), scm.NewInt(int64(colSize)),
+									scm.NewString("delta_count"), scm.NewInt(int64(deltaCount)),
+									scm.NewString("delta_size_bytes"), scm.NewInt(int64(deltaSize)),
+								}))
 							}
-							colSlice = append(colSlice, scm.NewSlice([]scm.Scmer{
-								scm.NewString("name"), scm.NewString(col.Name),
-								scm.NewString("compression"), scm.NewString(typStr),
-								scm.NewString("size_bytes"), scm.NewInt(int64(colSize)),
-								scm.NewString("delta_count"), scm.NewInt(int64(deltaCount)),
-								scm.NewString("delta_size_bytes"), scm.NewInt(int64(deltaSize)),
-							}))
+							colRows = scm.NewSlice(colSlice)
+							idxSlice := make([]scm.Scmer, 0, len(s.Indexes))
+							for _, ix := range s.Indexes {
+								idxSlice = append(idxSlice, scm.NewSlice([]scm.Scmer{
+									scm.NewString("cols"), scm.NewString(ix.String()),
+									scm.NewString("active"), scm.NewBool(ix.active),
+									scm.NewString("native"), scm.NewBool(ix.Native),
+									scm.NewString("savings"), scm.NewFloat(ix.Savings),
+									scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
+								}))
+							}
+							indexRows = scm.NewSlice(idxSlice)
+							s.mu.RUnlock()
 						}
-						colRows = scm.NewSlice(colSlice)
-						idxSlice := make([]scm.Scmer, 0, len(s.Indexes))
-						for _, ix := range s.Indexes {
-							idxSlice = append(idxSlice, scm.NewSlice([]scm.Scmer{
-								scm.NewString("cols"), scm.NewString(ix.String()),
-								scm.NewString("active"), scm.NewBool(ix.active),
-								scm.NewString("native"), scm.NewBool(ix.Native),
-								scm.NewString("savings"), scm.NewFloat(ix.Savings),
-								scm.NewString("size_bytes"), scm.NewInt(int64(ix.ComputeSize())),
-							}))
-						}
-						indexRows = scm.NewSlice(idxSlice)
-						s.mu.RUnlock()
+						// merge overview fields with columns and indexes
+						overviewSlice := overview.Slice()
+						result := make([]scm.Scmer, 0, len(overviewSlice)+4)
+						result = append(result, overviewSlice...)
+						result = append(result, scm.NewString("columns"), colRows)
+						result = append(result, scm.NewString("indexes"), indexRows)
+						return scm.NewSlice(result)
 					}
-					// merge overview fields with columns and indexes
-					overviewSlice := overview.Slice()
-					result := make([]scm.Scmer, 0, len(overviewSlice)+4)
-					result = append(result, overviewSlice...)
-					result = append(result, scm.NewString("columns"), colRows)
-					result = append(result, scm.NewString("indexes"), indexRows)
-					return scm.NewSlice(result)
+					panic("invalid call of show")
 				}
 				panic("invalid call of show")
-			}
-			panic("invalid call of show")
-		}, false, false, nil,
-		nil,
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "(optional) database name", Optional: true}, &scm.TypeDescriptor{Kind: "string|bool", ParamName: "table", ParamDesc: "(optional) table name, or true for full table listing", Optional: true}, &scm.TypeDescriptor{Kind: "int|bool", ParamName: "property", ParamDesc: "(optional) shard index (int), true for full table info, or \"statistics\"", Optional: true}, &scm.TypeDescriptor{Kind: "bool", ParamName: "full", ParamDesc: "(optional) true to include columns and indexes in shard detail", Optional: true}},
+		},
 	})
 	// show_triggers(schema, table): returns a list of triggers for a table (non-system triggers only)
-	scm.Declare(&en, &scm.Declaration{
-		"show_triggers", "show triggers for a given table",
-		1, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "database name", nil},
-			scm.DeclarationParameter{"table", "string", "(optional) table name, if omitted shows all triggers in schema", nil},
-		}, "any",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			rows := make([]scm.Scmer, 0)
-			tables := db.tables.GetAll()
-			for _, t := range tables {
-				// If table name specified, filter
-				if len(a) >= 2 && scm.String(a[1]) != t.Name {
-					continue
+		scm.Declare(&en, &scm.Declaration{
+		Name: "show_triggers",
+		Desc: "show triggers for a given table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
 				}
-				for _, tr := range t.Triggers {
-					// Skip system/internal triggers — only show user-visible ones
-					if tr.IsSystem || tr.Hidden {
+				rows := make([]scm.Scmer, 0)
+				tables := db.tables.GetAll()
+				for _, t := range tables {
+					// If table name specified, filter
+					if len(a) >= 2 && scm.String(a[1]) != t.Name {
 						continue
 					}
-					// MySQL SHOW TRIGGERS format:
-					// Trigger, Event, Table, Statement, Timing, Created, sql_mode, Definer, character_set_client, collation_connection, Database Collation
-					timing := "BEFORE"
-					event := "INSERT"
-					switch tr.Timing {
-					case BeforeInsert:
-						timing, event = "BEFORE", "INSERT"
-					case AfterInsert:
-						timing, event = "AFTER", "INSERT"
-					case BeforeUpdate:
-						timing, event = "BEFORE", "UPDATE"
-					case AfterUpdate:
-						timing, event = "AFTER", "UPDATE"
-					case BeforeDelete:
-						timing, event = "BEFORE", "DELETE"
-					case AfterDelete:
-						timing, event = "AFTER", "DELETE"
+					for _, tr := range t.Triggers {
+						// Skip system/internal triggers — only show user-visible ones
+						if tr.IsSystem || tr.Hidden {
+							continue
+						}
+						// MySQL SHOW TRIGGERS format:
+						// Trigger, Event, Table, Statement, Timing, Created, sql_mode, Definer, character_set_client, collation_connection, Database Collation
+						timing := "BEFORE"
+						event := "INSERT"
+						switch tr.Timing {
+						case BeforeInsert:
+							timing, event = "BEFORE", "INSERT"
+						case AfterInsert:
+							timing, event = "AFTER", "INSERT"
+						case BeforeUpdate:
+							timing, event = "BEFORE", "UPDATE"
+						case AfterUpdate:
+							timing, event = "AFTER", "UPDATE"
+						case BeforeDelete:
+							timing, event = "BEFORE", "DELETE"
+						case AfterDelete:
+							timing, event = "AFTER", "DELETE"
+						}
+						funcStr := ""
+						if !tr.Func.IsNil() {
+							funcStr = scm.String(tr.Func)
+						}
+						rows = append(rows, scm.NewSlice([]scm.Scmer{
+							scm.NewString("Trigger"), scm.NewString(tr.Name),
+							scm.NewString("Event"), scm.NewString(event),
+							scm.NewString("Table"), scm.NewString(t.Name),
+							scm.NewString("Statement"), scm.NewString(tr.SourceSQL),
+							scm.NewString("Timing"), scm.NewString(timing),
+							scm.NewString("Created"), scm.NewNil(),
+							scm.NewString("sql_mode"), scm.NewString(""),
+							scm.NewString("Definer"), scm.NewString(""),
+							scm.NewString("character_set_client"), scm.NewString("utf8mb4"),
+							scm.NewString("collation_connection"), scm.NewString("utf8mb4_general_ci"),
+							scm.NewString("Database Collation"), scm.NewString("utf8mb4_general_ci"),
+							scm.NewString("FuncStr"), scm.NewString(funcStr),
+						}))
 					}
-					funcStr := ""
-					if !tr.Func.IsNil() {
-						funcStr = scm.String(tr.Func)
-					}
-					rows = append(rows, scm.NewSlice([]scm.Scmer{
-						scm.NewString("Trigger"), scm.NewString(tr.Name),
-						scm.NewString("Event"), scm.NewString(event),
-						scm.NewString("Table"), scm.NewString(t.Name),
-						scm.NewString("Statement"), scm.NewString(tr.SourceSQL),
-						scm.NewString("Timing"), scm.NewString(timing),
-						scm.NewString("Created"), scm.NewNil(),
-						scm.NewString("sql_mode"), scm.NewString(""),
-						scm.NewString("Definer"), scm.NewString(""),
-						scm.NewString("character_set_client"), scm.NewString("utf8mb4"),
-						scm.NewString("collation_connection"), scm.NewString("utf8mb4_general_ci"),
-						scm.NewString("Database Collation"), scm.NewString("utf8mb4_general_ci"),
-						scm.NewString("FuncStr"), scm.NewString(funcStr),
-					}))
 				}
-			}
-			return scm.NewSlice(rows)
-		}, false, false, nil,
-		nil,
+				return scm.NewSlice(rows)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "database name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "(optional) table name, if omitted shows all triggers in schema", Optional: true}},
+		},
 	})
 
-	scm.Declare(&en, &scm.Declaration{
-		"rebuild", "rebuilds all main storages and returns the amount of time it took",
-		0, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"all", "bool", "if true, rebuild all shards, even if nothing has changed (default: false)", nil},
-			scm.DeclarationParameter{"repartition", "bool", "if true, also repartition (default: true)", nil},
-		}, "string",
-		func(a ...scm.Scmer) scm.Scmer {
-			all := false
-			if len(a) > 0 && scm.ToBool(a[0]) {
-				all = true
-			}
-			repartition := true
-			if len(a) > 1 {
-				repartition = scm.ToBool(a[1])
-			}
-
-			return scm.NewString(Rebuild(all, repartition))
-		}, false, false, nil,
-		nil,
+		scm.Declare(&en, &scm.Declaration{
+		Name: "rebuild",
+		Desc: "rebuilds all main storages and returns the amount of time it took",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				all := false
+				if len(a) > 0 && scm.ToBool(a[0]) {
+					all = true
+				}
+				repartition := true
+				if len(a) > 1 {
+					repartition = scm.ToBool(a[1])
+				}
+	
+				return scm.NewString(Rebuild(all, repartition))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "bool", ParamName: "all", ParamDesc: "if true, rebuild all shards, even if nothing has changed (default: false)", Optional: true}, &scm.TypeDescriptor{Kind: "bool", ParamName: "repartition", ParamDesc: "if true, also repartition (default: true)", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "string"},
+		},
 	})
 	// clean() is intentionally not exposed as a SQL function.
 	// It runs automatically at startup (in a background goroutine) after LoadDatabases().
 
-	scm.Declare(&en, &scm.Declaration{
-		"loadCSV", "loads a CSV stream into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.",
-		3, 5,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table", nil},
-			scm.DeclarationParameter{"stream", "stream", "CSV file, load with: (stream filename)", nil},
-			scm.DeclarationParameter{"delimiter", "string", "(optional) delimiter defaults to \";\"", nil},
-			scm.DeclarationParameter{"firstline", "bool", "(optional) if the first line contains the column names (otherwise, the tables column order is used)", nil},
-		}, "string",
-		func(a ...scm.Scmer) scm.Scmer {
-			// schema, table, filename, delimiter
-			start := time.Now()
-
-			delimiter := ";"
-			if len(a) > 3 {
-				delimiter = scm.String(a[3])
-			}
-			firstline := true
-			if len(a) > 4 {
-				firstline = scm.ToBool(a[4])
-			}
-			stream, ok := a[2].Any().(io.Reader)
-			if !ok {
-				panic("loadCSV expects a stream")
-			}
-			LoadCSV(scm.String(a[0]), scm.String(a[1]), stream, delimiter, firstline)
-
-			return scm.NewString(fmt.Sprint(time.Since(start)))
-		}, false, false, nil,
-		nil,
+		scm.Declare(&en, &scm.Declaration{
+		Name: "loadCSV",
+		Desc: "loads a CSV stream into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				// schema, table, filename, delimiter
+				start := time.Now()
+	
+				delimiter := ";"
+				if len(a) > 3 {
+					delimiter = scm.String(a[3])
+				}
+				firstline := true
+				if len(a) > 4 {
+					firstline = scm.ToBool(a[4])
+				}
+				stream, ok := a[2].Any().(io.Reader)
+				if !ok {
+					panic("loadCSV expects a stream")
+				}
+				LoadCSV(scm.String(a[0]), scm.String(a[1]), stream, delimiter, firstline)
+	
+				return scm.NewString(fmt.Sprint(time.Since(start)))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}, &scm.TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "CSV file, load with: (stream filename)"}, &scm.TypeDescriptor{Kind: "string", ParamName: "delimiter", ParamDesc: "(optional) delimiter defaults to \";\"", Optional: true}, &scm.TypeDescriptor{Kind: "bool", ParamName: "firstline", ParamDesc: "(optional) if the first line contains the column names (otherwise, the tables column order is used)", Optional: true}},
+			Return: &scm.TypeDescriptor{Kind: "string"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"loadJSON", "loads a .jsonl file from stream into a database and returns the amount of time it took.\nJSONL is a linebreak separated file of JSON objects. Each JSON object is one dataset in the database. Before you add rows, you must declare the table in a line '#table <tablename>'. All other lines starting with # are comments. Columns are created dynamically as soon as they occur in a json object.",
-		2, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database where you want to put the tables in", nil},
-			scm.DeclarationParameter{"stream", "stream", "stream of the .jsonl file, read with: (stream filename)", nil},
-		}, "string",
-		func(a ...scm.Scmer) scm.Scmer {
-			// schema, filename
-			start := time.Now()
-
-			stream, ok := a[1].Any().(io.Reader)
-			if !ok {
-				panic("loadJSON expects a stream")
-			}
-			LoadJSON(scm.String(a[0]), stream)
-
-			return scm.NewString(fmt.Sprint(time.Since(start)))
-		}, false, false, nil,
-		nil,
+		scm.Declare(&en, &scm.Declaration{
+		Name: "loadJSON",
+		Desc: "loads a .jsonl file from stream into a database and returns the amount of time it took.\nJSONL is a linebreak separated file of JSON objects. Each JSON object is one dataset in the database. Before you add rows, you must declare the table in a line '#table <tablename>'. All other lines starting with # are comments. Columns are created dynamically as soon as they occur in a json object.",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				// schema, filename
+				start := time.Now()
+	
+				stream, ok := a[1].Any().(io.Reader)
+				if !ok {
+					panic("loadJSON expects a stream")
+				}
+				LoadJSON(scm.String(a[0]), stream)
+	
+				return scm.NewString(fmt.Sprint(time.Since(start)))
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database where you want to put the tables in"}, &scm.TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "stream of the .jsonl file, read with: (stream filename)"}},
+			Return: &scm.TypeDescriptor{Kind: "string"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"settings", "reads or writes a global settings value. This modifies your data/settings.json.",
-		0, 2,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"key", "string", "name of the key to set or get (for reference, rts)", nil},
-			scm.DeclarationParameter{"value", "any", "new value of that setting", nil},
-		}, "any",
-		ChangeSettings, false, false, nil,
-		nil,
+		scm.Declare(&en, &scm.Declaration{
+		Name: "settings",
+		Desc: "reads or writes a global settings value. This modifies your data/settings.json.",
+		Fn: ChangeSettings,
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "key", ParamDesc: "name of the key to set or get (for reference, rts)", Optional: true}, &scm.TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "new value of that setting", Optional: true}},
+		},
 	})
 
 	// Trigger management
-	scm.Declare(&en, &scm.Declaration{
-		"createtrigger", "creates a new trigger on a table",
-		7, 7,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"table", "string", "name of the table", nil},
-			scm.DeclarationParameter{"name", "string", "name of the trigger", nil},
-			scm.DeclarationParameter{"timing", "string", "one of: before_insert, after_insert, before_update, after_update, before_delete, after_delete", nil},
-			scm.DeclarationParameter{"source_sql", "string", "original SQL body text (for SHOW TRIGGERS)", nil},
-			scm.DeclarationParameter{"body", "any", "trigger body (parsed Scheme expression)", nil},
-			scm.DeclarationParameter{"visible", "bool", "true = user trigger (shown in SHOW TRIGGERS), false = internal trigger (hidden)", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-			t := db.GetTable(scm.String(a[1]))
-			if t == nil {
-				panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
-			}
-
-			name := scm.String(a[2])
-			timingStr := scm.String(a[3])
-			var timing TriggerTiming
-			switch timingStr {
-			case "before_insert":
-				timing = BeforeInsert
-			case "after_insert":
-				timing = AfterInsert
-			case "before_update":
-				timing = BeforeUpdate
-			case "after_update":
-				timing = AfterUpdate
-			case "before_delete":
-				timing = BeforeDelete
-			case "after_delete":
-				timing = AfterDelete
-			case "after_drop_table":
-				timing = AfterDropTable
-			case "after_drop_column":
-				timing = AfterDropColumn
-			default:
-				panic("invalid trigger timing: " + timingStr)
-			}
-
-			sourceSQL := scm.String(a[4])
-			body := a[5]
-			visible := scm.ToBool(a[6])
-
-			// Idempotent: replace any existing trigger with the same name
-			t.RemoveTrigger(name)
-			trigger := TriggerDescription{
-				Name:      name,
-				Timing:    timing,
-				Func:      body,
-				SourceSQL: sourceSQL,
-				Hidden:    !visible,
-				Priority:  0,
-			}
-			t.AddTrigger(trigger)
-			t.schema.save()
-			return scm.NewBool(true)
-		}, false, false, nil,
-		nil,
+		scm.Declare(&en, &scm.Declaration{
+		Name: "createtrigger",
+		Desc: "creates a new trigger on a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+				t := db.GetTable(scm.String(a[1]))
+				if t == nil {
+					panic("table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
+				}
+	
+				name := scm.String(a[2])
+				timingStr := scm.String(a[3])
+				var timing TriggerTiming
+				switch timingStr {
+				case "before_insert":
+					timing = BeforeInsert
+				case "after_insert":
+					timing = AfterInsert
+				case "before_update":
+					timing = BeforeUpdate
+				case "after_update":
+					timing = AfterUpdate
+				case "before_delete":
+					timing = BeforeDelete
+				case "after_delete":
+					timing = AfterDelete
+				case "after_drop_table":
+					timing = AfterDropTable
+				case "after_drop_column":
+					timing = AfterDropColumn
+				default:
+					panic("invalid trigger timing: " + timingStr)
+				}
+	
+				sourceSQL := scm.String(a[4])
+				body := a[5]
+				visible := scm.ToBool(a[6])
+	
+				// Idempotent: replace any existing trigger with the same name
+				t.RemoveTrigger(name)
+				trigger := TriggerDescription{
+					Name:      name,
+					Timing:    timing,
+					Func:      body,
+					SourceSQL: sourceSQL,
+					Hidden:    !visible,
+					Priority:  0,
+				}
+				t.AddTrigger(trigger)
+				t.schema.save()
+				return scm.NewBool(true)
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "table", ParamDesc: "name of the table"}, &scm.TypeDescriptor{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"}, &scm.TypeDescriptor{Kind: "string", ParamName: "timing", ParamDesc: "one of: before_insert, after_insert, before_update, after_update, before_delete, after_delete"}, &scm.TypeDescriptor{Kind: "string", ParamName: "source_sql", ParamDesc: "original SQL body text (for SHOW TRIGGERS)"}, &scm.TypeDescriptor{Kind: "any", ParamName: "body", ParamDesc: "trigger body (parsed Scheme expression)"}, &scm.TypeDescriptor{Kind: "bool", ParamName: "visible", ParamDesc: "true = user trigger (shown in SHOW TRIGGERS), false = internal trigger (hidden)"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
-	scm.Declare(&en, &scm.Declaration{
-		"droptrigger", "removes a trigger from a table",
-		3, 3,
-		[]scm.DeclarationParameter{
-			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
-			scm.DeclarationParameter{"name", "string", "name of the trigger", nil},
-			scm.DeclarationParameter{"ifexists", "bool", "don't throw error if trigger doesn't exist", nil},
-		}, "bool",
-		func(a ...scm.Scmer) scm.Scmer {
-			db := GetDatabase(scm.String(a[0]))
-			if db == nil {
+		scm.Declare(&en, &scm.Declaration{
+		Name: "droptrigger",
+		Desc: "removes a trigger from a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				db := GetDatabase(scm.String(a[0]))
+				if db == nil {
+					if scm.ToBool(a[2]) {
+						return scm.NewBool(false)
+					}
+					panic("database " + scm.String(a[0]) + " does not exist")
+				}
+	
+				name := scm.String(a[1])
+				// Search all tables for the trigger
+				for _, t := range db.tables.GetAll() {
+					if t.RemoveTrigger(name) {
+						t.schema.save()
+						return scm.NewBool(true)
+					}
+				}
+	
 				if scm.ToBool(a[2]) {
 					return scm.NewBool(false)
 				}
-				panic("database " + scm.String(a[0]) + " does not exist")
-			}
-
-			name := scm.String(a[1])
-			// Search all tables for the trigger
-			for _, t := range db.tables.GetAll() {
-				if t.RemoveTrigger(name) {
-					t.schema.save()
-					return scm.NewBool(true)
-				}
-			}
-
-			if scm.ToBool(a[2]) {
-				return scm.NewBool(false)
-			}
-			panic("trigger " + name + " does not exist")
-		}, false, false, nil,
-		nil,
+				panic("trigger " + name + " does not exist")
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"}, &scm.TypeDescriptor{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"}, &scm.TypeDescriptor{Kind: "bool", ParamName: "ifexists", ParamDesc: "don't throw error if trigger doesn't exist"}},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
 	})
 
 	initMySQLImport(en)
@@ -1953,11 +1847,12 @@ func Init(en scm.Env) {
 	initDashboard(en)
 	initMetricsDeclarations(en)
 	scm.DeclareInSection("Sync", &en, &scm.Declaration{
-		"newcachemap", "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
-		0, 0,
-		[]scm.DeclarationParameter{}, "func",
-		NewCacheMap, false, false, nil,
-		nil,
+		Name: "newcachemap",
+		Desc: "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys.",
+		Fn:   NewCacheMap,
+		Type: &scm.TypeDescriptor{
+			Return: &scm.TypeDescriptor{Kind: "func"},
+		},
 	})
 	initTransaction(en)
 	initFKBuiltins(en)
@@ -2162,143 +2057,128 @@ func fkCascadeUpdate(childTbl *table, cols []string, oldVals, newVals []scm.Scme
 
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.
 func initFKBuiltins(en scm.Env) {
-	scm.Declare(&en, &scm.Declaration{
-		"__fk_check_ref", "check that FK values exist in the parent table, panic if not",
-		5, 5,
-		[]scm.DeclarationParameter{
-			{"schema", "string", "database name", nil},
-			{"parent_table", "string", "parent table name", nil},
-			{"parent_cols", "list", "parent column names", nil},
-			{"values", "list", "FK values to check", nil},
-			{"fk_id", "string", "FK constraint name", nil},
-		}, "nil",
-		func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			parentTable := scm.String(a[1])
-			parentCols := scmerSliceToStrings(mustScmerSlice(a[2], "parent_cols"))
-			values := mustScmerSlice(a[3], "values")
-			fkId := scm.String(a[4])
-			// NULL FK values are always valid
-			for _, v := range values {
-				if v.IsNil() {
-					return scm.NewNil()
-				}
-			}
-			db := GetDatabase(schema)
-			if db == nil {
-				panic("foreign key " + fkId + ": database " + schema + " does not exist")
-			}
-			tbl := db.GetTable(parentTable)
-			if tbl == nil {
-				panic("foreign key " + fkId + ": parent table " + schema + "." + parentTable + " does not exist")
-			}
-			if !fkExistenceCheck(tbl, parentCols, values) {
-				panic("foreign key constraint " + fkId + " failed: value does not exist in " + parentTable)
-			}
-			return scm.NewNil()
-		},
-		false, true, nil,
-		nil,
-	})
-
-	scm.Declare(&en, &scm.Declaration{
-		"__fk_on_parent_delete", "enforce FK constraint when parent row is deleted",
-		6, 6,
-		[]scm.DeclarationParameter{
-			{"schema", "string", "database name", nil},
-			{"child_table", "string", "child table name", nil},
-			{"child_cols", "list", "child FK column names", nil},
-			{"parent_vals", "list", "old parent PK values", nil},
-			{"fk_id", "string", "FK constraint name", nil},
-			{"mode", "string", "RESTRICT, CASCADE, or SETNULL", nil},
-		}, "nil",
-		func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			childTable := scm.String(a[1])
-			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
-			parentVals := mustScmerSlice(a[3], "parent_vals")
-			fkId := scm.String(a[4])
-			mode := scm.String(a[5])
-			db := GetDatabase(schema)
-			if db == nil {
-				return scm.NewNil()
-			}
-			tbl := db.GetTable(childTable)
-			if tbl == nil {
-				return scm.NewNil()
-			}
-			if !fkExistenceCheck(tbl, childCols, parentVals) {
-				return scm.NewNil() // no references
-			}
-			switch mode {
-			case "RESTRICT":
-				panic("foreign key constraint " + fkId + " failed: cannot delete because rows in " + childTable + " reference it")
-			case "CASCADE":
-				fkCascadeDelete(tbl, childCols, parentVals)
-			case "SETNULL":
-				fkCascadeSetNull(tbl, childCols, parentVals)
-			}
-			return scm.NewNil()
-		},
-		false, true, nil,
-		nil,
-	})
-
-	scm.Declare(&en, &scm.Declaration{
-		"__fk_on_parent_update", "enforce FK constraint when parent PK is updated",
-		7, 7,
-		[]scm.DeclarationParameter{
-			{"schema", "string", "database name", nil},
-			{"child_table", "string", "child table name", nil},
-			{"child_cols", "list", "child FK column names", nil},
-			{"old_vals", "list", "old parent PK values", nil},
-			{"new_vals", "list", "new parent PK values", nil},
-			{"fk_id", "string", "FK constraint name", nil},
-			{"mode", "string", "RESTRICT, CASCADE, or SETNULL", nil},
-		}, "nil",
-		func(a ...scm.Scmer) scm.Scmer {
-			schema := scm.String(a[0])
-			childTable := scm.String(a[1])
-			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
-			oldVals := mustScmerSlice(a[3], "old_vals")
-			newVals := mustScmerSlice(a[4], "new_vals")
-			fkId := scm.String(a[5])
-			mode := scm.String(a[6])
-			// check if PK actually changed
-			if len(oldVals) == len(newVals) {
-				changed := false
-				for i := range oldVals {
-					if !scm.Equal(oldVals[i], newVals[i]) {
-						changed = true
-						break
+		scm.Declare(&en, &scm.Declaration{
+		Name: "__fk_check_ref",
+		Desc: "check that FK values exist in the parent table, panic if not",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				schema := scm.String(a[0])
+				parentTable := scm.String(a[1])
+				parentCols := scmerSliceToStrings(mustScmerSlice(a[2], "parent_cols"))
+				values := mustScmerSlice(a[3], "values")
+				fkId := scm.String(a[4])
+				// NULL FK values are always valid
+				for _, v := range values {
+					if v.IsNil() {
+						return scm.NewNil()
 					}
 				}
-				if !changed {
+				db := GetDatabase(schema)
+				if db == nil {
+					panic("foreign key " + fkId + ": database " + schema + " does not exist")
+				}
+				tbl := db.GetTable(parentTable)
+				if tbl == nil {
+					panic("foreign key " + fkId + ": parent table " + schema + "." + parentTable + " does not exist")
+				}
+				if !fkExistenceCheck(tbl, parentCols, values) {
+					panic("foreign key constraint " + fkId + " failed: value does not exist in " + parentTable)
+				}
+				return scm.NewNil()
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "database name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "parent_table", ParamDesc: "parent table name"}, &scm.TypeDescriptor{Kind: "list", ParamName: "parent_cols", ParamDesc: "parent column names"}, &scm.TypeDescriptor{Kind: "list", ParamName: "values", ParamDesc: "FK values to check"}, &scm.TypeDescriptor{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"}},
+			Return: &scm.TypeDescriptor{Kind: "nil"},
+			Forbidden: true,
+		},
+	})
+
+		scm.Declare(&en, &scm.Declaration{
+		Name: "__fk_on_parent_delete",
+		Desc: "enforce FK constraint when parent row is deleted",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				schema := scm.String(a[0])
+				childTable := scm.String(a[1])
+				childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
+				parentVals := mustScmerSlice(a[3], "parent_vals")
+				fkId := scm.String(a[4])
+				mode := scm.String(a[5])
+				db := GetDatabase(schema)
+				if db == nil {
 					return scm.NewNil()
 				}
-			}
-			db := GetDatabase(schema)
-			if db == nil {
-				return scm.NewNil()
-			}
-			tbl := db.GetTable(childTable)
-			if tbl == nil {
-				return scm.NewNil()
-			}
-			switch mode {
-			case "RESTRICT":
-				if fkExistenceCheck(tbl, childCols, oldVals) {
-					panic("foreign key constraint " + fkId + " failed: cannot update because rows in " + childTable + " reference it")
+				tbl := db.GetTable(childTable)
+				if tbl == nil {
+					return scm.NewNil()
 				}
-			case "CASCADE":
-				fkCascadeUpdate(tbl, childCols, oldVals, newVals)
-			case "SETNULL":
-				fkCascadeSetNull(tbl, childCols, oldVals)
-			}
-			return scm.NewNil()
+				if !fkExistenceCheck(tbl, childCols, parentVals) {
+					return scm.NewNil() // no references
+				}
+				switch mode {
+				case "RESTRICT":
+					panic("foreign key constraint " + fkId + " failed: cannot delete because rows in " + childTable + " reference it")
+				case "CASCADE":
+					fkCascadeDelete(tbl, childCols, parentVals)
+				case "SETNULL":
+					fkCascadeSetNull(tbl, childCols, parentVals)
+				}
+				return scm.NewNil()
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "database name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "child_table", ParamDesc: "child table name"}, &scm.TypeDescriptor{Kind: "list", ParamName: "child_cols", ParamDesc: "child FK column names"}, &scm.TypeDescriptor{Kind: "list", ParamName: "parent_vals", ParamDesc: "old parent PK values"}, &scm.TypeDescriptor{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "mode", ParamDesc: "RESTRICT, CASCADE, or SETNULL"}},
+			Return: &scm.TypeDescriptor{Kind: "nil"},
+			Forbidden: true,
 		},
-		false, true, nil,
-		nil,
+	})
+
+		scm.Declare(&en, &scm.Declaration{
+		Name: "__fk_on_parent_update",
+		Desc: "enforce FK constraint when parent PK is updated",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+				schema := scm.String(a[0])
+				childTable := scm.String(a[1])
+				childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
+				oldVals := mustScmerSlice(a[3], "old_vals")
+				newVals := mustScmerSlice(a[4], "new_vals")
+				fkId := scm.String(a[5])
+				mode := scm.String(a[6])
+				// check if PK actually changed
+				if len(oldVals) == len(newVals) {
+					changed := false
+					for i := range oldVals {
+						if !scm.Equal(oldVals[i], newVals[i]) {
+							changed = true
+							break
+						}
+					}
+					if !changed {
+						return scm.NewNil()
+					}
+				}
+				db := GetDatabase(schema)
+				if db == nil {
+					return scm.NewNil()
+				}
+				tbl := db.GetTable(childTable)
+				if tbl == nil {
+					return scm.NewNil()
+				}
+				switch mode {
+				case "RESTRICT":
+					if fkExistenceCheck(tbl, childCols, oldVals) {
+						panic("foreign key constraint " + fkId + " failed: cannot update because rows in " + childTable + " reference it")
+					}
+				case "CASCADE":
+					fkCascadeUpdate(tbl, childCols, oldVals, newVals)
+				case "SETNULL":
+					fkCascadeSetNull(tbl, childCols, oldVals)
+				}
+				return scm.NewNil()
+			},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string", ParamName: "schema", ParamDesc: "database name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "child_table", ParamDesc: "child table name"}, &scm.TypeDescriptor{Kind: "list", ParamName: "child_cols", ParamDesc: "child FK column names"}, &scm.TypeDescriptor{Kind: "list", ParamName: "old_vals", ParamDesc: "old parent PK values"}, &scm.TypeDescriptor{Kind: "list", ParamName: "new_vals", ParamDesc: "new parent PK values"}, &scm.TypeDescriptor{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"}, &scm.TypeDescriptor{Kind: "string", ParamName: "mode", ParamDesc: "RESTRICT, CASCADE, or SETNULL"}},
+			Return: &scm.TypeDescriptor{Kind: "nil"},
+			Forbidden: true,
+		},
 	})
 
 }
