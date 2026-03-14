@@ -50,6 +50,8 @@ func String(v Scmer) string {
 			parts[i] = fmt.Sprint(x)
 		}
 		return "#(" + strings.Join(parts, " ") + ")"
+	case tagPromise:
+		return "[promise]"
 	case tagFunc:
 		return "[native func]"
 	case tagProc:
@@ -180,6 +182,8 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			b.WriteString(fmt.Sprint(x))
 		}
 		b.WriteByte(')')
+	case tagPromise:
+		b.WriteString("[promise]")
 	case tagFunc:
 		serializeNativeFunc(b, v.Func(), en)
 	case tagProc:

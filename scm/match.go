@@ -107,7 +107,7 @@ func valueFromPattern(pattern Scmer, en *Env) Scmer {
 }
 
 // pattern matching
-func match(val Scmer, pattern Scmer, en *Env) bool {
+func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 	/* our custom implementation of match consisting of:
 	(match value pattern result pattern result pattern result [default])
 	where pattern may be string, number, Symbol or list or applications
@@ -128,7 +128,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	*/
 	switch pattern.GetTag() {
 	case tagSourceInfo:
-		return match(val, pattern.SourceInfo().value, en)
+		return match(val, pattern.SourceInfo().value, en, mutable)
 	case tagInt, tagFloat, tagString:
 		return Equal(val, pattern)
 	case tagSymbol:
@@ -164,7 +164,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 							return false
 						}
 						for i := range p {
-							if !match(list[i], p[i], en) {
+							if !match(list[i], p[i], en, mutable) {
 								return false
 							}
 						}
@@ -198,7 +198,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					return false
 				}
 				for i, pat := range p {
-					if !match(list[i], pat, en) {
+					if !match(list[i], pat, en, mutable) {
 						return false
 					}
 				}
@@ -224,19 +224,19 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		case "string?":
 			// symbol literal
 			if _, ok := scmerAsString(val); ok {
-				return match(val, p[1], en)
+				return match(val, p[1], en, mutable)
 			}
 			return false
 		case "number?":
 			// symbol literal
 			if val.IsInt() || val.IsFloat() {
-				return match(val, p[1], en)
+				return match(val, p[1], en, mutable)
 			}
 			return false
 		case "list?":
 			// symbol literal
 			if list, ok := scmerAsSlice(val); ok {
-				return match(NewSlice(list), p[1], en)
+				return match(NewSlice(list), p[1], en, mutable)
 			}
 			return false
 		case "ignorecase":
@@ -255,11 +255,11 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 						if len(subPattern) > 0 {
 							if head, ok := symbolName(subPattern[0]); ok && head == "list" && len(subPattern)-1 <= len(list) {
 								for i := 1; i < len(subPattern); i++ {
-									if !match(list[i-1], subPattern[i], en) {
+									if !match(list[i-1], subPattern[i], en, mutable) {
 										return false
 									}
 								}
-								return match(NewSlice(list[len(subPattern)-1:]), p[2], en)
+								return match(NewSlice(list[len(subPattern)-1:]), p[2], en, mutable)
 							}
 						}
 					}
@@ -272,7 +272,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 				if len(list) == 0 {
 					return false
 				}
-				return match(list[0], p[1], en) && match(NewSlice(list[1:]), p[2], en)
+				return match(list[0], p[1], en, mutable) && match(NewSlice(list[1:]), p[2], en, mutable)
 			}
 			return false
 		case "regex":

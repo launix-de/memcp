@@ -294,6 +294,11 @@ func Equal(a, b Scmer) bool {
 			return a.ptr == b.ptr
 		}
 		return false
+	case tagPromise:
+		if tb == tagPromise {
+			return a.ptr == b.ptr
+		}
+		return false
 	case tagAny:
 		return a.Any() == b.Any()
 	}
@@ -493,6 +498,11 @@ func EqualSQL(a, b Scmer) Scmer {
 		}
 	case tagFunc:
 		if tb == tagFunc {
+			return NewBool(a.ptr == b.ptr)
+		}
+		return NewBool(false)
+	case tagPromise:
+		if tb == tagPromise {
 			return NewBool(a.ptr == b.ptr)
 		}
 		return NewBool(false)

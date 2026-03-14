@@ -708,8 +708,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			v[0] = NewSymbol("setN")
 		}
 		v[2], transferOwnership, _ = OptimizeEx(v[2], env, ome, true)
-	case headOk && headSym == Symbol("match"):
-		v[1], transferOwnership, _ = OptimizeEx(v[1], env, ome, true)
+	case headOk && (headSym == Symbol("match") || headSym == Symbol("match_mut")):
+		value, valueTransfer, _ := OptimizeEx(v[1], env, ome, true)
+		v[1] = value
+		transferOwnership = valueTransfer
+		if headSym == Symbol("match") && valueTransfer {
+			v[0] = NewSymbol("match_mut")
+		}
 		for i := 3; i < len(v); i += 2 {
 			ome2 := ome.CopySharedScope()
 			v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2)

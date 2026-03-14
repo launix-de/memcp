@@ -104,6 +104,18 @@ update_fn embeds delete_fn/insert_fn as proc literals in its body (no closure ca
 	(if (equal? result neutral) nil result)
 )))
 
+/* scalar single-value helper with forward-compatible runtime promise fallback */
+(define new_scalar_promise (lambda () (try
+	(lambda () (list true (newpromise)))
+	(lambda (e) (list false (newsession)))
+)))
+(define scalar_promise_get (lambda (p)
+	((nth p 1) "value")
+))
+(define scalar_promise_set (lambda (p v)
+	((nth p 1) "value" v)
+))
+
 /* returns a list of all aggregates in this expr */
 (define extract_aggregates (lambda (expr)
 	(match expr
@@ -1119,16 +1131,16 @@ They must not reinterpret the query as syntactically nested again.
 										(define _sq_saved_rr_name (concat "__scalar_saved_resultrow_" _sq_hash))
 										(define subplan (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect))
 										/* cache the read expression so duplicate subqueries skip the subplan */
-										(sq_cache _sq_hash (list (quote if) (list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral) nil (list (symbol _sq_acc_name) "acc")))
+										(sq_cache _sq_hash (list (quote if) (list (quote equal?) (list (quote scalar_promise_get) (symbol _sq_acc_name)) scalar_neutral) nil (list (quote scalar_promise_get) (symbol _sq_acc_name))))
 										(list (quote !begin)
-											(list (quote set) (symbol _sq_acc_name) (list (quote newsession)))
-											(list (symbol _sq_acc_name) "acc" scalar_neutral)
+											(list (quote set) (symbol _sq_acc_name) (list (quote new_scalar_promise)))
+											(list (quote scalar_promise_set) (symbol _sq_acc_name) scalar_neutral)
 											(list (quote set) (symbol _sq_rr_name)
 												(list (quote lambda) (list (symbol "row"))
 													(list (quote begin)
-														(list (symbol _sq_acc_name) "acc"
+														(list (quote scalar_promise_set) (symbol _sq_acc_name)
 															(list scalar_reduce
-																(list (symbol _sq_acc_name) "acc")
+																(list (quote scalar_promise_get) (symbol _sq_acc_name))
 																(list (quote nth) (symbol "row") 1)))
 														true
 													)
@@ -1139,9 +1151,9 @@ They must not reinterpret the query as syntactically nested again.
 											subplan
 											(list (quote set) (symbol "resultrow") (symbol _sq_saved_rr_name))
 											(list (quote if)
-												(list (quote equal?) (list (symbol _sq_acc_name) "acc") scalar_neutral)
+												(list (quote equal?) (list (quote scalar_promise_get) (symbol _sq_acc_name)) scalar_neutral)
 												nil
-												(list (symbol _sq_acc_name) "acc"))
+												(list (quote scalar_promise_get) (symbol _sq_acc_name)))
 										)
 									)
 								)
