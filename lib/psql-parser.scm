@@ -813,21 +813,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		))
 
 		/* GRANT syntax (PostgreSQL-style) -> reflect only admin and database-level access */
-		/* GRANT <any> ON DATABASE db TO user */
+		/* GRANT <any> ON DATABASE db TO user (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
+				'('insert "system" "access" '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
-		/* GRANT <any> ON SCHEMA db TO user */
+		/* GRANT <any> ON SCHEMA db TO user (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
+				'('insert "system" "access" '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
 		/* GRANT ALL PRIVILEGES ON ALL DATABASES is non-standard; ignore */
-		/* Treat GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA db TO user as db-level access */
+		/* Treat GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA db TO user as db-level access (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
+				'('insert "system" "access" '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
 
 		/* REVOKE syntax (PostgreSQL-style) -> mirror GRANT behavior */

@@ -1463,17 +1463,25 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (? (atom "DEFAULT" true)) (atom "CHARACTER" true) (atom "SET" true) sql_identifier (? (atom "COLLATE" true) sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) nil nil)))
 		/* CREATE {DATABASE | SCHEMA} name [SET key=val, ...] */
 		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (define opts (? (atom "SET" true) (+ (parser '((define k sql_identifier) "=" (define v sql_literal)) '(k v)) ",")))) (begin (if policy (policy "system" true true) true) '((quote createdatabase) id (if ifnot true false) (if opts (cons (quote list) (merge opts)) nil) nil)))
-		/* DROP USER [IF EXISTS] user — deletes from system.user */
+		/* DROP USER [IF EXISTS] user — deletes from system.user and cascades to system.access */
 		(parser '((atom "DROP" true) (atom "USER" true) (? (atom "IF" true) (atom "EXISTS" true)) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) "system" "user"
-					'('list "username")
-					'((quote lambda) '((quote username)) '((quote equal??) (quote username) username))
-					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
-					0
-				)
+				(cons '!begin (list
+					'((quote scan) "system" "access"
+						'('list "username")
+						'((quote lambda) '('username) '((quote equal??) (quote username) username))
+						'(list "$update")
+						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						(quote +)
+						0)
+					'((quote scan) "system" "user"
+						'('list "username")
+						'((quote lambda) '('username) '((quote equal??) (quote username) username))
+						'(list "$update")
+						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						(quote +)
+						0)
+				))
 		))
 		(parser '((atom "CREATE" true) (atom "USER" true) (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
@@ -1495,15 +1503,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(begin (if policy (policy "system" true true) true)
 				'((quote scan) "system" "user" '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
 		))
-		/* GRANT <anything> ON db.* TO user -> insert access */
+		/* GRANT <anything> ON db.* TO user -> insert access (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
+				'('insert "system" "access" '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
-		/* GRANT <anything> ON db.table TO user -> also insert access at db level */
+		/* GRANT <anything> ON db.table TO user -> also insert access at db level (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'('insert "system" "access" '('list "username" "database") '('list '('list username db)))
+				'('insert "system" "access" '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))
 		))
 
 		/* REVOKE syntax (MySQL-style) -> mirror GRANT behavior */
@@ -1609,7 +1617,19 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression)) (quote true)) /* ignore */
 
 
-		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id (if if_exists true false))))
+		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
+			(begin (if policy (policy "system" true true) true)
+				(cons '!begin (list
+					'((quote scan) "system" "access"
+						'('list "database")
+						'((quote lambda) '('database) '((quote equal??) (quote database) id))
+						'(list "$update")
+						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						(quote +)
+						0)
+					'((quote dropdatabase) id (if if_exists true false))
+				))
+		))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
