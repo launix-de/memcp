@@ -17,8 +17,11 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"fmt"
+	"os"
 	"testing"
 
+	querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -242,6 +245,71 @@ func TestStringRoundTripMixedEmptyAndUUID(t *testing.T) {
 		got := scm.String(s.GetValue(uint32(i)))
 		if got != want {
 			t.Fatalf("[%d]: got %q, want %q (format=%d)", i, got, want, s.format)
+		}
+	}
+}
+
+func TestStringStorageFormatNames(t *testing.T) {
+	s := &StorageString{dictionary: "1234", count: 2, format: FormatPhone}
+	if got := s.String(); got != "string-dict[2 entries; 4 bytes, format=tel]" {
+		t.Fatalf("dict String() = %q", got)
+	}
+	s.nodict = true
+	if got := s.String(); got != "string-buffer[4 bytes, format=tel]" {
+		t.Fatalf("buffer String() = %q", got)
+	}
+}
+
+func TestRebuildPreservesLateDecodedCompressedStrings(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-cstring-repartition-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tstrrebuild")
+
+	CreateDatabase("tstrrebuild", false)
+	tbl, _ := CreateTable("tstrrebuild", "items", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("grp", "INT", nil, nil)
+	tbl.CreateColumn("hash", "TEXT", nil, nil)
+
+	rows := make([][]scm.Scmer, 0, 100)
+	expectedHash := make(map[int]string, 10)
+	for grp := 0; grp < 10; grp++ {
+		hash := fmt.Sprintf("%032x", grp+1)
+		expectedHash[grp] = hash
+		for j := 0; j < 10; j++ {
+			id := grp*10 + j + 1
+			rows = append(rows, []scm.Scmer{scm.NewInt(int64(id)), scm.NewInt(int64(grp)), scm.NewString(hash)})
+		}
+	}
+	tbl.Insert([]string{"id", "grp", "hash"}, rows, nil, scm.NewNil(), false, nil)
+
+	Rebuild(true, false)
+
+	hashCol := tbl.Shards[0].getColumnStorageOrPanic("hash")
+	if _, ok := hashCol.(*StorageString); !ok {
+		t.Fatalf("expected rebuilt hash column to be StorageString, got %T", hashCol)
+	}
+	for i := 0; i < len(rows); i++ {
+		grp := i / 10
+		hashValue := hashCol.GetValue(uint32(i))
+		if !hashValue.IsCString() {
+			t.Fatalf("row %d hash is not CString after rebuild: tag=%d", i, hashValue.GetTag())
+		}
+		hashWire := scm.ScmerToMySQL(hashValue)
+		if hashWire.Type() != querypb.Type_VARCHAR {
+			t.Fatalf("row %d hash type = %v, want VARCHAR", i, hashWire.Type())
+		}
+		if got := string(hashWire.Raw()); got != expectedHash[grp] {
+			t.Fatalf("row %d hash = %q, want %q", i, got, expectedHash[grp])
 		}
 	}
 }

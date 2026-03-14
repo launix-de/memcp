@@ -395,11 +395,40 @@ func (s *StorageString) ComputeSize() uint {
 	return s.values.ComputeSize() + 8 + uint(len(s.dictionary)) + 24 + s.starts.ComputeSize() + s.lens.ComputeSize() + 8*8
 }
 
+func (f StringFormat) String() string {
+	switch f {
+	case FormatRaw:
+		return "raw"
+	case FormatPhone:
+		return "tel"
+	case FormatHexLower:
+		return "hex"
+	case FormatHexUpper:
+		return "HEX"
+	case FormatBase64Lower:
+		return "base64url"
+	case FormatBase64Upper:
+		return "base64"
+	case FormatUUIDLower:
+		return "uuid"
+	case FormatUUIDUpper:
+		return "UUID"
+	case FormatDecimal:
+		return "decimal"
+	case FormatDateTime:
+		return "datetime"
+	case FormatPhoneDTMF:
+		return "dtmf"
+	default:
+		return fmt.Sprintf("format-%d", uint8(f))
+	}
+}
+
 func (s *StorageString) String() string {
 	if s.nodict {
-		return fmt.Sprintf("string-buffer[%d bytes, format=%d]", len(s.dictionary), s.format)
+		return fmt.Sprintf("string-buffer[%d bytes, format=%s]", len(s.dictionary), s.format)
 	} else {
-		return fmt.Sprintf("string-dict[%d entries; %d bytes, format=%d]", s.count, len(s.dictionary), s.format)
+		return fmt.Sprintf("string-dict[%d entries; %d bytes, format=%s]", s.count, len(s.dictionary), s.format)
 	}
 }
 
