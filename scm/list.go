@@ -449,6 +449,30 @@ func init_list() {
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{
+		"find", "returns the first list element that passes the condition function, or nil/default if none matches",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"list", "list", "list to search", NoEscape},
+			DeclarationParameter{"condition", "func", "predicate func(any)->bool that is applied until the first match", nil},
+			DeclarationParameter{"default", "any", "optional default value if nothing matches", nil},
+		}, "any",
+		func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "find")
+			fn := OptimizeProcToSerialFunction(a[1])
+			for _, v := range input {
+				if fn(v).Bool() {
+					return v
+				}
+			}
+			if len(a) >= 3 {
+				return a[2]
+			}
+			return NewNil()
+		},
+		true, false, nil,
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
 		"map", "returns a list that contains the results of a map function that is applied to the list",
 		2, 2,
 		[]DeclarationParameter{
@@ -832,6 +856,45 @@ func init_list() {
 			return NewSlice(result)
 		},
 		true, false, &TypeDescriptor{Return: FreshAlloc, Optimize: FirstParameterMutable("filter_assoc_mut")},
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
+		"find_assoc", "returns the first key/value pair that passes the condition function, or nil/default if none matches",
+		2, 3,
+		[]DeclarationParameter{
+			DeclarationParameter{"dict", "list", "dictionary to search", NoEscape},
+			DeclarationParameter{"condition", "func", "predicate func(string any)->bool that is applied until the first match", nil},
+			DeclarationParameter{"default", "any", "optional default value if nothing matches", nil},
+		}, "any",
+		func(a ...Scmer) Scmer {
+			fn := OptimizeProcToSerialFunction(a[1])
+			if slice, fd := asAssoc(a[0], "find_assoc"); fd == nil {
+				for i := 0; i < len(slice); i += 2 {
+					if fn(slice[i], slice[i+1]).Bool() {
+						return NewSlice([]Scmer{slice[i], slice[i+1]})
+					}
+				}
+			} else {
+				var result Scmer
+				found := false
+				fd.Iterate(func(k, v Scmer) bool {
+					if fn(k, v).Bool() {
+						result = NewSlice([]Scmer{k, v})
+						found = true
+						return false
+					}
+					return true
+				})
+				if found {
+					return result
+				}
+			}
+			if len(a) >= 3 {
+				return a[2]
+			}
+			return NewNil()
+		},
+		true, false, nil,
 		nil,
 	})
 	Declare(&Globalenv, &Declaration{

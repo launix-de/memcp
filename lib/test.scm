@@ -390,6 +390,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define df (filter_assoc dmap (lambda (k v) (> v 10))))
 	(assert (has_assoc? df "x") true "filter keeps x")
 	(assert (has_assoc? df "z") false "filter drops z")
+	(assert (equal? (find_assoc df (lambda (k v) (equal? k "x"))) '("x" 11)) true "find_assoc finds slice pair")
+	(assert (equal? (find_assoc df (lambda (k v) (equal? k "missing")) '("fallback" 0)) '("fallback" 0)) true "find_assoc default on slice")
 
 	/* big assoc to test auto switch to FastDict */
 	(define big (reduce (produceN 2000) (lambda (acc i) (set_assoc acc (concat "k" i) i)) '()))
@@ -415,6 +417,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define bigf (filter_assoc biginc (lambda (k v) (> v 1000))))
 	(assert (has_assoc? bigf "k1500") true "filter keeps large values")
 	(assert (has_assoc? bigf "k1") false "filter drops small values")
+	(assert (equal? (find_assoc bigf (lambda (k v) (equal? k "k1500"))) '("k1500" 1501)) true "find_assoc finds FastDict pair")
 
 	/* set_assoc immutability: original must not be modified */
 	(define orig '("a" 1 "b" 2))
@@ -1047,6 +1050,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (nil? (reduce '() (lambda (acc x) (+ acc x)))) true "reduce empty list no neutral returns nil")
 	(assert (equal? (merge '(1 2) '(3 4)) '(1 2 3 4)) true "merge multi-arg")
 	(assert (equal? (merge_unique '(1 2) '(2 3)) '(1 2 3)) true "merge_unique multi-arg")
+	(assert (equal? (find '(10 20 30) (lambda (x) (> x 15))) 20) true "find returns first matching element")
+	(assert (equal? (find '(10 20 30) (lambda (x) (> x 100)) 99) 99) true "find default when missing")
 	(assert (has_assoc? nil "key") false "has_assoc? on nil returns false")
 	(assert (nil? (get_assoc nil "key")) true "get_assoc on nil returns nil")
 
