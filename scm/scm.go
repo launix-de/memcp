@@ -232,6 +232,9 @@ restart:
 				i := 2
 				mutable := headSym == Symbol("match_mut")
 				en2 := Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: true}
+				if mutable && val.IsSlice() {
+					en2.OwnedSlice = val.Slice()
+				}
 				for i < len(list)-1 {
 					if match(val, list[i], &en2, mutable) {
 						en = &en2
@@ -303,7 +306,8 @@ restart:
 			case "!list":
 				// Stack-allocated list: (!list NthLocalVar(start) count expr...)
 				// Evaluates exprs into VarsNumbered[start..start+count] and returns
-				// a slice view. The slice MUST NOT escape the current lambda frame.
+				// a slice view. When an OwnedSlice is available (from match_mut), it
+				// is reused as backing instead of VarsNumbered to avoid a fresh alloc.
 				start := int(list[1].NthLocalVar())
 				count := int(ToInt(list[2]))
 				if start+count > len(en.VarsNumbered) {
@@ -311,10 +315,22 @@ restart:
 					n := runtime.Stack(buf, false)
 					panic(fmt.Sprintf("!list start=%d count=%d out of range (len=%d)\n%s", start, count, len(en.VarsNumbered), buf[:n]))
 				}
-				for i := 0; i < count && i+3 < len(list); i++ {
-					en.VarsNumbered[start+i] = Eval(list[i+3], en)
+				// Try to reuse owned backing from enclosing match_mut
+				backing := en.VarsNumbered[start : start+count]
+				for e := en; e != nil; e = e.Outer {
+					if s := e.OwnedSlice; s != nil && len(s) >= count {
+						backing = s[:count]
+						e.OwnedSlice = nil // consume: one reuse per match_mut
+						break
+					}
+					if !e.Nodefine {
+						break
+					}
 				}
-				return NewSlice(en.VarsNumbered[start : start+count])
+				for i := 0; i < count && i+3 < len(list); i++ {
+					backing[i] = Eval(list[i+3], en)
+				}
+				return NewSlice(backing)
 			case "parallel":
 				// execute all childs parallely, return nil after finish
 				childExprs := list[1:]
@@ -652,7 +668,8 @@ type Env struct {
 	Vars         Vars
 	VarsNumbered []Scmer // <- for the optimizer
 	Outer        *Env
-	Nodefine     bool // define will write to Outer
+	Nodefine     bool    // define will write to Outer
+	OwnedSlice   []Scmer // set by match_mut: input slice available for output reuse
 }
 
 func (e *Env) FindRead(s Symbol) *Env {
@@ -686,9 +703,29 @@ var Globalenv Env
 func List(a ...Scmer) Scmer {
 	return NewSlice(a)
 }
+
+// listMut is the FuncEnv variant of list: reuses OwnedSlice from match_mut if
+// the backing has sufficient capacity, saving one heap allocation per call.
+func listMut(en *Env, a ...Scmer) Scmer {
+	for e := en; e != nil; e = e.Outer {
+		if s := e.OwnedSlice; s != nil && len(s) >= len(a) {
+			e.OwnedSlice = nil // consume
+			copy(s, a)
+			return NewSlice(s[:len(a)])
+		}
+		if !e.Nodefine {
+			break
+		}
+	}
+	return NewSlice(a)
+}
+
 func isList(v Scmer) bool {
 	if v.GetTag() == tagFunc {
 		return reflect.ValueOf(v.Func()).Pointer() == reflect.ValueOf(List).Pointer()
+	}
+	if v.GetTag() == tagFuncEnv {
+		return reflect.ValueOf(v.FuncEnv()).Pointer() == reflect.ValueOf(listMut).Pointer()
 	}
 	if v.GetTag() == tagAny {
 		if fn, ok := v.Any().(func(...Scmer) Scmer); ok {
@@ -699,16 +736,13 @@ func isList(v Scmer) bool {
 }
 func init() {
 	Globalenv = Env{
-		Vars{ //aka an incomplete set of compiled-in functions
+		Vars: Vars{ //aka an incomplete set of compiled-in functions
 			Symbol("true"):  NewBool(true),
 			Symbol("false"): NewBool(false),
 
 			// basic
-			Symbol("list"): NewFunc(List),
+			Symbol("list"): NewFuncEnv(listMut),
 		},
-		nil,
-		nil,
-		false,
 	}
 
 	// system
