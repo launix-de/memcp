@@ -440,6 +440,71 @@ test_cases:
           type::description: null
           type::canView: null
 
+  - name: "INSERT VALUES accepts scalar subselect in value expression"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_ins_src"
+      - sql: "DROP TABLE IF EXISTS expr32_ins_dst"
+      - sql: "CREATE TABLE expr32_ins_src (id INT PRIMARY KEY, val INT)"
+      - sql: "CREATE TABLE expr32_ins_dst (id INT PRIMARY KEY, picked INT)"
+      - sql: "INSERT INTO expr32_ins_src (id, val) VALUES (1, 10), (2, 20)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_ins_src"
+      - sql: "DROP TABLE IF EXISTS expr32_ins_dst"
+    sql: >
+      INSERT INTO expr32_ins_dst (id, picked)
+      VALUES (1, (SELECT s.val FROM expr32_ins_src s ORDER BY s.id DESC LIMIT 1))
+    expect:
+      affected_rows: 1
+
+  - name: "No-FROM projection accepts scalar subselect alongside literal field"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_ins_src"
+      - sql: "CREATE TABLE expr32_ins_src (id INT PRIMARY KEY, val INT)"
+      - sql: "INSERT INTO expr32_ins_src (id, val) VALUES (1, 10), (2, 20)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_ins_src"
+    sql: >
+      SELECT 1 AS id,
+        (SELECT s.val FROM expr32_ins_src s ORDER BY s.id DESC LIMIT 1) AS picked
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          picked: 20
+
+  - name: "EXISTS with UNION ALL branches over outer file id in select list"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_exists_file"
+      - sql: "DROP TABLE IF EXISTS expr32_exists_refa"
+      - sql: "DROP TABLE IF EXISTS expr32_exists_refb"
+      - sql: "CREATE TABLE expr32_exists_file (id INT PRIMARY KEY, filename VARCHAR(255))"
+      - sql: "CREATE TABLE expr32_exists_refa (id INT PRIMARY KEY, file INT)"
+      - sql: "CREATE TABLE expr32_exists_refb (id INT PRIMARY KEY, file INT)"
+      - sql: "INSERT INTO expr32_exists_file (id, filename) VALUES (3, 'offer.pdf'), (4, 'other.pdf')"
+      - sql: "INSERT INTO expr32_exists_refa (id, file) VALUES (1, 3)"
+      - sql: "INSERT INTO expr32_exists_refb (id, file) VALUES (1, 4)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_exists_file"
+      - sql: "DROP TABLE IF EXISTS expr32_exists_refa"
+      - sql: "DROP TABLE IF EXISTS expr32_exists_refb"
+    sql: >
+      SELECT f.id, f.filename, EXISTS (
+        SELECT a.id FROM expr32_exists_refa a WHERE a.file = f.id
+        UNION ALL
+        SELECT b.id FROM expr32_exists_refb b WHERE b.file = f.id
+      ) AS can_view
+      FROM expr32_exists_file f
+      ORDER BY f.id
+    expect:
+      rows: 2
+      data:
+        - id: 3
+          filename: offer.pdf
+          can_view: true
+        - id: 4
+          filename: other.pdf
+          can_view: true
+
   - name: "Scalar subselect multiple rows errors"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:
