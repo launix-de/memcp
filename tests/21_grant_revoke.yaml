@@ -134,4 +134,67 @@ test_cases:
     sql: "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM alice"
     expect: {}
 
-cleanup: []
+  # === UNIQUE constraint on system.access ===
+  - name: "duplicate GRANT does not create second access entry"
+    sql: "GRANT ALL PRIVILEGES ON `memcp-tests`.* TO alice"
+    expect: {}
+  - name: "second GRANT: still only one access row"
+    sql: "SELECT COUNT(*) AS cnt FROM system.access WHERE username='alice' AND database='memcp-tests'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 1 }
+  - name: "cleanup duplicate grant"
+    sql: "REVOKE ALL PRIVILEGES ON `memcp-tests`.* FROM alice"
+    expect: { affected_rows: 1 }
+
+  # === DROP USER cascades to system.access ===
+  - name: "grant access to alice before drop"
+    sql: "GRANT ALL PRIVILEGES ON `memcp-tests`.* TO alice"
+    expect: {}
+  - name: "verify access entry exists before drop"
+    sql: "SELECT COUNT(*) AS cnt FROM system.access WHERE username='alice'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 1 }
+  - name: "DROP USER alice removes access entries too"
+    sql: "DROP USER alice"
+    expect: {}
+  - name: "access entry gone after DROP USER"
+    sql: "SELECT COUNT(*) AS cnt FROM system.access WHERE username='alice'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 0 }
+
+  # === DROP DATABASE cascades to system.access ===
+  - name: "create user bob for db-drop test"
+    sql: "CREATE USER bob IDENTIFIED BY 'pw'"
+    expect: { affected_rows: 1 }
+  - name: "create database to drop"
+    sql: "CREATE DATABASE drop_test_db"
+    expect: {}
+  - name: "grant bob access to drop_test_db"
+    sql: "GRANT ALL PRIVILEGES ON `drop_test_db`.* TO bob"
+    expect: {}
+  - name: "verify access entry before drop db"
+    sql: "SELECT COUNT(*) AS cnt FROM system.access WHERE username='bob' AND database='drop_test_db'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 1 }
+  - name: "DROP DATABASE removes access entries"
+    sql: "DROP DATABASE drop_test_db"
+    expect: {}
+  - name: "access entry gone after DROP DATABASE"
+    sql: "SELECT COUNT(*) AS cnt FROM system.access WHERE username='bob' AND database='drop_test_db'"
+    expect:
+      rows: 1
+      data:
+        - { cnt: 0 }
+
+cleanup:
+  - sql: "DROP USER IF EXISTS alice"
+  - sql: "DROP USER IF EXISTS bob"
+  - sql: "DROP DATABASE IF EXISTS drop_test_db"

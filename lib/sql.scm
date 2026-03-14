@@ -163,6 +163,13 @@ qry    — query text (pass "" when unknown) */
 	(eval (parse_sql "system" "CREATE TABLE `access`(username text, database text) ENGINE=SAFE" (lambda (schema table write) true)))
 ))
 
+/* migration: ensure unique (username, database) constraint on system.access */
+(try (lambda () (begin
+	(if (has? (show "system") "access")
+		(createkey "system" "access" "uniq_user_db" true '("username" "database"))
+		true)
+)) (lambda (e) true))
+
 /* global variables exposed via @@ and SHOW VARIABLES */
 (set globalvars (newsession))
 (globalvars "lower_case_table_names" 0)
