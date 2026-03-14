@@ -228,6 +228,24 @@ func TestStringRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStringRoundTripMixedEmptyAndUUID(t *testing.T) {
+	inputs := []string{
+		"",
+		"550e8400-e29b-41d4-a716-446655440000",
+		"",
+	}
+	s := buildStringColumn(inputs)
+	if s.format == FormatUUIDLower || s.format == FormatUUIDUpper {
+		t.Fatalf("mixed empty+UUID column chose UUID format %d", s.format)
+	}
+	for i, want := range inputs {
+		got := scm.String(s.GetValue(uint32(i)))
+		if got != want {
+			t.Fatalf("[%d]: got %q, want %q (format=%d)", i, got, want, s.format)
+		}
+	}
+}
+
 // TestBase64PaddingRejected verifies that '=' at an interior position prevents
 // base64 format selection, falling back to FormatRaw.
 func TestBase64PaddingRejected(t *testing.T) {

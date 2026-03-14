@@ -89,7 +89,9 @@ const allFormatsValid uint16 = (1 << 11) - 1 // bits 0..10
 // FormatRaw (bit 0) is always set.
 func checkFormatBits(s string) uint16 {
 	if len(s) == 0 {
-		return allFormatsValid // empty string is compatible with everything
+		// Empty strings are representable by every variable-length format, but
+		// not by the fixed-size UUID codecs which require a 36-char textual form.
+		return allFormatsValid &^ ((1 << FormatUUIDLower) | (1 << FormatUUIDUpper))
 	}
 	valid := allFormatsValid
 
