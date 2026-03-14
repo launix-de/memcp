@@ -1,0 +1,79 @@
+# Tests for $break pseudo-column early-exit semantics.
+# The $break pseudo-column injects a closure into mapFn args that, when called,
+# panics with a breakSentinel causing the ordered-scan merge loop to stop.
+# This enables ORC early-exit (LIMIT semantics inside ORC window materialization).
+# These tests verify LIMIT + ORDER BY correctness which exercises the break path.
+
+metadata:
+  version: "1.0"
+  description: "$break early-exit: ORDER BY + LIMIT correctness"
+  isolated: true
+
+test_cases:
+  - name: "Setup: drop leftover"
+    sql: "DROP TABLE IF EXISTS break_test"
+
+  - name: "Create table"
+    sql: |
+      CREATE TABLE break_test (
+        id  INT PRIMARY KEY,
+        val INT
+      )
+
+  - name: "Insert 20 rows"
+    sql: |
+      INSERT INTO break_test (id, val) VALUES
+        (1,  15), (2,  8),  (3,  22), (4,  3),  (5,  17),
+        (6,  11), (7,  29), (8,  6),  (9,  25), (10, 1),
+        (11, 14), (12, 9),  (13, 20), (14, 4),  (15, 18),
+        (16, 13), (17, 27), (18, 7),  (19, 23), (20, 2)
+
+  - name: "LIMIT 1 — should return minimum val"
+    sql: "SELECT id, val FROM break_test ORDER BY val ASC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - id: 10
+          val: 1
+
+  - name: "LIMIT 5 — top 5 smallest vals"
+    sql: "SELECT val FROM break_test ORDER BY val ASC LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - val: 1
+        - val: 2
+        - val: 3
+        - val: 4
+        - val: 6
+
+  - name: "LIMIT 3 DESC — top 3 largest"
+    sql: "SELECT val FROM break_test ORDER BY val DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - val: 29
+        - val: 27
+        - val: 25
+
+  - name: "LIMIT with OFFSET"
+    sql: "SELECT val FROM break_test ORDER BY val ASC LIMIT 3 OFFSET 2"
+    expect:
+      rows: 3
+      data:
+        - val: 3
+        - val: 4
+        - val: 6
+
+  - name: "LIMIT larger than table — returns all rows"
+    sql: "SELECT id, val FROM break_test ORDER BY val ASC LIMIT 100"
+    expect:
+      rows: 20
+
+  - name: "LIMIT 0 — returns no rows"
+    sql: "SELECT id FROM break_test ORDER BY val LIMIT 0"
+    expect:
+      rows: 0
+
+  - name: "Cleanup"
+    sql: "DROP TABLE IF EXISTS break_test"

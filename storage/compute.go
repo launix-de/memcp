@@ -144,6 +144,205 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	return true
 }
 
+// ComputeOrderedColumn materializes an ordered-reduce computed (ORC) column.
+// The column value for each row is produced by a scan_order pass over the table:
+// mapFn receives a $set closure plus any mapCols values; reduceFn threads an
+// accumulator, writing results via ($set val).
+//
+// sortCols: ORDER BY column names (partition cols first)
+// sortDirs: false=ASC, true=DESC, one per sortCol
+// partCount: leading sortCols that are partition keys (0 = unpartitioned)
+// mapCols:   additional input columns passed to mapFn (beyond the implicit $set closure)
+// mapFn:     (lambda ($set mapCols...) ...) — passes data through to reduceFn
+// reduceFn:  (lambda (acc mapped) ...) — calls ($set newVal), returns new acc
+// reduceInit: initial accumulator value
+func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
+	found := false
+	for i, c := range t.Columns {
+		if c.Name == name {
+			t.Columns[i].OrcSortCols = sortCols
+			t.Columns[i].OrcSortDirs = sortDirs
+			t.Columns[i].OrcPartCount = partCount
+			t.Columns[i].OrcMapCols = mapCols
+			t.Columns[i].OrcMapFn = mapFn
+			t.Columns[i].OrcReduceFn = reduceFn
+			t.Columns[i].OrcReduceInit = reduceInit
+			found = true
+			break
+		}
+	}
+	if !found {
+		panic("ComputeOrderedColumn: column " + t.Name + "." + name + " does not exist")
+	}
+
+	// Ensure every shard has an ORC proxy.
+	for _, s := range t.ActiveShards() {
+		t.initORCShard(s, name)
+	}
+
+	// Run the initial full recompute (requires orcMu for consistent ordering).
+	t.orcMu.Lock()
+	t.recomputeORC(name)
+	t.orcMu.Unlock()
+
+	// Register Mode A triggers: any mutation → InvalidateAll.
+	t.registerORCTriggers(name)
+
+	// Persist ORC parameters and trigger registrations.
+	t.schema.save()
+}
+
+// initORCShard ensures a StorageComputeProxy with isOrdered=true exists on shard s.
+func (t *table) initORCShard(s *storageShard, name string) {
+	s.ensureLoaded()
+	s.ensureMainCount(false)
+
+	s.mu.RLock()
+	existing := s.columns[name]
+	s.mu.RUnlock()
+
+	if proxy, ok := existing.(*StorageComputeProxy); ok {
+		proxy.isOrdered = true
+		proxy.InvalidateAll()
+	} else {
+		proxy := &StorageComputeProxy{
+			delta:     make(map[uint32]scm.Scmer),
+			isOrdered: true,
+			shard:     s,
+			colName:   name,
+			count:     s.main_count,
+		}
+		s.mu.Lock()
+		s.columns[name] = proxy
+		s.mu.Unlock()
+	}
+}
+
+// recomputeORC rebuilds any dirty shards (delta → main), then runs a full scan_order
+// pass to materialize the ORC column. Must be called with t.orcMu held.
+func (t *table) recomputeORC(name string) {
+	var col *column
+	for i := range t.Columns {
+		if t.Columns[i].Name == name {
+			col = t.Columns[i]
+			break
+		}
+	}
+	if col == nil || len(col.OrcSortCols) == 0 {
+		panic("recomputeORC: column '" + name + "' is not an ORC column on table " + t.Name)
+	}
+
+	// Reset all shard proxies to accept fresh scan_order writes.
+	// No shard rebuild needed: $set: closures write to the proxy's delta map
+	// which accepts any row index (main or delta storage).
+	for _, s := range t.ActiveShards() {
+		s.mu.RLock()
+		cs := s.columns[name]
+		s.mu.RUnlock()
+		if proxy, ok := cs.(*StorageComputeProxy); ok {
+			proxy.isOrdered = true
+			proxy.InvalidateAll()
+		} else {
+			// Proxy missing (e.g., shard was evicted and reloaded without ORC init).
+			s.ensureLoaded()
+			s.ensureMainCount(false)
+			proxy := &StorageComputeProxy{
+				delta:     make(map[uint32]scm.Scmer),
+				isOrdered: true,
+				shard:     s,
+				colName:   name,
+				count:     s.main_count,
+			}
+			s.mu.Lock()
+			s.columns[name] = proxy
+			s.mu.Unlock()
+		}
+	}
+
+	// Build sortcols as Scmer string values (column name lookup in scan_order).
+	sortcolsScmer := make([]scm.Scmer, len(col.OrcSortCols))
+	for i, sc := range col.OrcSortCols {
+		sortcolsScmer[i] = scm.NewString(sc)
+	}
+
+	// Convert bool sort directions to comparator functions (< for ASC, > for DESC).
+	ltFn := scm.OptimizeProcToSerialFunction(scm.Eval(scm.NewSymbol("<"), &scm.Globalenv))
+	gtFn := scm.OptimizeProcToSerialFunction(scm.Eval(scm.NewSymbol(">"), &scm.Globalenv))
+	sortdirsFns := make([]func(...scm.Scmer) scm.Scmer, len(col.OrcSortDirs))
+	for i, desc := range col.OrcSortDirs {
+		if desc {
+			sortdirsFns[i] = gtFn
+		} else {
+			sortdirsFns[i] = ltFn
+		}
+	}
+
+	// "$set:colname" is prepended; mapCols are the additional input columns.
+	callbackCols := make([]string, 0, 1+len(col.OrcMapCols))
+	callbackCols = append(callbackCols, "$set:"+name)
+	callbackCols = append(callbackCols, col.OrcMapCols...)
+
+	// Full table scan: no filter, no offset/limit.
+	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+
+	t.scan_order(
+		[]string{}, trueFn,
+		sortcolsScmer, sortdirsFns,
+		0, -1,
+		callbackCols,
+		col.OrcMapFn,
+		col.OrcReduceFn,
+		col.OrcReduceInit,
+		false,
+	)
+
+	// Mark all shard proxies as computed. Values live in the proxy's delta map
+	// (written by $set: closures during scan_order). Setting compressed=true
+	// prevents GetValue from re-triggering recomputeORC.
+	for _, s := range t.ActiveShards() {
+		s.mu.RLock()
+		cs := s.columns[name]
+		s.mu.RUnlock()
+		if proxy, ok := cs.(*StorageComputeProxy); ok {
+			proxy.mu.Lock()
+			proxy.compressed = true
+			proxy.mu.Unlock()
+		}
+	}
+}
+
+// registerORCTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers on the
+// table itself so that any mutation invalidates the ORC column (Mode A: full invalidation).
+// The triggers are idempotent (skipped if already registered).
+func (t *table) registerORCTriggers(name string) {
+	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+		triggerName := ".orc:" + t.Name + ":" + name + "|" + timing.String()
+		exists := false
+		for _, tr := range t.Triggers {
+			if tr.Name == triggerName {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+		body := scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("invalidatecolumn"),
+			scm.NewString(t.schema.Name),
+			scm.NewString(t.Name),
+			scm.NewString(name),
+		})
+		t.AddTrigger(TriggerDescription{
+			Name:     triggerName,
+			Timing:   timing,
+			IsSystem: true,
+			Priority: 100,
+			Func:     buildFKProc(body),
+		})
+	}
+}
+
 type tableRef struct{ schema, table string }
 
 // extractScannedTables walks a Scheme expression tree and returns all

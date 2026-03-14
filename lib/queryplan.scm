@@ -1889,19 +1889,58 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				/* extract and resolve OVER info */
 				(define over_partition (map (car first_over) replace_find_column))
 				(define over_order (map (cadr first_over) (lambda (o) (match o '(col dir) (list (replace_find_column col) dir)))))
-				/* Case 3: conflicting ORDER BY */
 				(define effective_sort (merge (map over_partition (lambda (pe) (list pe <))) over_order))
 				(define stage_order_resolved (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
-				(if (and (not (equal? stage_order_resolved '())) (not (equal? effective_sort stage_order_resolved)))
-					(error "window ORDER BY with outer ORDER BY not yet supported"))
-				/* only LAG/LEAD for now */
 				(define wf_resolved (map window_funcs_all (lambda (wf) (match wf '(fn args over)
 					(list fn (map args replace_find_column) over)))))
-				(if (reduce wf_resolved (lambda (acc wf) (match wf '(fn _ _)
-					(or acc (and (not (equal? fn "LAG")) (not (equal? fn "LEAD")))))) false)
-					(error "only LAG and LEAD window functions are currently supported"))
-				/* single table only */
+				/* classify: all ROW_NUMBER vs LAG/LEAD */
+				(define all_row_number (reduce wf_resolved (lambda (acc wf) (match wf '(fn _ _) (and acc (equal? fn "ROW_NUMBER")))) true))
+				(if all_row_number
 				(match tables
+					/* ========= ROW_NUMBER → ORC materialization ========= */
+					'('(tblvar schema tbl isOuter _)) (begin
+						/* extract ORC sort column names from OVER ORDER BY */
+						(define orc_sort_col_names (map over_order (lambda (o) (match o '(col dir) (match col
+							'((symbol get_column) _ _ c _) c
+							'((quote get_column) _ _ c _) c
+							_ (match (replace_find_column col) /* retry after resolution */
+								'((symbol get_column) _ _ c _) c
+								'((quote get_column) _ _ c _) c
+								_ (error (concat "unsupported ORC sort expression: " col))))))))
+						(define orc_sort_dirs_vals (map over_order (lambda (o) (match o '(col dir)
+							(if (equal? dir >) true false)))))
+						/* unique temp column name */
+						(define orc_col_name (concat ".orc_rn_" tbl))
+						/* compile time: add bare column so the scan plan can reference it */
+						(createcolumn schema tbl orc_col_name "INT" '() '("temp" true))
+						/* replace ROW_NUMBER() references with ORC column read */
+						(define replace_rn (lambda (expr) (match expr
+							(cons (symbol window_func) _) '((quote get_column) (eval tblvar) false (eval orc_col_name) false)
+							(cons sym args_) (cons sym (map args_ replace_rn))
+							expr)))
+						(define new_fields (map_assoc fields (lambda (k v) (replace_rn v))))
+						/* runtime plan: createcolumn with ORC params, then the actual scan */
+						(define orc_setup (lambda ()
+							(createcolumn schema tbl orc_col_name "INT" '()
+								(list "sortcols" orc_sort_col_names "sortdirs" orc_sort_dirs_vals
+									"partitioncount" 0 "mapcols" '()
+									"mapfn" (lambda ($set) (list $set))
+									"reducefn" (lambda (acc mapped) (begin ((car mapped) (+ acc 1)) (+ acc 1)))
+									"reduceinit" 0 "temp" true))))
+						(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
+						(list (quote begin) (list orc_setup) scan_plan)
+					)
+					(error "window functions on joined tables not yet supported"))
+				(begin
+					/* ========= LAG/LEAD scan path (unchanged) ========= */
+					/* Case 3: conflicting ORDER BY */
+					(if (and (not (equal? stage_order_resolved '())) (not (equal? effective_sort stage_order_resolved)))
+						(error "window ORDER BY with outer ORDER BY not yet supported"))
+					(if (reduce wf_resolved (lambda (acc wf) (match wf '(fn _ _)
+						(or acc (and (not (equal? fn "LAG")) (not (equal? fn "LEAD")))))) false)
+						(error "only LAG, LEAD and ROW_NUMBER window functions are currently supported"))
+					/* single table only */
+					(match tables
 					'('(tblvar schema tbl isOuter _)) (begin
 						(set condition (replace_find_column (coalesceNil condition true)))
 						(define has_partition (not (equal? over_partition '())))
@@ -2065,7 +2104,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						))
 					)
 					(error "window functions on joined tables not yet supported")
-				)
+				)))
 			) (if (coalesce stage_order stage_limit stage_offset) (begin
 					/* ordered or limited scan */
 					/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */

@@ -281,5 +281,63 @@ test_cases:
     expect:
       error: true
 
+  # ==========================================================================
+  # Case 11: ROW_NUMBER — basic rank assignment
+  # ==========================================================================
+
+  - name: "Case 11: ROW_NUMBER ordered by time_val"
+    noncritical: true
+    sql: "SELECT id, ROW_NUMBER() OVER (ORDER BY time_val) AS rn FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, rn: 1}
+        - {id: 4, rn: 2}
+        - {id: 2, rn: 3}
+        - {id: 5, rn: 4}
+        - {id: 3, rn: 5}
+
+  - name: "Case 11b: ROW_NUMBER ordered by amount DESC"
+    noncritical: true
+    sql: "SELECT id, amount, ROW_NUMBER() OVER (ORDER BY amount DESC) AS rn FROM win_emp ORDER BY amount DESC"
+    expect:
+      rows: 5
+      data:
+        - {id: 3, amount: 700, rn: 1}
+        - {id: 1, amount: 500, rn: 2}
+        - {id: 5, amount: 400, rn: 3}
+        - {id: 2, amount: 300, rn: 4}
+        - {id: 4, amount: 200, rn: 5}
+
+  # ==========================================================================
+  # Case 12: ROW_NUMBER with conflicting ORDER BY (ORC materialization needed)
+  # ==========================================================================
+
+  - name: "Case 12: ROW_NUMBER + conflicting outer ORDER BY"
+    noncritical: true
+    sql: "SELECT id, amount, ROW_NUMBER() OVER (ORDER BY time_val) AS rn FROM win_emp ORDER BY amount"
+    expect:
+      rows: 5
+      data:
+        - {id: 4, amount: 200, rn: 2}
+        - {id: 2, amount: 300, rn: 3}
+        - {id: 5, amount: 400, rn: 4}
+        - {id: 1, amount: 500, rn: 1}
+        - {id: 3, amount: 700, rn: 5}
+
+  - name: "Case 12b: Nested ORDER BY LIMIT via ROW_NUMBER — top 3 by time, sort by amount"
+    noncritical: true
+    sql: |
+      SELECT id, amount, rn FROM (
+        SELECT id, amount, ROW_NUMBER() OVER (ORDER BY time_val) AS rn FROM win_emp
+      ) t WHERE rn <= 3 ORDER BY amount
+    expect:
+      rows: 3
+      data:
+        - {id: 4, amount: 200, rn: 2}
+        - {id: 2, amount: 300, rn: 3}
+        - {id: 1, amount: 500, rn: 1}
+    ignore_order: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS win_emp"

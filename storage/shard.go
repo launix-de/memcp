@@ -1062,6 +1062,10 @@ func (t *storageShard) ColumnReader(col string) func(uint32) scm.Scmer {
 	}
 }
 
+// breakSentinel is the panic value injected by $break pseudo-column closures.
+// scan_order.go catches this type to implement early-exit (LIMIT semantics inside ORC).
+type breakSentinel struct{}
+
 // ShardMapReducer pre-allocates args and applies map+reduce over batches of record IDs.
 // Local implementation of the streaming MapReducer pattern (see todos/cluster.md §15.7).
 // Stream() partitions recid batches into main/delta runs and dispatches to
@@ -1076,7 +1080,18 @@ type ShardMapReducer struct {
 	invalidateProxy []*StorageComputeProxy // proxy per $invalidate col (nil if not found)
 	isIncrement     []bool                 // true for $increment: columns
 	incrementProxy  []*StorageComputeProxy // proxy per $increment col (nil if not found)
-	args            []scm.Scmer            // pre-allocated args buffer
+	isSet           []bool                 // true for $set: columns
+	setProxy        []*StorageComputeProxy // proxy per $set col (nil if not found)
+	hasSetCol       bool
+	isBreak         []bool // true for $break column
+	hasBreakCol     bool
+	// tagClosure hoisted fn ptrs — allocated once per mapper, reused per row
+	setClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
+	incrClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
+	invClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
+	noopClosureFn   *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
+	breakClosureFn  *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
+	args            []scm.Scmer                             // pre-allocated args buffer
 	mapFn           func(...scm.Scmer) scm.Scmer
 	reduceFn        func(...scm.Scmer) scm.Scmer
 	mapScmer        scm.Scmer // original Scmer for network serialization
@@ -1111,6 +1126,12 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 		invalidateProxy:  make([]*StorageComputeProxy, len(cols)),
 		isIncrement:      make([]bool, len(cols)),
 		incrementProxy:   make([]*StorageComputeProxy, len(cols)),
+		isSet:            make([]bool, len(cols)),
+		setProxy:         make([]*StorageComputeProxy, len(cols)),
+		isBreak:          make([]bool, len(cols)),
+		setClosureFn:     make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
+		incrClosureFn:    make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
+		invClosureFn:     make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols)),
 		args:             make([]scm.Scmer, len(cols)),
 		mapFn:            scm.OptimizeProcToSerialFunction(mapFn),
 		reduceFn:         scm.OptimizeProcToSerialFunction(reduceFn),
@@ -1141,8 +1162,59 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.incrementProxy[i] = proxy
 			}
+		} else if len(col) > 5 && col[:5] == "$set:" {
+			mr.isSet[i] = true
+			mr.hasSetCol = true
+			cacheColName := col[5:]
+			cs := t.getColumnStorageOrPanicEx(cacheColName, alreadyLocked)
+			if proxy, ok := cs.(*StorageComputeProxy); ok {
+				mr.setProxy[i] = proxy
+			}
+		} else if col == "$break" {
+			mr.isBreak[i] = true
+			mr.hasBreakCol = true
 		} else {
 			mr.mainCols[i] = t.getColumnStorageOrPanicEx(col, alreadyLocked)
+		}
+	}
+	// Pre-allocate tagClosure fn ptrs (hoisted, one per pseudo-col type per column).
+	// These are allocated once here so processMainBlock/processDeltaBlock can use
+	// NewClosure(ptr, effectiveID) per row without any heap allocation.
+	noopFn := func(id uint32, args ...scm.Scmer) scm.Scmer { return scm.NewBool(true) }
+	mr.noopClosureFn = &noopFn
+	breakFn := func(id uint32, args ...scm.Scmer) scm.Scmer { panic(breakSentinel{}) }
+	mr.breakClosureFn = &breakFn
+	for i := range cols {
+		if mr.isSet[i] {
+			if proxy := mr.setProxy[i]; proxy != nil {
+				fn := func(id uint32, args ...scm.Scmer) scm.Scmer {
+					if len(args) > 0 {
+						proxy.SetValue(id, args[0])
+					}
+					return scm.NewBool(true)
+				}
+				mr.setClosureFn[i] = &fn
+			}
+		}
+		if mr.isIncrement[i] {
+			if proxy := mr.incrementProxy[i]; proxy != nil {
+				fn := func(id uint32, args ...scm.Scmer) scm.Scmer {
+					if len(args) > 0 {
+						proxy.IncrementalUpdate(id, args[0])
+					}
+					return scm.NewBool(true)
+				}
+				mr.incrClosureFn[i] = &fn
+			}
+		}
+		if mr.isInvalidate[i] {
+			if proxy := mr.invalidateProxy[i]; proxy != nil {
+				fn := func(id uint32, args ...scm.Scmer) scm.Scmer {
+					proxy.Invalidate(id)
+					return scm.NewBool(true)
+				}
+				mr.invClosureFn[i] = &fn
+			}
 		}
 	}
 	// Register shard for deferred fsync once, not per row.
@@ -1186,7 +1258,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	// holds shard.mu; in that case we must NOT re-acquire it. For the rare case
 	// where a mapper is opened without the shard being locked (e.g. NEW. columns
 	// outside a mutation scan), acquire once for the whole batch instead of per-row.
-	if (m.hasUpdateCol || m.hasIncrementCol) && !m.shardWriteLocked {
+	if (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked {
 		currentTx := CurrentTx()
 		m.shard.mu.Lock()
 		defer m.shard.mu.Unlock()
@@ -1200,7 +1272,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	for _, id := range recids {
 		func() {
 			effectiveID := id
-			if m.hasUpdateCol || m.hasIncrementCol {
+			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
 				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
@@ -1213,27 +1285,25 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 			}
 			for i, col := range m.mainCols {
 				if m.isInvalidate[i] {
-					if proxy := m.invalidateProxy[i]; proxy != nil {
-						capturedId := effectiveID
-						m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-							proxy.Invalidate(capturedId)
-							return scm.NewBool(true)
-						})
+					if fnptr := m.invClosureFn[i]; fnptr != nil {
+						m.args[i] = scm.NewClosure(fnptr, effectiveID)
 					} else {
-						m.args[i] = scm.NewBool(true)
+						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
 					}
 				} else if m.isIncrement[i] {
-					if proxy := m.incrementProxy[i]; proxy != nil {
-						capturedId := effectiveID
-						m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-							if len(args) > 0 {
-								proxy.IncrementalUpdate(capturedId, args[0])
-							}
-							return scm.NewBool(true)
-						})
+					if fnptr := m.incrClosureFn[i]; fnptr != nil {
+						m.args[i] = scm.NewClosure(fnptr, effectiveID)
 					} else {
-						m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
 					}
+				} else if m.isSet[i] {
+					if fnptr := m.setClosureFn[i]; fnptr != nil {
+						m.args[i] = scm.NewClosure(fnptr, effectiveID)
+					} else {
+						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
+					}
+				} else if m.isBreak[i] {
+					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
 				} else if m.isUpdate[i] {
 					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, m.hasUpdateCol))
 				} else {
@@ -1253,7 +1323,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 // processDeltaBlock handles delta-storage records via getDelta. JIT candidate.
 func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
 	// Same hoisting as processMainBlock (see comment there).
-	if (m.hasUpdateCol || m.hasIncrementCol) && !m.shardWriteLocked {
+	if (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked {
 		currentTx := CurrentTx()
 		m.shard.mu.Lock()
 		defer m.shard.mu.Unlock()
@@ -1267,7 +1337,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 	for _, id := range recids {
 		func() {
 			effectiveID := id
-			if m.hasUpdateCol || m.hasIncrementCol {
+			if m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol {
 				if tx := CurrentTx(); tx == nil || tx.Mode != TxACID {
 					if m.shard.deletions.Get(uint(effectiveID)) {
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID)
@@ -1279,17 +1349,29 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 				}
 			}
 			for i, col := range m.colNames {
-				if m.isInvalidate[i] || m.isIncrement[i] {
-					// delta rows are outside proxy range — no-op
-					m.args[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-						return scm.NewBool(true)
-					})
+				if m.isSet[i] {
+					// $set: works on delta rows too — proxy stores values
+					// in its delta map keyed by effectiveID (any row index).
+					if fnptr := m.setClosureFn[i]; fnptr != nil {
+						m.args[i] = scm.NewClosure(fnptr, effectiveID)
+					} else {
+						m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
+					}
+				} else if m.isInvalidate[i] || m.isIncrement[i] {
+					// invalidate/increment on delta rows outside proxy range — no-op
+					m.args[i] = scm.NewClosure(m.noopClosureFn, effectiveID)
+				} else if m.isBreak[i] {
+					m.args[i] = scm.NewClosure(m.breakClosureFn, effectiveID)
 				} else if m.isUpdate[i] {
 					m.args[i] = scm.NewFunc(m.shard.UpdateFunction(effectiveID, true, m.hasUpdateCol))
 				} else if len(col) >= 4 && col[:4] == "NEW." {
 					m.args[i] = scm.NewNil()
 				} else {
 					if effectiveID < m.mainCount {
+						m.args[i] = m.mainCols[i].GetValue(effectiveID)
+					} else if _, isProxy := m.mainCols[i].(*StorageComputeProxy); isProxy {
+						// Proxy columns (computed/ORC): read from proxy even for delta rows.
+						// The proxy stores values in its delta map keyed by row index.
 						m.args[i] = m.mainCols[i].GetValue(effectiveID)
 					} else {
 						m.args[i] = m.shard.getDelta(int(effectiveID-m.mainCount), col)

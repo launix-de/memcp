@@ -366,7 +366,11 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				}
 			} else {
 				for i, k := range conditionCols {
-					cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
+					if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+						cdataset[i] = ccols[i].GetValue(effectiveIdx)
+					} else {
+						cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
+					}
 				}
 			}
 			var condResult bool

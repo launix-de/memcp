@@ -1,0 +1,112 @@
+# Tests for the SetValue path on StorageComputeProxy and $set: pseudo-column
+# infrastructure. Since computed columns created via SQL don't yet support
+# AS (expr) STORED syntax, this file exercises the related UPDATE round-trip
+# semantics via regular column writes that go through the same delta/proxy paths.
+#
+# The $set: scan mechanism is tested at the Go level in
+# storage/scan_fixcost_bench_test.go via BenchmarkScanUpdate.
+
+metadata:
+  version: "1.0"
+  description: "UPDATE round-trip correctness — exercises delta + proxy write paths"
+  isolated: true
+
+test_cases:
+  - name: "Setup: drop leftover"
+    sql: "DROP TABLE IF EXISTS set_col_test"
+
+  - name: "Create table"
+    sql: |
+      CREATE TABLE set_col_test (
+        id  INT PRIMARY KEY,
+        a   INT,
+        b   INT
+      )
+
+  - name: "Insert rows"
+    sql: |
+      INSERT INTO set_col_test (id, a, b) VALUES
+        (1, 10, 20),
+        (2, 30, 40),
+        (3, 50, 60)
+
+  - name: "Baseline SELECT"
+    sql: "SELECT id, a, b FROM set_col_test ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          a: 10
+          b: 20
+        - id: 2
+          a: 30
+          b: 40
+        - id: 3
+          a: 50
+          b: 60
+
+  - name: "Single row UPDATE — one column"
+    sql: "UPDATE set_col_test SET a = 99 WHERE id = 2"
+
+  - name: "After single-row update"
+    sql: "SELECT id, a, b FROM set_col_test ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          a: 10
+          b: 20
+        - id: 2
+          a: 99
+          b: 40
+        - id: 3
+          a: 50
+          b: 60
+
+  - name: "Multi-column single-row UPDATE"
+    sql: "UPDATE set_col_test SET a = 1, b = 2 WHERE id = 1"
+
+  - name: "After multi-column update"
+    sql: "SELECT id, a, b FROM set_col_test WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          a: 1
+          b: 2
+
+  - name: "Bulk UPDATE all rows (expression)"
+    sql: "UPDATE set_col_test SET b = a * 2"
+
+  - name: "After bulk update — b is double a for all rows"
+    sql: "SELECT id, a, b FROM set_col_test ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          a: 1
+          b: 2
+        - id: 2
+          a: 99
+          b: 198
+        - id: 3
+          a: 50
+          b: 100
+
+  - name: "UPDATE with arithmetic on existing value"
+    sql: "UPDATE set_col_test SET a = a + 10"
+
+  - name: "After arithmetic update"
+    sql: "SELECT id, a FROM set_col_test ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          a: 11
+        - id: 2
+          a: 109
+        - id: 3
+          a: 60
+
+  - name: "Cleanup"
+    sql: "DROP TABLE IF EXISTS set_col_test"

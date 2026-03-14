@@ -31,6 +31,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unsafe"
 )
 
 func symbolName(v Scmer) (string, bool) {
@@ -101,7 +102,7 @@ restart:
 	switch expression.GetTag() {
 	case tagSourceInfo:
 		return evalWithSourceInfo(*expression.SourceInfo(), en)
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagProc, tagJIT:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure:
 		// literals
 		return expression
 	case tagSymbol:
@@ -419,6 +420,21 @@ restart:
 				args[i] = Eval(x, en)
 			}
 			return jep.Native(args...)
+		case tagClosure:
+			fn := *(*func(uint32, ...Scmer) Scmer)(unsafe.Pointer(procedure.ptr))
+			id := uint32(auxVal(procedure.aux))
+			if n := len(operands); n <= 4 {
+				var buf [4]Scmer
+				for i := 0; i < n; i++ {
+					buf[i] = Eval(operands[i], en)
+				}
+				return fn(id, buf[:n]...)
+			}
+			args := make([]Scmer, len(operands))
+			for i, x := range operands {
+				args[i] = Eval(x, en)
+			}
+			return fn(id, args...)
 		default:
 			panic("Unknown function: " + list[0].String())
 		}
@@ -562,6 +578,10 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		return procedure.FuncEnv()(en, args...)
 	case tagFunc:
 		return procedure.Func()(args...)
+	case tagClosure:
+		fn := *(*func(uint32, ...Scmer) Scmer)(unsafe.Pointer(procedure.ptr))
+		id := uint32(auxVal(procedure.aux))
+		return fn(id, args...)
 	// Lambdas
 	case tagProc:
 		env, body := prepareProcCallWithArgs(procedure.Proc(), args)
