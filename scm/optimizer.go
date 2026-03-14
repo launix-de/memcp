@@ -181,6 +181,7 @@ type optimizerMetainfo struct {
 	pendingCallbackOwned []bool          // when set, the next lambda's params at these indices are owned
 	ownedSlots           map[int]bool    // NthLocalVar slot → owned; used in second-pass re-opt
 	localLambdas         map[Symbol]*localLambdaInfo
+	funcReturnsFresh     map[Symbol]bool // Scheme-defined functions whose return is always a fresh alloc
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -194,6 +195,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	}
 	result.setBlacklist = ome.setBlacklist
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
+	result.funcReturnsFresh = ome.funcReturnsFresh // lambdas see outer fresh-return knowledge
 	return
 }
 
@@ -214,6 +216,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.ownedVars = ome.ownedVars       // shared scope inherits ownership info
 	result.localLambdas = ome.localLambdas // shared scope can call same local lambdas
 	result.ownedSlots = ome.ownedSlots
+	result.funcReturnsFresh = ome.funcReturnsFresh // inherit fresh-return knowledge
 	return
 }
 
@@ -751,6 +754,15 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			v[0] = NewSymbol("setN")
 		}
 		v[2], transferOwnership, _ = OptimizeEx(v[2], env, ome, true)
+		// Track fresh-return Scheme functions for cross-call transferOwnership propagation
+		if sym, ok2 := scmerSymbol(v[1]); ok2 {
+			if transferOwnership {
+				if ome.funcReturnsFresh == nil {
+					ome.funcReturnsFresh = make(map[Symbol]bool)
+				}
+				ome.funcReturnsFresh[sym] = true
+			}
+		}
 		// Register local non-escaping lambda for second-pass ownership inference
 		if sym, ok2 := scmerSymbol(v[1]); ok2 {
 			if lambdaAST, ok3 := scmerSlice(v[2]); ok3 && len(lambdaAST) >= 3 && scmerIsSymbol(lambdaAST[0], "lambda") {
@@ -910,6 +922,17 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			if pi < len(headLocalLambda.paramOwned) {
 				headLocalLambda.paramOwned[pi] = headLocalLambda.paramOwned[pi] && transferOwnership
 			}
+		}
+	}
+
+	// If the called function is known to always return a fresh alloc, mark result as owned.
+	// This covers Scheme-defined functions (not just Go builtins with FreshAlloc declarations).
+	if headOk && ome.funcReturnsFresh != nil && ome.funcReturnsFresh[headSym] {
+		transferOwnership = true
+	} else if headOk {
+		// Also check Declaration.Type.Return.Transfer for Go builtins
+		if d := DeclarationForValue(v[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
+			transferOwnership = true
 		}
 	}
 
