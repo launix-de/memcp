@@ -1177,11 +1177,8 @@ func ComputeSize(v Scmer) uint {
 		sz += ComputeSize(NewProcStruct(jep.Proc))
 		return sz
 	case tagPromise:
-		// promiseBacking: RWMutex(24) + [2]Scmer(32) = 56 bytes
-		if auxVal(v.aux) == 0 {
-			return base + goAllocOverhead + 56
-		}
-		return base // atomic/slice-backed: no extra allocation
+		// [2]Scmer backing: 32 bytes (or zero extra if list-backed)
+		return base + goAllocOverhead + 32
 	default:
 		if v.GetTag() >= 100 {
 			return base

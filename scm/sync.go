@@ -18,7 +18,6 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import "sync"
-import "sync/atomic"
 import "time"
 import "unsafe"
 import "context"
@@ -65,46 +64,35 @@ func AdjustMemStats(delta int64) {
 	cachedStatsMu.Unlock()
 }
 
-/* threadsafe single-value promise */
+/* promise: single-value cell */
 
-// promiseBacking is the heap allocation for a standalone tagPromise.
-// ptr of a tagPromise Scmer points to this struct when auxVal(aux) == 0.
-type promiseBacking struct {
-	mu    sync.RWMutex
-	cells [2]Scmer // cells[0]=value, cells[1]=state (nil/true/false)
-}
+// NOTE: current implementation uses plain shared state — not fully thread-safe.
+// For concurrent use, a CAS-based READLOCK/LOCK state would be needed to ensure
+// .value is exchanged atomically (read-lock state to prevent torn reads while a
+// write is in progress). For now, promise is safe only with a single writer and
+// a single reader that synchronizes externally (e.g. sequential query plan execution).
 
-// NewPromise creates a tagPromise Scmer backed by a newly allocated promiseBacking.
-// For (newpromise list): if one Scmer arg is given, it must be a slice with ≥2 elements;
-// its first two elements are used as the backing cells (atomic-only, no mutex).
+// NewPromise creates a tagPromise Scmer.
+// (newpromise)      — allocates a fresh [2]Scmer backing: cells[0]=value, cells[1]=state.
+// (newpromise list) — reuses an existing ≥2-element slice as backing (zero extra alloc).
+// ptr always points to cells[0] of the backing.
 func NewPromise(a ...Scmer) Scmer {
+	var cells []Scmer
 	if len(a) == 0 {
-		b := new(promiseBacking)
-		b.cells[1] = NewNil() // state = pending
-		return Scmer{(*byte)(unsafe.Pointer(b)), makeAux(tagPromise, 0)}
-	}
-	// list-backed: reuse caller-supplied slice (atomic-only)
-	cells := a[0].Slice()
-	if len(cells) < 2 {
-		panic("newpromise: list backing requires at least 2 elements")
+		cells = make([]Scmer, 2)
+	} else {
+		cells = a[0].Slice()
+		if len(cells) < 2 {
+			panic("newpromise: list backing requires at least 2 elements")
+		}
 	}
 	cells[1] = NewNil() // state = pending
-	return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 1)}
+	return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 0)}
 }
 
 // ApplyPromise dispatches a tagPromise call. Called from ApplyEx.
 func ApplyPromise(p Scmer, args []Scmer) Scmer {
-	isAtomic := auxVal(p.aux) != 0
-	var cells *[2]Scmer
-	var mu *sync.RWMutex
-	if isAtomic {
-		cells = (*[2]Scmer)(unsafe.Pointer(p.ptr))
-	} else {
-		b := (*promiseBacking)(unsafe.Pointer(p.ptr))
-		cells = &b.cells
-		mu = &b.mu
-	}
-
+	cells := (*[2]Scmer)(unsafe.Pointer(p.ptr))
 	if len(args) == 0 {
 		panic("promise: at least 1 argument required")
 	}
@@ -113,32 +101,13 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 	case 1:
 		switch key {
 		case "value":
-			if isAtomic {
-				if atomic.LoadUint64(&cells[1].aux) != makeAux(tagBool, 1) {
-					return NewNil()
-				}
-				return cells[0]
-			}
-			mu.RLock()
-			defer mu.RUnlock()
 			if cells[1].IsNil() {
 				return NewNil()
 			}
 			return cells[0]
 		case "state":
-			if isAtomic {
-				return Scmer{nil, atomic.LoadUint64(&cells[1].aux)}
-			}
-			mu.RLock()
-			defer mu.RUnlock()
 			return cells[1]
 		case "fail":
-			if isAtomic {
-				atomic.StoreUint64(&cells[1].aux, makeAux(tagBool, 0))
-				return NewBool(false)
-			}
-			mu.Lock()
-			defer mu.Unlock()
 			cells[1] = NewBool(false)
 			return NewBool(false)
 		default:
@@ -146,13 +115,6 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 		}
 	case 2:
 		if key == "value" {
-			if isAtomic {
-				cells[0] = args[1]
-				atomic.StoreUint64(&cells[1].aux, makeAux(tagBool, 1))
-				return args[1]
-			}
-			mu.Lock()
-			defer mu.Unlock()
 			cells[0] = args[1]
 			cells[1] = NewBool(true)
 			return args[1]
@@ -323,10 +285,10 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 func init_sync() {
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
-		"newpromise", "Creates a new promise — a threadsafe single-value container. Returns a tagPromise Scmer. (newpromise) allocates a new backing; (newpromise list) reuses an existing ≥2-element slice as backing (atomic-only, for generated query plan code). API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed.",
+		"newpromise", "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing (zero extra alloc). API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed.",
 		0, 1,
 		[]DeclarationParameter{
-			{"list", "any", "optional: ≥2-element slice to use as backing (atomic-only)", nil},
+			{"list", "any", "optional: ≥2-element slice to use as backing", nil},
 		}, "func",
 		NewPromise, false, false, nil,
 		nil,
