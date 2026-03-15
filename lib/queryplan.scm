@@ -298,8 +298,12 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 	))
 ) nil)))
 /* attach tables and condition to an existing group stage */
+/* replace stage-tables and stage-condition in an existing group stage */
 (define stage_with_tables (lambda (stage tables condition)
-	(append stage (list (list (quote stage-tables) tables) (list (quote stage-condition) condition)))))
+	(map stage (lambda (item) (match item
+		(cons (quote stage-tables) _) (list (quote stage-tables) tables)
+		(cons (quote stage-condition) _) (list (quote stage-condition) condition)
+		item)))))
 
 /* query term helpers */
 (define query_union_all_parts (lambda (query) (match query
@@ -1569,7 +1573,11 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col '()) dir)))))
 			/* if scalar subqueries introduced tables, build a proper has-tables return */
 			(define _pst (pending_scalar_tables "data"))
-			(if (and (not (nil? _pst)) (not (equal? _pst '())))
+			(define _psg (pending_scalar_groups "data"))
+			(define _has_pending (or
+				(and (not (nil? _pst)) (not (equal? _pst '())))
+				(and (not (nil? _psg)) (not (equal? _psg '())))))
+			(if _has_pending
 				/* scalar subqueries added tables: construct full relational return */
 				(begin
 					(define _renamelist (pending_scalar_renames "data"))
@@ -1908,22 +1916,20 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	/* stage-tables: if the stage has its own tables, use them instead of outer tables */
 	(define _stage_tables (if stage (stage_tables stage) nil))
 	(define _stage_cond (if stage (stage_condition stage) nil))
-	(if (not (nil? _stage_tables))
+	/* stage has own tables: extract joinexprs → condition, strip joinexprs, merge tables */
+	(define _stripped_stage_tables (if (nil? _stage_tables) nil
+		(map _stage_tables (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil))))))
+	(define _stage_je_conds (if (nil? _stage_tables) '()
+		(filter (merge
+			(map _stage_tables (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
+			(if (nil? _stage_cond) '() (list _stage_cond)))
+			(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+	(set condition (if (equal? _stage_je_conds '()) condition
 		(begin
-			/* stage has own tables: extract joinexprs and merge into condition,
-			   then merge tables (with joinexprs stripped) into the scan set */
-			(define _je_conds (filter
-				(map _stage_tables (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
-				(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
-			(set _stage_tables (map _stage_tables (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil)))))
-			(define _all_stage_conds (filter (merge _je_conds (if (nil? _stage_cond) '() (list _stage_cond)))
-				(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
-			(if (not (equal? _all_stage_conds '()))
-				(begin
-					(define _merged_cond (if (equal? (count _all_stage_conds) 1) (car _all_stage_conds) (cons 'and _all_stage_conds)))
-					(set condition (if (or (nil? condition) (equal? condition true)) _merged_cond
-						(list 'and condition _merged_cond)))))
-			(set tables (merge _stage_tables (coalesceNil tables '())))))
+			(define _sc (if (equal? (count _stage_je_conds) 1) (car _stage_je_conds) (cons 'and _stage_je_conds)))
+			(if (or (nil? condition) (equal? condition true)) _sc (list 'and condition _sc)))))
+	(set tables (if (nil? _stripped_stage_tables) tables
+		(merge _stripped_stage_tables (coalesceNil tables '()))))
 
 	/* window function detection */
 	(define window_funcs_all (merge (extract_assoc fields (lambda (k v) (extract_window_funcs v)))))
