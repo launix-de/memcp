@@ -394,5 +394,51 @@ test_cases:
   - name: "Drop rank test table"
     sql: "DROP TABLE IF EXISTS win_rank"
 
+  # ==========================================================================
+  # Case 14: Running SUM via ORC
+  # ==========================================================================
+
+  - name: "Case 14: Running SUM ordered by time_val"
+    noncritical: true
+    sql: "SELECT id, amount, SUM(amount) OVER (ORDER BY time_val) AS running FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, amount: 500, running: 500}
+        - {id: 4, amount: 200, running: 700}
+        - {id: 2, amount: 300, running: 1000}
+        - {id: 5, amount: 400, running: 1400}
+        - {id: 3, amount: 700, running: 2100}
+
+  # ==========================================================================
+  # Case 15: ROW_NUMBER with PARTITION BY
+  # ==========================================================================
+
+  - name: "Case 15: ROW_NUMBER partitioned by parent"
+    noncritical: true
+    sql: "SELECT id, parent, time_val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY time_val) AS rn FROM win_emp ORDER BY parent, time_val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, parent: 100, time_val: 10, rn: 1}
+        - {id: 2, parent: 100, time_val: 20, rn: 2}
+        - {id: 3, parent: 100, time_val: 30, rn: 3}
+        - {id: 4, parent: 200, time_val: 15, rn: 1}
+        - {id: 5, parent: 200, time_val: 25, rn: 2}
+
+  - name: "Case 15b: RANK partitioned by parent"
+    noncritical: true
+    sql: |
+      SELECT id, parent, amount, RANK() OVER (PARTITION BY parent ORDER BY amount) AS rnk
+      FROM win_emp ORDER BY parent, amount
+    expect:
+      rows: 5
+      data:
+        - {id: 2, parent: 100, amount: 300, rnk: 1}
+        - {id: 1, parent: 100, amount: 500, rnk: 2}
+        - {id: 3, parent: 100, amount: 700, rnk: 3}
+        - {id: 4, parent: 200, amount: 200, rnk: 1}
+        - {id: 5, parent: 200, amount: 400, rnk: 2}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS win_emp"

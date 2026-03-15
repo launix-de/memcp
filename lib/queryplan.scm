@@ -1894,14 +1894,26 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define wf_resolved (map window_funcs_all (lambda (wf) (match wf '(fn args over)
 					(list fn (map args replace_find_column) over)))))
 				/* ========= ORC window function descriptors ========= */
-				/* Build a mapfn that passes $set + sort key values through as (list $set composite_key).
-				   For 1 sort col: key = scalar; for N>1: key = (list k0 k1 ...). */
-				(define build_key_mapfn (lambda (sort_col_names) (begin
-					(define key_params (map (produceN (count sort_col_names) (lambda (i) i)) (lambda (i) (symbol (concat "__k" i)))))
+				/* Build a mapfn that passes $set + N extra values through as (list $set composite).
+				   For 1 col: composite = scalar; for N>1: composite = (list v0 v1 ...). */
+				(define build_key_mapfn (lambda (col_names) (begin
+					(define key_params (map (produceN (count col_names) (lambda (i) i)) (lambda (i) (symbol (concat "__k" i)))))
 					(define key_expr (if (equal? (count key_params) 1) (car key_params) (cons (quote list) key_params)))
 					(define mapfn_params (cons (symbol "$set") key_params))
 					(define mapfn_body (list (quote list) (symbol "$set") key_expr))
 					(eval (list (quote lambda) mapfn_params mapfn_body)))))
+				/* Build a mapfn for aggregate window functions: $set + sort_cols + agg_col */
+				(define build_agg_mapfn (lambda (agg_col_name sort_col_names) (begin
+					(define all_cols (merge sort_col_names (list agg_col_name)))
+					(define params (map (produceN (count all_cols) (lambda (i) i)) (lambda (i) (symbol (concat "__v" i)))))
+					(define mapfn_params (cons (symbol "$set") params))
+					(define mapfn_body (cons (quote list) (cons (symbol "$set") params)))
+					(eval (list (quote lambda) mapfn_params mapfn_body)))))
+				/* Extract column name from a resolved expression */
+				(define extract_col_name (lambda (expr) (match expr
+					'((symbol get_column) _ _ c _) c
+					'((quote get_column) _ _ c _) c
+					_ nil)))
 				/* orc_window_descriptor: fn × args × sort_col_names → (extra_mapcols mapfn reducefn reduceinit)
 				   Returns nil for non-ORC functions (LAG/LEAD stay on window_mut path). */
 				(define orc_window_descriptor (lambda (fn wf_args sort_col_names)
@@ -1934,8 +1946,44 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									(setter new_rank)
 									(list new_rank key)))
 							(list 0 nil))
+						"SUM" (if (nil? wf_args) nil (begin
+							(define agg_col (extract_col_name (car wf_args)))
+							(if (nil? agg_col) nil
+								(list (list agg_col)
+									(lambda ($set v) (list $set v))
+									(lambda (acc mapped) (begin
+										(define new_sum (+ acc (cadr mapped)))
+										((car mapped) new_sum)
+										new_sum))
+									0))))
+						"COUNT" (list '()
+							(lambda ($set) (list $set))
+							(lambda (acc mapped) (begin ((car mapped) (+ acc 1)) (+ acc 1)))
+							0)
+						"MIN" (if (nil? wf_args) nil (begin
+							(define agg_col (extract_col_name (car wf_args)))
+							(if (nil? agg_col) nil
+								(list (list agg_col)
+									(lambda ($set v) (list $set v))
+									(lambda (acc mapped) (begin
+										(define v (cadr mapped))
+										(define new_min (if (nil? acc) v (min acc v)))
+										((car mapped) new_min)
+										new_min))
+									nil))))
+						"MAX" (if (nil? wf_args) nil (begin
+							(define agg_col (extract_col_name (car wf_args)))
+							(if (nil? agg_col) nil
+								(list (list agg_col)
+									(lambda ($set v) (list $set v))
+									(lambda (acc mapped) (begin
+										(define v (cadr mapped))
+										(define new_max (if (nil? acc) v (max acc v)))
+										((car mapped) new_max)
+										new_max))
+									nil))))
 						nil)))
-				(define is_orc_window (lambda (wf) (match wf '(fn _ _) (not (nil? (orc_window_descriptor fn '() '()))))))
+				(define is_orc_window (lambda (wf) (match wf '(fn args _) (not (nil? (orc_window_descriptor fn args '()))))))
 				(define all_orc_window (reduce wf_resolved (lambda (acc wf) (and acc (is_orc_window wf))) true))
 				(if all_orc_window
 				(match tables
@@ -1956,10 +2004,49 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(define wf_fn (car first_wf))
 						(define wf_args (cadr first_wf))
 						(define descriptor (orc_window_descriptor wf_fn wf_args orc_sort_col_names))
-						(define extra_mapcols (nth descriptor 0))
-						(define orc_mapfn (nth descriptor 1))
-						(define orc_reducefn (nth descriptor 2))
-						(define orc_reduceinit (nth descriptor 3))
+						(define inner_extra_mapcols (nth descriptor 0))
+						(define inner_mapfn (nth descriptor 1))
+						(define inner_reducefn (nth descriptor 2))
+						(define inner_reduceinit (nth descriptor 3))
+						/* partition wrapper: prepend partition cols, wrap reducer with boundary reset */
+						(define has_partition (not (equal? over_partition '())))
+						(define partition_col_names (if has_partition
+							(map over_partition (lambda (pe) (match pe
+								'((symbol get_column) _ _ c _) c
+								'((quote get_column) _ _ c _) c
+								_ (match (replace_find_column pe)
+									'((symbol get_column) _ _ c _) c
+									'((quote get_column) _ _ c _) c
+									_ (error (concat "unsupported partition expression: " pe))))))
+							'()))
+						(define extra_mapcols (if has_partition (merge partition_col_names inner_extra_mapcols) inner_extra_mapcols))
+						(define orc_mapfn (if has_partition (begin
+							/* build mapfn: ($set part_cols... inner_cols...) → (cons partition_key inner_mapped)
+							   The inner reducer sees (cdr mapped); wrapper sees (car mapped) as partition key. */
+							(define n_part (count partition_col_names))
+							(define n_inner (count inner_extra_mapcols))
+							(define all_params (cons (symbol "$set")
+								(map (produceN (+ n_part n_inner) (lambda (i) i)) (lambda (i) (symbol (concat "__p" i))))))
+							(define part_syms (slice all_params 1 (+ 1 n_part)))
+							(define inner_syms (slice all_params (+ 1 n_part) (+ 1 n_part n_inner)))
+							(define pk_expr (if (equal? n_part 1) (car part_syms) (cons (quote list) part_syms)))
+							(define inner_call (cons inner_mapfn (cons (symbol "$set") inner_syms)))
+							(eval (list (quote lambda) all_params (list (quote cons) pk_expr inner_call))))
+							inner_mapfn))
+						(define orc_reducefn (if has_partition (begin
+							/* wrap: acc = (list inner_acc prev_pk); mapped = (cons pk inner_mapped) */
+							(lambda (acc mapped)
+								(begin
+									(define pk (car mapped))
+									(define inner_mapped (cdr mapped))
+									(define prev_pk (cadr acc))
+									(define inner_acc (car acc))
+									(define eff_acc (if (or (nil? prev_pk) (equal? pk prev_pk)) inner_acc inner_reduceinit))
+									(define new_inner (inner_reducefn eff_acc inner_mapped))
+									(list new_inner pk))))
+							inner_reducefn))
+						(define orc_reduceinit (if has_partition (list inner_reduceinit nil) inner_reduceinit))
+						(define orc_partitioncount (count partition_col_names))
 						/* unique temp column name */
 						(define orc_col_name (concat ".orc_" wf_fn "_" tbl))
 						/* compile time: add bare column so the scan plan can reference it */
@@ -1971,10 +2058,15 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							expr)))
 						(define new_fields (map_assoc fields (lambda (k v) (replace_wf v))))
 						/* runtime plan: createcolumn with ORC params, then the actual scan */
+						/* sortcols: partition cols (ASC) first, then ORDER BY cols */
+						(define full_sort_cols (if has_partition (merge partition_col_names orc_sort_col_names) orc_sort_col_names))
+						(define full_sort_dirs (if has_partition
+							(merge (map partition_col_names (lambda (_) false)) orc_sort_dirs_vals)
+							orc_sort_dirs_vals))
 						(define orc_setup (lambda ()
 							(createcolumn schema tbl orc_col_name "any" '()
-								(list "sortcols" orc_sort_col_names "sortdirs" orc_sort_dirs_vals
-									"partitioncount" 0 "mapcols" extra_mapcols
+								(list "sortcols" full_sort_cols "sortdirs" full_sort_dirs
+									"partitioncount" orc_partitioncount "mapcols" extra_mapcols
 									"mapfn" orc_mapfn "reducefn" orc_reducefn
 									"reduceinit" orc_reduceinit "temp" true))))
 						(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
