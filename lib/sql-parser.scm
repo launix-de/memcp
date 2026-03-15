@@ -63,6 +63,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "RTRIM" true)
 	(atom "REGEXP" true)
 	(atom "RLIKE" true)
+	(atom "COALESCE" true)
 )))
 (define sql_identifier_quoted (parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`"))) /* with backtick */
 (define sql_identifier (parser (define x (or sql_identifier_unquoted sql_identifier_quoted)) x))
