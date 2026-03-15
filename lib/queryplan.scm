@@ -365,7 +365,8 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 	(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition))))
 	(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
 	(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
-		(define map_expr (if (equal? fn "COUNT") 1 (if (nil? args) 1 (replace_find_column (car args)))))
+		/* args already resolved via replace_find_column in wf_resolved */
+		(define map_expr (if (equal? fn "COUNT") 1 (if (nil? args) 1 (car args))))
 		(match fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil)
 			(error (concat "unsupported aggregate window function: " fn))))))))
 	/* createcolumn on KEYTABLE */
@@ -392,13 +393,13 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 				'('scan schema grouptbl
 					(cons 'list (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 					'('lambda (map group_keys (lambda (col) (symbol (concat grouptbl "." (if is_fk_reuse fk_pk_col (expr_name col)))))) (cons 'and (map group_keys (lambda (col) '('equal? (symbol (concat grouptbl "." (if is_fk_reuse fk_pk_col (expr_name col)))) '('outer (symbol (concat tblvar "." (if is_fk_reuse fk_pk_col (expr_name col))))))))))
-					'('list ag_col)
-					'('lambda '((symbol (concat grouptbl "." ag_col))) (symbol (concat grouptbl "." ag_col)))
-					nil nil nil false)
-				'('scan schema grouptbl '(list) '('lambda '() true)
-					'('list ag_col)
-					'('lambda '((symbol (concat grouptbl "." ag_col))) (symbol (concat grouptbl "." ag_col)))
-					nil nil nil false)))
+					(list 'list ag_col)
+					'('lambda '('__v) '__v)
+					'('lambda '('__a '__b) '__b) nil nil false)
+				(list 'scan schema grouptbl '(list) '('lambda '() true)
+					(list 'list ag_col)
+					'('lambda '('__v) '__v)
+					'('lambda '('__a '__b) '__b) nil nil false)))
 		(cons sym args_) (cons sym (map args_ replace_wf_with_fetch))
 		expr)))
 	(define new_fields (map_assoc fields (lambda (k v) (replace_wf_with_fetch (replace_find_column v)))))
