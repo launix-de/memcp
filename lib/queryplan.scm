@@ -1626,8 +1626,14 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 							(define _sq_tables (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 1) nil))
 							(define _sq_has_from (and (not (nil? _sq_tables)) (not (equal? _sq_tables '()))))
 							(if _sq_has_from
-								/* has FROM clause: flatten as LEFT JOIN */
-								(register_scalar_subquery subquery outer_schemas)
+								/* has FROM clause: flatten or inline depending on correlation */
+								(if (and (not (nil? outer_schemas)) (not (equal? outer_schemas '()))
+										(not (subquery_references_outer_alias subquery outer_schemas)))
+									/* non-correlated with outer tables present: use inline scan
+									   to avoid cross-join with outer tables during GROUP BY */
+									(build_scalar_subselect subquery outer_schemas)
+									/* correlated or no outer tables: flatten as LEFT JOIN */
+									(register_scalar_subquery subquery outer_schemas))
 								/* FROM-less SELECT: inline the expression directly */
 								(begin
 									(define _sq_fields (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 2) nil))
@@ -2061,17 +2067,21 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define _new_groups (if _has_stage (merge _acc_groups (list _sg)) _acc_groups))
 				(list (nth _merged 0) (nth _merged 1) _new_groups _acc_pre)))))
 		(list '() true '() '())))
-	/* pre-segments: merge tables+condition back into main plan, stages first */
+	(define tables (nth _flat 0))
+	(define condition (nth _flat 1))
+	(define groups (nth _flat 2))
+	/* pre-segments: for now, merge back into main plan (stages first).
+	   TODO: build independent scans with newpromise for proper isolation. */
 	(define _pre_merged (reduce (nth _flat 3) (lambda (acc seg) (begin
 		(define _st (segment_tables seg))
 		(define _sc (segment_condition seg))
 		(define _sg (segment_group seg))
 		(define _merged (_seg_merge _st _sc (nth acc 0) (nth acc 1)))
 		(list (nth _merged 0) (nth _merged 1) (if (nil? _sg) (nth acc 2) (cons _sg (nth acc 2))))))
-		(list (nth _flat 0) (nth _flat 1) '())))
-	(define tables (nth _pre_merged 0))
-	(define condition (nth _pre_merged 1))
-	(define groups (merge (nth _pre_merged 2) (nth _flat 2)))
+		(list tables condition '())))
+	(set tables (nth _pre_merged 0))
+	(set condition (nth _pre_merged 1))
+	(set groups (merge (nth _pre_merged 2) groups))
 
 	/* internal helper: wrap old-style (tables condition groups) into segments for recursive calls */
 	(define _bqp (lambda (_schema _tables _fields _condition _groups _schemas _rfn)
