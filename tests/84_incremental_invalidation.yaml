@@ -168,7 +168,6 @@ test_cases:
       rows: 10
 
   - name: "Concurrent: slow GROUP BY cross-join + INSERT during scan"
-    noncritical: true
     steps:
       # Session A: slow cross-join GROUP BY (200*100 = 20k rows to scan)
       - session_id: "conc-slow-reader"
@@ -193,7 +192,6 @@ test_cases:
           rows: 1
 
   - name: "Concurrent: DELETE during slow GROUP BY"
-    noncritical: true
     steps:
       # cleanup from previous test
       - session_id: "conc-del-setup"
@@ -225,17 +223,19 @@ test_cases:
         (insert "memcp-tests" "inv_orc_big" '("id" "val") rows '() (lambda () true) false))
 
   - name: "Concurrent: INSERT during ORC scan_order"
-    noncritical: true
     steps:
-      # Background: ROW_NUMBER over 10k rows — triggers scan_order
+      # Background: ROW_NUMBER over 10k rows — triggers scan_order + recompute
       - session_id: "conc-orc-reader"
         sql: "SELECT COUNT(*) AS n FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY val) AS rn FROM inv_orc_big) t WHERE rn <= 100"
         background: true
+        timeout: 60
         expect:
           rows: 1
       - session_id: "conc-orc-writer"
         sql: "SELECT 1"
-      # INSERT while ORC scan_order is running
+      - session_id: "conc-orc-writer"
+        sql: "SELECT 1"
+      # INSERT while ORC scan_order may be running
       - session_id: "conc-orc-writer"
         sql: "INSERT INTO inv_orc_big VALUES (100001, 42)"
       - session_id: "conc-orc-writer"
