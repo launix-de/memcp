@@ -1627,12 +1627,11 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 							(define _sq_has_from (and (not (nil? _sq_tables)) (not (equal? _sq_tables '()))))
 							(if _sq_has_from
 								/* has FROM clause: flatten or inline depending on correlation */
-								(if (and (not (nil? outer_schemas)) (not (equal? outer_schemas '()))
+								(if (or (nil? outer_schemas) (equal? outer_schemas '())
 										(not (subquery_references_outer_alias subquery outer_schemas)))
-									/* non-correlated with outer tables present: use inline scan
-									   to avoid cross-join with outer tables during GROUP BY */
+									/* non-correlated: use inline scan (correct HAVING/multi-row semantics) */
 									(build_scalar_subselect subquery outer_schemas)
-									/* correlated or no outer tables: flatten as LEFT JOIN */
+									/* correlated: flatten as LEFT JOIN */
 									(register_scalar_subquery subquery outer_schemas))
 								/* FROM-less SELECT: inline the expression directly */
 								(begin
