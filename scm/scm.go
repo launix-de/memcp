@@ -913,6 +913,7 @@ func init() {
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", ParamName: "function", ParamDesc: "function to execute"}, &TypeDescriptor{Kind: "list", ParamName: "arguments", ParamDesc: "list of arguments to apply"}},
 			Const: true,
+			Optimize: optimizeApply,
 		},
 	})
 		Declare(&Globalenv, &Declaration{

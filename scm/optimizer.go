@@ -155,6 +155,36 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	}
 }
 
+// optimizeApply is the optimizer hook for `apply`. It propagates the return
+// type of the applied function: (apply fn args) has the same return type as fn.
+// This enables ownership flow through (apply build_queryplan (apply untangle_query query)).
+func optimizeApply(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	// Check if the first arg (the function) is a symbol with known return type
+	if result.IsSlice() {
+		rv := result.Slice()
+		if len(rv) >= 2 {
+			if fnSym, ok := scmerSymbol(rv[1]); ok {
+				// Check globalFuncTypeInfo for the applied function's return type
+				if ti := globalFuncTypeInfo[fnSym]; ti.Transfer() {
+					if td == nil {
+						td = &TypeDescriptor{}
+					}
+					td.Transfer = true
+				}
+				// Check Declaration for the applied function's return type
+				if d := DeclarationForValue(rv[1]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
+					if td == nil {
+						td = &TypeDescriptor{}
+					}
+					td.Transfer = true
+				}
+			}
+		}
+	}
+	return result, td
+}
+
 // do preprocessing and optimization (Optimize is allowed to edit the value in-place)
 func Optimize(val Scmer, env *Env) Scmer {
 	ome := newOptimizerMetainfo()
