@@ -1060,6 +1060,38 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"invalidateorcpartition", "marks a single partition of an ORC column as stale",
+		4, 4,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
+			scm.DeclarationParameter{"table", "string", "name of the table", nil},
+			scm.DeclarationParameter{"column", "string", "name of the ORC column", nil},
+			scm.DeclarationParameter{"partitionkey", "string", "serialized partition key value", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewBool(false)
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				return scm.NewBool(false)
+			}
+			colName := scm.String(a[2])
+			partKey := scm.String(a[3])
+			for _, s := range t.ActiveShards() {
+				s.mu.RLock()
+				col := s.columns[colName]
+				s.mu.RUnlock()
+				if proxy, ok := col.(*StorageComputeProxy); ok {
+					proxy.InvalidatePartition(partKey)
+				}
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"canonical_expr_name", "builds a canonical string for an expression; maps var(n)/lambda params to column names and can normalize aliases",
 		1, 4,
 		[]scm.DeclarationParameter{

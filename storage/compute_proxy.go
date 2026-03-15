@@ -42,6 +42,9 @@ type StorageComputeProxy struct {
 	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
 	// Instead, the full table is recomputed via scan_order (coordinated by table.orcMu).
 	isOrdered bool
+	// Partition-scoped ORC invalidation: when non-nil, only these partition keys
+	// are dirty. nil = fully dirty (InvalidateAll). Empty map = all valid.
+	dirtyPartitions map[string]bool
 }
 
 func (p *StorageComputeProxy) String() string {
@@ -311,6 +314,23 @@ func (p *StorageComputeProxy) InvalidateAll() {
 	p.compressed = false
 	p.validMask.Reset()
 	p.delta = make(map[uint32]scm.Scmer)
+	p.dirtyPartitions = nil // nil = fully dirty
+}
+
+// InvalidatePartition marks a specific partition as dirty for ORC columns.
+// Only the affected partition will be recomputed on next read.
+func (p *StorageComputeProxy) InvalidatePartition(partitionKey string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dirtyPartitions == nil && p.compressed {
+		// First partial invalidation: create dirty set
+		p.dirtyPartitions = make(map[string]bool)
+	}
+	if p.dirtyPartitions != nil {
+		p.dirtyPartitions[partitionKey] = true
+		p.compressed = false // trigger recompute on next read
+	}
+	// If dirtyPartitions is nil and !compressed, we're already fully dirty
 }
 
 // proposeCompression returns nil — the proxy does not participate in shard

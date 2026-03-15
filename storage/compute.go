@@ -232,18 +232,51 @@ func (t *table) recomputeORC(name string) {
 		panic("recomputeORC: column '" + name + "' is not an ORC column on table " + t.Name)
 	}
 
-	// Reset all shard proxies to accept fresh scan_order writes.
-	// No shard rebuild needed: $set: closures write to the proxy's delta map
-	// which accepts any row index (main or delta storage).
+	// Collect dirty partitions from all shard proxies.
+	// nil = fully dirty (full recompute), non-nil = partition-scoped recompute.
+	var dirtyParts map[string]bool
+	fullDirty := false
+	for _, s := range t.ActiveShards() {
+		s.mu.RLock()
+		cs := s.columns[name]
+		s.mu.RUnlock()
+		if proxy, ok := cs.(*StorageComputeProxy); ok {
+			proxy.mu.RLock()
+			if proxy.dirtyPartitions == nil {
+				fullDirty = true
+			} else {
+				if dirtyParts == nil {
+					dirtyParts = make(map[string]bool)
+				}
+				for k := range proxy.dirtyPartitions {
+					dirtyParts[k] = true
+				}
+			}
+			proxy.mu.RUnlock()
+		} else {
+			fullDirty = true
+		}
+	}
+	if fullDirty {
+		dirtyParts = nil // full recompute
+	}
+
+	// Reset shard proxies for fresh writes.
 	for _, s := range t.ActiveShards() {
 		s.mu.RLock()
 		cs := s.columns[name]
 		s.mu.RUnlock()
 		if proxy, ok := cs.(*StorageComputeProxy); ok {
 			proxy.isOrdered = true
-			proxy.InvalidateAll()
+			if dirtyParts == nil {
+				proxy.InvalidateAll()
+			} else {
+				// Partition-scoped: clear dirty set, keep existing values
+				proxy.mu.Lock()
+				proxy.dirtyPartitions = make(map[string]bool) // empty = all valid after recompute
+				proxy.mu.Unlock()
+			}
 		} else {
-			// Proxy missing (e.g., shard was evicted and reloaded without ORC init).
 			s.ensureLoaded()
 			s.ensureMainCount(false)
 			proxy := &StorageComputeProxy{
@@ -282,11 +315,33 @@ func (t *table) recomputeORC(name string) {
 	callbackCols = append(callbackCols, "$set:"+name)
 	callbackCols = append(callbackCols, col.OrcMapCols...)
 
-	// Full table scan: no filter, no offset/limit.
-	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	// Build filter: full scan or partition-scoped scan.
+	var condCols []string
+	var condFn scm.Scmer
+	if dirtyParts != nil && col.OrcPartCount > 0 {
+		// Partition-scoped recompute: filter by dirty partition keys.
+		// For each dirty partition, we recompute only rows in that partition.
+		partCols := col.OrcSortCols[:col.OrcPartCount]
+		condCols = partCols
+		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			// Build partition key string from the filter column values
+			key := scm.String(a[0])
+			for i := 1; i < len(a); i++ {
+				key += "|" + scm.String(a[i])
+			}
+			if dirtyParts[key] {
+				return scm.NewBool(true)
+			}
+			return scm.NewBool(false)
+		})
+	} else {
+		// Full recompute
+		condCols = []string{}
+		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	}
 
 	t.scan_order(
-		[]string{}, trueFn,
+		condCols, condFn,
 		sortcolsScmer, sortdirsFns,
 		0, -1,
 		callbackCols,
@@ -315,6 +370,16 @@ func (t *table) recomputeORC(name string) {
 // table itself so that any mutation invalidates the ORC column (Mode A: full invalidation).
 // The triggers are idempotent (skipped if already registered).
 func (t *table) registerORCTriggers(name string) {
+	// Find the column to check for partition support
+	var col *column
+	for _, c := range t.Columns {
+		if c.Name == name {
+			col = c
+			break
+		}
+	}
+	partitioned := col != nil && col.OrcPartCount > 0
+
 	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 		triggerName := ".orc:" + t.Name + ":" + name + "|" + timing.String()
 		exists := false
@@ -327,12 +392,36 @@ func (t *table) registerORCTriggers(name string) {
 		if exists {
 			continue
 		}
-		body := scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("invalidatecolumn"),
-			scm.NewString(t.schema.Name),
-			scm.NewString(t.Name),
-			scm.NewString(name),
-		})
+
+		var body scm.Scmer
+		if partitioned {
+			// Partition-scoped invalidation: extract partition key from OLD/NEW
+			// and invalidate only that partition.
+			partCols := col.OrcSortCols[:col.OrcPartCount]
+			switch timing {
+			case AfterInsert:
+				body = buildOrcPartitionInvalidation(t.schema.Name, t.Name, name, partCols, "NEW")
+			case AfterDelete:
+				body = buildOrcPartitionInvalidation(t.schema.Name, t.Name, name, partCols, "OLD")
+			case AfterUpdate:
+				// Invalidate both old and new partition if partition key changed
+				oldInval := buildOrcPartitionInvalidation(t.schema.Name, t.Name, name, partCols, "OLD")
+				newInval := buildOrcPartitionInvalidation(t.schema.Name, t.Name, name, partCols, "NEW")
+				body = scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("begin"),
+					oldInval,
+					newInval,
+				})
+			}
+		} else {
+			// Unpartitioned: full column invalidation (Mode A)
+			body = scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("invalidatecolumn"),
+				scm.NewString(t.schema.Name),
+				scm.NewString(t.Name),
+				scm.NewString(name),
+			})
+		}
 		t.AddTrigger(TriggerDescription{
 			Name:     triggerName,
 			Timing:   timing,
@@ -341,6 +430,34 @@ func (t *table) registerORCTriggers(name string) {
 			Func:     buildFKProc(body),
 		})
 	}
+}
+
+// buildOrcPartitionInvalidation constructs a trigger body that extracts the partition
+// key from a trigger dict (OLD/NEW) and calls invalidateorcpartition with it.
+func buildOrcPartitionInvalidation(schema, table, colName string, partCols []string, dictSym string) scm.Scmer {
+	// Build partition key: concat all partition column values as a string key
+	var keyExpr scm.Scmer
+	if len(partCols) == 1 {
+		keyExpr = fkGetAssocExpr(dictSym, partCols[0])
+	} else {
+		parts := make([]scm.Scmer, 1+len(partCols))
+		parts[0] = scm.NewSymbol("concat")
+		for i, col := range partCols {
+			if i > 0 {
+				// Insert separator between parts for multi-column keys
+				parts = append(parts[:1+2*i], append([]scm.Scmer{scm.NewString("|")}, parts[1+2*i:]...)...)
+			}
+			parts[1+i] = fkGetAssocExpr(dictSym, col)
+		}
+		keyExpr = scm.NewSlice(parts)
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("invalidateorcpartition"),
+		scm.NewString(schema),
+		scm.NewString(table),
+		scm.NewString(colName),
+		keyExpr,
+	})
 }
 
 type tableRef struct{ schema, table string }
@@ -866,10 +983,10 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 			invalidateBody,
 		})
 	default:
-		// AfterDelete and others: use full invalidation.
-		// Incremental subtraction can leave empty groups (value=0) on the
-		// keytable; full invalidation lets the next query recompute and
-		// correctly remove groups with no source rows.
+		// AfterDelete: use full invalidation.
+		// Incremental subtraction (subtract OLD delta) is theoretically possible
+		// but interacts with the exists-column trigger and keytable cleanup in
+		// ways that need careful ordering. For now, full invalidation is safe.
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
 			scm.NewString(targetSchema),
@@ -1007,8 +1124,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 				if incremental && timing != AfterDelete {
 					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[6], timing)
 				} else {
-					// Full invalidation: correct for all cases including
-					// group removal on DELETE and non-additive aggregates.
+					// Full invalidation: correct for DELETE and non-additive aggregates.
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						scm.NewString(targetSchema),
