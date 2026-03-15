@@ -39,6 +39,9 @@ type StorageComputeProxy struct {
 	colName    string                              // own column name (for cycle protection)
 	mu         sync.RWMutex                        // protects delta map + compressed flag
 	count      uint32                              // total row count at creation
+	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
+	// Instead, the full table is recomputed via scan_order (coordinated by table.orcMu).
+	isOrdered bool
 }
 
 func (p *StorageComputeProxy) String() string {
@@ -57,6 +60,27 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 
 // GetValue returns the value at idx, computing on demand if necessary.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
+	// ORC path: values live in delta map, written by $set: during scan_order.
+	if p.isOrdered {
+		if !p.compressed {
+			p.shard.t.orcMu.Lock()
+			if !p.compressed {
+				p.shard.t.recomputeORC(p.colName)
+			}
+			p.shard.t.orcMu.Unlock()
+		}
+		p.mu.RLock()
+		if val, ok := p.delta[idx]; ok {
+			p.mu.RUnlock()
+			return val
+		}
+		p.mu.RUnlock()
+		if p.main != nil {
+			return p.main.GetValue(idx)
+		}
+		return scm.NewNil()
+	}
+
 	// Fast path 1: fully compressed → all values in main
 	if p.compressed {
 		return p.main.GetValue(idx)
@@ -258,6 +282,28 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 	}
 }
 
+// SetValue writes val directly to the cached value at idx, bypassing recomputation.
+// If the shard is compressed and main is a StorageSCMER, the value is written in-place.
+// Otherwise the value is written to the delta map.
+func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.compressed {
+		if scmer, ok := p.main.(*StorageSCMER); ok {
+			scmer.SetValue(idx, val)
+			return
+		}
+		// main is a compressed type → fall back to delta; mark all rows valid
+		// so that GetValue falls through to main for rows not in delta.
+		p.compressed = false
+		for i := uint32(0); i < p.count; i++ {
+			p.validMask.Set(uint(i), true)
+		}
+	}
+	p.delta[idx] = val
+	p.validMask.Set(uint(idx), true)
+}
+
 // InvalidateAll marks all rows as needing recomputation.
 func (p *StorageComputeProxy) InvalidateAll() {
 	p.mu.Lock()
@@ -294,7 +340,7 @@ func (p *StorageComputeProxy) finish() {
 // storageComputeProxyVersion is the current binary format version for StorageComputeProxy.
 // Increment this constant and add a new deserializeComputeProxyV* helper whenever the
 // layout after the magic byte changes.  Never delete old helpers.
-const storageComputeProxyVersion = 0
+const storageComputeProxyVersion = 1
 
 // StorageComputeProxy binary layout (magic byte 50 consumed by shard loader):
 //
@@ -313,7 +359,8 @@ const storageComputeProxyVersion = 0
 //
 // Version history:
 //
-//	0 (current): layout as above.
+//	0: layout as above.
+//	1: adds [isOrdered uint8] after validMask (1=ORC column, 0=regular computed column).
 func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(50))                         // magic byte
 	binary.Write(f, binary.LittleEndian, uint8(storageComputeProxyVersion)) // version byte
@@ -367,6 +414,13 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	p.validMask.Iterate(func(idx uint) {
 		binary.Write(f, binary.LittleEndian, idx)
 	})
+
+	// v1: isOrdered flag
+	var isOrderedByte uint8
+	if p.isOrdered {
+		isOrderedByte = 1
+	}
+	binary.Write(f, binary.LittleEndian, isOrderedByte)
 }
 
 // Deserialize reads the proxy from the given reader.
@@ -377,6 +431,8 @@ func (p *StorageComputeProxy) Deserialize(f io.Reader) uint {
 	switch version {
 	case 0:
 		return p.deserializeComputeProxyV0(f)
+	case 1:
+		return p.deserializeComputeProxyV1(f)
 	default:
 		panic(fmt.Sprintf("StorageComputeProxy: unknown version %d", version))
 	}
@@ -451,4 +507,13 @@ func (p *StorageComputeProxy) deserializeComputeProxyV0(f io.Reader) uint {
 
 	// shard back-reference is set by post-load hook in ensureColumnLoaded
 	return uint(p.count)
+}
+
+func (p *StorageComputeProxy) deserializeComputeProxyV1(f io.Reader) uint {
+	n := p.deserializeComputeProxyV0(f)
+	// v1 adds isOrdered byte after validMask
+	var isOrderedByte uint8
+	binary.Read(f, binary.LittleEndian, &isOrderedByte)
+	p.isOrdered = isOrderedByte != 0
+	return n
 }

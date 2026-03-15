@@ -585,7 +585,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"colname", "string", "name of the new column", nil},
 			scm.DeclarationParameter{"type", "string", "name of the basetype", nil},
 			scm.DeclarationParameter{"dimensions", "list", "dimensions of the type (e.g. for decimal)", nil},
-			scm.DeclarationParameter{"options", "list", "assoc list with one of the following options: primary true, unique true, auto_increment true, null bool, comment string default string collate identifier", nil},
+			scm.DeclarationParameter{"options", "list", "assoc list: primary, unique, auto_increment, null, comment, default, collate; ORC: sortcols, sortdirs, partitioncount, mapcols, mapfn, reducefn, reduceinit", nil},
 			scm.DeclarationParameter{"computorCols", "list", "list of columns that is passed into params of computor", nil},
 			scm.DeclarationParameter{"computor", "func", "lambda expression that can take other column values and computes the value of that column", nil},
 		}, "bool",
@@ -611,6 +611,43 @@ func Init(en scm.Env) {
 			typeparams := mustScmerSlice(a[5], "typeparams")
 			ok := t.CreateColumn(colname, typename, dimensions, typeparams)
 
+			// ORC column: sortcols in options signals ordered-reduce computed column.
+			// Extract ORC params from the options assoc list.
+			var orcSortCols []string
+			var orcSortDirs []bool
+			orcPartCount := 0
+			var orcMapCols []string
+			var orcMapFn, orcReduceFn, orcReduceInit scm.Scmer
+			for i := 0; i+1 < len(typeparams); i += 2 {
+				key := scm.String(typeparams[i])
+				val := typeparams[i+1]
+				switch key {
+				case "sortcols":
+					orcSortCols = scmerSliceToStrings(mustScmerSlice(val, "sortcols"))
+				case "sortdirs":
+					dirs := mustScmerSlice(val, "sortdirs")
+					orcSortDirs = make([]bool, len(dirs))
+					for j, d := range dirs {
+						orcSortDirs[j] = scm.ToBool(d)
+					}
+				case "partitioncount":
+					orcPartCount = int(scm.ToInt(val))
+				case "mapcols":
+					orcMapCols = scmerSliceToStrings(mustScmerSlice(val, "mapcols"))
+				case "mapfn":
+					orcMapFn = val
+				case "reducefn":
+					orcReduceFn = val
+				case "reduceinit":
+					orcReduceInit = val
+				}
+			}
+			if len(orcSortCols) > 0 {
+				t.ComputeOrderedColumn(colname, orcSortCols, orcSortDirs, orcPartCount, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
+				return scm.NewBool(ok)
+			}
+
+			// Regular per-row computed column.
 			if len(a) > 7 && !a[7].IsNil() {
 				paramNames := scmerSliceToStrings(mustScmerSlice(a[6], "computor param names"))
 				// extract filter from options

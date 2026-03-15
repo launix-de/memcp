@@ -347,7 +347,8 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 	var buf [1024]uint32 // stack-allocated batch buffer (4 KB, fits in L1)
 	bufN := 0
 	var bufShard *shardqueue
-	for len(q.q) > 0 {
+	breakCaught := false
+	for !breakCaught && len(q.q) > 0 {
 		qx := q.q[0]
 
 		if len(qx.items) == 0 {
@@ -377,9 +378,12 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 
 		// If shard changed, flush the buffer to the previous shard's mapper
 		if bufShard != nil && bufShard != qx {
-			akkumulator = bufShard.mapper.Stream(akkumulator, buf[:bufN])
+			akkumulator, breakCaught = streamOrBreak(bufShard.mapper, akkumulator, buf[:bufN])
 			hadValue = true
 			bufN = 0
+			if breakCaught {
+				break
+			}
 		}
 
 		// Accumulate item into buffer
@@ -393,9 +397,12 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 
 		// Flush if buffer full
 		if bufN == len(buf) {
-			akkumulator = bufShard.mapper.Stream(akkumulator, buf[:bufN])
+			akkumulator, breakCaught = streamOrBreak(bufShard.mapper, akkumulator, buf[:bufN])
 			hadValue = true
 			bufN = 0
+			if breakCaught {
+				break
+			}
 		}
 
 		// Re-heapify or remove exhausted shard
@@ -406,8 +413,8 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		}
 	}
 	// Flush remaining buffer
-	if bufN > 0 && bufShard != nil {
-		akkumulator = bufShard.mapper.Stream(akkumulator, buf[:bufN])
+	if !breakCaught && bufN > 0 && bufShard != nil {
+		akkumulator, _ = streamOrBreak(bufShard.mapper, akkumulator, buf[:bufN])
 		hadValue = true
 	}
 	if !hadValue && isOuter {
@@ -451,6 +458,24 @@ func (t *table) scan_order(conditionCols []string, condition scm.Scmer, sortcols
 		}(analyzeNs, execNs)
 	}
 	return akkumulator
+}
+
+// streamOrBreak calls mapper.Stream and catches a breakSentinel panic (from $break
+// pseudo-columns). When a break is caught, the current accumulator is returned and
+// broke=true signals the merge loop to stop iteration.
+func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (result scm.Scmer, broke bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(breakSentinel); ok {
+				broke = true
+				result = acc
+			} else {
+				panic(r) // re-panic for all other errors
+			}
+		}
+	}()
+	result = mapper.Stream(acc, recids)
+	return
 }
 
 func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limit int, callbackCols []string) (result *shardqueue) {
@@ -646,7 +671,11 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					// value from delta storage
 					// prepare&call condition function
 					for i, k := range conditionCols { // iterate over columns
+						if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+						cdataset[i] = ccols[i].GetValue(idx)
+					} else {
 						cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
+					}
 					}
 				}
 				// check condition

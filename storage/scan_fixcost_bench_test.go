@@ -161,3 +161,49 @@ func BenchmarkNewContext(b *testing.B) {
 		scm.NewContext(context.TODO(), func() {})
 	}
 }
+
+// BenchmarkScanUpdate measures per-row allocation cost when scanning with a
+// $increment: pseudo-column. This is the primary target of the tagClosure
+// optimization: before tagClosure, each row allocates a new scm.NewFunc closure;
+// after tagClosure, NewClosure is used (zero per-row allocation).
+//
+// Run with:
+//
+//	go test ./storage/ -bench BenchmarkScanUpdate -benchtime=5s -count=3 -benchmem
+func BenchmarkScanUpdate(b *testing.B) {
+	CreateDatabase("bench_scan_update", true)
+	tbl, _ := CreateTable("bench_scan_update", "su", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("val", "INT", nil, nil)
+	// Create computed column schema first, then populate with ComputeColumn
+	computor := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })
+	tbl.CreateColumn("cached_val", "INT", nil, nil)
+
+	// Insert 10k rows
+	const N = 10_000
+	rows := make([][]scm.Scmer, N)
+	for i := 0; i < N; i++ {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i * 2))}
+	}
+	tbl.Insert([]string{"id", "val"}, rows, nil, scm.NewNil(), false, nil)
+
+	// Attach the computor to the column after data is loaded
+	tbl.ComputeColumn("cached_val", []string{"val"}, computor, nil, scm.NewNil())
+
+	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	nilFn := scm.NewNil()
+	neutral := scm.NewNil()
+	session := scm.NewSession()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		scm.SetValues(map[string]any{"session": session}, func() {
+			tbl.scan(
+				[]string{"id"}, trueFn,
+				[]string{"id", "$increment:cached_val"}, trueFn,
+				nilFn, neutral, nilFn, false,
+			)
+		})
+	}
+}

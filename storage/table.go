@@ -44,6 +44,16 @@ type column struct {
 	Comment           string
 	sanitizer         func(scm.Scmer) scm.Scmer
 	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
+
+	// ORC fields — non-empty OrcSortCols signals this is an ordered-reduce computed column.
+	// The column value is produced by a scan_order pass rather than per-row computation.
+	OrcSortCols   []string  `json:",omitempty"` // ORDER BY column names (partition cols first)
+	OrcSortDirs   []bool    `json:",omitempty"` // false=ASC, true=DESC, one per OrcSortCol
+	OrcPartCount  int       `json:",omitempty"` // leading OrcSortCols that are PARTITION BY keys
+	OrcMapCols    []string  `json:",omitempty"` // additional input columns passed to OrcMapFn
+	OrcMapFn      scm.Scmer                    // (lambda ($set mapcols...) ...) — passes data to reduceFn
+	OrcReduceFn   scm.Scmer                    // (lambda (acc mapped) ...) — accumulates and writes via $set
+	OrcReduceInit scm.Scmer                    // initial accumulator value (neutral element)
 }
 
 // PersistencyMode controls the durability and persistence behaviour of a table.
@@ -230,6 +240,9 @@ type table struct {
 	mutationMu     sync.Mutex
 	mutationOwnMu  sync.Mutex
 	mutationOwners map[uint64]uint32
+
+	// orcMu serializes ORC recomputes: only one full scan_order pass at a time per table.
+	orcMu sync.Mutex
 
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode         ShardMode
@@ -764,10 +777,10 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 			c.Collation = scm.String(extrainfo[i+1])
 		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
-		case "filtercols":
+		case "filtercols", "filter":
 			// handled by createcolumn builtin, not a column property
-		case "filter":
-			// handled by createcolumn builtin, not a column property
+		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapfn", "reducefn", "reduceinit":
+			// ORC params handled by createcolumn builtin after CreateColumn
 		default:
 			panic("unknown column attribute: " + key)
 		}

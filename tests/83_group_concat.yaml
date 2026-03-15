@@ -1,0 +1,70 @@
+metadata:
+  version: "1.0"
+  description: "GROUP_CONCAT in GROUP BY, OVER (PARTITION BY), and OVER (ORDER BY) contexts"
+  isolated: true
+
+test_cases:
+
+  - name: "Drop leftover tables"
+    sql: "DROP TABLE IF EXISTS gc_test"
+
+  - name: "Create test table"
+    sql: |
+      CREATE TABLE gc_test (id INT PRIMARY KEY, grp INT, name VARCHAR(50), val INT)
+
+  - name: "Insert test data"
+    sql: |
+      INSERT INTO gc_test VALUES
+      (1, 1, 'alice', 10),
+      (2, 1, 'bob', 20),
+      (3, 1, 'charlie', 30),
+      (4, 2, 'dave', 40),
+      (5, 2, 'eve', 50)
+
+  # ==========================================================================
+  # GROUP BY context (existing functionality)
+  # ==========================================================================
+
+  - name: "GROUP_CONCAT with GROUP BY (default separator)"
+    sql: "SELECT grp, GROUP_CONCAT(name) AS names FROM gc_test GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+
+  - name: "GROUP_CONCAT with GROUP BY + SEPARATOR"
+    sql: "SELECT grp, GROUP_CONCAT(name SEPARATOR '; ') AS names FROM gc_test GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 2
+
+  # ==========================================================================
+  # OVER (PARTITION BY) — same value per partition (ordered=true → ORC needed)
+  # ==========================================================================
+
+  - name: "GROUP_CONCAT OVER (PARTITION BY grp)"
+    sql: "SELECT id, grp, name, GROUP_CONCAT(name) OVER (PARTITION BY grp) AS all_names FROM gc_test ORDER BY id"
+    expect:
+      rows: 5
+
+  # ==========================================================================
+  # OVER (ORDER BY) — running concatenation (ordered=true)
+  # ==========================================================================
+
+  - name: "GROUP_CONCAT OVER (ORDER BY val) — running concat"
+    sql: "SELECT id, name, GROUP_CONCAT(name) OVER (ORDER BY val) AS running_names FROM gc_test ORDER BY val"
+    expect:
+      rows: 5
+
+  # ==========================================================================
+  # OVER () — global concat
+  # ==========================================================================
+
+  - name: "GROUP_CONCAT OVER () — all names for every row"
+    sql: "SELECT id, name, GROUP_CONCAT(name) OVER () AS all_names FROM gc_test ORDER BY id"
+    expect:
+      rows: 5
+
+  # ==========================================================================
+  # Cleanup
+  # ==========================================================================
+
+  - name: "Drop test table"
+    sql: "DROP TABLE IF EXISTS gc_test"

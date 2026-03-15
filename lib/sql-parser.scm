@@ -17,6 +17,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (define sql_builtins (coalesce sql_builtins (newsession)))
 
+/* Aggregate function registry: maps uppercase name → (reduce neutral ordered).
+   ordered=false: ORDER BY in OVER() can be ignored (result independent of row order)
+   ordered=true: ORDER BY matters → ORC running aggregate (e.g. GROUP_CONCAT)
+   Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
+(define sql_aggregates (coalesce sql_aggregates (newsession)))
+(sql_aggregates "SUM" '(+ 0 false))
+(sql_aggregates "MIN" '(min nil false))
+(sql_aggregates "MAX" '(max nil false))
+/* COUNT is special: compiler replaces arg with 1 (TODO: COUNT(DISTINCT col)) */
+(sql_aggregates "COUNT" '(+ 0 false))
+/* GROUP_CONCAT is order-sensitive: ORDER BY in OVER matters (running concatenation) */
+(sql_aggregates "GROUP_CONCAT" (list (lambda (a b) (if (nil? a) b (concat a "," b))) nil true))
+
 (define sql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 	/* exceptions for things that can't be identifiers */
@@ -693,17 +706,33 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* Simple CASE: CASE expr WHEN val THEN result ... ELSE default END */
 		(parser '((atom "CASE" true) (define expr sql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) '('('equal?? expr a) b)))) '(elsebranch)))
 
+		/* aggregate-as-window: KEYWORD(expr) OVER (...) → window_func node (must precede plain aggregate rules) */
+		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "COUNT" '() _over))
+		(parser '((atom "COUNT" true) "(" (define e sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "COUNT" (list e) _over))
+		(parser '((atom "SUM" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "SUM" (list s) _over))
+		(parser '((atom "AVG" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "AVG" (list s) _over))
+		(parser '((atom "MIN" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "MIN" (list s) _over))
+		(parser '((atom "MAX" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "MAX" (list s) _over))
+		/* plain aggregates: look up (reduce neutral) from registry */
 		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e sql_expression) ")") '('count_distinct e))
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
-		/* COUNT(expr): count non-NULL values -> map to (if (nil? expr) 0 1), reduce +, neutral 0 */
 		(parser '((atom "COUNT" true) "(" (define e sql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
-		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") '('aggregate s (quote +) 0))
-		(parser '((atom "AVG" true) "(" (define s sql_expression) ")") '((quote /) '('aggregate s (quote +) 0) '('aggregate 1 (quote +) 0)))
-		(parser '((atom "MIN" true) "(" (define s sql_expression) ")") '('aggregate s 'min nil))
-		(parser '((atom "MAX" true) "(" (define s sql_expression) ")") '('aggregate s 'max nil))
+		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
+		(parser '((atom "AVG" true) "(" (define s sql_expression) ")") (begin (define ds (sql_aggregates "SUM")) (define dc (sql_aggregates "COUNT")) '((quote /) '('aggregate s (car ds) (cadr ds)) '('aggregate 1 (car dc) (cadr dc)))))
+		(parser '((atom "MIN" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "MIN")) '('aggregate s (car d) (cadr d))))
+		(parser '((atom "MAX" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "MAX")) '('aggregate s (car d) (cadr d))))
+		/* GROUP_CONCAT with OVER: window function (must precede plain rules) */
+		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "GROUP_CONCAT" (list s sep) _over))
+		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "GROUP_CONCAT" (list s ",") _over))
+		/* plain GROUP_CONCAT */
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a "," 'b))) nil))
-
+		/* user-registered aggregates: FUNCNAME(expr) where FUNCNAME is in sql_aggregates */
+		(parser '((define fn sql_identifier_unquoted) "(" (define arg sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")")
+			(if (sql_aggregates (toUpper fn))
+				'('window_func (toUpper fn) (list arg) _over)
+				'('window_func (toUpper fn) (list arg) _over)))
+	
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('unix_timestamp))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('unix_timestamp p))
@@ -782,7 +811,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "RIGHT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
 		/* window functions: parse OVER(...) clause and emit AST node */
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func (toUpper fn) args _over))
-		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
+		/* fallback: user-registered aggregates or builtins */
+		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")")
+			(begin (define d (sql_aggregates (toUpper fn)))
+				(if (not (nil? d))
+					'('aggregate (car args) (car d) (cadr d))
+					(cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))))
 		/* positional ? placeholder: compiles to (session "vN"), 1-indexed to match MySQL bind var naming */
 		(parser "?" (begin
 			(define n (placeholder_counter "n"))
