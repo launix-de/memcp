@@ -337,7 +337,7 @@ func (t *table) recomputeORC(name string) {
 	}
 
 	// "$set:colname" is prepended; mapCols are the additional input columns.
-	callbackCols := make([]string, 0, 1+len(col.OrcMapCols))
+	callbackCols := make([]string, 0, 3+len(col.OrcMapCols))
 	callbackCols = append(callbackCols, "$set:"+name)
 	callbackCols = append(callbackCols, col.OrcMapCols...)
 
@@ -423,13 +423,59 @@ func (t *table) recomputeORC(name string) {
 		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
 	}
 
+	// For suffix recompute: wrap mapFn/reduceFn with convergence checking.
+	// Adds $break + stored ORC value to callbackCols. When the newly computed
+	// accumulator matches the stored value, $break stops the scan immediately.
+	scanMapFn := col.OrcMapFn
+	scanReduceFn := col.OrcReduceFn
+	scanCallbackCols := callbackCols
+	if useSuffix {
+		// Extend callbackCols: [$set:col, mapCols...] → [$set:col, $break, col, mapCols...]
+		scanCallbackCols = make([]string, 0, 3+len(col.OrcMapCols))
+		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
+		scanCallbackCols = append(scanCallbackCols, "$break")
+		scanCallbackCols = append(scanCallbackCols, name) // stored ORC value
+		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
+
+		// Wrap mapFn: receives ($set, $brk, stored, mapCols...) → returns (brk, stored, innerMapped)
+		innerMapFn := scm.OptimizeProcToSerialFunction(col.OrcMapFn)
+		scanMapFn = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+			brk := args[1]
+			storedVal := args[2]
+			innerArgs := make([]scm.Scmer, 1+len(col.OrcMapCols))
+			innerArgs[0] = args[0] // $set
+			copy(innerArgs[1:], args[3:]) // mapCols
+			innerResult := innerMapFn(innerArgs...)
+			return scm.NewSlice([]scm.Scmer{brk, storedVal, innerResult})
+		})
+
+		// Wrap reduceFn: after inner reduce, check convergence
+		innerReduceFn := scm.OptimizeProcToSerialFunction(col.OrcReduceFn)
+		scanReduceFn = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+			mapped := args[1].Slice()
+			brk := mapped[0]
+			storedVal := mapped[1]
+			innerMapped := mapped[2]
+			newAcc := innerReduceFn(args[0], innerMapped)
+			// Convergence: new accumulator matches stored value → break
+			if !storedVal.IsNil() && !newAcc.IsNil() {
+				if (newAcc.IsInt() && storedVal.IsInt() && newAcc.Int() == storedVal.Int()) ||
+					(newAcc.IsFloat() && storedVal.IsFloat() && newAcc.Float() == storedVal.Float()) ||
+					(newAcc.IsString() && storedVal.IsString() && newAcc.String() == storedVal.String()) {
+					scm.Apply(brk) // triggers breakSentinel → scan stops
+				}
+			}
+			return newAcc
+		})
+	}
+
 	t.scan_order(
 		condCols, condFn,
 		sortcolsScmer, sortdirsFns,
 		0, -1,
-		callbackCols,
-		col.OrcMapFn,
-		col.OrcReduceFn,
+		scanCallbackCols,
+		scanMapFn,
+		scanReduceFn,
 		startAcc,
 		false,
 	)
