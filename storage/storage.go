@@ -1060,6 +1060,38 @@ func Init(en scm.Env) {
 		nil,
 	})
 	scm.Declare(&en, &scm.Declaration{
+		"invalidateorcsuffix", "marks an ORC column dirty from a sort key value onwards (suffix recompute)",
+		4, 4,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
+			scm.DeclarationParameter{"table", "string", "name of the table", nil},
+			scm.DeclarationParameter{"column", "string", "name of the ORC column", nil},
+			scm.DeclarationParameter{"sortkey", "any", "sort key value from which to recompute", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewBool(false)
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				return scm.NewBool(false)
+			}
+			colName := scm.String(a[2])
+			sortKey := a[3]
+			for _, s := range t.ActiveShards() {
+				s.mu.RLock()
+				col := s.columns[colName]
+				s.mu.RUnlock()
+				if proxy, ok := col.(*StorageComputeProxy); ok {
+					proxy.InvalidateFromSortKey(sortKey)
+				}
+			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
 		"invalidateorcpartition", "marks a single partition of an ORC column as stale",
 		4, 4,
 		[]scm.DeclarationParameter{

@@ -45,6 +45,9 @@ type StorageComputeProxy struct {
 	// Partition-scoped ORC invalidation: when non-nil, only these partition keys
 	// are dirty. nil = fully dirty (InvalidateAll). Empty map = all valid.
 	dirtyPartitions map[string]bool
+	// Suffix recompute: earliest sort key value from which recompute is needed.
+	// nil = full recompute, non-nil = recompute from this sort key onwards.
+	dirtySortKey scm.Scmer
 }
 
 func (p *StorageComputeProxy) String() string {
@@ -315,6 +318,25 @@ func (p *StorageComputeProxy) InvalidateAll() {
 	p.validMask.Reset()
 	p.delta = make(map[uint32]scm.Scmer)
 	p.dirtyPartitions = nil // nil = fully dirty
+	p.dirtySortKey = scm.NewNil()
+}
+
+// InvalidateFromSortKey marks the column dirty from a specific sort key onwards.
+// If already dirty from an earlier key, keeps the earlier one (minimum).
+func (p *StorageComputeProxy) InvalidateFromSortKey(sortKey scm.Scmer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.compressed && p.dirtySortKey.IsNil() {
+		return // already fully dirty
+	}
+	if p.compressed || p.dirtySortKey.IsNil() {
+		// First suffix invalidation
+		p.compressed = false
+		p.dirtySortKey = sortKey
+	} else if scm.Less(sortKey, p.dirtySortKey) {
+		// New key is earlier — extend suffix
+		p.dirtySortKey = sortKey
+	}
 }
 
 // InvalidatePartition marks a specific partition as dirty for ORC columns.
