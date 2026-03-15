@@ -1921,10 +1921,12 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	(define stage_limit (if stage (stage_limit_val stage) nil))
 	(define stage_offset (if stage (stage_offset_val stage) nil))
 
-	/* stage-tables: if the stage has its own tables, use them instead of outer tables */
+	/* stage-tables: if the first stage has its own tables, process it independently.
+	   Extract joinexprs into condition, merge stage-tables into outer tables.
+	   The stage's GROUP/ORDER/LIMIT applies to the combined table set. */
 	(define _stage_tables (if stage (stage_tables stage) nil))
 	(define _stage_cond (if stage (stage_condition stage) nil))
-	/* stage has own tables: extract joinexprs → condition, strip joinexprs, merge tables */
+	/* extract joinexprs from stage-tables → condition, strip joinexprs, merge tables */
 	(define _stripped_stage_tables (if (nil? _stage_tables) nil
 		(map _stage_tables (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil))))))
 	(define _stage_je_conds (if (nil? _stage_tables) '()
@@ -1932,12 +1934,32 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 			(map _stage_tables (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
 			(if (nil? _stage_cond) '() (list _stage_cond)))
 			(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
-	(set condition (if (equal? _stage_je_conds '()) condition
-		(begin
-			(define _sc (if (equal? (count _stage_je_conds) 1) (car _stage_je_conds) (cons 'and _stage_je_conds)))
-			(if (or (nil? condition) (equal? condition true)) _sc (list 'and condition _sc)))))
+	(define _merged_stage_cond (if (equal? _stage_je_conds '()) nil
+		(if (equal? (count _stage_je_conds) 1) (car _stage_je_conds) (cons 'and _stage_je_conds))))
+	(set condition (if (nil? _merged_stage_cond) condition
+		(if (or (nil? condition) (equal? condition true)) _merged_stage_cond
+			(list 'and condition _merged_stage_cond))))
 	(set tables (if (nil? _stripped_stage_tables) tables
 		(merge _stripped_stage_tables (coalesceNil tables '()))))
+	/* if this stage had own tables, it's been integrated; skip to rest_groups */
+	(if (not (nil? _stage_tables))
+		(begin
+			(set stage nil)
+			(set stage_group nil)
+			(set stage_having nil)
+			(set stage_order nil)
+			(set stage_limit nil)
+			(set stage_offset nil)
+			(set groups rest_groups)
+			(set groups_present (and (not (nil? groups)) (not (equal? groups '()))))
+			(set stage (if groups_present (car groups) nil))
+			(set rest_groups (if groups_present (cdr groups) nil))
+			(set rest_groups (coalesceNil rest_groups '()))
+			(set stage_group (if stage (stage_group_cols stage) nil))
+			(set stage_having (if stage (stage_having_expr stage) nil))
+			(set stage_order (if stage (stage_order_list stage) nil))
+			(set stage_limit (if stage (stage_limit_val stage) nil))
+			(set stage_offset (if stage (stage_offset_val stage) nil))))
 
 	/* window function detection */
 	(define window_funcs_all (merge (extract_assoc fields (lambda (k v) (extract_window_funcs v)))))
