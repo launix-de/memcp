@@ -905,6 +905,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				globalFuncTypeInfo[sym] = TypeInfo{}.WithTransfer()
 			}
 		}
+		// NOTE: ownership propagation through define/set requires use-count
+		// analysis (linear use). A variable defined with a fresh value may be
+		// used multiple times, so marking it as owned would allow _mut swap
+		// on the first use, corrupting the value for subsequent uses.
 		// Register local non-escaping lambda for second-pass ownership inference
 		if sym, ok2 := scmerSymbol(v[1]); ok2 {
 			if lambdaAST, ok3 := scmerSlice(v[2]); ok3 && len(lambdaAST) >= 3 && scmerIsSymbol(lambdaAST[0], "lambda") {
