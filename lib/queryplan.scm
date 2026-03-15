@@ -2446,8 +2446,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 			)
 		)
 	) (optimize (begin
-			/* grouping has been removed; now to the real data: */
-			(if (and (not (nil? rest_groups)) (not (equal? rest_groups '()))) (error "non-group stage must be last"))
+			/* grouping has been removed; remaining stages (if any) are bare LIMIT-only from scalar subqueries */
 			(if has_window (begin
 				/* ========= Window function scan path (LAG/LEAD) ========= */
 				/* Case 8: different OVER clauses */
