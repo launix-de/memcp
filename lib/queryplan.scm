@@ -1946,55 +1946,37 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									(setter new_rank)
 									(list new_rank key)))
 							(list 0 nil))
-						"SUM" (if (nil? wf_args) nil (begin
-							(define agg_col (extract_col_name (car wf_args)))
-							(if (nil? agg_col) nil
-								(list (list agg_col)
-									(lambda ($set v) (list $set v))
-									(lambda (acc mapped) (begin
-										(define new_sum (+ acc (cadr mapped)))
-										((car mapped) new_sum)
-										new_sum))
-									0))))
-						"COUNT" (list '()
-							(lambda ($set) (list $set))
-							(lambda (acc mapped) (begin ((car mapped) (+ acc 1)) (+ acc 1)))
-							0)
-						"MIN" (if (nil? wf_args) nil (begin
-							(define agg_col (extract_col_name (car wf_args)))
-							(if (nil? agg_col) nil
-								(list (list agg_col)
-									(lambda ($set v) (list $set v))
-									(lambda (acc mapped) (begin
-										(define v (cadr mapped))
-										(define new_min (if (nil? acc) v (min acc v)))
-										((car mapped) new_min)
-										new_min))
-									nil))))
-						"MAX" (if (nil? wf_args) nil (begin
-							(define agg_col (extract_col_name (car wf_args)))
-							(if (nil? agg_col) nil
-								(list (list agg_col)
-									(lambda ($set v) (list $set v))
-									(lambda (acc mapped) (begin
-										(define v (cadr mapped))
-										(define new_max (if (nil? acc) v (max acc v)))
-										((car mapped) new_max)
-										new_max))
-									nil))))
-						nil)))
+						/* registry-based aggregates as running ORC: look up (reduce neutral) from sql_aggregates */
+						_ (begin
+							(define agg_desc (sql_aggregates fn))
+							(if (nil? agg_desc) nil
+								(begin
+									(define agg_reduce (car agg_desc))
+									(define agg_neutral (cadr agg_desc))
+									/* COUNT special case: replace arg with 1 (TODO: COUNT(DISTINCT col)) */
+									(if (equal? fn "COUNT")
+										(list '()
+											(lambda ($set) (list $set))
+											(lambda (acc mapped) (begin
+												(define new_acc (agg_reduce acc 1))
+												((car mapped) new_acc)
+												new_acc))
+											agg_neutral)
+										(if (nil? wf_args) nil
+											(begin
+												(define agg_col (extract_col_name (car wf_args)))
+												(if (nil? agg_col) nil
+													(list (list agg_col)
+														(lambda ($set v) (list $set v))
+														(lambda (acc mapped) (begin
+															(define new_acc (agg_reduce acc (cadr mapped)))
+															((car mapped) new_acc)
+															new_acc))
+														agg_neutral))))))))
+					)))
 				(define is_orc_window (lambda (wf) (match wf '(fn args _) (not (nil? (orc_window_descriptor fn args '()))))))
-				/* aggregate window descriptors: fn → (reduce neutral) for createcolumn-based partition/global aggregates */
-				(define agg_window_descriptor (lambda (fn wf_args)
-					(match fn
-						"SUM" (if (nil? wf_args) nil (list (car wf_args) (quote +) 0))
-						"COUNT" (if (nil? wf_args)
-							(list 1 (quote +) 0)
-							(list '((quote if) '((quote nil?) (eval (car wf_args))) 0 1) (quote +) 0))
-						"MIN" (if (nil? wf_args) nil (list (car wf_args) 'min nil))
-						"MAX" (if (nil? wf_args) nil (list (car wf_args) 'max nil))
-						nil)))
-				(define is_agg_window (lambda (wf) (match wf '(fn args _) (not (nil? (agg_window_descriptor fn args))))))
+				/* aggregate window: look up fn in sql_aggregates registry → (reduce neutral) */
+				(define is_agg_window (lambda (wf) (match wf '(fn _ _) (not (nil? (sql_aggregates fn))))))
 				/* classify: ORC (has ORDER BY + is ORC-eligible), aggregate (no ORDER BY), or LAG/LEAD */
 				(define has_over_order (not (equal? over_order '())))
 				(define all_orc_window (and has_over_order (reduce wf_resolved (lambda (acc wf) (and acc (is_orc_window wf))) true)))
@@ -2094,10 +2076,11 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(define first_wf (car wf_resolved))
 						(define wf_fn (car first_wf))
 						(define wf_args (cadr first_wf))
-						(define agg_desc (agg_window_descriptor wf_fn wf_args))
-						(define agg_expr (nth agg_desc 0))
-						(define agg_reduce (nth agg_desc 1))
-						(define agg_neutral (nth agg_desc 2))
+						(define agg_reg (sql_aggregates wf_fn))
+						(define agg_reduce (car agg_reg))
+						(define agg_neutral (cadr agg_reg))
+						/* COUNT: map_expr = 1; others: map_expr = arg */
+						(define agg_expr (if (equal? wf_fn "COUNT") 1 (if (nil? wf_args) 1 (car wf_args))))
 						/* partition columns for the computor's input + filter */
 						(define has_partition (not (equal? over_partition '())))
 						(define partition_col_names (if has_partition
