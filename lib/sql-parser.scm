@@ -63,7 +63,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "RTRIM" true)
 	(atom "REGEXP" true)
 	(atom "RLIKE" true)
-	(atom "COALESCE" true)
 )))
 (define sql_identifier_quoted (parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`"))) /* with backtick */
 (define sql_identifier (parser (define x (or sql_identifier_unquoted sql_identifier_quoted)) x))
@@ -733,12 +732,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(if (sql_aggregates (toUpper fn))
 				'('window_func (toUpper fn) (list arg) _over)
 				'('window_func (toUpper fn) (list arg) _over)))
-		(parser '((define fn sql_identifier_unquoted) "(" (define arg sql_expression) ")")
-			(begin (define d (sql_aggregates (toUpper fn)))
-				(if (nil? d)
-					(cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) (list arg))
-					'('aggregate arg (car d) (cadr d)))))
-
+	
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('unix_timestamp))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('unix_timestamp p))
@@ -817,7 +811,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "RIGHT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
 		/* window functions: parse OVER(...) clause and emit AST node */
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func (toUpper fn) args _over))
-		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")") (cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))
+		/* fallback: user-registered aggregates or builtins */
+		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")")
+			(begin (define d (sql_aggregates (toUpper fn)))
+				(if (not (nil? d))
+					'('aggregate (car args) (car d) (cadr d))
+					(cons (coalesce (sql_builtins (toUpper fn)) (error "unknown function " fn)) args))))
 		/* positional ? placeholder: compiles to (session "vN"), 1-indexed to match MySQL bind var naming */
 		(parser "?" (begin
 			(define n (placeholder_counter "n"))
