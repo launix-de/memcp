@@ -139,7 +139,7 @@ test_cases:
     sql: "DROP TABLE IF EXISTS inv_part"
 
   # =========================================================================
-  # Part 3: Concurrency — write during read (noncritical, may fail)
+  # Part 3: Concurrency — write during cached read (steps with sessions)
   # =========================================================================
 
   - name: "Create concurrency test table"
@@ -152,13 +152,71 @@ test_cases:
         (define rows (produceN 100 (lambda (i) (list (+ i 1) (mod (+ i 1) 10) (* (+ i 1) 7)))))
         (insert "memcp-tests" "inv_conc" '("id" "grp" "val") rows '() (lambda () true) false))
 
-  - name: "Concurrent read+write: GROUP BY during INSERT"
-    noncritical: true
-    background:
-      - sql: "INSERT INTO inv_conc VALUES (1001, 5, 9999)"
+  - name: "Warm up aggregate cache"
     sql: "SELECT grp, SUM(val) AS total FROM inv_conc GROUP BY grp ORDER BY grp"
     expect:
       rows: 10
+
+  - name: "Concurrent: INSERT while GROUP BY reads from cache"
+    noncritical: true
+    steps:
+      # Session A: start a GROUP BY (hits cache)
+      - session_id: "conc-reader"
+        sql: "SELECT grp, SUM(val) AS total FROM inv_conc GROUP BY grp ORDER BY grp"
+        background: true
+        expect:
+          rows: 10
+      # Session B: INSERT a new row — triggers incremental cache update
+      - session_id: "conc-writer"
+        sql: "INSERT INTO inv_conc VALUES (1001, 5, 9999)"
+      # Verify: after INSERT, cache reflects new value
+      - session_id: "conc-writer"
+        sql: "SELECT grp, SUM(val) AS total FROM inv_conc WHERE grp = 5 GROUP BY grp"
+        expect:
+          rows: 1
+
+  - name: "Concurrent: DELETE while GROUP BY reads from cache"
+    noncritical: true
+    steps:
+      - session_id: "conc-del-writer"
+        sql: "DELETE FROM inv_conc WHERE id = 1001"
+      # Session A: GROUP BY in background
+      - session_id: "conc-del-reader"
+        sql: "SELECT grp, SUM(val) AS total FROM inv_conc GROUP BY grp ORDER BY grp"
+        background: true
+        expect:
+          rows: 10
+      # Session B: DELETE another row
+      - session_id: "conc-del-writer"
+        sql: "DELETE FROM inv_conc WHERE id = 1"
+      # Verify consistency
+      - session_id: "conc-del-writer"
+        sql: "SELECT COUNT(*) AS n FROM inv_conc"
+        expect:
+          rows: 1
+
+  - name: "Concurrent: bulk INSERT during ORC read"
+    noncritical: true
+    steps:
+      # Warm up ORC: create ROW_NUMBER column
+      - session_id: "conc-orc-setup"
+        sql: "SELECT id, ROW_NUMBER() OVER (ORDER BY val) AS rn FROM inv_conc ORDER BY val LIMIT 5"
+        expect:
+          rows: 5
+      # Background: read ORC column
+      - session_id: "conc-orc-reader"
+        sql: "SELECT id, ROW_NUMBER() OVER (ORDER BY val) AS rn FROM inv_conc ORDER BY val LIMIT 5"
+        background: true
+        expect:
+          rows: 5
+      # Concurrent INSERT
+      - session_id: "conc-orc-writer"
+        sql: "INSERT INTO inv_conc VALUES (2001, 3, 1)"
+      # Verify ORC still consistent after mutation
+      - session_id: "conc-orc-writer"
+        sql: "SELECT id, ROW_NUMBER() OVER (ORDER BY val) AS rn FROM inv_conc ORDER BY val LIMIT 3"
+        expect:
+          rows: 3
 
   - name: "Drop concurrency table"
     sql: "DROP TABLE IF EXISTS inv_conc"
