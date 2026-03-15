@@ -389,13 +389,20 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 			(define wf_args (cadr wf_rest))
 			(define map_expr (if (equal? wf_fn "COUNT") 1 (if (nil? wf_args) 1 (replace_find_column (car wf_args)))))
 			(define ag_col (agg_col_name (match wf_fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil) (list map_expr '+ 0))))
-			(if has_partition
-				'('scan schema grouptbl
-					(cons 'list (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
-					'('lambda (map group_keys (lambda (col) (symbol (concat grouptbl "." (if is_fk_reuse fk_pk_col (expr_name col)))))) (cons 'and (map group_keys (lambda (col) '('equal? (symbol (concat grouptbl "." (if is_fk_reuse fk_pk_col (expr_name col)))) '('outer (symbol (concat tblvar "." (if is_fk_reuse fk_pk_col (expr_name col))))))))))
+			(if has_partition (begin
+				(define kt_key_names (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
+				/* outer refs need raw column names (tblvar.col), not canonical expr_name */
+				(define raw_col_names (map group_keys (lambda (col) (match col '('get_column _ _ c _) c (expr_name col)))))
+				(list 'scan schema grouptbl
+					(cons 'list kt_key_names)
+					/* filter: (equal? grouptbl.kt_key (outer tblvar.raw_col)) — zip kt_key_names with raw_col_names */
+						(list 'lambda
+						(map kt_key_names (lambda (kn) (symbol (concat grouptbl "." kn))))
+						(cons 'and (map (produceN (count kt_key_names) (lambda (i) i)) (lambda (i)
+							(list 'equal? (symbol (concat grouptbl "." (nth kt_key_names i))) (list 'outer (symbol (concat tblvar "." (nth raw_col_names i)))))))))
 					(list 'list ag_col)
 					'('lambda '('__v) '__v)
-					'('lambda '('__a '__b) '__b) nil nil false)
+					'('lambda '('__a '__b) '__b) nil nil false))
 				(list 'scan schema grouptbl '(list) '('lambda '() true)
 					(list 'list ag_col)
 					'('lambda '('__v) '__v)
