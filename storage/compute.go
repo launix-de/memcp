@@ -982,11 +982,15 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 			incrementBody,
 			invalidateBody,
 		})
+	case AfterDelete:
+		// Incremental subtraction: subtract OLD delta from cached aggregate.
+		// The COUNT column on the keytable naturally tracks group membership;
+		// when COUNT reaches 0, HAVING (COUNT > 0) excludes the empty group.
+		// The keytable cleanup trigger (priority 90) removes the row entirely.
+		oldDelta := extractDeltaExpr(mapFn, "OLD")
+		return buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD", oldDelta, true)
 	default:
-		// AfterDelete: use full invalidation.
-		// Incremental subtraction (subtract OLD delta) is theoretically possible
-		// but interacts with the exists-column trigger and keytable cleanup in
-		// ways that need careful ordering. For now, full invalidation is safe.
+		// Fallback: full invalidation.
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
 			scm.NewString(targetSchema),
@@ -1121,10 +1125,10 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			}
 			if !exists {
 				var body scm.Scmer
-				if incremental && timing != AfterDelete {
+				if incremental {
 					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[6], timing)
 				} else {
-					// Full invalidation: correct for DELETE and non-additive aggregates.
+					// Full invalidation: correct for non-additive aggregates.
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						scm.NewString(targetSchema),
