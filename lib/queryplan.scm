@@ -225,9 +225,29 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 
 (import "sql-metadata.scm")
 
-/* group stage constructors and accessors - shared between untangle_query and build_queryplan
-   Group stages segment the FROM-list: each stage operates on its own set of tables.
-   Tables not claimed by any stage belong to the final (non-grouped) scan. */
+/* ========================================================================
+   Pipeline segments — the interface between untangle_query and build_queryplan.
+
+   A query after unnesting is a PIPELINE of segments:
+     (segment1 segment2 ... segmentN)
+   Each segment = (tables condition group-stage):
+     - tables:      new tables introduced in this segment (may be '())
+     - condition:   WHERE/JOIN conditions for these tables
+     - group-stage: nil, or GROUP BY / HAVING / ORDER / LIMIT / OFFSET / WINDOW
+
+   Processing (by build_queryplan):
+     1. For each segment: add its tables to the running set, apply condition
+     2. If group-stage: apply GROUP BY → keytable, ORDER → ordered scan, etc.
+     3. Result feeds into the next segment
+     4. After all segments: apply fields projection, call resultrow
+   ======================================================================== */
+(define make_segment (lambda (tables condition group-stage)
+	(list tables condition group-stage)))
+(define segment_tables (lambda (seg) (nth seg 0)))
+(define segment_condition (lambda (seg) (nth seg 1)))
+(define segment_group (lambda (seg) (nth seg 2)))
+
+/* group stage constructors and accessors */
 (define make_group_stage (lambda (group having order limit offset)
 	(list
 		(cons (quote group-cols) (coalesce group '()))
@@ -780,8 +800,15 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 			))
 			(define old_projection_scalar_flatten (projection_scalar_flatten "value"))
 			(projection_scalar_flatten "value" (projection_scalar_flatten_safe subquery))
-			(match (untangle_subquery_with_outer subquery subquery_outer_schemas) '(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2) (begin
+			(match (untangle_subquery_with_outer subquery subquery_outer_schemas) '(schema2 segments2 fields2 schemas2 replace_find_column2) (begin
 				(projection_scalar_flatten "value" old_projection_scalar_flatten)
+				/* extract flat tables, condition, groups from segments for subquery processing */
+				(define tables2 (merge (map segments2 segment_tables)))
+				(define condition2 (reduce segments2 (lambda (acc seg)
+					(begin (define sc (segment_condition seg))
+						(if (or (nil? sc) (equal? sc true)) acc
+							(if (or (nil? acc) (equal? acc true)) sc (list 'and acc sc))))) true))
+				(define groups2 (filter (map segments2 segment_group) (lambda (x) (not (nil? x)))))
 				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 subquery_outer_schemas))
 				(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
 				(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
@@ -914,7 +941,7 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 									(list rows_sym "rows"
 										(list (quote cons) (symbol "item") (list rows_sym "rows"))))
 							)
-							(build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
+							(build_queryplan schema2 (list (make_segment tables2 condition2 (if (and (not (nil? groups2)) (not (equal? groups2 '()))) (car groups2) nil))) fields2 schemas2 replace_find_column2)
 							(list (quote set) (symbol "resultrow") resultrow_sym)
 							(list rows_sym "rows")
 						))
@@ -1169,7 +1196,7 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 									/* first occurrence: generate full setup+subplan */
 									(begin
 										(define _sq_saved_rr_name (concat "__scalar_saved_resultrow_" _sq_hash))
-										(define subplan (build_queryplan schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column_subselect))
+										(define subplan (build_queryplan schema2 (list (make_segment tables2 condition2 (if (and (not (nil? groups2)) (not (equal? groups2 '()))) (car groups2) nil))) fields2 schemas2 replace_find_column_subselect))
 										/* cache the read expression so duplicate subqueries skip the subplan */
 										(sq_cache _sq_hash (list (quote if) (list (quote equal?) (list (quote scalar_promise_get) (symbol _sq_acc_name)) scalar_neutral) nil (list (quote scalar_promise_get) (symbol _sq_acc_name))))
 										(list (quote !begin)
@@ -1615,18 +1642,37 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 						expr)))
 					(set fields (map_assoc fields (lambda (k v) (_replace_rename v))))
 					(set condition (_replace_rename condition))
-					/* merge joinexprs from tables into condition (same as has-tables path at line 1517) */
-					/* merge joinexprs from tables into condition; use same pattern as has-tables path */
-					(define _condAll (cons 'and (coalesce (filter (append (map _pst (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
-						/* build groups */
-					(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
-					(set groups (if (or (nil? _pending_groups) (equal? _pending_groups '()))
-						groups (merge (coalesceNil groups '()) _pending_groups)))
-						(list schema _pst fields _condAll groups _schemas _replace_rename))
+					/* build segments from pending scalar data */
+					(define _scalar_segments (map _pending_groups (lambda (stage)
+						(begin
+							(define _st (stage_tables stage))
+							(define _sc (stage_condition stage))
+							/* extract joinexprs from stage-tables */
+							(define _je (if (nil? _st) '()
+								(filter (map _st (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
+									(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+							(define _stripped (if (nil? _st) '()
+								(map _st (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil))))))
+							(define _cond_parts (filter (merge _je (if (nil? _sc) '() (list _sc))) (lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+							(define _cond (if (equal? _cond_parts '()) true
+								(if (equal? (count _cond_parts) 1) (car _cond_parts) (cons 'and _cond_parts))))
+							/* rebuild stage without stage-tables */
+							(define _clean (make_group_stage (stage_group_cols stage) (stage_having_expr stage)
+								(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)))
+							(make_segment _stripped _cond _clean)))))
+					/* segments for tables without group stages (simple LEFT JOINs) */
+					(define _plain_segment (if (and (not (nil? _pst)) (not (equal? _pst '())))
+						(list (make_segment _pst condition nil))
+						'()))
+					/* outer query's own group stage */
+					(define _outer_grp (if (or group having order limit offset) (make_group_stage group having order limit offset) nil))
+					(define _outer_segment (if _outer_grp (list (make_segment '() nil _outer_grp)) '()))
+					(define _all_segments (merge _plain_segment _scalar_segments _outer_segment))
+					(list schema _all_segments fields _schemas _replace_rename))
 				/* truly no tables */
 				(begin
-					(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
-					(list schema tables fields condition groups '() (lambda (expr) expr))))
+					(define _grp (if (or group having order limit offset) (make_group_stage group having order limit offset) nil))
+					(list schema (list (make_segment '() condition _grp)) fields '() (lambda (expr) expr))))
 		)
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
@@ -1827,11 +1873,30 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 						_cd_limit _cd_offset))
 				/* normal: single group stage */
 				(if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil)))
-			/* merge group stages from flattened subqueries (scalar aggregates, derived tables with GROUP BY) */
-			(set groups (if (or (nil? pending_groups) (equal? pending_groups '()))
-				groups
-				(merge (coalesceNil groups '()) pending_groups)))
-			(list schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll groups schemas replace_find_column)
+			/* build pipeline segments */
+			/* scalar subquery segments (from pending_groups with stage-tables) */
+			(define _scalar_segs (if (or (nil? pending_groups) (equal? pending_groups '())) '()
+				(map pending_groups (lambda (stage)
+					(begin
+						(define _st (stage_tables stage))
+						(define _sc (stage_condition stage))
+						(define _je (if (nil? _st) '()
+							(filter (map _st (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
+								(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+						(define _stripped (if (nil? _st) '()
+							(map _st (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil))))))
+						(define _cp (filter (merge _je (if (nil? _sc) '() (list _sc))) (lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+						(define _cond (if (equal? _cp '()) true (if (equal? (count _cp) 1) (car _cp) (cons 'and _cp))))
+						(define _clean (make_group_stage (stage_group_cols stage) (stage_having_expr stage)
+							(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)))
+						(make_segment _stripped _cond _clean))))))
+			/* base segment: outer tables + condition */
+			(define _base_seg (make_segment tables conditionAll nil))
+			/* outer query's group stage(s) */
+			(define _outer_segs (if (nil? groups) '()
+				(map groups (lambda (grp) (make_segment '() nil grp)))))
+			(define _all_segs (merge (list _base_seg) _scalar_segs _outer_segs))
+			(list schema _all_segs (map_assoc fields (lambda (k v) (replace_rename v))) schemas replace_find_column)
 		)
 	)
 )
@@ -1895,21 +1960,51 @@ and store results as keytable columns named "expr|condition"
 All aggregates from fields, ORDER BY, and HAVING are collected into 'ags' so that
 e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 */
-(define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column) (begin
-	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */
-	/* fields: '(colname expr ...) (colname=* -> SELECT *) */
-	/* expressions will use (get_column tblvar ti col ci) for reading from columns. we have to replace it with the correct variable */
-	/*(print "build queryplan " '(schema tables fields condition groups schemas))*/
+(define build_queryplan (lambda (schema segments fields schemas replace_find_column) (begin
 	/*
-	Query builder masterplan:
-	1. make sure all optimizations are done (unnesting arbitrary queries, leave just one big table list with fields, conditions, and group-stages)
-	2. process group-stages: split queryplan into filling grouped table(s) and scanning them
-	3. order/limit stages become ordered scans on the current table set
-	4. scan the rest of the tables
-
+	Pipeline query builder:
+	  segments = ((tables condition group-stage) ...)
+	  fields = (colname expr ...)
+	  schemas = (alias coldef ...)
+	Process segments left-to-right: accumulate tables+conditions, apply group stages.
 	*/
 
-	/* TODO: order tables: outer joins behind */
+	/* flatten segments into tables + condition + groups for the existing engine */
+	(define _seg_tables '())
+	(define _seg_condition true)
+	(define _seg_groups '())
+	(map segments (lambda (seg) (begin
+		(define _st (segment_tables seg))
+		(define _sc (segment_condition seg))
+		(define _sg (segment_group seg))
+		/* accumulate tables (extract joinexprs into condition) */
+		(if (and (not (nil? _st)) (not (equal? _st '())))
+			(begin
+				(define _jes (filter (map _st (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
+					(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+				(define _stripped (map _st (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil)))))
+				(set _seg_tables (merge _seg_tables _stripped))
+				(map _jes (lambda (je) (set _seg_condition (if (equal? _seg_condition true) je (list 'and _seg_condition je)))))))
+		/* accumulate condition */
+		(if (and (not (nil? _sc)) (not (equal? _sc true)))
+			(set _seg_condition (if (equal? _seg_condition true) _sc (list 'and _seg_condition _sc))))
+		/* accumulate group stages */
+		(if (not (nil? _sg))
+			(set _seg_groups (merge _seg_groups (list _sg)))))))
+	(define tables _seg_tables)
+	(define condition _seg_condition)
+	(define groups _seg_groups)
+
+	/* internal helper: wrap old-style (tables condition groups) into segments for recursive calls */
+	(define _bqp (lambda (_schema _tables _fields _condition _groups _schemas _rfn)
+		(build_queryplan _schema
+			(if (or (nil? _groups) (equal? _groups '()))
+				(list (make_segment _tables _condition nil))
+				(cons (make_segment _tables _condition (car _groups))
+					(map (cdr _groups) (lambda (g) (make_segment '() nil g)))))
+			_fields _schemas _rfn)))
+
+	/* --- existing build_queryplan logic below --- */
 	(set groups (coalesceNil groups '()))
 	(define groups_present (and (not (nil? groups)) (not (equal? groups '()))))
 	(define stage (if groups_present (car groups) nil))
@@ -1921,54 +2016,6 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	(define stage_limit (if stage (stage_limit_val stage) nil))
 	(define stage_offset (if stage (stage_offset_val stage) nil))
 
-	/* stage-tables: consume ALL leading stages that have own tables.
-	   For each: extract joinexprs into condition, merge stage-tables into outer tables.
-	   Then advance to the first stage WITHOUT stage-tables (the outer query's stage). */
-	(define _consume_stage_tables (lambda (_groups _tables _condition)
-		(if (or (nil? _groups) (equal? _groups '()))
-			(list _tables _condition _groups)
-			(begin
-				(define _st (stage_tables (car _groups)))
-				(if (nil? _st)
-					/* no stage-tables: this is the outer stage, stop consuming */
-					(list _tables _condition _groups)
-					/* has stage-tables: merge and continue */
-					(begin
-						(define _sc (stage_condition (car _groups)))
-						(define _je (filter (merge
-							(map _st (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
-							(if (nil? _sc) '() (list _sc)))
-							(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
-						(define _new_cond (if (equal? _je '()) _condition
-							(begin
-								(define _mc (if (equal? (count _je) 1) (car _je) (cons 'and _je)))
-								(if (or (nil? _condition) (equal? _condition true)) _mc (list 'and _condition _mc)))))
-						(define _new_tables (merge
-							(map _st (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil))))
-							_tables))
-						/* keep GROUP/ORDER/LIMIT as clean stage */
-						(define _cur (car _groups))
-						(define _clean (make_group_stage (stage_group_cols _cur) (stage_having_expr _cur) (stage_order_list _cur) (stage_limit_val _cur) (stage_offset_val _cur)))
-						/* re-add as clean stage if it has meaningful info.
-						   GROUP BY '(1) is auto-detected from aggregate expressions — skip it. */
-						(define _sg (stage_group_cols _cur))
-						(define _has_real_group (and (not (nil? _sg)) (not (equal? _sg '())) (not (equal? _sg '(1)))))
-						(define _has_info (or _has_real_group (stage_having_expr _cur) (stage_limit_val _cur) (stage_offset_val _cur) (and (not (nil? (stage_order_list _cur))) (not (equal? (stage_order_list _cur) '())))))
-						(define _rest (if _has_info (cons _clean (cdr _groups)) (cdr _groups)))
-						(_consume_stage_tables _rest _new_tables _new_cond)))))))
-	(define _consumed (_consume_stage_tables groups tables condition))
-	(set tables (nth _consumed 0))
-	(set condition (nth _consumed 1))
-	(set groups (nth _consumed 2))
-	(set groups_present (and (not (nil? groups)) (not (equal? groups '()))))
-	(set stage (if groups_present (car groups) nil))
-	(set rest_groups (if groups_present (cdr groups) nil))
-	(set rest_groups (coalesceNil rest_groups '()))
-	(set stage_group (if stage (stage_group_cols stage) nil))
-	(set stage_having (if stage (stage_having_expr stage) nil))
-	(set stage_order (if stage (stage_order_list stage) nil))
-	(set stage_limit (if stage (stage_limit_val stage) nil))
-	(set stage_offset (if stage (stage_offset_val stage) nil))
 
 	/* window function detection */
 	(define window_funcs_all (merge (extract_assoc fields (lambda (k v) (extract_window_funcs v)))))
@@ -2062,7 +2109,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							(stage_limit_val s)
 							(stage_offset_val s))
 					)))
-					(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
+					(define grouped_plan (_bqp schema '('(grouptbl schema grouptbl false nil))
 						(map_assoc fields (lambda (k v) (_dedup_resolve v)))
 						nil /* condition already applied in collect */
 						transformed_rest_groups
@@ -2106,7 +2153,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									(list 'and replaced_having exists_check)))
 							(replace_group_key_or_fetch stage_having)))
 
-						(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
+						(define grouped_plan (_bqp schema '('(grouptbl schema grouptbl false nil))
 							(map_assoc fields (lambda (k v) (replace_group_key_or_fetch v)))
 							effective_having
 							next_groups
@@ -2283,7 +2330,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define pj_stage (make_group_stage pj_group pj_having pj_order stage_limit stage_offset))
 				(define pj_all_groups (cons pj_stage rest_groups))
 				/* recursive call with single prejoin table */
-				(define grouped_result (build_queryplan schema '('(pjvar schema prejointbl false nil))
+				(define grouped_result (_bqp schema '('(pjvar schema prejointbl false nil))
 					pj_fields
 					nil /* condition already applied during materialization */
 					pj_all_groups
