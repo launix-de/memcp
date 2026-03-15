@@ -936,7 +936,15 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 							(merge
 								(list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (wrap_outer_join_projection (replace_column_alias v))))))
 								(merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v)))))
-							(coalesceNil groups2 '()) /* propagate group stages (aggregates, ORDER/LIMIT) */
+							/* propagate group stages with prefixed column aliases */
+							(if (or (nil? groups2) (equal? groups2 '())) '()
+								(map groups2 (lambda (stage)
+									(make_group_stage
+										(map (coalesceNil (stage_group_cols stage) '()) replace_column_alias)
+										(replace_column_alias (stage_having_expr stage))
+										(map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (list (replace_column_alias col) dir))))
+										(stage_limit_val stage)
+										(stage_offset_val stage)))))
 						)
 					)
 				)
