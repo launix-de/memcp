@@ -1949,8 +1949,8 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						/* keep GROUP/ORDER/LIMIT as clean stage */
 						(define _cur (car _groups))
 						(define _clean (make_group_stage (stage_group_cols _cur) (stage_having_expr _cur) (stage_order_list _cur) (stage_limit_val _cur) (stage_offset_val _cur)))
-						/* re-add only ORDER/LIMIT/OFFSET stages; GROUP BY '(1) is redundant
-						   (build_queryplan auto-detects aggregates in fields) */
+						/* re-add as clean stage if it has meaningful info.
+						   GROUP BY '(1) is auto-detected from aggregate expressions — skip it. */
 						(define _sg (stage_group_cols _cur))
 						(define _has_real_group (and (not (nil? _sg)) (not (equal? _sg '())) (not (equal? _sg '(1)))))
 						(define _has_info (or _has_real_group (stage_having_expr _cur) (stage_limit_val _cur) (stage_offset_val _cur) (and (not (nil? (stage_order_list _cur))) (not (equal? (stage_order_list _cur) '())))))
