@@ -1708,20 +1708,22 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						(define fk_child_col (if is_fk_reuse
 							(match (car stage_group) '('get_column _ false scol false) scol)
 							nil))
-						/* exists column: always enforce non-empty groups for non-global GROUP BY.
-						This prevents stale empty keytable rows (e.g. after bulk key updates) from surfacing
-						as groups with zeroed aggregates. */
-						(define needs_exists (not (equal? stage_group '(1))))
-						(define exists_col_name (if needs_exists (concat "." (expr_name condition)) nil))
+						/* COUNT column replaces the old exists column: always add (1 + 0) to ags
+						so we have a row count per group. HAVING filters on COUNT > 0 to exclude
+						empty groups after DELETE. This also enables incremental DELETE maintenance. */
+						(define needs_count (not (equal? stage_group '(1))))
+						(define count_ag '(1 + 0))
+						(define ags (if needs_count (merge_unique ags (list count_ag)) ags))
+						(define count_col_name (if needs_count (agg_col_name count_ag) nil))
 
-						/* AND exists>0 into HAVING so empty/non-matching groups are excluded */
-						(define effective_having (if needs_exists
+						/* AND count>0 into HAVING so empty/non-matching groups are excluded */
+						(define effective_having (if needs_count
 							(begin
-								(define exists_check '('> '('get_column grouptbl false exists_col_name false) 0))
+								(define count_check '('> '('get_column grouptbl false count_col_name false) 0))
 								(define replaced_having (replace_group_key_or_fetch stage_having))
 								(if (or (nil? replaced_having) (equal? replaced_having true))
-									exists_check
-									(list 'and replaced_having exists_check)))
+									count_check
+									(list 'and replaced_having count_check)))
 							(replace_group_key_or_fetch stage_having)))
 
 						(define grouped_plan (build_queryplan schema '('(grouptbl schema grouptbl false nil))
@@ -1731,45 +1733,18 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 							schemas
 							replace_find_column))
 
-						/* createcolumn options: filter by exists column when WHERE condition is present */
+						/* createcolumn options: filter by COUNT column so only groups with rows are computed */
 						(define createcol_options (cons 'list (merge '("temp" true)
-							(if needs_exists
-								(list "filtercols" (list 'list exists_col_name)
-									"filter" '((quote lambda) (list (symbol exists_col_name)) '('> (symbol exists_col_name) 0)))
+							(if needs_count
+								(list "filtercols" (list 'list count_col_name)
+									"filter" '((quote lambda) (list (symbol count_col_name)) '('> (symbol count_col_name) 0)))
 								'()))))
-
-						/* exists column: counts ≥1 matching source row per group key (braking=1).
-						CompressFiltered by aggregate filter lazily computes exists values on demand. */
-						(define exists_plan (if (not needs_exists) nil
-							(if is_fk_reuse
-								/* FK reuse: scan child table, check FK=PK equality + WHERE */
-								'((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
-									'(list fk_pk_col)
-									'((quote lambda) (list (symbol fk_pk_col))
-										(scan_wrapper 'scan schema tbl
-											(cons list (merge (list fk_child_col) filtercols))
-											'((quote lambda) (map (merge (list fk_child_col) filtercols) (lambda (c) (symbol (concat tblvar "." c))))
-												(optimize (cons (quote and) (cons (replace_columns_from_expr condition)
-													(list '((quote equal?) (symbol (concat tblvar "." fk_child_col)) '((quote outer) (symbol fk_pk_col))))))))
-											'(list)
-											'((quote lambda) '() 1)
-											'+ 0 1 isOuter)))
-								/* Normal keytable: scan source with WHERE + group key equality */
-								'((quote createcolumn) schema grouptbl exists_col_name "any" '(list) '(list "temp" true)
-									(cons list (map stage_group expr_name))
-									'((quote lambda) (map stage_group (lambda (col) (symbol (expr_name col))))
-										(scan_wrapper 'scan schema tbl
-											(cons list (merge tblvar_cols filtercols))
-											'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (c) (symbol (concat tblvar "." c))))
-												(optimize (cons (quote and) (cons (replace_columns_from_expr condition)
-													(map stage_group (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (expr_name col))))))))))
-											'(list)
-											'((quote lambda) '() 1)
-											'+ 0 1 isOuter))))))
 
 						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
 							(set cols (extract_columns_for_tblvar tblvar expr))
-							'((quote createcolumn) schema grouptbl (agg_col_name ag) "any" '(list) createcol_options
+							/* COUNT column itself must not filter by itself (circular); all others filter by COUNT>0 */
+							(define this_options (if (and needs_count (equal? (agg_col_name ag) count_col_name)) '(list "temp" true) createcol_options))
+							'((quote createcolumn) schema grouptbl (agg_col_name ag) "any" '(list) this_options
 								(cons list (map stage_group (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 								'((quote lambda) (map stage_group (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
 									(scan_wrapper 'scan schema tbl
@@ -1787,9 +1762,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						)))))
 
 						(define compute_plan
-							'('time (if needs_exists
-								(list 'begin exists_plan (cons 'parallel agg_plans))
-								(cons 'parallel agg_plans)) "compute"))
+							'('time (cons 'parallel agg_plans) "compute"))
 
 						/* global aggregates (stage_group='(1)): invalidate computed columns before recompute
 						so correlated subqueries get fresh values per outer row */

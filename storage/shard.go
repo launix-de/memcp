@@ -2038,9 +2038,18 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			break
 		}
 
+		// Snapshot column keys under lock to avoid concurrent map iteration + write.
+		// After unlock, new columns may be added but won't be seen by this rebuild.
+		t.mu.RLock()
+		columnSnapshot := make(map[string]ColumnStorage, len(t.columns))
+		for k, v := range t.columns {
+			columnSnapshot[k] = v
+		}
+		t.mu.RUnlock()
+
 		// copy column data in two phases: scan, build (if delta is non-empty)
 		isFirst := true
-		for col, c := range t.columns {
+		for col, c := range columnSnapshot {
 			if isFirst {
 				isFirst = false
 			} else {

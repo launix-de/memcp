@@ -1,0 +1,202 @@
+metadata:
+  version: "1.0"
+  description: "ORC suffix recompute: correctness under INSERT/DELETE/UPDATE at various positions"
+  isolated: true
+
+test_cases:
+
+  # =========================================================================
+  # Setup: running SUM table with known sort order
+  # =========================================================================
+
+  - name: "Create running SUM table"
+    sql: |
+      CREATE TABLE suf_sum (id INT PRIMARY KEY, day INT, amount INT, running INT)
+
+  - name: "Insert initial data"
+    sql: |
+      INSERT INTO suf_sum (id, day, amount) VALUES
+      (1, 10, 100),
+      (2, 20, 200),
+      (3, 30, 300),
+      (4, 40, 400),
+      (5, 50, 500)
+
+  - name: "Create running SUM ORC column"
+    scm: |
+      (createcolumn "memcp-tests" "suf_sum" "running" "INT" '()
+        (list
+          "sortcols"  '("day")
+          "sortdirs"  (list false)
+          "partitioncount" 0
+          "mapcols"   '("amount")
+          "mapfn"     (lambda ($set v) (list $set v))
+          "reducefn"  (lambda (acc mapped) (begin
+                        (define new_acc (+ acc (cadr mapped)))
+                        ((car mapped) new_acc)
+                        new_acc))
+          "reduceinit" 0))
+
+  - name: "Verify initial running SUM"
+    sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, day: 10, amount: 100, running: 100}
+        - {id: 2, day: 20, amount: 200, running: 300}
+        - {id: 3, day: 30, amount: 300, running: 600}
+        - {id: 4, day: 40, amount: 400, running: 1000}
+        - {id: 5, day: 50, amount: 500, running: 1500}
+
+  # =========================================================================
+  # INSERT at beginning — all values shift
+  # =========================================================================
+
+  - name: "INSERT at beginning (day=5)"
+    sql: "INSERT INTO suf_sum (id, day, amount) VALUES (6, 5, 50)"
+
+  - name: "Running SUM after INSERT at beginning"
+    sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
+    expect:
+      rows: 6
+      data:
+        - {id: 6, day: 5, amount: 50, running: 50}
+        - {id: 1, day: 10, amount: 100, running: 150}
+        - {id: 2, day: 20, amount: 200, running: 350}
+        - {id: 3, day: 30, amount: 300, running: 650}
+        - {id: 4, day: 40, amount: 400, running: 1050}
+        - {id: 5, day: 50, amount: 500, running: 1550}
+
+  # =========================================================================
+  # INSERT in middle — only suffix changes
+  # =========================================================================
+
+  - name: "INSERT in middle (day=25)"
+    sql: "INSERT INTO suf_sum (id, day, amount) VALUES (7, 25, 75)"
+
+  - name: "Running SUM after INSERT in middle"
+    sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
+    expect:
+      rows: 7
+      data:
+        - {id: 6, day: 5, amount: 50, running: 50}
+        - {id: 1, day: 10, amount: 100, running: 150}
+        - {id: 2, day: 20, amount: 200, running: 350}
+        - {id: 7, day: 25, amount: 75, running: 425}
+        - {id: 3, day: 30, amount: 300, running: 725}
+        - {id: 4, day: 40, amount: 400, running: 1125}
+        - {id: 5, day: 50, amount: 500, running: 1625}
+
+  # =========================================================================
+  # INSERT at end — only new row changes
+  # =========================================================================
+
+  - name: "INSERT at end (day=60)"
+    sql: "INSERT INTO suf_sum (id, day, amount) VALUES (8, 60, 1000)"
+
+  - name: "Running SUM after INSERT at end"
+    sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
+    expect:
+      rows: 8
+      data:
+        - {id: 6, day: 5, amount: 50, running: 50}
+        - {id: 1, day: 10, amount: 100, running: 150}
+        - {id: 2, day: 20, amount: 200, running: 350}
+        - {id: 7, day: 25, amount: 75, running: 425}
+        - {id: 3, day: 30, amount: 300, running: 725}
+        - {id: 4, day: 40, amount: 400, running: 1125}
+        - {id: 5, day: 50, amount: 500, running: 1625}
+        - {id: 8, day: 60, amount: 1000, running: 2625}
+
+  # =========================================================================
+  # DELETE from middle — suffix shifts down
+  # =========================================================================
+
+  - name: "DELETE from middle (day=25)"
+    sql: "DELETE FROM suf_sum WHERE id = 7"
+
+  - name: "Running SUM after DELETE from middle"
+    sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
+    expect:
+      rows: 7
+      data:
+        - {id: 6, day: 5, amount: 50, running: 50}
+        - {id: 1, day: 10, amount: 100, running: 150}
+        - {id: 2, day: 20, amount: 200, running: 350}
+        - {id: 3, day: 30, amount: 300, running: 650}
+        - {id: 4, day: 40, amount: 400, running: 1050}
+        - {id: 5, day: 50, amount: 500, running: 1550}
+        - {id: 8, day: 60, amount: 1000, running: 2550}
+
+  # =========================================================================
+  # UPDATE amount in middle — suffix recalculates
+  # =========================================================================
+
+  - name: "UPDATE amount in middle (id=3, day=30)"
+    sql: "UPDATE suf_sum SET amount = 999 WHERE id = 3"
+
+  - name: "Running SUM after UPDATE in middle"
+    sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
+    expect:
+      rows: 7
+      data:
+        - {id: 6, day: 5, amount: 50, running: 50}
+        - {id: 1, day: 10, amount: 100, running: 150}
+        - {id: 2, day: 20, amount: 200, running: 350}
+        - {id: 3, day: 30, amount: 999, running: 1349}
+        - {id: 4, day: 40, amount: 400, running: 1749}
+        - {id: 5, day: 50, amount: 500, running: 2249}
+        - {id: 8, day: 60, amount: 1000, running: 3249}
+
+  # =========================================================================
+  # UPDATE sort key — row moves position, full recompute needed
+  # =========================================================================
+
+  - name: "UPDATE sort key (id=3 moves from day=30 to day=15)"
+    sql: "UPDATE suf_sum SET day = 15 WHERE id = 3"
+
+  - name: "Running SUM after sort key change"
+    sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
+    expect:
+      rows: 7
+      data:
+        - {id: 6, day: 5, amount: 50, running: 50}
+        - {id: 1, day: 10, amount: 100, running: 150}
+        - {id: 3, day: 15, amount: 999, running: 1149}
+        - {id: 2, day: 20, amount: 200, running: 1349}
+        - {id: 4, day: 40, amount: 400, running: 1749}
+        - {id: 5, day: 50, amount: 500, running: 2249}
+        - {id: 8, day: 60, amount: 1000, running: 3249}
+
+  # =========================================================================
+  # Multiple rapid mutations — consistency under churn
+  # =========================================================================
+
+  - name: "Rapid mutations"
+    sql: "INSERT INTO suf_sum (id, day, amount) VALUES (9, 35, 111)"
+
+  - name: "Rapid mutation 2"
+    sql: "DELETE FROM suf_sum WHERE id = 6"
+
+  - name: "Rapid mutation 3"
+    sql: "UPDATE suf_sum SET amount = 1 WHERE id = 1"
+
+  - name: "Running SUM after rapid mutations"
+    sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
+    expect:
+      rows: 7
+      data:
+        - {id: 1, day: 10, amount: 1, running: 1}
+        - {id: 3, day: 15, amount: 999, running: 1000}
+        - {id: 2, day: 20, amount: 200, running: 1200}
+        - {id: 9, day: 35, amount: 111, running: 1311}
+        - {id: 4, day: 40, amount: 400, running: 1711}
+        - {id: 5, day: 50, amount: 500, running: 2211}
+        - {id: 8, day: 60, amount: 1000, running: 3211}
+
+  # =========================================================================
+  # Cleanup
+  # =========================================================================
+
+  - name: "Drop running SUM table"
+    sql: "DROP TABLE IF EXISTS suf_sum"

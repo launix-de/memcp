@@ -42,6 +42,15 @@ type StorageComputeProxy struct {
 	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
 	// Instead, the full table is recomputed via scan_order (coordinated by table.orcMu).
 	isOrdered bool
+	// Partition-scoped ORC invalidation: when non-nil, only these partition keys
+	// are dirty. nil = fully dirty (InvalidateAll). Empty map = all valid.
+	dirtyPartitions map[string]bool
+	// Suffix recompute: earliest sort key value from which recompute is needed.
+	// nil = full recompute, non-nil = recompute from this sort key onwards.
+	dirtySortKey scm.Scmer
+	// Combined partition+suffix: per-partition earliest sort key.
+	// nil = use dirtyPartitions/dirtySortKey, non-nil = per-partition suffix.
+	dirtyPartitionSuffix map[string]scm.Scmer
 }
 
 func (p *StorageComputeProxy) String() string {
@@ -311,6 +320,62 @@ func (p *StorageComputeProxy) InvalidateAll() {
 	p.compressed = false
 	p.validMask.Reset()
 	p.delta = make(map[uint32]scm.Scmer)
+	p.dirtyPartitions = nil // nil = fully dirty
+	p.dirtySortKey = scm.NewNil()
+}
+
+// InvalidatePartitionSuffix marks a specific partition dirty from a sort key onwards.
+func (p *StorageComputeProxy) InvalidatePartitionSuffix(partitionKey string, sortKey scm.Scmer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.compressed && p.dirtyPartitions == nil && p.dirtyPartitionSuffix == nil {
+		return // already fully dirty
+	}
+	if p.dirtyPartitionSuffix == nil {
+		p.dirtyPartitionSuffix = make(map[string]scm.Scmer)
+	}
+	if existing, ok := p.dirtyPartitionSuffix[partitionKey]; ok {
+		if scm.Less(sortKey, existing) {
+			p.dirtyPartitionSuffix[partitionKey] = sortKey
+		}
+	} else {
+		p.dirtyPartitionSuffix[partitionKey] = sortKey
+	}
+	p.compressed = false
+}
+
+// InvalidateFromSortKey marks the column dirty from a specific sort key onwards.
+// If already dirty from an earlier key, keeps the earlier one (minimum).
+func (p *StorageComputeProxy) InvalidateFromSortKey(sortKey scm.Scmer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.compressed && p.dirtySortKey.IsNil() {
+		return // already fully dirty
+	}
+	if p.compressed || p.dirtySortKey.IsNil() {
+		// First suffix invalidation
+		p.compressed = false
+		p.dirtySortKey = sortKey
+	} else if scm.Less(sortKey, p.dirtySortKey) {
+		// New key is earlier — extend suffix
+		p.dirtySortKey = sortKey
+	}
+}
+
+// InvalidatePartition marks a specific partition as dirty for ORC columns.
+// Only the affected partition will be recomputed on next read.
+func (p *StorageComputeProxy) InvalidatePartition(partitionKey string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dirtyPartitions == nil && p.compressed {
+		// First partial invalidation: create dirty set
+		p.dirtyPartitions = make(map[string]bool)
+	}
+	if p.dirtyPartitions != nil {
+		p.dirtyPartitions[partitionKey] = true
+		p.compressed = false // trigger recompute on next read
+	}
+	// If dirtyPartitions is nil and !compressed, we're already fully dirty
 }
 
 // proposeCompression returns nil — the proxy does not participate in shard
