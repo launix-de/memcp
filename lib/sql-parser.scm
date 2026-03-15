@@ -17,15 +17,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 (define sql_builtins (coalesce sql_builtins (newsession)))
 
-/* Aggregate function registry: maps uppercase name → (reduce neutral).
-   Used for GROUP BY aggregates AND window aggregates (OVER).
-   Users can register custom aggregates: (sql_aggregates "PRODUCT" (list * 1)) */
+/* Aggregate function registry: maps uppercase name → (reduce neutral ordered).
+   ordered=false: ORDER BY in OVER() can be ignored (result independent of row order)
+   ordered=true: ORDER BY matters → ORC running aggregate (e.g. GROUP_CONCAT)
+   Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
 (define sql_aggregates (coalesce sql_aggregates (newsession)))
-(sql_aggregates "SUM" '(+ 0))
-(sql_aggregates "MIN" '(min nil))
-(sql_aggregates "MAX" '(max nil))
+(sql_aggregates "SUM" '(+ 0 false))
+(sql_aggregates "MIN" '(min nil false))
+(sql_aggregates "MAX" '(max nil false))
 /* COUNT is special: compiler replaces arg with 1 (TODO: COUNT(DISTINCT col)) */
-(sql_aggregates "COUNT" '(+ 0))
+(sql_aggregates "COUNT" '(+ 0 false))
 
 (define sql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")

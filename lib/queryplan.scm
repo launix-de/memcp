@@ -1946,10 +1946,10 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									(setter new_rank)
 									(list new_rank key)))
 							(list 0 nil))
-						/* registry-based aggregates as running ORC: look up (reduce neutral) from sql_aggregates */
+						/* registry-based ordered aggregates as running ORC (only if ordered=true) */
 						_ (begin
 							(define agg_desc (sql_aggregates fn))
-							(if (nil? agg_desc) nil
+							(if (or (nil? agg_desc) (not (nth agg_desc 2))) nil
 								(begin
 									(define agg_reduce (car agg_desc))
 									(define agg_neutral (cadr agg_desc))
@@ -1975,12 +1975,18 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 														agg_neutral))))))))
 					)))
 				(define is_orc_window (lambda (wf) (match wf '(fn args _) (not (nil? (orc_window_descriptor fn args '()))))))
-				/* aggregate window: look up fn in sql_aggregates registry → (reduce neutral) */
+				/* aggregate window: look up fn in sql_aggregates registry → (reduce neutral ordered) */
 				(define is_agg_window (lambda (wf) (match wf '(fn _ _) (not (nil? (sql_aggregates fn))))))
-				/* classify: ORC (has ORDER BY + is ORC-eligible), aggregate (no ORDER BY), or LAG/LEAD */
+				/* is_ordered_agg: true if the aggregate is order-sensitive (e.g. GROUP_CONCAT) */
+				(define is_ordered_agg (lambda (wf) (match wf '(fn _ _) (begin
+					(define reg (sql_aggregates fn))
+					(if (nil? reg) false (nth reg 2))))))
+				/* classify: ORC (has ORDER BY + ORC-eligible or ordered aggregate),
+				   aggregate (no ORDER BY, or non-ordered aggregate ignoring ORDER BY),
+				   LAG/LEAD (everything else) */
 				(define has_over_order (not (equal? over_order '())))
-				(define all_orc_window (and has_over_order (reduce wf_resolved (lambda (acc wf) (and acc (is_orc_window wf))) true)))
-				(define all_agg_window (and (not has_over_order) (reduce wf_resolved (lambda (acc wf) (and acc (is_agg_window wf))) true)))
+				(define all_orc_window (and has_over_order (reduce wf_resolved (lambda (acc wf) (and acc (or (is_orc_window wf) (is_ordered_agg wf)))) true)))
+				(define all_agg_window (reduce wf_resolved (lambda (acc wf) (and acc (is_agg_window wf) (not (is_ordered_agg wf)))) true))
 				(if all_orc_window
 				(match tables
 					/* ========= ORC materialization (ROW_NUMBER, RANK, DENSE_RANK, ...) ========= */

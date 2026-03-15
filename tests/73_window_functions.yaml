@@ -395,20 +395,20 @@ test_cases:
     sql: "DROP TABLE IF EXISTS win_rank"
 
   # ==========================================================================
-  # Case 14: Running SUM via ORC
+  # Case 14: Non-ordered aggregate + ORDER BY → ORDER BY ignored, same as OVER()
   # ==========================================================================
 
-  - name: "Case 14: Running SUM ordered by time_val"
+  - name: "Case 14: SUM OVER (ORDER BY) = total (non-ordered aggregate)"
     noncritical: true
-    sql: "SELECT id, amount, SUM(amount) OVER (ORDER BY time_val) AS running FROM win_emp ORDER BY time_val"
+    sql: "SELECT id, amount, SUM(amount) OVER (ORDER BY time_val) AS total FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
       data:
-        - {id: 1, amount: 500, running: 500}
-        - {id: 4, amount: 200, running: 700}
-        - {id: 2, amount: 300, running: 1000}
-        - {id: 5, amount: 400, running: 1400}
-        - {id: 3, amount: 700, running: 2100}
+        - {id: 1, amount: 500, total: 2100}
+        - {id: 4, amount: 200, total: 2100}
+        - {id: 2, amount: 300, total: 2100}
+        - {id: 5, amount: 400, total: 2100}
+        - {id: 3, amount: 700, total: 2100}
 
   # ==========================================================================
   # Case 15: ROW_NUMBER with PARTITION BY
