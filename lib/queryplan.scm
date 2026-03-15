@@ -549,26 +549,33 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 
 /* recursively preprocess a query and return the flattened query. The returned parameterset will be passed to build_queryplan */
 /*
-SOFTWARE CONTRACT: untangle_query
----------------------------------
+SOFTWARE CONTRACT: untangle_query (= unnesting arbitrary queries, Neumann & Kemper 2015)
+---------------------------------------------------------------------------------------------
 
-untangle_query is the semantic boundary between SQL syntax and physical plan building.
-Its job is to untangle a SELECT into a relational intermediate form with these properties:
+untangle_query is the unnesting/decorrelation phase. It transforms any SQL SELECT —
+including arbitrarily nested subqueries — into a flat relational intermediate form.
 
-- a flat FROM-list (`tables`)
-- a flat WHERE condition list (`condition` plus `conditionList` contributions)
-- a group-stage list (`groups`) that carries GROUP BY / HAVING / ORDER / LIMIT / OFFSET
-- a projection map (`fields`) whose expressions are bound against that flattened relational input
+Output: (schema tables fields condition groups schemas replace_find_column)
 
-The result of untangle_query must still be purely relational/logical. In particular:
+- `tables`    — a FLAT FROM-list of (alias schema tbl isOuter joinexpr) tuples
+- `condition` — a single WHERE expression (all join conditions merged in)
+- `fields`    — a projection map (colname → expression), may contain aggregate() nodes
+- `groups`    — a list of group-stages (GROUP BY / HAVING / ORDER / LIMIT / OFFSET)
+- `schemas`   — column metadata per table alias
 
-- no physical materialization strategy is chosen here
-- no nested scan shape is chosen here
-- no later wrapper around `SELECT t.* FROM (...)` may change the semantics of already projected fields
-- derived tables may rename/project fields, but must not reintroduce hidden query nesting semantics
+ALL subqueries (scalar, IN, EXISTS, derived tables) must be eliminated here:
+- scalar subqueries → LEFT JOIN + get_column reference + group-stage for aggregates
+- IN/EXISTS         → flattened tables + conditions (semi-join semantics)
+- derived tables    → inlined tables with prefix-renamed columns
 
-After untangle_query, later stages may only decide execution strategy for this flattened form.
-They must not reinterpret the query as syntactically nested again.
+STRICTLY FORBIDDEN in untangle_query output:
+- NO scan/scan_order calls (physical execution is build_queryplan's job)
+- NO materialization (build_queryplan decides when to materialize)
+- NO nested query plans or (!begin ...) code blocks in expressions
+- NO resultrow calls
+
+build_queryplan receives this flat form and chooses the physical strategy:
+keytable + createcolumn for aggregates, nested scans for joins, prejoin for multi-table, etc.
 */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_chain) (begin
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
@@ -746,6 +753,7 @@ They must not reinterpret the query as syntactically nested again.
 					'()
 					true
 					(list id (map output_cols (lambda (col) '("Field" col "Type" "any"))))
+					'() /* groups: UNION ALL is materialized, no groups to propagate */
 				)
 			))
 			(define old_projection_scalar_flatten (projection_scalar_flatten "value"))
@@ -868,10 +876,8 @@ They must not reinterpret the query as syntactically nested again.
 						)
 					) false)
 					false))
-				(define use_materialize (or subquery_has_window unsupported_groups))
-				/* if groups2 had only pass-through stages (no GROUP/HAVING/LIMIT/OFFSET), strip them for flattening */
-				(if (and groups2_present (not unsupported_groups))
-					(set groups2 nil))
+				/* only window functions require materialization; all other groups are propagated via 5th return element */
+				(define use_materialize subquery_has_window)
 				(if use_materialize
 					(begin
 						(define output_cols_sub (extract_assoc fields2 (lambda (k v) k)))
@@ -895,6 +901,7 @@ They must not reinterpret the query as syntactically nested again.
 							'()
 							true
 							(list id (map output_cols_sub (lambda (col) '("Field" col "Type" "any"))))
+							'() /* groups: materialized, no groups to propagate */
 						)
 					)
 					(begin
@@ -907,6 +914,7 @@ They must not reinterpret the query as syntactically nested again.
 							(merge
 								(list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (wrap_outer_join_projection (replace_column_alias v))))))
 								(merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v)))))
+							(coalesceNil groups2 '()) /* propagate group stages (aggregates, ORDER/LIMIT) */
 						)
 					)
 				)
@@ -920,12 +928,14 @@ They must not reinterpret the query as syntactically nested again.
 	(define pending_scalar_renames (newsession))
 	(define pending_scalar_conditions (newsession))
 	(define pending_scalar_schemas (newsession))
+	(define pending_scalar_groups (newsession))
 	(define pending_scalar_counter (newsession))
 	(define projection_scalar_flatten (newsession))
 	(pending_scalar_tables "data" '())
 	(pending_scalar_renames "data" '())
 	(pending_scalar_conditions "data" '())
 	(pending_scalar_schemas "data" '())
+	(pending_scalar_groups "data" '())
 	(pending_scalar_counter "value" 0)
 	(projection_scalar_flatten "value" false)
 	(define expr_contains_inner_select (lambda (expr) (match expr
@@ -965,26 +975,16 @@ They must not reinterpret the query as syntactically nested again.
 				(reduce (coalesceNil (nth subquery 6) '()) (lambda (a b) (or a (match b '(col dir) (expr_references_outer_alias col outer_schemas)))) false)
 			)
 	)))
+	/* scalar_subquery_flattenable: any scalar subquery with a FROM clause is flattenable.
+	Subqueries with GROUP BY/HAVING/ORDER/LIMIT/OFFSET are handled by flatten_tabledesc_subquery
+	via materialization; simple correlated subqueries become LEFT JOINs.
+	Only subqueries without a FROM clause (pure expressions like SELECT 1+1) fall through
+	to build_scalar_subselect. */
 	(define scalar_subquery_flattenable (lambda (subquery outer_schemas)
 		(and (list? subquery)
 			(>= (count subquery) 9)
-			(equal? (nth subquery 7) 1)
-			(or
-				(reduce_assoc (nth subquery 2) (lambda (a k v) (or a (expr_contains_inner_select v))) false)
-				(expr_contains_inner_select (nth subquery 3))
-				(reduce (coalesceNil (nth subquery 4) '()) (lambda (a b) (or a (expr_contains_inner_select b))) false)
-				(expr_contains_inner_select (nth subquery 5))
-				(reduce (coalesceNil (nth subquery 6) '()) (lambda (a b) (or a (match b '(col dir) (expr_contains_inner_select col)))) false)
-			)
-			(or
-				(and
-					(subquery_references_outer_alias subquery outer_schemas)
-					(> (count (extract_assoc outer_schemas (lambda (k v) k))) 1)
-					(outer_schemas_simple outer_schemas))
-				(and
-					(projection_scalar_flatten "value")
-					(subquery_references_outer_alias subquery outer_schemas))
-			)
+			(not (nil? (nth subquery 1)))
+			(not (equal? (nth subquery 1) '()))
 	)))
 	(define register_scalar_subquery (lambda (subquery outer_schemas) (begin
 		(define output_cols (query_branch_field_names subquery))
@@ -995,10 +995,12 @@ They must not reinterpret the query as syntactically nested again.
 		(pending_scalar_counter "value" (+ (pending_scalar_counter "value") 1))
 		(define scalar_alias (concat "__scalar_" (pending_scalar_counter "value")))
 		(match (flatten_tabledesc_subquery scalar_alias schema subquery true true outer_schemas)
-			'(tables2 renames2 condition2 schemas2) (begin
+			'(tables2 renames2 condition2 schemas2 groups2) (begin
 				(pending_scalar_tables "data" (merge (pending_scalar_tables "data") tables2))
+				(pending_scalar_renames "data" (merge (pending_scalar_renames "data") renames2))
 				(pending_scalar_conditions "data" (merge (pending_scalar_conditions "data") (list condition2)))
 				(pending_scalar_schemas "data" (merge (pending_scalar_schemas "data") schemas2))
+				(pending_scalar_groups "data" (merge (pending_scalar_groups "data") (coalesceNil groups2 '())))
 				'((quote get_column) scalar_alias false (car output_cols) false)
 			)
 			_ (error "scalar subselect flattening failed")
@@ -1501,9 +1503,17 @@ They must not reinterpret the query as syntactically nested again.
 			(if (nil? not_expr)
 				(match kind
 					(quote inner_select) (match args
-						(cons subquery '()) (if (scalar_subquery_flattenable subquery outer_schemas)
-							(register_scalar_subquery subquery outer_schemas)
-							(build_scalar_subselect subquery outer_schemas))
+						(cons subquery '()) (begin
+							(define _sq_tables (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 1) nil))
+							(define _sq_has_from (and (not (nil? _sq_tables)) (not (equal? _sq_tables '()))))
+							(if _sq_has_from
+								/* has FROM clause: flatten as LEFT JOIN */
+								(register_scalar_subquery subquery outer_schemas)
+								/* FROM-less SELECT: inline the expression directly */
+								(begin
+									(define _sq_fields (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 2) nil))
+									(if (nil? _sq_fields) nil
+										(car (extract_assoc _sq_fields (lambda (k v) v)))))))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					(quote inner_select_in) (match args
@@ -1525,17 +1535,60 @@ They must not reinterpret the query as syntactically nested again.
 	/* check if we have FROM selects -> returns '(tables renamelist condition schemas) */
 	(if (or (nil? tables) (equal? tables '()))
 		(begin
+			/* FROM-less: process inner selects (scalar subqueries may add tables via pending_scalar_*) */
 			(set fields (map_assoc fields (lambda (k v) (replace_inner_selects v '()))))
 			(set condition (replace_inner_selects condition '()))
 			(set group (map group (lambda (g) (replace_inner_selects g '()))))
 			(set having (replace_inner_selects having '()))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col '()) dir)))))
-			(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
-			(list schema tables fields condition groups '() (lambda (expr) expr))
+			/* if scalar subqueries introduced tables, build a proper has-tables return */
+			(define _pst (pending_scalar_tables "data"))
+			(if (and (not (nil? _pst)) (not (equal? _pst '())))
+				/* scalar subqueries added tables: construct full relational return */
+				(begin
+					(define _renamelist (pending_scalar_renames "data"))
+					(define _schemas (pending_scalar_schemas "data"))
+					(define _pending_conds (pending_scalar_conditions "data"))
+					(define _pending_groups (pending_scalar_groups "data"))
+					/* apply renames to resolve __scalar_N aliases to real table columns */
+					(define _rename_lookup (lambda (rename_fn col ci)
+						(if ci
+							(begin (define pair (find_assoc rename_fn (lambda (key value) (equal?? key col)))) (if pair (nth pair 1) nil))
+							(rename_fn col))))
+					(define _replace_rename (lambda (expr) (match expr
+						'((symbol get_column) alias_ ti col ci) (if (nil? alias_)
+							/* unqualified: resolve against schemas */
+							(begin
+								(define _resolved (reduce_assoc _schemas (lambda (acc alias cols)
+									(if acc acc
+										(if (and (equal? (replace alias ":" "") alias)
+											(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+											(list alias col) nil))) nil))
+								(if _resolved (list (quote get_column) (car _resolved) false (nth _resolved 1) false) expr))
+							/* qualified: try rename first, then pass through */
+							(begin
+								(define rename_fn (if (has_assoc? _renamelist alias_) (_renamelist alias_) nil))
+								(if (nil? rename_fn) expr (coalesce (_rename_lookup rename_fn col ci) expr))))
+						(cons sym args) (cons sym (map args _replace_rename))
+						expr)))
+					(set fields (map_assoc fields (lambda (k v) (_replace_rename v))))
+					(set condition (_replace_rename condition))
+					/* merge joinexprs from tables into condition (same as has-tables path at line 1517) */
+					/* merge joinexprs from tables into condition; use same pattern as has-tables path */
+					(define _condAll (cons 'and (coalesce (filter (append (map _pst (lambda (t) (match t '(alias schema tbl isOuter joinexpr) joinexpr nil))) condition) (lambda (x) (not (nil? x)))) true)))
+						/* build groups */
+					(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
+					(set groups (if (or (nil? _pending_groups) (equal? _pending_groups '()))
+						groups (merge (coalesceNil groups '()) _pending_groups)))
+						(list schema _pst fields _condAll groups _schemas _replace_rename))
+				/* truly no tables */
+				(begin
+					(set groups (if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil))
+					(list schema tables fields condition groups '() (lambda (expr) expr))))
 		)
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
-				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
+				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl)) '()) /* leave primary tables as is and load their schema definition */
 				'(id schemax subquery isOuter joinexpr) (flatten_tabledesc_subquery id schemax subquery isOuter joinexpr '())
 				(error (concat "unknown tabledesc: " tbldesc))
 			)))))
@@ -1543,6 +1596,7 @@ They must not reinterpret the query as syntactically nested again.
 			(set renameList (car (cdr zipped)))
 			(set conditionList (car (cdr (cdr zipped))))
 			(set schemasList (car (cdr (cdr (cdr zipped)))))
+			(define fromGroupsList (car (cdr (cdr (cdr (cdr zipped))))))
 			/* schemas is an assoc array from alias -> columnlist */
 			/* rewrite a flat table list according to inner selects */
 			(set renamelist (merge renameList))
@@ -1662,6 +1716,7 @@ They must not reinterpret the query as syntactically nested again.
 			(set renamelist (merge renamelist (pending_scalar_renames "data")))
 			(set conditionList (merge conditionList (pending_scalar_conditions "data")))
 			(set schemas (merge schemas (pending_scalar_schemas "data")))
+			(define pending_groups (merge (merge fromGroupsList) (pending_scalar_groups "data")))
 
 			/* apply renamelist (assoc of assoc of expr) */
 			(define renamelist_lookup (lambda (rename_fn col ci)
@@ -1730,6 +1785,10 @@ They must not reinterpret the query as syntactically nested again.
 						_cd_limit _cd_offset))
 				/* normal: single group stage */
 				(if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil)))
+			/* merge group stages from flattened subqueries (scalar aggregates, derived tables with GROUP BY) */
+			(set groups (if (or (nil? pending_groups) (equal? pending_groups '()))
+				groups
+				(merge (coalesceNil groups '()) pending_groups)))
 			(list schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll groups schemas replace_find_column)
 		)
 	)
