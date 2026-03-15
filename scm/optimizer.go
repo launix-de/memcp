@@ -156,32 +156,110 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 }
 
 // optimizeApply is the optimizer hook for `apply`. It propagates the return
-// type of the applied function: (apply fn args) has the same return type as fn.
-// This enables ownership flow through (apply build_queryplan (apply untangle_query query)).
+// type of the applied function and specializes when args are fresh:
+// (apply fn freshArgs) → all of fn's params are owned → specialize fn.
 func optimizeApply(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
-	// Check if the first arg (the function) is a symbol with known return type
-	if result.IsSlice() {
-		rv := result.Slice()
-		if len(rv) >= 2 {
-			if fnSym, ok := scmerSymbol(rv[1]); ok {
-				// Check globalFuncTypeInfo for the applied function's return type
-				if ti := globalFuncTypeInfo[fnSym]; ti.Transfer() {
-					if td == nil {
-						td = &TypeDescriptor{}
-					}
-					td.Transfer = true
+	if !result.IsSlice() {
+		return result, td
+	}
+	rv := result.Slice()
+	if len(rv) < 2 {
+		return result, td
+	}
+	fnSym, fnOk := scmerSymbol(rv[1])
+	if !fnOk {
+		return result, td
+	}
+
+	// Propagate return type of the applied function
+	fnReturnsFresh := false
+	if ti := globalFuncTypeInfo[fnSym]; ti.Transfer() {
+		fnReturnsFresh = true
+	} else if d := DeclarationForValue(rv[1]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
+		fnReturnsFresh = true
+	}
+	if fnReturnsFresh {
+		if td == nil {
+			td = &TypeDescriptor{}
+		}
+		td.Transfer = true
+	}
+
+	// Specialize: if args (rv[2]) are fresh, all of fn's params are owned.
+	// (apply fn freshList) → fn receives each element as owned.
+	if len(rv) >= 3 {
+		// Check if args are fresh: look at the call that produces them
+		argsFresh := false
+		if inner, ok := scmerSlice(rv[2]); ok && len(inner) > 0 {
+			// Direct function call: check return type
+			if d := DeclarationForValue(inner[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
+				argsFresh = true
+			}
+			if innerSym, ok2 := scmerSymbol(inner[0]); ok2 {
+				if globalFuncTypeInfo[innerSym].Transfer() {
+					argsFresh = true
 				}
-				// Check Declaration for the applied function's return type
-				if d := DeclarationForValue(rv[1]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
-					if td == nil {
-						td = &TypeDescriptor{}
+				// Nested apply: (apply untangle_query ...) — check if untangle_query returns fresh
+				if innerSym == Symbol("apply") && len(inner) >= 2 {
+					if appliedSym, ok3 := scmerSymbol(inner[1]); ok3 {
+						if globalFuncTypeInfo[appliedSym].Transfer() {
+							argsFresh = true
+						}
 					}
-					td.Transfer = true
+				}
+			}
+		}
+		if argsFresh {
+			// Resolve fn to a Proc and specialize with all params owned
+			if resolved := oc.Env.FindRead(fnSym); resolved != nil {
+				if fnVal, ok := resolved.Vars[fnSym]; ok && fnVal.GetTag() == tagProc {
+					proc := *fnVal.Proc()
+					nParams := proc.NumVars
+					if nParams == 0 && proc.Params.IsSlice() {
+						nParams = len(proc.Params.Slice())
+					}
+					if nParams > 0 && nParams <= 64 {
+						var ownedMask uint64
+						for i := 0; i < nParams; i++ {
+							ownedMask |= 1 << uint(i)
+						}
+						// Get or create variant storage
+						ti := globalFuncTypeInfo[fnSym]
+						if ti.Extra == nil {
+							ti.Extra = &TypeDescriptor{}
+							globalFuncTypeInfo[fnSym] = ti
+						}
+						if ti.Extra.Variants == nil {
+							ti.Extra.Variants = make(map[uint64]Scmer)
+						}
+						if variantSym, exists := ti.Extra.Variants[ownedMask]; exists && !variantSym.IsNil() {
+							rv[1] = variantSym
+							return NewSlice(rv), td
+						} else if exists {
+							// sentinel from in-progress or failed attempt — skip
+						} else {
+							ti.Extra.Variants[ownedMask] = NewNil() // sentinel
+							ome2 := optimizerMetainfo{ownedSlots: make(map[int]bool)}
+							for i := 0; i < nParams; i++ {
+								ome2.ownedSlots[i] = true
+							}
+							specializedBody, _ := OptimizeEx(proc.Body, oc.Env, &ome2, true)
+							newProc := proc
+							newProc.Body = specializedBody
+							variantName := Symbol(string(fnSym) + "$$owned")
+							oc.Env.FindRead(fnSym).Vars[variantName] = NewProc(&newProc)
+							variantSym := NewSymbol(string(variantName))
+							ti.Extra.Variants[ownedMask] = variantSym
+							rv[1] = variantSym
+							return NewSlice(rv), td
+						}
+					}
 				}
 			}
 		}
 	}
+
 	return result, td
 }
 
