@@ -461,6 +461,134 @@ func reorderByFrequency(bounds boundaries, t *table) {
 	})
 }
 
+// ORC suffix recompute mode classification.
+const (
+	OrcSuffixOpaque         = 0 // can't analyze → full recompute only
+	OrcSuffixIdentity       = 1 // acc == emitted value (SUM, ROW_NUMBER) → stored value is accumulator
+	OrcSuffixReconstructible = 2 // acc = (emitted, ...state) → need extra state from row data
+)
+
+// analyzeOrcSuffix inspects an ORC reduceFn to determine if the accumulator
+// equals the emitted value ($set argument). This enables suffix recompute
+// by reading the stored ORC value as the start accumulator.
+//
+// The reducer has the form: (lambda (acc mapped) body)
+// where body calls (setter value) and returns new_acc.
+// If value == new_acc, it's an identity accumulator.
+func analyzeOrcSuffix(reduceFn scm.Scmer) int {
+	if reduceFn.IsNil() {
+		return OrcSuffixOpaque
+	}
+	var body scm.Scmer
+	if reduceFn.IsProc() {
+		body = reduceFn.Proc().Body
+	} else if reduceFn.IsSlice() {
+		items := reduceFn.Slice()
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			body = items[2]
+		}
+	}
+	if body.IsNil() {
+		return OrcSuffixOpaque
+	}
+
+	// Unwrap (begin ...) to find the last expression (= return value)
+	// and any setter call (= $set invocation).
+	var setArg scm.Scmer   // the value passed to $set
+	var returnVal scm.Scmer // the return value of the reducer
+
+	if body.IsSlice() {
+		items := body.Slice()
+		if len(items) >= 2 && items[0].IsSymbol() && items[0].String() == "begin" {
+			returnVal = items[len(items)-1]
+			// Search for setter call: ((car mapped) val) or ((nth mapped 0) val)
+			for _, item := range items[1 : len(items)-1] {
+				if sa := findSetterArg(item); !sa.IsNil() {
+					setArg = sa
+				}
+			}
+		} else {
+			// No begin — body IS the return value
+			returnVal = body
+		}
+	}
+
+	if setArg.IsNil() || returnVal.IsNil() {
+		return OrcSuffixOpaque
+	}
+
+	// Compare: are they structurally equal?
+	if scmerStructEqual(setArg, returnVal) {
+		return OrcSuffixIdentity
+	}
+
+	return OrcSuffixOpaque
+}
+
+// findSetterArg looks for a call pattern ((car mapped) val) or ((nth mapped 0) val)
+// and returns val. These are the patterns produced by ORC reducers calling the $set closure.
+func findSetterArg(expr scm.Scmer) scm.Scmer {
+	if !expr.IsSlice() {
+		return scm.NewNil()
+	}
+	items := expr.Slice()
+	if len(items) < 2 {
+		return scm.NewNil()
+	}
+	// Check if items[0] is (car mapped) or (nth mapped 0)
+	if items[0].IsSlice() {
+		head := items[0].Slice()
+		if len(head) == 2 && head[0].IsSymbol() && head[0].String() == "car" {
+			return items[1] // the value passed to $set
+		}
+		if len(head) == 3 && head[0].IsSymbol() && head[0].String() == "nth" {
+			return items[1]
+		}
+	}
+	// Recurse into begin blocks
+	if items[0].IsSymbol() && items[0].String() == "begin" {
+		for _, item := range items[1:] {
+			if sa := findSetterArg(item); !sa.IsNil() {
+				return sa
+			}
+		}
+	}
+	return scm.NewNil()
+}
+
+// scmerStructEqual compares two Scmer AST nodes for structural equality.
+// Handles symbols, ints, floats, strings, and nested slices.
+func scmerStructEqual(a, b scm.Scmer) bool {
+	if a.IsSymbol() && b.IsSymbol() {
+		return a.String() == b.String()
+	}
+	if a.IsInt() && b.IsInt() {
+		return a.Int() == b.Int()
+	}
+	if a.IsFloat() && b.IsFloat() {
+		return a.Float() == b.Float()
+	}
+	if a.IsString() && b.IsString() {
+		return a.String() == b.String()
+	}
+	if a.IsNthLocalVar() && b.IsNthLocalVar() {
+		return a.NthLocalVar() == b.NthLocalVar()
+	}
+	if a.IsSlice() && b.IsSlice() {
+		as, bs := a.Slice(), b.Slice()
+		if len(as) != len(bs) {
+			return false
+		}
+		for i := range as {
+			if !scmerStructEqual(as[i], bs[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
 		//fmt.Println("conditions:", cols)

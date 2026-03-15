@@ -48,6 +48,9 @@ type StorageComputeProxy struct {
 	// Suffix recompute: earliest sort key value from which recompute is needed.
 	// nil = full recompute, non-nil = recompute from this sort key onwards.
 	dirtySortKey scm.Scmer
+	// Combined partition+suffix: per-partition earliest sort key.
+	// nil = use dirtyPartitions/dirtySortKey, non-nil = per-partition suffix.
+	dirtyPartitionSuffix map[string]scm.Scmer
 }
 
 func (p *StorageComputeProxy) String() string {
@@ -319,6 +322,26 @@ func (p *StorageComputeProxy) InvalidateAll() {
 	p.delta = make(map[uint32]scm.Scmer)
 	p.dirtyPartitions = nil // nil = fully dirty
 	p.dirtySortKey = scm.NewNil()
+}
+
+// InvalidatePartitionSuffix marks a specific partition dirty from a sort key onwards.
+func (p *StorageComputeProxy) InvalidatePartitionSuffix(partitionKey string, sortKey scm.Scmer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.compressed && p.dirtyPartitions == nil && p.dirtyPartitionSuffix == nil {
+		return // already fully dirty
+	}
+	if p.dirtyPartitionSuffix == nil {
+		p.dirtyPartitionSuffix = make(map[string]scm.Scmer)
+	}
+	if existing, ok := p.dirtyPartitionSuffix[partitionKey]; ok {
+		if scm.Less(sortKey, existing) {
+			p.dirtyPartitionSuffix[partitionKey] = sortKey
+		}
+	} else {
+		p.dirtyPartitionSuffix[partitionKey] = sortKey
+	}
+	p.compressed = false
 }
 
 // InvalidateFromSortKey marks the column dirty from a specific sort key onwards.

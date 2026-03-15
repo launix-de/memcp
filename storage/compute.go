@@ -167,6 +167,7 @@ func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []
 			t.Columns[i].OrcMapFn = mapFn
 			t.Columns[i].OrcReduceFn = reduceFn
 			t.Columns[i].OrcReduceInit = reduceInit
+			t.Columns[i].OrcSuffixMode = analyzeOrcSuffix(reduceFn)
 			found = true
 			break
 		}
@@ -234,9 +235,11 @@ func (t *table) recomputeORC(name string) {
 
 	// Collect dirty state from all shard proxies:
 	// - dirtyParts: partition-scoped recompute (nil = full, non-nil = specific partitions)
-	// - suffixKey: earliest sort key from which to recompute (nil = full)
+	// - suffixKey: earliest sort key from which to recompute (unpartitioned)
+	// - partSuffix: per-partition earliest sort key (partitioned + suffix)
 	var dirtyParts map[string]bool
 	var suffixKey scm.Scmer
+	var partSuffix map[string]scm.Scmer
 	fullDirty := false
 	for _, s := range t.ActiveShards() {
 		s.mu.RLock()
@@ -244,7 +247,7 @@ func (t *table) recomputeORC(name string) {
 		s.mu.RUnlock()
 		if proxy, ok := cs.(*StorageComputeProxy); ok {
 			proxy.mu.RLock()
-			if proxy.dirtyPartitions == nil && proxy.dirtySortKey.IsNil() {
+			if proxy.dirtyPartitions == nil && proxy.dirtySortKey.IsNil() && proxy.dirtyPartitionSuffix == nil {
 				fullDirty = true
 			} else {
 				if proxy.dirtyPartitions != nil {
@@ -260,6 +263,16 @@ func (t *table) recomputeORC(name string) {
 						suffixKey = proxy.dirtySortKey
 					}
 				}
+				if proxy.dirtyPartitionSuffix != nil {
+					if partSuffix == nil {
+						partSuffix = make(map[string]scm.Scmer)
+					}
+					for pk, sk := range proxy.dirtyPartitionSuffix {
+						if existing, ok := partSuffix[pk]; !ok || scm.Less(sk, existing) {
+							partSuffix[pk] = sk
+						}
+					}
+				}
 			}
 			proxy.mu.RUnlock()
 		} else {
@@ -269,6 +282,7 @@ func (t *table) recomputeORC(name string) {
 	if fullDirty {
 		dirtyParts = nil
 		suffixKey = scm.NewNil()
+		partSuffix = nil
 	}
 
 	// Reset shard proxies for fresh writes.
@@ -278,13 +292,14 @@ func (t *table) recomputeORC(name string) {
 		s.mu.RUnlock()
 		if proxy, ok := cs.(*StorageComputeProxy); ok {
 			proxy.isOrdered = true
-			if dirtyParts == nil && suffixKey.IsNil() {
+			if dirtyParts == nil && suffixKey.IsNil() && partSuffix == nil {
 				proxy.InvalidateAll()
 			} else {
 				// Partial recompute: clear dirty markers, keep existing values
 				proxy.mu.Lock()
 				proxy.dirtyPartitions = make(map[string]bool)
 				proxy.dirtySortKey = scm.NewNil()
+				proxy.dirtyPartitionSuffix = nil
 				proxy.mu.Unlock()
 			}
 		} else {
@@ -331,7 +346,29 @@ func (t *table) recomputeORC(name string) {
 	var condFn scm.Scmer
 	startAcc := col.OrcReduceInit
 
-	if !suffixKey.IsNil() && col.OrcPartCount == 0 {
+	if partSuffix != nil && col.OrcPartCount > 0 {
+		// Combined partition + suffix recompute: for each dirty partition,
+		// only recompute from its earliest dirty sort key onwards.
+		partCols := col.OrcSortCols[:col.OrcPartCount]
+		sortCol := col.OrcSortCols[col.OrcPartCount] // first ORDER BY col after partition cols
+		condCols = append(partCols, sortCol)
+		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			// Build partition key from first OrcPartCount args
+			key := scm.String(a[0])
+			for i := 1; i < len(partCols); i++ {
+				key += "|" + scm.String(a[i])
+			}
+			sk, ok := partSuffix[key]
+			if !ok {
+				return scm.NewBool(false) // partition not dirty
+			}
+			sortVal := a[len(partCols)] // sort column value
+			return scm.NewBool(!scm.Less(sortVal, sk)) // sort_val >= dirty_sort_key
+		})
+		// Find start accumulator per partition from stored values
+		// (for now, use ReduceInit — the partition boundary reset handles it)
+		// The partition wrapper in the reduceFn resets acc at boundaries anyway.
+	} else if !suffixKey.IsNil() && col.OrcPartCount == 0 && col.OrcSuffixMode == OrcSuffixIdentity {
 		// Suffix recompute: filter sort_col >= suffixKey.
 		// Start accumulator = stored ORC value of the row just before suffixKey.
 		sortCol := col.OrcSortCols[0]
@@ -466,8 +503,9 @@ func (t *table) registerORCTriggers(name string) {
 
 		var body scm.Scmer
 		if partitioned {
-			// Partition-scoped invalidation: extract partition key from OLD/NEW
-			// and invalidate only that partition.
+			// Partition-scoped invalidation (full partition recompute).
+			// Suffix recompute within partitions requires per-partition accumulator
+			// lookup which is not yet implemented.
 			partCols := col.OrcSortCols[:col.OrcPartCount]
 			switch timing {
 			case AfterInsert:
@@ -475,7 +513,6 @@ func (t *table) registerORCTriggers(name string) {
 			case AfterDelete:
 				body = buildOrcPartitionInvalidation(t.schema.Name, t.Name, name, partCols, "OLD")
 			case AfterUpdate:
-				// Invalidate both old and new partition if partition key changed
 				oldInval := buildOrcPartitionInvalidation(t.schema.Name, t.Name, name, partCols, "OLD")
 				newInval := buildOrcPartitionInvalidation(t.schema.Name, t.Name, name, partCols, "NEW")
 				body = scm.NewSlice([]scm.Scmer{
@@ -484,8 +521,8 @@ func (t *table) registerORCTriggers(name string) {
 					newInval,
 				})
 			}
-		} else if len(col.OrcSortCols) > 0 {
-			// Suffix invalidation: extract sort key from OLD/NEW and invalidate from there
+		} else if len(col.OrcSortCols) > 0 && col.OrcSuffixMode == OrcSuffixIdentity {
+			// Suffix invalidation (identity accumulator): extract sort key and invalidate from there
 			sortCol := col.OrcSortCols[0] // first sort column
 			switch timing {
 			case AfterInsert:
@@ -535,6 +572,30 @@ func (t *table) registerORCTriggers(name string) {
 			Func:     buildFKProc(body),
 		})
 	}
+}
+
+// buildOrcPartitionSuffixInvalidation constructs a trigger body that extracts both
+// partition key and sort key from a trigger dict and calls invalidateorcpartitionsuffix.
+func buildOrcPartitionSuffixInvalidation(schema, table, colName string, partCols []string, sortCol, dictSym string) scm.Scmer {
+	var pkExpr scm.Scmer
+	if len(partCols) == 1 {
+		pkExpr = fkGetAssocExpr(dictSym, partCols[0])
+	} else {
+		parts := make([]scm.Scmer, 1+len(partCols))
+		parts[0] = scm.NewSymbol("concat")
+		for i, col := range partCols {
+			parts[1+i] = fkGetAssocExpr(dictSym, col)
+		}
+		pkExpr = scm.NewSlice(parts)
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("invalidateorcpartitionsuffix"),
+		scm.NewString(schema),
+		scm.NewString(table),
+		scm.NewString(colName),
+		pkExpr,
+		fkGetAssocExpr(dictSym, sortCol),
+	})
 }
 
 // buildOrcPartitionInvalidation constructs a trigger body that extracts the partition
