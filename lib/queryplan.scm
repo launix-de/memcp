@@ -225,7 +225,9 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 
 (import "sql-metadata.scm")
 
-/* group stage constructors and accessors - shared between untangle_query and build_queryplan */
+/* group stage constructors and accessors - shared between untangle_query and build_queryplan
+   Group stages segment the FROM-list: each stage operates on its own set of tables.
+   Tables not claimed by any stage belong to the final (non-grouped) scan. */
 (define make_group_stage (lambda (group having order limit offset)
 	(list
 		(cons (quote group-cols) (coalesce group '()))
@@ -234,6 +236,7 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 		(list (quote limit) limit)
 		(list (quote offset) offset)
 		(list (quote dedup) false)
+		(list (quote stage-tables) nil) /* tables belonging to this stage; nil = use outer tables */
 	)
 ))
 (define make_dedup_stage (lambda (group)
@@ -282,6 +285,21 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 		_ false
 	))
 ) false)))
+(define stage_tables (lambda (stage) (reduce stage (lambda (acc item)
+	(if (not (nil? acc)) acc (match item
+		'((quote stage-tables) tbls) tbls
+		_ nil
+	))
+) nil)))
+(define stage_condition (lambda (stage) (reduce stage (lambda (acc item)
+	(if (not (nil? acc)) acc (match item
+		'((quote stage-condition) cond) cond
+		_ nil
+	))
+) nil)))
+/* attach tables and condition to an existing group stage */
+(define stage_with_tables (lambda (stage tables condition)
+	(append stage (list (list (quote stage-tables) tables) (list (quote stage-condition) condition)))))
 
 /* query term helpers */
 (define query_union_all_parts (lambda (query) (match query
@@ -996,11 +1014,19 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 		(define scalar_alias (concat "__scalar_" (pending_scalar_counter "value")))
 		(match (flatten_tabledesc_subquery scalar_alias schema subquery true true outer_schemas)
 			'(tables2 renames2 condition2 schemas2 groups2) (begin
-				(pending_scalar_tables "data" (merge (pending_scalar_tables "data") tables2))
+				(define _has_groups (and (not (nil? groups2)) (not (equal? groups2 '()))))
+				(if _has_groups
+					/* scalar has GROUP/ORDER/LIMIT: attach tables+condition to the group stages */
+					(begin
+						(define _enriched_groups (map groups2 (lambda (stage)
+							(stage_with_tables stage tables2 condition2))))
+						(pending_scalar_groups "data" (merge (pending_scalar_groups "data") _enriched_groups)))
+					/* no groups: tables go into the outer FROM-list as LEFT JOINs */
+					(begin
+						(pending_scalar_tables "data" (merge (pending_scalar_tables "data") tables2))
+						(pending_scalar_conditions "data" (merge (pending_scalar_conditions "data") (list condition2)))))
 				(pending_scalar_renames "data" (merge (pending_scalar_renames "data") renames2))
-				(pending_scalar_conditions "data" (merge (pending_scalar_conditions "data") (list condition2)))
 				(pending_scalar_schemas "data" (merge (pending_scalar_schemas "data") schemas2))
-				(pending_scalar_groups "data" (merge (pending_scalar_groups "data") (coalesceNil groups2 '())))
 				'((quote get_column) scalar_alias false (car output_cols) false)
 			)
 			_ (error "scalar subselect flattening failed")
@@ -1878,6 +1904,26 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	(define stage_order (if stage (stage_order_list stage) nil))
 	(define stage_limit (if stage (stage_limit_val stage) nil))
 	(define stage_offset (if stage (stage_offset_val stage) nil))
+
+	/* stage-tables: if the stage has its own tables, use them instead of outer tables */
+	(define _stage_tables (if stage (stage_tables stage) nil))
+	(define _stage_cond (if stage (stage_condition stage) nil))
+	(if (not (nil? _stage_tables))
+		(begin
+			/* stage has own tables: extract joinexprs and merge into condition,
+			   then merge tables (with joinexprs stripped) into the scan set */
+			(define _je_conds (filter
+				(map _stage_tables (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
+				(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+			(set _stage_tables (map _stage_tables (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil)))))
+			(define _all_stage_conds (filter (merge _je_conds (if (nil? _stage_cond) '() (list _stage_cond)))
+				(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+			(if (not (equal? _all_stage_conds '()))
+				(begin
+					(define _merged_cond (if (equal? (count _all_stage_conds) 1) (car _all_stage_conds) (cons 'and _all_stage_conds)))
+					(set condition (if (or (nil? condition) (equal? condition true)) _merged_cond
+						(list 'and condition _merged_cond)))))
+			(set tables (merge _stage_tables (coalesceNil tables '())))))
 
 	/* window function detection */
 	(define window_funcs_all (merge (extract_assoc fields (lambda (k v) (extract_window_funcs v)))))
