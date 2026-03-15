@@ -54,7 +54,6 @@ type column struct {
 	OrcMapFn      scm.Scmer                    // (lambda ($set mapcols...) ...) — passes data to reduceFn
 	OrcReduceFn   scm.Scmer                    // (lambda (acc mapped) ...) — accumulates and writes via $set
 	OrcReduceInit scm.Scmer                    // initial accumulator value (neutral element)
-	OrcSuffixMode int       `json:",omitempty"` // 0=opaque, 1=identity (acc==emit), 2=reconstructible
 }
 
 // PersistencyMode controls the durability and persistence behaviour of a table.
