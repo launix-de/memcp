@@ -2098,8 +2098,8 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									'((quote get_column) _ _ c _) c
 									_ (error (concat "unsupported partition expression: " pe))))))
 							'()))
-						/* extract aggregate source column */
-						(define agg_src_cols (merge_unique (extract_columns_for_tblvar tblvar agg_expr)))
+						/* extract aggregate source columns */
+						(define agg_src_cols (extract_columns_for_tblvar tblvar agg_expr))
 						(define scan_cols (merge_unique (list agg_src_cols partition_col_names)))
 						/* unique temp column name */
 						(define agg_col_name (concat ".wf_" wf_fn "_" tbl))
