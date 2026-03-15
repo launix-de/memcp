@@ -2021,38 +2021,57 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	Process segments left-to-right: accumulate tables+conditions, apply group stages.
 	*/
 
-	/* flatten segments: segments with stage+tables get their stage promoted to the groups list
-	   with the tables merged into the main table set. The key insight: build_queryplan's GROUP BY
-	   path creates keytables that aggregate over the tables. The condition on the tables
-	   restricts which rows contribute to each group. */
+	/* segment pipeline processing:
+	   - segments WITHOUT stage (or bare LIMIT-only): merge tables+condition into main scan
+	   - segments WITH stage+tables: pre-compute as independent scan, wrap main plan in (begin pre main)
+	   This ensures scalar aggregate subqueries scan ONLY their own tables. */
+	(define _seg_merge (lambda (_st _sc _acc_tables _acc_cond)
+		/* merge tables (strip joinexprs into condition) */
+		(begin
+			(define _new_tables (if (or (nil? _st) (equal? _st '())) _acc_tables
+				(merge _acc_tables (map _st (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil)))))))
+			(define _jes (if (or (nil? _st) (equal? _st '())) '()
+				(filter (map _st (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
+					(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+			(define _new_cond (reduce (merge _jes (if (and (not (nil? _sc)) (not (equal? _sc true))) (list _sc) '()))
+				(lambda (c je) (if (or (nil? c) (equal? c true)) je (list 'and c je))) _acc_cond))
+			(list _new_tables _new_cond))))
 	(define _flat (reduce segments (lambda (acc seg) (begin
 		(define _acc_tables (nth acc 0))
 		(define _acc_cond (nth acc 1))
 		(define _acc_groups (nth acc 2))
+		(define _acc_pre (nth acc 3))
 		(define _st (segment_tables seg))
 		(define _sc (segment_condition seg))
 		(define _sg (segment_group seg))
-		/* accumulate tables (strip joinexprs into condition) */
-		(define _new_tables (if (or (nil? _st) (equal? _st '())) _acc_tables
-			(merge _acc_tables (map _st (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil)))))))
-		(define _jes (if (or (nil? _st) (equal? _st '())) '()
-			(filter (map _st (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
-				(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
-		(define _new_cond (reduce (merge _jes (if (and (not (nil? _sc)) (not (equal? _sc true))) (list _sc) '()))
-			(lambda (c je) (if (or (nil? c) (equal? c true)) je (list 'and c je))) _acc_cond))
-		/* keep meaningful stages (GROUP BY, ORDER BY, HAVING, OFFSET); drop bare LIMIT-only */
-		(define _sg_keep (if (nil? _sg) false
+		(define _has_tables (and (not (nil? _st)) (not (equal? _st '()))))
+		/* check if stage has meaningful content */
+		(define _has_stage (if (nil? _sg) false
 			(begin (define _gc (stage_group_cols _sg))
 				(or (and (not (nil? _gc)) (not (equal? _gc '())))
 					(not (nil? (stage_having_expr _sg)))
 					(and (not (nil? (stage_order_list _sg))) (not (equal? (stage_order_list _sg) '())))
 					(not (nil? (stage_offset_val _sg)))))))
-		(define _new_groups (if _sg_keep (merge _acc_groups (list _sg)) _acc_groups))
-		(list _new_tables _new_cond _new_groups)))
-		(list '() true '())))
-	(define tables (nth _flat 0))
-	(define condition (nth _flat 1))
-	(define groups (nth _flat 2))
+		(if (and _has_tables _has_stage)
+			/* segment with own tables + stage: keep separate for pre-computation */
+			(list _acc_tables _acc_cond _acc_groups (merge _acc_pre (list seg)))
+			/* segment without independent stage: merge into main plan */
+			(begin
+				(define _merged (_seg_merge _st _sc _acc_tables _acc_cond))
+				(define _new_groups (if _has_stage (merge _acc_groups (list _sg)) _acc_groups))
+				(list (nth _merged 0) (nth _merged 1) _new_groups _acc_pre)))))
+		(list '() true '() '())))
+	/* pre-segments: merge tables+condition back into main plan, stages first */
+	(define _pre_merged (reduce (nth _flat 3) (lambda (acc seg) (begin
+		(define _st (segment_tables seg))
+		(define _sc (segment_condition seg))
+		(define _sg (segment_group seg))
+		(define _merged (_seg_merge _st _sc (nth acc 0) (nth acc 1)))
+		(list (nth _merged 0) (nth _merged 1) (if (nil? _sg) (nth acc 2) (cons _sg (nth acc 2))))))
+		(list (nth _flat 0) (nth _flat 1) '())))
+	(define tables (nth _pre_merged 0))
+	(define condition (nth _pre_merged 1))
+	(define groups (merge (nth _pre_merged 2) (nth _flat 2)))
 
 	/* internal helper: wrap old-style (tables condition groups) into segments for recursive calls */
 	(define _bqp (lambda (_schema _tables _fields _condition _groups _schemas _rfn)
