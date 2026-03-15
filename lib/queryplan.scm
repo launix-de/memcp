@@ -1981,6 +1981,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(define has_over_order (not (equal? over_order '())))
 				(define all_orc_window (and has_over_order (reduce wf_resolved (lambda (acc wf) (and acc (is_orc_window wf))) true)))
 				(define all_agg_window (and (not has_over_order) (reduce wf_resolved (lambda (acc wf) (and acc (is_agg_window wf))) true)))
+				(print "classify:" "over_order=" over_order "has_over_order=" has_over_order "all_orc=" all_orc_window "all_agg=" all_agg_window "wf_resolved=" wf_resolved)
 				(if all_orc_window
 				(match tables
 					/* ========= ORC materialization (ROW_NUMBER, RANK, DENSE_RANK, ...) ========= */
@@ -2113,29 +2114,9 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 											'('extract_assoc 'sharddict '('lambda '('k 'v) 'k))
 											'(list) '('lambda '() true) true))
 									isOuter))))
-						/* build aggregate descriptors from window functions: (expr reduce neutral)
-					   using SYMBOLS for reduce (not resolved functions) so expr_name can stringify them */
-						(set ags (merge_unique (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
-							(define map_expr (if (equal? fn "COUNT") 1 (if (nil? args) 1 (replace_find_column (car args)))))
-							(match fn
-								"SUM" (list map_expr (quote +) 0)
-								"COUNT" (list 1 (quote +) 0)
-								"MIN" (list map_expr 'min nil)
-								"MAX" (list map_expr 'max nil)
-								(error (concat "unsupported aggregate window function: " fn)))))))))
-						(set agg_col_name_ (lambda (ag) (concat (expr_name ag) "|" (expr_name condition))))
-						((lambda (fk_child_col) (begin /* createcolumn plans for each aggregate */
-						(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
-							(set cols (extract_columns_for_tblvar tblvar expr))
-							'((quote createcolumn) schema grouptbl (agg_col_name_ ag) "any" '(list) '(list "temp" true)
-								(cons list (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
-								'((quote lambda) (map group_keys (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
-									(scan_wrapper 'scan schema tbl
-										(cons list (merge tblvar_cols filtercols))
-										'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map group_keys (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))))
-										(cons list cols)
-										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))
-										reduce neutral nil isOuter)))))))
+						/* build aggregate descriptors + keytable plans via IIFE (fresh scope) */
+						((lambda (ags agg_col_name_)
+						((lambda (fk_child_col agg_plans) (begin
 						(define compute_plan (cons 'parallel agg_plans))
 						/* replace window_func references with scalar fetch from keytable */
 						(define replace_wf_with_fetch (lambda (expr) (match expr
@@ -2175,7 +2156,30 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						/* result query runs on BASE table (all rows), not keytable */
 						(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
 						(list 'begin keytable_init '('time collect_plan "collect") '('time compute_plan "compute") scan_plan)))
-					) (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil)))
+					/* inner IIFE args: fk_child_col, agg_plans */
+					(if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil)
+					(map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
+							(define cols (extract_columns_for_tblvar tblvar expr))
+							(define ag_col_name (agg_col_name_ ag))
+							'((quote createcolumn) schema grouptbl ag_col_name "any" '(list) '(list "temp" true)
+								(cons list (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
+								'((quote lambda) (map group_keys (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
+									(scan_wrapper 'scan schema tbl
+										(cons list (merge tblvar_cols filtercols))
+										'((quote lambda) (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons (quote and) (cons (replace_columns_from_expr condition) (map group_keys (lambda (col) '((quote equal?) (replace_columns_from_expr col) '((quote outer) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))))
+										(cons list cols)
+										'((quote lambda) (map cols (lambda(col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))
+										reduce neutral nil isOuter))))))))
+					/* outer IIFE args: ags, agg_col_name_ */
+					(merge_unique (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
+						(define map_expr (if (equal? fn "COUNT") 1 (if (nil? args) 1 (replace_find_column (car args)))))
+						(match fn
+							"SUM" (list map_expr (quote +) 0)
+							"COUNT" (list 1 (quote +) 0)
+							"MIN" (list map_expr 'min nil)
+							"MAX" (list map_expr 'max nil)
+							(error (concat "unsupported aggregate window function: " fn))))))))
+					(lambda (ag) (concat (expr_name ag) "|" (expr_name condition))))))
 					(error "window functions on joined tables not yet supported"))
 				(begin
 					/* ========= LAG/LEAD scan path (unchanged) ========= */
