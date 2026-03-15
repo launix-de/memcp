@@ -85,13 +85,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
 )))
 
-/* SQL modulo expression: NULL-safe, division-by-zero-safe, truncates quotient toward zero */
-(define psql_mod_expr (lambda (a b)
-	'((quote if)
-		'((quote or) '((quote nil?) a) '((quote nil?) b) '((quote equal??) b 0))
-		nil
-		'((quote -) a '((quote *) b '((quote if) '((quote <) '((quote /) a b) 0) '((quote ceil) '((quote /) a b)) '((quote floor) '((quote /) a b)))))
-	)
+/* SQL modulo expression: uses native mod builtin (NULL-safe, div-by-zero returns NULL) */
+(define psql_mod_expr (lambda (a b) '('mod a b))
 ))
 
 (define psql_type (parser (or
