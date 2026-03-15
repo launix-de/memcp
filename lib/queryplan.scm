@@ -624,11 +624,31 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define sq_cache (newsession))
+	/* untangle_subquery_with_outer: returns pipeline format (schema segments fields schemas rfn) */
 	(define untangle_subquery_with_outer (lambda (query outer_chain)
 		(untangle_query
 			(nth query 0) (nth query 1) (nth query 2) (nth query 3)
 			(nth query 4) (nth query 5) (nth query 6) (nth query 7)
 			(nth query 8) outer_chain)))
+	/* untangle_subquery_flat: returns old flat format (schema tables fields condition groups schemas rfn)
+	   for build_in_subselect, build_exists_subselect, build_scalar_subselect */
+	(define untangle_subquery_flat (lambda (query outer_chain) (begin
+		(define _r (untangle_subquery_with_outer query outer_chain))
+		(define _segments (nth _r 1))
+		(define _flat (reduce _segments (lambda (acc seg) (begin
+			(define _at (nth acc 0))
+			(define _ac (nth acc 1))
+			(define _ag (nth acc 2))
+			(define _st (segment_tables seg))
+			(define _sc (segment_condition seg))
+			(define _sg (segment_group seg))
+			(define _nt (if (or (nil? _st) (equal? _st '())) _at (merge _at _st)))
+			(define _nc (if (or (nil? _sc) (equal? _sc true)) _ac
+				(if (or (nil? _ac) (equal? _ac true)) _sc (list 'and _ac _sc))))
+			(define _ng (if (nil? _sg) _ag (merge _ag (list _sg))))
+			(list _nt _nc _ng)))
+			(list '() true '())))
+		(list (nth _r 0) (nth _flat 0) (nth _r 2) (nth _flat 1) (nth _flat 2) (nth _r 3) (nth _r 4)))))
 
 	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
 	(define _cd_is_subquery (lambda (sym) (match sym
@@ -1086,7 +1106,7 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (untangle_subquery_with_outer subquery outer_schemas)
+				(match (untangle_subquery_flat subquery outer_schemas)
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -1252,7 +1272,7 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (untangle_subquery_with_outer subquery outer_schemas)
+				(match (untangle_subquery_flat subquery outer_schemas)
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
@@ -1411,7 +1431,7 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 				(define raw_order (nth raw_vals 2))
 				(define raw_limit (nth raw_vals 3))
 				(define raw_offset (nth raw_vals 4))
-				(match (untangle_subquery_with_outer subquery outer_schemas)
+				(match (untangle_subquery_flat subquery outer_schemas)
 					'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 					(begin
 						(define groups2 (coalesceNil groups2 '()))
