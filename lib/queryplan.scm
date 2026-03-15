@@ -1063,6 +1063,28 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 			(not (nil? (nth subquery 1)))
 			(not (equal? (nth subquery 1) '()))
 	)))
+	/* unwrap_outer_refs: replace (outer tblvar.col) with (get_column tblvar false col false)
+	   After flattening, outer tables are in the same FROM-list, so (outer) is wrong. */
+	(define _is_outer_sym (lambda (sym) (or (equal? sym (quote outer)) (equal? sym '(quote outer)) (equal? sym '(symbol outer)))))
+	(define unwrap_outer_refs (lambda (expr) (match expr
+		(cons sym '(inner_sym)) (if (_is_outer_sym sym)
+			(begin
+				(define parts (split (string inner_sym) "."))
+				(if (>= (count parts) 2)
+					(list (quote get_column) (car parts) false (nth parts 1) false)
+					expr))
+			(cons (unwrap_outer_refs sym) (map (list inner_sym) unwrap_outer_refs)))
+		(cons sym args) (if (_is_outer_sym sym)
+			(if (and (equal? (count args) 1) (not (list? (car args))))
+				(begin
+					(define parts (split (string (car args)) "."))
+					(if (>= (count parts) 2)
+						(list (quote get_column) (car parts) false (nth parts 1) false)
+						expr))
+				(cons sym (map args unwrap_outer_refs)))
+			(cons (unwrap_outer_refs sym) (map args unwrap_outer_refs)))
+		expr)))
+
 	(define register_scalar_subquery (lambda (subquery outer_schemas) (begin
 		(define output_cols (query_branch_field_names subquery))
 		(if (or (nil? output_cols) (equal? output_cols '()))
@@ -1073,6 +1095,11 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 		(define scalar_alias (concat "__scalar_" (pending_scalar_counter "value")))
 		(match (flatten_tabledesc_subquery scalar_alias schema subquery true true outer_schemas)
 			'(tables2 renames2 condition2 schemas2 groups2) (begin
+				/* unwrap (outer tblvar.col) → (get_column tblvar false col false) in joinexprs
+			   because after flattening, outer tables are in the same FROM-list */
+				(set tables2 (map tables2 (lambda (t) (match t '(a s tbl io je)
+					(list a s tbl io (if (nil? je) nil (unwrap_outer_refs je)))))))
+				(set condition2 (unwrap_outer_refs condition2))
 				(define _has_groups (and (not (nil? groups2)) (not (equal? groups2 '()))))
 				(if _has_groups
 					/* scalar has GROUP/ORDER/LIMIT: attach tables+condition to the group stages */
