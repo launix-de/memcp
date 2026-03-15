@@ -2003,7 +2003,17 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
 		(define _new_cond (reduce (merge _jes (if (and (not (nil? _sc)) (not (equal? _sc true))) (list _sc) '()))
 			(lambda (c je) (if (or (nil? c) (equal? c true)) je (list 'and c je))) _acc_cond))
-		(define _new_groups (if (nil? _sg) _acc_groups (merge _acc_groups (list _sg))))
+		/* drop bare LIMIT-only stages (no GROUP/ORDER/HAVING/OFFSET) — LIMIT 1 on LEFT JOIN is a no-op.
+		   Keep stages with ANY GROUP BY (including '(1)), ORDER BY, HAVING, or OFFSET. */
+		(define _sg_keep (if (nil? _sg) false
+			(begin
+				(define _gc (stage_group_cols _sg))
+				(or
+					(and (not (nil? _gc)) (not (equal? _gc '())))
+					(not (nil? (stage_having_expr _sg)))
+					(and (not (nil? (stage_order_list _sg))) (not (equal? (stage_order_list _sg) '())))
+					(not (nil? (stage_offset_val _sg)))))))
+		(define _new_groups (if _sg_keep (merge _acc_groups (list _sg)) _acc_groups))
 		(list _new_tables _new_cond _new_groups)))
 		(list '() true '())))
 	(define tables (nth _flat 0))
