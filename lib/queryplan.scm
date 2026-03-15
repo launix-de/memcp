@@ -1970,30 +1970,27 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	*/
 
 	/* flatten segments into tables + condition + groups for the existing engine */
-	(define _seg_tables '())
-	(define _seg_condition true)
-	(define _seg_groups '())
-	(map segments (lambda (seg) (begin
+	(define _flat (reduce segments (lambda (acc seg) (begin
+		(define _acc_tables (nth acc 0))
+		(define _acc_cond (nth acc 1))
+		(define _acc_groups (nth acc 2))
 		(define _st (segment_tables seg))
 		(define _sc (segment_condition seg))
 		(define _sg (segment_group seg))
-		/* accumulate tables (extract joinexprs into condition) */
-		(if (and (not (nil? _st)) (not (equal? _st '())))
-			(begin
-				(define _jes (filter (map _st (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
-					(lambda (x) (and (not (nil? x)) (not (equal? x true))))))
-				(define _stripped (map _st (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil)))))
-				(set _seg_tables (merge _seg_tables _stripped))
-				(map _jes (lambda (je) (set _seg_condition (if (equal? _seg_condition true) je (list 'and _seg_condition je)))))))
-		/* accumulate condition */
-		(if (and (not (nil? _sc)) (not (equal? _sc true)))
-			(set _seg_condition (if (equal? _seg_condition true) _sc (list 'and _seg_condition _sc))))
-		/* accumulate group stages */
-		(if (not (nil? _sg))
-			(set _seg_groups (merge _seg_groups (list _sg)))))))
-	(define tables _seg_tables)
-	(define condition _seg_condition)
-	(define groups _seg_groups)
+		/* accumulate tables (strip joinexprs into condition) */
+		(define _new_tables (if (or (nil? _st) (equal? _st '())) _acc_tables
+			(merge _acc_tables (map _st (lambda (t) (match t '(a s tbl io je) (list a s tbl io nil)))))))
+		(define _jes (if (or (nil? _st) (equal? _st '())) '()
+			(filter (map _st (lambda (t) (match t '(a s tbl io joinexpr) joinexpr nil)))
+				(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
+		(define _new_cond (reduce (merge _jes (if (and (not (nil? _sc)) (not (equal? _sc true))) (list _sc) '()))
+			(lambda (c je) (if (or (nil? c) (equal? c true)) je (list 'and c je))) _acc_cond))
+		(define _new_groups (if (nil? _sg) _acc_groups (merge _acc_groups (list _sg))))
+		(list _new_tables _new_cond _new_groups)))
+		(list '() true '())))
+	(define tables (nth _flat 0))
+	(define condition (nth _flat 1))
+	(define groups (nth _flat 2))
 
 	/* internal helper: wrap old-style (tables condition groups) into segments for recursive calls */
 	(define _bqp (lambda (_schema _tables _fields _condition _groups _schemas _rfn)
