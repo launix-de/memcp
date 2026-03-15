@@ -1984,7 +1984,21 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									nil))))
 						nil)))
 				(define is_orc_window (lambda (wf) (match wf '(fn args _) (not (nil? (orc_window_descriptor fn args '()))))))
-				(define all_orc_window (reduce wf_resolved (lambda (acc wf) (and acc (is_orc_window wf))) true))
+				/* aggregate window descriptors: fn → (reduce neutral) for createcolumn-based partition/global aggregates */
+				(define agg_window_descriptor (lambda (fn wf_args)
+					(match fn
+						"SUM" (if (nil? wf_args) nil (list (car wf_args) (quote +) 0))
+						"COUNT" (if (nil? wf_args)
+							(list 1 (quote +) 0)
+							(list '((quote if) '((quote nil?) (eval (car wf_args))) 0 1) (quote +) 0))
+						"MIN" (if (nil? wf_args) nil (list (car wf_args) 'min nil))
+						"MAX" (if (nil? wf_args) nil (list (car wf_args) 'max nil))
+						nil)))
+				(define is_agg_window (lambda (wf) (match wf '(fn args _) (not (nil? (agg_window_descriptor fn args))))))
+				/* classify: ORC (has ORDER BY + is ORC-eligible), aggregate (no ORDER BY), or LAG/LEAD */
+				(define has_over_order (not (equal? over_order '())))
+				(define all_orc_window (and has_over_order (reduce wf_resolved (lambda (acc wf) (and acc (is_orc_window wf))) true)))
+				(define all_agg_window (and (not has_over_order) (reduce wf_resolved (lambda (acc wf) (and acc (is_agg_window wf))) true)))
 				(if all_orc_window
 				(match tables
 					/* ========= ORC materialization (ROW_NUMBER, RANK, DENSE_RANK, ...) ========= */
@@ -2071,6 +2085,78 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 									"reduceinit" orc_reduceinit "temp" true))))
 						(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
 						(list (quote begin) (list orc_setup) scan_plan)
+					)
+					(error "window functions on joined tables not yet supported"))
+				(if all_agg_window
+				(match tables
+					/* ========= Aggregate window: createcolumn with scan computor ========= */
+					'('(tblvar schema tbl isOuter _)) (begin
+						(define first_wf (car wf_resolved))
+						(define wf_fn (car first_wf))
+						(define wf_args (cadr first_wf))
+						(define agg_desc (agg_window_descriptor wf_fn wf_args))
+						(define agg_expr (nth agg_desc 0))
+						(define agg_reduce (nth agg_desc 1))
+						(define agg_neutral (nth agg_desc 2))
+						/* partition columns for the computor's input + filter */
+						(define has_partition (not (equal? over_partition '())))
+						(define partition_col_names (if has_partition
+							(map over_partition (lambda (pe) (match pe
+								'((symbol get_column) _ _ c _) c
+								'((quote get_column) _ _ c _) c
+								_ (match (replace_find_column pe)
+									'((symbol get_column) _ _ c _) c
+									'((quote get_column) _ _ c _) c
+									_ (error (concat "unsupported partition expression: " pe))))))
+							'()))
+						/* extract aggregate source column */
+						(define agg_src_cols (merge_unique (extract_columns_for_tblvar tblvar agg_expr)))
+						(define scan_cols (merge_unique (list agg_src_cols partition_col_names)))
+						/* unique temp column name */
+						(define agg_col_name (concat ".wf_" wf_fn "_" tbl))
+						/* compile time: add bare column */
+						(createcolumn schema tbl agg_col_name "any" '() '("temp" true))
+						/* replace window_func references with column read */
+						(define replace_wf (lambda (expr) (match expr
+							(cons (symbol window_func) _) '((quote get_column) (eval tblvar) false (eval agg_col_name) false)
+							(cons sym args_) (cons sym (map args_ replace_wf))
+							expr)))
+						(define new_fields (map_assoc fields (lambda (k v) (replace_wf v))))
+						/* runtime: createcolumn with computor that scans same table */
+						(define agg_computor_setup (lambda () (begin
+							(define filter_cols (if has_partition partition_col_names '()))
+							(define filter_fn (if has_partition
+								(eval (list (quote lambda)
+									(map partition_col_names (lambda (c) (symbol (concat tblvar "." c))))
+									(cons (quote and)
+										(map partition_col_names (lambda (c)
+											(list (quote equal?) (symbol (concat tblvar "." c)) (symbol (concat "__pk_" c))))))))
+								(lambda () true)))
+							(define map_fn_inner (eval (list (quote lambda)
+								(map scan_cols (lambda (c) (symbol (concat tblvar "." c))))
+								(replace_columns_from_expr agg_expr))))
+							(createcolumn schema tbl agg_col_name "any" '() '("temp" true)
+								partition_col_names
+								(if has_partition
+									(eval (list (quote lambda)
+										(map partition_col_names (lambda (c) (symbol (concat "__pk_" c))))
+										(list (quote scan) schema tbl
+											(cons (quote list) filter_cols)
+											(list (quote lambda)
+												(map filter_cols (lambda (c) (symbol (concat tblvar "." c))))
+												(cons (quote and)
+													(map partition_col_names (lambda (c)
+														(list (quote equal?) (symbol (concat tblvar "." c)) (symbol (concat "__pk_" c)))))))
+											(cons (quote list) scan_cols)
+											map_fn_inner
+											agg_reduce agg_neutral nil false)))
+									(lambda ()
+										(scan schema tbl
+											'() (lambda () true)
+											scan_cols map_fn_inner
+											agg_reduce agg_neutral nil false)))))))
+						(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
+						(list (quote begin) (list agg_computor_setup) scan_plan)
 					)
 					(error "window functions on joined tables not yet supported"))
 				(begin
@@ -2246,7 +2332,7 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						))
 					)
 					(error "window functions on joined tables not yet supported")
-				)))
+				))))
 			) (if (coalesce stage_order stage_limit stage_offset) (begin
 					/* ordered or limited scan */
 					/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */

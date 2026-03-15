@@ -693,6 +693,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		/* Simple CASE: CASE expr WHEN val THEN result ... ELSE default END */
 		(parser '((atom "CASE" true) (define expr sql_expression) (define conditions (+ (parser '((atom "WHEN" true) (define a sql_expression) (atom "THEN" true) (define b sql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch sql_expression)) (atom "END" true)) (merge '((quote if)) (merge (extract_assoc (merge conditions) (lambda (a b) '('('equal?? expr a) b)))) '(elsebranch)))
 
+		/* aggregate-as-window: SUM/COUNT/MIN/MAX/AVG with OVER → window_func (must precede plain aggregate rules) */
+		(parser '((atom "COUNT" true) "(" "*" ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "COUNT" '() _over))
+		(parser '((atom "COUNT" true) "(" (define e sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "COUNT" (list e) _over))
+		(parser '((atom "SUM" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "SUM" (list s) _over))
+		(parser '((atom "AVG" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "AVG" (list s) _over))
+		(parser '((atom "MIN" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "MIN" (list s) _over))
+		(parser '((atom "MAX" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "MAX" (list s) _over))
+		/* plain aggregates (no OVER) */
 		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e sql_expression) ")") '('count_distinct e))
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
 		/* COUNT(expr): count non-NULL values -> map to (if (nil? expr) 0 1), reduce +, neutral 0 */
