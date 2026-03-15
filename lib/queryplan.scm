@@ -1091,6 +1091,11 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 			(error "scalar subselect must return single column"))
 		(if (not (equal? (count output_cols) 1))
 			(error "scalar subselect must return single column"))
+		/* dedup: reuse existing alias for identical scalar subqueries */
+		(define _sq_key (concat subquery))
+		(if (not (nil? (sq_cache _sq_key)))
+			(sq_cache _sq_key)
+			(begin
 		(pending_scalar_counter "value" (+ (pending_scalar_counter "value") 1))
 		(define scalar_alias (concat "__scalar_" (pending_scalar_counter "value")))
 		(match (flatten_tabledesc_subquery scalar_alias schema subquery true true outer_schemas)
@@ -1113,11 +1118,13 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 						(pending_scalar_conditions "data" (merge (pending_scalar_conditions "data") (list condition2)))))
 				(pending_scalar_renames "data" (merge (pending_scalar_renames "data") renames2))
 				(pending_scalar_schemas "data" (merge (pending_scalar_schemas "data") schemas2))
-				'((quote get_column) scalar_alias false (car output_cols) false)
+				(define _result '((quote get_column) scalar_alias false (car output_cols) false))
+			(sq_cache _sq_key _result)
+			_result
 			)
 			_ (error "scalar subselect flattening failed")
 		)
-	)))
+	)))))
 
 	(define build_scalar_subselect (lambda (subquery outer_schemas) (begin
 		(define union_parts (query_union_all_parts subquery))
