@@ -14,6 +14,11 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 	You should have received a copy of the GNU General Public License
 	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+// TODO(optimizer): match with '(a b c) pattern (= (list a b c)) does not work
+// as destructuring in the /scm endpoint but works inside queryplan.scm when
+// the optimizer compiles lambdas. In /scm: (match (list 1 2 3) '(a b c) a)
+// returns nil. Workaround: use (cons a (cons b (cons c _))) patterns outside
+// optimizer-compiled contexts.
 package scm
 
 import "regexp"
