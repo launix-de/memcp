@@ -367,7 +367,9 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 	(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
 		/* args already resolved via replace_find_column in wf_resolved */
 		(define map_expr (if (equal? fn "COUNT") 1 (if (nil? args) 1 (car args))))
+		(define sep (if (and (equal? fn "GROUP_CONCAT") (> (count args) 1)) (cadr args) ","))
 		(match fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil)
+			"GROUP_CONCAT" (list '('concat map_expr) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil)
 			(error (concat "unsupported aggregate window function: " fn))))))))
 	/* createcolumn on KEYTABLE */
 	(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
@@ -388,7 +390,10 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 			(define wf_fn (car wf_rest))
 			(define wf_args (cadr wf_rest))
 			(define map_expr (if (equal? wf_fn "COUNT") 1 (if (nil? wf_args) 1 (replace_find_column (car wf_args)))))
-			(define ag_col (agg_col_name (match wf_fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil) (list map_expr '+ 0))))
+			(define sep (if (and (equal? wf_fn "GROUP_CONCAT") (> (count wf_args) 1)) (cadr wf_args) ","))
+			(define ag_col (agg_col_name (match wf_fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil)
+				"GROUP_CONCAT" (list '('concat map_expr) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil)
+				(list map_expr '+ 0))))
 			(if has_partition (begin
 				(define kt_key_names (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
 				/* outer refs need raw column names (tblvar.col), not canonical expr_name */
@@ -2032,22 +2037,25 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						_ (begin
 							(define agg_desc (sql_aggregates fn))
 							(if (or (nil? agg_desc) (not (nth agg_desc 2))) nil
-								(begin
-									(define agg_reduce (car agg_desc))
-									(define agg_neutral (cadr agg_desc))
-									/* COUNT special case: replace arg with 1 (TODO: COUNT(DISTINCT col)) */
-									(if (equal? fn "COUNT")
-										(list '()
-											(lambda ($set) (list $set))
-											(lambda (acc mapped) (begin
-												(define new_acc (agg_reduce acc 1))
-												((car mapped) new_acc)
-												new_acc))
-											agg_neutral)
-										(if (nil? wf_args) nil
+								(if (nil? wf_args) nil
+									(begin
+										(define agg_col (extract_col_name (car wf_args)))
+										(if (nil? agg_col) nil
 											(begin
-												(define agg_col (extract_col_name (car wf_args)))
-												(if (nil? agg_col) nil
+												(define agg_reduce (car agg_desc))
+												(define agg_neutral (cadr agg_desc))
+												/* GROUP_CONCAT: build reducer with separator from args */
+												(if (equal? fn "GROUP_CONCAT")
+													(begin
+														(define sep (if (> (count wf_args) 1) (cadr wf_args) ","))
+														(list (list agg_col)
+															(lambda ($set v) (list $set v))
+															(lambda (acc mapped) (begin
+																(define v (cadr mapped))
+																(define new_acc (if (nil? acc) (concat v) (concat acc sep v)))
+																((car mapped) new_acc)
+																new_acc))
+															nil))
 													(list (list agg_col)
 														(lambda ($set v) (list $set v))
 														(lambda (acc mapped) (begin
@@ -2068,7 +2076,8 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				   LAG/LEAD (everything else) */
 				(define has_over_order (not (equal? over_order '())))
 				(define all_orc_window (and has_over_order (reduce wf_resolved (lambda (acc wf) (and acc (or (is_orc_window wf) (is_ordered_agg wf)))) true)))
-				(define all_agg_window (reduce wf_resolved (lambda (acc wf) (and acc (is_agg_window wf) (not (is_ordered_agg wf)))) true))
+				/* agg window: non-ordered aggs always, OR ordered aggs WITHOUT ORDER BY (keytable, not ORC) */
+				(define all_agg_window (and (not all_orc_window) (reduce wf_resolved (lambda (acc wf) (and acc (is_agg_window wf) (or (not (is_ordered_agg wf)) (not has_over_order)))) true)))
 				(if all_orc_window
 				(match tables
 					/* ========= ORC materialization (ROW_NUMBER, RANK, DENSE_RANK, ...) ========= */

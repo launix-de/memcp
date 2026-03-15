@@ -27,6 +27,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (sql_aggregates "MAX" '(max nil false))
 /* COUNT is special: compiler replaces arg with 1 (TODO: COUNT(DISTINCT col)) */
 (sql_aggregates "COUNT" '(+ 0 false))
+/* GROUP_CONCAT is order-sensitive: ORDER BY in OVER matters (running concatenation) */
+(sql_aggregates "GROUP_CONCAT" (list (lambda (a b) (if (nil? a) b (concat a "," b))) nil true))
 
 (define sql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
@@ -719,6 +721,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "AVG" true) "(" (define s sql_expression) ")") (begin (define ds (sql_aggregates "SUM")) (define dc (sql_aggregates "COUNT")) '((quote /) '('aggregate s (car ds) (cadr ds)) '('aggregate 1 (car dc) (cadr dc)))))
 		(parser '((atom "MIN" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "MIN")) '('aggregate s (car d) (cadr d))))
 		(parser '((atom "MAX" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "MAX")) '('aggregate s (car d) (cadr d))))
+		/* GROUP_CONCAT with OVER: window function (must precede plain rules) */
+		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "GROUP_CONCAT" (list s sep) _over))
+		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "GROUP_CONCAT" (list s ",") _over))
+		/* plain GROUP_CONCAT */
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a "," 'b))) nil))
 		/* user-registered aggregates: FUNCNAME(expr) where FUNCNAME is in sql_aggregates */

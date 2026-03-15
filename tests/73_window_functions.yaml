@@ -80,7 +80,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 2: SUM OVER (PARTITION BY)"
-    noncritical: true
     sql: "SELECT id, parent, amount, SUM(amount) OVER (PARTITION BY parent) AS total FROM win_emp ORDER BY id"
     expect:
       rows: 5
@@ -92,7 +91,6 @@ test_cases:
         - {id: 5, parent: 200, amount: 400, total: 600}
 
   - name: "Case 2: COUNT OVER (PARTITION BY)"
-    noncritical: true
     sql: "SELECT id, parent, COUNT(*) OVER (PARTITION BY parent) AS cnt FROM win_emp ORDER BY id"
     expect:
       rows: 5
@@ -104,7 +102,6 @@ test_cases:
         - {id: 5, parent: 200, cnt: 2}
 
   - name: "Case 2: MAX OVER (PARTITION BY)"
-    noncritical: true
     sql: "SELECT id, parent, amount, MAX(amount) OVER (PARTITION BY parent) AS mx FROM win_emp ORDER BY id"
     expect:
       rows: 5
@@ -189,7 +186,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 5: SUM OVER ()"
-    noncritical: true
     sql: "SELECT id, amount, SUM(amount) OVER () AS total FROM win_emp ORDER BY id"
     expect:
       rows: 5
@@ -201,7 +197,6 @@ test_cases:
         - {id: 5, amount: 400, total: 2100}
 
   - name: "Case 5: COUNT OVER ()"
-    noncritical: true
     sql: "SELECT id, COUNT(*) OVER () AS cnt FROM win_emp ORDER BY id"
     expect:
       rows: 5
@@ -217,7 +212,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 6: SUM OVER (ORDER BY) without frame = SUM OVER ()"
-    noncritical: true
     sql: "SELECT id, amount, SUM(amount) OVER (ORDER BY time_val) AS total FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -286,7 +280,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 11: ROW_NUMBER ordered by time_val"
-    noncritical: true
     sql: "SELECT id, ROW_NUMBER() OVER (ORDER BY time_val) AS rn FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -298,7 +291,6 @@ test_cases:
         - {id: 3, rn: 5}
 
   - name: "Case 11b: ROW_NUMBER ordered by amount DESC"
-    noncritical: true
     sql: "SELECT id, amount, ROW_NUMBER() OVER (ORDER BY amount DESC) AS rn FROM win_emp ORDER BY amount DESC"
     expect:
       rows: 5
@@ -314,7 +306,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 12: ROW_NUMBER + conflicting outer ORDER BY"
-    noncritical: true
     sql: "SELECT id, amount, ROW_NUMBER() OVER (ORDER BY time_val) AS rn FROM win_emp ORDER BY amount"
     expect:
       rows: 5
@@ -353,7 +344,6 @@ test_cases:
       (1, 100), (2, 200), (3, 200), (4, 300), (5, 300), (6, 400)
 
   - name: "Case 13: RANK with ties"
-    noncritical: true
     sql: "SELECT id, score, RANK() OVER (ORDER BY score) AS rnk FROM win_rank ORDER BY score, id"
     expect:
       rows: 6
@@ -366,7 +356,6 @@ test_cases:
         - {id: 6, score: 400, rnk: 6}
 
   - name: "Case 13b: DENSE_RANK with ties"
-    noncritical: true
     sql: "SELECT id, score, DENSE_RANK() OVER (ORDER BY score) AS drnk FROM win_rank ORDER BY score, id"
     expect:
       rows: 6
@@ -379,7 +368,6 @@ test_cases:
         - {id: 6, score: 400, drnk: 4}
 
   - name: "Case 13c: RANK with conflicting ORDER BY"
-    noncritical: true
     sql: "SELECT id, score, RANK() OVER (ORDER BY score) AS rnk FROM win_rank ORDER BY id"
     expect:
       rows: 6
@@ -399,7 +387,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 14: SUM OVER (ORDER BY) = total (non-ordered aggregate)"
-    noncritical: true
     sql: "SELECT id, amount, SUM(amount) OVER (ORDER BY time_val) AS total FROM win_emp ORDER BY time_val"
     expect:
       rows: 5
@@ -415,7 +402,6 @@ test_cases:
   # ==========================================================================
 
   - name: "Case 15: ROW_NUMBER partitioned by parent"
-    noncritical: true
     sql: "SELECT id, parent, time_val, ROW_NUMBER() OVER (PARTITION BY parent ORDER BY time_val) AS rn FROM win_emp ORDER BY parent, time_val"
     expect:
       rows: 5
@@ -427,7 +413,6 @@ test_cases:
         - {id: 5, parent: 200, time_val: 25, rn: 2}
 
   - name: "Case 15b: RANK partitioned by parent"
-    noncritical: true
     sql: |
       SELECT id, parent, amount, RANK() OVER (PARTITION BY parent ORDER BY amount) AS rnk
       FROM win_emp ORDER BY parent, amount
