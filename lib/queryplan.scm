@@ -2021,7 +2021,10 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 	Process segments left-to-right: accumulate tables+conditions, apply group stages.
 	*/
 
-	/* flatten segments into tables + condition + groups for the existing engine */
+	/* flatten segments: segments with stage+tables get their stage promoted to the groups list
+	   with the tables merged into the main table set. The key insight: build_queryplan's GROUP BY
+	   path creates keytables that aggregate over the tables. The condition on the tables
+	   restricts which rows contribute to each group. */
 	(define _flat (reduce segments (lambda (acc seg) (begin
 		(define _acc_tables (nth acc 0))
 		(define _acc_cond (nth acc 1))
@@ -2037,13 +2040,10 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 				(lambda (x) (and (not (nil? x)) (not (equal? x true)))))))
 		(define _new_cond (reduce (merge _jes (if (and (not (nil? _sc)) (not (equal? _sc true))) (list _sc) '()))
 			(lambda (c je) (if (or (nil? c) (equal? c true)) je (list 'and c je))) _acc_cond))
-		/* drop bare LIMIT-only stages (no GROUP/ORDER/HAVING/OFFSET) — LIMIT 1 on LEFT JOIN is a no-op.
-		   Keep stages with ANY GROUP BY (including '(1)), ORDER BY, HAVING, or OFFSET. */
+		/* keep meaningful stages (GROUP BY, ORDER BY, HAVING, OFFSET); drop bare LIMIT-only */
 		(define _sg_keep (if (nil? _sg) false
-			(begin
-				(define _gc (stage_group_cols _sg))
-				(or
-					(and (not (nil? _gc)) (not (equal? _gc '())))
+			(begin (define _gc (stage_group_cols _sg))
+				(or (and (not (nil? _gc)) (not (equal? _gc '())))
 					(not (nil? (stage_having_expr _sg)))
 					(and (not (nil? (stage_order_list _sg))) (not (equal? (stage_order_list _sg) '())))
 					(not (nil? (stage_offset_val _sg)))))))
