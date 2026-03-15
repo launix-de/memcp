@@ -148,6 +148,11 @@ var declaration_titles []string
 var declarations map[string]*Declaration = make(map[string]*Declaration)
 var declarations_hash map[string]*Declaration = make(map[string]*Declaration)
 
+// globalFuncTypeInfo stores optimizer type info for Scheme-defined functions.
+// Persists across import boundaries so cross-file ownership propagation works.
+// Not used for arity checks or documentation — only for optimizer type inference.
+var globalFuncTypeInfo = make(map[Symbol]TypeInfo)
+
 func DeclareTitle(title string) {
 	declaration_titles = append(declaration_titles, "#"+title)
 }

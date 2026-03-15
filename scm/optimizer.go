@@ -793,6 +793,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					ome.funcTypeInfo = make(map[Symbol]TypeInfo)
 				}
 				ome.funcTypeInfo[sym] = TypeInfo{}.WithTransfer()
+				// Also register globally so cross-import lookups work
+				globalFuncTypeInfo[sym] = TypeInfo{}.WithTransfer()
 			}
 		}
 		// Register local non-escaping lambda for second-pass ownership inference
@@ -980,6 +982,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	// If the called function is known to always return a fresh alloc, mark result as owned.
 	if headOk {
 		if ti := ome.funcTypeInfo[headSym]; ti.Transfer() {
+			transferOwnership = true
+		} else if ti := globalFuncTypeInfo[headSym]; ti.Transfer() {
 			transferOwnership = true
 		} else if d := DeclarationForValue(v[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
 			transferOwnership = true
@@ -1283,10 +1287,10 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 	if headOk && (headSym == Symbol("*") || headSym == Symbol("+")) {
 		transferOwnership = true
 	}
-	// Sub-parser symbol reference: check funcTypeInfo
+	// Sub-parser symbol reference: check funcTypeInfo (local + global)
 	if !ok {
-		if sym, ok2 := scmerSymbol(val); ok2 && ome.funcTypeInfo != nil {
-			if ti := ome.funcTypeInfo[sym]; ti.Transfer() {
+		if sym, ok2 := scmerSymbol(val); ok2 {
+			if (ome.funcTypeInfo != nil && ome.funcTypeInfo[sym].Transfer()) || globalFuncTypeInfo[sym].Transfer() {
 				transferOwnership = true
 			}
 		}

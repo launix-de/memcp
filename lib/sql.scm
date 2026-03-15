@@ -15,10 +15,10 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+(import "queryplan.scm")
+(import "sql-builtins.scm")
 (import "sql-parser.scm")
 (import "psql-parser.scm")
-(import "sql-builtins.scm")
-(import "queryplan.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
