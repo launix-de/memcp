@@ -332,6 +332,80 @@ condition_suffix: if non-nil, appended to name (for dedup stages with WHERE) */
 			(list keytable_name init_code nil)))
 )))
 
+/* build_agg_window_plan: generates the full plan for aggregate window functions (SUM/COUNT/MIN/MAX OVER).
+   Uses keytable infrastructure (same as GROUP BY): make_keytable + collect + createcolumn + scalar fetch.
+   Result query runs on the BASE table; window_func expressions are replaced with scalar keytable scans. */
+(define build_agg_window_plan (lambda (schema tbl tblvar tables over_partition wf_resolved condition groups schemas replace_find_column fields isOuter replace_columns_from_expr extract_columns_for_tblvar scan_wrapper) (begin
+	(define has_partition (not (equal? over_partition '())))
+	(define partition_exprs (map over_partition replace_find_column))
+	(define group_keys (if has_partition partition_exprs '(1)))
+	(define canon_alias_map (list (list tblvar (concat schema "." tbl))))
+	(define expr_name (lambda (expr) (canonical_expr_name expr '(list) '(list) canon_alias_map)))
+	(set condition (replace_find_column (coalesceNil condition true)))
+	(define kt_result (make_keytable schema tbl group_keys tblvar nil))
+	(match kt_result '(grouptbl keytable_init fk_pk_col) (begin
+	(define is_fk_reuse (not (nil? fk_pk_col)))
+	(define tblvar_cols (if has_partition (merge_unique (map group_keys (lambda (col) (extract_columns_for_tblvar tblvar col)))) '()))
+	(set filtercols (if has_partition (extract_columns_for_tblvar tblvar condition) '()))
+	/* collect plan */
+	(define collect_plan (if (equal? group_keys '(1))
+		'('insert schema grouptbl '(list "1") '(list '(list 1)) '(list) '('lambda '() true) true)
+		(begin
+			(define keycols (merge_unique (map group_keys (lambda (expr) (extract_columns_for_tblvar tblvar expr)))))
+			(scan_wrapper 'scan schema tbl
+				(cons list filtercols)
+				'('lambda (map filtercols (lambda (col) (symbol (concat tblvar "." col)))) (optimize (replace_columns_from_expr condition)))
+				(cons list keycols)
+				'('lambda (map keycols (lambda (col) (symbol (concat tblvar "." col)))) (cons 'list (map group_keys (lambda (expr) (replace_columns_from_expr expr)))))
+				'('lambda '('acc 'rowvals) '('set_assoc 'acc 'rowvals true))
+				'(list)
+				'('lambda '('acc 'sharddict) '('insert schema grouptbl (cons 'list (map group_keys expr_name)) '('extract_assoc 'sharddict '('lambda '('k 'v) 'k)) '(list) '('lambda '() true) true))
+				isOuter))))
+	/* aggregate descriptors */
+	(define agg_col_name (lambda (ag) (concat (expr_name ag) "|" (expr_name condition))))
+	(define fk_child_col (if is_fk_reuse (if has_partition (match (car group_keys) '('get_column _ false scol false) scol) nil) nil))
+	(define ags (map wf_resolved (lambda (wf) (match wf '(fn args _) (begin
+		(define map_expr (if (equal? fn "COUNT") 1 (if (nil? args) 1 (replace_find_column (car args)))))
+		(match fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil)
+			(error (concat "unsupported aggregate window function: " fn))))))))
+	/* createcolumn on KEYTABLE */
+	(define agg_plans (map ags (lambda (ag) (match ag '(expr reduce neutral) (begin
+		(define cols (extract_columns_for_tblvar tblvar expr))
+		'('createcolumn schema grouptbl (agg_col_name ag) "any" '(list) '(list "temp" true)
+			(cons list (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
+			'('lambda (map group_keys (lambda (col) (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))
+				(scan_wrapper 'scan schema tbl
+					(cons list (merge tblvar_cols filtercols))
+					'('lambda (map (merge tblvar_cols filtercols) (lambda (col) (symbol (concat tblvar "." col)))) (optimize (cons 'and (cons (replace_columns_from_expr condition) (map group_keys (lambda (col) '('equal? (replace_columns_from_expr col) '('outer (symbol (if is_fk_reuse fk_pk_col (expr_name col)))))))))))
+					(cons list cols)
+					'('lambda (map cols (lambda (col) (symbol (concat tblvar "." col)))) (replace_columns_from_expr expr))
+					reduce neutral nil isOuter))))))))
+	(define compute_plan (cons 'parallel agg_plans))
+	/* replace window_func with scalar fetch */
+	(define replace_wf_with_fetch (lambda (expr) (match expr
+		(cons (symbol window_func) wf_rest) (begin
+			(define wf_fn (car wf_rest))
+			(define wf_args (cadr wf_rest))
+			(define map_expr (if (equal? wf_fn "COUNT") 1 (if (nil? wf_args) 1 (replace_find_column (car wf_args)))))
+			(define ag_col (agg_col_name (match wf_fn "SUM" (list map_expr '+ 0) "COUNT" (list 1 '+ 0) "MIN" (list map_expr 'min nil) "MAX" (list map_expr 'max nil) (list map_expr '+ 0))))
+			(if has_partition
+				'('scan schema grouptbl
+					(cons 'list (map group_keys (lambda (col) (if is_fk_reuse fk_pk_col (expr_name col)))))
+					'('lambda (map group_keys (lambda (col) (symbol (concat grouptbl "." (if is_fk_reuse fk_pk_col (expr_name col)))))) (cons 'and (map group_keys (lambda (col) '('equal? (symbol (concat grouptbl "." (if is_fk_reuse fk_pk_col (expr_name col)))) '('outer (symbol (concat tblvar "." (if is_fk_reuse fk_pk_col (expr_name col))))))))))
+					'('list ag_col)
+					'('lambda '((symbol (concat grouptbl "." ag_col))) (symbol (concat grouptbl "." ag_col)))
+					nil nil nil false)
+				'('scan schema grouptbl '(list) '('lambda '() true)
+					'('list ag_col)
+					'('lambda '((symbol (concat grouptbl "." ag_col))) (symbol (concat grouptbl "." ag_col)))
+					nil nil nil false)))
+		(cons sym args_) (cons sym (map args_ replace_wf_with_fetch))
+		expr)))
+	(define new_fields (map_assoc fields (lambda (k v) (replace_wf_with_fetch (replace_find_column v)))))
+	(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
+	(list 'begin keytable_init '('time collect_plan "collect") '('time compute_plan "compute") scan_plan)))
+)))
+
 /* make_col_replacer: create a function that rewrites column/aggregate references to point at a group table
 is_dedup=true: leave aggregates intact (for dedup stages)
 is_dedup=false: replace aggregates with column fetches (for normal group stages) */
@@ -2077,76 +2151,8 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 					(error "window functions on joined tables not yet supported"))
 				(if all_agg_window
 				(match tables
-					/* ========= Aggregate window: createcolumn with scan computor ========= */
-					'('(tblvar schema tbl isOuter _)) (begin
-						(define first_wf (car wf_resolved))
-						(define wf_fn (car first_wf))
-						(define wf_args (cadr first_wf))
-						(define agg_reg (sql_aggregates wf_fn))
-						(define agg_reduce (car agg_reg))
-						(define agg_neutral (cadr agg_reg))
-						/* COUNT: map_expr = 1; others: map_expr = arg */
-						(define agg_expr (if (equal? wf_fn "COUNT") 1 (if (nil? wf_args) 1 (car wf_args))))
-						/* partition columns for the computor's input + filter */
-						(define has_partition (not (equal? over_partition '())))
-						(define partition_col_names (if has_partition
-							(map over_partition (lambda (pe) (match pe
-								'((symbol get_column) _ _ c _) c
-								'((quote get_column) _ _ c _) c
-								_ (match (replace_find_column pe)
-									'((symbol get_column) _ _ c _) c
-									'((quote get_column) _ _ c _) c
-									_ (error (concat "unsupported partition expression: " pe))))))
-							'()))
-						/* extract aggregate source columns */
-						(define agg_src_cols (extract_columns_for_tblvar tblvar agg_expr))
-						(define scan_cols (merge_unique (list agg_src_cols partition_col_names)))
-						/* unique temp column name */
-						(define agg_col_name (concat ".wf_" wf_fn "_" tbl))
-						/* compile time: add bare column */
-						(createcolumn schema tbl agg_col_name "any" '() '("temp" true))
-						/* replace window_func references with column read */
-						(define replace_wf (lambda (expr) (match expr
-							(cons (symbol window_func) _) '((quote get_column) (eval tblvar) false (eval agg_col_name) false)
-							(cons sym args_) (cons sym (map args_ replace_wf))
-							expr)))
-						(define new_fields (map_assoc fields (lambda (k v) (replace_wf v))))
-						/* runtime: createcolumn with computor that scans same table */
-						(define agg_computor_setup (lambda () (begin
-							(define filter_cols (if has_partition partition_col_names '()))
-							(define filter_fn (if has_partition
-								(eval (list (quote lambda)
-									(map partition_col_names (lambda (c) (symbol (concat tblvar "." c))))
-									(cons (quote and)
-										(map partition_col_names (lambda (c)
-											(list (quote equal?) (symbol (concat tblvar "." c)) (symbol (concat "__pk_" c))))))))
-								(lambda () true)))
-							(define map_fn_inner (eval (list (quote lambda)
-								(map scan_cols (lambda (c) (symbol (concat tblvar "." c))))
-								(replace_columns_from_expr agg_expr))))
-							(createcolumn schema tbl agg_col_name "any" '() '("temp" true)
-								partition_col_names
-								(if has_partition
-									(eval (list (quote lambda)
-										(map partition_col_names (lambda (c) (symbol (concat "__pk_" c))))
-										(list (quote scan) schema tbl
-											(cons (quote list) filter_cols)
-											(list (quote lambda)
-												(map filter_cols (lambda (c) (symbol (concat tblvar "." c))))
-												(cons (quote and)
-													(map partition_col_names (lambda (c)
-														(list (quote equal?) (symbol (concat tblvar "." c)) (symbol (concat "__pk_" c)))))))
-											(cons (quote list) scan_cols)
-											map_fn_inner
-											agg_reduce agg_neutral nil false)))
-									(lambda ()
-										(scan schema tbl
-											'() (lambda () true)
-											scan_cols map_fn_inner
-											agg_reduce agg_neutral nil false)))))))
-						(define scan_plan (build_queryplan schema tables new_fields condition groups schemas replace_find_column))
-						(list (quote begin) (list agg_computor_setup) scan_plan)
-					)
+					'('(tblvar schema tbl isOuter _))
+						(build_agg_window_plan schema tbl tblvar tables over_partition wf_resolved condition groups schemas replace_find_column fields isOuter replace_columns_from_expr extract_columns_for_tblvar scan_wrapper)
 					(error "window functions on joined tables not yet supported"))
 				(begin
 					/* ========= LAG/LEAD scan path (unchanged) ========= */
