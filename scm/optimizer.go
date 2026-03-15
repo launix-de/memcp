@@ -904,6 +904,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	allConstArgs := true
 	var transferOwnership bool
+	argOwned := make([]bool, len(v)) // per-arg ownership for specialization
 
 	// Look up declaration for callback ownership propagation
 	var callDecl *Declaration
@@ -967,6 +968,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		var elemTI TypeInfo
 		v[i], elemTI = OptimizeEx(v[i], env, ome, true)
 		transferOwnership = elemTI.Transfer()
+		argOwned[i] = transferOwnership
 		if i > 0 && !elemTI.Const() {
 			allConstArgs = false
 		}
@@ -987,6 +989,57 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			transferOwnership = true
 		} else if d := DeclarationForValue(v[0]); d != nil && d.Type != nil && d.Type.Return != nil && d.Type.Return.Transfer {
 			transferOwnership = true
+		}
+	}
+
+	// Function specialization: when calling a known Proc with owned args,
+	// create or reuse a specialized variant with ownedSlots for those params.
+	if headSymOk && len(v) > 1 {
+		var ownedMask uint64
+		for i := 1; i < len(v) && i <= 64; i++ {
+			if argOwned[i] {
+				ownedMask |= 1 << uint(i-1)
+			}
+		}
+		if ownedMask != 0 && globalFuncTypeInfo[headSym].Transfer() {
+			// Only specialize functions registered in globalFuncTypeInfo (Scheme-defined globals)
+			if resolved := env.FindRead(headSym); resolved != nil {
+				if fnVal, ok := resolved.Vars[headSym]; ok && fnVal.GetTag() == tagProc {
+					proc := *fnVal.Proc()
+					// Get or create the TypeDescriptor for variants storage
+					ti := globalFuncTypeInfo[headSym]
+					if ti.Extra == nil {
+						ti.Extra = &TypeDescriptor{}
+						globalFuncTypeInfo[headSym] = ti
+					}
+					if ti.Extra.Variants == nil {
+						ti.Extra.Variants = make(map[uint64]Scmer)
+					}
+					if variantSym, exists := ti.Extra.Variants[ownedMask]; exists && !variantSym.IsNil() {
+						// Reuse cached variant symbol
+						v[0] = variantSym
+					} else if !exists && proc.Body.IsSlice() {
+						// Sentinel: mark as in-progress to prevent recursive specialization
+						ti.Extra.Variants[ownedMask] = NewNil()
+						// Build specialized variant: re-optimize body with ownedSlots
+						ome2 := optimizerMetainfo{ownedSlots: make(map[int]bool)}
+						for i := 0; i < 64; i++ {
+							if ownedMask&(1<<uint(i)) != 0 {
+								ome2.ownedSlots[i] = true
+							}
+						}
+						specializedBody, _ := OptimizeEx(proc.Body, env, &ome2, true)
+						newProc := proc
+						newProc.Body = specializedBody
+						// Register under a new symbol so callsite stays a clean function call
+						variantName := Symbol(string(headSym) + "$$owned")
+						env.FindRead(headSym).Vars[variantName] = NewProc(&newProc)
+						variantSym := NewSymbol(string(variantName))
+						ti.Extra.Variants[ownedMask] = variantSym
+						v[0] = variantSym
+					}
+				}
+			}
 		}
 	}
 
