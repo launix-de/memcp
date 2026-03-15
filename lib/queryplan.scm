@@ -1639,7 +1639,9 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 										(if _sq_has_agg
 											/* correlated WITH aggregate: inline scan (avoids cross-join) */
 											(build_scalar_subselect subquery outer_schemas)
-											/* correlated WITHOUT aggregate: flatten as LEFT JOIN */
+											/* correlated WITHOUT aggregate: flatten as LEFT JOIN
+											   ORDER/LIMIT stages are attached to the tables and
+											   resolved via promise-based side queries in build_queryplan */
 											(register_scalar_subquery subquery outer_schemas))))
 								/* FROM-less SELECT: inline the expression directly */
 								(begin
