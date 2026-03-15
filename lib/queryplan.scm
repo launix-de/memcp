@@ -1660,10 +1660,8 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 							(define _clean (make_group_stage (stage_group_cols stage) (stage_having_expr stage)
 								(stage_order_list stage) (stage_limit_val stage) (stage_offset_val stage)))
 							(make_segment _stripped _cond _clean)))))
-					/* segments for tables without group stages (simple LEFT JOINs) */
-					(define _plain_segment (if (and (not (nil? _pst)) (not (equal? _pst '())))
-						(list (make_segment _pst condition nil))
-						'()))
+					/* base segment: outer tables (if any) + WHERE condition */
+					(define _plain_segment (list (make_segment (coalesceNil _pst '()) condition nil)))
 					/* outer query's own group stage */
 					(define _outer_grp (if (or group having order limit offset) (make_group_stage group having order limit offset) nil))
 					(define _outer_segment (if _outer_grp (list (make_segment '() nil _outer_grp)) '()))
