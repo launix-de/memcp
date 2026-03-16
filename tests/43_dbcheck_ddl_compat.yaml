@@ -107,6 +107,10 @@ test_cases:
     sql: "INSERT IGNORE INTO dbc_t (id, name, email, status, active) SELECT id+100, name, CONCAT(name, '@copy.com'), status, active FROM dbc_t"
     expect:
       affected_rows: 1
+  - name: "INSERT IGNORE ... VALUES SELECT legacy syntax"
+    sql: "INSERT IGNORE INTO dbc_t (id, name, email, status, active) VALUES SELECT id+200, name, CONCAT(name, '@legacy.com'), status, active FROM dbc_t"
+    expect:
+      affected_rows: 2
 
   # --- Triggers ---
   - name: "DROP TRIGGER IF EXISTS"

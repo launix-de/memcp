@@ -505,6 +505,34 @@ test_cases:
           filename: other.pdf
           can_view: true
 
+  - name: "Aggregate over correlated scalar subselect keeps outer reference inputs"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_currency"
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_offer"
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_offer_element"
+      - sql: "CREATE TABLE expr32_scalar_currency (id INT PRIMARY KEY, wkz VARCHAR(10))"
+      - sql: "CREATE TABLE expr32_scalar_offer (id INT PRIMARY KEY, waehrung INT)"
+      - sql: "CREATE TABLE expr32_scalar_offer_element (id INT PRIMARY KEY, angebot INT, einzelpreis INT, menge INT)"
+      - sql: "INSERT INTO expr32_scalar_currency (id, wkz) VALUES (1, 'EUR')"
+      - sql: "INSERT INTO expr32_scalar_offer (id, waehrung) VALUES (1, 1)"
+      - sql: "INSERT INTO expr32_scalar_offer_element (id, angebot, einzelpreis, menge) VALUES (1, 1, 10, 2)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_offer_element"
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_offer"
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_currency"
+    sql: >
+      SELECT MAX((
+        SELECT c.wkz FROM expr32_scalar_currency c
+        WHERE c.id = (SELECT o.waehrung FROM expr32_scalar_offer o WHERE o.id = oe.angebot LIMIT 1)
+        LIMIT 1
+      )) AS unit2
+      FROM expr32_scalar_offer_element oe
+      WHERE oe.angebot = 1
+    expect:
+      rows: 1
+      data:
+        - unit2: EUR
+
   - name: "Scalar subselect multiple rows errors"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:

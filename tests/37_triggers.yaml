@@ -11,6 +11,8 @@ cleanup:
     sql: "DROP TABLE IF EXISTS trigger_test"
   - action: "Clean up log table"
     sql: "DROP TABLE IF EXISTS trigger_log"
+  - action: "Clean up auto increment trigger table"
+    sql: "DROP TABLE IF EXISTS trigger_auto_bi"
 
 setup:
   - action: "Create test table"
@@ -117,6 +119,40 @@ test_cases:
 
   - name: "DROP expression trigger"
     sql: "DROP TRIGGER calc_trigger"
+    expect:
+      affected_rows: 0
+
+  - name: "Create AUTO_INCREMENT table for BEFORE INSERT trigger"
+    sql: "CREATE TABLE trigger_auto_bi (id INT AUTO_INCREMENT PRIMARY KEY, val INT, name VARCHAR(50))"
+    expect:
+      affected_rows: 0
+
+  - name: "CREATE BEFORE INSERT trigger on AUTO_INCREMENT table"
+    sql: "CREATE TRIGGER trigger_auto_bi_before BEFORE INSERT ON trigger_auto_bi FOR EACH ROW SET NEW.val = COALESCE(NEW.val, 123)"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT without explicit id keeps AUTO_INCREMENT under BEFORE INSERT trigger"
+    sql: "INSERT INTO trigger_auto_bi (name) VALUES ('auto_before_insert')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify BEFORE INSERT trigger did not NULL out AUTO_INCREMENT id"
+    sql: "SELECT id, val, name FROM trigger_auto_bi"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          val: 123
+          name: "auto_before_insert"
+
+  - name: "DROP AUTO_INCREMENT BEFORE INSERT trigger"
+    sql: "DROP TRIGGER IF EXISTS trigger_auto_bi_before"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop AUTO_INCREMENT trigger table"
+    sql: "DROP TABLE IF EXISTS trigger_auto_bi"
     expect:
       affected_rows: 0
 

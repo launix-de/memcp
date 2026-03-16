@@ -307,6 +307,16 @@ func (u *storageShard) getColumnStorageOrPanicEx(colName string, alreadyLocked b
 	if alreadyLocked {
 		cs, present := u.columns[colName]
 		if !present {
+			// Shards can lag behind table schema changes (for example when a
+			// column was added after the shard was created and the old shard was
+			// later reloaded from disk). Mirror the fallback from the unlocked
+			// path so scans can still proceed under the shard write lock.
+			for _, c := range u.t.Columns {
+				if c.Name == colName {
+					u.columns[colName] = new(StorageSparse)
+					return u.columns[colName]
+				}
+			}
 			panic("Column does not exist: `" + u.t.schema.Name + "`.`" + u.t.Name + "`.`" + colName + "`")
 		}
 		if cs != nil {
@@ -1395,14 +1405,42 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	if t.t.tableLockOwner.Load() != nil {
 		t.t.waitTableLock(scm.GetCurrentSessionState(), true)
 	}
-	// Execute BEFORE INSERT triggers (can modify values; isIgnore skips failing rows)
-	if len(t.t.Triggers) > 0 {
-		columns, values = t.t.ExecuteBeforeInsertTriggers(columns, values, isIgnore)
-		if len(values) == 0 {
-			return // all rows skipped by triggers
+	beforeInsertTriggers := t.t.GetTriggers(BeforeInsert)
+	if len(beforeInsertTriggers) > 0 {
+		preparedColumns := make([][]string, 0, len(values))
+		preparedRows := make([][]scm.Scmer, 0, len(values))
+		for _, row := range values {
+			rowColumns, preparedRow, ok := t.t.executeBeforeInsertTriggerRow(columns, row, isIgnore)
+			if !ok {
+				continue
+			}
+			sanitized := t.t.sanitizeInsertRows(rowColumns, [][]scm.Scmer{preparedRow}, isIgnore)
+			if len(sanitized) == 0 {
+				continue
+			}
+			preparedColumns = append(preparedColumns, rowColumns)
+			preparedRows = append(preparedRows, sanitized[0])
 		}
+		if len(preparedRows) == 0 {
+			return
+		}
+		if !alreadyLocked {
+			t.mu.Lock()
+		}
+		firstInsertId := onFirstInsertId
+		for i, row := range preparedRows {
+			t.insertPreparedLocked(preparedColumns[i], [][]scm.Scmer{row}, firstInsertId)
+			if firstInsertId != nil {
+				firstInsertId = nil
+			}
+		}
+		if !alreadyLocked {
+			t.mu.Unlock()
+		}
+		return
 	}
-	// Re-apply sanitizers after BEFORE INSERT trigger mutations.
+
+	// Re-apply sanitizers after trigger-free INSERT input preparation.
 	values = t.t.sanitizeInsertRows(columns, values, isIgnore)
 	if len(values) == 0 {
 		return // all rows skipped by sanitizer in INSERT IGNORE mode
@@ -1411,6 +1449,13 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	if !alreadyLocked {
 		t.mu.Lock()
 	}
+	t.insertPreparedLocked(columns, values, onFirstInsertId)
+	if !alreadyLocked {
+		t.mu.Unlock()
+	}
+}
+
+func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64)) {
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.inserts))
 	firstNewInsertIdx := len(t.inserts) // for capturing actual rows after insertDataset fills auto-increment
@@ -1453,9 +1498,6 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		// also insert into next storage
 		t.next.Insert(columns, values, false, nil, false)
 	}
-	if !alreadyLocked {
-		t.mu.Unlock()
-	}
 	// transaction bookkeeping
 	if tx := CurrentTx(); tx != nil {
 		switch tx.Mode {
@@ -1477,11 +1519,17 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	} else if t.t.PersistencyMode == Safe && t.logfile != nil {
 		t.logfile.Sync() // write barrier; no tx means immediate sync
 	}
-	// execute AFTER INSERT triggers
+	// execute AFTER INSERT triggers outside the shard write lock, matching the
+	// AFTER UPDATE/DELETE paths and avoiding lock inversion with computed-column
+	// invalidation on shared keytables.
 	if len(t.t.Triggers) > 0 {
-		for _, row := range triggerInsertRows {
-			t.t.ExecuteTriggers(AfterInsert, nil, row)
-		}
+		func() {
+			t.mu.Unlock()
+			defer t.mu.Lock()
+			for _, row := range triggerInsertRows {
+				t.t.ExecuteTriggers(AfterInsert, nil, row)
+			}
+		}()
 	}
 }
 
