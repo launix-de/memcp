@@ -18,9 +18,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define sql_builtins (coalesce sql_builtins (newsession)))
 
 /* Aggregate function registry: maps uppercase name → (reduce neutral ordered).
-   ordered=false: ORDER BY in OVER() can be ignored (result independent of row order)
-   ordered=true: ORDER BY matters → ORC running aggregate (e.g. GROUP_CONCAT)
-   Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
+ordered=false: ORDER BY in OVER() can be ignored (result independent of row order)
+ordered=true: ORDER BY matters → ORC running aggregate (e.g. GROUP_CONCAT)
+Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
 (define sql_aggregates (coalesce sql_aggregates (newsession)))
 (sql_aggregates "SUM" '(+ 0 false))
 (sql_aggregates "MIN" '(min nil false))
@@ -727,7 +727,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(if (sql_aggregates (toUpper fn))
 				'('window_func (toUpper fn) (list arg) _over)
 				'('window_func (toUpper fn) (list arg) _over)))
-	
+
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('unix_timestamp))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('unix_timestamp p))
@@ -884,6 +884,61 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(sql_select_offset right))
 			(match right_parts '(branches order limit offset)
 				(list (quote union_all) (cons left branches) order limit offset)))
+	)))
+	(define sql_inner_select_kind (lambda (sym) (begin
+		(if (equal?? sym "inner_select")
+			(quote inner_select)
+			(if (equal?? sym "inner_select_in")
+				(quote inner_select_in)
+				(if (equal?? sym "inner_select_exists")
+					(quote inner_select_exists)
+					(match sym
+						(symbol inner_select) (quote inner_select)
+						'inner_select (quote inner_select)
+						'(quote inner_select) (quote inner_select)
+						(symbol inner_select_in) (quote inner_select_in)
+						'inner_select_in (quote inner_select_in)
+						'(quote inner_select_in) (quote inner_select_in)
+						(symbol inner_select_exists) (quote inner_select_exists)
+						'inner_select_exists (quote inner_select_exists)
+						'(quote inner_select_exists) (quote inner_select_exists)
+						_ nil)
+				)
+			)
+		)
+	)))
+	(define sql_expr_contains_inner_select (lambda (expr) (match expr
+		(cons sym args) (or
+			(not (nil? (sql_inner_select_kind sym)))
+			(reduce args (lambda (a b) (or a (sql_expr_contains_inner_select b))) false))
+		_ false
+	)))
+	(define sql_dataset_contains_inner_select (lambda (dataset)
+		(reduce dataset (lambda (a b) (or a (sql_expr_contains_inner_select b))) false)
+	))
+	(define sql_values_row_query (lambda (schema2 coldesc dataset)
+		(list schema2 '()
+			(merge (map (produceN (count coldesc)) (lambda (i) (list (nth coldesc i) (nth dataset i)))))
+			true nil nil nil nil nil)
+	))
+	(define sql_values_to_select_query (lambda (schema2 coldesc datasets)
+		(match datasets
+			(cons only '()) (sql_values_row_query schema2 coldesc only)
+			(cons first rest) (reduce rest (lambda (acc row)
+				(sql_union_all_query acc (sql_values_row_query schema2 coldesc row)))
+				(sql_values_row_query schema2 coldesc first))
+			_ (error "INSERT VALUES requires at least one row")
+		)
+	))
+	(define sql_insert_select_plan (lambda (schema2 tbl coldesc inner ignoreexists updaterows updaterows2 updatecols) (begin
+		'('begin
+			'('set 'resultrow '('lambda '('item) '('insert schema2 tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
+				(if (and ignoreexists (nil? updaterows))
+					'((quote lambda) '() 0)
+					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
+				'('lambda '('id) '('session "last_insert_id" 'id)))))
+			(build_queryplan_term inner)
+		)
 	)))
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
@@ -1308,11 +1363,15 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
-			'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
-				(if (and ignoreexists (nil? updaterows))
-					'((quote lambda) '() 0)
-					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-				false '('lambda '('id) '('session "last_insert_id" 'id)))
+			(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
+				(begin
+					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
+					(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
+				'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
+					(if (and ignoreexists (nil? updaterows))
+						'((quote lambda) '() 0)
+						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
+					false '('lambda '('id) '('session "last_insert_id" 'id))))
 	)))
 
 	(define sql_insert_select (parser '(
@@ -1346,14 +1405,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
-			'('begin
-				'('set 'resultrow '('lambda '('item) '('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
-					(if (and ignoreexists (nil? updaterows))
-						'((quote lambda) '() 0)
-						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-					'('lambda '('id) '('session "last_insert_id" 'id)))))
-				(build_queryplan_term inner)
-			)
+			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
 	(define sql_foreign_key_mode (parser (or
