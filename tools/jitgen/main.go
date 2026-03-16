@@ -3445,6 +3445,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t%s = args[idx]", dv)
 				g.emit("\t%s.ID = 0", dv)
 				g.emit("} else {")
+				g.emit("\tctx.EnsureDesc(&%s)", idxDescVar)
 				g.emit("\tprotected := make([]Reg, 0, len(args)*2+1)")
 				g.emit("\tseen := make(map[Reg]bool)")
 				g.emit("\tif !seen[%s.Reg] {", idxDescVar)

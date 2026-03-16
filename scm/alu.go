@@ -975,10 +975,10 @@ func init_alu() {
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
 			}
+			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
-			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -1008,6 +1008,7 @@ func init_alu() {
 				d7 = args[idx]
 				d7.ID = 0
 			} else {
+				ctx.EnsureDesc(&d1)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d1.Reg] {
@@ -1762,10 +1763,10 @@ func init_alu() {
 				ctx.MarkLabel(lbl5)
 				ctx.ResolveFixups()
 			}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -2119,10 +2120,10 @@ func init_alu() {
 				ctx.MarkLabel(lbl7)
 				ctx.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
+			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -2316,10 +2317,10 @@ func init_alu() {
 				ctx.MarkLabel(lbl8)
 				ctx.ResolveFixups()
 			}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -2430,6 +2431,7 @@ func init_alu() {
 				d97 = args[idx]
 				d97.ID = 0
 			} else {
+				ctx.EnsureDesc(&d2)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d2.Reg] {
@@ -2825,10 +2827,10 @@ func init_alu() {
 				ctx.MarkLabel(lbl9)
 				ctx.ResolveFixups()
 			}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
-			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
+			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -2981,10 +2983,10 @@ func init_alu() {
 				ctx.MarkLabel(lbl10)
 				ctx.ResolveFixups()
 			}
+			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
-			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -3651,10 +3653,10 @@ func init_alu() {
 				ctx.MarkLabel(lbl12)
 				ctx.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(48)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -4321,13 +4323,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl1)
 				ctx.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
+			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -4639,13 +4641,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -4699,6 +4701,7 @@ func init_alu() {
 				d34 = args[idx]
 				d34.ID = 0
 			} else {
+				ctx.EnsureDesc(&d11)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d11.Reg] {
@@ -5344,13 +5347,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl5)
 				ctx.ResolveFixups()
 			}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5457,13 +5460,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl6)
 				ctx.ResolveFixups()
 			}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5857,13 +5860,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl8)
 				ctx.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5986,6 +5989,7 @@ func init_alu() {
 				d119 = args[idx]
 				d119.ID = 0
 			} else {
+				ctx.EnsureDesc(&d2)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d2.Reg] {
@@ -6275,13 +6279,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl9)
 				ctx.ResolveFixups()
 			}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -6824,13 +6828,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl10)
 				ctx.ResolveFixups()
 			}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
-			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
+			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -7432,13 +7436,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl11)
 				ctx.ResolveFixups()
 			}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
+			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
-			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -7618,6 +7622,7 @@ func init_alu() {
 				d254 = args[idx]
 				d254.ID = 0
 			} else {
+				ctx.EnsureDesc(&d2)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d2.Reg] {
@@ -8918,6 +8923,7 @@ func init_alu() {
 				d331 = args[idx]
 				d331.ID = 0
 			} else {
+				ctx.EnsureDesc(&d3)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d3.Reg] {
@@ -9227,13 +9233,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl15)
 				ctx.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -9497,13 +9503,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl16)
 				ctx.ResolveFixups()
 			}
+			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
-			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -10349,13 +10355,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl17)
 				ctx.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -11254,13 +11260,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl18)
 				ctx.ResolveFixups()
 			}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
+			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
-			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -11539,6 +11545,7 @@ func init_alu() {
 				d536 = args[idx]
 				d536.ID = 0
 			} else {
+				ctx.EnsureDesc(&d6)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d6.Reg] {
@@ -11871,13 +11878,13 @@ func init_alu() {
 				ctx.MarkLabel(lbl19)
 				ctx.ResolveFixups()
 			}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d6 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(96)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -12513,12 +12520,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl1)
 				ctx.ResolveFixups()
 			}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -12583,12 +12590,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
 			}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
-			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
+			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -12816,12 +12823,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -12872,6 +12879,7 @@ func init_alu() {
 				d32 = args[idx]
 				d32.ID = 0
 			} else {
+				ctx.EnsureDesc(&d10)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d10.Reg] {
@@ -13333,12 +13341,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl5)
 				ctx.ResolveFixups()
 			}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -13436,12 +13444,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl6)
 				ctx.ResolveFixups()
 			}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -13525,6 +13533,7 @@ func init_alu() {
 				d71 = args[idx]
 				d71.ID = 0
 			} else {
+				ctx.EnsureDesc(&d2)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d2.Reg] {
@@ -13866,12 +13875,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl7)
 				ctx.ResolveFixups()
 			}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -14720,12 +14729,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl9)
 				ctx.ResolveFixups()
 			}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -15269,12 +15278,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl11)
 				ctx.ResolveFixups()
 			}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -15801,12 +15810,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl12)
 				ctx.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -16429,12 +16438,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl13)
 				ctx.ResolveFixups()
 			}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -16761,12 +16770,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl14)
 				ctx.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -17302,12 +17311,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl16)
 				ctx.ResolveFixups()
 			}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
-			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
+			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -17514,6 +17523,7 @@ func init_alu() {
 				d349 = args[idx]
 				d349.ID = 0
 			} else {
+				ctx.EnsureDesc(&d4)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d4.Reg] {
@@ -17822,12 +17832,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl17)
 				ctx.ResolveFixups()
 			}
+			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
 			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
 			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
-			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -18088,12 +18098,12 @@ func init_alu() {
 				ctx.MarkLabel(lbl18)
 				ctx.ResolveFixups()
 			}
-			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
-			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			d5 = JITValueDesc{Loc: LocStack, Type: tagFloat, StackOff: int32(80)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(32)}
+			d3 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(48)}
+			d4 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(64)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -20270,8 +20280,8 @@ func init_alu() {
 				ctx.MarkLabel(lbl1)
 				ctx.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -20601,6 +20611,7 @@ func init_alu() {
 				d30 = args[idx]
 				d30.ID = 0
 			} else {
+				ctx.EnsureDesc(&d8)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d8.Reg] {
@@ -21114,8 +21125,8 @@ func init_alu() {
 				ctx.MarkLabel(lbl6)
 				ctx.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -21719,8 +21730,8 @@ func init_alu() {
 				ctx.MarkLabel(lbl8)
 				ctx.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -22781,8 +22792,8 @@ func init_alu() {
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -22830,6 +22841,7 @@ func init_alu() {
 				d30 = args[idx]
 				d30.ID = 0
 			} else {
+				ctx.EnsureDesc(&d8)
 				protected := make([]Reg, 0, len(args)*2+1)
 				seen := make(map[Reg]bool)
 				if !seen[d8.Reg] {
@@ -23198,8 +23210,8 @@ func init_alu() {
 				ctx.MarkLabel(lbl5)
 				ctx.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
