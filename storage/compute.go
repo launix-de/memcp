@@ -399,8 +399,53 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 	partCount := analyzeOrcPartition(col)
 
-	// Parallel invalidation across shards. No ordering needed — pure filter + bit-flip.
-	// TODO: use index infrastructure for partition equality acceleration.
+	// Build boundaries for index-accelerated lookup.
+	// Partition columns → equality points; order columns → range from mutation key.
+	var bounds boundaries
+	for i := 0; i < partCount && i < nCols; i++ {
+		bounds = append(bounds, columnboundaries{
+			col: col.OrcSortCols[i], lower: sortKeys[i], lowerInclusive: true,
+			upper: sortKeys[i], upperInclusive: true, // equality
+		})
+	}
+	// Order columns: range from mutation key onwards.
+	// For ASC: [sortKey, ∞); for DESC: (∞, sortKey].
+	for i := partCount; i < nCols; i++ {
+		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+		if desc {
+			bounds = append(bounds, columnboundaries{
+				col: col.OrcSortCols[i], lower: scm.NewNil(), lowerInclusive: false,
+				upper: sortKeys[i], upperInclusive: true,
+			})
+		} else {
+			bounds = append(bounds, columnboundaries{
+				col: col.OrcSortCols[i], lower: sortKeys[i], lowerInclusive: true,
+				upper: scm.NewNil(), upperInclusive: false,
+			})
+		}
+	}
+	lower, upperLast := indexFromBoundaries(bounds)
+
+	// Build condition function for post-index filtering (index may return superset).
+	condFn := func(rowVals []scm.Scmer) bool {
+		for i := 0; i < partCount && i < len(rowVals); i++ {
+			if scm.Less(rowVals[i], sortKeys[i]) || scm.Less(sortKeys[i], rowVals[i]) {
+				return false
+			}
+		}
+		cmp := 0
+		for i := partCount; i < nCols && i < len(rowVals) && cmp == 0; i++ {
+			desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+			if scm.Less(rowVals[i], sortKeys[i]) {
+				if desc { cmp = 1 } else { cmp = -1 }
+			} else if scm.Less(sortKeys[i], rowVals[i]) {
+				if desc { cmp = -1 } else { cmp = 1 }
+			}
+		}
+		return cmp >= 0
+	}
+
+	// Parallel invalidation across shards using index-accelerated iteration.
 	shards := t.ActiveShards()
 	var wg sync.WaitGroup
 	wg.Add(len(shards))
@@ -418,47 +463,29 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			if !ok {
 				return
 			}
-			total := s.main_count + uint32(len(s.inserts))
+			s.ensureLoaded()
+			s.ensureMainCount(false)
+			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
-			for idx := uint32(0); idx < total; idx++ {
-				if s.deletions.Get(uint(idx)) {
-					continue
-				}
-				for i := 0; i < nCols; i++ {
-					if sortCSs[i] != nil && idx < s.main_count {
-						rowVals[i] = sortCSs[i].GetValue(idx)
-					} else if idx >= s.main_count {
-						rowVals[i] = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
-					}
-				}
-				// Partition: skip rows in other partitions
-				if partCount > 0 {
-					skip := false
-					for i := 0; i < partCount && i < nCols; i++ {
-						if scm.Less(rowVals[i], sortKeys[i]) || scm.Less(sortKeys[i], rowVals[i]) {
-							skip = true
-							break
-						}
-					}
-					if skip {
+			s.iterateIndex(bounds, lower, upperLast, len(s.inserts), buf[:], func(batch []uint32) bool {
+				for _, idx := range batch {
+					if s.deletions.Get(uint(idx)) {
 						continue
 					}
-				}
-				// Order: skip rows before mutation point
-				cmp := 0
-				for i := partCount; i < nCols && cmp == 0; i++ {
-					desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
-					if scm.Less(rowVals[i], sortKeys[i]) {
-						if desc { cmp = 1 } else { cmp = -1 }
-					} else if scm.Less(sortKeys[i], rowVals[i]) {
-						if desc { cmp = -1 } else { cmp = 1 }
+					// Read sort values for post-index verification
+					for i := 0; i < nCols; i++ {
+						if sortCSs[i] != nil && idx < s.main_count {
+							rowVals[i] = sortCSs[i].GetValue(idx)
+						} else if idx >= s.main_count {
+							rowVals[i] = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
+						}
+					}
+					if condFn(rowVals) {
+						proxy.validMask.Set(uint(idx), false)
 					}
 				}
-				if cmp < 0 {
-					continue
-				}
-				proxy.validMask.Set(uint(idx), false)
-			}
+				return true // continue
+			})
 		}(s)
 	}
 	wg.Wait()
