@@ -19,6 +19,7 @@ package scm
 
 import "sync"
 import "time"
+import "unsafe"
 import "context"
 import "runtime"
 import "github.com/jtolds/gls"
@@ -61,6 +62,86 @@ func AdjustMemStats(delta int64) {
 	cachedStatsMu.Lock()
 	memStatsDelta += delta
 	cachedStatsMu.Unlock()
+}
+
+/* promise: single-value cell */
+
+// NOTE: current implementation is intentionally not thread-safe.
+// It is sufficient for sequential query-plan execution. Fresh promises use a
+// dedicated [2]Scmer backing; (newpromise list) reuses an existing >=2-element
+// slice with zero extra allocation.
+func NewPromise(a ...Scmer) Scmer {
+	var cells []Scmer
+	if len(a) == 0 {
+		cells = make([]Scmer, 2)
+		cells[1] = NewNil()
+		return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 0)}
+	}
+	cells = a[0].Slice()
+	if len(cells) < 2 {
+		panic("newpromise: list backing requires at least 2 elements")
+	}
+	cells[1] = NewNil()
+	return Scmer{(*byte)(unsafe.Pointer(&cells[0])), makeAux(tagPromise, 1)}
+}
+
+// ApplyPromise dispatches a tagPromise call. Called from ApplyEx.
+func ApplyPromise(p Scmer, args []Scmer) Scmer {
+	cells := (*[2]Scmer)(unsafe.Pointer(p.ptr))
+	if len(args) == 0 {
+		panic("promise: at least 1 argument required")
+	}
+	key := args[0].String()
+	switch len(args) {
+	case 1:
+		switch key {
+		case "value":
+			if cells[1].IsNil() {
+				return NewNil()
+			}
+			return cells[0]
+		case "state":
+			return cells[1]
+		case "fail":
+			cells[0] = NewNil()
+			cells[1] = NewBool(false)
+			return NewBool(false)
+		default:
+			panic("promise: unknown operation: " + key)
+		}
+	case 2:
+		if key == "value" {
+			cells[0] = args[1]
+			cells[1] = NewBool(true)
+			return args[1]
+		}
+		if key == "once" {
+			if !cells[1].IsNil() {
+				panic("promise already fulfilled/failed")
+			}
+			cells[0] = args[1]
+			cells[1] = NewBool(true)
+			return args[1]
+		}
+		if key == "fail" {
+			cells[0] = args[1]
+			cells[1] = NewBool(false)
+			return args[1]
+		}
+		panic("promise: unknown operation: " + key)
+	case 3:
+		if key == "once" {
+			if !cells[1].IsNil() {
+				panic(args[2].String())
+			}
+			cells[0] = args[1]
+			cells[1] = NewBool(true)
+			return args[1]
+		}
+		panic("promise: unknown operation: " + key)
+	default:
+		panic("promise: too many arguments")
+	}
 }
 
 /* threadsafe session storage */
@@ -222,6 +303,15 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 
 func init_sync() {
 	DeclareTitle("Sync")
+	Declare(&Globalenv, &Declaration{
+		"newpromise", "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
+		0, 1,
+		[]DeclarationParameter{
+			{"list", "any", "optional: ≥2-element slice to use as backing", nil},
+		}, "func",
+		NewPromise, false, false, nil,
+		nil,
+	})
 	Declare(&Globalenv, &Declaration{
 		"newsession", "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session)",
 		0, 0,

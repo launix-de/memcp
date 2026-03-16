@@ -102,7 +102,7 @@ restart:
 	switch expression.GetTag() {
 	case tagSourceInfo:
 		return evalWithSourceInfo(*expression.SourceInfo(), en)
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure, tagPromise:
 		// literals
 		return expression
 	case tagSymbol:
@@ -435,6 +435,19 @@ restart:
 				args[i] = Eval(x, en)
 			}
 			return fn(id, args...)
+		case tagPromise:
+			if n := len(operands); n <= 4 {
+				var buf [4]Scmer
+				for i := 0; i < n; i++ {
+					buf[i] = Eval(operands[i], en)
+				}
+				return ApplyPromise(procedure, buf[:n])
+			}
+			args := make([]Scmer, len(operands))
+			for i, x := range operands {
+				args[i] = Eval(x, en)
+			}
+			return ApplyPromise(procedure, args)
 		default:
 			panic("Unknown function: " + list[0].String())
 		}
@@ -619,6 +632,8 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		return NewNil()
 	case tagJIT:
 		return procedure.JIT().Native(args...)
+	case tagPromise:
+		return ApplyPromise(procedure, args)
 	default:
 		panic("Unknown function: " + procedure.String())
 	}
@@ -1181,6 +1196,11 @@ func ComputeSize(v Scmer) uint {
 		}
 		sz += ComputeSize(NewProcStruct(jep.Proc))
 		return sz
+	case tagPromise:
+		if auxVal(v.aux) == 0 {
+			return base + goAllocOverhead + 32
+		}
+		return base
 	default:
 		if v.GetTag() >= 100 {
 			return base
