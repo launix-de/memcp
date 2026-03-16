@@ -274,17 +274,41 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	// when the recomputed range ends.
 	isIdentity := analyzeOrcSuffix(col.OrcReduceFn) == OrcSuffixIdentity
 
-	// Single-pass scan_order over ALL rows in sort order.
-	// The reducer walks the validMask and handles three phases:
-	//   1. Valid rows before first invalid: read stored ORC value as accumulator (skip $set)
-	//      Only works for identity reducers. Non-identity must compute every row.
-	//   2. Invalid rows: compute normally via inner reducer + $set + mark valid
-	//   3. Valid rows after recompute: convergence check → $break if values match
-	//      Only for identity reducers.
-	//
-	// This avoids a separate O(N) scan to find the earliest invalid sort key.
-	condCols := []string{}
-	condFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	// Build condition filter. For partitioned ORCs, restrict the scan to the
+	// partition containing the requested row. This avoids scanning all partitions
+	// when only one was invalidated.
+	partCount := analyzeOrcPartition(col)
+	var condCols []string
+	var condFn scm.Scmer
+
+	if partCount > 0 {
+		// Read partition key of the requested row
+		partCols := col.OrcSortCols[:partCount]
+		partKeys := make([]scm.Scmer, partCount)
+		for i, pc := range partCols {
+			requestShard.mu.RLock()
+			cs := requestShard.columns[pc]
+			requestShard.mu.RUnlock()
+			if cs != nil && requestIdx < requestShard.main_count {
+				partKeys[i] = cs.GetValue(requestIdx)
+			} else if requestIdx >= requestShard.main_count {
+				partKeys[i] = requestShard.getDelta(int(requestIdx-requestShard.main_count), pc)
+			}
+		}
+		// Filter: only rows in the same partition
+		condCols = partCols
+		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			for i := 0; i < partCount; i++ {
+				if scm.Less(a[i], partKeys[i]) || scm.Less(partKeys[i], a[i]) {
+					return scm.NewBool(false) // different partition
+				}
+			}
+			return scm.NewBool(true)
+		})
+	} else {
+		condCols = []string{}
+		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	}
 
 	// Callback: $set + $break + stored ORC value + mapCols
 	// During orcRecomputing, GetValue returns nil for invalid rows.
@@ -350,10 +374,12 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	)
 }
 
-// invalidateORCFromSortKey clears validMask bits for all rows whose composite
-// sort key is >= the mutation sort key (or <= for DESC). sortKeys is a list of
-// values corresponding to col.OrcSortCols. Uses composite comparison matching
-// the scan_order sort semantics.
+// invalidateORCFromSortKey clears validMask bits for rows affected by a mutation.
+// sortKeys is a list of values corresponding to col.OrcSortCols.
+//
+// For partitioned ORCs (detected via analyzeOrcPartition), only rows in the
+// SAME partition are invalidated. Other partitions remain valid.
+// For unpartitioned ORCs, all rows from the mutation sort key onwards.
 func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	var col *column
 	for _, c := range t.Columns {
@@ -366,13 +392,12 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 		return
 	}
 
-	// Build comparators for each sort column
 	nCols := len(col.OrcSortCols)
 	if len(sortKeys) < nCols {
 		nCols = len(sortKeys)
 	}
+	partCount := analyzeOrcPartition(col)
 
-	// For each shard, iterate rows and clear validMask for rows at or past the mutation point.
 	for _, s := range t.ActiveShards() {
 		s.mu.RLock()
 		cs := s.columns[colName]
@@ -390,35 +415,52 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			if s.deletions.Get(uint(idx)) {
 				continue
 			}
-			// Composite comparison: row's sort tuple vs mutation sort tuple.
-			// Result: -1 (before), 0 (equal), +1 (after) in sort order.
-			cmp := 0
-			for i := 0; i < nCols && cmp == 0; i++ {
-				var rowVal scm.Scmer
+			// Read row's sort values
+			rowVals := make([]scm.Scmer, nCols)
+			for i := 0; i < nCols; i++ {
 				if sortCSs[i] != nil && idx < s.main_count {
-					rowVal = sortCSs[i].GetValue(idx)
+					rowVals[i] = sortCSs[i].GetValue(idx)
 				} else if idx >= s.main_count {
-					rowVal = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
+					rowVals[i] = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
 				}
-				desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
-				if scm.Less(rowVal, sortKeys[i]) {
-					if desc {
-						cmp = 1 // row < key in DESC = after
-					} else {
-						cmp = -1 // row < key in ASC = before
+			}
+
+			// Partition check: if partitioned, skip rows in OTHER partitions.
+			if partCount > 0 {
+				samePartition := true
+				for i := 0; i < partCount && i < nCols; i++ {
+					if scm.Less(rowVals[i], sortKeys[i]) || scm.Less(sortKeys[i], rowVals[i]) {
+						samePartition = false
+						break
 					}
-				} else if scm.Less(sortKeys[i], rowVal) {
+				}
+				if !samePartition {
+					continue // different partition → skip
+				}
+			}
+
+			// Composite comparison on ORDER columns (after partition prefix):
+			// Only invalidate rows at or past the mutation's order key.
+			cmp := 0
+			for i := partCount; i < nCols && cmp == 0; i++ {
+				desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+				if scm.Less(rowVals[i], sortKeys[i]) {
 					if desc {
-						cmp = -1 // row > key in DESC = before
+						cmp = 1
 					} else {
-						cmp = 1 // row > key in ASC = after
+						cmp = -1
+					}
+				} else if scm.Less(sortKeys[i], rowVals[i]) {
+					if desc {
+						cmp = -1
+					} else {
+						cmp = 1
 					}
 				}
 			}
 			if cmp < 0 {
-				continue // row is before mutation point → skip
+				continue // before mutation's order key within partition → skip
 			}
-			// Row is at or past mutation point → invalidate
 			proxy.validMask.Set(uint(idx), false)
 		}
 	}

@@ -77,12 +77,23 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
 		if !p.validMask.Get(uint(idx)) {
-			// During an active recompute (scan_order reading ORC values for convergence),
-			// return nil for invalid rows instead of triggering re-entry.
-			// The reducer uses nil to detect "this row needs recomputing" vs
-			// "this row has a valid cached value".
+			// During an active recompute (scan_order reading ORC values):
+			// Return nil for invalid rows (reducer uses nil to detect "needs compute").
+			// Return cached value for valid rows (enables Phase 1 skip + Phase 3 convergence).
 			if atomic.LoadInt32(&p.shard.t.orcRecomputing) > 0 {
-				return scm.NewNil()
+				if p.validMask.Get(uint(idx)) {
+					// Valid row: return cached value for convergence check
+					p.mu.RLock()
+					if val, ok := p.delta[idx]; ok {
+						p.mu.RUnlock()
+						return val
+					}
+					p.mu.RUnlock()
+					if p.main != nil {
+						return p.main.GetValue(idx)
+					}
+				}
+				return scm.NewNil() // invalid row
 			}
 			// Invalid row → on-demand incremental recompute
 			p.shard.t.orcMu.Lock()

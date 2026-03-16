@@ -462,6 +462,35 @@ func reorderByFrequency(bounds boundaries, t *table) {
 }
 
 
+// analyzeOrcPartition inspects reduceFn + reduceInit + sortCols to detect
+// whether the ORC uses a partition wrapper. Returns the number of leading
+// sort columns that serve as partition keys (0 = no partitioning).
+//
+// Detection: reduceInit = (list inner_init nil) with exactly 2 elements
+// AND at least 2 sort columns (need partition + order). The first sort
+// column(s) become the partition key, the last is the order column.
+//
+// This correctly distinguishes:
+//   - DENSE_RANK (list 0 nil) + 1 sortCol → 0 (no partition)
+//   - Partitioned ROW_NUMBER (list 0 nil) + 2 sortCols → 1
+//   - Partitioned RANK (list (list 0 0 nil) nil) + 2 sortCols → 1
+func analyzeOrcPartition(col *column) int {
+	if len(col.OrcSortCols) < 2 {
+		return 0
+	}
+	init := col.OrcReduceInit
+	if init.IsNil() || !init.IsSlice() {
+		return 0
+	}
+	items := init.Slice()
+	if len(items) != 2 || !items[1].IsNil() {
+		return 0
+	}
+	// Detected: (list inner_init nil) with 2+ sort columns.
+	// First sort column is the partition key.
+	return 1
+}
+
 // ORC suffix recompute mode classification.
 const (
 	OrcSuffixOpaque         = 0 // can't analyze → full recompute only
