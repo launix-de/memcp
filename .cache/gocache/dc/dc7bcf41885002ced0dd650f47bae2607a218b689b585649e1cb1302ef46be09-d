@@ -1,9 +1,0 @@
-./errors.go
-./go_module_metadata.go
-./ini.go
-./parse.go
-./sections.go
-./strings.go
-./token.go
-./tokenize.go
-./value.go

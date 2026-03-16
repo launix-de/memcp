@@ -1,5 +1,0 @@
-./encode.go
-./header.go
-./path_replace.go
-./query.go
-./uri.go

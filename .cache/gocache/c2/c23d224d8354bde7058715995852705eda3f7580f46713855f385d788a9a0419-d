@@ -1,3 +1,0 @@
-./gzip.go
-./middleware_capture_request_compression.go
-./request_compression.go

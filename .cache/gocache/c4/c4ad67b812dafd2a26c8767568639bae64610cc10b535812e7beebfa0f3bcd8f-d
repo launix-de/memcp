@@ -1,8 +1,0 @@
-./auth.go
-./column.go
-./const.go
-./eof.go
-./err.go
-./greeting.go
-./ok.go
-./statement.go
