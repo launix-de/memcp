@@ -69,10 +69,6 @@ func (s *StorageSCMER) String() string {
 //	NEW magic byte in storages[] (storage.go); keep magic 1 as a legacy
 //	reader forever.
 func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-			var d0 scm.JITValueDesc
-			_ = d0
-			var d1 scm.JITValueDesc
-			_ = d1
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var idxInt scm.JITValueDesc
 			if idx.Loc == scm.LocImm {
@@ -93,30 +89,6 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				ctx.EmitShrRegImm8(idxInt.Reg, 32)
 				ctx.BindReg(idxInt.Reg, &idxInt)
 			}
-			var bbs [1]scm.BBDescriptor
-			bbpos_0_0 := int32(-1)
-			_ = bbpos_0_0
-			lbl0 := ctx.ReserveLabel()
-			bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
-			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
-					ps.General = true
-					return bbs[0].RenderPS(ps)
-				}
-			}
-			bbs[0].VisitCount++
-			if ps.General {
-				if bbs[0].Rendered {
-					ctx.EmitJmp(lbl0)
-					return result
-				}
-				bbs[0].Rendered = true
-				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				bbpos_0_0 = bbs[0].Address
-				ctx.MarkLabel(lbl0)
-				ctx.ResolveFixups()
-			}
-			ctx.ReclaimUntrackedRegs()
 			var d0 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSCMER)(nil).values)
@@ -158,11 +130,13 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.EmitMovRegMem(r5, r4, 0)
 			ctx.EmitMovRegMem(r6, r4, 8)
 			ctx.FreeReg(r4)
-			d1 = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r5, Reg2: r6}
+			d1 := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r5, Reg2: r6}
 			ctx.BindReg(r5, &d1)
 			ctx.BindReg(r6, &d1)
 			ctx.FreeDesc(&idxInt)
-			ctx.ResolveFixups()
+			if d1.Loc == scm.LocImm {
+				if result.Loc == scm.LocAny { return d1 }
+			}
 			if result.Loc == scm.LocAny {
 				result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 				ctx.BindReg(result.Reg, &result)
@@ -191,10 +165,6 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				}
 			}
 			return result
-			return result
-			}
-			ps2 := scm.PhiState{General: false}
-			_ = bbs[0].RenderPS(ps2)
 			return result
 }
 

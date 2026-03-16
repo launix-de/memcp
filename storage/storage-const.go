@@ -47,34 +47,8 @@ func (s *StorageConst) GetValue(i uint32) scm.Scmer {
 func (s *StorageConst) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-			var d0 scm.JITValueDesc
-			_ = d0
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			ctx.FreeDesc(&idx)
-			var bbs [1]scm.BBDescriptor
-			bbpos_0_0 := int32(-1)
-			_ = bbpos_0_0
-			lbl0 := ctx.ReserveLabel()
-			bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
-			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
-					ps.General = true
-					return bbs[0].RenderPS(ps)
-				}
-			}
-			bbs[0].VisitCount++
-			if ps.General {
-				if bbs[0].Rendered {
-					ctx.EmitJmp(lbl0)
-					return result
-				}
-				bbs[0].Rendered = true
-				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				bbpos_0_0 = bbs[0].Address
-				ctx.MarkLabel(lbl0)
-				ctx.ResolveFixups()
-			}
-			ctx.ReclaimUntrackedRegs()
 			var d0 scm.JITValueDesc
 			if thisptr.Loc == scm.LocImm {
 				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageConst)(nil).value)
@@ -93,7 +67,6 @@ func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				ctx.BindReg(r0, &d0)
 				ctx.BindReg(r1, &d0)
 			}
-			ctx.ResolveFixups()
 			if d0.Loc == scm.LocImm {
 				if result.Loc == scm.LocAny { return d0 }
 			}
@@ -125,10 +98,6 @@ func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				}
 			}
 			return result
-			return result
-			}
-			ps1 := scm.PhiState{General: false}
-			_ = bbs[0].RenderPS(ps1)
 			return result
 }
 

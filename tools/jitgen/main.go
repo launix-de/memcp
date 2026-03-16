@@ -2148,18 +2148,8 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 
 // generateClosure tries to generate a JIT emitter closure for the given SSA function.
 // Returns (closureCode, "") on success, or ("", errorDescription) on failure.
-func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) (code string, errMsg string) {
-	defer func() {
-		if r := recover(); r != nil {
-			if os.Getenv("JITGEN_DEBUG_PANIC") == "1" && (dumpOp == "" || dumpOp == opName) {
-				panic(r)
-			}
-			code = ""
-			errMsg = fmt.Sprintf("%v", r)
-		}
-	}()
-
-	g := &codeGen{
+func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter) *codeGen {
+	return &codeGen{
 		vals:            map[string]genVal{},
 		fn:              fn,
 		bbLabels:        map[uint64]string{},
@@ -2178,36 +2168,60 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 		topLevelPkgPath: fn.Pkg.Pkg.Path(),
 		valueRewriter:   rewrite,
 	}
-	fmt.Fprintf(&g.w, "\t\t\t%s\n", generatedBanner)
-	if len(fn.Params) > 0 {
-		g.paramName = fn.Params[0].Name()
-	}
+}
 
-	g.multiBlock = len(fn.Blocks) > 1
+// emitBodyConfig parametrizes the divergent parts of the shared emitter body.
+type emitBodyConfig struct {
+	entryGeneral     bool                 // PhiState{General: ...} at entry (closure: true, storage: false)
+	useReturnPhiRegs bool                 // allocate returnPhiReg/Reg2 for multi-block merge (storage only)
+	bbsDeclPrefix    string               // "scm." for storage package, "" for scm package
+	emitPhiFrameAdj  func(g *codeGen)     // emits phi-frame stack offset adjustments (nil = none)
+}
 
-	// Pre-allocate registers for all phi nodes
+// emitBody generates the shared core: phi allocation, BB renderers, entry call, epilogue.
+// For single-block functions, it skips the BB closure infrastructure entirely.
+func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	g.allocPhiRegs()
-	if g.globalPhiSize > 0 {
-		g.emit("for i := range args {")
-		g.emit("\tif args[i].MemPtr == 0 && (args[i].Loc == LocStack || args[i].Loc == LocStackPair) {")
-		g.emit("\t\targs[i].StackOff += int32(%d)", g.globalPhiSize)
-		g.emit("\t}")
-		g.emit("}")
-		g.emit("if result.MemPtr == 0 && (result.Loc == LocStack || result.Loc == LocStackPair) {")
-		g.emit("\tresult.StackOff += int32(%d)", g.globalPhiSize)
-		g.emit("}")
+	if g.globalPhiSize > 0 && cfg.emitPhiFrameAdj != nil {
+		cfg.emitPhiFrameAdj(g)
 	}
 	g.initAllPhiDescs()
-	g.emit("var bbs [%d]BBDescriptor", len(fn.Blocks))
+
+	// Single-block fast path: no BB closures, no phi state, just emit instructions inline.
+	if len(g.fn.Blocks) == 1 {
+		pinnedArgRegs := g.emitProtectIncomingArgRegs()
+		g.curBlock = 0
+		for _, instr := range g.fn.Blocks[0].Instrs {
+			g.emitInstr(instr)
+			g.freeDeadOperands(instr)
+			if _, isRet := instr.(*ssa.Return); isRet {
+				break
+			}
+		}
+		g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
+		if g.hasStorageIdx {
+			g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
+		}
+		g.emit("return result")
+		return
+	}
+
+	// Multi-block path: full BB closure infrastructure.
+	g.emit("var bbs [%d]%sBBDescriptor", len(g.fn.Blocks), cfg.bbsDeclPrefix)
 	g.emitBBPhiLayout()
 
-	// Ensure result has a concrete location and reserve end label for shared epilogue.
 	if g.multiBlock {
 		g.emit("if result.Loc == LocAny {")
 		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 		g.emit("\tctx.BindReg(result.Reg, &result)")
 		g.emit("\tctx.BindReg(result.Reg2, &result)")
 		g.emit("}")
+		if cfg.useReturnPhiRegs {
+			g.returnPhiReg = g.allocReg()
+			g.returnPhiReg2 = g.allocReg()
+			g.emit("%s := ctx.AllocReg()", g.returnPhiReg)
+			g.emit("%s := ctx.AllocRegExcept(%s)", g.returnPhiReg2, g.returnPhiReg)
+		}
 		g.endLabel = g.allocLabel()
 		g.emit("%s := ctx.ReserveLabel()", g.endLabel)
 	}
@@ -2215,21 +2229,65 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 	g.emitRecursiveBBRenderers()
 	pinnedArgRegs := g.emitProtectIncomingArgRegs()
 	entryPS := g.allocTemp("ps")
-	g.emit("%s := PhiState{General: true}", entryPS)
+	g.emit("%s := %sPhiState{General: %v}", entryPS, cfg.bbsDeclPrefix, cfg.entryGeneral)
 	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
 
-	// Emit fixup resolution and epilogue
+	// Epilogue
 	if g.multiBlock {
 		g.emit("ctx.MarkLabel(%s)", g.endLabel)
+		if cfg.useReturnPhiRegs && g.returnPhiReg != "" && g.returnPhiReg2 != "" {
+			dv := g.allocDesc()
+			g.emit("%s := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, g.returnPhiReg, g.returnPhiReg2)
+			g.emit("ctx.EmitMovPairToResult(&%s, &result)", dv)
+			g.emit("ctx.FreeReg(%s)", g.returnPhiReg)
+			g.emit("ctx.FreeReg(%s)", g.returnPhiReg2)
+		}
 		g.emit("ctx.ResolveFixups()")
 	}
-	// Deallocate unified phi stack frame (patch fixup + emit cleanup)
+	if g.hasStorageIdx {
+		g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
+	}
 	if g.globalPhiSize > 0 {
 		g.emit("ctx.PatchInt32(%s, int32(%d))", g.phiFrameFixup, g.globalPhiSize)
 		g.emit("ctx.EmitAddRSP32(int32(%d))", g.globalPhiSize)
 	}
 	g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
 	g.emit("return result")
+}
+
+func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) (code string, errMsg string) {
+	defer func() {
+		if r := recover(); r != nil {
+			if os.Getenv("JITGEN_DEBUG_PANIC") == "1" && (dumpOp == "" || dumpOp == opName) {
+				panic(r)
+			}
+			code = ""
+			errMsg = fmt.Sprintf("%v", r)
+		}
+	}()
+
+	g := newCodeGen(fn, rewrite)
+	fmt.Fprintf(&g.w, "\t\t\t%s\n", generatedBanner)
+	if len(fn.Params) > 0 {
+		g.paramName = fn.Params[0].Name()
+	}
+
+	g.multiBlock = len(fn.Blocks) > 1
+
+	g.emitBody(emitBodyConfig{
+		entryGeneral: true,
+		bbsDeclPrefix: "",
+		emitPhiFrameAdj: func(g *codeGen) {
+			g.emit("for i := range args {")
+			g.emit("\tif args[i].MemPtr == 0 && (args[i].Loc == LocStack || args[i].Loc == LocStackPair) {")
+			g.emit("\t\targs[i].StackOff += int32(%d)", g.globalPhiSize)
+			g.emit("\t}")
+			g.emit("}")
+			g.emit("if result.MemPtr == 0 && (result.Loc == LocStack || result.Loc == LocStackPair) {")
+			g.emit("\tresult.StackOff += int32(%d)", g.globalPhiSize)
+			g.emit("}")
+		},
+	})
 
 	result := fmt.Sprintf("func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s\t\t}",
 		g.wDecl.String(), injectBindRegCalls(g.w.String()))
@@ -2247,27 +2305,9 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 			errMsg = fmt.Sprintf("%v", r)
 		}
 	}()
-	g := &codeGen{
-		vals:            map[string]genVal{},
-		fn:              fn,
-		bbLabels:        map[uint64]string{},
-		bbPosVars:       map[uint64]string{},
-		bbDone:          map[uint64]bool{},
-		bbQueued:        map[uint64]bool{},
-		inlineCallSeq:   map[uint64]uint32{},
-		phiRegs:         map[string]string{},
-		phiPair:         map[string]bool{},
-		phiTypeTag:      map[string]string{},
-		bbPhiBase:       map[int]int{},
-		bbPhiCount:      map[int]int{},
-		fieldCache:      map[string]genVal{},
-		refCounts:       computeRefCounts(fn),
-		ssaAliases:      map[string]string{},
-		storageMode:     true,
-		typeName:        typeName,
-		topLevelPkgPath: fn.Pkg.Pkg.Path(),
-		valueRewriter:   rewrite,
-	}
+	g := newCodeGen(fn, rewrite)
+	g.storageMode = true
+	g.typeName = typeName
 	fmt.Fprintf(&g.w, "\t%s\n", generatedBanner)
 	g.multiBlock = len(fn.Blocks) > 1
 	g.returnPhiReg = ""
@@ -2313,74 +2353,22 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 		g.vals[fn.Params[1].Name()] = genVal{goVar: "idxInt", isDesc: true}
 	}
 
-	// Pre-allocate registers for all phi nodes
-	g.allocPhiRegs()
-	if g.globalPhiSize > 0 {
-		g.emit("if thisptr.MemPtr == 0 && (thisptr.Loc == LocStack || thisptr.Loc == LocStackPair) {")
-		g.emit("\tthisptr.StackOff += int32(%d)", g.globalPhiSize)
-		g.emit("}")
-		g.emit("if idxInt.MemPtr == 0 && (idxInt.Loc == LocStack || idxInt.Loc == LocStackPair) {")
-		g.emit("\tidxInt.StackOff += int32(%d)", g.globalPhiSize)
-		g.emit("}")
-		g.emit("if result.MemPtr == 0 && (result.Loc == LocStack || result.Loc == LocStackPair) {")
-		g.emit("\tresult.StackOff += int32(%d)", g.globalPhiSize)
-		g.emit("}")
-	}
-	g.initAllPhiDescs()
-	g.emit("var bbs [%d]scm.BBDescriptor", len(fn.Blocks))
-	g.emitBBPhiLayout()
-
-	if g.multiBlock {
-		g.emit("if result.Loc == LocAny {")
-		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
-		g.emit("\tctx.BindReg(result.Reg, &result)")
-		g.emit("\tctx.BindReg(result.Reg2, &result)")
-		g.emit("}")
-		// Register-based return phi for multi-block storage emitters.
-		g.returnPhiReg = g.allocReg()
-		g.returnPhiReg2 = g.allocReg()
-		g.emit("%s := ctx.AllocReg()", g.returnPhiReg)
-		g.emit("%s := ctx.AllocRegExcept(%s)", g.returnPhiReg2, g.returnPhiReg)
-		g.endLabel = g.allocLabel()
-		g.emit("%s := ctx.ReserveLabel()", g.endLabel)
-	}
-
-	g.emitRecursiveBBRenderers()
-	pinnedArgRegs := g.emitProtectIncomingArgRegs()
-	entryPS := g.allocTemp("ps")
-	g.emit("%s := PhiState{General: false}", entryPS)
-	g.emit("_ = bbs[0].RenderPS(%s)", entryPS)
-
-	if g.multiBlock {
-		g.emit("ctx.MarkLabel(%s)", g.endLabel)
-		if g.returnPhiReg != "" && g.returnPhiReg2 != "" {
-			dv := g.allocDesc()
-			g.emit("%s := JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, g.returnPhiReg, g.returnPhiReg2)
-			g.emit("ctx.EmitMovPairToResult(&%s, &result)", dv)
-			g.emit("ctx.FreeReg(%s)", g.returnPhiReg)
-			g.emit("ctx.FreeReg(%s)", g.returnPhiReg2)
-		}
-		g.emit("ctx.ResolveFixups()")
-	}
-	if g.hasStorageIdx {
-		g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
-		if !g.multiBlock {
-			// Keep Go return-checker happy when single-block body already emitted
-			// returns above: this tail return is unreachable but well-formed.
-			g.emit("return result")
-		}
-	}
-	// Deallocate unified phi stack frame (patch fixup + emit cleanup)
-	if g.globalPhiSize > 0 {
-		g.emit("ctx.PatchInt32(%s, int32(%d))", g.phiFrameFixup, g.globalPhiSize)
-		g.emit("ctx.EmitAddRSP32(int32(%d))", g.globalPhiSize)
-	}
-	g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
-	if g.multiBlock {
-		g.emit("return result")
-	} else if !g.hasStorageIdx {
-		g.emit("return result")
-	}
+	g.emitBody(emitBodyConfig{
+		entryGeneral:     false,
+		useReturnPhiRegs: true,
+		bbsDeclPrefix:    "scm.",
+		emitPhiFrameAdj: func(g *codeGen) {
+			g.emit("if thisptr.MemPtr == 0 && (thisptr.Loc == LocStack || thisptr.Loc == LocStackPair) {")
+			g.emit("\tthisptr.StackOff += int32(%d)", g.globalPhiSize)
+			g.emit("}")
+			g.emit("if idxInt.MemPtr == 0 && (idxInt.Loc == LocStack || idxInt.Loc == LocStackPair) {")
+			g.emit("\tidxInt.StackOff += int32(%d)", g.globalPhiSize)
+			g.emit("}")
+			g.emit("if result.MemPtr == 0 && (result.Loc == LocStack || result.Loc == LocStackPair) {")
+			g.emit("\tresult.StackOff += int32(%d)", g.globalPhiSize)
+			g.emit("}")
+		},
+	})
 
 	code = g.wDecl.String() + g.w.String()
 	// In storage mode, generated code goes in the storage package and needs scm. prefix

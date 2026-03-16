@@ -1526,95 +1526,60 @@ func init_jit() {
 			return NewBool(a[0].GetTag() == tagJIT)
 		},
 		true, false, nil, func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			var d0 JITValueDesc
-			_ = d0
-			var d1 JITValueDesc
-			_ = d1
-			var d2 JITValueDesc
-			_ = d2
 			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-			var bbs [1]BBDescriptor
-			bbpos_0_0 := int32(-1)
-			_ = bbpos_0_0
-			lbl0 := ctx.ReserveLabel()
-			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
-			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
-					ps.General = true
-					return bbs[0].RenderPS(ps)
-				}
-			}
-			bbs[0].VisitCount++
-			if ps.General {
-				if bbs[0].Rendered {
-					ctx.EmitJmp(lbl0)
-					return result
-				}
-				bbs[0].Rendered = true
-				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				bbpos_0_0 = bbs[0].Address
-				ctx.MarkLabel(lbl0)
-				ctx.ResolveFixups()
-			}
-			ctx.ReclaimUntrackedRegs()
-			d0 = args[0]
-			d0.ID = 0
-			d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
-			ctx.FreeDesc(&d0)
-			ctx.EnsureDesc(&d1)
-			var d2 JITValueDesc
-			if d1.Loc == LocImm {
-				d2 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(11))}
-			} else {
-				r0 := ctx.AllocReg()
-				ctx.EmitCmpRegImm32(d1.Reg, 11)
-				ctx.EmitSetcc(r0, CcE)
-				d2 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
-				ctx.BindReg(r0, &d2)
-			}
-			ctx.FreeDesc(&d1)
-			ctx.EnsureDesc(&d2)
-			ctx.ResolveFixups()
-			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				ctx.BindReg(result.Reg, &result)
-				ctx.BindReg(result.Reg2, &result)
-			}
-			if d2.Loc == LocImm {
-				ctx.EmitMakeBool(result, d2)
-			} else {
-				ctx.EmitMakeBool(result, d2)
-				ctx.FreeReg(d2.Reg)
-			}
-			result.Type = tagBool
-			return result
-			return result
-			}
-			argPinned3 := make([]Reg, 0, len(args)*2)
+			argPinned0 := make([]Reg, 0, len(args)*2)
 			seenArgRegs := make(map[Reg]bool)
 			for _, ai := range args {
 				if ai.Loc == LocReg {
 					if !seenArgRegs[ai.Reg] {
 						ctx.ProtectReg(ai.Reg)
 						seenArgRegs[ai.Reg] = true
-						argPinned3 = append(argPinned3, ai.Reg)
+						argPinned0 = append(argPinned0, ai.Reg)
 					}
 				} else if ai.Loc == LocRegPair {
 					if !seenArgRegs[ai.Reg] {
 						ctx.ProtectReg(ai.Reg)
 						seenArgRegs[ai.Reg] = true
-						argPinned3 = append(argPinned3, ai.Reg)
+						argPinned0 = append(argPinned0, ai.Reg)
 					}
 					if !seenArgRegs[ai.Reg2] {
 						ctx.ProtectReg(ai.Reg2)
 						seenArgRegs[ai.Reg2] = true
-						argPinned3 = append(argPinned3, ai.Reg2)
+						argPinned0 = append(argPinned0, ai.Reg2)
 					}
 				}
 			}
-			ps4 := PhiState{General: true}
-			_ = bbs[0].RenderPS(ps4)
-			for _, r := range argPinned3 {
+			d1 := args[0]
+			d1.ID = 0
+			d2 := ctx.EmitGetTagDesc(&d1, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d1)
+			ctx.EnsureDesc(&d2)
+			var d3 JITValueDesc
+			if d2.Loc == LocImm {
+				d3 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d2.Imm.Int()) == uint64(11))}
+			} else {
+				r0 := ctx.AllocReg()
+				ctx.EmitCmpRegImm32(d2.Reg, 11)
+				ctx.EmitSetcc(r0, CcE)
+				d3 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+				ctx.BindReg(r0, &d3)
+			}
+			ctx.FreeDesc(&d2)
+			ctx.EnsureDesc(&d3)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
+			}
+			if d3.Loc == LocImm {
+				ctx.EmitMakeBool(result, d3)
+			} else {
+				ctx.EmitMakeBool(result, d3)
+				ctx.FreeReg(d3.Reg)
+			}
+			result.Type = tagBool
+			return result
+			for _, r := range argPinned0 {
 				ctx.UnprotectReg(r)
 			}
 			return result
