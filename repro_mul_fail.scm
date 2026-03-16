@@ -1,0 +1,5 @@
+(settings "JITLog" true)
+(print "jit" ((jit (lambda (a b) (* a b))) 6 7))
+(print "int" (* 6 7))
+(print "jitf" ((jit (lambda (a b) (* a b))) 1.5 2.0))
+(print "flt" (* 1.5 2.0))

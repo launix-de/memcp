@@ -1,0 +1,5 @@
+(print ((jit (lambda (a b) (- a b))) 10 3))
+(print ((jit (lambda (a b) (- a b))) 20 3))
+(print ((jit (lambda (a b) (- a b))) 20 10))
+(print ((jit (lambda (a b) (- a b))) 5 1))
+(print ((jit (lambda (a b) (- a b))) 1 5))

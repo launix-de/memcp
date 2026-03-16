@@ -1,0 +1,14 @@
+./api_client.go
+./api_op_GetDynamicData.go
+./api_op_GetIAMInfo.go
+./api_op_GetInstanceIdentityDocument.go
+./api_op_GetMetadata.go
+./api_op_GetRegion.go
+./api_op_GetToken.go
+./api_op_GetUserData.go
+./auth.go
+./doc.go
+./endpoints.go
+./go_module_metadata.go
+./request_middleware.go
+./token_provider.go

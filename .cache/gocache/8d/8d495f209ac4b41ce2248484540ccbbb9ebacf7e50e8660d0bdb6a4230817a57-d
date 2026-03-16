@@ -1,0 +1,15 @@
+./and.go
+./atom.go
+./charmap.go
+./empty.go
+./end.go
+./fastpath.go
+./kleene.go
+./many.go
+./maybe.go
+./not.go
+./or.go
+./parser.go
+./regex.go
+./rest.go
+./scanner.go

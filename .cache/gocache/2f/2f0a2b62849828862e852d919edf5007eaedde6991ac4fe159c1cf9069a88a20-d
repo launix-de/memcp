@@ -1,0 +1,4 @@
+./middleware.go
+./presign_middleware.go
+./stream.go
+./v4.go

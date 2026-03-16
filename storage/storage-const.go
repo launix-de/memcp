@@ -45,6 +45,12 @@ func (s *StorageConst) GetValue(i uint32) scm.Scmer {
 
 func (s *StorageConst) GetCachedReader() ColumnReader { return s }
 
+func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	// Constant column: return the value as an immediate — no code emitted.
+	ctx.FreeDesc(&idx)
+	return scm.JITValueDesc{Loc: scm.LocImm, Imm: s.value}
+}
+
 func (s *StorageConst) prepare()                                  {}
 func (s *StorageConst) scan(i uint32, value scm.Scmer)            {}
 func (s *StorageConst) proposeCompression(i uint32) ColumnStorage { return nil }

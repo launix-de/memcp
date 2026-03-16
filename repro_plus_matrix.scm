@@ -1,0 +1,6 @@
+(define f (jit (lambda (a b) (+ a b))))
+(print "3+4=" (f 3 4))
+(print "-1+1=" (f -1 1))
+(print "100+200=" (f 100 200))
+(print "1+2.5=" (f 1 2.5))
+(print "2.5+3.5=" (f 2.5 3.5))

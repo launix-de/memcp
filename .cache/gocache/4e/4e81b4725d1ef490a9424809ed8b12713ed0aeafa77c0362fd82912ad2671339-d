@@ -1,0 +1,5 @@
+./build.go
+./doc.go
+./gc.go
+./read.go
+./zcgo.go

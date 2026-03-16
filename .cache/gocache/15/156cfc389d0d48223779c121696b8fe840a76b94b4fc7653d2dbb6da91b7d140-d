@@ -1,0 +1,14 @@
+./auth_scheme_preference.go
+./config.go
+./defaultsmode.go
+./doc.go
+./env_config.go
+./generate.go
+./go_module_metadata.go
+./load_options.go
+./local.go
+./provider.go
+./resolve.go
+./resolve_bearer_token.go
+./resolve_credentials.go
+./shared_config.go

@@ -1,0 +1,13 @@
+(begin
+  (settings "JITLog" false)
+  (define f1 (jit (lambda (a b) (+ a b))))
+  (define f2 (jit (lambda (a b) (+ b a))))
+  (define f3 (jit (lambda (a b) (+ a 1))))
+  (define f4 (jit (lambda (a b) (+ b 1))))
+  (define f5 (jit (lambda (a b) (+ a b 1))))
+  (print (list "f1" (f1 3 4)))
+  (print (list "f2" (f2 3 4)))
+  (print (list "f3" (f3 3 4)))
+  (print (list "f4" (f4 3 4)))
+  (print (list "f5" (f5 3 4)))
+)

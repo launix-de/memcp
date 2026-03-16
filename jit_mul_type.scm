@@ -1,0 +1,5 @@
+(set r ((jit (lambda (x) (* x 1))) 5))
+(print r)
+(print (int? r))
+(print (number? r))
+(print (string r))

@@ -1,0 +1,5 @@
+./bearer_token_adapter.go
+./bearer_token_signer_adapter.go
+./credentials_adapter.go
+./smithy.go
+./v4signer_adapter.go

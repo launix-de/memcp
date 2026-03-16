@@ -1,0 +1,5 @@
+(print "jit1" ((jit (lambda (a) (coalesce a))) 42))
+(print "jit2" ((jit (lambda (a b) (coalesce a b))) nil 42))
+(print "jit3" ((jit (lambda (a b c) (coalesce a b c))) nil false 42))
+(print "jit4" ((jit (lambda (a b c) (coalesce a b c))) 5 false 42))
+(exit)

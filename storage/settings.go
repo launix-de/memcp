@@ -44,14 +44,19 @@ type SettingsT struct {
 	MetricsTracing         bool  // when true, periodically insert metrics into system.perf_metrics
 	MetricsTracingInterval int   // interval in seconds (0 = default 60s)
 	ShutdownDrainSeconds   int   // seconds to wait for in-flight requests during shutdown (0 = default 10s)
-	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
 	ScanDebugging          bool  // when true, log every scan/scan_order: db+table+boundaries+index; also overrides AnalyzeMinItems for scan statistics
 	ExplainWidth           int   // max chars before EXPLAIN pretty-prints a sub-expression on multiple lines (0 = default 20)
 	ErrorQueryLog          bool  // when true, log failed queries to system_statistic.errors
 	MaxErrorQueryLog       int   // max rows in error log (0 = unlimited)
 }
 
-var Settings SettingsT = SettingsT{false, false, false, false, 10, "safe", 60000, 50, 0, 0, 0, 0, false, 0, 0}
+var Settings SettingsT = SettingsT{
+	PartitionMaxDimensions: 10,
+	DefaultEngine:          "safe",
+	ShardSize:              60000,
+	AnalyzeMinItems:        50,
+	ExplainWidth:           20,
+}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -83,7 +88,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("MetricsTracing"), scm.NewBool(Settings.MetricsTracing),
 			scm.NewString("MetricsTracingInterval"), scm.NewInt(int64(Settings.MetricsTracingInterval)),
 			scm.NewString("ShutdownDrainSeconds"), scm.NewInt(int64(Settings.ShutdownDrainSeconds)),
-			scm.NewString("LogJIT"), scm.NewBool(Settings.LogJIT),
+			scm.NewString("LogJIT"), scm.NewBool(Settings.JITLog),
 			scm.NewString("ScanDebugging"), scm.NewBool(Settings.ScanDebugging),
 			scm.NewString("ExplainWidth"), scm.NewInt(int64(Settings.ExplainWidth)),
 			scm.NewString("ErrorQueryLog"), scm.NewBool(Settings.ErrorQueryLog),
@@ -124,7 +129,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		case "ShutdownDrainSeconds":
 			return scm.NewInt(int64(Settings.ShutdownDrainSeconds))
 		case "LogJIT":
-			return scm.NewBool(Settings.LogJIT)
+			return scm.NewBool(Settings.JITLog)
 		case "ScanDebugging":
 			return scm.NewBool(Settings.ScanDebugging)
 		case "ExplainWidth":
@@ -183,8 +188,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		case "ShutdownDrainSeconds":
 			Settings.ShutdownDrainSeconds = scm.ToInt(a[1])
 		case "LogJIT":
-			Settings.LogJIT = scm.ToBool(a[1])
-			scm.LogJIT = Settings.LogJIT
+			Settings.JITLog = scm.ToBool(a[1])
+			scm.JITLog = Settings.JITLog
 		case "ScanDebugging":
 			Settings.ScanDebugging = scm.ToBool(a[1])
 		case "ExplainWidth":

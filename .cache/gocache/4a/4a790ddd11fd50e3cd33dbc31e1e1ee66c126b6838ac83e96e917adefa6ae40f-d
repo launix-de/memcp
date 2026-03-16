@@ -1,0 +1,4 @@
+./auth.go
+./client.go
+./endpoints.go
+./middleware.go

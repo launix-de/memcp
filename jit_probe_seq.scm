@@ -1,0 +1,8 @@
+(settings "JITLog" false)
+(print "1" ((jit (lambda (x) (+ x 1))) 4))
+(print "2" ((jit (lambda (x) (* x 2))) 5))
+(print "3" ((jit (lambda (a b) (+ a b))) 3 4))
+(print "4" ((jit (lambda (a b) (* a b))) 3 4))
+(print "5" ((jit (lambda (a b) (- a b))) 10 3))
+(print "6" ((jit (lambda (x) (* (+ x 1) 2))) 4))
+(print "DONE")

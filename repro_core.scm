@@ -1,0 +1,7 @@
+(define jit_add_desc (jit (lambda (a b) (+ a b))))
+(print "eval=" (eval (list jit_add_desc 2 5)))
+(print "apply=" (apply jit_add_desc '(2 5)))
+(print "ab=" ((jit (lambda (a b) (+ a b))) 3 4))
+(print "strlen1=" ((jit (lambda (a) (+ (strlen a) 1))) "hello"))
+(print "iif=" ((jit (lambda (a b) (+ a b))) 1 2.5))
+(print "fff=" ((jit (lambda (a b) (+ a b))) 2.5 3.5))

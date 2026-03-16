@@ -1,0 +1,7 @@
+./bits.go
+./crc.go
+./format.go
+./lzmafilter.go
+./none-check.go
+./reader.go
+./writer.go

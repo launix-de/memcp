@@ -26,8 +26,6 @@ Copyright (C) 2013  Pieter Kelchtermans (originally licensed unter WTFPL 2.0)
 package scm
 
 import "fmt"
-import "runtime"
-import "sync"
 
 // optimizeMap is the optimizer hook for `map`. It applies default optimization
 // (including FirstParameterMutable swap to map_mut), then fuses

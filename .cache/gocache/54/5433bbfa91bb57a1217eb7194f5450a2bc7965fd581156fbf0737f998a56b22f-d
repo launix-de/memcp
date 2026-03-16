@@ -1,0 +1,6 @@
+./context.go
+./gen_sym.go
+./gid.go
+./id_pool.go
+./stack_tags.go
+./stack_tags_main.go

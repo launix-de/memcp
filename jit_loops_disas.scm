@@ -1,0 +1,7 @@
+(settings "JITLog" true)
+(print "PLUS")
+(jit (lambda (a b c d) (+ a b c d)))
+(print "MUL")
+(jit (lambda (a b c d) (* a b c d)))
+(print "MINUS")
+(jit (lambda (a b c d) (- a b c d)))

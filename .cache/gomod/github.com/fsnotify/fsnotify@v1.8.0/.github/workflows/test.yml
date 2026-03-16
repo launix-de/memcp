@@ -1,0 +1,183 @@
+name: 'test'
+on:
+  pull_request:
+    paths: ['**.go', 'go.mod', '.github/workflows/*']
+  push:
+    branches: ['main', 'aix']
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ['ubuntu-20.04', 'ubuntu-latest']
+        go: ['1.17', '1.23']
+    runs-on: '${{ matrix.os }}'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-go@v5'
+        with:
+          go-version: '${{ matrix.go }}'
+      - name: test
+        run: |
+          FSNOTIFY_BUFFER=4096 go test -parallel 1 -race    ./...
+                               go test -parallel 1 -race    ./...
+          FSNOTIFY_DEBUG=1     go test -parallel 1 -race -v ./...
+
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ['windows-latest']
+        go: ['1.17', '1.23']
+    runs-on: '${{ matrix.os }}'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-go@v5'
+        with:
+          go-version: '${{ matrix.go }}'
+      - name: test
+        run: |
+          go test -parallel 1 -race    ./...
+
+          $Env:FSNOTIFY_BUFFER = 4096
+          go test -parallel 1 -race    ./...
+
+          $Env:FSNOTIFY_DEBUG = 1
+          go test -parallel 1 -race -v ./...
+
+  # Test gccgo
+  # Needs gccgo 13, which should be available in Ubuntu 24.04.
+  # gcc:
+  #   runs-on: 'ubuntu-22.04'
+  #   name:    'test (ubuntu-22.04, gccgo 12.1)'
+  #   steps:
+  #     - uses: 'actions/checkout@v4'
+  #     - name: test
+  #       run: |
+  #         sudo apt-get -y install gccgo-12
+  #         FSNOTIFY_BUFFER=4096 go-12 test -parallel 1    ./...
+  #                              go-12 test -parallel 1    ./...
+  #         FSNOTIFY_DEBUG=1     go-12 test -parallel 1 -v ./...
+
+  # Test only the latest Go version on macOS; we use the macOS builders for BSD
+  # and illumos, and GitHub doesn't allow many of them to run concurrently. If
+  # it works on Windows and Linux with Go 1.17, then it probably does on macOS
+  # too.
+  macos:
+    name: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ['macos-12', 'macos-latest']
+    runs-on: '${{ matrix.os }}'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-go@v5'
+        with:
+          go-version: '1.23'
+      - name: test
+        run: |
+          FSNOTIFY_BUFFER=4096 go test -parallel 1 -race    ./...
+                               go test -parallel 1 -race    ./...
+          FSNOTIFY_DEBUG=1     go test -parallel 1 -race -v ./...
+
+  # OpenBSD; no -race as the VM doesn't include the comp set.
+  #
+  # TODO: should probably add this, but on my local machine the tests time out
+  #       with -race as the waits aren't long enough (OpenBSD is kind of slow),
+  #       so should probably look into that first. Go 1.19 is supposed to have a
+  #       much faster race detector, so maybe waiting until we have that is
+  #       enough.
+  openbsd:
+    runs-on: 'ubuntu-latest'
+    name: 'test (openbsd, 1.17)'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - name: 'test (openbsd, 1.17)'
+        id:   'openbsd'
+        uses: 'vmactions/openbsd-vm@v1'
+        with:
+          prepare: pkg_add go
+          run: |
+            useradd -mG wheel action
+            FSNOTIFY_BUFFER=4096 su action -c 'go test -parallel 1    ./...'
+                                 su action -c 'go test -parallel 1    ./...'
+            FSNOTIFY_DEBUG=1     su action -c 'go test -parallel 1 -v ./...'
+
+  # NetBSD
+  netbsd:
+    runs-on: 'ubuntu-latest'
+    name: 'test (netbsd, 1.21)'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - name: 'test (netbsd, 1.21)'
+        id:   'netbsd'
+        uses: 'vmactions/netbsd-vm@v1'
+        with:
+          prepare: pkg_add go
+          # TODO: no -race for the same reason as OpenBSD (the timing; it does run).
+          run: |
+            useradd -mG wheel action
+            FSNOTIFY_BUFFER=4096 su action -c '/usr/pkg/bin/go??? test -parallel 1    ./...'
+                                 su action -c '/usr/pkg/bin/go??? test -parallel 1    ./...'
+            FSNOTIFY_DEBUG=1     su action -c '/usr/pkg/bin/go??? test -parallel 1 -v ./...'
+
+  # DragonFlyBSD
+  dragonflybsd:
+    runs-on: 'ubuntu-latest'
+    name: 'test (dragonflybsd, 1.20)'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - name: 'test (dragonflybsd, 1.20)'
+        id:   'dragonflybsd'
+        uses: 'vmactions/dragonflybsd-vm@v1'
+        with:
+          prepare: pkg install -y go
+          # TODO: no -race for the same reason as OpenBSD (the timing; it does run).
+          run: |
+            pw user add -mG wheel -n action
+            env FSNOTIFY_BUFFER=4096 su action -c 'go test -parallel 1    ./...'
+                                     su action -c 'go test -parallel 1    ./...'
+            env FSNOTIFY_DEBUG=1     su action -c 'go test -parallel 1 -v ./...'
+
+  # illumos
+  illumos:
+    runs-on: 'ubuntu-latest'
+    name: 'test (illumos, 1.22)'
+    steps:
+    - uses: 'actions/checkout@v4'
+    - name: 'test (illumos, 1.22)'
+      id:   'illumos'
+      uses: 'vmactions/omnios-vm@v1'
+      with:
+        prepare: pkg install go-122
+        run: |
+          useradd action
+          export GOCACHE=/tmp/go-cache
+          export GOPATH=/tmp/go-path
+          FSNOTIFY_BUFFER=4096 su action -c '/opt/ooce/go-1.22/bin/go test -parallel 1    ./...'
+                               su action -c '/opt/ooce/go-1.22/bin/go test -parallel 1    ./...'
+          FSNOTIFY_DEBUG=1     su action -c '/opt/ooce/go-1.22/bin/go test -parallel 1 -v ./...'
+
+
+  # Solaris
+  # TODO: latest version is go 1.7(!) Need to find a good way to install a more
+  # recent version; the go.dev doesn't have binaries for Solaris.
+  # solaris:
+  #   runs-on: 'ubuntu-latest'
+  #   name: 'test (solaris, 1.17)'
+  #   steps:
+  #   - uses: 'actions/checkout@v4'
+  #   - name: 'test (solaris, 1.17)'
+  #     id:   'solaris'
+  #     uses: 'vmactions/solaris-vm@v1'
+  #     with:
+  #       prepare: pkg install pkg://solaris/developer/golang-17
+  #       run: |
+  #         useradd action
+  #         export GOCACHE=/tmp/go-cache
+  #         export GOPATH=/tmp/go-path
+  #         FSNOTIFY_BUFFER=4096 su action -c 'go test -parallel 1    ./...'
+  #                              su action -c 'go test -parallel 1    ./...'
+  #         FSNOTIFY_DEBUG=1     su action -c 'go test -parallel 1 -v ./...'

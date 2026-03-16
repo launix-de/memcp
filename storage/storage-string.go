@@ -373,7 +373,8 @@ type StorageString struct {
 	dictionary string
 	starts     StorageInt
 	lens       StorageInt
-	nodict     bool `jit:"immutable-after-finish"` // disable values array
+	nodict     bool       // disable values array
+	format     StringFormat
 
 	// helpers (scan/build phase only)
 	sb           strings.Builder

@@ -1,0 +1,5 @@
+(print "interp-coalesce" ((lambda (a b c) (coalesce a b c)) nil false 42))
+(print "jit-coalesce" ((jit (lambda (a b c) (coalesce a b c))) nil false 42))
+(print "interp-coalesceNil" ((lambda (a b c) (coalesceNil a b c)) nil nil 42))
+(print "jit-coalesceNil" ((jit (lambda (a b c) (coalesceNil a b c))) nil nil 42))
+(exit)

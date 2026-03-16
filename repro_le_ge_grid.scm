@@ -1,0 +1,6 @@
+(print ((jit (lambda (a b) (<= a b))) 3 3))
+(print ((jit (lambda (a b) (<= a b))) 3 5))
+(print ((jit (lambda (a b) (<= a b))) 5 3))
+(print ((jit (lambda (a b) (>= a b))) 3 3))
+(print ((jit (lambda (a b) (>= a b))) 3 5))
+(print ((jit (lambda (a b) (>= a b))) 5 3))

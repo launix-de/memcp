@@ -1,0 +1,6 @@
+(define jit_add_desc (jit (lambda (a b) (+ a b))))
+(print (equal? (eval (list jit_add_desc 2 5)) 7))
+(print (equal? (apply jit_add_desc '(2 5)) 7))
+(print ((jit (lambda (x) (+ x 1))) 4))
+(print ((jit (lambda (x) (- x 3))) 10))
+(print ((jit (lambda (x) (* x 2))) 5))

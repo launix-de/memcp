@@ -1,0 +1,7 @@
+./credentials.go
+./error.go
+./go_module_metadata.go
+./middleware.go
+./presign_middleware.go
+./smithy.go
+./v4a.go

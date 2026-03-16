@@ -1,0 +1,4 @@
+./invoke.go
+./invoke_unix.go
+./vendor.go
+./version.go

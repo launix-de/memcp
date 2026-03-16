@@ -16,6 +16,17 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+import (
+	"bufio"
+	"math"
+	"os"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+	"unsafe"
+)
+
 // ActiveHTTPConnections tracks the current number of active HTTP connections.
 // Incremented/decremented via ConnState callback — single atomic, no mutex.
 var ActiveHTTPConnections int64

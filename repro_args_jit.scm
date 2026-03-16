@@ -1,0 +1,5 @@
+(settings "JITLog" false)
+(print ((jit (lambda (a b) a)) 1 7))
+(print ((jit (lambda (a b) b)) 1 7))
+(print ((jit (lambda (a b) (+ a 0))) 1 7))
+(print ((jit (lambda (a b) (+ b 0))) 1 7))

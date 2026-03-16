@@ -1,0 +1,6 @@
+./array.go
+./encoder.go
+./map.go
+./middleware.go
+./object.go
+./value.go

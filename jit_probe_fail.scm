@@ -1,0 +1,8 @@
+(print "start")
+(print "plain (+ 4 1): " (+ 4 1))
+(print "jit (x+1) 4: " ((jit (lambda (x) (+ x 1))) 4))
+(print "plain (* 5 2): " (* 5 2))
+(print "jit (x*2) 5: " ((jit (lambda (x) (* x 2))) 5))
+(print "plain substr: " (substr "hello" 1 3))
+(print "jit substr: " ((jit (lambda (s) (substr s 1 3))) "hello"))
+(print "done")

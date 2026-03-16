@@ -1,0 +1,5 @@
+(settings "JITLog" true)
+(print "STRLEN_CONST_PLUS1")
+(jit (lambda () (+ (strlen "abcdef") 1)))
+(print "STRLEN_CONST_ONLY")
+(jit (lambda () (strlen "abcdef")))

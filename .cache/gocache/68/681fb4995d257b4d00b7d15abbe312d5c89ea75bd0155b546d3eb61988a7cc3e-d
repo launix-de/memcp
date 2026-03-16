@@ -1,0 +1,2 @@
+./main.go
+./ssa_per_instr_emit.go

@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -172,6 +173,27 @@ const (
 // TagDateEncodeVal encodes a unix timestamp and zone_id into the 56-bit val for tagDate.
 func TagDateEncodeVal(unix int64, zoneID int) uint64 {
 	return (uint64(zoneID)&tagDateZoneMask)<<tagDateUnixBits | (uint64(unix) & tagDateUnixMask)
+}
+
+// TagDateDecodeUnix extracts the unix timestamp (signed, seconds since epoch) from a tagDate val.
+func TagDateDecodeUnix(val uint64) int64 {
+	raw := val & tagDateUnixMask
+	// sign-extend from bit 44
+	return int64(raw<<(64-tagDateUnixBits)) >> (64 - tagDateUnixBits)
+}
+
+// TagDateDecodeZone extracts the zone_id from a tagDate val.
+func TagDateDecodeZone(val uint64) int {
+	return int((val >> tagDateUnixBits) & tagDateZoneMask)
+}
+
+func NewDate(unixts int64) Scmer {
+	return Scmer{nil, makeAux(tagDate, TagDateEncodeVal(unixts, 0))}
+}
+
+// NewDateWithZone creates a tagDate value with an explicit zone_id (1..2047 = index in system.timezones).
+func NewDateWithZone(unixts int64, zoneID int) Scmer {
+	return Scmer{nil, makeAux(tagDate, TagDateEncodeVal(unixts, zoneID))}
 }
 
 // signExtend56 sign-extends a 56-bit two's complement value to int64.
@@ -635,7 +657,7 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		}
 		return "false", dst
 	case tagDate:
-		return time.Unix(signExtend56(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05")
+		return time.Unix(signExtend56(auxVal(s.aux)), 0).UTC().Format("2006-01-02 15:04:05"), dst
 	case tagNil:
 		return "nil", dst
 	case tagFunc:

@@ -1072,16 +1072,37 @@ type breakSentinel struct{}
 // processMainBlock/processDeltaBlock – tight loops suitable for JIT compilation.
 // For remote shards, Stream() will be backed by an RPC returning the accumulator per batch.
 type ShardMapReducer struct {
-	shard       *storageShard
-	mainCols    []ColumnStorage // direct main storage access (nil for $update cols)
-	colNames    []string        // column names for delta getDelta access
-	isUpdate    []bool          // true for $update columns
-	args        []scm.Scmer     // pre-allocated args buffer (interpreted fallback)
-	mapFn       func(...scm.Scmer) scm.Scmer
-	reduceFn    func(...scm.Scmer) scm.Scmer
-	mapScmer    scm.Scmer // original Scmer for network serialization
-	reduceScmer scm.Scmer // original Scmer for network serialization
-	mainCount   uint32
+	shard           *storageShard
+	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate/$increment cols)
+	colNames        []string               // column names for delta getDelta access
+	isUpdate        []bool                 // true for $update columns
+	isInvalidate    []bool                 // true for $invalidate: columns
+	invalidateProxy []*StorageComputeProxy // proxy per $invalidate col (nil if not found)
+	isIncrement     []bool                 // true for $increment: columns
+	incrementProxy  []*StorageComputeProxy // proxy per $increment col (nil if not found)
+	isSet           []bool                 // true for $set: columns
+	setProxy        []*StorageComputeProxy // proxy per $set col (nil if not found)
+	hasSetCol       bool
+	isBreak         []bool // true for $break column
+	hasBreakCol     bool
+	// tagClosure hoisted fn ptrs — allocated once per mapper, reused per row
+	setClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
+	incrClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
+	invClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
+	noopClosureFn   *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
+	breakClosureFn  *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
+	args            []scm.Scmer                             // pre-allocated args buffer
+	mapFn           func(...scm.Scmer) scm.Scmer
+	reduceFn        func(...scm.Scmer) scm.Scmer
+	mapScmer        scm.Scmer // original Scmer for network serialization
+	reduceScmer     scm.Scmer // original Scmer for network serialization
+	mainCount       uint32
+	hasUpdateCol    bool
+	hasIncrementCol bool
+	// shardWriteLocked is true when the caller already holds shard.mu (write lock)
+	// and registered write ownership before opening this mapper. When true,
+	// processMainBlock/processDeltaBlock must NOT try to re-acquire the lock.
+	shardWriteLocked bool
 	// JIT-compiled fused loop for main storage (nil = use interpreted fallback).
 	compiledMain fusedMainFn
 	cleanupJIT   func()
@@ -1244,7 +1265,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	for _, id := range recids {
 		for i, col := range m.mainCols {
 			if m.isUpdate[i] {
-				m.args[i] = scm.NewFunc(m.shard.UpdateFunction(id, true))
+				m.args[i] = scm.NewFunc(m.shard.UpdateFunction(id, true, m.shardWriteLocked))
 			} else {
 				m.args[i] = col.GetValue(id)
 			}

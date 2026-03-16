@@ -1,0 +1,6 @@
+(print ((jit (lambda (x) (* x 2))) 5))
+(print ((jit (lambda (x) (* 2 x))) 5))
+(print ((jit (lambda (x) (* x 3))) 5))
+(print ((jit (lambda (x) (* 3 x))) 5))
+(print ((jit (lambda (x) (* x 2.0))) 5))
+(print ((jit (lambda (x) (* 2.0 x))) 5))

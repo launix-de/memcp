@@ -1,0 +1,10 @@
+(begin
+  (settings "JITLog" true)
+  (define f2 (jit (lambda (s) (substr s 2))))
+  (define f3 (jit (lambda (s i l) (substr s i l))))
+  (print (list "s2" (f2 "hello")))
+  (print (list "pfx" (f3 "abcdef" 0 3)))
+  (print (list "mid" (f3 "abcdef" 1 3)))
+  (print (list "zlen" (f3 "abcdef" 3 0)))
+  (print (list "sfx" (f3 "abcdef" 3 3)))
+)

@@ -1,0 +1,7 @@
+(settings "JITLog" true)
+(print "ADD2")
+(jit (lambda (a b) (+ a b)))
+(print "SUB2")
+(jit (lambda (a b) (- a b)))
+(print "STRLEN_PLUS1")
+(jit (lambda (x) (+ (strlen x) 1)))
