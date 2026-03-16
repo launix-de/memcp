@@ -902,15 +902,41 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 				)))
 				/* transform and attach joinexpr to first table in tablesPrefixed */
 				(set joinexpr2 (if (nil? joinexpr) nil (transform_joinexpr joinexpr)))
-				/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics */
+				/* for LEFT JOIN (isOuter=true), integrate condition2 into joinexpr to preserve LEFT JOIN semantics.
+				   BUT: only include conditions that reference the first table or outer tables.
+				   Cross-table conditions between inner tables must stay as globalFilter. */
 				(set condition2_transformed (replace_column_alias condition2))
+				(define _first_alias (if (not (nil? tablesPrefixed)) (match (car tablesPrefixed) '(a s t io je) a) nil))
+				/* split condition2_transformed into parts for joinexpr vs global */
+				(define _split_for_joinexpr (lambda (expr) (match expr
+					(cons (symbol and) parts) (begin
+						(define _split_parts (map parts _split_for_joinexpr))
+						(define _je_parts (filter (map _split_parts (lambda (p) (car p))) (lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+						(define _gl_parts (filter (map _split_parts (lambda (p) (cadr p))) (lambda (x) (and (not (nil? x)) (not (equal? x true))))))
+						(list
+							(if (equal? _je_parts '()) true (if (equal? (count _je_parts) 1) (car _je_parts) (cons 'and _je_parts)))
+							(if (equal? _gl_parts '()) true (if (equal? (count _gl_parts) 1) (car _gl_parts) (cons 'and _gl_parts)))))
+					_ (begin
+						/* check if expr references any inner table other than the first */
+						(define _refs_other_inner (reduce (if (nil? tablesPrefixed) '() (cdr tablesPrefixed))
+							(lambda (found tbl) (or found (match tbl '(a2 s2 t2 io2 je2)
+								(not (equal? (extract_columns_for_tblvar a2 expr) '()))))) false))
+						(if _refs_other_inner
+							(list true expr)  /* → globalFilter */
+							(list expr true))  /* → joinexpr */
+					))))
+				(define _split_result (if (or (nil? condition2_transformed) (equal? condition2_transformed true))
+					(list true true)
+					(_split_for_joinexpr condition2_transformed)))
+				(define _je_condition (car _split_result))
+				(define _gl_condition (cadr _split_result))
 				(set joinexpr2 (if isOuter
-					/* merge condition2 into joinexpr for outer joins */
+					/* merge joinexpr-safe parts into joinexpr for outer joins */
 					(if (nil? joinexpr2)
-						condition2_transformed
-						(if (or (nil? condition2_transformed) (equal? condition2_transformed true))
+						_je_condition
+						(if (or (nil? _je_condition) (equal? _je_condition true))
 							joinexpr2
-							(list (quote and) joinexpr2 condition2_transformed)))
+							(list (quote and) joinexpr2 _je_condition)))
 					joinexpr2))
 				(if (and (not (nil? joinexpr2)) (not (nil? tablesPrefixed)))
 					(set tablesPrefixed (cons
@@ -974,9 +1000,9 @@ keytable + createcolumn for aggregates, nested scans for joins, prejoin for mult
 						)
 					)
 					(begin
-						/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
-						/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
-						(set globalFilter (if isOuter true (replace_column_alias condition2)))
+						/* for LEFT JOIN: joinexpr-safe parts integrated into joinexpr, cross-table parts stay global */
+						/* for INNER JOIN: full condition2 becomes global filter (can be reordered) */
+						(set globalFilter (if isOuter _gl_condition (replace_column_alias condition2)))
 						(list tablesPrefixed
 							(list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v)))))
 							globalFilter
