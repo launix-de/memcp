@@ -846,6 +846,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(setTimeout (lambda () (p7 "value" "async")) 1)
 	(context (lambda () (sleep 0.02)))
 	(assert (equal? (p7 "value") "async") true "promise resolves from async callback")
+	/* once: resolve exactly once, panic on second */
+	(define p8 (newpromise))
+	(p8 "once" 77)
+	(assert (equal? (p8 "value") 77) true "once resolves value")
+	(assert (equal? (try (lambda () (begin (p8 "once" 88) false)) (lambda (e) true)) true) true "once panics on second call")
+	/* once with custom error message */
+	(define p9 (newpromise))
+	(p9 "once" 1)
+	(assert (equal? (try (lambda () (begin (p9 "once" 2 "scalar subselect returned more than one row") false)) (lambda (e) (equal? e "scalar subselect returned more than one row"))) true) true "once custom error message")
 
 	/* Scheduler */
 	(print "testing scheduler ...")

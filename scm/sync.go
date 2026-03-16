@@ -115,9 +115,27 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 			cells[1] = NewBool(true)
 			return args[1]
 		}
+		if key == "once" {
+			if !cells[1].IsNil() {
+				panic("promise already fulfilled/failed")
+			}
+			cells[0] = args[1]
+			cells[1] = NewBool(true)
+			return args[1]
+		}
 		if key == "fail" {
 			cells[0] = args[1]
 			cells[1] = NewBool(false)
+			return args[1]
+		}
+		panic("promise: unknown operation: " + key)
+	case 3:
+		if key == "once" {
+			if !cells[1].IsNil() {
+				panic(args[2].String())
+			}
+			cells[0] = args[1]
+			cells[1] = NewBool(true)
 			return args[1]
 		}
 		panic("promise: unknown operation: " + key)
@@ -286,7 +304,7 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 func init_sync() {
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
-		"newpromise", "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
+		"newpromise", "Creates a single-value promise cell (not thread-safe). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
 		0, 1,
 		[]DeclarationParameter{
 			{"list", "any", "optional: ≥2-element slice to use as backing", nil},
