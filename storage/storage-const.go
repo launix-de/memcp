@@ -47,8 +47,11 @@ func (s *StorageConst) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	// Constant column: return the value as an immediate — no code emitted.
+	// This enables full constant folding downstream (e.g. const + const = const).
+	ctx.FreeDesc(&thisptr)
 	ctx.FreeDesc(&idx)
-	return scm.JITValueDesc{Loc: scm.LocImm, Imm: s.value}
+	ctx.TrackImm(s.value) // keep heap objects alive for JIT code lifetime
+	return scm.JITValueDesc{Loc: scm.LocImm, Type: s.value.GetTag(), Imm: s.value}
 }
 
 func (s *StorageConst) prepare()                                  {}
