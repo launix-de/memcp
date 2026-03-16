@@ -469,6 +469,115 @@ const (
 	OrcSuffixReconstructible = 2 // acc = (emitted, ...state) → need extra state from row data
 )
 
+// OrcAdditiveInfo describes a reducer that computes acc + f(mapped).
+// When detected, INSERT/DELETE can be handled by adding/subtracting the delta
+// to all subsequent stored values instead of running a full suffix recompute.
+type OrcAdditiveInfo struct {
+	IsAdditive bool      // true if reducer is (+ acc f(mapped))
+	DeltaExpr  scm.Scmer // the f(mapped) expression (e.g. (cadr mapped) for running SUM)
+}
+
+// analyzeOrcAdditive inspects the ORC reduceFn to detect the additive pattern:
+//   return value = (+ acc X) where X depends only on mapped, not acc.
+// This enables O(N) delta propagation instead of O(N) suffix recompute.
+func analyzeOrcAdditive(reduceFn scm.Scmer) OrcAdditiveInfo {
+	if reduceFn.IsNil() {
+		return OrcAdditiveInfo{}
+	}
+	var body scm.Scmer
+	var accParam string
+	if reduceFn.IsProc() {
+		body = reduceFn.Proc().Body
+		if reduceFn.Proc().Params.IsSlice() {
+			params := reduceFn.Proc().Params.Slice()
+			if len(params) >= 1 && params[0].IsSymbol() {
+				accParam = params[0].String()
+			}
+		}
+	} else if reduceFn.IsSlice() {
+		items := reduceFn.Slice()
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			body = items[2]
+			if items[1].IsSlice() {
+				params := items[1].Slice()
+				if len(params) >= 1 && params[0].IsSymbol() {
+					accParam = params[0].String()
+				}
+			}
+		}
+	}
+	if body.IsNil() || accParam == "" {
+		return OrcAdditiveInfo{}
+	}
+
+	// Find return value (last expr in begin block)
+	var returnVal scm.Scmer
+	if body.IsSlice() {
+		items := body.Slice()
+		if len(items) >= 2 && items[0].IsSymbol() && items[0].String() == "begin" {
+			returnVal = items[len(items)-1]
+		} else {
+			returnVal = body
+		}
+	}
+	if returnVal.IsNil() || !returnVal.IsSlice() {
+		return OrcAdditiveInfo{}
+	}
+
+	// Check: is returnVal = (+ acc X) ?
+	rv := returnVal.Slice()
+	if len(rv) != 3 {
+		return OrcAdditiveInfo{}
+	}
+	isPlus := rv[0].IsSymbol() && rv[0].String() == "+"
+	if !isPlus {
+		// Check for tagFunc-resolved +
+		d := scm.DeclarationForValue(rv[0])
+		if d == nil || d.Name != "+" {
+			return OrcAdditiveInfo{}
+		}
+	}
+
+	// One operand must be acc, the other must not reference acc.
+	var deltaExpr scm.Scmer
+	if rv[1].IsSymbol() && rv[1].String() == accParam {
+		deltaExpr = rv[2]
+	} else if rv[1].IsNthLocalVar() && rv[1].NthLocalVar() == 0 {
+		// NthLocalVar(0) = first param = acc
+		deltaExpr = rv[2]
+	} else if rv[2].IsSymbol() && rv[2].String() == accParam {
+		deltaExpr = rv[1]
+	} else if rv[2].IsNthLocalVar() && rv[2].NthLocalVar() == 0 {
+		deltaExpr = rv[1]
+	}
+
+	if deltaExpr.IsNil() {
+		return OrcAdditiveInfo{}
+	}
+
+	// Verify deltaExpr does not reference acc
+	if containsSymbol(deltaExpr, accParam) {
+		return OrcAdditiveInfo{}
+	}
+
+	return OrcAdditiveInfo{IsAdditive: true, DeltaExpr: deltaExpr}
+}
+
+// containsSymbol checks if an AST node references a given symbol name.
+func containsSymbol(expr scm.Scmer, name string) bool {
+	if expr.IsSymbol() && expr.String() == name {
+		return true
+	}
+	if expr.IsSlice() {
+		for _, item := range expr.Slice() {
+			if containsSymbol(item, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // analyzeOrcSuffix inspects an ORC reduceFn to determine if the accumulator
 // equals the emitted value ($set argument). This enables suffix recompute
 // by reading the stored ORC value as the start accumulator.
