@@ -252,65 +252,6 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		panic("incrementalRecomputeORC: column '" + name + "' is not an ORC column on table " + t.Name)
 	}
 
-	// Find the earliest invalid row's sort key across ALL shards.
-	// This ensures we always start from the beginning of the invalid range,
-	// regardless of which row's GetValue triggered this recompute.
-	sortCol := col.OrcFirstSortCol()
-	sortDesc := col.OrcFirstSortDesc()
-	var earliestInvalidSortKey scm.Scmer
-	for _, s := range t.ActiveShards() {
-		s.mu.RLock()
-		sortCS := s.columns[sortCol]
-		orcCS := s.columns[name]
-		s.mu.RUnlock()
-		proxy, ok := orcCS.(*StorageComputeProxy)
-		if !ok || sortCS == nil {
-			continue
-		}
-		total := s.main_count + uint32(len(s.inserts))
-		for idx := uint32(0); idx < total; idx++ {
-			if s.deletions.Get(uint(idx)) {
-				continue
-			}
-			if proxy.validMask.Get(uint(idx)) {
-				continue // valid row, skip
-			}
-			// Invalid row — read its sort key
-			var sk scm.Scmer
-			if idx < s.main_count {
-				sk = sortCS.GetValue(idx)
-			} else {
-				sk = s.getDelta(int(idx-s.main_count), sortCol)
-			}
-			if sk.IsNil() {
-				continue
-			}
-			if earliestInvalidSortKey.IsNil() {
-				earliestInvalidSortKey = sk
-			} else if sortDesc {
-				if scm.Less(earliestInvalidSortKey, sk) {
-					earliestInvalidSortKey = sk // DESC: larger = earlier
-				}
-			} else {
-				if scm.Less(sk, earliestInvalidSortKey) {
-					earliestInvalidSortKey = sk // ASC: smaller = earlier
-				}
-			}
-		}
-	}
-
-	// Try to predict the start accumulator from the last valid predecessor.
-	// If prediction fails → full recompute from OrcReduceInit with no filter.
-	startAcc := col.OrcReduceInit
-	useSuffix := false
-	if !earliestInvalidSortKey.IsNil() {
-		func() {
-			defer func() { recover() }()
-			startAcc = predictLastAccumulator(col, t, earliestInvalidSortKey)
-			useSuffix = true
-		}()
-	}
-
 	// Build sort infrastructure.
 	sortcolsScmer := make([]scm.Scmer, len(col.OrcSortCols))
 	for i, sc := range col.OrcSortCols {
@@ -327,71 +268,75 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		}
 	}
 
-	// Build condition based on whether we can suffix-recompute or need full recompute.
-	var condCols []string
-	var condFn scm.Scmer
-	if useSuffix {
-		// Suffix: only visit rows from earliest invalid sort key onwards.
-		condCols = []string{sortCol}
-		capturedKey := earliestInvalidSortKey
-		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-			if sortDesc {
-				return scm.NewBool(!scm.Less(capturedKey, a[0])) // a[0] <= capturedKey
+	// Determine if the reducer has the identity property (stored value == accumulator).
+	// Identity enables: skip valid prefix (Phase 1) + convergence break (Phase 3).
+	// Non-identity: must compute every row but still benefits from validMask to detect
+	// when the recomputed range ends.
+	isIdentity := analyzeOrcSuffix(col.OrcReduceFn) == OrcSuffixIdentity
+
+	// Single-pass scan_order over ALL rows in sort order.
+	// The reducer walks the validMask and handles three phases:
+	//   1. Valid rows before first invalid: read stored ORC value as accumulator (skip $set)
+	//      Only works for identity reducers. Non-identity must compute every row.
+	//   2. Invalid rows: compute normally via inner reducer + $set + mark valid
+	//   3. Valid rows after recompute: convergence check → $break if values match
+	//      Only for identity reducers.
+	//
+	// This avoids a separate O(N) scan to find the earliest invalid sort key.
+	condCols := []string{}
+	condFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+
+	// Callback: $set + $break + stored ORC value + mapCols
+	// During orcRecomputing, GetValue returns nil for invalid rows.
+	// The reducer uses nil to detect "needs recompute" vs "valid cached value".
+	scanCallbackCols := make([]string, 0, 3+len(col.OrcMapCols))
+	scanCallbackCols = append(scanCallbackCols, "$set:"+name)
+	scanCallbackCols = append(scanCallbackCols, "$break")
+	scanCallbackCols = append(scanCallbackCols, name) // stored ORC value (nil if invalid)
+	scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
+
+	innerMapFn := scm.OptimizeProcToSerialFunction(col.OrcMapFn)
+	scanMapFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		brk := args[1]
+		storedVal := args[2] // nil = invalid row, non-nil = valid cached value
+		innerArgs := make([]scm.Scmer, 1+len(col.OrcMapCols))
+		innerArgs[0] = args[0] // $set
+		copy(innerArgs[1:], args[3:])
+		return scm.NewSlice([]scm.Scmer{brk, storedVal, innerMapFn(innerArgs...)})
+	})
+
+	innerReduceFn := scm.OptimizeProcToSerialFunction(col.OrcReduceFn)
+	recomputeStarted := false
+	scanReduceFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		mapped := args[1].Slice()
+		brk := mapped[0]
+		storedVal := mapped[1] // nil = invalid (orcRecomputing returns nil for invalid rows)
+		innerMapped := mapped[2]
+
+		if isIdentity && !recomputeStarted && !storedVal.IsNil() {
+			// Phase 1 (identity only): valid row before first invalid.
+			// storedVal is non-nil = row was valid. Use as accumulator, skip $set.
+			return storedVal
+		}
+		if !recomputeStarted && storedVal.IsNil() {
+			recomputeStarted = true
+		}
+
+		// Phase 2: compute new value via inner reducer (calls $set internally)
+		newAcc := innerReduceFn(args[0], innerMapped)
+
+		if isIdentity && recomputeStarted && !storedVal.IsNil() && !newAcc.IsNil() {
+			// Phase 3 (identity only): valid row after recompute region.
+			// Convergence: new matches stored → all subsequent are valid → $break.
+			if (newAcc.IsInt() && storedVal.IsInt() && newAcc.Int() == storedVal.Int()) ||
+				(newAcc.IsFloat() && storedVal.IsFloat() && newAcc.Float() == storedVal.Float()) ||
+				(newAcc.IsString() && storedVal.IsString() && newAcc.String() == storedVal.String()) {
+				scm.Apply(brk)
 			}
-			return scm.NewBool(!scm.Less(a[0], capturedKey)) // a[0] >= capturedKey
-		})
-	} else {
-		// Full recompute: visit all rows.
-		condCols = []string{}
-		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
-	}
+		}
 
-	// Build callback cols and map/reduce functions.
-	// For suffix recompute: wrap with convergence check ($break when new == stored).
-	// For full recompute: use plain mapFn/reduceFn (no convergence, must visit all).
-	var scanCallbackCols []string
-	var scanMapFn, scanReduceFn scm.Scmer
-
-	if useSuffix {
-		scanCallbackCols = make([]string, 0, 3+len(col.OrcMapCols))
-		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
-		scanCallbackCols = append(scanCallbackCols, "$break")
-		scanCallbackCols = append(scanCallbackCols, name)
-		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
-
-		innerMapFn := scm.OptimizeProcToSerialFunction(col.OrcMapFn)
-		scanMapFn = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-			brk := args[1]
-			storedVal := args[2]
-			innerArgs := make([]scm.Scmer, 1+len(col.OrcMapCols))
-			innerArgs[0] = args[0]
-			copy(innerArgs[1:], args[3:])
-			return scm.NewSlice([]scm.Scmer{brk, storedVal, innerMapFn(innerArgs...)})
-		})
-
-		innerReduceFn := scm.OptimizeProcToSerialFunction(col.OrcReduceFn)
-		scanReduceFn = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-			mapped := args[1].Slice()
-			brk := mapped[0]
-			storedVal := mapped[1]
-			newAcc := innerReduceFn(args[0], mapped[2])
-			if !storedVal.IsNil() && !newAcc.IsNil() {
-				if (newAcc.IsInt() && storedVal.IsInt() && newAcc.Int() == storedVal.Int()) ||
-					(newAcc.IsFloat() && storedVal.IsFloat() && newAcc.Float() == storedVal.Float()) ||
-					(newAcc.IsString() && storedVal.IsString() && newAcc.String() == storedVal.String()) {
-					scm.Apply(brk)
-				}
-			}
-			return newAcc
-		})
-	} else {
-		// Full recompute: plain mapFn/reduceFn, no convergence
-		scanCallbackCols = make([]string, 0, 1+len(col.OrcMapCols))
-		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
-		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
-		scanMapFn = col.OrcMapFn
-		scanReduceFn = col.OrcReduceFn
-	}
+		return newAcc
+	})
 
 	t.scan_order(
 		condCols, condFn,
@@ -400,7 +345,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		scanCallbackCols,
 		scanMapFn,
 		scanReduceFn,
-		startAcc,
+		col.OrcReduceInit,
 		false,
 	)
 }
