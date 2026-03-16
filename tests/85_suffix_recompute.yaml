@@ -195,8 +195,274 @@ test_cases:
         - {id: 8, day: 60, amount: 1000, running: 3211}
 
   # =========================================================================
-  # Cleanup
+  # Cleanup unpartitioned
   # =========================================================================
 
   - name: "Drop running SUM table"
     sql: "DROP TABLE IF EXISTS suf_sum"
+
+  # =========================================================================
+  # Partitioned suffix recompute: ROW_NUMBER PARTITION BY category
+  # =========================================================================
+
+  - name: "Create partitioned table"
+    sql: |
+      CREATE TABLE suf_part (id INT PRIMARY KEY, cat VARCHAR(10), score INT)
+
+  - name: "Insert partitioned data"
+    sql: |
+      INSERT INTO suf_part (id, cat, score) VALUES
+      (1, 'A', 10), (2, 'A', 20), (3, 'A', 30),
+      (4, 'B', 15), (5, 'B', 25),
+      (6, 'C', 5), (7, 'C', 35), (8, 'C', 45)
+
+  - name: "Verify initial partitioned ROW_NUMBER via SQL window"
+    sql: |
+      SELECT id, cat, score,
+             ROW_NUMBER() OVER (PARTITION BY cat ORDER BY score) AS rn
+      FROM suf_part
+      ORDER BY cat, score
+    expect:
+      rows: 8
+      data:
+        - {id: 1, cat: "A", score: 10, rn: 1}
+        - {id: 2, cat: "A", score: 20, rn: 2}
+        - {id: 3, cat: "A", score: 30, rn: 3}
+        - {id: 4, cat: "B", score: 15, rn: 1}
+        - {id: 5, cat: "B", score: 25, rn: 2}
+        - {id: 6, cat: "C", score: 5, rn: 1}
+        - {id: 7, cat: "C", score: 35, rn: 2}
+        - {id: 8, cat: "C", score: 45, rn: 3}
+
+  - name: "INSERT into partition A (suffix within partition)"
+    sql: "INSERT INTO suf_part (id, cat, score) VALUES (9, 'A', 15)"
+
+  - name: "ROW_NUMBER after INSERT into partition A"
+    sql: |
+      SELECT id, cat, score,
+             ROW_NUMBER() OVER (PARTITION BY cat ORDER BY score) AS rn
+      FROM suf_part
+      ORDER BY cat, score
+    expect:
+      rows: 9
+      data:
+        - {id: 1, cat: "A", score: 10, rn: 1}
+        - {id: 9, cat: "A", score: 15, rn: 2}
+        - {id: 2, cat: "A", score: 20, rn: 3}
+        - {id: 3, cat: "A", score: 30, rn: 4}
+        - {id: 4, cat: "B", score: 15, rn: 1}
+        - {id: 5, cat: "B", score: 25, rn: 2}
+        - {id: 6, cat: "C", score: 5, rn: 1}
+        - {id: 7, cat: "C", score: 35, rn: 2}
+        - {id: 8, cat: "C", score: 45, rn: 3}
+
+  - name: "DELETE from partition B"
+    sql: "DELETE FROM suf_part WHERE id = 4"
+
+  - name: "ROW_NUMBER after DELETE from partition B"
+    sql: |
+      SELECT id, cat, score,
+             ROW_NUMBER() OVER (PARTITION BY cat ORDER BY score) AS rn
+      FROM suf_part
+      ORDER BY cat, score
+    expect:
+      rows: 8
+      data:
+        - {id: 1, cat: "A", score: 10, rn: 1}
+        - {id: 9, cat: "A", score: 15, rn: 2}
+        - {id: 2, cat: "A", score: 20, rn: 3}
+        - {id: 3, cat: "A", score: 30, rn: 4}
+        - {id: 5, cat: "B", score: 25, rn: 1}
+        - {id: 6, cat: "C", score: 5, rn: 1}
+        - {id: 7, cat: "C", score: 35, rn: 2}
+        - {id: 8, cat: "C", score: 45, rn: 3}
+
+  - name: "UPDATE score within partition C (reorder)"
+    sql: "UPDATE suf_part SET score = 1 WHERE id = 8"
+
+  - name: "ROW_NUMBER after UPDATE in partition C"
+    sql: |
+      SELECT id, cat, score,
+             ROW_NUMBER() OVER (PARTITION BY cat ORDER BY score) AS rn
+      FROM suf_part
+      ORDER BY cat, score
+    expect:
+      rows: 8
+      data:
+        - {id: 1, cat: "A", score: 10, rn: 1}
+        - {id: 9, cat: "A", score: 15, rn: 2}
+        - {id: 2, cat: "A", score: 20, rn: 3}
+        - {id: 3, cat: "A", score: 30, rn: 4}
+        - {id: 5, cat: "B", score: 25, rn: 1}
+        - {id: 8, cat: "C", score: 1, rn: 1}
+        - {id: 6, cat: "C", score: 5, rn: 2}
+        - {id: 7, cat: "C", score: 35, rn: 3}
+
+  - name: "INSERT into new partition D"
+    sql: "INSERT INTO suf_part (id, cat, score) VALUES (10, 'D', 100), (11, 'D', 200)"
+
+  - name: "ROW_NUMBER with new partition D"
+    sql: |
+      SELECT id, cat, score,
+             ROW_NUMBER() OVER (PARTITION BY cat ORDER BY score) AS rn
+      FROM suf_part
+      ORDER BY cat, score
+    expect:
+      rows: 10
+      data:
+        - {id: 1, cat: "A", score: 10, rn: 1}
+        - {id: 9, cat: "A", score: 15, rn: 2}
+        - {id: 2, cat: "A", score: 20, rn: 3}
+        - {id: 3, cat: "A", score: 30, rn: 4}
+        - {id: 5, cat: "B", score: 25, rn: 1}
+        - {id: 8, cat: "C", score: 1, rn: 1}
+        - {id: 6, cat: "C", score: 5, rn: 2}
+        - {id: 7, cat: "C", score: 35, rn: 3}
+        - {id: 10, cat: "D", score: 100, rn: 1}
+        - {id: 11, cat: "D", score: 200, rn: 2}
+
+  # =========================================================================
+  # DESC suffix recompute
+  # =========================================================================
+
+  - name: "Create DESC table"
+    sql: |
+      CREATE TABLE suf_desc (id INT PRIMARY KEY, ts INT, val VARCHAR(10))
+
+  - name: "Insert DESC data"
+    sql: |
+      INSERT INTO suf_desc VALUES
+      (1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c'), (4, 40, 'd')
+
+  - name: "Initial DESC ROW_NUMBER"
+    sql: |
+      SELECT id, ts, val,
+             ROW_NUMBER() OVER (ORDER BY ts DESC) AS rn
+      FROM suf_desc ORDER BY ts DESC
+    expect:
+      rows: 4
+      data:
+        - {id: 4, ts: 40, val: "d", rn: 1}
+        - {id: 3, ts: 30, val: "c", rn: 2}
+        - {id: 2, ts: 20, val: "b", rn: 3}
+        - {id: 1, ts: 10, val: "a", rn: 4}
+
+  - name: "INSERT highest ts (new rn=1 in DESC)"
+    sql: "INSERT INTO suf_desc VALUES (5, 50, 'e')"
+
+  - name: "DESC ROW_NUMBER after INSERT at top"
+    sql: |
+      SELECT id, ts, val,
+             ROW_NUMBER() OVER (ORDER BY ts DESC) AS rn
+      FROM suf_desc ORDER BY ts DESC
+    expect:
+      rows: 5
+      data:
+        - {id: 5, ts: 50, val: "e", rn: 1}
+        - {id: 4, ts: 40, val: "d", rn: 2}
+        - {id: 3, ts: 30, val: "c", rn: 3}
+        - {id: 2, ts: 20, val: "b", rn: 4}
+        - {id: 1, ts: 10, val: "a", rn: 5}
+
+  - name: "INSERT middle ts in DESC"
+    sql: "INSERT INTO suf_desc VALUES (6, 25, 'f')"
+
+  - name: "DESC ROW_NUMBER after INSERT in middle"
+    sql: |
+      SELECT id, ts, val,
+             ROW_NUMBER() OVER (ORDER BY ts DESC) AS rn
+      FROM suf_desc ORDER BY ts DESC
+    expect:
+      rows: 6
+      data:
+        - {id: 5, ts: 50, val: "e", rn: 1}
+        - {id: 4, ts: 40, val: "d", rn: 2}
+        - {id: 3, ts: 30, val: "c", rn: 3}
+        - {id: 6, ts: 25, val: "f", rn: 4}
+        - {id: 2, ts: 20, val: "b", rn: 5}
+        - {id: 1, ts: 10, val: "a", rn: 6}
+
+  - name: "DELETE from top in DESC"
+    sql: "DELETE FROM suf_desc WHERE id = 5"
+
+  - name: "DESC ROW_NUMBER after DELETE top"
+    sql: |
+      SELECT id, ts, val,
+             ROW_NUMBER() OVER (ORDER BY ts DESC) AS rn
+      FROM suf_desc ORDER BY ts DESC
+    expect:
+      rows: 5
+      data:
+        - {id: 4, ts: 40, val: "d", rn: 1}
+        - {id: 3, ts: 30, val: "c", rn: 2}
+        - {id: 6, ts: 25, val: "f", rn: 3}
+        - {id: 2, ts: 20, val: "b", rn: 4}
+        - {id: 1, ts: 10, val: "a", rn: 5}
+
+  - name: "Drop DESC table"
+    sql: "DROP TABLE IF EXISTS suf_desc"
+
+  # =========================================================================
+  # OVER clause change: same column, different ORDER BY
+  # =========================================================================
+
+  - name: "Create OVER-change table"
+    sql: |
+      CREATE TABLE suf_oc (id INT PRIMARY KEY, a INT, b INT)
+
+  - name: "Insert OVER-change data"
+    sql: "INSERT INTO suf_oc VALUES (1, 10, 90), (2, 20, 80), (3, 30, 70)"
+
+  - name: "ROW_NUMBER ORDER BY a ASC"
+    sql: |
+      SELECT id, ROW_NUMBER() OVER (ORDER BY a) AS rn
+      FROM suf_oc ORDER BY a
+    expect:
+      rows: 3
+      data:
+        - {id: 1, rn: 1}
+        - {id: 2, rn: 2}
+        - {id: 3, rn: 3}
+
+  - name: "ROW_NUMBER ORDER BY b ASC (different column, same ORC)"
+    sql: |
+      SELECT id, ROW_NUMBER() OVER (ORDER BY b) AS rn
+      FROM suf_oc ORDER BY b
+    expect:
+      rows: 3
+      data:
+        - {id: 3, rn: 1}
+        - {id: 2, rn: 2}
+        - {id: 1, rn: 3}
+
+  - name: "ROW_NUMBER ORDER BY a DESC (direction change)"
+    sql: |
+      SELECT id, ROW_NUMBER() OVER (ORDER BY a DESC) AS rn
+      FROM suf_oc ORDER BY a DESC
+    expect:
+      rows: 3
+      data:
+        - {id: 3, rn: 1}
+        - {id: 2, rn: 2}
+        - {id: 1, rn: 3}
+
+  - name: "Back to ORDER BY a ASC"
+    sql: |
+      SELECT id, ROW_NUMBER() OVER (ORDER BY a) AS rn
+      FROM suf_oc ORDER BY a
+    expect:
+      rows: 3
+      data:
+        - {id: 1, rn: 1}
+        - {id: 2, rn: 2}
+        - {id: 3, rn: 3}
+
+  - name: "Drop OVER-change table"
+    sql: "DROP TABLE IF EXISTS suf_oc"
+
+  # =========================================================================
+  # Cleanup
+  # =========================================================================
+
+  - name: "Drop partitioned table"
+    sql: "DROP TABLE IF EXISTS suf_part"

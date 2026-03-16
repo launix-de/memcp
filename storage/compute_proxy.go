@@ -57,6 +57,26 @@ func (p *StorageComputeProxy) String() string {
 	return "compute-proxy"
 }
 
+// orcCol returns the column definition for this ORC proxy's column.
+func (p *StorageComputeProxy) orcCol() *column {
+	for _, c := range p.shard.t.Columns {
+		if c.Name == p.colName {
+			return c
+		}
+	}
+	return nil
+}
+
+// orcSortDesc returns true if the ORC sort direction (first non-partition sort col) is DESC.
+func (p *StorageComputeProxy) orcSortDesc() bool {
+	col := p.orcCol()
+	if col == nil {
+		return false
+	}
+	idx := col.OrcPartCount
+	return idx < len(col.OrcSortDirs) && col.OrcSortDirs[idx]
+}
+
 func (p *StorageComputeProxy) ComputeSize() uint {
 	var sz uint = 128 // struct overhead
 	sz += p.validMask.ComputeSize()
@@ -297,7 +317,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.compressed {
+	if p.compressed && p.main != nil {
 		if scmer, ok := p.main.(*StorageSCMER); ok {
 			scmer.SetValue(idx, val)
 			return
@@ -322,6 +342,7 @@ func (p *StorageComputeProxy) InvalidateAll() {
 	p.delta = make(map[uint32]scm.Scmer)
 	p.dirtyPartitions = nil // nil = fully dirty
 	p.dirtySortKey = scm.NewNil()
+	p.dirtyPartitionSuffix = nil
 }
 
 // InvalidatePartitionSuffix marks a specific partition dirty from a sort key onwards.
@@ -335,7 +356,14 @@ func (p *StorageComputeProxy) InvalidatePartitionSuffix(partitionKey string, sor
 		p.dirtyPartitionSuffix = make(map[string]scm.Scmer)
 	}
 	if existing, ok := p.dirtyPartitionSuffix[partitionKey]; ok {
-		if scm.Less(sortKey, existing) {
+		// Extend dirty range: ASC keeps min, DESC keeps max.
+		extend := false
+		if p.orcSortDesc() {
+			extend = scm.Less(existing, sortKey)
+		} else {
+			extend = scm.Less(sortKey, existing)
+		}
+		if extend {
 			p.dirtyPartitionSuffix[partitionKey] = sortKey
 		}
 	} else {
@@ -345,7 +373,8 @@ func (p *StorageComputeProxy) InvalidatePartitionSuffix(partitionKey string, sor
 }
 
 // InvalidateFromSortKey marks the column dirty from a specific sort key onwards.
-// If already dirty from an earlier key, keeps the earlier one (minimum).
+// If already dirty from an earlier key (in sort order), keeps that one.
+// Reads sort direction from the column definition.
 func (p *StorageComputeProxy) InvalidateFromSortKey(sortKey scm.Scmer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -353,12 +382,19 @@ func (p *StorageComputeProxy) InvalidateFromSortKey(sortKey scm.Scmer) {
 		return // already fully dirty
 	}
 	if p.compressed || p.dirtySortKey.IsNil() {
-		// First suffix invalidation
 		p.compressed = false
 		p.dirtySortKey = sortKey
-	} else if scm.Less(sortKey, p.dirtySortKey) {
-		// New key is earlier — extend suffix
-		p.dirtySortKey = sortKey
+	} else {
+		// Extend dirty range: for ASC take min, for DESC take max.
+		if p.orcSortDesc() {
+			if scm.Less(p.dirtySortKey, sortKey) {
+				p.dirtySortKey = sortKey // DESC: larger = earlier in sort order
+			}
+		} else {
+			if scm.Less(sortKey, p.dirtySortKey) {
+				p.dirtySortKey = sortKey // ASC: smaller = earlier in sort order
+			}
+		}
 	}
 }
 
