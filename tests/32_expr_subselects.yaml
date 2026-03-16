@@ -511,7 +511,13 @@ test_cases:
       error: true
 
   - name: "Correlated scalar subselect multiple rows errors"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = t1.id) AS v FROM t1 WHERE id = 2"
+    setup:
+      - sql: "DROP TABLE IF EXISTS t1_multi"
+      - sql: "CREATE TABLE t1_multi (id INT PRIMARY KEY)"
+      - sql: "INSERT INTO t1_multi (id) VALUES (2)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS t1_multi"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = t1_multi.id) AS v FROM t1_multi"
     expect:
       error: true
 
