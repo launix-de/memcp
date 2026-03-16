@@ -2280,7 +2280,11 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 	}
 	// Map index: idx is a Scmer (JITValueDesc), but GetValue's i is uint32.
 	// Extract the integer value from the Scmer.
-	if len(fn.Params) >= 2 {
+	// Dead code elimination: if the index parameter is never used in the body,
+	// just free it and skip the conversion boilerplate.
+	if len(fn.Params) >= 2 && g.refCounts[fn.Params[1].Name()] == 0 {
+		g.emit("ctx.FreeDesc(&idx)")
+	} else if len(fn.Params) >= 2 {
 		g.emit("var idxInt JITValueDesc")
 		g.emit("if idx.Loc == LocImm {")
 		g.emit("\tidxInt = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(idx.Imm.Int())}")
@@ -5580,6 +5584,10 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("return result")
 	default:
 		if res.isDesc {
+			// Constant folding: LocImm values need no materialization.
+			g.emit("if %s.Loc == LocImm {", res.goVar)
+			g.emit("\tif result.Loc == LocAny { return %s }", res.goVar)
+			g.emit("}")
 			g.emit("if result.Loc == LocAny {")
 			g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
 			g.emit("\tctx.BindReg(result.Reg, &result)")

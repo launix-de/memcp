@@ -50,25 +50,7 @@ func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			var d0 scm.JITValueDesc
 			_ = d0
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-			var idxInt scm.JITValueDesc
-			if idx.Loc == scm.LocImm {
-				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
-			} else if idx.Loc == scm.LocRegPair {
-				ctx.FreeReg(idx.Reg)
-				idxInt = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idx.Reg2}
-				ctx.BindReg(idx.Reg2, &idxInt)
-			} else {
-				idxInt = idx
-			}
-			if idxInt.Loc == scm.LocImm {
-				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
-			} else {
-				ctx.EnsureDesc(&idxInt)
-				if idxInt.Loc != scm.LocReg { panic("jit: idxInt not in register") }
-				ctx.EmitShlRegImm8(idxInt.Reg, 32)
-				ctx.EmitShrRegImm8(idxInt.Reg, 32)
-				ctx.BindReg(idxInt.Reg, &idxInt)
-			}
+			ctx.FreeDesc(&idx)
 			var bbs [1]scm.BBDescriptor
 			bbpos_0_0 := int32(-1)
 			_ = bbpos_0_0
@@ -112,6 +94,9 @@ func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				ctx.BindReg(r1, &d0)
 			}
 			ctx.ResolveFixups()
+			if d0.Loc == scm.LocImm {
+				if result.Loc == scm.LocAny { return d0 }
+			}
 			if result.Loc == scm.LocAny {
 				result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 				ctx.BindReg(result.Reg, &result)
