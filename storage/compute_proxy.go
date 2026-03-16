@@ -73,8 +73,7 @@ func (p *StorageComputeProxy) orcSortDesc() bool {
 	if col == nil {
 		return false
 	}
-	idx := col.OrcPartCount
-	return idx < len(col.OrcSortDirs) && col.OrcSortDirs[idx]
+	return col.OrcOrderDesc()
 }
 
 func (p *StorageComputeProxy) ComputeSize() uint {

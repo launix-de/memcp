@@ -56,6 +56,26 @@ type column struct {
 	OrcReduceInit scm.Scmer                    // initial accumulator value (neutral element)
 }
 
+// OrcIsPartitioned returns true if the ORC column uses partition-scoped accumulation.
+func (c *column) OrcIsPartitioned() bool {
+	return c.OrcPartCount > 0
+}
+
+// OrcPartitionCols returns the leading sort column names used as partition keys.
+func (c *column) OrcPartitionCols() []string {
+	return c.OrcSortCols[:c.OrcPartCount]
+}
+
+// OrcOrderCol returns the first non-partition sort column name (the actual ORDER BY column).
+func (c *column) OrcOrderCol() string {
+	return c.OrcSortCols[c.OrcPartCount]
+}
+
+// OrcOrderDesc returns true if the ORDER BY direction is DESC.
+func (c *column) OrcOrderDesc() bool {
+	return c.OrcPartCount < len(c.OrcSortDirs) && c.OrcSortDirs[c.OrcPartCount]
+}
+
 // PersistencyMode controls the durability and persistence behaviour of a table.
 //
 // DATA SAFETY CONTRACT — each mode's guarantees and risks:

@@ -461,6 +461,42 @@ func reorderByFrequency(bounds boundaries, t *table) {
 	})
 }
 
+// analyzeOrcPartitionCount detects whether the ORC reducer uses a partition wrapper
+// by inspecting the reduceInit value. The partition wrapper convention is:
+//
+//	reduceInit = (list inner_init nil)         → 1 partition key
+//	reduceInit = (list inner_init nil nil)     → 2 partition keys
+//
+// Returns 0 if reduceInit is not a partition-wrapped accumulator.
+// The trailing nil elements represent the initial prev-partition-key slots.
+func analyzeOrcPartitionCount(reduceInit scm.Scmer) int {
+	if reduceInit.IsNil() {
+		return 0
+	}
+	// Check if it's a cons pair / list with trailing nil(s)
+	if !reduceInit.IsSlice() {
+		return 0
+	}
+	items := reduceInit.Slice()
+	if len(items) < 2 {
+		return 0
+	}
+	// Count trailing nil elements (prev-partition-key slots)
+	count := 0
+	for i := len(items) - 1; i >= 1; i-- {
+		if items[i].IsNil() {
+			count++
+		} else {
+			break
+		}
+	}
+	// Must have at least one non-nil element (the inner init) before the nils
+	if count > 0 && count < len(items) {
+		return count
+	}
+	return 0
+}
+
 // ORC suffix recompute mode classification.
 const (
 	OrcSuffixOpaque         = 0 // can't analyze → full recompute only
@@ -602,13 +638,8 @@ func predictLastAccumulator(col *column, t *table, beforeSortKey scm.Scmer) scm.
 		panic("no sort columns")
 	}
 
-	// Determine which sort column to compare against (first non-partition sort col)
-	sortColIdx := col.OrcPartCount
-	if sortColIdx >= len(col.OrcSortCols) {
-		panic("no order columns after partition columns")
-	}
-	sortCol := col.OrcSortCols[sortColIdx]
-	sortDesc := sortColIdx < len(col.OrcSortDirs) && col.OrcSortDirs[sortColIdx]
+	sortCol := col.OrcOrderCol()
+	sortDesc := col.OrcOrderDesc()
 
 	// Check if accumulator == emitted value (identity property).
 	// For partitioned ORCs, the outer reducer is a partition wrapper that
@@ -616,14 +647,14 @@ func predictLastAccumulator(col *column, t *table, beforeSortKey scm.Scmer) scm.
 	// However, the stored ORC value IS the inner accumulator by construction
 	// (the inner reducer calls $set with new_inner), so we can reconstruct
 	// the full outer accumulator as (list stored_value prev_partition_key).
-	isPartitioned := col.OrcPartCount > 0
+	isPartitioned := col.OrcIsPartitioned()
 	if !isPartitioned {
 		if analyzeOrcSuffix(col.OrcReduceFn) != OrcSuffixIdentity {
 			panic("non-identity accumulator — cannot predict")
 		}
 	}
 	// For partitioned ORCs, we also need to read partition column values.
-	partCols := col.OrcSortCols[:col.OrcPartCount]
+	partCols := col.OrcPartitionCols()
 
 	// Scan all shards for the last row before beforeSortKey
 	// and read its stored ORC value (+ partition cols if partitioned).

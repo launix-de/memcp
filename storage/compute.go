@@ -157,6 +157,13 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 // reduceFn:  (lambda (acc mapped) ...) — calls ($set newVal), returns new acc
 // reduceInit: initial accumulator value
 func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
+	// Derive partition count from reduceInit shape instead of trusting the parameter.
+	// Convention: (list inner_init nil) → 1 partition key, (list inner_init nil nil) → 2, etc.
+	detectedPartCount := analyzeOrcPartitionCount(reduceInit)
+	if detectedPartCount > 0 {
+		partCount = detectedPartCount
+	}
+
 	found := false
 	paramsChanged := false
 	for i, c := range t.Columns {
@@ -249,7 +256,7 @@ func (t *table) recomputeORC(name string) {
 	// - suffixKey: earliest sort key from which to recompute (unpartitioned)
 	// - partSuffix: per-partition earliest sort key (partitioned + suffix)
 	// Sort direction determines which sort key is "earlier" (min for ASC, max for DESC).
-	sortDescMerge := col.OrcPartCount < len(col.OrcSortDirs) && col.OrcSortDirs[col.OrcPartCount]
+	sortDescMerge := col.OrcOrderDesc()
 	mergeIsEarlier := func(a, b scm.Scmer) bool {
 		if sortDescMerge {
 			return scm.Less(b, a) // DESC: larger = earlier
@@ -322,7 +329,7 @@ func (t *table) recomputeORC(name string) {
 				proxy.delta = make(map[uint32]scm.Scmer)
 				proxy.validMask.Reset()
 			}
-			if col.OrcPartCount > 0 {
+			if col.OrcIsPartitioned() {
 				proxy.dirtyPartitions = make(map[string]bool) // empty = all clean
 			} else {
 				proxy.dirtyPartitions = nil // unpartitioned: nil means no partition tracking
@@ -413,7 +420,7 @@ func (t *table) recomputeORC(name string) {
 
 	// Determine sort direction for suffix filter:
 	// ASC: recompute from sortKey onwards (>=), DESC: recompute from sortKey backwards (<=).
-	sortDesc := col.OrcPartCount < len(col.OrcSortDirs) && col.OrcSortDirs[col.OrcPartCount]
+	sortDesc := col.OrcOrderDesc()
 	suffixMatch := func(val, key scm.Scmer) bool {
 		if sortDesc {
 			return !scm.Less(key, val) // val <= key
@@ -423,17 +430,15 @@ func (t *table) recomputeORC(name string) {
 
 	if useSuffix && dirtyParts == nil && partSuffix == nil {
 		// Unpartitioned suffix: sort_key >= earliestDirtySortKey (or <= for DESC)
-		sortCol := col.OrcSortCols[col.OrcPartCount]
-		condCols = []string{sortCol}
+		condCols = []string{col.OrcOrderCol()}
 		capturedKey := earliestDirtySortKey
 		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(suffixMatch(a[0], capturedKey))
 		})
-	} else if partSuffix != nil && col.OrcPartCount > 0 {
+	} else if partSuffix != nil && col.OrcIsPartitioned() {
 		// Partition + suffix: dirty partition AND sort_key >= per-partition dirty key (or <= for DESC)
-		partCols := col.OrcSortCols[:col.OrcPartCount]
-		sortCol := col.OrcSortCols[col.OrcPartCount]
-		condCols = append(partCols, sortCol)
+		partCols := col.OrcPartitionCols()
+		condCols = append(partCols, col.OrcOrderCol())
 		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			key := scm.String(a[0])
 			for i := 1; i < len(partCols); i++ {
@@ -445,9 +450,9 @@ func (t *table) recomputeORC(name string) {
 			}
 			return scm.NewBool(suffixMatch(a[len(partCols)], sk))
 		})
-	} else if dirtyParts != nil && col.OrcPartCount > 0 {
+	} else if dirtyParts != nil && col.OrcIsPartitioned() {
 		// Partition-only (no suffix): dirty partition, full partition recompute
-		partCols := col.OrcSortCols[:col.OrcPartCount]
+		partCols := col.OrcPartitionCols()
 		condCols = partCols
 		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			key := scm.String(a[0])
@@ -535,7 +540,8 @@ func (t *table) registerORCTriggers(name string) {
 			break
 		}
 	}
-	partitioned := col != nil && col.OrcPartCount > 0
+	partitioned := col != nil && col.OrcIsPartitioned()
+	hasSortKey := col != nil && len(col.OrcSortCols) > col.OrcPartCount
 
 	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 		triggerName := ".orc:" + t.Name + ":" + name + "|" + timing.String()
@@ -551,10 +557,10 @@ func (t *table) registerORCTriggers(name string) {
 		}
 
 		var body scm.Scmer
-		if partitioned && len(col.OrcSortCols) > col.OrcPartCount {
+		if partitioned && hasSortKey {
 			// Partitioned with sort key: partition + suffix invalidation
-			partCols := col.OrcSortCols[:col.OrcPartCount]
-			sortCol := col.OrcSortCols[col.OrcPartCount]
+			partCols := col.OrcPartitionCols()
+			sortCol := col.OrcOrderCol()
 			switch timing {
 			case AfterInsert:
 				body = buildOrcPartitionSuffixInvalidation(t.schema.Name, t.Name, name, partCols, sortCol, "NEW")
@@ -569,12 +575,12 @@ func (t *table) registerORCTriggers(name string) {
 					newInval,
 				})
 			}
-		} else if len(col.OrcSortCols) > col.OrcPartCount {
+		} else if hasSortKey {
 			// Unpartitioned with sort key: suffix invalidation
-			sortCol := col.OrcSortCols[col.OrcPartCount]
+			sortCol := col.OrcOrderCol()
 			// For UPDATE: merge OLD and NEW sort keys. ASC: min (earliest), DESC: max (earliest in desc order).
 			mergeFn := "min"
-			if col.OrcPartCount < len(col.OrcSortDirs) && col.OrcSortDirs[col.OrcPartCount] {
+			if col.OrcOrderDesc() {
 				mergeFn = "max"
 			}
 			switch timing {
