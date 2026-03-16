@@ -16,6 +16,7 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "sync"
 import "strings"
 import "runtime/debug"
 import "sync/atomic"
@@ -398,72 +399,69 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 	partCount := analyzeOrcPartition(col)
 
-	for _, s := range t.ActiveShards() {
-		s.mu.RLock()
-		cs := s.columns[colName]
-		sortCSs := make([]ColumnStorage, nCols)
-		for i := 0; i < nCols; i++ {
-			sortCSs[i] = s.columns[col.OrcSortCols[i]]
-		}
-		s.mu.RUnlock()
-		proxy, ok := cs.(*StorageComputeProxy)
-		if !ok {
-			continue
-		}
-		total := s.main_count + uint32(len(s.inserts))
-		for idx := uint32(0); idx < total; idx++ {
-			if s.deletions.Get(uint(idx)) {
-				continue
-			}
-			// Read row's sort values
-			rowVals := make([]scm.Scmer, nCols)
+	// Parallel invalidation across shards. No ordering needed — pure filter + bit-flip.
+	// TODO: use index infrastructure for partition equality acceleration.
+	shards := t.ActiveShards()
+	var wg sync.WaitGroup
+	wg.Add(len(shards))
+	for _, s := range shards {
+		go func(s *storageShard) {
+			defer wg.Done()
+			s.mu.RLock()
+			cs := s.columns[colName]
+			sortCSs := make([]ColumnStorage, nCols)
 			for i := 0; i < nCols; i++ {
-				if sortCSs[i] != nil && idx < s.main_count {
-					rowVals[i] = sortCSs[i].GetValue(idx)
-				} else if idx >= s.main_count {
-					rowVals[i] = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
-				}
+				sortCSs[i] = s.columns[col.OrcSortCols[i]]
 			}
-
-			// Partition check: if partitioned, skip rows in OTHER partitions.
-			if partCount > 0 {
-				samePartition := true
-				for i := 0; i < partCount && i < nCols; i++ {
-					if scm.Less(rowVals[i], sortKeys[i]) || scm.Less(sortKeys[i], rowVals[i]) {
-						samePartition = false
-						break
+			s.mu.RUnlock()
+			proxy, ok := cs.(*StorageComputeProxy)
+			if !ok {
+				return
+			}
+			total := s.main_count + uint32(len(s.inserts))
+			rowVals := make([]scm.Scmer, nCols)
+			for idx := uint32(0); idx < total; idx++ {
+				if s.deletions.Get(uint(idx)) {
+					continue
+				}
+				for i := 0; i < nCols; i++ {
+					if sortCSs[i] != nil && idx < s.main_count {
+						rowVals[i] = sortCSs[i].GetValue(idx)
+					} else if idx >= s.main_count {
+						rowVals[i] = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
 					}
 				}
-				if !samePartition {
-					continue // different partition → skip
-				}
-			}
-
-			// Composite comparison on ORDER columns (after partition prefix):
-			// Only invalidate rows at or past the mutation's order key.
-			cmp := 0
-			for i := partCount; i < nCols && cmp == 0; i++ {
-				desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
-				if scm.Less(rowVals[i], sortKeys[i]) {
-					if desc {
-						cmp = 1
-					} else {
-						cmp = -1
+				// Partition: skip rows in other partitions
+				if partCount > 0 {
+					skip := false
+					for i := 0; i < partCount && i < nCols; i++ {
+						if scm.Less(rowVals[i], sortKeys[i]) || scm.Less(sortKeys[i], rowVals[i]) {
+							skip = true
+							break
+						}
 					}
-				} else if scm.Less(sortKeys[i], rowVals[i]) {
-					if desc {
-						cmp = -1
-					} else {
-						cmp = 1
+					if skip {
+						continue
 					}
 				}
+				// Order: skip rows before mutation point
+				cmp := 0
+				for i := partCount; i < nCols && cmp == 0; i++ {
+					desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+					if scm.Less(rowVals[i], sortKeys[i]) {
+						if desc { cmp = 1 } else { cmp = -1 }
+					} else if scm.Less(sortKeys[i], rowVals[i]) {
+						if desc { cmp = -1 } else { cmp = 1 }
+					}
+				}
+				if cmp < 0 {
+					continue
+				}
+				proxy.validMask.Set(uint(idx), false)
 			}
-			if cmp < 0 {
-				continue // before mutation's order key within partition → skip
-			}
-			proxy.validMask.Set(uint(idx), false)
-		}
+		}(s)
 	}
+	wg.Wait()
 }
 
 // registerORCTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers on the
