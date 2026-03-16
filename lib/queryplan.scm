@@ -535,6 +535,15 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define sq_cache (newsession))
+	/* Neumann dependent-scalar accumulator: collects declarative dependent_scalar table
+	   entries created by replace_inner_selects for correlated scalar subqueries.
+	   Each entry is a table tuple (alias schema (dependent_scalar ...) true joinexpr).
+	   Fresh per untangle_query call → no cross-recursion pool mixing. */
+	(define pending_dependent_scalars (newsession))
+	(pending_dependent_scalars "tables" '())
+	(pending_dependent_scalars "schemas" '())
+	(define pending_scalar_counter (newsession))
+	(pending_scalar_counter "value" 0)
 
 	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
 	(define _cd_is_subquery (lambda (sym) (match sym
@@ -1128,6 +1137,43 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 		'(quote not) true
 		_ false
 	)))
+	/* Neumann: check if expression references outer table aliases */
+	(define expr_references_outer (lambda (expr outer_schemas) (match expr
+		'((symbol get_column) tblvar ti col ci) (and
+			(not (nil? tblvar))
+			(reduce_assoc outer_schemas (lambda (acc alias cols) (or acc (equal?? tblvar alias))) false))
+		(cons sym args) (reduce args (lambda (a b) (or a (expr_references_outer b outer_schemas))) false)
+		false)))
+	(define subquery_is_correlated (lambda (subquery outer_schemas)
+		(and (list? subquery) (>= (count subquery) 9)
+			(or
+				(reduce_assoc (nth subquery 2) (lambda (a k v) (or a (expr_references_outer v outer_schemas))) false)
+				(expr_references_outer (nth subquery 3) outer_schemas)
+				(reduce (coalesceNil (nth subquery 4) '()) (lambda (a b) (or a (expr_references_outer b outer_schemas))) false)
+				(expr_references_outer (nth subquery 5) outer_schemas)
+				(reduce (coalesceNil (nth subquery 6) '()) (lambda (a b) (or a (match b '(col dir) (expr_references_outer col outer_schemas)))) false)
+			))))
+	/* Neumann: create a dependent_scalar table entry for a correlated scalar subquery.
+	   The subquery is NOT flattened here — it stays as a declarative node.
+	   build_scan will later generate the physical subplan. */
+	(define make_dependent_scalar (lambda (subquery outer_schemas) (begin
+		(pending_scalar_counter "value" (+ (pending_scalar_counter "value") 1))
+		(define scalar_alias (concat "__dscalar_" (pending_scalar_counter "value")))
+		(define output_cols (query_branch_field_names subquery))
+		(define output_col (if (and (not (nil? output_cols)) (equal? (count output_cols) 1)) (car output_cols)
+			(error "scalar subselect must return single column")))
+		/* call untangle_query on the subquery to get the declarative plan */
+		(define subplan (apply untangle_query (append subquery (list outer_schemas))))
+		/* store as dependent_scalar table entry */
+		(pending_dependent_scalars "tables"
+			(merge (pending_dependent_scalars "tables")
+				(list (list scalar_alias schema (list (quote dependent_scalar) subplan output_col) true nil))))
+		(pending_dependent_scalars "schemas"
+			(merge (pending_dependent_scalars "schemas")
+				(list scalar_alias (list (list "Field" output_col "Type" "any")))))
+		/* return column reference to the scalar result */
+		(list (quote get_column) scalar_alias false output_col false)
+	)))
 	(define replace_inner_selects (lambda (expr outer_schemas) (match expr
 		(cons sym args) (begin
 			(define kind (inner_select_kind sym))
@@ -1151,7 +1197,16 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 			(if (nil? not_expr)
 				(match kind
 					(quote inner_select) (match args
-						(cons subquery '()) (build_scalar_subselect subquery outer_schemas)
+						(cons subquery '()) (begin
+							(define _sq_tables (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 1) nil))
+							(define _sq_has_from (and (not (nil? _sq_tables)) (not (equal? _sq_tables '()))))
+							(if (and _sq_has_from
+									(not (or (nil? outer_schemas) (equal? outer_schemas '())))
+									(subquery_is_correlated subquery outer_schemas))
+								/* Neumann: correlated scalar → dependent_scalar node (declarative) */
+								(make_dependent_scalar subquery outer_schemas)
+								/* non-correlated or FROM-less: build inline (no dependent join needed) */
+								(build_scalar_subselect subquery outer_schemas)))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					(quote inner_select_in) (match args
@@ -1184,6 +1239,8 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 		(begin
 			(set zipped (zip (map tables (lambda (tbldesc) (match tbldesc
 				'(alias schema (string? tbl) _ _) '('(tbldesc) '() true '(alias (get_schema schema tbl))) /* leave primary tables as is and load their schema definition */
+				/* Neumann: dependent_scalar passes through untouched — build_scan handles it */
+				'(alias schema '((quote dependent_scalar) _ _) _ _) '('(tbldesc) '() true '(alias (schemas alias)))
 				'(id schemax subquery isOuter joinexpr) (begin
 					(define union_parts_from (query_union_all_parts subquery))
 					(if (not (nil? union_parts_from))
@@ -1442,6 +1499,14 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 			(set group (map group (lambda (g) (replace_inner_selects g _outer_schemas_merged))))
 			(set having (replace_inner_selects having _outer_schemas_merged))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col _outer_schemas_merged) dir)))))
+
+			/* Neumann: merge dependent_scalar tables from correlated scalar subqueries into FROM list */
+			(define _ds_tables (pending_dependent_scalars "tables"))
+			(define _ds_schemas (pending_dependent_scalars "schemas"))
+			(if (not (equal? _ds_tables '()))
+				(begin
+					(set tables (merge tables _ds_tables))
+					(set schemas (merge schemas _ds_schemas))))
 
 			/* apply renamelist (assoc of assoc of expr) */
 			(define replace_rename (lambda (expr) (match expr
@@ -2355,6 +2420,29 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 					/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
 					(define build_scan (lambda (tables condition is_first)
 						(match tables
+							/* Neumann: dependent_scalar → build subplan with promise "once" */
+							(cons '(tblvar _ '((quote dependent_scalar) subplan output_col) isOuter _) tables) (begin
+								(define _ds_plan (apply build_queryplan subplan))
+								(define _ds_promise (symbol (concat "__dsp_" tblvar)))
+								(define _ds_saved_rr (symbol (concat "__dssr_" tblvar)))
+								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
+									(define _ds_body (build_scan tables later_condition false))
+									(list (quote begin)
+										(list (quote set) _ds_promise (list (quote newpromise)))
+										(list (quote set) _ds_saved_rr (symbol "resultrow"))
+										(list (quote set) (symbol "resultrow")
+											(list (quote lambda) (list (symbol "__ds_row"))
+												(list _ds_promise "once"
+													(list (quote nth) (symbol "__ds_row") 1)
+													"scalar subselect returned more than one row")))
+										_ds_plan
+										(list (quote set) (symbol "resultrow") _ds_saved_rr)
+										(list (quote set) (symbol (concat tblvar "." output_col))
+											(list (quote if) (list (quote nil?) (list _ds_promise "state")) nil (list _ds_promise "value")))
+										(if (or (nil? now_condition) (equal? now_condition true))
+											_ds_body
+											(list (quote if) (replace_columns_from_expr now_condition) _ds_body nil))))))
+							/* regular table → scan_order as usual */
 							(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
 								(set cols (merge_unique
 									(list
@@ -2425,6 +2513,29 @@ e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
 						/* TODO: match tbl to inner query vs string */
 						(define build_scan (lambda (tables condition)
 							(match tables
+								/* Neumann: dependent_scalar → build subplan with promise "once" */
+								(cons '(tblvar _ '((quote dependent_scalar) subplan output_col) isOuter _) tables) (begin
+									(define _ds_plan (apply build_queryplan subplan))
+									(define _ds_promise (symbol (concat "__dsp_" tblvar)))
+									(define _ds_saved_rr (symbol (concat "__dssr_" tblvar)))
+									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
+										(define _ds_body (build_scan tables later_condition))
+										(list (quote begin)
+											(list (quote set) _ds_promise (list (quote newpromise)))
+											(list (quote set) _ds_saved_rr (symbol "resultrow"))
+											(list (quote set) (symbol "resultrow")
+												(list (quote lambda) (list (symbol "__ds_row"))
+													(list _ds_promise "once"
+														(list (quote nth) (symbol "__ds_row") 1)
+														"scalar subselect returned more than one row")))
+											_ds_plan
+											(list (quote set) (symbol "resultrow") _ds_saved_rr)
+											(list (quote set) (symbol (concat tblvar "." output_col))
+												(list (quote if) (list (quote nil?) (list _ds_promise "state")) nil (list _ds_promise "value")))
+											(if (or (nil? now_condition) (equal? now_condition true))
+												_ds_body
+												(list (quote if) (replace_columns_from_expr now_condition) _ds_body nil))))))
+								/* regular table → scan as usual */
 								(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
 									(set cols (merge_unique
 										(list
