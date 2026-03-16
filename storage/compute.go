@@ -405,10 +405,11 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	)
 }
 
-// invalidateORCFromSortKey runs a lightweight scan_order from sortKey onwards,
-// clearing validMask bits for each successor row. Stops early when hitting
-// an already-invalid row (everything after is already invalid from a prior mutation).
-func (t *table) invalidateORCFromSortKey(colName string, sortKey scm.Scmer) {
+// invalidateORCFromSortKey clears validMask bits for all rows whose composite
+// sort key is >= the mutation sort key (or <= for DESC). sortKeys is a list of
+// values corresponding to col.OrcSortCols. Uses composite comparison matching
+// the scan_order sort semantics.
+func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	var col *column
 	for _, c := range t.Columns {
 		if c.Name == colName {
@@ -416,21 +417,27 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKey scm.Scmer) {
 			break
 		}
 	}
-	if col == nil || len(col.OrcSortCols) == 0 {
+	if col == nil || len(col.OrcSortCols) == 0 || len(sortKeys) == 0 {
 		return
 	}
 
-	sortDesc := col.OrcFirstSortDesc()
+	// Build comparators for each sort column
+	nCols := len(col.OrcSortCols)
+	if len(sortKeys) < nCols {
+		nCols = len(sortKeys)
+	}
 
-	// For each shard, iterate rows in sort-key order from the mutation point,
-	// clearing validMask bits. Stop when hitting an already-invalid row.
+	// For each shard, iterate rows and clear validMask for rows at or past the mutation point.
 	for _, s := range t.ActiveShards() {
 		s.mu.RLock()
 		cs := s.columns[colName]
-		sortCS := s.columns[col.OrcFirstSortCol()]
+		sortCSs := make([]ColumnStorage, nCols)
+		for i := 0; i < nCols; i++ {
+			sortCSs[i] = s.columns[col.OrcSortCols[i]]
+		}
 		s.mu.RUnlock()
 		proxy, ok := cs.(*StorageComputeProxy)
-		if !ok || sortCS == nil {
+		if !ok {
 			continue
 		}
 		total := s.main_count + uint32(len(s.inserts))
@@ -438,22 +445,33 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKey scm.Scmer) {
 			if s.deletions.Get(uint(idx)) {
 				continue
 			}
-			// Read sort key for this row
-			var rowSortKey scm.Scmer
-			if idx < s.main_count {
-				rowSortKey = sortCS.GetValue(idx)
-			} else {
-				rowSortKey = s.getDelta(int(idx-s.main_count), col.OrcFirstSortCol())
+			// Composite comparison: row's sort tuple vs mutation sort tuple.
+			// Result: -1 (before), 0 (equal), +1 (after) in sort order.
+			cmp := 0
+			for i := 0; i < nCols && cmp == 0; i++ {
+				var rowVal scm.Scmer
+				if sortCSs[i] != nil && idx < s.main_count {
+					rowVal = sortCSs[i].GetValue(idx)
+				} else if idx >= s.main_count {
+					rowVal = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
+				}
+				desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+				if scm.Less(rowVal, sortKeys[i]) {
+					if desc {
+						cmp = 1 // row < key in DESC = after
+					} else {
+						cmp = -1 // row < key in ASC = before
+					}
+				} else if scm.Less(sortKeys[i], rowVal) {
+					if desc {
+						cmp = -1 // row > key in DESC = before
+					} else {
+						cmp = 1 // row > key in ASC = after
+					}
+				}
 			}
-			// Check if row is at or past the mutation point
-			if sortDesc {
-				if scm.Less(sortKey, rowSortKey) {
-					continue // rowSortKey > sortKey → before mutation in DESC
-				}
-			} else {
-				if scm.Less(rowSortKey, sortKey) {
-					continue // rowSortKey < sortKey → before mutation in ASC
-				}
+			if cmp < 0 {
+				continue // row is before mutation point → skip
 			}
 			// Row is at or past mutation point → invalidate
 			proxy.validMask.Set(uint(idx), false)
@@ -474,14 +492,19 @@ func (t *table) registerORCTriggers(name string) {
 		}
 	}
 	hasSortKey := col != nil && len(col.OrcSortCols) > 0
-	// For UPDATE with sort key: merge OLD and NEW with min (ASC) or max (DESC).
-	var sortCol string
-	mergeFn := "min"
-	if hasSortKey {
-		sortCol = col.OrcFirstSortCol()
-		if col.OrcFirstSortDesc() {
-			mergeFn = "max"
+
+	// Build composite sort key expression: (list (get_assoc dict "col1") (get_assoc dict "col2") ...)
+	buildSortKeyExpr := func(dictSym string) scm.Scmer {
+		if len(col.OrcSortCols) == 1 {
+			// Single sort col: pass value directly (backward compat)
+			return fkGetAssocExpr(dictSym, col.OrcSortCols[0])
 		}
+		parts := make([]scm.Scmer, 1+len(col.OrcSortCols))
+		parts[0] = scm.NewSymbol("list")
+		for i, sc := range col.OrcSortCols {
+			parts[1+i] = fkGetAssocExpr(dictSym, sc)
+		}
+		return scm.NewSlice(parts)
 	}
 
 	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
@@ -499,15 +522,19 @@ func (t *table) registerORCTriggers(name string) {
 
 		var body scm.Scmer
 		if hasSortKey {
-			// Sort key available: invalidate from sort key onwards via validMask scan
+			// Invalidate from composite sort key onwards via validMask scan
 			switch timing {
 			case AfterInsert:
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), fkGetAssocExpr("NEW", sortCol)})
+				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("NEW")})
 			case AfterDelete:
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), fkGetAssocExpr("OLD", sortCol)})
+				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("OLD")})
 			case AfterUpdate:
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol(mergeFn), fkGetAssocExpr("OLD", sortCol), fkGetAssocExpr("NEW", sortCol)})})
+				// For UPDATE: invalidate from both OLD and NEW positions
+				body = scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("begin"),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("OLD")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("NEW")}),
+				})
 			}
 		} else {
 			// No sort key: full column invalidation

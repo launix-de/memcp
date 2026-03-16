@@ -1063,7 +1063,7 @@ func Init(en scm.Env) {
 			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
 			scm.DeclarationParameter{"table", "string", "name of the table", nil},
 			scm.DeclarationParameter{"column", "string", "name of the ORC column", nil},
-			scm.DeclarationParameter{"sortkey", "any", "sort key value from which to invalidate", nil},
+			scm.DeclarationParameter{"sortkeys", "list", "composite sort key values from which to invalidate", nil},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
@@ -1074,7 +1074,14 @@ func Init(en scm.Env) {
 			if t == nil {
 				return scm.NewBool(false)
 			}
-			t.invalidateORCFromSortKey(scm.String(a[2]), a[3])
+			// Accept both a single value and a list of sort key values
+			var sortKeys []scm.Scmer
+			if a[3].IsSlice() {
+				sortKeys = a[3].Slice()
+			} else {
+				sortKeys = []scm.Scmer{a[3]}
+			}
+			t.invalidateORCFromSortKey(scm.String(a[2]), sortKeys)
 			return scm.NewBool(true)
 		}, false, false, nil,
 		nil,
