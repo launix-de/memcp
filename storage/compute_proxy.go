@@ -109,34 +109,91 @@ func (p *StorageComputeProxy) orcRowPartitionKey(idx uint32, partCols []string) 
 	return key
 }
 
-// orcRowIsDirty checks if the row at idx belongs to a dirty partition.
-// Returns true if the row needs recomputation (or if we can't determine → conservative).
+// orcRowIsDirty checks if the row at idx needs recomputation.
+// Returns false (= clean) when the row is in a clean partition or before the
+// dirty suffix point in sort order. Conservative: returns true when uncertain.
 func (p *StorageComputeProxy) orcRowIsDirty(idx uint32) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	// Fully dirty (nil dirtyPartitions + nil dirtyPartitionSuffix) → everything dirty
-	if p.dirtyPartitions == nil && p.dirtyPartitionSuffix == nil {
+
+	col := p.orcCol()
+	if col == nil {
 		return true
 	}
-	col := p.orcCol()
-	if col == nil || !col.OrcIsPartitioned() {
-		return true // unpartitioned → always dirty when !compressed
+
+	// Fully dirty (nil dirtyPartitions + nil suffix markers) → everything dirty
+	if p.dirtyPartitions == nil && p.dirtySortKey.IsNil() && p.dirtyPartitionSuffix == nil {
+		return true
+	}
+
+	// Helper: check if a sort value is before the dirty suffix point (= clean).
+	// ASC: sortVal < suffixKey → clean. DESC: sortVal > suffixKey → clean.
+	sortDesc := col.OrcOrderDesc()
+	isBefore := func(sortVal, suffixKey scm.Scmer) bool {
+		if sortDesc {
+			return scm.Less(suffixKey, sortVal) // sortVal > suffixKey → before in DESC
+		}
+		return scm.Less(sortVal, suffixKey) // sortVal < suffixKey → before in ASC
+	}
+
+	// Unpartitioned suffix: check sort key position
+	if !p.dirtySortKey.IsNil() && !col.OrcIsPartitioned() {
+		sortCol := col.OrcOrderCol()
+		var sortVal scm.Scmer
+		s := p.shard
+		if idx < s.main_count {
+			s.mu.RLock()
+			cs := s.columns[sortCol]
+			s.mu.RUnlock()
+			if cs != nil {
+				sortVal = cs.GetValue(idx)
+			}
+		} else {
+			sortVal = s.getDelta(int(idx-s.main_count), sortCol)
+		}
+		if !sortVal.IsNil() && isBefore(sortVal, p.dirtySortKey) {
+			return false // row is before suffix point → clean
+		}
+		return true
+	}
+
+	// Partitioned: need to check partition membership
+	if !col.OrcIsPartitioned() {
+		return true // unpartitioned without suffix → fully dirty
 	}
 	partCols := col.OrcPartitionCols()
 	pk := p.orcRowPartitionKey(idx, partCols)
+
 	// Check dirtyPartitions (full partition dirty)
-	if p.dirtyPartitions != nil {
-		if p.dirtyPartitions[pk] {
-			return true
-		}
+	if p.dirtyPartitions != nil && p.dirtyPartitions[pk] {
+		return true
 	}
+
 	// Check dirtyPartitionSuffix (partition+suffix dirty)
 	if p.dirtyPartitionSuffix != nil {
-		if _, ok := p.dirtyPartitionSuffix[pk]; ok {
+		if suffixKey, ok := p.dirtyPartitionSuffix[pk]; ok {
+			// Partition is dirty, but check if row is before the suffix point
+			sortCol := col.OrcOrderCol()
+			var sortVal scm.Scmer
+			s := p.shard
+			if idx < s.main_count {
+				s.mu.RLock()
+				cs := s.columns[sortCol]
+				s.mu.RUnlock()
+				if cs != nil {
+					sortVal = cs.GetValue(idx)
+				}
+			} else {
+				sortVal = s.getDelta(int(idx-s.main_count), sortCol)
+			}
+			if !sortVal.IsNil() && isBefore(sortVal, suffixKey) {
+				return false // row is before suffix point within partition → clean
+			}
 			return true
 		}
 	}
-	return false
+
+	return false // partition is not dirty
 }
 
 // GetValue returns the value at idx, computing on demand if necessary.

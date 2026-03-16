@@ -94,6 +94,15 @@ test_cases:
   - name: "INSERT at end (day=60)"
     sql: "INSERT INTO suf_sum (id, day, amount) VALUES (8, 60, 1000)"
 
+  - name: "Query rows before suffix point (demand-driven suffix skip)"
+    sql: "SELECT id, day, amount, running FROM suf_sum WHERE day <= 20 ORDER BY day"
+    expect:
+      rows: 3
+      data:
+        - {id: 6, day: 5, amount: 50, running: 50}
+        - {id: 1, day: 10, amount: 100, running: 150}
+        - {id: 2, day: 20, amount: 200, running: 350}
+
   - name: "Running SUM after INSERT at end"
     sql: "SELECT id, day, amount, running FROM suf_sum ORDER BY day"
     expect:
