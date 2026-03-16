@@ -2231,7 +2231,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 	g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
 	g.emit("return result")
 
-	result := fmt.Sprintf("func(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s\t\t}",
+	result := fmt.Sprintf("func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s\t\t}",
 		g.wDecl.String(), injectBindRegCalls(g.w.String()))
 	return result, ""
 }

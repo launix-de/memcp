@@ -358,11 +358,6 @@ func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
 	}
 	return result
 }
-func (s *StorageEnum) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-
-	/* TODO: Extract: extract t20 #0 */
-	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
-}
 
 // GetValueCached provides O(1) sequential access using a per-goroutine cache.
 // The cache must not be shared between goroutines.
@@ -462,6 +457,12 @@ func (s *StorageEnum) findChunk(idx int) int {
 //	magic is k (uint8, always 2..8), so there is no safe location for an inline
 //	version byte.  Format changes require a NEW magic byte in storages[]
 //	(storage.go); keep magic 40 as a legacy reader forever.
+
+func (s *StorageEnum) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+
+	/* TODO: Extract: extract t20 #0 */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+}
 
 func (s *StorageEnum) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(40)) // magic byte 40 = StorageEnum

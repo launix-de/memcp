@@ -1103,9 +1103,6 @@ type ShardMapReducer struct {
 	// and registered write ownership before opening this mapper. When true,
 	// processMainBlock/processDeltaBlock must NOT try to re-acquire the lock.
 	shardWriteLocked bool
-	// JIT-compiled fused loop for main storage (nil = use interpreted fallback).
-	compiledMain fusedMainFn
-	cleanupJIT   func()
 }
 
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
@@ -1226,8 +1223,6 @@ func (t *storageShard) openMapReducerEx(cols []string, mapFn scm.Scmer, reduceFn
 			tx.RegisterTouchedShard(t)
 		}
 	}
-	// Attempt JIT compilation of the fused main loop; fall back to interpreted if it fails.
-	mr.compiledMain, mr.cleanupJIT = compileFusedMainLoop(mr.mainCols, mr.isUpdate, mapFn, reduceFn)
 	return mr
 }
 
@@ -1256,19 +1251,22 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32) scm.Scmer {
 }
 
 // processMainBlock is a tight loop over main-storage records – no branching
-// on main vs delta, direct ColumnStorage.GetValue calls.
-// Uses JIT-compiled fused loop when available, interpreted fallback otherwise.
+// on main vs delta, direct ColumnStorage.GetValue calls. JIT candidate.
 func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
-	if m.compiledMain != nil {
-		return m.compiledMain(acc, recids)
-	}
-	for _, id := range recids {
-		for i, col := range m.mainCols {
-			if m.isUpdate[i] {
-				m.args[i] = scm.NewFunc(m.shard.UpdateFunction(id, true, m.shardWriteLocked))
-			} else {
-				m.args[i] = col.GetValue(id)
-			}
+	// Hoist write-lock acquisition out of the per-row loop.
+	// shardWriteLocked is set by openMapReducerEx when the caller (scan.go) already
+	// holds shard.mu; in that case we must NOT re-acquire it. For the rare case
+	// where a mapper is opened without the shard being locked (e.g. NEW. columns
+	// outside a mutation scan), acquire once for the whole batch instead of per-row.
+	if (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked {
+		currentTx := CurrentTx()
+		m.shard.mu.Lock()
+		defer m.shard.mu.Unlock()
+		m.shard.enterWriteOwner()
+		defer m.shard.exitWriteOwner()
+		if currentTx != nil {
+			currentTx.EnterShardWrite(m.shard)
+			defer currentTx.ExitShardWrite(m.shard)
 		}
 	}
 	for _, id := range recids {
@@ -1386,12 +1384,8 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 	return acc
 }
 
-// Close releases resources held by the MapReducer (mmap'd JIT code pages).
+// Close releases resources held by the MapReducer. No-op for local shards.
 func (m *ShardMapReducer) Close() {
-	if m.cleanupJIT != nil {
-		m.cleanupJIT()
-		m.cleanupJIT = nil
-	}
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, onFirstInsertId func(int64), isIgnore bool) {

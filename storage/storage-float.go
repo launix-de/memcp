@@ -53,55 +53,7 @@ const storageFloatVersion = 0
 //	0 (current): layout as above; the version byte was previously the first byte
 //	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
 //	             Legacy detection: if version byte == '1' (49), treat as v0 legacy.
-func (s *StorageFloat) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(12))                  // 12 = StorageFloat
-	binary.Write(f, binary.LittleEndian, uint8(storageFloatVersion)) // version byte (was '1' in legacy)
-	var pad [6]byte
-	f.Write(pad[:]) // remaining alignment padding (was "234567")
-	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
-	// now at offset 16 begin data
-	rawdata := unsafe.Slice((*byte)(unsafe.Pointer(&s.values[0])), 8*len(s.values))
-	f.Write(rawdata)
-	// free allocated memory and mmap
-	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) {f.Close()})
-	newrawdata = mmap.Map(f, RDWR, 0)
-	s.values = unsafe.Slice((*float64)&newrawdata[16], len(s.values))
-	*/
-}
-func (s *StorageFloat) Deserialize(f io.Reader) uint {
-	var version uint8
-	binary.Read(f, binary.LittleEndian, &version)
-	var pad [6]byte
-	f.Read(pad[:])
-	switch version {
-	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
-		return s.deserializeFloatV0(f)
-	default:
-		panic(fmt.Sprintf("StorageFloat: unknown version %d", version))
-	}
-}
 
-func (s *StorageFloat) deserializeFloatV0(f io.Reader) uint {
-	var l uint64
-	binary.Read(f, binary.LittleEndian, &l)
-	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) { f.Close() })
-	rawdata := mmap.Map(f, RDWR, 0)
-	*/
-	rawdata := make([]byte, 8*l)
-	f.Read(rawdata)
-	s.values = unsafe.Slice((*float64)(unsafe.Pointer(&rawdata[0])), l)
-	return uint(l)
-}
-
-func (s *StorageFloat) GetCachedReader() ColumnReader { return s }
-
-func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
-	// NULL is encoded as NaN in SQL
-	if math.IsNaN(s.values[i]) {
-		return scm.NewNil()
-	}
-	return scm.NewFloat(s.values[i])
-}
 func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 			var d0 scm.JITValueDesc
 			_ = d0
@@ -411,6 +363,56 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ctx.ResolveFixups()
 			if idxPinned { ctx.UnprotectReg(idxPinnedReg) }
 			return result
+}
+
+func (s *StorageFloat) Serialize(f io.Writer) {
+	binary.Write(f, binary.LittleEndian, uint8(12))                  // 12 = StorageFloat
+	binary.Write(f, binary.LittleEndian, uint8(storageFloatVersion)) // version byte (was '1' in legacy)
+	var pad [6]byte
+	f.Write(pad[:]) // remaining alignment padding (was "234567")
+	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
+	// now at offset 16 begin data
+	rawdata := unsafe.Slice((*byte)(unsafe.Pointer(&s.values[0])), 8*len(s.values))
+	f.Write(rawdata)
+	// free allocated memory and mmap
+	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) {f.Close()})
+	newrawdata = mmap.Map(f, RDWR, 0)
+	s.values = unsafe.Slice((*float64)&newrawdata[16], len(s.values))
+	*/
+}
+func (s *StorageFloat) Deserialize(f io.Reader) uint {
+	var version uint8
+	binary.Read(f, binary.LittleEndian, &version)
+	var pad [6]byte
+	f.Read(pad[:])
+	switch version {
+	case 0, '1': // '1'=49: legacy pre-versioning dummy byte; treat as v0
+		return s.deserializeFloatV0(f)
+	default:
+		panic(fmt.Sprintf("StorageFloat: unknown version %d", version))
+	}
+}
+
+func (s *StorageFloat) deserializeFloatV0(f io.Reader) uint {
+	var l uint64
+	binary.Read(f, binary.LittleEndian, &l)
+	/* TODO: runtime.SetFinalizer(s, func(s *StorageSCMER) { f.Close() })
+	rawdata := mmap.Map(f, RDWR, 0)
+	*/
+	rawdata := make([]byte, 8*l)
+	f.Read(rawdata)
+	s.values = unsafe.Slice((*float64)(unsafe.Pointer(&rawdata[0])), l)
+	return uint(l)
+}
+
+func (s *StorageFloat) GetCachedReader() ColumnReader { return s }
+
+func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
+	// NULL is encoded as NaN in SQL
+	if math.IsNaN(s.values[i]) {
+		return scm.NewNil()
+	}
+	return scm.NewFloat(s.values[i])
 }
 
 func (s *StorageFloat) scan(i uint32, value scm.Scmer) {

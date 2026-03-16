@@ -113,11 +113,6 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 
 	return val
 }
-func (p *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-
-	/* TODO: dynamic call: invoke t3.GetValue(idx) */
-	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
-}
 
 func (p *StorageComputeProxy) GetCachedReader() ColumnReader {
 	return p
@@ -366,6 +361,12 @@ const storageComputeProxyVersion = 1
 //
 //	0: layout as above.
 //	1: adds [isOrdered uint8] after validMask (1=ORC column, 0=regular computed column).
+func (p *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+
+	/* TODO: FieldAddr on non-receiver: &m.mu [#1] */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+}
+
 func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(50))                         // magic byte
 	binary.Write(f, binary.LittleEndian, uint8(storageComputeProxyVersion)) // version byte

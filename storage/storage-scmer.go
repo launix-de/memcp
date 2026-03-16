@@ -68,40 +68,6 @@ func (s *StorageSCMER) String() string {
 //	no persisted files exist with magic 1.  Still, format changes require a
 //	NEW magic byte in storages[] (storage.go); keep magic 1 as a legacy
 //	reader forever.
-func (s *StorageSCMER) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
-	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
-	for i := 0; i < len(s.values); i++ {
-		v, err := json.Marshal(s.values[i])
-		if err != nil {
-			panic(err)
-		}
-		f.Write(v)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 10
-	}
-}
-func (s *StorageSCMER) Deserialize(f io.Reader) uint {
-	// No version byte: this type had no padding byte in v0.1.0.
-	// Count is read directly.  Format changes require a new magic byte.
-	var l uint64
-	binary.Read(f, binary.LittleEndian, &l)
-	s.values = make([]scm.Scmer, l)
-	scanner := bufio.NewScanner(f)
-	for i := uint64(0); i < l; i++ {
-		if scanner.Scan() {
-			var v any
-			json.Unmarshal(scanner.Bytes(), &v)
-			s.values[i] = scm.TransformFromJSON(v)
-		}
-	}
-	return uint(l)
-}
-
-func (s *StorageSCMER) GetCachedReader() ColumnReader { return s }
-
-func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
-	return s.values[i]
-}
 func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 			var d0 scm.JITValueDesc
 			_ = d0
@@ -230,6 +196,41 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			ps2 := scm.PhiState{General: false}
 			_ = bbs[0].RenderPS(ps2)
 			return result
+}
+
+func (s *StorageSCMER) Serialize(f io.Writer) {
+	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
+	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
+	for i := 0; i < len(s.values); i++ {
+		v, err := json.Marshal(s.values[i])
+		if err != nil {
+			panic(err)
+		}
+		f.Write(v)
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 10
+	}
+}
+func (s *StorageSCMER) Deserialize(f io.Reader) uint {
+	// No version byte: this type had no padding byte in v0.1.0.
+	// Count is read directly.  Format changes require a new magic byte.
+	var l uint64
+	binary.Read(f, binary.LittleEndian, &l)
+	s.values = make([]scm.Scmer, l)
+	scanner := bufio.NewScanner(f)
+	for i := uint64(0); i < l; i++ {
+		if scanner.Scan() {
+			var v any
+			json.Unmarshal(scanner.Bytes(), &v)
+			s.values[i] = scm.TransformFromJSON(v)
+		}
+	}
+	return uint(l)
+}
+
+func (s *StorageSCMER) GetCachedReader() ColumnReader { return s }
+
+func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
+	return s.values[i]
 }
 
 func (s *StorageSCMER) SetValue(i uint32, v scm.Scmer) {

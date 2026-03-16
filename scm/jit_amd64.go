@@ -93,6 +93,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		AllRegs:   freeRegs,
 		SliceBase: RegR12,
 	}
+	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
 
 	// Emit: MOV R12, RAX (save slice base pointer)
 	ctx.emitMovRegReg(RegR12, RegRAX)
@@ -1019,7 +1020,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					ctx.UnprotectReg(r)
 				}
 			}()
-			out := decl.JITEmit(ctx, args, result)
+			out := decl.JITEmit(ctx, list[1:], args, result)
 			if out.Loc == LocImm {
 				ctx.TrackImm(out.Imm)
 			}
