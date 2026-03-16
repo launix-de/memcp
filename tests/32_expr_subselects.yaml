@@ -510,6 +510,11 @@ test_cases:
     expect:
       error: true
 
+  - name: "Correlated scalar subselect multiple rows errors"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = t1.id) AS v FROM t1 WHERE id = 2"
+    expect:
+      error: true
+
   - name: "IN constant list still supported"
     sql: "SELECT 1 WHERE 1 IN (1,2,3)"
     expect:
