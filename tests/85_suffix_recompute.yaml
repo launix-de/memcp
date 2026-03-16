@@ -237,6 +237,19 @@ test_cases:
   - name: "INSERT into partition A (suffix within partition)"
     sql: "INSERT INTO suf_part (id, cat, score) VALUES (9, 'A', 15)"
 
+  - name: "Query only partition B after INSERT into A (demand-driven skip)"
+    sql: |
+      SELECT id, cat, score,
+             ROW_NUMBER() OVER (PARTITION BY cat ORDER BY score) AS rn
+      FROM suf_part
+      WHERE cat = 'B'
+      ORDER BY score
+    expect:
+      rows: 2
+      data:
+        - {id: 4, cat: "B", score: 15, rn: 1}
+        - {id: 5, cat: "B", score: 25, rn: 2}
+
   - name: "ROW_NUMBER after INSERT into partition A"
     sql: |
       SELECT id, cat, score,

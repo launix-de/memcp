@@ -86,11 +86,78 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 	return sz
 }
 
+// orcRowPartitionKey returns the partition key string for a given row index.
+// Reads partition columns from the shard's column storages.
+func (p *StorageComputeProxy) orcRowPartitionKey(idx uint32, partCols []string) string {
+	s := p.shard
+	key := ""
+	for i, pc := range partCols {
+		var val scm.Scmer
+		s.mu.RLock()
+		cs := s.columns[pc]
+		s.mu.RUnlock()
+		if cs != nil && idx < s.main_count {
+			val = cs.GetValue(idx)
+		} else if idx >= s.main_count {
+			val = s.getDelta(int(idx-s.main_count), pc)
+		}
+		if i > 0 {
+			key += "|"
+		}
+		key += scm.String(val)
+	}
+	return key
+}
+
+// orcRowIsDirty checks if the row at idx belongs to a dirty partition.
+// Returns true if the row needs recomputation (or if we can't determine → conservative).
+func (p *StorageComputeProxy) orcRowIsDirty(idx uint32) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	// Fully dirty (nil dirtyPartitions + nil dirtyPartitionSuffix) → everything dirty
+	if p.dirtyPartitions == nil && p.dirtyPartitionSuffix == nil {
+		return true
+	}
+	col := p.orcCol()
+	if col == nil || !col.OrcIsPartitioned() {
+		return true // unpartitioned → always dirty when !compressed
+	}
+	partCols := col.OrcPartitionCols()
+	pk := p.orcRowPartitionKey(idx, partCols)
+	// Check dirtyPartitions (full partition dirty)
+	if p.dirtyPartitions != nil {
+		if p.dirtyPartitions[pk] {
+			return true
+		}
+	}
+	// Check dirtyPartitionSuffix (partition+suffix dirty)
+	if p.dirtyPartitionSuffix != nil {
+		if _, ok := p.dirtyPartitionSuffix[pk]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // GetValue returns the value at idx, computing on demand if necessary.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	// ORC path: values live in delta map, written by $set: during scan_order.
 	if p.isOrdered {
 		if !p.compressed {
+			// Demand-driven: for partitioned ORCs, skip recompute if this
+			// row's partition is clean — return the existing cached value.
+			if !p.orcRowIsDirty(idx) {
+				p.mu.RLock()
+				if val, ok := p.delta[idx]; ok {
+					p.mu.RUnlock()
+					return val
+				}
+				p.mu.RUnlock()
+				if p.main != nil {
+					return p.main.GetValue(idx)
+				}
+				return scm.NewNil()
+			}
 			p.shard.t.orcMu.Lock()
 			if !p.compressed {
 				p.shard.t.recomputeORC(p.colName)
