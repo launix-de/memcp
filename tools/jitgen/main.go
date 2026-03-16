@@ -2841,29 +2841,34 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// Determine field size for the load instruction
 		var sizeStr string
 		var goTypeName string
-		switch t := fieldType.(type) {
-		case *types.Basic:
-			goTypeName = t.Name()
-			switch t.Kind() {
-			case types.String:
-				// Go strings are two words: data pointer + length.
+		// Scmer is a two-word struct (ptr + aux), must be loaded as a pair.
+		if isScmerType(field.Type()) {
+			sizeStr = "scmer"
+		} else {
+			switch t := fieldType.(type) {
+			case *types.Basic:
+				goTypeName = t.Name()
+				switch t.Kind() {
+				case types.String:
+					// Go strings are two words: data pointer + length.
+					sizeStr = "slice"
+				case types.Bool, types.Uint8, types.Int8:
+					sizeStr = "1"
+				case types.Uint16, types.Int16:
+					sizeStr = "2"
+				case types.Uint32, types.Int32:
+					sizeStr = "4"
+				default:
+					sizeStr = "8"
+				}
+			case *types.Slice:
 				sizeStr = "slice"
-			case types.Bool, types.Uint8, types.Int8:
-				sizeStr = "1"
-			case types.Uint16, types.Int16:
-				sizeStr = "2"
-			case types.Uint32, types.Int32:
-				sizeStr = "4"
+			case *types.Array:
+				// Keep array as addressable aggregate; indexed loads are lowered via IndexAddr.
+				sizeStr = "array"
 			default:
 				sizeStr = "8"
 			}
-		case *types.Slice:
-			sizeStr = "slice"
-		case *types.Array:
-			// Keep array as addressable aggregate; indexed loads are lowered via IndexAddr.
-			sizeStr = "array"
-		default:
-			sizeStr = "8"
 		}
 
 		// Create marker with offsetExpr
@@ -2874,6 +2879,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				offsetExpr:      offsetExpr,
 				deferredBaseSSA: v.X.Name(),
 			}
+		} else if isImmutable && sizeStr == "scmer" {
+			g.vals[name] = genVal{marker: "_fieldconst:scmer:" + cacheKey, offsetExpr: offsetExpr}
 		} else if isImmutable && sizeStr == "slice" {
 			g.vals[name] = genVal{marker: "_fieldconst:slice:" + cacheKey, offsetExpr: offsetExpr}
 		} else if isImmutable && goTypeName != "" {
@@ -3091,6 +3098,41 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("}")
 					g.emit("ctx.BindReg(%s, &%s)", ptrReg2, dv)
 					gv := genVal{goVar: dv, isDesc: true, marker: "_slice"}
+					g.vals[name] = gv
+					g.fieldCache[cacheKey] = gv
+					break
+				}
+
+				if goType == "scmer" {
+					// Immutable Scmer field: at JIT-compile-time, read the two-word
+					// value from the struct and return it as LocImm (zero code emitted).
+					// This enables maximum constant folding downstream.
+					cacheKey := fieldName
+					if cached, ok := g.fieldCache[cacheKey]; ok {
+						g.vals[name] = cached
+						break
+					}
+					dv := g.allocDesc()
+					g.emit("var %s JITValueDesc", dv)
+					g.emit("if thisptr.Loc == LocImm {")
+					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
+					g.emit("\tval := *(*Scmer)(unsafe.Pointer(fieldAddr))")
+					g.emit("\tctx.TrackImm(val)")
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: val.GetTag(), Imm: val}", dv)
+					g.emit("} else {")
+					// Register receiver: load both words at runtime
+					ptrReg := g.allocReg()
+					auxReg := g.allocReg()
+					g.emit("\toff := int32(%s)", src.offsetExpr)
+					g.emit("\t%s := ctx.AllocReg()", ptrReg)
+					g.emit("\t%s := ctx.AllocRegExcept(%s)", auxReg, ptrReg)
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg)
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+8)", auxReg)
+					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: %s, Reg2: %s}", dv, ptrReg, auxReg)
+					g.emit("\tctx.BindReg(%s, &%s)", ptrReg, dv)
+					g.emit("\tctx.BindReg(%s, &%s)", auxReg, dv)
+					g.emit("}")
+					gv := genVal{goVar: dv, isDesc: true}
 					g.vals[name] = gv
 					g.fieldCache[cacheKey] = gv
 					break

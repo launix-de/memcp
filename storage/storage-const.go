@@ -23,11 +23,12 @@ import (
 	"github.com/launix-de/memcp/scm"
 	"io"
 )
+import "unsafe"
 
 // StorageConst stores a column where every row has the same value.
 // Zero per-element overhead: only the single constant value is stored.
 type StorageConst struct {
-	value scm.Scmer
+	value scm.Scmer `jit:"immutable-after-finish"`
 	count uint64
 }
 
@@ -46,12 +47,104 @@ func (s *StorageConst) GetValue(i uint32) scm.Scmer {
 func (s *StorageConst) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-	// Constant column: return the value as an immediate — no code emitted.
-	// This enables full constant folding downstream (e.g. const + const = const).
-	ctx.FreeDesc(&thisptr)
-	ctx.FreeDesc(&idx)
-	ctx.TrackImm(s.value) // keep heap objects alive for JIT code lifetime
-	return scm.JITValueDesc{Loc: scm.LocImm, Type: s.value.GetTag(), Imm: s.value}
+			var d0 scm.JITValueDesc
+			_ = d0
+	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var idxInt scm.JITValueDesc
+			if idx.Loc == scm.LocImm {
+				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
+			} else if idx.Loc == scm.LocRegPair {
+				ctx.FreeReg(idx.Reg)
+				idxInt = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idx.Reg2}
+				ctx.BindReg(idx.Reg2, &idxInt)
+			} else {
+				idxInt = idx
+			}
+			if idxInt.Loc == scm.LocImm {
+				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
+			} else {
+				ctx.EnsureDesc(&idxInt)
+				if idxInt.Loc != scm.LocReg { panic("jit: idxInt not in register") }
+				ctx.EmitShlRegImm8(idxInt.Reg, 32)
+				ctx.EmitShrRegImm8(idxInt.Reg, 32)
+				ctx.BindReg(idxInt.Reg, &idxInt)
+			}
+			var bbs [1]scm.BBDescriptor
+			bbpos_0_0 := int32(-1)
+			_ = bbpos_0_0
+			lbl0 := ctx.ReserveLabel()
+			bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
+			if !ps.General {
+				if bbs[0].VisitCount >= 2 {
+					ps.General = true
+					return bbs[0].RenderPS(ps)
+				}
+			}
+			bbs[0].VisitCount++
+			if ps.General {
+				if bbs[0].Rendered {
+					ctx.EmitJmp(lbl0)
+					return result
+				}
+				bbs[0].Rendered = true
+				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				bbpos_0_0 = bbs[0].Address
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+			}
+			ctx.ReclaimUntrackedRegs()
+			var d0 scm.JITValueDesc
+			if thisptr.Loc == scm.LocImm {
+				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageConst)(nil).value)
+				val := *(*scm.Scmer)(unsafe.Pointer(fieldAddr))
+				ctx.TrackImm(val)
+				d0 = scm.JITValueDesc{Loc: scm.LocImm, Type: val.GetTag(), Imm: val}
+			} else {
+				off := int32(unsafe.Offsetof((*StorageConst)(nil).value))
+				r0 := ctx.AllocReg()
+				r1 := ctx.AllocRegExcept(r0)
+				ctx.EmitMovRegMem(r0, thisptr.Reg, off)
+				ctx.EmitMovRegMem(r1, thisptr.Reg, off+8)
+				d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r0, Reg2: r1}
+				ctx.BindReg(r0, &d0)
+				ctx.BindReg(r1, &d0)
+				ctx.BindReg(r0, &d0)
+				ctx.BindReg(r1, &d0)
+			}
+			ctx.ResolveFixups()
+			if result.Loc == scm.LocAny {
+				result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
+			}
+			ctx.EnsureDesc(&d0)
+			if d0.Loc == scm.LocRegPair {
+				ctx.EmitMovPairToResult(&d0, &result)
+				result.Type = d0.Type
+			} else {
+				switch d0.Type {
+				case scm.TagBool:
+					ctx.EmitMakeBool(result, d0)
+					result.Type = scm.TagBool
+				case scm.TagInt:
+					ctx.EmitMakeInt(result, d0)
+					result.Type = scm.TagInt
+				case scm.TagFloat:
+					ctx.EmitMakeFloat(result, d0)
+					result.Type = scm.TagFloat
+				case scm.TagNil:
+					ctx.EmitMakeNil(result)
+					result.Type = scm.TagNil
+				default:
+					panic("jit: single-block scalar return with unknown type")
+				}
+			}
+			return result
+			return result
+			}
+			ps1 := scm.PhiState{General: false}
+			_ = bbs[0].RenderPS(ps1)
+			return result
 }
 
 func (s *StorageConst) prepare()                                  {}
