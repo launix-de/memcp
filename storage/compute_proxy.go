@@ -19,6 +19,7 @@ package storage
 import "io"
 import "fmt"
 import "sync"
+import "sync/atomic"
 import "reflect"
 import "encoding/json"
 import "encoding/binary"
@@ -40,17 +41,9 @@ type StorageComputeProxy struct {
 	mu         sync.RWMutex                        // protects delta map + compressed flag
 	count      uint32                              // total row count at creation
 	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
-	// Instead, the full table is recomputed via scan_order (coordinated by table.orcMu).
+	// Validity is tracked per-row via validMask (1=valid, 0=needs compute).
+	// Invalidation sets bits to 0; on-demand recompute sets them back to 1.
 	isOrdered bool
-	// Partition-scoped ORC invalidation: when non-nil, only these partition keys
-	// are dirty. nil = fully dirty (InvalidateAll). Empty map = all valid.
-	dirtyPartitions map[string]bool
-	// Suffix recompute: earliest sort key value from which recompute is needed.
-	// nil = full recompute, non-nil = recompute from this sort key onwards.
-	dirtySortKey scm.Scmer
-	// Combined partition+suffix: per-partition earliest sort key.
-	// nil = use dirtyPartitions/dirtySortKey, non-nil = per-partition suffix.
-	dirtyPartitionSuffix map[string]scm.Scmer
 }
 
 func (p *StorageComputeProxy) String() string {
@@ -67,14 +60,6 @@ func (p *StorageComputeProxy) orcCol() *column {
 	return nil
 }
 
-// orcSortDesc returns true if the ORC sort direction (first non-partition sort col) is DESC.
-func (p *StorageComputeProxy) orcSortDesc() bool {
-	col := p.orcCol()
-	if col == nil {
-		return false
-	}
-	return col.OrcOrderDesc()
-}
 
 func (p *StorageComputeProxy) ComputeSize() uint {
 	var sz uint = 128 // struct overhead
@@ -86,136 +71,15 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 	return sz
 }
 
-// orcRowPartitionKey returns the partition key string for a given row index.
-// Reads partition columns from the shard's column storages.
-func (p *StorageComputeProxy) orcRowPartitionKey(idx uint32, partCols []string) string {
-	s := p.shard
-	key := ""
-	for i, pc := range partCols {
-		var val scm.Scmer
-		s.mu.RLock()
-		cs := s.columns[pc]
-		s.mu.RUnlock()
-		if cs != nil && idx < s.main_count {
-			val = cs.GetValue(idx)
-		} else if idx >= s.main_count {
-			val = s.getDelta(int(idx-s.main_count), pc)
-		}
-		if i > 0 {
-			key += "|"
-		}
-		key += scm.String(val)
-	}
-	return key
-}
-
-// orcNeedsRecompute is a cheap check (no column reads, no allocs) whether
-// recomputeORC must run at all. Returns false when there is no dirty state,
-// meaning every row can be served from cache without row-level checks.
-func (p *StorageComputeProxy) orcNeedsRecompute() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	// Any non-empty dirty marker → recompute needed
-	if p.dirtyPartitions == nil && p.dirtySortKey.IsNil() && p.dirtyPartitionSuffix == nil {
-		return true // fully dirty (initial state)
-	}
-	if !p.dirtySortKey.IsNil() {
-		return true
-	}
-	if p.dirtyPartitionSuffix != nil && len(p.dirtyPartitionSuffix) > 0 {
-		return true
-	}
-	if p.dirtyPartitions != nil && len(p.dirtyPartitions) > 0 {
-		return true
-	}
-	return false // all dirty maps are empty → everything clean
-}
-
-// orcRowIsDirty checks if the row at idx needs recomputation.
-// Called only when orcNeedsRecompute() returned true, so dirty state exists.
-// Returns false (= clean) when the row is in a clean partition or before the
-// dirty suffix point. Reads sort/partition columns for the specific row.
-func (p *StorageComputeProxy) orcRowIsDirty(idx uint32) bool {
-	col := p.orcCol()
-	if col == nil {
-		return true
-	}
-
-	p.mu.RLock()
-	dirtySK := p.dirtySortKey
-	dirtyParts := p.dirtyPartitions
-	dirtyPartSuffix := p.dirtyPartitionSuffix
-	p.mu.RUnlock()
-
-	// Fully dirty (nil everywhere) → all rows dirty
-	if dirtyParts == nil && dirtySK.IsNil() && dirtyPartSuffix == nil {
-		return true
-	}
-
-	// Helper: read sort column value for this row (one column read, no alloc).
-	readSortVal := func() scm.Scmer {
-		sortCol := col.OrcOrderCol()
-		s := p.shard
-		if idx < s.main_count {
-			s.mu.RLock()
-			cs := s.columns[sortCol]
-			s.mu.RUnlock()
-			if cs != nil {
-				return cs.GetValue(idx)
-			}
-			return scm.NewNil()
-		}
-		return s.getDelta(int(idx-s.main_count), sortCol)
-	}
-
-	// Sort-direction-aware "before suffix" check.
-	sortDesc := col.OrcOrderDesc()
-	isBefore := func(sortVal, suffixKey scm.Scmer) bool {
-		if sortDesc {
-			return scm.Less(suffixKey, sortVal)
-		}
-		return scm.Less(sortVal, suffixKey)
-	}
-
-	// Unpartitioned suffix
-	if !dirtySK.IsNil() && !col.OrcIsPartitioned() {
-		sortVal := readSortVal()
-		return sortVal.IsNil() || !isBefore(sortVal, dirtySK)
-	}
-
-	// Unpartitioned, no suffix → fully dirty
-	if !col.OrcIsPartitioned() {
-		return true
-	}
-
-	// Partitioned: check partition membership
-	pk := p.orcRowPartitionKey(idx, col.OrcPartitionCols())
-
-	if dirtyParts != nil && dirtyParts[pk] {
-		return true
-	}
-	if dirtyPartSuffix != nil {
-		if suffixKey, ok := dirtyPartSuffix[pk]; ok {
-			sortVal := readSortVal()
-			return sortVal.IsNil() || !isBefore(sortVal, suffixKey)
-		}
-	}
-	return false
-}
 
 // GetValue returns the value at idx, computing on demand if necessary.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
-	// ORC path: values live in delta map, written by $set: during scan_order.
+	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
-		if !p.compressed {
-			// Fast check: is there any dirty state at all?
-			if !p.orcNeedsRecompute() {
-				// No dirty state → mark compressed, skip recompute
-				p.mu.Lock()
-				p.compressed = true
-				p.mu.Unlock()
-			} else if !p.orcRowIsDirty(idx) {
-				// This specific row is clean → return cached value
+		if !p.validMask.Get(uint(idx)) {
+			// During an active recompute (scan_order reading ORC values for convergence),
+			// return the stale cached value instead of triggering re-entry.
+			if atomic.LoadInt32(&p.shard.t.orcRecomputing) > 0 {
 				p.mu.RLock()
 				if val, ok := p.delta[idx]; ok {
 					p.mu.RUnlock()
@@ -226,15 +90,15 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 					return p.main.GetValue(idx)
 				}
 				return scm.NewNil()
-			} else {
-				// Row is dirty → trigger recompute
-				p.shard.t.orcMu.Lock()
-				if !p.compressed {
-					p.shard.t.recomputeORC(p.colName)
-				}
-				p.shard.t.orcMu.Unlock()
 			}
+			// Invalid row → on-demand incremental recompute
+			p.shard.t.orcMu.Lock()
+			if !p.validMask.Get(uint(idx)) {
+				p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx)
+			}
+			p.shard.t.orcMu.Unlock()
 		}
+		// Valid: return from delta or main
 		p.mu.RLock()
 		if val, ok := p.delta[idx]; ok {
 			p.mu.RUnlock()
@@ -470,85 +334,13 @@ func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
 	p.validMask.Set(uint(idx), true)
 }
 
-// InvalidateAll marks all rows as needing recomputation.
+// InvalidateAll marks all rows as needing recomputation (resets validMask).
 func (p *StorageComputeProxy) InvalidateAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.compressed = false
 	p.validMask.Reset()
 	p.delta = make(map[uint32]scm.Scmer)
-	p.dirtyPartitions = nil // nil = fully dirty
-	p.dirtySortKey = scm.NewNil()
-	p.dirtyPartitionSuffix = nil
-}
-
-// InvalidatePartitionSuffix marks a specific partition dirty from a sort key onwards.
-func (p *StorageComputeProxy) InvalidatePartitionSuffix(partitionKey string, sortKey scm.Scmer) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.compressed && p.dirtyPartitions == nil && p.dirtyPartitionSuffix == nil {
-		return // already fully dirty
-	}
-	if p.dirtyPartitionSuffix == nil {
-		p.dirtyPartitionSuffix = make(map[string]scm.Scmer)
-	}
-	if existing, ok := p.dirtyPartitionSuffix[partitionKey]; ok {
-		// Extend dirty range: ASC keeps min, DESC keeps max.
-		extend := false
-		if p.orcSortDesc() {
-			extend = scm.Less(existing, sortKey)
-		} else {
-			extend = scm.Less(sortKey, existing)
-		}
-		if extend {
-			p.dirtyPartitionSuffix[partitionKey] = sortKey
-		}
-	} else {
-		p.dirtyPartitionSuffix[partitionKey] = sortKey
-	}
-	p.compressed = false
-}
-
-// InvalidateFromSortKey marks the column dirty from a specific sort key onwards.
-// If already dirty from an earlier key (in sort order), keeps that one.
-// Reads sort direction from the column definition.
-func (p *StorageComputeProxy) InvalidateFromSortKey(sortKey scm.Scmer) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.compressed && p.dirtySortKey.IsNil() {
-		return // already fully dirty
-	}
-	if p.compressed || p.dirtySortKey.IsNil() {
-		p.compressed = false
-		p.dirtySortKey = sortKey
-	} else {
-		// Extend dirty range: for ASC take min, for DESC take max.
-		if p.orcSortDesc() {
-			if scm.Less(p.dirtySortKey, sortKey) {
-				p.dirtySortKey = sortKey // DESC: larger = earlier in sort order
-			}
-		} else {
-			if scm.Less(sortKey, p.dirtySortKey) {
-				p.dirtySortKey = sortKey // ASC: smaller = earlier in sort order
-			}
-		}
-	}
-}
-
-// InvalidatePartition marks a specific partition as dirty for ORC columns.
-// Only the affected partition will be recomputed on next read.
-func (p *StorageComputeProxy) InvalidatePartition(partitionKey string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.dirtyPartitions == nil && p.compressed {
-		// First partial invalidation: create dirty set
-		p.dirtyPartitions = make(map[string]bool)
-	}
-	if p.dirtyPartitions != nil {
-		p.dirtyPartitions[partitionKey] = true
-		p.compressed = false // trigger recompute on next read
-	}
-	// If dirtyPartitions is nil and !compressed, we're already fully dirty
 }
 
 // proposeCompression returns nil — the proxy does not participate in shard

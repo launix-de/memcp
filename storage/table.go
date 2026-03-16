@@ -262,7 +262,8 @@ type table struct {
 	mutationOwners map[uint64]uint32
 
 	// orcMu serializes ORC recomputes: only one full scan_order pass at a time per table.
-	orcMu sync.Mutex
+	orcMu         sync.Mutex
+	orcRecomputing int32 // atomic: >0 means an ORC recompute is in progress (skip re-entry in GetValue)
 
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode         ShardMode
