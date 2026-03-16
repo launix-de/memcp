@@ -158,13 +158,6 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 // reduceFn:  (lambda (acc mapped) ...) — calls ($set newVal), returns new acc
 // reduceInit: initial accumulator value
 func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
-	// Derive partition count from reduceInit shape instead of trusting the parameter.
-	// Convention: (list inner_init nil) → 1 partition key, (list inner_init nil nil) → 2, etc.
-	detectedPartCount := analyzeOrcPartitionCount(reduceInit)
-	if detectedPartCount > 0 {
-		partCount = detectedPartCount
-	}
-
 	found := false
 	paramsChanged := false
 	for i, c := range t.Columns {
@@ -172,11 +165,9 @@ func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []
 			// Detect parameter changes (different OVER clause on same column).
 			paramsChanged = !slicesEqual(c.OrcSortCols, sortCols) ||
 				!boolSlicesEqual(c.OrcSortDirs, sortDirs) ||
-				c.OrcPartCount != partCount ||
 				!slicesEqual(c.OrcMapCols, mapCols)
 			t.Columns[i].OrcSortCols = sortCols
 			t.Columns[i].OrcSortDirs = sortDirs
-			t.Columns[i].OrcPartCount = partCount
 			t.Columns[i].OrcMapCols = mapCols
 			t.Columns[i].OrcMapFn = mapFn
 			t.Columns[i].OrcReduceFn = reduceFn
@@ -264,8 +255,8 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	// Find the earliest invalid row's sort key across ALL shards.
 	// This ensures we always start from the beginning of the invalid range,
 	// regardless of which row's GetValue triggered this recompute.
-	sortCol := col.OrcOrderCol()
-	sortDesc := col.OrcOrderDesc()
+	sortCol := col.OrcFirstSortCol()
+	sortDesc := col.OrcFirstSortDesc()
 	var earliestInvalidSortKey scm.Scmer
 	for _, s := range t.ActiveShards() {
 		s.mu.RLock()
@@ -429,14 +420,14 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKey scm.Scmer) {
 		return
 	}
 
-	sortDesc := col.OrcOrderDesc()
+	sortDesc := col.OrcFirstSortDesc()
 
 	// For each shard, iterate rows in sort-key order from the mutation point,
 	// clearing validMask bits. Stop when hitting an already-invalid row.
 	for _, s := range t.ActiveShards() {
 		s.mu.RLock()
 		cs := s.columns[colName]
-		sortCS := s.columns[col.OrcOrderCol()]
+		sortCS := s.columns[col.OrcFirstSortCol()]
 		s.mu.RUnlock()
 		proxy, ok := cs.(*StorageComputeProxy)
 		if !ok || sortCS == nil {
@@ -452,7 +443,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKey scm.Scmer) {
 			if idx < s.main_count {
 				rowSortKey = sortCS.GetValue(idx)
 			} else {
-				rowSortKey = s.getDelta(int(idx-s.main_count), col.OrcOrderCol())
+				rowSortKey = s.getDelta(int(idx-s.main_count), col.OrcFirstSortCol())
 			}
 			// Check if row is at or past the mutation point
 			if sortDesc {
@@ -482,13 +473,13 @@ func (t *table) registerORCTriggers(name string) {
 			break
 		}
 	}
-	hasSortKey := col != nil && len(col.OrcSortCols) > col.OrcPartCount
+	hasSortKey := col != nil && len(col.OrcSortCols) > 0
 	// For UPDATE with sort key: merge OLD and NEW with min (ASC) or max (DESC).
 	var sortCol string
 	mergeFn := "min"
 	if hasSortKey {
-		sortCol = col.OrcOrderCol()
-		if col.OrcOrderDesc() {
+		sortCol = col.OrcFirstSortCol()
+		if col.OrcFirstSortDesc() {
 			mergeFn = "max"
 		}
 	}

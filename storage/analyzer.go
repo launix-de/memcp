@@ -461,41 +461,6 @@ func reorderByFrequency(bounds boundaries, t *table) {
 	})
 }
 
-// analyzeOrcPartitionCount detects whether the ORC reducer uses a partition wrapper
-// by inspecting the reduceInit value. The partition wrapper convention is:
-//
-//	reduceInit = (list inner_init nil)         → 1 partition key
-//	reduceInit = (list inner_init nil nil)     → 2 partition keys
-//
-// Returns 0 if reduceInit is not a partition-wrapped accumulator.
-// The trailing nil elements represent the initial prev-partition-key slots.
-func analyzeOrcPartitionCount(reduceInit scm.Scmer) int {
-	if reduceInit.IsNil() {
-		return 0
-	}
-	// Check if it's a cons pair / list with trailing nil(s)
-	if !reduceInit.IsSlice() {
-		return 0
-	}
-	items := reduceInit.Slice()
-	if len(items) < 2 {
-		return 0
-	}
-	// Count trailing nil elements (prev-partition-key slots)
-	count := 0
-	for i := len(items) - 1; i >= 1; i-- {
-		if items[i].IsNil() {
-			count++
-		} else {
-			break
-		}
-	}
-	// Must have at least one non-nil element (the inner init) before the nils
-	if count > 0 && count < len(items) {
-		return count
-	}
-	return 0
-}
 
 // ORC suffix recompute mode classification.
 const (
@@ -638,43 +603,24 @@ func predictLastAccumulator(col *column, t *table, beforeSortKey scm.Scmer) scm.
 		panic("no sort columns")
 	}
 
-	sortCol := col.OrcOrderCol()
-	sortDesc := col.OrcOrderDesc()
+	sortCol := col.OrcFirstSortCol()
+	sortDesc := col.OrcFirstSortDesc()
 
 	// Check if accumulator == emitted value (identity property).
-	// For partitioned ORCs, the outer reducer is a partition wrapper that
-	// returns (list inner_acc pk) — analyzeOrcSuffix will classify it as Opaque.
-	// However, the stored ORC value IS the inner accumulator by construction
-	// (the inner reducer calls $set with new_inner), so we can reconstruct
-	// the full outer accumulator as (list stored_value prev_partition_key).
-	isPartitioned := col.OrcIsPartitioned()
-	if !isPartitioned {
-		if analyzeOrcSuffix(col.OrcReduceFn) != OrcSuffixIdentity {
-			panic("non-identity accumulator — cannot predict")
-		}
+	if analyzeOrcSuffix(col.OrcReduceFn) != OrcSuffixIdentity {
+		panic("non-identity accumulator — cannot predict")
 	}
-	// For partitioned ORCs, we also need to read partition column values.
-	partCols := col.OrcPartitionCols()
 
 	// Scan all shards for the last row before beforeSortKey
-	// and read its stored ORC value (+ partition cols if partitioned).
+	// and read its stored ORC value.
 	var bestSortKey scm.Scmer
 	var bestOrcVal scm.Scmer
-	var bestPartKey scm.Scmer // only used when isPartitioned
 	found := false
 
 	for _, s := range t.ActiveShards() {
 		s.mu.RLock()
 		sortCS := s.columns[sortCol]
 		orcCS := s.columns[col.Name]
-		// Snapshot partition column storages
-		var partCSs []ColumnStorage
-		if isPartitioned {
-			partCSs = make([]ColumnStorage, len(partCols))
-			for i, pc := range partCols {
-				partCSs[i] = s.columns[pc]
-			}
-		}
 		s.mu.RUnlock()
 		if sortCS == nil || orcCS == nil {
 			continue
@@ -727,26 +673,6 @@ func predictLastAccumulator(col *column, t *table, beforeSortKey scm.Scmer) scm.
 				} else {
 					bestOrcVal = orcCS.GetValue(idx)
 				}
-				// Read partition column values for the predecessor
-				if isPartitioned {
-					if len(partCols) == 1 {
-						if idx < s.main_count && partCSs[0] != nil {
-							bestPartKey = partCSs[0].GetValue(idx)
-						} else if idx >= s.main_count {
-							bestPartKey = s.getDelta(int(idx-s.main_count), partCols[0])
-						}
-					} else {
-						pkParts := make([]scm.Scmer, len(partCols))
-						for i, pc := range partCols {
-							if idx < s.main_count && partCSs[i] != nil {
-								pkParts[i] = partCSs[i].GetValue(idx)
-							} else if idx >= s.main_count {
-								pkParts[i] = s.getDelta(int(idx-s.main_count), pc)
-							}
-						}
-						bestPartKey = scm.NewSlice(pkParts)
-					}
-				}
 				found = true
 			}
 		}
@@ -760,11 +686,6 @@ func predictLastAccumulator(col *column, t *table, beforeSortKey scm.Scmer) scm.
 		panic("stored ORC value is nil — cannot predict accumulator")
 	}
 
-	// For partitioned ORCs, reconstruct the full outer accumulator:
-	// (list inner_acc prev_partition_key) matching the partition wrapper shape.
-	if isPartitioned {
-		return scm.NewSlice([]scm.Scmer{bestOrcVal, bestPartKey})
-	}
 	return bestOrcVal
 }
 

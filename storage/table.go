@@ -47,33 +47,22 @@ type column struct {
 
 	// ORC fields — non-empty OrcSortCols signals this is an ordered-reduce computed column.
 	// The column value is produced by a scan_order pass rather than per-row computation.
-	OrcSortCols   []string  `json:",omitempty"` // ORDER BY column names (partition cols first)
+	OrcSortCols   []string  `json:",omitempty"` // ORDER BY column names (partition cols first, then order cols)
 	OrcSortDirs   []bool    `json:",omitempty"` // false=ASC, true=DESC, one per OrcSortCol
-	OrcPartCount  int       `json:",omitempty"` // leading OrcSortCols that are PARTITION BY keys
 	OrcMapCols    []string  `json:",omitempty"` // additional input columns passed to OrcMapFn
 	OrcMapFn      scm.Scmer                    // (lambda ($set mapcols...) ...) — passes data to reduceFn
 	OrcReduceFn   scm.Scmer                    // (lambda (acc mapped) ...) — accumulates and writes via $set
 	OrcReduceInit scm.Scmer                    // initial accumulator value (neutral element)
 }
 
-// OrcIsPartitioned returns true if the ORC column uses partition-scoped accumulation.
-func (c *column) OrcIsPartitioned() bool {
-	return c.OrcPartCount > 0
+// OrcFirstSortCol returns the first sort column name.
+func (c *column) OrcFirstSortCol() string {
+	return c.OrcSortCols[0]
 }
 
-// OrcPartitionCols returns the leading sort column names used as partition keys.
-func (c *column) OrcPartitionCols() []string {
-	return c.OrcSortCols[:c.OrcPartCount]
-}
-
-// OrcOrderCol returns the first non-partition sort column name (the actual ORDER BY column).
-func (c *column) OrcOrderCol() string {
-	return c.OrcSortCols[c.OrcPartCount]
-}
-
-// OrcOrderDesc returns true if the ORDER BY direction is DESC.
-func (c *column) OrcOrderDesc() bool {
-	return c.OrcPartCount < len(c.OrcSortDirs) && c.OrcSortDirs[c.OrcPartCount]
+// OrcFirstSortDesc returns true if the first sort direction is DESC.
+func (c *column) OrcFirstSortDesc() bool {
+	return len(c.OrcSortDirs) > 0 && c.OrcSortDirs[0]
 }
 
 // PersistencyMode controls the durability and persistence behaviour of a table.
@@ -800,7 +789,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
 		case "filtercols", "filter":
 			// handled by createcolumn builtin, not a column property
-		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapfn", "reducefn", "reduceinit":
+		case "sortcols", "sortdirs", "mapcols", "mapfn", "reducefn", "reduceinit":
 			// ORC params handled by createcolumn builtin after CreateColumn
 		default:
 			panic("unknown column attribute: " + key)

@@ -615,7 +615,6 @@ func Init(en scm.Env) {
 			// Extract ORC params from the options assoc list.
 			var orcSortCols []string
 			var orcSortDirs []bool
-			orcPartCount := 0
 			var orcMapCols []string
 			var orcMapFn, orcReduceFn, orcReduceInit scm.Scmer
 			for i := 0; i+1 < len(typeparams); i += 2 {
@@ -630,8 +629,6 @@ func Init(en scm.Env) {
 					for j, d := range dirs {
 						orcSortDirs[j] = scm.ToBool(d)
 					}
-				case "partitioncount":
-					orcPartCount = int(scm.ToInt(val))
 				case "mapcols":
 					orcMapCols = scmerSliceToStrings(mustScmerSlice(val, "mapcols"))
 				case "mapfn":
@@ -643,7 +640,7 @@ func Init(en scm.Env) {
 				}
 			}
 			if len(orcSortCols) > 0 {
-				t.ComputeOrderedColumn(colname, orcSortCols, orcSortDirs, orcPartCount, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
+				t.ComputeOrderedColumn(colname, orcSortCols, orcSortDirs, 0, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
 				return scm.NewBool(ok)
 			}
 
