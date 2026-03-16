@@ -21,13 +21,29 @@ package scm
 import (
 	"fmt"
 	"math"
-	"syscall"
 	"unsafe"
 )
 
 // TODO: create this file for other architectures, too
 
 var jitCodeOverflowPanic = &struct{}{}
+
+// jitNextCallback is the runtime/jit Next callback for unwinding through
+// JIT frames with standard RBP frame setup (push rbp; mov rbp, rsp).
+//
+func jitNextCallback(pc, sp uintptr) (callerPC, callerSP, callerBP uintptr, ok bool) {
+	// sp = frame.fp of the Go callee (= caller's SP).
+	// With frame pointers enabled (Go 1.18+ on amd64):
+	//   [sp - 8]  = callee's return address (= pc, pointing into JIT code)
+	//   [sp - 16] = callee's saved BP = JIT code's RBP
+	// JIT prologue sets RBP after "push rbp; mov rbp, rsp", so:
+	//   [JIT_RBP + 0] = saved outer RBP
+	//   [JIT_RBP + 8] = Go caller's return address
+	jitRBP := *(*uintptr)(unsafe.Pointer(sp - 16))
+	savedBP := *(*uintptr)(unsafe.Pointer(jitRBP))
+	goRetAddr := *(*uintptr)(unsafe.Pointer(jitRBP + 8))
+	return goRetAddr, jitRBP + 16, savedBP, true
+}
 
 // jitCompileProc compiles a Proc body to amd64 machine code or returns nil.
 func jitCompileProc(proc *Proc) []byte {
@@ -39,11 +55,8 @@ func jitCompileProc(proc *Proc) []byte {
 // returns GC roots for pointer constants embedded into immediates.
 func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
-	buf, err := allocExec(defaultCodeBufSize)
-	if err != nil {
-		return nil, nil
-	}
-	defer syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
+	ptr, _ := globalJITPool.Alloc(defaultCodeBufSize)
+	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize}
 	codeLen, roots, _ := jitCompileProcToExec(proc, buf)
 	if codeLen == 0 {
 		return nil, nil
@@ -94,6 +107,11 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		SliceBase: RegR12,
 	}
 	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
+
+	// RBP frame prologue for runtime/jit unwinding:
+	// push rbp; mov rbp, rsp
+	ctx.emitByte(0x55)                      // push rbp
+	ctx.emitBytes(0x48, 0x89, 0xE5)         // mov rbp, rsp
 
 	// Emit: MOV R12, RAX (save slice base pointer)
 	ctx.emitMovRegReg(RegR12, RegRAX)
@@ -176,6 +194,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		if frameBytes > 0 {
 			ctx.EmitAddRSP32(int32(frameBytes))
 		}
+		ctx.emitByte(0x5D) // pop rbp
 		ctx.emitByte(0xC3) // RET
 	} else {
 		// Ensure non-immediate results are in ABI return registers.
@@ -206,6 +225,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		if frameBytes > 0 {
 			ctx.EmitAddRSP32(int32(frameBytes))
 		}
+		ctx.emitByte(0x5D) // pop rbp
 		ctx.emitByte(0xC3) // RET
 	}
 

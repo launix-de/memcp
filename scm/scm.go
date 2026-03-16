@@ -2106,9 +2106,7 @@ func ComputeSize(v Scmer) uint {
 	case tagJIT:
 		jep := v.JIT()
 		sz := base + goAllocOverhead
-		for range jep.Pages {
-			sz += goAllocOverhead + 4096 // JITPage overhead
-		}
+		sz += uint(jep.CodeLen) // actual code bytes in arena
 		sz += ComputeSize(NewProcStruct(jep.Proc))
 		return sz
 	default:

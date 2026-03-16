@@ -23,6 +23,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"runtime/jit"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -130,8 +133,9 @@ Generated emitters (tools/jitgen):
 // Scheme representation for serialization and fallback.
 type JITEntryPoint struct {
 	Native     func(...Scmer) Scmer // compiled native function pointer
-	Pages      []*JITPage           // mmap'd pages holding machine code
-	Pool       *ShardJITPool        // pool for returning pages
+	CodePtr    unsafe.Pointer       // start of code in arena
+	CodeLen    int                   // bytes used
+	Arena      *jitArena            // owning arena (for free on GC)
 	ConstRoots []unsafe.Pointer     // GC roots for constants embedded into machine code
 	Proc       Proc                 // original Proc for serialization
 }
@@ -239,8 +243,6 @@ type JITContext struct {
 	Ptr     unsafe.Pointer // current write pointer (into mmap memory)
 	End     unsafe.Pointer // page end minus reserve
 	Start   unsafe.Pointer // page start for position calculation
-	Pages   []*JITPage
-	Current *JITPage
 
 	Labels    [256]int32
 	LabelNext uint8
@@ -1378,11 +1380,73 @@ func (ctx *JITContext) EmitGoCallVoid(funcAddr uint64, args []JITValueDesc) {
 
 // ---- merged from scm/jit_writer.go ----
 
-// JITPage represents one page of mmap'd executable memory.
-type JITPage struct {
-	RwBase unsafe.Pointer // writable mapping
-	RxBase unsafe.Pointer // executable mapping
-	Next   *JITPage
+// jitArena is a large mmap'd buffer registered with runtime/jit for unwinding.
+type jitArena struct {
+	base   unsafe.Pointer // start of mmap'd region
+	size   int            // total bytes
+	offset int            // bump pointer (next free byte)
+	handle jit.Handle     // runtime registration handle
+}
+
+// jitPool manages global JIT arena allocation.
+type jitPool struct {
+	mu     sync.Mutex
+	arenas []*jitArena
+}
+
+const jitArenaSize = 1 << 20 // 1 MB per arena
+
+// globalJITPool is the singleton arena pool.
+var globalJITPool jitPool
+
+// Alloc bump-allocates size bytes from the pool, 16-byte aligned.
+func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena) {
+	size = (size + 15) & ^15 // align to 16 bytes
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Try current arena
+	if len(p.arenas) > 0 {
+		a := p.arenas[len(p.arenas)-1]
+		if a.offset+size <= a.size {
+			ptr = unsafe.Add(a.base, a.offset)
+			a.offset += size
+			return ptr, a
+		}
+	}
+
+	// Allocate new arena
+	arenaBytes := jitArenaSize
+	if size > arenaBytes {
+		arenaBytes = (size + 4095) & ^4095
+	}
+	b, err := syscall.Mmap(-1, 0, arenaBytes,
+		syscall.PROT_READ|syscall.PROT_WRITE|syscall.PROT_EXEC,
+		syscall.MAP_PRIVATE|syscall.MAP_ANON)
+	if err != nil {
+		panic("jit: mmap arena failed: " + err.Error())
+	}
+	a := &jitArena{
+		base: unsafe.Pointer(&b[0]),
+		size: arenaBytes,
+	}
+	start := uintptr(a.base)
+	a.handle = jit.Register(jit.Region{
+		Start:  start,
+		End:    start + uintptr(arenaBytes),
+		Unwind: jit.UnwindSkip,
+		Next:   jitNextCallback,
+	})
+	ptr = a.base
+	a.offset = size
+	p.arenas = append(p.arenas, a)
+	return ptr, a
+}
+
+// Free returns a code region to the arena. Currently a no-op placeholder;
+// future: maintain a freelist and coalesce adjacent free blocks.
+func (p *jitPool) Free(ptr unsafe.Pointer, size int) {
+	// no-op for now — arenas are long-lived
 }
 
 // ReserveLabel allocates a label ID for later placement via MarkLabel.
@@ -1472,37 +1536,9 @@ func (ctx *JITContext) tryRewriteTrailingJmpToNop(f *JITFixup, offset int32) {
 
 // ---- merged from scm/jit_entry.go ----
 
-// ShardJITPool manages mmap'd page allocation per shard. Defined here as
-// a placeholder; the full implementation will be added when the page
-// allocator is built.
-type ShardJITPool struct {
-}
-
 // ---- merged from scm/jit.go ----
 
 var JITLog bool
-
-// execBuf is a small wrapper for mmap'd memory
-type execBuf struct {
-	ptr unsafe.Pointer
-	n   int // size
-}
-
-func allocExec(size int) (*execBuf, error) {
-	page := syscall.Getpagesize()
-	n := (size + page - 1) & ^(page - 1)
-	b, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
-	if err != nil {
-		return nil, err
-	}
-	return &execBuf{ptr: unsafe.Pointer(&b[0]), n: n}, nil
-}
-
-func (e *execBuf) makeRX() error {
-	// change to PROT_READ|PROT_EXEC
-	data := (*[1 << 30]byte)(e.ptr)[:e.n:e.n]
-	return syscall.Mprotect(data, syscall.PROT_READ|syscall.PROT_EXEC)
-}
 
 func init_jit() {
 	DeclareTitle("JIT Compilation")
@@ -1613,31 +1649,36 @@ func jitCompile(a ...Scmer) Scmer {
 		return v
 
 	case tagProc:
-		// Lambda/procedure - attempt native compilation first
+		// Lambda/procedure — compile into a pool arena
 		proc := v.Proc()
+		// Try increasing buffer sizes for overflow retry
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
-			buf, err := allocExec(codeCap)
-			if err != nil {
-				break
-			}
+			ptr, arena := globalJITPool.Alloc(codeCap)
+			buf := &execBuf{ptr: ptr, n: codeCap}
 			codeLen, roots, overflow := jitCompileProcToExec(proc, buf)
 			if codeLen > 0 {
-				code := (*[1 << 30]byte)(buf.ptr)[:codeLen:codeLen]
+				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
 				if JITLog {
 					fmt.Printf("%X\n", code)
 				}
-				maybeDumpJITCode(buf.ptr, code)
-				if err2 := buf.makeRX(); err2 == nil {
-					fn2 := unsafe.Pointer(&struct{ *byte }{&code[0]})
-					nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
-					return NewJIT(&JITEntryPoint{
-						Native:     nativeFn,
-						ConstRoots: roots,
-						Proc:       *proc,
-					})
+				maybeDumpJITCode(ptr, code)
+				fn2 := unsafe.Pointer(&struct{ *byte }{&code[0]})
+				nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
+				jep := &JITEntryPoint{
+					Native:     nativeFn,
+					CodePtr:    ptr,
+					CodeLen:    codeLen,
+					Arena:      arena,
+					ConstRoots: roots,
+					Proc:       *proc,
 				}
+				runtime.SetFinalizer(jep, func(jep *JITEntryPoint) {
+					if jep.Arena != nil && jep.CodePtr != nil {
+						globalJITPool.Free(jep.CodePtr, jep.CodeLen)
+					}
+				})
+				return NewJIT(jep)
 			}
-			syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
 			if !overflow {
 				break
 			}
@@ -1651,6 +1692,12 @@ func jitCompile(a ...Scmer) Scmer {
 	default:
 		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))
 	}
+}
+
+// execBuf is a small wrapper for writable memory (arena-backed or standalone)
+type execBuf struct {
+	ptr unsafe.Pointer
+	n   int // size
 }
 
 func maybeDumpJITCode(base unsafe.Pointer, code []byte) {
