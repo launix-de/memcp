@@ -261,26 +261,59 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		panic("incrementalRecomputeORC: column '" + name + "' is not an ORC column on table " + t.Name)
 	}
 
-	// Read the sort key of the requested invalid row to determine the recompute range.
+	// Find the earliest invalid row's sort key across ALL shards.
+	// This ensures we always start from the beginning of the invalid range,
+	// regardless of which row's GetValue triggered this recompute.
 	sortCol := col.OrcOrderCol()
-	var requestSortKey scm.Scmer
-	if requestIdx < requestShard.main_count {
-		requestShard.mu.RLock()
-		cs := requestShard.columns[sortCol]
-		requestShard.mu.RUnlock()
-		if cs != nil {
-			requestSortKey = cs.GetValue(requestIdx)
+	sortDesc := col.OrcOrderDesc()
+	var earliestInvalidSortKey scm.Scmer
+	for _, s := range t.ActiveShards() {
+		s.mu.RLock()
+		sortCS := s.columns[sortCol]
+		orcCS := s.columns[name]
+		s.mu.RUnlock()
+		proxy, ok := orcCS.(*StorageComputeProxy)
+		if !ok || sortCS == nil {
+			continue
 		}
-	} else {
-		requestSortKey = requestShard.getDelta(int(requestIdx-requestShard.main_count), sortCol)
+		total := s.main_count + uint32(len(s.inserts))
+		for idx := uint32(0); idx < total; idx++ {
+			if s.deletions.Get(uint(idx)) {
+				continue
+			}
+			if proxy.validMask.Get(uint(idx)) {
+				continue // valid row, skip
+			}
+			// Invalid row — read its sort key
+			var sk scm.Scmer
+			if idx < s.main_count {
+				sk = sortCS.GetValue(idx)
+			} else {
+				sk = s.getDelta(int(idx-s.main_count), sortCol)
+			}
+			if sk.IsNil() {
+				continue
+			}
+			if earliestInvalidSortKey.IsNil() {
+				earliestInvalidSortKey = sk
+			} else if sortDesc {
+				if scm.Less(earliestInvalidSortKey, sk) {
+					earliestInvalidSortKey = sk // DESC: larger = earlier
+				}
+			} else {
+				if scm.Less(sk, earliestInvalidSortKey) {
+					earliestInvalidSortKey = sk // ASC: smaller = earlier
+				}
+			}
+		}
 	}
 
 	// Try to predict the start accumulator from the last valid predecessor.
 	startAcc := col.OrcReduceInit
-	if !requestSortKey.IsNil() {
+	if !earliestInvalidSortKey.IsNil() {
 		func() {
 			defer func() { recover() }()
-			startAcc = predictLastAccumulator(col, t, requestSortKey)
+			startAcc = predictLastAccumulator(col, t, earliestInvalidSortKey)
 		}()
 	}
 
@@ -300,15 +333,12 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		}
 	}
 
-	// Build condition: only visit invalid rows (validMask == 0) from the
-	// request sort key onwards. Use the sort key as a lower bound (ASC)
-	// or upper bound (DESC) to avoid scanning already-valid prefix.
-	sortDesc := col.OrcOrderDesc()
+	// Build condition: visit rows from the earliest invalid sort key onwards.
 	condCols := []string{sortCol}
-	capturedKey := requestSortKey
+	capturedKey := earliestInvalidSortKey
 	condFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		if capturedKey.IsNil() {
-			return scm.NewBool(true)
+			return scm.NewBool(true) // no sort key found → full scan
 		}
 		if sortDesc {
 			return scm.NewBool(!scm.Less(capturedKey, a[0])) // a[0] <= capturedKey
