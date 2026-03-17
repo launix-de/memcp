@@ -256,9 +256,15 @@ type JITContext struct {
 	// SliceBaseTracksRSP indicates that SliceBase is a mirror of RSP and must be
 	// refreshed after helper calls (Go may grow/move the goroutine stack).
 	SliceBaseTracksRSP bool
-	RegOwners          [16]*JITValueDesc // register → owner descriptor (nil = untracked)
-	SpillBuf           [4096]int64       // pre-allocated spill buffer (heap-stable, not on stack)
-	SpillTop           int               // high-water mark in SpillBuf (next fresh slot)
+	RegOwners [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+
+	// Stack frame: all access via [RBP - offset]. Prolog: push rbp; mov rbp, rsp;
+	// sub rsp, MaxBPOffset. Epilog: leave; ret. AllocStack/FreeStack manage BPOffset.
+	BPOffset    int32 // current stack allocation point (grows on alloc, shrinks on free)
+	MaxBPOffset int32 // high-water-mark (patched into SUB RSP at the end)
+
+	SpillBuf [4096]int64 // TODO: replace with AllocStack-based spills
+	SpillTop int          // high-water mark in SpillBuf
 	ProtectedRegs      uint64            // bitmask of registers that must not be spilled
 	ProtectedRegCounts [16]int           // per-register protection refcount (supports nested protection)
 	nextDescID         uint32
@@ -373,6 +379,23 @@ type BBDescriptor struct {
 	VisitCount uint16
 	// RenderCount is kept for compatibility with older generated emitters.
 	RenderCount uint16
+}
+
+// AllocStack reserves size bytes on the stack frame. Returns the start offset
+// from RBP (positive; first byte at [RBP - returnedOffset], last at [RBP - returnedOffset - size + 1]).
+// Caller must FreeStack(size) when done.
+func (ctx *JITContext) AllocStack(size int32) int32 {
+	start := ctx.BPOffset
+	ctx.BPOffset += size
+	if ctx.BPOffset > ctx.MaxBPOffset {
+		ctx.MaxBPOffset = ctx.BPOffset
+	}
+	return start
+}
+
+// FreeStack releases size bytes from the stack frame.
+func (ctx *JITContext) FreeStack(size int32) {
+	ctx.BPOffset -= size
 }
 
 // TrackImm records a LocImm constant's pointer payload as a GC root when needed.

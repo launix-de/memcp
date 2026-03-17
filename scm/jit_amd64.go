@@ -118,27 +118,18 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 	}
 	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
 
-	// RBP frame prologue for runtime/jit unwinding:
-	// push rbp; mov rbp, rsp
+	// Unified frame: push rbp; mov rbp, rsp; sub rsp, <fixup>
+	// All frame access via [RSP + offset]. MaxBPOffset patched at the end.
+	// Epilog: leave; ret.
 	ctx.emitByte(0x55)                      // push rbp
 	ctx.emitBytes(0x48, 0x89, 0xE5)         // mov rbp, rsp
+	frameFixup := ctx.EmitSubRSP32Fixup()   // sub rsp, <patched>
 
-	// Emit: MOV R12, RAX (save slice base pointer)
-	ctx.emitMovRegReg(RegR12, RegRAX)
-	// Copy incoming variadic arguments into an emitter-local stack frame.
-	// Go helper calls use PUSH/POP heavily and may overlap caller-provided
-	// argument memory; reading NthLocalVar from a private copy is stable.
-	frameBytes := 0
+	ctx.emitMovRegReg(RegR12, RegRAX)       // save incoming args slice
+	// Allocate local vars via AllocStack.
 	if numVars > 0 {
-		slots := numVars
-		frameBytes = slots * 16
-		if frameBytes < 128 {
-			ctx.EmitSubRSP(uint8(frameBytes))
-		} else {
-			ctx.emitBytes(0x48, 0x81, 0xEC)
-			ctx.emitU32(uint32(frameBytes))
-		}
-		for i := 0; i < slots; i++ {
+		ctx.AllocStack(int32(numVars * 16))
+		for i := 0; i < numVars; i++ {
 			srcOff := int32(i * 16)
 			dstOff := int32(i * 16)
 			ctx.EmitMovRegMem(RegR11, RegR12, srcOff)
@@ -201,13 +192,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		default:
 			return 0, nil, false
 		}
-		if frameBytes > 0 {
-			ctx.EmitAddRSP32(int32(frameBytes))
-		}
-		ctx.emitByte(0x5D) // pop rbp
-		ctx.emitByte(0xC3) // RET
+		// fall through to epilog
 	} else {
-		// Ensure non-immediate results are in ABI return registers.
 		ctx.EnsureDesc(&desc)
 		switch desc.Loc {
 		case LocRegPair:
@@ -232,12 +218,11 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		default:
 			return 0, nil, false
 		}
-		if frameBytes > 0 {
-			ctx.EmitAddRSP32(int32(frameBytes))
-		}
-		ctx.emitByte(0x5D) // pop rbp
-		ctx.emitByte(0xC3) // RET
 	}
+	// Unified epilog: patch SUB RSP with max frame size, then leave; ret.
+	ctx.PatchInt32(frameFixup, ctx.MaxBPOffset)
+	ctx.emitByte(0xC9) // leave
+	ctx.emitByte(0xC3) // ret
 
 	ctx.ResolveFixupsFinal()
 	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))

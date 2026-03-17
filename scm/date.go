@@ -114,7 +114,7 @@ func init_date() {
 			return NewNil()
 		},
 		true, false, nil,
-		nil /* TODO: IndexAddr on non-parameter: &t0[t3] (x=t0 marker="" isDesc=true goVar=d61) */,
+		nil /* TODO: IndexAddr on non-parameter: &t0[t3] (x=t0 marker="" isDesc=true goVar=d62) */,
 	})
 	Declare(&Globalenv, &Declaration{
 		"format_date", "formats a unix timestamp, date, or datetime string into a date string",
