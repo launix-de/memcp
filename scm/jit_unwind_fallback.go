@@ -19,10 +19,8 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 package scm
 
-import "unsafe"
-
 // registerJITArena is a no-op on stock Go builds without runtime/jit.
-func registerJITArena(base unsafe.Pointer, size int) interface{} {
+func registerJITArena(a *jitArena) interface{} {
 	return nil
 }
 

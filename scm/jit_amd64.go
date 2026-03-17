@@ -71,7 +71,16 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
-		body = body.SourceInfo().value
+		si := body.SourceInfo()
+		if buf.arena != nil && si.source != "" {
+			codeOffset := int32(uintptr(buf.ptr) - uintptr(buf.arena.base))
+			buf.arena.sourceMap = append(buf.arena.sourceMap, jitSourceEntry{
+				offset: codeOffset,
+				file:   si.source,
+				line:   int32(si.line),
+			})
+		}
+		body = si.value
 	}
 	return jitCompileExprBodyToExec(proc, body, proc.NumVars, buf)
 }
@@ -105,6 +114,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		FreeRegs:  freeRegs,
 		AllRegs:   freeRegs,
 		SliceBase: RegR12,
+		Arena:     buf.arena,
 	}
 	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
 
@@ -556,7 +566,16 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 // Panics on unsupported expressions (caught by jitCompileExprBodyToExec).
 func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	if expr.GetTag() == tagSourceInfo {
-		expr = expr.SourceInfo().value
+		si := expr.SourceInfo()
+		if ctx.Arena != nil && si.source != "" {
+			codeOffset := int32(uintptr(ctx.Ptr) - uintptr(ctx.Arena.base))
+			ctx.Arena.sourceMap = append(ctx.Arena.sourceMap, jitSourceEntry{
+				offset: codeOffset,
+				file:   si.source,
+				line:   int32(si.line),
+			})
+		}
+		expr = si.value
 	}
 	switch expr.GetTag() {
 	case tagNil:

@@ -19,27 +19,38 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 package scm
 
-import (
-	"runtime/jit"
-	"unsafe"
-)
-
-// jitDescribeCallback returns traceback info for a PC inside a JIT arena.
-// Must not allocate Go memory (called from the runtime on the system stack).
-func jitDescribeCallback(pc uintptr) (name, file string, line int, ok bool) {
-	return "MemCP JIT", "", 0, true
-}
+import "runtime/jit"
 
 // registerJITArena registers a JIT arena with the Go runtime so the
 // unwinder, GC, and panic/recover can walk through JIT frames.
-func registerJITArena(base unsafe.Pointer, size int) interface{} {
-	start := uintptr(base)
+// The Describe callback resolves PCs to Scheme source locations
+// via the arena's source map (populated during JIT compilation).
+func registerJITArena(a *jitArena) interface{} {
+	start := uintptr(a.base)
 	return jit.Register(jit.Region{
-		Start:    start,
-		End:      start + uintptr(size),
-		Unwind:   jit.UnwindDeclare,
-		Describe: jitDescribeCallback,
-		Next:     jitNextCallback,
+		Start:  start,
+		End:    start + uintptr(a.size),
+		Unwind: jit.UnwindDeclare,
+		Describe: func(pc uintptr) (name, file string, line int, ok bool) {
+			offset := int32(pc - uintptr(a.base))
+			entries := a.sourceMap
+			// Binary search: find last entry with offset <= target
+			lo, hi := 0, len(entries)
+			for lo < hi {
+				mid := int(uint(lo+hi) >> 1)
+				if entries[mid].offset <= offset {
+					lo = mid + 1
+				} else {
+					hi = mid
+				}
+			}
+			if lo > 0 {
+				e := &entries[lo-1]
+				return "MemCP JIT", e.file, int(e.line), true
+			}
+			return "MemCP JIT", "", 0, true
+		},
+		Next: jitNextCallback,
 	})
 }
 

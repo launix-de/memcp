@@ -270,6 +270,7 @@ type JITContext struct {
 	// referenced heap data while JIT code may still dereference it.
 	ConstRoots []unsafe.Pointer
 	rootSet    map[unsafe.Pointer]struct{}
+	Arena      *jitArena // owning arena for source map entries
 }
 
 // jitAllocStateSnapshot captures allocator/spill bookkeeping so emitter
@@ -1379,13 +1380,21 @@ func (ctx *JITContext) EmitGoCallVoid(funcAddr uint64, args []JITValueDesc) {
 
 // ---- merged from scm/jit_writer.go ----
 
+// jitSourceEntry maps a code offset within an arena to a Scheme source location.
+type jitSourceEntry struct {
+	offset int32  // byte offset from arena base
+	file   string // source file name
+	line   int32  // 1-based line number
+}
+
 // jitArena is a large mmap'd buffer, optionally registered with
-// runtime/jit for unwinding (when built with -tags gojit).
+// runtime/jit for unwinding (when built with GOEXPERIMENT=jit).
 type jitArena struct {
-	base   unsafe.Pointer // start of mmap'd region
-	size   int            // total bytes
-	offset int            // bump pointer (next free byte)
-	handle interface{}    // opaque registration handle (nil = unregistered)
+	base      unsafe.Pointer   // start of mmap'd region
+	size      int              // total bytes
+	offset    int              // bump pointer (next free byte)
+	handle    interface{}      // opaque registration handle (nil = unregistered)
+	sourceMap []jitSourceEntry // sorted by offset, for Describe callback
 }
 
 // jitPool manages global JIT arena allocation.
@@ -1430,7 +1439,7 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena) {
 		base: unsafe.Pointer(&b[0]),
 		size: arenaBytes,
 	}
-	a.handle = registerJITArena(a.base, arenaBytes)
+	a.handle = registerJITArena(a)
 	ptr = a.base
 	a.offset = size
 	p.arenas = append(p.arenas, a)
@@ -1648,7 +1657,7 @@ func jitCompile(a ...Scmer) Scmer {
 		// Try increasing buffer sizes for overflow retry
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
 			ptr, arena := globalJITPool.Alloc(codeCap)
-			buf := &execBuf{ptr: ptr, n: codeCap}
+			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena}
 			codeLen, roots, overflow := jitCompileProcToExec(proc, buf)
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
@@ -1690,8 +1699,9 @@ func jitCompile(a ...Scmer) Scmer {
 
 // execBuf is a small wrapper for writable memory (arena-backed or standalone)
 type execBuf struct {
-	ptr unsafe.Pointer
-	n   int // size
+	ptr   unsafe.Pointer
+	n     int       // size
+	arena *jitArena // owning arena (nil for standalone buffers)
 }
 
 func maybeDumpJITCode(base unsafe.Pointer, code []byte) {
