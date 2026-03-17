@@ -32,9 +32,10 @@ type Tracefile struct {
 var Trace *Tracefile // default trace: set to not nil if you want to trace
 var TracePrint bool  // whether to print traces to stdout
 
-// PrintLogHook is called by (print) and (time) to optionally log messages
-// to a persistent log table.  Set by the storage layer at startup.
-var PrintLogHook func(message string)
+// TracePrintFunc is the output function used by (time) when TracePrint is
+// true.  Defaults to fmt.Println.  Override from the application layer to
+// route trace output to a log table or other sink.
+var TracePrintFunc = func(msg string) { fmt.Println(msg) }
 
 func SetTrace(on bool) { // sets Trace to nil or a value
 	if Trace != nil {

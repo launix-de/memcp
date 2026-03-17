@@ -205,11 +205,12 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 	}
 }
 
-// InitPrintLogHook wires up scm.PrintLogHook so that (print) and (time)
-// output is inserted into system_statistic.logs when PrintLog is enabled.
-// Call after lib/main.scm has been loaded (so the table exists).
-func InitPrintLogHook() {
-	scm.PrintLogHook = func(msg string) {
+// MakePrintLogFunc returns a function that inserts a message into
+// system_statistic.logs when PrintLog is enabled.  The returned function
+// is safe to call from any goroutine.  Returns nil if the table does not
+// exist.  The caller is responsible for wiring this into (print) / (time).
+func MakePrintLogFunc() func(string) {
+	return func(msg string) {
 		if !Settings.PrintLog {
 			return
 		}

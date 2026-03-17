@@ -46,6 +46,9 @@ import "github.com/launix-de/memcp/storage"
 
 var IOEnv scm.Env
 
+// printLogFunc is set after lib load to route (print) output to storage.
+var printLogFunc func(string)
+
 func getReadfile(path string) func(a ...scm.Scmer) scm.Scmer {
 	return func(a ...scm.Scmer) scm.Scmer {
 		filename := filepath.Join(path, scm.String(a[0]))
@@ -223,8 +226,8 @@ func setupIO(wd string) {
 				msg += scm.String(s)
 			}
 			fmt.Println(msg)
-			if scm.PrintLogHook != nil {
-				scm.PrintLogHook(msg)
+			if printLogFunc != nil {
+				printLogFunc(msg)
 			}
 			return scm.NewBool(true)
 		}, false, false, nil,
@@ -639,8 +642,16 @@ func main() {
 				IOEnv.Vars["import"].Func()(scm.NewString(scmfile))
 			}
 		}
-		// wire up PrintLogHook for (print)/(time) → system_statistic.logs
-		storage.InitPrintLogHook()
+		// wire up print log: (print) and (time) → system_statistic.logs
+		logFn := storage.MakePrintLogFunc()
+		printLogFunc = logFn
+		origTracePrint := scm.TracePrintFunc
+		scm.TracePrintFunc = func(msg string) {
+			origTracePrint(msg)
+			if logFn != nil {
+				logFn(msg)
+			}
+		}
 		for _, command := range commands {
 			fmt.Println("Executing " + command + " ...")
 			code := scm.Read("command line", command)

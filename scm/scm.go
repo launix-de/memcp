@@ -176,10 +176,7 @@ restart:
 					} else {
 						msg = "trace " + d
 					}
-					fmt.Println(msg)
-					if PrintLogHook != nil {
-						PrintLogHook(msg)
-					}
+					TracePrintFunc(msg)
 				}
 				return timedResult
 			case "if":
