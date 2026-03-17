@@ -27,6 +27,7 @@ import "reflect"
 import "strings"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 
 // ColumnReader provides sequential-access-optimized reads. Returned by
 // ColumnStorage.GetCachedReader(). Must not be shared between goroutines.
@@ -2328,7 +2329,7 @@ func initFKBuiltins(en scm.Env) {
 				panic("foreign key " + fkId + ": parent table " + schema + "." + parentTable + " does not exist")
 			}
 			if !fkExistenceCheck(tbl, parentCols, values) {
-				panic("foreign key constraint " + fkId + " failed: value does not exist in " + parentTable)
+				panic(sqldb.NewSQLError1(1452, "23000", "foreign key constraint %s failed: value does not exist in %s", fkId, parentTable))
 			}
 			return scm.NewNil()
 		},
@@ -2367,7 +2368,7 @@ func initFKBuiltins(en scm.Env) {
 			}
 			switch mode {
 			case "RESTRICT":
-				panic("foreign key constraint " + fkId + " failed: cannot delete because rows in " + childTable + " reference it")
+				panic(sqldb.NewSQLError1(1451, "23000", "foreign key constraint %s failed: cannot delete because rows in %s reference it", fkId, childTable))
 			case "CASCADE":
 				fkCascadeDelete(tbl, childCols, parentVals)
 			case "SETNULL":
@@ -2423,7 +2424,7 @@ func initFKBuiltins(en scm.Env) {
 			switch mode {
 			case "RESTRICT":
 				if fkExistenceCheck(tbl, childCols, oldVals) {
-					panic("foreign key constraint " + fkId + " failed: cannot update because rows in " + childTable + " reference it")
+					panic(sqldb.NewSQLError1(1451, "23000", "foreign key constraint %s failed: cannot update because rows in %s reference it", fkId, childTable))
 				}
 			case "CASCADE":
 				fkCascadeUpdate(tbl, childCols, oldVals, newVals)

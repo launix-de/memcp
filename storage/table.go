@@ -26,6 +26,7 @@ import "strings"
 import "strconv"
 import "encoding/json"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/go-mysqlstack/sqldb"
 
 type dataset []scm.Scmer
 type column struct {
@@ -992,7 +993,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 							result++
 						}
 					} else {
-						panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
+						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 					}
 				}, 0)
 			} else {
@@ -1051,7 +1052,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 							result++
 						}
 					} else {
-						panic("Unique key constraint violated in table " + t.Name + ": " + errmsg)
+						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 					}
 				}, 0)
 			} else {
