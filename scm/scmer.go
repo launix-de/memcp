@@ -863,6 +863,10 @@ func (s Scmer) Any() any {
 		return s.Parser()
 	case tagRegex:
 		return s.Regex()
+	case tagCString:
+		return s.String()
+	case tagBString:
+		return s.String()
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
 	default:
