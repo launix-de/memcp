@@ -38,8 +38,6 @@ github.com/aws/aws-sdk-go-v2/service/sts v1.41.6 h1:5fFjR/ToSOzB2OQ/XqWpZBmNvmP/
 github.com/aws/aws-sdk-go-v2/service/sts v1.41.6/go.mod h1:qgFDZQSD/Kys7nJnVqYlWKnh0SSdMjAi0uSwON4wgYQ=
 github.com/aws/smithy-go v1.24.0 h1:LpilSUItNPFr1eY85RYgTIg5eIEPtvFbskaFcmmIUnk=
 github.com/aws/smithy-go v1.24.0/go.mod h1:LEj2LM3rBRQJxPZTB4KuzZkaZYnZPnvgIhb4pu07mx0=
-github.com/carli2/text v0.34.1-0.20260304023616-d42ea421d3fb h1:4l8EQp4eyogvpSOCkpKun5cdNOyCC4IKCizxdeN47qw=
-github.com/carli2/text v0.34.1-0.20260304023616-d42ea421d3fb/go.mod h1:TPmb/M+s2YEvdo4U8+ROfwXl5GGKa++oem3DIkLe3MI=
 github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a h1:qnerlW5tSOXN0OYjUAscEZWzTzTzSP+ASRJwpUdfya4=
 github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a/go.mod h1:homfLqTYRFyVYemLBFl5GgL/DWEiH5wcsQ5gSh1yziA=
 github.com/ceph/go-ceph v0.37.0 h1:KXliBe3ZDr3/AtfY7n9d1MG7ippYNCVhMPcAgm05CFI=
@@ -78,6 +76,8 @@ github.com/launix-de/go-packrat/v2 v2.1.21 h1:2X2nlTg9pZdN2DiTGIRe4onI7/l/YukpOk
 github.com/launix-de/go-packrat/v2 v2.1.21/go.mod h1:Xb1/gZg0UMb2CPgmCfBdwvpMZYhKLjZ5BdqoWa/oQjw=
 github.com/lib/pq v1.11.2 h1:x6gxUeu39V0BHZiugWe8LXZYZ+Utk7hSJGThs8sdzfs=
 github.com/lib/pq v1.11.2/go.mod h1:/p+8NSbOcwzAEI7wiMXFlgydTwcgTr3OSKMsD2BitpA=
+github.com/pierrec/lz4/v4 v4.1.26 h1:GrpZw1gZttORinvzBdXPUXATeqlJjqUG/D87TKMnhjY=
+github.com/pierrec/lz4/v4 v4.1.26/go.mod h1:EoQMVJgeeEOMsCqCzqFm2O0cJvljX2nGZjcRIPL34O4=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/shopspring/decimal v1.4.0 h1:bxl37RwXBklmTi0C79JfXCEBD1cqqHt0bbgBAGFp81k=

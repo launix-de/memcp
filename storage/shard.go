@@ -455,8 +455,11 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 		idx.mainIndexes = StorageInt{}
 		idx.deltaBtree = nil
 	}
-	// release column storage
+	// release column storage (deregister compressed string dicts first)
 	for col := range s.columns {
+		if str, ok := s.columns[col].(*StorageString); ok && str.compressed {
+			GlobalCache.removeInternal(str, freedByType)
+		}
 		s.columns[col] = nil
 	}
 	s.srState = COLD
@@ -487,6 +490,9 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	s.deletions.Reset()
 	s.main_count = 0
 	for col := range s.columns {
+		if str, ok := s.columns[col].(*StorageString); ok && str.compressed {
+			GlobalCache.removeInternal(str, freedByType)
+		}
 		s.columns[col] = nil
 	}
 	// COLD: on next access ensureLoaded re-initialises as empty and re-registers
@@ -2186,6 +2192,18 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 			}
 			newcol.finish()
+
+			// LZ4 string dict compression: if the old column was a StorageString
+			// with zero reads in the last rebuild cycle, compress the new column's
+			// dictionary so it doesn't occupy RAM until actually needed.
+			if oldStr, ok := c.(*StorageString); ok {
+				if newStr, ok2 := newcol.(*StorageString); ok2 {
+					if oldStr.ReadCount() == 0 {
+						newStr.CompressDictionary()
+					}
+				}
+			}
+
 			result.columns[col] = newcol
 			result.main_count = i
 

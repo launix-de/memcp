@@ -218,10 +218,14 @@ func setupIO(wd string) {
 			scm.DeclarationParameter{"value...", "any", "values to print", nil},
 		}, "bool",
 		func(a ...scm.Scmer) scm.Scmer {
+			var msg string
 			for _, s := range a {
-				fmt.Print(scm.String(s))
+				msg += scm.String(s)
 			}
-			fmt.Println()
+			fmt.Println(msg)
+			if scm.PrintLogHook != nil {
+				scm.PrintLogHook(msg)
+			}
 			return scm.NewBool(true)
 		}, false, false, nil,
 		nil,
@@ -635,6 +639,8 @@ func main() {
 				IOEnv.Vars["import"].Func()(scm.NewString(scmfile))
 			}
 		}
+		// wire up PrintLogHook for (print)/(time) → system_statistic.logs
+		storage.InitPrintLogHook()
 		for _, command := range commands {
 			fmt.Println("Executing " + command + " ...")
 			code := scm.Read("command line", command)

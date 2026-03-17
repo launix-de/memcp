@@ -48,9 +48,11 @@ type SettingsT struct {
 	ExplainWidth           int   // max chars before EXPLAIN pretty-prints a sub-expression on multiple lines (0 = default 20)
 	ErrorQueryLog          bool  // when true, log failed queries to system_statistic.errors
 	MaxErrorQueryLog       int   // max rows in error log (0 = unlimited)
+	PrintLog               bool  // when true, log (print) output to system_statistic.logs
+	MaxPrintLog            int   // max rows in print log (0 = unlimited); trimmed in 15min cron
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, false, 0}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, false, 0, false, 0}
 
 // call this after you filled Settings
 func InitSettings() {
@@ -86,6 +88,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("ExplainWidth"), scm.NewInt(int64(Settings.ExplainWidth)),
 			scm.NewString("ErrorQueryLog"), scm.NewBool(Settings.ErrorQueryLog),
 			scm.NewString("MaxErrorQueryLog"), scm.NewInt(int64(Settings.MaxErrorQueryLog)),
+			scm.NewString("PrintLog"), scm.NewBool(Settings.PrintLog),
+			scm.NewString("MaxPrintLog"), scm.NewInt(int64(Settings.MaxPrintLog)),
 		})
 	} else if len(a) == 1 {
 		switch scm.String(a[0]) {
@@ -129,6 +133,10 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(Settings.ErrorQueryLog)
 		case "MaxErrorQueryLog":
 			return scm.NewInt(int64(Settings.MaxErrorQueryLog))
+		case "PrintLog":
+			return scm.NewBool(Settings.PrintLog)
+		case "MaxPrintLog":
+			return scm.NewInt(int64(Settings.MaxPrintLog))
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
@@ -186,10 +194,39 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.ErrorQueryLog = scm.ToBool(a[1])
 		case "MaxErrorQueryLog":
 			Settings.MaxErrorQueryLog = scm.ToInt(a[1])
+		case "PrintLog":
+			Settings.PrintLog = scm.ToBool(a[1])
+		case "MaxPrintLog":
+			Settings.MaxPrintLog = scm.ToInt(a[1])
 		default:
 			panic("unknown setting: " + scm.String(a[0]))
 		}
 		return scm.NewBool(true)
+	}
+}
+
+// InitPrintLogHook wires up scm.PrintLogHook so that (print) and (time)
+// output is inserted into system_statistic.logs when PrintLog is enabled.
+// Call after lib/main.scm has been loaded (so the table exists).
+func InitPrintLogHook() {
+	scm.PrintLogHook = func(msg string) {
+		if !Settings.PrintLog {
+			return
+		}
+		db := GetDatabase("system_statistic")
+		if db == nil {
+			return
+		}
+		t := db.GetTable("logs")
+		if t == nil {
+			return
+		}
+		now := float64(time.Now().UnixNano()) / 1e9
+		t.Insert(
+			[]string{"datetime", "message"},
+			[][]scm.Scmer{{scm.NewFloat(now), scm.NewString(msg)}},
+			nil, scm.NewNil(), false, nil,
+		)
 	}
 }
 

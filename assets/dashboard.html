@@ -154,6 +154,7 @@ body{display:flex;flex-direction:column}
 <a href="#console">Console</a>
 <a href="#users" data-admin-only>Users</a>
 <a href="#errors" data-admin-only>Errors</a>
+<a href="#logs" data-admin-only>Log</a>
 <a href="#settings" data-admin-only>Settings</a>
 <a href="https://memcp.org" target="_blank">memcp.org</a>
 <a href="https://github.com/launix-de/memcp" target="_blank">GitHub</a>
@@ -243,6 +244,7 @@ body{display:flex;flex-direction:column}
 <div class="tab-bar">
 <button class="tab-btn" id="tabbtn-dbs-databases" onclick="_switchDbsTab('databases')">Databases</button>
 <button class="tab-btn" id="tabbtn-dbs-errors" onclick="_switchDbsTab('errors')" data-admin-only>Errors</button>
+<button class="tab-btn" id="tabbtn-dbs-logs" onclick="_switchDbsTab('logs')" data-admin-only>Log</button>
 <button class="tab-btn" id="tabbtn-dbs-console" onclick="_switchDbsTab('console')">Console</button>
 </div>
 <div class="tab-panel" id="tabpanel-dbs-databases">
@@ -303,6 +305,29 @@ body{display:flex;flex-direction:column}
 <div style="display:flex;gap:8px;align-items:center;padding:10px 0" id="errors-pagination"></div>
 </div>
 </div><!-- end tabpanel-dbs-errors -->
+
+<div class="tab-panel" id="tabpanel-dbs-logs" data-admin-only>
+<div class="browse-wrap">
+<div style="margin-bottom:8px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;background:#1e1e3a;border-radius:6px;padding:8px 12px;font-size:.8rem">
+<label style="display:flex;align-items:center;gap:6px;color:#aaa"><span>Enable print log</span>
+<label class="toggle" style="margin:0"><input type="checkbox" id="pl-setting-enable"><span class="slider"></span></label></label>
+<label style="display:flex;align-items:center;gap:6px;color:#aaa"><span>Max rows</span>
+<input type="number" id="pl-setting-max" min="0" style="width:80px;background:#2a2a4a;border:1px solid #444;border-radius:3px;color:#e0e0e0;padding:2px 4px;font-size:.8rem">
+<span style="color:#666;font-size:.75rem">(0=unlimited, trimmed every 15min)</span></label>
+<span id="pl-setting-status" style="color:#76b512;font-size:.75rem"></span>
+</div>
+<div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+<button class="btn-warn" id="btn-reload-logs" onclick="loadLogs()">Reload</button>
+<button class="btn-danger" id="btn-clear-logs">Clear All</button>
+<label style="display:flex;align-items:center;gap:6px;color:#aaa;font-size:.8rem"><input type="checkbox" id="logs-autorefresh" checked><span>Auto-refresh (5s)</span></label>
+<span id="logs-status" style="color:#888;font-size:.8rem;margin-left:8px"></span>
+</div>
+<table class="browse-table" id="tbl-logs">
+<thead><tr><th style="width:160px">Time</th><th>Message</th></tr></thead>
+<tbody id="logs-tbody"></tbody>
+</table>
+</div>
+</div><!-- end tabpanel-dbs-logs -->
 
 <div class="tab-panel" id="tabpanel-dbs-console">
 <div class="console-wrap">
@@ -682,6 +707,70 @@ if(elStatus){elStatus.textContent="Saved";setTimeout(function(){elStatus.textCon
 });}
 });
 
+/* ---- Print log ---- */
+var _logsAll=[];
+var _logsAutoRefreshTimer=null;
+
+function renderLogsTable(){
+var rows=_logsAll;
+var status=document.getElementById("logs-status");
+if(status)status.textContent=rows.length+" entr"+(rows.length===1?"y":"ies")+" (latest 100)";
+var tbody=document.getElementById("logs-tbody");
+if(!rows.length){tbody.innerHTML='<tr><td colspan="2" style="color:#888;text-align:center;padding:20px">No log entries.</td></tr>';return;}
+var html="";
+for(var i=0;i<rows.length;i++){
+var r=rows[i];
+html+='<tr><td style="white-space:nowrap;font-size:.75rem;color:#888">'+esc(fmtDateTime(r.datetime))+'</td>';
+html+='<td><pre style="margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-all;color:#ccc">'+esc(r.message||"")+'</pre></td></tr>';
+}
+tbody.innerHTML=html;
+}
+
+function loadLogs(){
+apiFetch(base+"/dashboard/api/logs",function(rows){
+_logsAll=rows||[];
+renderLogsTable();
+});
+}
+
+function startLogsAutoRefresh(){
+stopLogsAutoRefresh();
+var cb=document.getElementById("logs-autorefresh");
+if(cb&&cb.checked){
+_logsAutoRefreshTimer=setInterval(loadLogs,5000);
+}
+}
+function stopLogsAutoRefresh(){
+if(_logsAutoRefreshTimer){clearInterval(_logsAutoRefreshTimer);_logsAutoRefreshTimer=null;}
+}
+
+document.addEventListener("DOMContentLoaded",function(){
+var cb=document.getElementById("logs-autorefresh");
+if(cb)cb.addEventListener("change",function(){if(this.checked)startLogsAutoRefresh();else stopLogsAutoRefresh();});
+var btn=document.getElementById("btn-clear-logs");
+if(btn)btn.addEventListener("click",function(){
+if(!confirm("Clear all log entries?"))return;
+scmFetch('(begin (scan "system_statistic" "logs" \'() (lambda () true) \'("$update") (lambda ($update) ($update))) true)',function(){loadLogs()});
+});
+/* Print Log inline settings — auto-save */
+var plEnable=document.getElementById("pl-setting-enable");
+var plMax=document.getElementById("pl-setting-max");
+var plStatus=document.getElementById("pl-setting-status");
+if(plEnable){plEnable.addEventListener("change",function(){
+saveSetting("PrintLog",plEnable.checked,function(){
+if(plStatus){plStatus.textContent="Saved";setTimeout(function(){plStatus.textContent=""},2000);}
+});
+});}
+if(plMax){var plMaxTimer=null;plMax.addEventListener("input",function(){
+if(plMaxTimer)clearTimeout(plMaxTimer);
+plMaxTimer=setTimeout(function(){
+saveSetting("MaxPrintLog",parseInt(plMax.value)||0,function(){
+if(plStatus){plStatus.textContent="Saved";setTimeout(function(){plStatus.textContent=""},2000);}
+});
+},500);
+});}
+});
+
 /* Admin detection */
 var isAdmin=false;
 var defaultPassword=false;
@@ -850,13 +939,14 @@ function _switchDbsTab(tab){
 /* if coming from console, remember the selected DB to pass to Databases/Errors filter */
 var fromConsoleDb=(_dbsTab==="console"&&consoleSyntax&&consoleSyntax.value!=="scheme"&&consoleDb)?consoleDb.value:"";
 _dbsTab=tab;
-var tabs=["databases","errors","console"];
+var tabs=["databases","errors","logs","console"];
 for(var i=0;i<tabs.length;i++){
 var p=document.getElementById("tabpanel-dbs-"+tabs[i]);
 var b=document.getElementById("tabbtn-dbs-"+tabs[i]);
 if(p)p.classList.toggle("active",tabs[i]===tab);
 if(b)b.classList.toggle("active",tabs[i]===tab);
 }
+stopLogsAutoRefresh();
 if(tab==="databases"){
 location.hash="databases";
 apiFetch(base+"/dashboard/api/databases",renderDatabases);
@@ -868,6 +958,16 @@ var cb=document.getElementById("el-setting-enable");
 var inp=document.getElementById("el-setting-max");
 if(cb)cb.checked=data.ErrorQueryLog||false;
 if(inp)inp.value=data.MaxErrorQueryLog||0;
+});
+}else if(tab==="logs"){
+location.hash="logs";
+loadLogs();
+startLogsAutoRefresh();
+fetchSettings(function(data){
+var cb=document.getElementById("pl-setting-enable");
+var inp=document.getElementById("pl-setting-max");
+if(cb)cb.checked=data.PrintLog||false;
+if(inp)inp.value=data.MaxPrintLog||0;
 });
 }else if(tab==="console"){
 location.hash="console";
@@ -884,7 +984,7 @@ renderHistory();
 }
 function _switchDbsTabQuiet(tab){
 _dbsTab=tab;
-var tabs=["databases","errors","console"];
+var tabs=["databases","errors","logs","console"];
 for(var i=0;i<tabs.length;i++){
 var p=document.getElementById("tabpanel-dbs-"+tabs[i]);
 var b=document.getElementById("tabbtn-dbs-"+tabs[i]);
@@ -1090,16 +1190,18 @@ var settingsGroups=[
 ]},
 {group:"Error Log",items:[
 {key:"ErrorQueryLog",desc:"Log failed queries to system_statistic.errors (view in Errors tab)",type:"bool"},
-{key:"MaxErrorQueryLog",desc:"Max rows to keep in error log (0=unlimited)",type:"number"}
+{key:"MaxErrorQueryLog",desc:"Max rows to keep in error log (0=unlimited, trimmed every 15min)",type:"number"}
 ]},
 {group:"Shutdown",items:[
 {key:"ShutdownDrainSeconds",desc:"Seconds to wait for in-flight requests during shutdown (0=10s)",type:"number"}
 ]},
 {group:"Debugging",items:[
-{key:"Backtrace",desc:"Enable detailed error backtraces",type:"bool"},
+{key:"Backtrace",desc:"Enable detailed error backtraces (requires restart)",type:"bool"},
 {key:"Trace",desc:"Enable Scheme runtime tracing to file",type:"bool"},
-{key:"TracePrint",desc:"Print trace timing to stdout",type:"bool"},
-{key:"ScanDebugging",desc:"Log every scan/scan_order: db+table+boundaries+index",type:"bool"}
+{key:"TracePrint",desc:"Print trace timing to stdout/log",type:"bool"},
+{key:"ScanDebugging",desc:"Log every scan/scan_order: db+table+boundaries+index",type:"bool"},
+{key:"PrintLog",desc:"Log (print) output to system_statistic.logs (view in Log tab)",type:"bool"},
+{key:"MaxPrintLog",desc:"Max rows to keep in print log (0=unlimited, trimmed every 15min)",type:"number"}
 ]}
 ];
 
@@ -1173,6 +1275,23 @@ var cb=document.getElementById("el-setting-enable");
 var inp=document.getElementById("el-setting-max");
 if(cb)cb.checked=data.ErrorQueryLog||false;
 if(inp)inp.value=data.MaxErrorQueryLog||0;
+});
+loadSidebar();
+return;
+}
+if(hash==="logs"){
+if(!isAdmin){location.hash="databases";return}
+showView("view-databases");
+_sidebarActiveDb=null;_sidebarActiveTbl=null;
+setBreadcrumb([]);
+_switchDbsTabQuiet("logs");
+loadLogs();
+startLogsAutoRefresh();
+fetchSettings(function(data){
+var cb=document.getElementById("pl-setting-enable");
+var inp=document.getElementById("pl-setting-max");
+if(cb)cb.checked=data.PrintLog||false;
+if(inp)inp.value=data.MaxPrintLog||0;
 });
 loadSidebar();
 return;
@@ -2099,6 +2218,9 @@ window.renderDbErrorsTable=renderDbErrorsTable;
 /* Pagination wrappers (primitives can't be shared across IIFE boundary) */
 window._gotoErrorsPage=function(p){_errorsPage=p;renderErrorsTable();};
 window._gotoDbErrorsPage=function(p){_dbErrorsPage=p;renderDbErrorsTable();};
+window.loadLogs=loadLogs;
+window.startLogsAutoRefresh=startLogsAutoRefresh;
+window.stopLogsAutoRefresh=stopLogsAutoRefresh;
 
 })();
 </script>
