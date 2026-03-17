@@ -296,6 +296,7 @@ body{display:flex;flex-direction:column}
 <select class="inline-select" id="errors-db-filter" style="min-width:160px"><option value="">All Databases</option></select>
 <button class="btn-warn" id="btn-reload-errors" onclick="loadErrors()">Reload</button>
 <button class="btn-danger" id="btn-clear-errors">Clear All</button>
+<label style="display:flex;align-items:center;gap:6px;color:#aaa;font-size:.8rem"><input type="checkbox" id="errors-autorefresh" checked><span>Auto-refresh (5s)</span></label>
 <span id="errors-status" style="color:#888;font-size:.8rem;margin-left:8px"></span>
 </div>
 <table class="browse-table" id="tbl-errors">
@@ -597,6 +598,7 @@ function truncName(s,n){n=n||30;return s.length>n?s.substring(0,n)+"\u2026":s}
 var _errorsAll=[];
 var _errorsPage=0;
 var _errorsPageSize=20;
+var _errorsAutoRefreshTimer=null;
 var _errorsDbFilter="";
 
 function fmtDateTime(ts){
@@ -680,9 +682,22 @@ renderErrorsTable();
 });
 }
 
+function startErrorsAutoRefresh(){
+stopErrorsAutoRefresh();
+var cb=document.getElementById("errors-autorefresh");
+if(cb&&cb.checked){
+_errorsAutoRefreshTimer=setInterval(loadErrors,5000);
+}
+}
+function stopErrorsAutoRefresh(){
+if(_errorsAutoRefreshTimer){clearInterval(_errorsAutoRefreshTimer);_errorsAutoRefreshTimer=null;}
+}
+
 document.addEventListener("DOMContentLoaded",function(){
 var sel=document.getElementById("errors-db-filter");
 if(sel)sel.addEventListener("change",function(){_errorsDbFilter=this.value;_errorsPage=0;renderErrorsTable();});
+var arcb=document.getElementById("errors-autorefresh");
+if(arcb)arcb.addEventListener("change",function(){if(this.checked)startErrorsAutoRefresh();else stopErrorsAutoRefresh();});
 var btn=document.getElementById("btn-clear-errors");
 if(btn)btn.addEventListener("click",function(){
 if(!confirm("Clear all error log entries?"))return;
@@ -947,12 +962,14 @@ if(p)p.classList.toggle("active",tabs[i]===tab);
 if(b)b.classList.toggle("active",tabs[i]===tab);
 }
 stopLogsAutoRefresh();
+stopErrorsAutoRefresh();
 if(tab==="databases"){
 location.hash="databases";
 apiFetch(base+"/dashboard/api/databases",renderDatabases);
 }else if(tab==="errors"){
 location.hash="errors";
 loadErrors(fromConsoleDb||undefined);
+startErrorsAutoRefresh();
 fetchSettings(function(data){
 var cb=document.getElementById("el-setting-enable");
 var inp=document.getElementById("el-setting-max");
@@ -1270,6 +1287,7 @@ _sidebarActiveDb=null;_sidebarActiveTbl=null;
 setBreadcrumb([]);
 _switchDbsTabQuiet("errors");
 loadErrors();
+startErrorsAutoRefresh();
 fetchSettings(function(data){
 var cb=document.getElementById("el-setting-enable");
 var inp=document.getElementById("el-setting-max");
@@ -2221,6 +2239,8 @@ window._gotoDbErrorsPage=function(p){_dbErrorsPage=p;renderDbErrorsTable();};
 window.loadLogs=loadLogs;
 window.startLogsAutoRefresh=startLogsAutoRefresh;
 window.stopLogsAutoRefresh=stopLogsAutoRefresh;
+window.startErrorsAutoRefresh=startErrorsAutoRefresh;
+window.stopErrorsAutoRefresh=stopErrorsAutoRefresh;
 
 })();
 </script>
