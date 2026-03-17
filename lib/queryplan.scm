@@ -594,10 +594,23 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(equal? sym '(symbol get_column))
 			)
 		))
+		/* canonical_column_in_schema: returns the Field name as stored in the schema (canonical casing) */
+		(define canonical_column_in_schema (lambda (schemas alias_name table_insensitive column_name column_insensitive)
+			(reduce_assoc schemas (lambda (acc alias cols)
+				(if (not (nil? acc)) acc
+					(if (or (nil? alias_name) ((if table_insensitive equal?? equal?) alias_name alias))
+						(reduce cols (lambda (found coldef)
+							(if (not (nil? found)) found
+								(if ((if column_insensitive equal?? equal?) (coldef "Field") column_name) (coldef "Field") nil))) nil)
+						nil))
+			) nil)
+		))
 		(define wrap_outer_leaves (lambda (expr) (match expr
 			(cons sym args) (if (is_get_column_sym sym)
 				(match args
-					'(tblvar _ col _) (if (nil? tblvar) expr (list (quote outer) (symbol (concat tblvar "." col))))
+					'(tblvar ti col ci) (if (nil? tblvar) expr (begin
+					(define canonical (coalesce (canonical_column_in_schema _o tblvar ti col ci) col))
+					(list (quote outer) (symbol (concat tblvar "." canonical)))))
 					_ (cons (wrap_outer_leaves sym) (map args wrap_outer_leaves))
 				)
 				(cons (wrap_outer_leaves sym) (map args wrap_outer_leaves))
@@ -611,7 +624,9 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 				(error (concat "column " alias_name "." column_name " does not exist in subquery"))
 				(if (not (nil? inner_alias))
 					(if (or (nil? alias_name) table_insensitive column_insensitive)
-						'((quote get_column) inner_alias false column_name false)
+						(begin
+							(define inner_column (coalesce (canonical_column_in_schema _s alias_name table_insensitive column_name column_insensitive) column_name))
+							'((quote get_column) inner_alias false inner_column false))
 						expr)
 					(begin
 						(define outer_alias (column_exists_in_schema _o alias_name table_insensitive column_name column_insensitive))
@@ -621,15 +636,16 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 								expr)
 							(begin
 								/* check if the outer column is a computed expression (derived table) */
+								(define outer_column (coalesce (canonical_column_in_schema _o alias_name table_insensitive column_name column_insensitive) column_name))
 								(define outer_cols (_o outer_alias))
-								(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") column_name)) coldef a)) nil))
+								(define outer_coldef (reduce outer_cols (lambda (a coldef) (if (and (nil? a) (equal? (coldef "Field") outer_column)) coldef a)) nil))
 								(define outer_expr (if outer_coldef (outer_coldef "Expr") nil))
 								(if outer_expr
 									/* derived table computed column: inline expression with leaf get_column
 									nodes replaced by (outer sym) references for optimizer resolution */
 									(wrap_outer_leaves outer_expr)
 									/* real table column: symbol lookup in outer scope */
-									(list (quote outer) (symbol (concat outer_alias "." column_name))))))
+									(list (quote outer) (symbol (concat outer_alias "." outer_column))))))
 					)
 				)
 			)
@@ -640,7 +656,19 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 					'(alias_name table_insensitive column_name column_insensitive) (replace_get_column_subselect alias_name table_insensitive column_name column_insensitive expr)
 					_ (cons sym (map args replace_find_column_subselect))
 				)
-				(cons sym (map args replace_find_column_subselect))
+				/* canonicalize (outer tbl.col) symbols: normalize col to schema casing */
+				(if (or (equal? sym (quote outer)) (equal? sym '(quote outer)))
+					(match args
+						(cons outer_sym '()) (begin
+							(define _ps (split (string outer_sym) "."))
+							(match _ps
+								(list _tbl _col) (begin
+									(define _canonical (coalesce (canonical_column_in_schema _o _tbl true _col true) _col))
+									(if (equal? _col _canonical) expr
+										(list (if (equal? sym (quote outer)) (quote outer) sym) (symbol (concat _tbl "." _canonical)))))
+								_ (cons sym (map args replace_find_column_subselect))))
+						_ (cons sym (map args replace_find_column_subselect)))
+					(cons sym (map args replace_find_column_subselect)))
 			)
 			expr
 		)))
@@ -694,6 +722,19 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 						))
 						(set fields2 (map_assoc fields2 (lambda (k v) (replace_find_column_subselect v))))
 						(set condition2 (replace_find_column_subselect (coalesceNil condition2 true)))
+						/* wrap remaining unresolved qualified get_column refs as (outer tbl.col).
+						These are outer-outer refs that weren't in _s or _o — wrapping them
+						preserves them through replace_columns_from_expr and allows
+						replace_column_alias to prefix them during derived-table flattening. */
+						(define wrap_unresolved_outer (lambda (e) (match e
+							'((symbol get_column) alias_ ti col ci) (if (and (not (nil? alias_)) (or ti ci))
+								(list (quote outer) (symbol (concat alias_ "." col)))
+								e)
+							(cons sym args) (cons (wrap_unresolved_outer sym) (map args wrap_unresolved_outer))
+							e
+						)))
+						(set fields2 (map_assoc fields2 (lambda (k v) (wrap_unresolved_outer v))))
+						(set condition2 (wrap_unresolved_outer condition2))
 						/* detect top-level aggregate for direct scan path */
 						(define value_expr_rep (car (extract_assoc fields2 (lambda (k v) v))))
 						(define _is_aggregate_sym (lambda (sym)
@@ -1334,7 +1375,11 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 									/* for LEFT JOIN: condition2 was integrated into joinexpr, so return true as global filter */
 									/* for INNER JOIN: condition2 becomes global filter (can be reordered) */
 									(set globalFilter (if isOuter true (replace_column_alias condition2)))
-									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (replace_column_alias v)))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
+									(define wrap_outer_join_projection (lambda (expr)
+										(if (and isOuter (not (equal? joinexpr true)) (not (nil? joinexpr2)) (not (equal? joinexpr2 true)))
+											(list (quote if) joinexpr2 expr nil)
+											expr)))
+									(list tablesPrefixed (list id (map_assoc fields2 (lambda (k v) (wrap_outer_join_projection (replace_column_alias v))))) globalFilter (merge (list id (extract_assoc fields2 (lambda (k v) (list "Field" k "Type" "any" "Expr" (replace_column_alias v))))) (merge (extract_assoc schemas2 (lambda (k v) (list (concat id ":" k) v))))))
 								)
 							)
 						) (error "non matching return value for untangle_query"))
@@ -1433,9 +1478,17 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 							(if (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)
 								alias a)) nil)
 						main_match))
-					'((quote get_column) (coalesce any_match (error (concat "column " col " does not exist in tables"))) false col false)
+					(begin
+						(define resolved_alias (coalesce any_match (error (concat "column " col " does not exist in tables"))))
+						(define canonical_col (if ci (coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col) col))
+						'((quote get_column) resolved_alias false canonical_col false))
 				)
-				'((symbol get_column) alias_ ti col ci) (if (or ti ci) '((quote get_column) (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))) false col false) expr) /* omit false false, otherwise freshly created columns wont be found */
+				'((symbol get_column) alias_ ti col ci) (if (or ti ci)
+					(begin
+						(define resolved_alias (coalesce (reduce_assoc schemas (lambda (a alias cols) (if (and ((if ti equal?? equal?) alias_ alias) (reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false)) alias a)) nil) (error (concat "column " alias_ "." col " does not exist in tables"))))
+						(define canonical_col (if ci (coalesce (reduce (schemas resolved_alias) (lambda (a coldef) (if (not (nil? a)) a (if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col) col))
+						'((quote get_column) resolved_alias false canonical_col false))
+					expr) /* omit false false, otherwise freshly created columns wont be found */
 				(cons sym args) /* function call */ (cons sym (map args replace_find_column))
 				expr
 			)))
@@ -1445,6 +1498,25 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 			(set group (map group (lambda (g) (replace_inner_selects g schemas))))
 			(set having (replace_inner_selects having schemas))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col schemas) dir)))))
+
+			/* canonicalize_for_rename: resolve case-insensitive column names to canonical form,
+			but ONLY for columns referencing derived table aliases (keys in renamelist).
+			Uses schemas to find canonical column name without calling replace_find_column. */
+			(define canonicalize_for_rename (lambda (expr) (match expr
+				'((symbol get_column) alias_ ti col ci) (if (and ci (not (nil? alias_)))
+					(if (has_assoc? renamelist (string alias_))
+						(begin
+							(define alias_cols (schemas (string alias_)))
+							(define canonical_col (if (nil? alias_cols) col
+								(coalesce (reduce alias_cols (lambda (found coldef)
+									(if (not (nil? found)) found
+										(if (equal?? (coldef "Field") col) (coldef "Field") nil))) nil) col)))
+							'((quote get_column) alias_ ti canonical_col ci))
+						expr)
+					expr)
+				(cons sym args) (cons sym (map args canonicalize_for_rename))
+				expr
+			)))
 
 			/* apply renamelist (assoc of assoc of expr) */
 			(define replace_rename (lambda (expr) (match expr
@@ -1488,10 +1560,10 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 			)))))
 
 			/* return parameter list for build_queryplan */
-			(set conditionAll (cons 'and (filter (cons (replace_rename condition) conditionList) (lambda (x) (not (nil? x)))))) /* TODO: append inner conditions to condition */
-			(set group (map group replace_rename))
-			(set having (replace_rename having))
-			(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename col) dir)))))
+			(set conditionAll (cons 'and (filter (cons (replace_rename (canonicalize_for_rename condition)) conditionList) (lambda (x) (not (nil? x)))))) /* TODO: append inner conditions to condition */
+			(set group (map group (lambda (g) (replace_rename (canonicalize_for_rename g)))))
+			(set having (replace_rename (canonicalize_for_rename having)))
+			(set order (map order (lambda (o) (match o '(col dir) (list (replace_rename (canonicalize_for_rename col)) dir)))))
 			(define groups (if (coalesce _cd_distinct_exprs false)
 				/* COUNT(DISTINCT): two group stages - first dedup, then aggregate */
 				(list
