@@ -454,15 +454,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 					/* BEFORE trigger: wrap with changed_rows handling */
 					/* Use outer begin for define, inner !begin (no new scope) for statements */
 					/* Wrap in begin: define changed_rows, execute stmts, return changed_rows */
-					(if (> (count valid_stmts) 0)
-						(list (symbol "lambda") params
-							(list (symbol "begin")
-								session_bind
-								(list (symbol "define") changed_rows_sym (symbol "NEW"))
-								(cons '!begin valid_stmts)
-								changed_rows_sym))
-						/* empty BEFORE trigger: return nil (row used as-is) */
-						(list (symbol "lambda") params nil)))
+					(list (symbol "lambda") params
+						(list (symbol "begin")
+							session_bind
+							(list (symbol "define") changed_rows_sym (symbol "NEW"))
+							(cons '!begin valid_stmts)
+							changed_rows_sym)))
 			)
 			/* SET assignments (legacy format) - body is AST (list (col1 expr1) ...), eval to get actual list */
 			(cons (symbol list) assignments) (begin
@@ -493,13 +490,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				"@" sql_identifier "=" sql_expression
 			) true) ",")
 			(? (atom ";" false))
-		) nil)
-		/* DO expr[;] - MySQL no-op (evaluates expression for side effects, result discarded) */
-		(parser '(
-			(atom "DO" true)
-			sql_expression
-			(? (atom ";" false))
-		) nil)
+		) '!nop)
 		/* INSERT [IGNORE] INTO table (...) VALUES (...)[;] */
 		(parser '(
 			(atom "INSERT" true) (define ignore (? (atom "IGNORE" true))) (atom "INTO" true) (define tbl sql_identifier)
@@ -532,8 +523,13 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		) (if (> (count tbls) 1)
 				(list '!update_multi tbls assignments where)
 				(list '!update (match (car tbls) '(alias _) alias) assignments where)))
+		/* DELETE FROM table WHERE condition[;] */
+		(parser '(
+			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
+			(? (atom "WHERE" true) (define where sql_expression))
+			(? (atom ";" false))
+		) (list '!delete tbl where))
 		/* DELETE FROM table USING table, table2 [AS alias] WHERE condition[;] (multi-table in trigger) */
-		/* Must come before simple DELETE to avoid consuming just "DELETE FROM tbl" leaving USING unparsed */
 		(parser '(
 			(atom "DELETE" true) (atom "FROM" true) (define target sql_identifier)
 			(atom "USING" true)
@@ -544,12 +540,6 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(? (atom "WHERE" true) (define where sql_expression))
 			(? (atom ";" false))
 		) (list '!delete_using target tbls where))
-		/* DELETE FROM table WHERE condition[;] */
-		(parser '(
-			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
-			(? (atom "WHERE" true) (define where sql_expression))
-			(? (atom ";" false))
-		) (list '!delete tbl where))
 	)))
 
 	/* Full trigger statement parser including IF...THEN...[ELSE...]END IF */
@@ -764,8 +754,6 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		(parser '((atom "DATE_ADD" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_add e n unit))
 		/* DATE_SUB(expr, INTERVAL n UNIT) */
 		(parser '((atom "DATE_SUB" true) "(" (define e sql_expression) "," (atom "INTERVAL" true) (define n sql_expression) (define unit sql_identifier_unquoted) ")") '('date_sub e n unit))
-		/* TIMESTAMPDIFF(unit, expr1, expr2) */
-		(parser '((atom "TIMESTAMPDIFF" true) "(" (define unit sql_identifier_unquoted) "," (define e1 sql_expression) "," (define e2 sql_expression) ")") '('timestampdiff unit e1 e2))
 
 		/* SUBSTRING(expr FROM start FOR len) - SQL standard syntax */
 		(parser '((atom "SUBSTRING" true) "(" (define s sql_expression) (atom "FROM" true) (define start sql_expression) (atom "FOR" true) (define len sql_expression) ")") '((quote sql_substr) s start len))
@@ -953,10 +941,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				(if (and ignoreexists (nil? updaterows))
 					'((quote lambda) '() 0)
 					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-				false '('lambda '('id) '('session "last_insert_id" 'id))))
-				(build_queryplan_term inner)
-			)
-	))))
+				'('lambda '('id) '('session "last_insert_id" 'id)))))
+			(build_queryplan_term inner)
+		)
+	)))
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
 		(? (atom "DISTINCT" true))
@@ -1361,7 +1349,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				","))
 			")")
 		(atom "VALUES" true)
-		(define datasets (+ (parser '(
+		(define datasets (* (parser '(
 			"("
 			(define dataset (* sql_expression ","))
 			")"
@@ -1374,21 +1362,50 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			/* TODO: ignorecase */
 			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 		) updaterows)))
+		) (begin
+				/* policy: write access check */
+				(if policy (policy (coalesce schema2 schema) tbl true) true)
+				(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+				(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+				(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+				(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
+					(begin
+						(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
+						(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
+					'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
+						(if (and ignoreexists (nil? updaterows))
+							'((quote lambda) '() 0)
+							(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
+						false '('lambda '('id) '('session "last_insert_id" 'id))))
+	)))
+
+	(define sql_insert_values_select (parser '(
+		(atom "INSERT" true)
+		(define ignoreexists (? (atom "IGNORE" true true true)))
+		(atom "INTO" true)
+		(? (define schema2 sql_identifier) ".")
+		(define tbl sql_identifier) /* TODO: ignorecase */
+		(? "("
+			(define coldesc (*
+				sql_identifier
+				","))
+			")")
+		(atom "VALUES" true)
+		(define inner sql_select)
+		(define updaterows (? (parser '(
+			(atom "ON" true)
+			(atom "DUPLICATE" true)
+			(atom "KEY" true)
+			(atom "UPDATE" true)
+			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
+		) updaterows)))
 	) (begin
-			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
 			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
-			(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
-				(begin
-					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
-					(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
-				'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
-					(if (and ignoreexists (nil? updaterows))
-						'((quote lambda) '() 0)
-						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-					false '('lambda '('id) '('session "last_insert_id" 'id)))))))
+			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
+	)))
 
 	(define sql_insert_select (parser '(
 		(atom "INSERT" true)
@@ -1401,7 +1418,6 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 				sql_identifier
 				","))
 			")")
-		(? (atom "VALUES" true)) /* MySQL extension: INSERT INTO t (cols) VALUES SELECT ... treated as INSERT INTO t (cols) SELECT ... */
 		(define inner sql_select) /* INNER SELECT */
 		(define datasets (* (parser '(
 			"("
@@ -1551,10 +1567,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
-		(parser (define query sql_select) (build_queryplan_term query))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
-		sql_insert_into
-		sql_insert_select
+			(parser (define query sql_select) (build_queryplan_term query))
+			(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+			sql_insert_values_select
+			sql_insert_into
+			sql_insert_select
 		sql_create_table
 		sql_alter_table
 		sql_update
@@ -1825,10 +1842,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(atom "FOR" true) (atom "EACH" true) (atom "ROW" true)
 			(define body sql_trigger_body)
 		) (begin
-				(define trigger_fn (try
-					(lambda () (eval (compile_trigger_body schema timing (car (cdr body)))))
-					(lambda (err) (begin (print (concat "WARNING: trigger " name " body compile failed: " (string err))) (lambda (row) nil)))))
-				(list 'createtrigger schema tbl name timing (car body) trigger_fn true)
+				(define compiled (compile_trigger_body schema timing (car (cdr body))))
+				(list 'createtrigger schema tbl name timing (car body) (eval compiled) true)
 		))
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))

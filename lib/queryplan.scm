@@ -1401,12 +1401,9 @@ TABLE ENTRY FORMAT:
 							correctly for correlated aggregates, so use build_scalar_subselect for those */
 							(define _sq_has_agg (if (nil? _sq_fields) false
 								(not (equal? (merge (extract_assoc _sq_fields (lambda (k v) (extract_aggregates v)))) '()))))
-							(if (and _sq_has_from
-								(not _sq_has_agg)
-								(not (or (nil? outer_schemas) (equal? outer_schemas '())))
-								(subquery_is_correlated subquery outer_schemas))
-								(make_dependent_scalar subquery outer_schemas)
-								(build_scalar_subselect subquery outer_schemas)))
+							/* TODO: route non-aggregate correlated scalars through make_dependent_scalar
+							once the derived-table flattening replace_find_column wrapping is fixed */
+							(build_scalar_subselect subquery outer_schemas))
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					(quote inner_select_in) (match args
