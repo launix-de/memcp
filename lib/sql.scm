@@ -145,17 +145,16 @@ qry    — query text (pass "" when unknown) */
 			(insert "system_statistic" "errors"
 				'("datetime" "database" "user" "query" "error")
 				(list (list (now) db usr qry (concat errmsg))))
-			/* truncate oldest rows when limit is set */
-			(define limit (settings "MaxErrorQueryLog"))
-			(if (> limit 0) (begin
-				(define cnt (scan "system_statistic" "errors" '() (lambda () true) '() (lambda () 1) + 0))
-				(if (> cnt limit)
-					(scan_order "system_statistic" "errors" '() (lambda () true) '("datetime") '(<) 0 (- cnt limit) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
-				)
-			))
+			/* trimming moved to 15-minute cron in dashboard.scm */
 		)) (lambda (e) true)) /* silently ignore logging errors to avoid infinite recursion */
 	) true)
 )))
+
+/* print log table */
+(if (not (has? (show "system_statistic") "logs")) (begin
+	(print "creating table system_statistic.logs")
+	(eval (parse_sql "system_statistic" "CREATE TABLE logs(datetime text, message text) ENGINE=SLOPPY" (lambda (schema table write) true)))
+))
 
 /* access control: which user can access which database */
 (if (has? (show "system") "access") true (begin
