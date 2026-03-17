@@ -302,7 +302,7 @@ test_cases:
             nil))
         (define untangled (apply untangle_query (merge nested_query (list nil))))
         (define physical (collect-physical untangled))
-        (if (nil? physical)
+        (if (or (nil? physical) (equal? physical '()))
           true
           (error (concat "untangle_query leaked physical ops: " (serialize physical)))))
 

@@ -18,9 +18,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define sql_builtins (coalesce sql_builtins (newsession)))
 
 /* Aggregate function registry: maps uppercase name → (reduce neutral ordered).
-   ordered=false: ORDER BY in OVER() can be ignored (result independent of row order)
-   ordered=true: ORDER BY matters → ORC running aggregate (e.g. GROUP_CONCAT)
-   Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
+ordered=false: ORDER BY in OVER() can be ignored (result independent of row order)
+ordered=true: ORDER BY matters → ORC running aggregate (e.g. GROUP_CONCAT)
+Users can register custom aggregates: (sql_aggregates "PRODUCT" '(* 1 false)) */
 (define sql_aggregates (coalesce sql_aggregates (newsession)))
 (sql_aggregates "SUM" '(+ 0 false))
 (sql_aggregates "MIN" '(min nil false))
@@ -742,7 +742,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(if (sql_aggregates (toUpper fn))
 				'('window_func (toUpper fn) (list arg) _over)
 				'('window_func (toUpper fn) (list arg) _over)))
-	
+
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('unix_timestamp))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('unix_timestamp p))
