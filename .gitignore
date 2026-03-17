@@ -12,3 +12,4 @@ trace*.json
 go.sum
 todos/
 .perf_baseline.json
+__pycache__/

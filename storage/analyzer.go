@@ -461,12 +461,151 @@ func reorderByFrequency(bounds boundaries, t *table) {
 	})
 }
 
+
+// analyzeOrcPartition inspects reduceFn + reduceInit + sortCols to detect
+// whether the ORC uses a partition wrapper. Returns the number of leading
+// sort columns that serve as partition keys (0 = no partitioning).
+//
+// Detection: reduceInit = (list inner_init nil) with exactly 2 elements
+// AND at least 2 sort columns (need partition + order). The first sort
+// column(s) become the partition key, the last is the order column.
+//
+// This correctly distinguishes:
+//   - DENSE_RANK (list 0 nil) + 1 sortCol → 0 (no partition)
+//   - Partitioned ROW_NUMBER (list 0 nil) + 2 sortCols → 1
+//   - Partitioned RANK (list (list 0 0 nil) nil) + 2 sortCols → 1
+func analyzeOrcPartition(col *column) int {
+	if len(col.OrcSortCols) < 2 {
+		return 0
+	}
+	init := col.OrcReduceInit
+	if init.IsNil() || !init.IsSlice() {
+		return 0
+	}
+	items := init.Slice()
+	if len(items) != 2 || !items[1].IsNil() {
+		return 0
+	}
+	// Detected: (list inner_init nil) with 2+ sort columns.
+	// First sort column is the partition key.
+	return 1
+}
+
 // ORC suffix recompute mode classification.
 const (
 	OrcSuffixOpaque         = 0 // can't analyze → full recompute only
 	OrcSuffixIdentity       = 1 // acc == emitted value (SUM, ROW_NUMBER) → stored value is accumulator
 	OrcSuffixReconstructible = 2 // acc = (emitted, ...state) → need extra state from row data
 )
+
+// OrcAdditiveInfo describes a reducer that computes acc + f(mapped).
+// When detected, INSERT/DELETE can be handled by adding/subtracting the delta
+// to all subsequent stored values instead of running a full suffix recompute.
+type OrcAdditiveInfo struct {
+	IsAdditive bool      // true if reducer is (+ acc f(mapped))
+	DeltaExpr  scm.Scmer // the f(mapped) expression (e.g. (cadr mapped) for running SUM)
+}
+
+// analyzeOrcAdditive inspects the ORC reduceFn to detect the additive pattern:
+//   return value = (+ acc X) where X depends only on mapped, not acc.
+// This enables O(N) delta propagation instead of O(N) suffix recompute.
+func analyzeOrcAdditive(reduceFn scm.Scmer) OrcAdditiveInfo {
+	if reduceFn.IsNil() {
+		return OrcAdditiveInfo{}
+	}
+	var body scm.Scmer
+	var accParam string
+	if reduceFn.IsProc() {
+		body = reduceFn.Proc().Body
+		if reduceFn.Proc().Params.IsSlice() {
+			params := reduceFn.Proc().Params.Slice()
+			if len(params) >= 1 && params[0].IsSymbol() {
+				accParam = params[0].String()
+			}
+		}
+	} else if reduceFn.IsSlice() {
+		items := reduceFn.Slice()
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			body = items[2]
+			if items[1].IsSlice() {
+				params := items[1].Slice()
+				if len(params) >= 1 && params[0].IsSymbol() {
+					accParam = params[0].String()
+				}
+			}
+		}
+	}
+	if body.IsNil() || accParam == "" {
+		return OrcAdditiveInfo{}
+	}
+
+	// Find return value (last expr in begin block)
+	var returnVal scm.Scmer
+	if body.IsSlice() {
+		items := body.Slice()
+		if len(items) >= 2 && items[0].IsSymbol() && items[0].String() == "begin" {
+			returnVal = items[len(items)-1]
+		} else {
+			returnVal = body
+		}
+	}
+	if returnVal.IsNil() || !returnVal.IsSlice() {
+		return OrcAdditiveInfo{}
+	}
+
+	// Check: is returnVal = (+ acc X) ?
+	rv := returnVal.Slice()
+	if len(rv) != 3 {
+		return OrcAdditiveInfo{}
+	}
+	isPlus := rv[0].IsSymbol() && rv[0].String() == "+"
+	if !isPlus {
+		// Check for tagFunc-resolved +
+		d := scm.DeclarationForValue(rv[0])
+		if d == nil || d.Name != "+" {
+			return OrcAdditiveInfo{}
+		}
+	}
+
+	// One operand must be acc, the other must not reference acc.
+	var deltaExpr scm.Scmer
+	if rv[1].IsSymbol() && rv[1].String() == accParam {
+		deltaExpr = rv[2]
+	} else if rv[1].IsNthLocalVar() && rv[1].NthLocalVar() == 0 {
+		// NthLocalVar(0) = first param = acc
+		deltaExpr = rv[2]
+	} else if rv[2].IsSymbol() && rv[2].String() == accParam {
+		deltaExpr = rv[1]
+	} else if rv[2].IsNthLocalVar() && rv[2].NthLocalVar() == 0 {
+		deltaExpr = rv[1]
+	}
+
+	if deltaExpr.IsNil() {
+		return OrcAdditiveInfo{}
+	}
+
+	// Verify deltaExpr does not reference acc
+	if containsSymbol(deltaExpr, accParam) {
+		return OrcAdditiveInfo{}
+	}
+
+	return OrcAdditiveInfo{IsAdditive: true, DeltaExpr: deltaExpr}
+}
+
+// containsSymbol checks if an AST node references a given symbol name.
+func containsSymbol(expr scm.Scmer, name string) bool {
+	if expr.IsSymbol() && expr.String() == name {
+		return true
+	}
+	if expr.IsSlice() {
+		for _, item := range expr.Slice() {
+			if containsSymbol(item, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // analyzeOrcSuffix inspects an ORC reduceFn to determine if the accumulator
 // equals the emitted value ($set argument). This enables suffix recompute
@@ -589,90 +728,6 @@ func scmerStructEqual(a, b scm.Scmer) bool {
 	return false
 }
 
-// predictLastAccumulator attempts to predict the ORC accumulator value
-// at the position just before beforeSortKey. If prediction succeeds,
-// returns the value. If not possible, panics — the caller should
-// recover and fall back to full recompute.
-//
-// For identity accumulators (where the stored ORC value IS the accumulator),
-// this reads the stored value of the last row before beforeSortKey.
-// For non-identity accumulators, this panics (full recompute needed).
-func predictLastAccumulator(col *column, t *table, beforeSortKey scm.Scmer) scm.Scmer {
-	if len(col.OrcSortCols) == 0 {
-		panic("no sort columns")
-	}
-
-	// Determine which sort column to compare against (first non-partition sort col)
-	sortColIdx := col.OrcPartCount
-	if sortColIdx >= len(col.OrcSortCols) {
-		panic("no order columns after partition columns")
-	}
-	sortCol := col.OrcSortCols[sortColIdx]
-
-	// Check if accumulator == emitted value (identity property)
-	if analyzeOrcSuffix(col.OrcReduceFn) != OrcSuffixIdentity {
-		panic("non-identity accumulator — cannot predict")
-	}
-
-	// Scan all shards for the last row before beforeSortKey
-	// and read its stored ORC value.
-	var bestSortKey scm.Scmer
-	var bestOrcVal scm.Scmer
-	found := false
-
-	for _, s := range t.ActiveShards() {
-		s.mu.RLock()
-		sortCS := s.columns[sortCol]
-		orcCS := s.columns[col.Name]
-		s.mu.RUnlock()
-		if sortCS == nil || orcCS == nil {
-			continue
-		}
-		total := s.main_count + uint32(len(s.inserts))
-		for idx := uint32(0); idx < total; idx++ {
-			if s.deletions.Get(uint(idx)) {
-				continue
-			}
-			var sortVal scm.Scmer
-			if idx < s.main_count {
-				sortVal = sortCS.GetValue(idx)
-			} else {
-				sortVal = s.getDelta(int(idx-s.main_count), sortCol)
-			}
-			if !scm.Less(sortVal, beforeSortKey) {
-				continue // at or past the mutation point
-			}
-			// This row is before the mutation point — candidate
-			if !found || scm.Less(bestSortKey, sortVal) {
-				bestSortKey = sortVal
-				// Read stored ORC value
-				if proxy, ok := orcCS.(*StorageComputeProxy); ok {
-					proxy.mu.RLock()
-					if v, ok := proxy.delta[idx]; ok {
-						bestOrcVal = v
-					} else if proxy.main != nil {
-						bestOrcVal = proxy.main.GetValue(idx)
-					} else {
-						bestOrcVal = scm.NewNil()
-					}
-					proxy.mu.RUnlock()
-				} else {
-					bestOrcVal = orcCS.GetValue(idx)
-				}
-				found = true
-			}
-		}
-	}
-
-	if !found {
-		// No row before the mutation point — start from initial accumulator
-		return col.OrcReduceInit
-	}
-	if bestOrcVal.IsNil() {
-		panic("stored ORC value is nil — cannot predict accumulator")
-	}
-	return bestOrcVal
-}
 
 func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
