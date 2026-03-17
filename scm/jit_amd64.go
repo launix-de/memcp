@@ -2484,6 +2484,7 @@ func (ctx *JITContext) EmitCallIndirect(addr uint64) {
 // argslice must describe a pair (ptr,len). The backing array is expected to be
 // materialized and kept alive by caller-managed stack memory.
 func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITValueDesc, result JITValueDesc) JITValueDesc {
+	f = jitWrapCallTarget(f) // on !gojit: wraps with panic trampoline; on gojit: identity
 	fnData := *(*uintptr)(unsafe.Pointer(&f))
 	if fnData == 0 {
 		panic("jit: nil variadic function value")

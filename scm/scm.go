@@ -413,13 +413,13 @@ restart:
 				for i := 0; i < n; i++ {
 					buf[i] = Eval(operands[i], en)
 				}
-				return jep.Native(buf[:n]...)
+				return callJIT(jep.Native, buf[:n]...)
 			}
 			args := make([]Scmer, len(operands))
 			for i, x := range operands {
 				args[i] = Eval(x, en)
 			}
-			return jep.Native(args...)
+			return callJIT(jep.Native, args...)
 		case tagClosure:
 			fn := *(*func(uint32, ...Scmer) Scmer)(unsafe.Pointer(procedure.ptr))
 			id := uint32(auxVal(procedure.aux))
@@ -618,7 +618,7 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		}
 		return NewNil()
 	case tagJIT:
-		return procedure.JIT().Native(args...)
+		return callJIT(procedure.JIT().Native, args...)
 	default:
 		panic("Unknown function: " + procedure.String())
 	}

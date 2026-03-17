@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"runtime/jit"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -1380,12 +1379,13 @@ func (ctx *JITContext) EmitGoCallVoid(funcAddr uint64, args []JITValueDesc) {
 
 // ---- merged from scm/jit_writer.go ----
 
-// jitArena is a large mmap'd buffer registered with runtime/jit for unwinding.
+// jitArena is a large mmap'd buffer, optionally registered with
+// runtime/jit for unwinding (when built with -tags gojit).
 type jitArena struct {
 	base   unsafe.Pointer // start of mmap'd region
 	size   int            // total bytes
 	offset int            // bump pointer (next free byte)
-	handle jit.Handle     // runtime registration handle
+	handle interface{}    // opaque registration handle (nil = unregistered)
 }
 
 // jitPool manages global JIT arena allocation.
@@ -1430,13 +1430,7 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena) {
 		base: unsafe.Pointer(&b[0]),
 		size: arenaBytes,
 	}
-	start := uintptr(a.base)
-	a.handle = jit.Register(jit.Region{
-		Start:  start,
-		End:    start + uintptr(arenaBytes),
-		Unwind: jit.UnwindSkip,
-		Next:   jitNextCallback,
-	})
+	a.handle = registerJITArena(a.base, arenaBytes)
 	ptr = a.base
 	a.offset = size
 	p.arenas = append(p.arenas, a)
