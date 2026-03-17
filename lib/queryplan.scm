@@ -1396,7 +1396,13 @@ TABLE ENTRY FORMAT:
 						(cons subquery '()) (begin
 							(define _sq_tables (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 1) nil))
 							(define _sq_has_from (and (not (nil? _sq_tables)) (not (equal? _sq_tables '()))))
+							(define _sq_fields (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 2) nil))
+							/* detect aggregates in subquery fields — keytable path can't handle (outer) refs
+							correctly for correlated aggregates, so use build_scalar_subselect for those */
+							(define _sq_has_agg (if (nil? _sq_fields) false
+								(not (equal? (merge (extract_assoc _sq_fields (lambda (k v) (extract_aggregates v)))) '()))))
 							(if (and _sq_has_from
+								(not _sq_has_agg)
 								(not (or (nil? outer_schemas) (equal? outer_schemas '())))
 								(subquery_is_correlated subquery outer_schemas))
 								(make_dependent_scalar subquery outer_schemas)
