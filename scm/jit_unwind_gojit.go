@@ -1,4 +1,4 @@
-//go:build gojit
+//go:build goexperiment.jit
 
 /*
 Copyright (C) 2024-2026  Carl-Philip Hänsch
@@ -24,15 +24,22 @@ import (
 	"unsafe"
 )
 
+// jitDescribeCallback returns traceback info for a PC inside a JIT arena.
+// Must not allocate Go memory (called from the runtime on the system stack).
+func jitDescribeCallback(pc uintptr) (name, file string, line int, ok bool) {
+	return "MemCP JIT", "", 0, true
+}
+
 // registerJITArena registers a JIT arena with the Go runtime so the
 // unwinder, GC, and panic/recover can walk through JIT frames.
 func registerJITArena(base unsafe.Pointer, size int) interface{} {
 	start := uintptr(base)
 	return jit.Register(jit.Region{
-		Start:  start,
-		End:    start + uintptr(size),
-		Unwind: jit.UnwindSkip,
-		Next:   jitNextCallback,
+		Start:    start,
+		End:      start + uintptr(size),
+		Unwind:   jit.UnwindDeclare,
+		Describe: jitDescribeCallback,
+		Next:     jitNextCallback,
 	})
 }
 

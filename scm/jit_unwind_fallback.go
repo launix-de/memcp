@@ -1,4 +1,4 @@
-//go:build !gojit
+//go:build !goexperiment.jit
 
 /*
 Copyright (C) 2024-2026  Carl-Philip Hänsch
