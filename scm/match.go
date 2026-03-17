@@ -20,6 +20,7 @@ package scm
 import (
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -106,7 +107,7 @@ func valueFromPattern(pattern Scmer, en *Env) Scmer {
 }
 
 // pattern matching
-func match(val Scmer, pattern Scmer, en *Env) bool {
+func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 	/* our custom implementation of match consisting of:
 	(match value pattern result pattern result pattern result [default])
 	where pattern may be string, number, Symbol or list or applications
@@ -127,7 +128,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 	*/
 	switch pattern.GetTag() {
 	case tagSourceInfo:
-		return match(val, pattern.SourceInfo().value, en)
+		return match(val, pattern.SourceInfo().value, en, mutable)
 	case tagInt, tagFloat, tagString:
 		return Equal(val, pattern)
 	case tagSymbol:
@@ -163,7 +164,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 							return false
 						}
 						for i := range p {
-							if !match(list[i], p[i], en) {
+							if !match(list[i], p[i], en, mutable) {
 								return false
 							}
 						}
@@ -181,7 +182,13 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 			return Equal(Eval(p[1], en), val)
 		case "var":
 			// unoptimized pattern
-			en.VarsNumbered[int(p[1].Int())] = val
+			idx := int(p[1].Int())
+			if idx >= len(en.VarsNumbered) {
+				buf := make([]byte, 8192)
+				n := runtime.Stack(buf, false)
+				panic(fmt.Sprintf("match var(%d) out of range (len=%d)\n%s", idx, len(en.VarsNumbered), buf[:n]))
+			}
+			en.VarsNumbered[idx] = val
 			return true
 		case "list":
 			// list matching
@@ -191,7 +198,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 					return false
 				}
 				for i, pat := range p {
-					if !match(list[i], pat, en) {
+					if !match(list[i], pat, en, mutable) {
 						return false
 					}
 				}
@@ -217,19 +224,19 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 		case "string?":
 			// symbol literal
 			if _, ok := scmerAsString(val); ok {
-				return match(val, p[1], en)
+				return match(val, p[1], en, mutable)
 			}
 			return false
 		case "number?":
 			// symbol literal
 			if val.IsInt() || val.IsFloat() {
-				return match(val, p[1], en)
+				return match(val, p[1], en, mutable)
 			}
 			return false
 		case "list?":
 			// symbol literal
 			if list, ok := scmerAsSlice(val); ok {
-				return match(NewSlice(list), p[1], en)
+				return match(NewSlice(list), p[1], en, mutable)
 			}
 			return false
 		case "ignorecase":
@@ -248,11 +255,11 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 						if len(subPattern) > 0 {
 							if head, ok := symbolName(subPattern[0]); ok && head == "list" && len(subPattern)-1 <= len(list) {
 								for i := 1; i < len(subPattern); i++ {
-									if !match(list[i-1], subPattern[i], en) {
+									if !match(list[i-1], subPattern[i], en, mutable) {
 										return false
 									}
 								}
-								return match(NewSlice(list[len(subPattern)-1:]), p[2], en)
+								return match(NewSlice(list[len(subPattern)-1:]), p[2], en, mutable)
 							}
 						}
 					}
@@ -265,7 +272,7 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 				if len(list) == 0 {
 					return false
 				}
-				return match(list[0], p[1], en) && match(NewSlice(list[1:]), p[2], en)
+				return match(list[0], p[1], en, mutable) && match(NewSlice(list[1:]), p[2], en, mutable)
 			}
 			return false
 		case "regex":
@@ -295,7 +302,13 @@ func match(val Scmer, pattern Scmer, en *Env) bool {
 							continue
 						}
 						if p[i+2].IsNthLocalVar() {
-							en.VarsNumbered[p[i+2].NthLocalVar()] = NewString(match[i])
+							idx := int(p[i+2].NthLocalVar())
+							if idx >= len(en.VarsNumbered) {
+								buf := make([]byte, 8192)
+								n := runtime.Stack(buf, false)
+								panic(fmt.Sprintf("regex NthLocalVar(%d) out of range (len=%d)\n%s", idx, len(en.VarsNumbered), buf[:n]))
+							}
+							en.VarsNumbered[idx] = NewString(match[i])
 							continue
 						}
 						if sym, ok := symbolName(p[i+2]); ok {
@@ -329,6 +342,11 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 	if len(p) == 1 {
 		target := valueFromPattern(p[0], en)
 		if idx, ok := target.Any().(NthLocalVar); ok {
+			if int(idx) >= len(en.VarsNumbered) {
+				buf := make([]byte, 8192)
+				n := runtime.Stack(buf, false)
+				panic(fmt.Sprintf("concat NthLocalVar(%d) out of range (len=%d)\n%s", int(idx), len(en.VarsNumbered), buf[:n]))
+			}
 			en.VarsNumbered[idx] = NewString(str)
 			return true
 		}
@@ -351,6 +369,11 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 			if strings.HasSuffix(str, suffix) {
 				base := str[:len(str)-len(suffix)]
 				if idx, ok := first.Any().(NthLocalVar); ok {
+					if int(idx) >= len(en.VarsNumbered) {
+						buf := make([]byte, 8192)
+						n := runtime.Stack(buf, false)
+						panic(fmt.Sprintf("concat NthLocalVar(%d) out of range (len=%d)\n%s", int(idx), len(en.VarsNumbered), buf[:n]))
+					}
 					en.VarsNumbered[idx] = NewString(base)
 					return true
 				}
@@ -372,6 +395,11 @@ func matchConcat(val Scmer, p []Scmer, en *Env) bool {
 			prefix := str[:idx]
 			rest := NewString(str[idx+len(delim):])
 			if id, ok := first.Any().(NthLocalVar); ok {
+				if int(id) >= len(en.VarsNumbered) {
+					buf := make([]byte, 8192)
+					n := runtime.Stack(buf, false)
+					panic(fmt.Sprintf("concat NthLocalVar(%d) out of range (len=%d)\n%s", int(id), len(en.VarsNumbered), buf[:n]))
+				}
 				en.VarsNumbered[id] = NewString(prefix)
 			} else if name, ok := symbolName(first); ok {
 				en.Vars[Symbol(name)] = NewString(prefix)

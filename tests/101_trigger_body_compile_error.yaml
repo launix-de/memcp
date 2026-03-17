@@ -1,0 +1,34 @@
+# Trigger body references non-existent table at CREATE TRIGGER time
+# Expected: CREATE TRIGGER succeeds (with a warning), trigger acts as no-op
+# Regression: without the try wrapper, compile_trigger_body panics with
+# "table does not exist" when the body references a table not yet created.
+
+metadata:
+  version: "1.0"
+  description: "CREATE TRIGGER must not panic when body references a not-yet-existing table"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS trig_source"
+  - sql: "DROP TABLE IF EXISTS trig_missing_ref"
+  - sql: "DROP TRIGGER IF EXISTS trig_bad_body"
+
+setup:
+  - sql: "CREATE TABLE trig_source (id INT, val INT)"
+
+test_cases:
+  - name: "CREATE TRIGGER with body referencing non-existent table must not panic"
+    sql: "CREATE TRIGGER trig_bad_body AFTER INSERT ON trig_source FOR EACH ROW BEGIN INSERT INTO trig_missing_ref (id) SELECT NEW.id FROM trig_missing_ref WHERE id = NEW.id; END"
+    expect:
+      affected_rows: 0
+
+  - name: "INSERT into source table works after bad trigger creation"
+    sql: "INSERT INTO trig_source (id, val) VALUES (1, 10)"
+    expect:
+      affected_rows: 1
+
+  - name: "Row was inserted (trigger was a no-op, not preventing inserts)"
+    sql: "SELECT id, val FROM trig_source WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - {id: 1, val: 10}

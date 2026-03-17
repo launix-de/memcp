@@ -40,14 +40,15 @@ const (
 	TypeIndex                              // factor 1
 	TypeTempKeytable                       // factor 10
 	TypeCacheEntry                         // factor 1
+	TypeStringDict                         // factor 1 — lz4-compressed StorageString materialized dictionary
 	numEvictableTypes                      // sentinel for array sizing
 )
 
 // evictableFactors maps EvictableType → rebuild cost factor.
 // Higher factor = more protected = lower evictionScore.
-var evictableFactors = [numEvictableTypes]int64{1, 20, 1, 10, 1}
+var evictableFactors = [numEvictableTypes]int64{1, 20, 1, 10, 1, 1}
 
-var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry"}
+var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry", "StringDict"}
 
 type softItem struct {
 	pointer       any
@@ -651,13 +652,14 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		if shardColsOnly < 0 {
 			shardColsOnly = 0
 		}
-		log.Printf("memory pressure: freed %s total (%s temp columns, %s shard columns, %s indexes, %s keytables, %s cache entries)",
+		log.Printf("memory pressure: freed %s total (%s temp columns, %s shard columns, %s indexes, %s keytables, %s cache entries, %s string dicts)",
 			units.BytesSize(float64(totalFreed)),
 			units.BytesSize(float64(freedByType[TypeTempColumn])),
 			units.BytesSize(float64(shardColsOnly)),
 			units.BytesSize(float64(freedByType[TypeIndex])),
 			units.BytesSize(float64(freedByType[TypeTempKeytable])),
 			units.BytesSize(float64(freedByType[TypeCacheEntry])),
+			units.BytesSize(float64(freedByType[TypeStringDict])),
 		)
 	}
 }
@@ -687,5 +689,6 @@ func (cs CacheStat) FormatStat() string {
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Indexes", cs.CountByType[TypeIndex], units.BytesSize(float64(cs.SizeByType[TypeIndex]))))
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Temp keytables", cs.CountByType[TypeTempKeytable], units.BytesSize(float64(cs.SizeByType[TypeTempKeytable]))))
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Cache entries", cs.CountByType[TypeCacheEntry], units.BytesSize(float64(cs.SizeByType[TypeCacheEntry]))))
+	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "String dicts (lz4)", cs.CountByType[TypeStringDict], units.BytesSize(float64(cs.SizeByType[TypeStringDict]))))
 	return b.String()
 }

@@ -38,6 +38,11 @@ type database struct {
 	srState SharedState `json:"-"`
 }
 
+type rebuildDatabaseResult struct {
+	replaced []*storageShard
+	errors   []string
+}
+
 // Custom JSON to persist private tables field
 func (d *database) MarshalJSON() ([]byte, error) {
 	type persist struct {
@@ -79,30 +84,48 @@ func (d database) ComputeSize() uint {
 	return sz
 }
 
+func recoverAsError(context string) (err error) {
+	if r := recover(); r != nil {
+		err = fmt.Errorf("%s: %v", context, r)
+	}
+	return err
+}
+
 func Rebuild(all bool, repartition bool) string {
 	start := time.Now()
 	dbs := databases.GetAll()
+	var errs []string
 	for _, db := range dbs {
 		func(db *database) {
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Println("error: rebuild/save failed for database", db.Name, ":", r)
+			result := db.rebuild(all, repartition)
+			if len(result.errors) > 0 {
+				errs = append(errs, result.errors...)
+				return
+			}
+			if err := func() (err error) {
+				defer func() { err = recoverAsError("save failed for database " + db.Name) }()
+				db.save()
+				return nil
+			}(); err != nil {
+				errs = append(errs, err.Error())
+				return
+			}
+			for _, s := range result.replaced {
+				if err := func() (err error) {
+					defer func() { err = recoverAsError("cleanup failed for database " + db.Name + " shard " + s.uuid.String()) }()
+					s.RemoveFromDisk()
+					return nil
+				}(); err != nil {
+					errs = append(errs, err.Error())
 				}
-			}()
-			replaced := db.rebuild(all, repartition)
-			// Save schema BEFORE deleting old column files.
-			// This ensures schema.json always references files that exist on disk:
-			// if the process is killed after save but before cleanup, old files
-			// are orphaned (wasted space) but data is never lost.  Reversing the
-			// order (delete then save) creates a window where schema.json still
-			// points to already-deleted UUIDs, causing empty tables on restart.
-			db.save()
-			for _, s := range replaced {
-				s.RemoveFromDisk()
 			}
 		}(db)
 	}
-	return fmt.Sprint(time.Since(start))
+	duration := fmt.Sprint(time.Since(start))
+	if len(errs) == 0 {
+		return duration
+	}
+	return duration + " errors: " + strings.Join(errs, " | ")
 }
 
 func UnloadDatabases() {
@@ -263,10 +286,10 @@ func (db *database) ShowTables() scm.Scmer {
 	return scm.NewSlice(result)
 }
 
-func (db *database) rebuild(all bool, repartition bool) []*storageShard {
+func (db *database) rebuild(all bool, repartition bool) rebuildDatabaseResult {
 	if db.srState == COLD {
 		// do nothing for cold databases; avoid loading during rebuild
-		return nil
+		return rebuildDatabaseResult{}
 	}
 	var done sync.WaitGroup
 	// Collect pre-rebuild shards that were superseded. Their cleanup
@@ -275,6 +298,8 @@ func (db *database) rebuild(all bool, repartition bool) []*storageShard {
 	// repartition holding shard read-locks.
 	var replacedMu sync.Mutex
 	var allReplaced []*storageShard
+	var errMu sync.Mutex
+	var rebuildErrors []string
 	dbs := db.tables.GetAll()
 	done.Add(len(dbs))
 	for _, t := range dbs {
@@ -282,7 +307,11 @@ func (db *database) rebuild(all bool, repartition bool) []*storageShard {
 			tableLocked := false
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Println("error: rebuild failed for table", db.Name+".", t.Name, ":", r)
+					errmsg := fmt.Sprintf("rebuild failed for table %s.%s: %v", db.Name, t.Name, r)
+					fmt.Println("error:", errmsg)
+					errMu.Lock()
+					rebuildErrors = append(rebuildErrors, errmsg)
+					errMu.Unlock()
 					// best-effort unlock if still locked
 					if tableLocked {
 						func() { defer func() { _ = recover() }(); t.mu.Unlock() }()
@@ -312,6 +341,8 @@ func (db *database) rebuild(all bool, repartition bool) []*storageShard {
 			}
 			maincount := uint(0)
 			var sdone sync.WaitGroup
+			var shardErrMu sync.Mutex
+			var shardErrors []string
 			sdone.Add(len(origShardList))
 			// throttle concurrent shard rebuilds by CPU count
 			workers := runtime.NumCPU()
@@ -331,7 +362,11 @@ func (db *database) rebuild(all bool, repartition bool) []*storageShard {
 					go func(i int, s *storageShard) {
 						defer func() {
 							if r := recover(); r != nil {
-								fmt.Println("error: shard rebuild failed for", db.Name+".", t.Name, "shard", i, ":", r, "\n", r)
+								errmsg := fmt.Sprintf("shard rebuild failed for %s.%s shard %d: %v", db.Name, t.Name, i, r)
+								fmt.Println("error:", errmsg)
+								shardErrMu.Lock()
+								shardErrors = append(shardErrors, errmsg)
+								shardErrMu.Unlock()
 							}
 							sdone.Done()
 						}()
@@ -349,7 +384,11 @@ func (db *database) rebuild(all bool, repartition bool) []*storageShard {
 							func(j job) {
 								defer func() {
 									if r := recover(); r != nil {
-										fmt.Println("error: shard rebuild failed for", db.Name+".", t.Name, "shard", j.i, ":", r)
+										errmsg := fmt.Sprintf("shard rebuild failed for %s.%s shard %d: %v", db.Name, t.Name, j.i, r)
+										fmt.Println("error:", errmsg)
+										shardErrMu.Lock()
+										shardErrors = append(shardErrors, errmsg)
+										shardErrMu.Unlock()
 									}
 									sdone.Done()
 								}()
@@ -370,6 +409,14 @@ func (db *database) rebuild(all bool, repartition bool) []*storageShard {
 				close(jobs)
 			}
 			sdone.Wait()
+			if len(shardErrors) > 0 {
+				errMu.Lock()
+				rebuildErrors = append(rebuildErrors, shardErrors...)
+				errMu.Unlock()
+				t.mu.Unlock()
+				tableLocked = false
+				return
+			}
 
 			// Collect pre-rebuild shards that were replaced so we can clean them up.
 			var replaced []*storageShard
@@ -433,7 +480,7 @@ func (db *database) rebuild(all bool, repartition bool) []*storageShard {
 	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
 	// The finalizer set in shard.rebuild() provides a safety net: if the
 	// caller never calls RemoveFromDisk (e.g. on panic), GC will clean up.
-	return allReplaced
+	return rebuildDatabaseResult{replaced: allReplaced, errors: rebuildErrors}
 }
 
 func GetDatabase(schema string) *database {

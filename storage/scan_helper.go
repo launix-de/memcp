@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -75,6 +76,7 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 		io.WriteString(w, "?")
 	}
 
+	var numBuf [64]byte // stack-allocated buffer for number formatting
 	enc = func(node scm.Scmer) {
 		switch {
 		case node.IsNil():
@@ -86,19 +88,24 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 				io.WriteString(w, "false")
 			}
 		case node.IsInt():
-			io.WriteString(w, fmt.Sprint(node.Int()))
+			b := strconv.AppendInt(numBuf[:0], node.Int(), 10)
+			w.Write(b)
 		case node.IsFloat():
-			io.WriteString(w, fmt.Sprint(node.Float()))
+			b := strconv.AppendFloat(numBuf[:0], node.Float(), 'g', -1, 64)
+			w.Write(b)
 		case node.IsString():
+			s, _ := node.AppendString(nil) // zero-alloc for tagString
 			io.WriteString(w, "\"")
-			io.WriteString(w, node.String())
+			io.WriteString(w, s)
 			io.WriteString(w, "\"")
 		case node.IsSymbol():
-			writeSymbolOrColumn(node.String())
+			s, _ := node.AppendString(nil) // zero-alloc for tagSymbol
+			writeSymbolOrColumn(s)
 		case node.IsSlice():
 			slice := node.Slice()
-			if len(slice) > 0 {
-				if slice[0].IsSymbol() && slice[0].String() == "outer" {
+			if len(slice) > 0 && slice[0].IsSymbol() {
+				head, _ := slice[0].AppendString(nil) // zero-alloc
+				if head == "outer" {
 					io.WriteString(w, "?")
 					return
 				}
@@ -106,7 +113,7 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 				// (!list NthLocalVar(start) count expr...) encodes (list expr...) but the
 				// storage slot (items[1]) varies per call site, so two identical lists would
 				// get different canonical names. Strip items[1] and items[2] and use "list".
-				if slice[0].IsSymbol() && slice[0].String() == "!list" && len(slice) >= 3 {
+				if head == "!list" && len(slice) >= 3 {
 					count := int(scm.ToInt(slice[2]))
 					if count == len(slice)-3 {
 						io.WriteString(w, "(list")
@@ -169,14 +176,14 @@ func buildCanonicalSymbolIndex(columns []string, columnSymbols []scm.Scmer) map[
 	symIndex := make(map[string]int, len(columnSymbols))
 	for i, s := range columnSymbols {
 		if s.IsSymbol() {
-			symIndex[strings.ToLower(s.String())] = i
+			str, _ := s.AppendString(nil) // zero-alloc for tagSymbol
+			symIndex[strings.ToLower(str)] = i
 			continue
 		}
 		if sym, ok := s.Any().(scm.Symbol); ok {
 			symIndex[strings.ToLower(string(sym))] = i
 		}
 	}
-	_ = columns
 	return symIndex
 }
 
@@ -189,7 +196,8 @@ func canonicalizeScmerNode(v scm.Scmer, columns []string, symIndex map[string]in
 		return v
 	}
 	if v.IsSymbol() {
-		sLower := strings.ToLower(v.String())
+		s, _ := v.AppendString(nil) // zero-alloc for tagSymbol
+		sLower := strings.ToLower(s)
 		if idx, ok := symIndex[sLower]; ok && idx >= 0 && idx < len(columns) {
 			return scm.NewSymbol(columns[idx])
 		}
@@ -203,20 +211,24 @@ func canonicalizeScmerNode(v scm.Scmer, columns []string, symIndex map[string]in
 	}
 
 	items := v.Slice()
-	if len(items) >= 5 && items[0].IsSymbol() && items[0].String() == "get_column" {
-		out := make([]scm.Scmer, len(items))
-		copy(out, items)
-		if items[1].IsString() {
-			if mapped, ok := aliasMap[strings.ToLower(items[1].String())]; ok {
-				out[1] = scm.NewString(mapped)
+	if len(items) >= 5 && items[0].IsSymbol() {
+		head, _ := items[0].AppendString(nil)
+		if head == "get_column" {
+			out := make([]scm.Scmer, len(items))
+			copy(out, items)
+			if items[1].IsString() {
+				alias, _ := items[1].AppendString(nil)
+				if mapped, ok := aliasMap[strings.ToLower(alias)]; ok {
+					out[1] = scm.NewString(mapped)
+				} else {
+					out[1] = items[1]
+				}
 			} else {
-				out[1] = items[1]
+				out[1] = canonicalizeScmerNode(items[1], columns, symIndex, aliasMap)
 			}
-		} else {
-			out[1] = canonicalizeScmerNode(items[1], columns, symIndex, aliasMap)
+			out[3] = canonicalizeScmerNode(items[3], columns, symIndex, aliasMap)
+			return scm.NewSlice(out)
 		}
-		out[3] = canonicalizeScmerNode(items[3], columns, symIndex, aliasMap)
-		return scm.NewSlice(out)
 	}
 
 	out := make([]scm.Scmer, len(items))
