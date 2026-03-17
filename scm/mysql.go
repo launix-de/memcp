@@ -213,6 +213,42 @@ type ErrorWrapper string
 func (s ErrorWrapper) Error() string {
 	return string(s)
 }
+
+func updateMySQLFieldMetadata(field *querypb.Field, val sqltypes.Value) {
+	field.Type = val.Type()
+	switch val.Type() {
+	case querypb.Type_TEXT, querypb.Type_VARCHAR, querypb.Type_CHAR, querypb.Type_BLOB:
+		field.Charset = 45 // utf8mb4_general_ci
+	default:
+		field.Charset = 0
+	}
+}
+
+func appendMySQLResultRow(result *sqltypes.Result, colmap map[string]int, item []Scmer) []sqltypes.Value {
+	newitem := make([]sqltypes.Value, len(result.Fields))
+	for i := 0; i < len(item)-1; i += 2 {
+		val := ScmerToMySQL(item[i+1])
+
+		colname := item[i].String()
+		colid, ok := colmap[colname]
+		if ok {
+			duplicateAliasInRow := colid < len(newitem) && !newitem[colid].IsNull()
+			newitem[colid] = val
+			if duplicateAliasInRow || result.Fields[colid].Type == querypb.Type_NULL_TYPE {
+				updateMySQLFieldMetadata(result.Fields[colid], val)
+			}
+		} else {
+			colmap[colname] = len(result.Fields)
+			newcol := new(querypb.Field)
+			newcol.Name = colname
+			updateMySQLFieldMetadata(newcol, val)
+			result.Fields = append(result.Fields, newcol)
+			newitem = append(newitem, val)
+		}
+	}
+	return newitem
+}
+
 func isSelectQuery(query string) bool {
 	trimmed := strings.TrimSpace(query)
 	for {
@@ -308,30 +344,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			defer resultlock.Unlock()
 			updateFlags(session, sessionFunc) // set transaction status
 
-			newitem := make([]sqltypes.Value, len(result.Fields))
-			for i := 0; i < len(item)-1; i += 2 {
-				val := ScmerToMySQL(item[i+1])
-
-				colname := item[i].String()
-				colid, ok := colmap[colname]
-				if ok {
-					newitem[colid] = val
-					if result.Fields[colid].Type == querypb.Type_NULL_TYPE {
-						result.Fields[colid].Type = val.Type()
-					}
-				} else {
-					// add row to result
-					colmap[colname] = len(result.Fields)
-					newcol := new(querypb.Field)
-					newcol.Name = colname
-					newcol.Type = val.Type()
-					if val.Type() == querypb.Type_TEXT || val.Type() == querypb.Type_VARCHAR || val.Type() == querypb.Type_CHAR || val.Type() == querypb.Type_BLOB {
-						newcol.Charset = 45 // utf8mb4_general_ci
-					}
-					result.Fields = append(result.Fields, newcol)
-					newitem = append(newitem, val)
-				}
-			}
+			newitem := appendMySQLResultRow(&result, colmap, item)
 			if len(result.Rows) == cap(result.Rows) {
 				// flush
 				callback(&result)

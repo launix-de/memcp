@@ -210,6 +210,40 @@ func (t *table) dictToRow(dict scm.Scmer, columns []string) dataset {
 	return row
 }
 
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *table) beforeInsertOutputColumns(dict scm.Scmer, columns []string) []string {
+	result := make([]string, 0, len(t.Columns))
+	seen := make(map[string]struct{}, len(columns))
+	for _, col := range columns {
+		result = append(result, col)
+		seen[col] = struct{}{}
+	}
+	if !dict.IsFastDict() {
+		return result
+	}
+	fd := dict.FastDict()
+	for _, col := range t.Columns {
+		if _, ok := seen[col.Name]; ok {
+			continue
+		}
+		if _, ok := fd.Get(scm.NewString(col.Name)); ok {
+			result = append(result, col.Name)
+		}
+	}
+	return result
+}
+
 // ExecuteTriggers executes all triggers for a specific timing (AFTER triggers).
 // oldRow is nil for INSERT, newRow is nil for DELETE.
 // If a transaction is active, a savepoint is created before each trigger;
@@ -304,91 +338,117 @@ func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming) {
 
 // ExecuteBeforeInsertTriggers executes BEFORE INSERT triggers and returns modified rows.
 // The trigger function can modify NEW values by returning a modified dict, including
-// columns not present in the original INSERT. The returned columns slice is expanded to
-// ALL table columns so trigger-set values are not discarded.
+// columns not present in the original INSERT.
 // When isIgnore is true, rows whose triggers panic are silently skipped
 // and any partial transaction effects are rolled back via savepoints.
 // When isIgnore is false, trigger panics propagate to the caller.
+func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isIgnore bool) ([]string, dataset, bool) {
+	triggers := t.GetTriggers(BeforeInsert)
+	if len(triggers) == 0 {
+		return columns, row, true
+	}
+
+	// Build dict using the columns that are being inserted.
+	newDict := t.rowToDictWithColumns(row, columns)
+	triggerOk := true
+	for _, tr := range triggers {
+		if tr.Func.IsNil() {
+			continue
+		}
+		if isIgnore {
+			// Per-row savepoint + panic recovery for INSERT IGNORE.
+			func() {
+				tx := CurrentTx()
+				var sp Savepoint
+				hasSavepoint := false
+				if tx != nil {
+					sp = tx.CreateSavepoint()
+					hasSavepoint = true
+				}
+				defer func() {
+					if r := recover(); r != nil {
+						if hasSavepoint {
+							tx.RollbackToSavepoint(sp)
+						}
+						triggerOk = false
+					}
+				}()
+				returned := scm.Apply(tr.Func, scm.NewNil(), newDict)
+				if !returned.IsNil() && returned.IsFastDict() {
+					newDict = returned
+				}
+			}()
+			if !triggerOk {
+				break
+			}
+		} else {
+			// Normal mode: savepoint for proper rollback on propagated panic.
+			func() {
+				tx := CurrentTx()
+				var sp Savepoint
+				hasSavepoint := false
+				if tx != nil {
+					sp = tx.CreateSavepoint()
+					hasSavepoint = true
+				}
+				defer func() {
+					if r := recover(); r != nil {
+						if hasSavepoint {
+							tx.RollbackToSavepoint(sp)
+						}
+						panic(fmt.Sprintf("trigger %s (BEFORE INSERT) on %s failed: %v", tr.Name, t.Name, r))
+					}
+				}()
+				returned := scm.Apply(tr.Func, scm.NewNil(), newDict)
+				if !returned.IsNil() && returned.IsFastDict() {
+					newDict = returned
+				}
+			}()
+		}
+	}
+	if !triggerOk {
+		return nil, nil, false
+	}
+	rowColumns := t.beforeInsertOutputColumns(newDict, columns)
+	return rowColumns, t.dictToRow(newDict, rowColumns), true
+}
+
 func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer, isIgnore bool) ([]string, [][]scm.Scmer) {
 	triggers := t.GetTriggers(BeforeInsert)
 	if len(triggers) == 0 {
 		return columns, values
 	}
 
-	// Expand output to all table columns so trigger-set columns are preserved.
-	allColumns := make([]string, len(t.Columns))
-	for i, col := range t.Columns {
-		allColumns[i] = col.Name
-	}
-
+	resultColumns := append([]string(nil), columns...)
+	rowColumns := make([][]string, 0, len(values))
 	result := make([][]scm.Scmer, 0, len(values))
 	for _, row := range values {
-		// Build dict using the columns that are being inserted
-		newDict := t.rowToDictWithColumns(row, columns)
-		triggerOk := true
-		// Execute all BEFORE INSERT triggers, each can modify NEW
-		for _, tr := range triggers {
-			if tr.Func.IsNil() {
-				continue
-			}
-			if isIgnore {
-				// Per-row savepoint + panic recovery for INSERT IGNORE
-				func() {
-					tx := CurrentTx()
-					var sp Savepoint
-					hasSavepoint := false
-					if tx != nil {
-						sp = tx.CreateSavepoint()
-						hasSavepoint = true
-					}
-					defer func() {
-						if r := recover(); r != nil {
-							if hasSavepoint {
-								tx.RollbackToSavepoint(sp)
-							}
-							triggerOk = false
-						}
-					}()
-					returned := scm.Apply(tr.Func, scm.NewNil(), newDict)
-					if !returned.IsNil() && returned.IsFastDict() {
-						newDict = returned
-					}
-				}()
-				if !triggerOk {
-					break
-				}
-			} else {
-				// Normal mode: savepoint for proper rollback on propagated panic
-				func() {
-					tx := CurrentTx()
-					var sp Savepoint
-					hasSavepoint := false
-					if tx != nil {
-						sp = tx.CreateSavepoint()
-						hasSavepoint = true
-					}
-					defer func() {
-						if r := recover(); r != nil {
-							if hasSavepoint {
-								tx.RollbackToSavepoint(sp)
-							}
-							panic(fmt.Sprintf("trigger %s (BEFORE INSERT) on %s failed: %v", tr.Name, t.Name, r))
-						}
-					}()
-					returned := scm.Apply(tr.Func, scm.NewNil(), newDict)
-					if !returned.IsNil() && returned.IsFastDict() {
-						newDict = returned
-					}
-				}()
-			}
+		newColumns, newRow, ok := t.executeBeforeInsertTriggerRow(columns, row, isIgnore)
+		if !ok {
+			continue
 		}
-		if triggerOk {
-			// Convert modified dict back to row using ALL table columns
-			// so trigger-set values on columns not in the INSERT are preserved.
-			result = append(result, t.dictToRow(newDict, allColumns))
+		if len(result) == 0 {
+			resultColumns = append([]string(nil), newColumns...)
+		}
+		rowColumns = append(rowColumns, newColumns)
+		result = append(result, newRow)
+	}
+	if len(result) == 0 {
+		return resultColumns, result
+	}
+	for _, cols := range rowColumns[1:] {
+		if !stringSlicesEqual(resultColumns, cols) {
+			allColumns := make([]string, len(t.Columns))
+			for i, col := range t.Columns {
+				allColumns[i] = col.Name
+			}
+			for i, row := range result {
+				result[i] = t.dictToRow(t.rowToDictWithColumns(row, rowColumns[i]), allColumns)
+			}
+			return allColumns, result
 		}
 	}
-	return allColumns, result
+	return resultColumns, result
 }
 
 // ExecuteBeforeUpdateTriggers executes BEFORE UPDATE triggers.

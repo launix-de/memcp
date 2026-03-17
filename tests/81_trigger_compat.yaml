@@ -8,25 +8,50 @@ setup:
   - sql: "DROP TABLE IF EXISTS `bill`"
   - sql: "DROP TABLE IF EXISTS `billElement`"
   - sql: "DROP TABLE IF EXISTS `fop_journal`"
+  - sql: "DROP TABLE IF EXISTS trig_assoc"
+  - sql: "DROP TABLE IF EXISTS trig_history"
+  - sql: "DROP TABLE IF EXISTS trig_main"
+  - sql: "DROP TABLE IF EXISTS trig_journal"
+  - sql: "DROP TABLE IF EXISTS trig_invoice"
+  - sql: "DROP TABLE IF EXISTS trig_invitem"
+  - sql: "DROP TABLE IF EXISTS trig_year"
   - sql: "DROP TRIGGER IF EXISTS after_items_insert"
   - sql: "DROP TRIGGER IF EXISTS after_bill_insert"
   - sql: "DROP TRIGGER IF EXISTS trig_no_begin"
+  - sql: "DROP TRIGGER IF EXISTS `trig_main.ia`"
+  - sql: "DROP TRIGGER IF EXISTS `trig_year.ia`"
   - sql: "CREATE TABLE trig_log (id int, msg text)"
   - sql: "CREATE TABLE trig_items (id int, name text, val float)"
   - sql: "CREATE TABLE `billElement` (id int, name text, amount float)"
   - sql: "CREATE TABLE `fop_journal` (id int, ref text, amount float)"
   - sql: "CREATE TABLE `bill` (id int, betrag float, ist float)"
+  - sql: "CREATE TABLE trig_assoc (id INT AUTO_INCREMENT PRIMARY KEY, mainid INT, val INT)"
+  - sql: "CREATE TABLE trig_history (id INT AUTO_INCREMENT PRIMARY KEY, ref INT, note TEXT)"
+  - sql: "CREATE TABLE trig_main (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE trig_journal (id INT AUTO_INCREMENT PRIMARY KEY, `invoice:year:debit` INT, `invoice:debit` INT, `item:debit` INT, amount DECIMAL(10,2))"
+  - sql: "CREATE TABLE trig_invoice (ID INT AUTO_INCREMENT PRIMARY KEY, rnr TEXT, rdate INT)"
+  - sql: "CREATE TABLE trig_invitem (ID INT AUTO_INCREMENT PRIMARY KEY, invoice INT, amount DECIMAL(10,2))"
+  - sql: "CREATE TABLE trig_year (ID INT AUTO_INCREMENT PRIMARY KEY, xstart INT, xend INT, mode INT)"
 
 cleanup:
   - sql: "DROP TRIGGER IF EXISTS after_items_insert"
   - sql: "DROP TRIGGER IF EXISTS after_bill_insert"
   - sql: "DROP TRIGGER IF EXISTS after_billelement_insert"
   - sql: "DROP TRIGGER IF EXISTS trig_no_begin"
+  - sql: "DROP TRIGGER IF EXISTS `trig_main.ia`"
+  - sql: "DROP TRIGGER IF EXISTS `trig_year.ia`"
   - sql: "DROP TABLE IF EXISTS trig_log"
   - sql: "DROP TABLE IF EXISTS trig_items"
   - sql: "DROP TABLE IF EXISTS `bill`"
   - sql: "DROP TABLE IF EXISTS `billElement`"
   - sql: "DROP TABLE IF EXISTS `fop_journal`"
+  - sql: "DROP TABLE IF EXISTS trig_assoc"
+  - sql: "DROP TABLE IF EXISTS trig_history"
+  - sql: "DROP TABLE IF EXISTS trig_main"
+  - sql: "DROP TABLE IF EXISTS trig_journal"
+  - sql: "DROP TABLE IF EXISTS trig_invoice"
+  - sql: "DROP TABLE IF EXISTS trig_invitem"
+  - sql: "DROP TABLE IF EXISTS trig_year"
 
 test_cases:
 
@@ -126,3 +151,64 @@ test_cases:
       rows: 1
       data:
         - {cnt: 2}
+
+  # --- DELETE FROM ... USING (multi-table DELETE in trigger body) ---
+
+  - name: "CREATE TRIGGER with DELETE USING and INSERT IGNORE SELECT"
+    sql: "CREATE TRIGGER `trig_main.ia` AFTER INSERT ON `trig_main` FOR EACH ROW BEGIN DELETE FROM `trig_history` USING `trig_history`, `trig_assoc` AS `ASSOCIATED` WHERE `trig_history`.`ref` = `ASSOCIATED`.`id` AND NEW.`id` = `ASSOCIATED`.`mainid`; INSERT IGNORE INTO `trig_history`(`ref`, `note`) SELECT `id`, 'created' FROM `trig_assoc` AS `ASSOCIATED` WHERE NEW.`id` = `ASSOCIATED`.`mainid`; END"
+    expect:
+      affected_rows: 1
+
+  - name: "Setup assoc row for DELETE USING trigger test"
+    sql: "INSERT INTO trig_assoc (mainid, val) VALUES (1, 42)"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT fires DELETE USING trigger"
+    sql: "INSERT INTO trig_main (name) VALUES ('test')"
+    expect:
+      affected_rows: 1
+
+  - name: "Trigger INSERT IGNORE wrote to trig_history"
+    sql: "SELECT ref, note FROM trig_history WHERE ref = 1"
+    expect:
+      rows: 1
+      data:
+        - {ref: 1, note: "created"}
+
+  # --- Colon-containing aliases in trigger INSERT...SELECT ---
+
+  - name: "CREATE TRIGGER with colon-containing aliases in INSERT SELECT"
+    sql: |
+      CREATE TRIGGER `trig_year.ia` AFTER INSERT ON `trig_year` FOR EACH ROW BEGIN
+        IF (NEW.`mode`) = (0) THEN
+          INSERT INTO `trig_journal` (`invoice:year:debit`, `invoice:debit`, `item:debit`, `amount`)
+            SELECT NEW.`ID`, `invoice:debit`.`ID`, `item:debit`.`ID`, `item:debit`.`amount`
+            FROM `trig_invoice` AS `invoice:debit`, `trig_invitem` AS `item:debit`
+            WHERE (NEW.`ID`) = (`item:debit`.`invoice`);
+        END IF;
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "Setup invoice for colon-alias trigger"
+    sql: "INSERT INTO trig_invoice (rnr, rdate) VALUES ('INV-001', 50)"
+    expect:
+      affected_rows: 1
+
+  - name: "Setup item for colon-alias trigger"
+    sql: "INSERT INTO trig_invitem (invoice, amount) VALUES (1, 100.50)"
+    expect:
+      affected_rows: 1
+
+  - name: "INSERT fires colon-alias trigger"
+    sql: "INSERT INTO trig_year (xstart, xend, mode) VALUES (1, 100, 0)"
+    expect:
+      affected_rows: 1
+
+  - name: "Colon-alias trigger wrote correct data to journal"
+    sql: "SELECT `invoice:year:debit`, `invoice:debit`, `item:debit`, amount FROM trig_journal"
+    expect:
+      rows: 1
+      data:
+        - {"invoice:year:debit": 1, "invoice:debit": 1, "item:debit": 1, amount: 100.5}

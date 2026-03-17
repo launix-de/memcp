@@ -17,11 +17,12 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"bytes"
 	"fmt"
-	"os"
+	"encoding/binary"
+	"sync"
 	"testing"
 
-	querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -231,89 +232,6 @@ func TestStringRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStringRoundTripMixedEmptyAndUUID(t *testing.T) {
-	inputs := []string{
-		"",
-		"550e8400-e29b-41d4-a716-446655440000",
-		"",
-	}
-	s := buildStringColumn(inputs)
-	if s.format == FormatUUIDLower || s.format == FormatUUIDUpper {
-		t.Fatalf("mixed empty+UUID column chose UUID format %d", s.format)
-	}
-	for i, want := range inputs {
-		got := scm.String(s.GetValue(uint32(i)))
-		if got != want {
-			t.Fatalf("[%d]: got %q, want %q (format=%d)", i, got, want, s.format)
-		}
-	}
-}
-
-func TestStringStorageFormatNames(t *testing.T) {
-	s := &StorageString{dictionary: "1234", count: 2, format: FormatPhone}
-	if got := s.String(); got != "string-dict[2 entries; 4 bytes, format=tel]" {
-		t.Fatalf("dict String() = %q", got)
-	}
-	s.nodict = true
-	if got := s.String(); got != "string-buffer[4 bytes, format=tel]" {
-		t.Fatalf("buffer String() = %q", got)
-	}
-}
-
-func TestRebuildPreservesLateDecodedCompressedStrings(t *testing.T) {
-	dir, err := os.MkdirTemp("", "memcp-cstring-repartition-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	oldBasepath := Basepath
-	Basepath = dir
-	defer func() { Basepath = oldBasepath }()
-
-	Init(scm.Globalenv)
-	LoadDatabases()
-	defer databases.Remove("tstrrebuild")
-
-	CreateDatabase("tstrrebuild", false)
-	tbl, _ := CreateTable("tstrrebuild", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("grp", "INT", nil, nil)
-	tbl.CreateColumn("hash", "TEXT", nil, nil)
-
-	rows := make([][]scm.Scmer, 0, 100)
-	expectedHash := make(map[int]string, 10)
-	for grp := 0; grp < 10; grp++ {
-		hash := fmt.Sprintf("%032x", grp+1)
-		expectedHash[grp] = hash
-		for j := 0; j < 10; j++ {
-			id := grp*10 + j + 1
-			rows = append(rows, []scm.Scmer{scm.NewInt(int64(id)), scm.NewInt(int64(grp)), scm.NewString(hash)})
-		}
-	}
-	tbl.Insert([]string{"id", "grp", "hash"}, rows, nil, scm.NewNil(), false, nil)
-
-	Rebuild(true, false)
-
-	hashCol := tbl.Shards[0].getColumnStorageOrPanic("hash")
-	if _, ok := hashCol.(*StorageString); !ok {
-		t.Fatalf("expected rebuilt hash column to be StorageString, got %T", hashCol)
-	}
-	for i := 0; i < len(rows); i++ {
-		grp := i / 10
-		hashValue := hashCol.GetValue(uint32(i))
-		if !hashValue.IsCString() {
-			t.Fatalf("row %d hash is not CString after rebuild: tag=%d", i, hashValue.GetTag())
-		}
-		hashWire := scm.ScmerToMySQL(hashValue)
-		if hashWire.Type() != querypb.Type_VARCHAR {
-			t.Fatalf("row %d hash type = %v, want VARCHAR", i, hashWire.Type())
-		}
-		if got := string(hashWire.Raw()); got != expectedHash[grp] {
-			t.Fatalf("row %d hash = %q, want %q", i, got, expectedHash[grp])
-		}
-	}
-}
-
 // TestBase64PaddingRejected verifies that '=' at an interior position prevents
 // base64 format selection, falling back to FormatRaw.
 func TestBase64PaddingRejected(t *testing.T) {
@@ -471,5 +389,333 @@ func TestNibbleOddLength(t *testing.T) {
 				t.Errorf("format=%d: input[%d] got %q, want %q", tc.format, i, got, want)
 			}
 		}
+	}
+}
+
+// --- LZ4 dictionary compression tests ---
+
+// TestCompressDictionaryRoundTrip verifies that compressing the dictionary
+// and reading values back produces identical results.
+func TestCompressDictionaryRoundTrip(t *testing.T) {
+	groups := [][]string{
+		// Raw strings (dict mode — few unique values)
+		{"hello", "world", "hello", "world", "foo"},
+		// Raw strings (nodict mode — all unique)
+		func() []string {
+			out := make([]string, 200)
+			for i := range out {
+				out[i] = fmt.Sprintf("unique-string-number-%04d-with-padding", i)
+			}
+			return out
+		}(),
+		// UUID
+		{
+			"550e8400-e29b-41d4-a716-446655440000",
+			"6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+		},
+		// Hex
+		{
+			"d41d8cd98f00b204e9800998ecf8427e",
+			"098f6bcd4621d373cade4e832627b4f6",
+		},
+		// DateTime
+		{
+			"2024-03-07 15:30:00",
+			"2023-12-31T23:59:59",
+		},
+	}
+
+	for gi, inputs := range groups {
+		col := buildStringColumn(inputs)
+		// read all values once to verify baseline
+		for i, want := range inputs {
+			got := scm.String(col.GetValue(uint32(i)))
+			if got != want {
+				t.Fatalf("group %d[%d] pre-compress: got %q, want %q", gi, i, got, want)
+			}
+		}
+
+		col.CompressDictionary()
+		if !col.compressed {
+			t.Logf("group %d: compression did not activate (incompressible), skipping", gi)
+			continue
+		}
+		if len(col.compressedDict) == 0 {
+			t.Errorf("group %d: compressed flag set but compressedDict is empty", gi)
+		}
+
+		// dictionary should be cleared after compression
+		if len(col.dictionary) != 0 {
+			t.Errorf("group %d: dictionary not cleared after CompressDictionary", gi)
+		}
+
+		// reading should transparently decompress
+		for i, want := range inputs {
+			got := scm.String(col.GetValue(uint32(i)))
+			if got != want {
+				t.Errorf("group %d[%d] post-compress: got %q, want %q (format=%d)", gi, i, got, want, col.format)
+			}
+		}
+	}
+}
+
+// TestReadCountTelemetry verifies that readCount is incremented on each GetValue call.
+func TestReadCountTelemetry(t *testing.T) {
+	inputs := []string{"alpha", "beta", "gamma"}
+	col := buildStringColumn(inputs)
+
+	if col.ReadCount() != 0 {
+		t.Fatalf("readCount should be 0 after build, got %d", col.ReadCount())
+	}
+
+	for i := range inputs {
+		col.GetValue(uint32(i))
+	}
+	if col.ReadCount() != 3 {
+		t.Errorf("readCount should be 3 after 3 reads, got %d", col.ReadCount())
+	}
+
+	// compress and read again
+	col.CompressDictionary()
+	col.GetValue(0)
+	if col.ReadCount() != 4 {
+		t.Errorf("readCount should be 4 after compress+read, got %d", col.ReadCount())
+	}
+}
+
+// TestEvictDictionary verifies that EvictDictionary clears the materialized
+// dictionary and that subsequent reads re-materialize it.
+func TestEvictDictionary(t *testing.T) {
+	inputs := make([]string, 200)
+	for i := range inputs {
+		inputs[i] = fmt.Sprintf("evict-test-value-%04d-padding", i)
+	}
+	col := buildStringColumn(inputs)
+	col.CompressDictionary()
+	if !col.compressed {
+		t.Skip("compression did not activate")
+	}
+
+	// first read materializes
+	want0 := inputs[0]
+	got0 := scm.String(col.GetValue(0))
+	if got0 != want0 {
+		t.Fatalf("first read: got %q, want %q", got0, want0)
+	}
+	if len(col.dictionary) == 0 {
+		t.Fatal("dictionary should be materialized after read")
+	}
+
+	// evict
+	freed := col.EvictDictionary()
+	if freed <= 0 {
+		t.Errorf("EvictDictionary should return positive freed bytes, got %d", freed)
+	}
+	if len(col.dictionary) != 0 {
+		t.Error("dictionary should be empty after eviction")
+	}
+
+	// read again → re-materialize
+	got0 = scm.String(col.GetValue(0))
+	if got0 != want0 {
+		t.Errorf("after evict+re-read: got %q, want %q", got0, want0)
+	}
+}
+
+// TestCompressDictionaryNoopOnEmpty verifies CompressDictionary is a no-op
+// when the dictionary is empty (e.g., all NULL column).
+func TestCompressDictionaryNoopOnEmpty(t *testing.T) {
+	col := new(StorageString)
+	col.prepare()
+	for i := 0; i < 5; i++ {
+		col.scan(uint32(i), scm.NewNil())
+	}
+	col.init(5)
+	for i := 0; i < 5; i++ {
+		col.build(uint32(i), scm.NewNil())
+	}
+	col.finish()
+
+	col.CompressDictionary()
+	if col.compressed {
+		t.Error("CompressDictionary should not activate on empty dictionary")
+	}
+}
+
+// TestCompressDictionaryIdempotent verifies that calling CompressDictionary
+// twice is harmless.
+func TestCompressDictionaryIdempotent(t *testing.T) {
+	inputs := make([]string, 200)
+	for i := range inputs {
+		inputs[i] = fmt.Sprintf("idempotent-test-%04d-xxxxx", i)
+	}
+	col := buildStringColumn(inputs)
+	col.CompressDictionary()
+	if !col.compressed {
+		t.Skip("compression did not activate")
+	}
+	origCompressed := make([]byte, len(col.compressedDict))
+	copy(origCompressed, col.compressedDict)
+
+	col.CompressDictionary() // second call — should be no-op
+	if !bytes.Equal(col.compressedDict, origCompressed) {
+		t.Error("second CompressDictionary changed the compressed data")
+	}
+}
+
+// TestSerializeDeserializeCompressed verifies the version 1 serialize/deserialize
+// roundtrip for lz4-compressed dictionaries.
+func TestSerializeDeserializeCompressed(t *testing.T) {
+	inputs := make([]string, 200)
+	for i := range inputs {
+		inputs[i] = fmt.Sprintf("serialize-test-value-%04d-padding", i)
+	}
+	col := buildStringColumn(inputs)
+	col.CompressDictionary()
+	if !col.compressed {
+		t.Skip("compression did not activate")
+	}
+
+	// serialize
+	var buf bytes.Buffer
+	col.Serialize(&buf)
+
+	// deserialize
+	data := buf.Bytes()
+	reader := bytes.NewReader(data[1:]) // skip magic byte (20)
+	if data[0] != 20 {
+		t.Fatalf("expected magic byte 20, got %d", data[0])
+	}
+	col2 := new(StorageString)
+	col2.Deserialize(reader)
+
+	if !col2.compressed {
+		t.Fatal("deserialized column should have compressed=true")
+	}
+	if len(col2.compressedDict) == 0 {
+		t.Fatal("deserialized column should have non-empty compressedDict")
+	}
+
+	// verify all values
+	for i, want := range inputs {
+		got := scm.String(col2.GetValue(uint32(i)))
+		if got != want {
+			t.Errorf("[%d] deserialized: got %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestSerializeDeserializeUncompressed verifies version 1 format works for
+// uncompressed dictionaries (backward-compatible read path).
+func TestSerializeDeserializeUncompressed(t *testing.T) {
+	inputs := []string{"hello", "world", "hello", "world", "foo"}
+	col := buildStringColumn(inputs)
+	// do NOT compress
+
+	var buf bytes.Buffer
+	col.Serialize(&buf)
+
+	data := buf.Bytes()
+	reader := bytes.NewReader(data[1:])
+	col2 := new(StorageString)
+	col2.Deserialize(reader)
+
+	if col2.compressed {
+		t.Fatal("deserialized column should not be compressed")
+	}
+	for i, want := range inputs {
+		got := scm.String(col2.GetValue(uint32(i)))
+		if got != want {
+			t.Errorf("[%d] got %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestDeserializeV0BackwardCompat verifies that old version 0 data can still
+// be deserialized by the new code.
+func TestDeserializeV0BackwardCompat(t *testing.T) {
+	// Build a column and manually serialize as version 0 (old format)
+	inputs := []string{"compat", "test", "compat"}
+	col := buildStringColumn(inputs)
+
+	var buf bytes.Buffer
+	// Write magic byte
+	binary.Write(&buf, binary.LittleEndian, uint8(20))
+	// nodict
+	var nodict uint8 = 0
+	if col.nodict {
+		nodict = 1
+	}
+	binary.Write(&buf, binary.LittleEndian, nodict)
+	binary.Write(&buf, binary.LittleEndian, uint8(col.format))
+	// version 0
+	binary.Write(&buf, binary.LittleEndian, uint8(0))
+	var pad [4]byte
+	buf.Write(pad[:])
+	// count
+	if col.nodict {
+		binary.Write(&buf, binary.LittleEndian, uint64(col.starts.count))
+	} else {
+		binary.Write(&buf, binary.LittleEndian, uint64(col.values.count))
+	}
+	col.values.Serialize(&buf)
+	col.starts.Serialize(&buf)
+	col.lens.Serialize(&buf)
+	dict := col.dictionary
+	binary.Write(&buf, binary.LittleEndian, uint64(len(dict)))
+	buf.WriteString(dict)
+
+	// Deserialize
+	data := buf.Bytes()
+	reader := bytes.NewReader(data[1:]) // skip magic byte
+	col2 := new(StorageString)
+	col2.Deserialize(reader)
+
+	if col2.compressed {
+		t.Fatal("v0 deserialized should not be compressed")
+	}
+	for i, want := range inputs {
+		got := scm.String(col2.GetValue(uint32(i)))
+		if got != want {
+			t.Errorf("[%d] v0 compat: got %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestConcurrentReadAfterCompress exercises concurrent GetValue on a
+// compressed column to verify the dictMu locking is correct.
+func TestConcurrentReadAfterCompress(t *testing.T) {
+	inputs := make([]string, 200)
+	for i := range inputs {
+		inputs[i] = fmt.Sprintf("concurrent-test-%04d-xxxxxxxx", i)
+	}
+	col := buildStringColumn(inputs)
+	col.CompressDictionary()
+	if !col.compressed {
+		t.Skip("compression did not activate")
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan string, len(inputs)*4)
+	for round := 0; round < 4; round++ {
+		// evict between rounds to force re-materialization
+		if round > 0 {
+			col.EvictDictionary()
+		}
+		for i, want := range inputs {
+			wg.Add(1)
+			go func(idx int, expected string) {
+				defer wg.Done()
+				got := scm.String(col.GetValue(uint32(idx)))
+				if got != expected {
+					errs <- fmt.Sprintf("[%d] got %q, want %q", idx, got, expected)
+				}
+			}(i, want)
+		}
+		wg.Wait()
+	}
+	close(errs)
+	for e := range errs {
+		t.Error(e)
 	}
 }

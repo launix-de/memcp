@@ -523,13 +523,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 		) (if (> (count tbls) 1)
 				(list '!update_multi tbls assignments where)
 				(list '!update (match (car tbls) '(alias _) alias) assignments where)))
-		/* DELETE FROM table WHERE condition[;] */
-		(parser '(
-			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
-			(? (atom "WHERE" true) (define where sql_expression))
-			(? (atom ";" false))
-		) (list '!delete tbl where))
 		/* DELETE FROM table USING table, table2 [AS alias] WHERE condition[;] (multi-table in trigger) */
+		/* Must be before simple DELETE FROM — otherwise the simple variant greedily matches the table name */
 		(parser '(
 			(atom "DELETE" true) (atom "FROM" true) (define target sql_identifier)
 			(atom "USING" true)
@@ -540,6 +535,12 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			(? (atom "WHERE" true) (define where sql_expression))
 			(? (atom ";" false))
 		) (list '!delete_using target tbls where))
+		/* DELETE FROM table WHERE condition[;] */
+		(parser '(
+			(atom "DELETE" true) (atom "FROM" true) (define tbl sql_identifier)
+			(? (atom "WHERE" true) (define where sql_expression))
+			(? (atom ";" false))
+		) (list '!delete tbl where))
 	)))
 
 	/* Full trigger statement parser including IF...THEN...[ELSE...]END IF */
@@ -1362,21 +1363,21 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 			/* TODO: ignorecase */
 			(define updaterows (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 		) updaterows)))
-		) (begin
-				/* policy: write access check */
-				(if policy (policy (coalesce schema2 schema) tbl true) true)
-				(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
-				(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-				(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
-				(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
-					(begin
-						(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
-						(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
-					'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
-						(if (and ignoreexists (nil? updaterows))
-							'((quote lambda) '() 0)
-							(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-						false '('lambda '('id) '('session "last_insert_id" 'id))))
+	) (begin
+			/* policy: write access check */
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
+			(define coldesc (coalesce coldesc (map (show (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(if (reduce datasets (lambda (a b) (or a (sql_dataset_contains_inner_select b))) false)
+				(begin
+					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
+					(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
+				'('insert (coalesce schema2 schema) tbl (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
+					(if (and ignoreexists (nil? updaterows))
+						'((quote lambda) '() 0)
+						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
+					false '('lambda '('id) '('session "last_insert_id" 'id))))
 	)))
 
 	(define sql_insert_values_select (parser '(
@@ -1567,11 +1568,11 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
-			(parser (define query sql_select) (build_queryplan_term query))
-			(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
-			sql_insert_values_select
-			sql_insert_into
-			sql_insert_select
+		(parser (define query sql_select) (build_queryplan_term query))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (build_queryplan_term query) (settings "ExplainWidth")))))
+		sql_insert_values_select
+		sql_insert_into
+		sql_insert_select
 		sql_create_table
 		sql_alter_table
 		sql_update

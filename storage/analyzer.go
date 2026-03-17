@@ -461,6 +461,274 @@ func reorderByFrequency(bounds boundaries, t *table) {
 	})
 }
 
+
+// analyzeOrcPartition inspects reduceFn + reduceInit + sortCols to detect
+// whether the ORC uses a partition wrapper. Returns the number of leading
+// sort columns that serve as partition keys (0 = no partitioning).
+//
+// Detection: reduceInit = (list inner_init nil) with exactly 2 elements
+// AND at least 2 sort columns (need partition + order). The first sort
+// column(s) become the partition key, the last is the order column.
+//
+// This correctly distinguishes:
+//   - DENSE_RANK (list 0 nil) + 1 sortCol → 0 (no partition)
+//   - Partitioned ROW_NUMBER (list 0 nil) + 2 sortCols → 1
+//   - Partitioned RANK (list (list 0 0 nil) nil) + 2 sortCols → 1
+func analyzeOrcPartition(col *column) int {
+	if len(col.OrcSortCols) < 2 {
+		return 0
+	}
+	init := col.OrcReduceInit
+	if init.IsNil() || !init.IsSlice() {
+		return 0
+	}
+	items := init.Slice()
+	if len(items) != 2 || !items[1].IsNil() {
+		return 0
+	}
+	// Detected: (list inner_init nil) with 2+ sort columns.
+	// First sort column is the partition key.
+	return 1
+}
+
+// ORC suffix recompute mode classification.
+const (
+	OrcSuffixOpaque         = 0 // can't analyze → full recompute only
+	OrcSuffixIdentity       = 1 // acc == emitted value (SUM, ROW_NUMBER) → stored value is accumulator
+	OrcSuffixReconstructible = 2 // acc = (emitted, ...state) → need extra state from row data
+)
+
+// OrcAdditiveInfo describes a reducer that computes acc + f(mapped).
+// When detected, INSERT/DELETE can be handled by adding/subtracting the delta
+// to all subsequent stored values instead of running a full suffix recompute.
+type OrcAdditiveInfo struct {
+	IsAdditive bool      // true if reducer is (+ acc f(mapped))
+	DeltaExpr  scm.Scmer // the f(mapped) expression (e.g. (cadr mapped) for running SUM)
+}
+
+// analyzeOrcAdditive inspects the ORC reduceFn to detect the additive pattern:
+//   return value = (+ acc X) where X depends only on mapped, not acc.
+// This enables O(N) delta propagation instead of O(N) suffix recompute.
+func analyzeOrcAdditive(reduceFn scm.Scmer) OrcAdditiveInfo {
+	if reduceFn.IsNil() {
+		return OrcAdditiveInfo{}
+	}
+	var body scm.Scmer
+	var accParam string
+	if reduceFn.IsProc() {
+		body = reduceFn.Proc().Body
+		if reduceFn.Proc().Params.IsSlice() {
+			params := reduceFn.Proc().Params.Slice()
+			if len(params) >= 1 && params[0].IsSymbol() {
+				accParam = params[0].String()
+			}
+		}
+	} else if reduceFn.IsSlice() {
+		items := reduceFn.Slice()
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			body = items[2]
+			if items[1].IsSlice() {
+				params := items[1].Slice()
+				if len(params) >= 1 && params[0].IsSymbol() {
+					accParam = params[0].String()
+				}
+			}
+		}
+	}
+	if body.IsNil() || accParam == "" {
+		return OrcAdditiveInfo{}
+	}
+
+	// Find return value (last expr in begin block)
+	var returnVal scm.Scmer
+	if body.IsSlice() {
+		items := body.Slice()
+		if len(items) >= 2 && items[0].IsSymbol() && items[0].String() == "begin" {
+			returnVal = items[len(items)-1]
+		} else {
+			returnVal = body
+		}
+	}
+	if returnVal.IsNil() || !returnVal.IsSlice() {
+		return OrcAdditiveInfo{}
+	}
+
+	// Check: is returnVal = (+ acc X) ?
+	rv := returnVal.Slice()
+	if len(rv) != 3 {
+		return OrcAdditiveInfo{}
+	}
+	isPlus := rv[0].IsSymbol() && rv[0].String() == "+"
+	if !isPlus {
+		// Check for tagFunc-resolved +
+		d := scm.DeclarationForValue(rv[0])
+		if d == nil || d.Name != "+" {
+			return OrcAdditiveInfo{}
+		}
+	}
+
+	// One operand must be acc, the other must not reference acc.
+	var deltaExpr scm.Scmer
+	if rv[1].IsSymbol() && rv[1].String() == accParam {
+		deltaExpr = rv[2]
+	} else if rv[1].IsNthLocalVar() && rv[1].NthLocalVar() == 0 {
+		// NthLocalVar(0) = first param = acc
+		deltaExpr = rv[2]
+	} else if rv[2].IsSymbol() && rv[2].String() == accParam {
+		deltaExpr = rv[1]
+	} else if rv[2].IsNthLocalVar() && rv[2].NthLocalVar() == 0 {
+		deltaExpr = rv[1]
+	}
+
+	if deltaExpr.IsNil() {
+		return OrcAdditiveInfo{}
+	}
+
+	// Verify deltaExpr does not reference acc
+	if containsSymbol(deltaExpr, accParam) {
+		return OrcAdditiveInfo{}
+	}
+
+	return OrcAdditiveInfo{IsAdditive: true, DeltaExpr: deltaExpr}
+}
+
+// containsSymbol checks if an AST node references a given symbol name.
+func containsSymbol(expr scm.Scmer, name string) bool {
+	if expr.IsSymbol() && expr.String() == name {
+		return true
+	}
+	if expr.IsSlice() {
+		for _, item := range expr.Slice() {
+			if containsSymbol(item, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// analyzeOrcSuffix inspects an ORC reduceFn to determine if the accumulator
+// equals the emitted value ($set argument). This enables suffix recompute
+// by reading the stored ORC value as the start accumulator.
+//
+// The reducer has the form: (lambda (acc mapped) body)
+// where body calls (setter value) and returns new_acc.
+// If value == new_acc, it's an identity accumulator.
+func analyzeOrcSuffix(reduceFn scm.Scmer) int {
+	if reduceFn.IsNil() {
+		return OrcSuffixOpaque
+	}
+	var body scm.Scmer
+	if reduceFn.IsProc() {
+		body = reduceFn.Proc().Body
+	} else if reduceFn.IsSlice() {
+		items := reduceFn.Slice()
+		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+			body = items[2]
+		}
+	}
+	if body.IsNil() {
+		return OrcSuffixOpaque
+	}
+
+	// Unwrap (begin ...) to find the last expression (= return value)
+	// and any setter call (= $set invocation).
+	var setArg scm.Scmer   // the value passed to $set
+	var returnVal scm.Scmer // the return value of the reducer
+
+	if body.IsSlice() {
+		items := body.Slice()
+		if len(items) >= 2 && items[0].IsSymbol() && items[0].String() == "begin" {
+			returnVal = items[len(items)-1]
+			// Search for setter call: ((car mapped) val) or ((nth mapped 0) val)
+			for _, item := range items[1 : len(items)-1] {
+				if sa := findSetterArg(item); !sa.IsNil() {
+					setArg = sa
+				}
+			}
+		} else {
+			// No begin — body IS the return value
+			returnVal = body
+		}
+	}
+
+	if setArg.IsNil() || returnVal.IsNil() {
+		return OrcSuffixOpaque
+	}
+
+	// Compare: are they structurally equal?
+	if scmerStructEqual(setArg, returnVal) {
+		return OrcSuffixIdentity
+	}
+
+	return OrcSuffixOpaque
+}
+
+// findSetterArg looks for a call pattern ((car mapped) val) or ((nth mapped 0) val)
+// and returns val. These are the patterns produced by ORC reducers calling the $set closure.
+func findSetterArg(expr scm.Scmer) scm.Scmer {
+	if !expr.IsSlice() {
+		return scm.NewNil()
+	}
+	items := expr.Slice()
+	if len(items) < 2 {
+		return scm.NewNil()
+	}
+	// Check if items[0] is (car mapped) or (nth mapped 0)
+	if items[0].IsSlice() {
+		head := items[0].Slice()
+		if len(head) == 2 && head[0].IsSymbol() && head[0].String() == "car" {
+			return items[1] // the value passed to $set
+		}
+		if len(head) == 3 && head[0].IsSymbol() && head[0].String() == "nth" {
+			return items[1]
+		}
+	}
+	// Recurse into begin blocks
+	if items[0].IsSymbol() && items[0].String() == "begin" {
+		for _, item := range items[1:] {
+			if sa := findSetterArg(item); !sa.IsNil() {
+				return sa
+			}
+		}
+	}
+	return scm.NewNil()
+}
+
+// scmerStructEqual compares two Scmer AST nodes for structural equality.
+// Handles symbols, ints, floats, strings, and nested slices.
+func scmerStructEqual(a, b scm.Scmer) bool {
+	if a.IsSymbol() && b.IsSymbol() {
+		return a.String() == b.String()
+	}
+	if a.IsInt() && b.IsInt() {
+		return a.Int() == b.Int()
+	}
+	if a.IsFloat() && b.IsFloat() {
+		return a.Float() == b.Float()
+	}
+	if a.IsString() && b.IsString() {
+		return a.String() == b.String()
+	}
+	if a.IsNthLocalVar() && b.IsNthLocalVar() {
+		return a.NthLocalVar() == b.NthLocalVar()
+	}
+	if a.IsSlice() && b.IsSlice() {
+		as, bs := a.Slice(), b.Slice()
+		if len(as) != len(bs) {
+			return false
+		}
+		for i := range as {
+			if !scmerStructEqual(as[i], bs[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+
 func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
 		//fmt.Println("conditions:", cols)

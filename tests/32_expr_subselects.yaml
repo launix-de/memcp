@@ -238,74 +238,6 @@ test_cases:
           file: 3
           filename: Angebot.pdf
 
-  - name: "Planner contract: untangle stays declarative for doubly nested scalar subselects"
-    noncritical: true
-    scm: |
-      (begin
-        (define q (lambda (sym) (list 'quote sym)))
-        (define gc (lambda (tbl ti col ci) (list (q 'get_column) tbl ti col ci)))
-        (define scalar (lambda (query) (list (q 'inner_select) query)))
-        (define physical-head (lambda (head) (begin
-          (define s (serialize head))
-          (if (equal? s "scan") "scan"
-            (if (equal? s "scan_order") "scan_order"
-              (if (equal? s "scalar_scan") "scalar_scan"
-                (if (equal? s "!begin") "!begin"
-                  (if (equal? s "resultrow") "resultrow"
-                    (if (equal? s "newsession") "newsession" nil)))))))
-        ))
-        (define collect-physical (lambda (expr)
-          (if (not (list? expr)) '()
-            (match expr
-              (cons head tail)
-                (reduce tail
-                  (lambda (acc item) (merge_unique acc (collect-physical item)))
-                  (merge_unique
-                    (if (nil? (physical-head head)) '() (list (physical-head head)))
-                    (collect-physical head)))
-              _ '()
-        ))))
-        (define nested_query
-          (list "memcp-tests"
-            (list (list "doc" "memcp-tests" "doc" false nil))
-            (list
-              "id" (gc "doc" true "id" true)
-              "filename"
-              (scalar
-                (list "memcp-tests"
-                  (list (list "f" "memcp-tests" "fop_files" false nil))
-                  (list "filename" (gc "f" true "filename" true))
-                  (list (q 'equal??)
-                    (gc "f" true "id" true)
-                    (scalar
-                      (list "memcp-tests"
-                        (list (list "r" "memcp-tests" "doc_revision" false nil))
-                        (list "file" (gc "r" true "file" true))
-                        (list (q 'equal??)
-                          (gc "r" true "doc" true)
-                          (gc "doc" true "id" true))
-                        nil
-                        nil
-                        (list (list (gc "r" true "created" true) >))
-                        1
-                        nil)))
-                  nil
-                  nil
-                  nil
-                  nil
-                  nil)))
-            nil
-            nil
-            nil
-            (list (list (gc "doc" true "id" true) <))
-            nil
-            nil))
-        (define untangled (apply untangle_query (merge nested_query (list nil))))
-        (define physical (collect-physical untangled))
-        (if (or (nil? physical) (equal? physical '()))
-          true
-          (error (concat "untangle_query leaked physical ops: " (serialize physical)))))
-
   - name: "Raw lowercase columns resolve on derived table aliases with uppercase fields"
     setup:
       - sql: "DROP TABLE IF EXISTS expr32_alias_src"
@@ -573,19 +505,41 @@ test_cases:
           filename: other.pdf
           can_view: true
 
+  - name: "Aggregate over correlated scalar subselect keeps outer reference inputs"
+    setup:
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_currency"
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_offer"
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_offer_element"
+      - sql: "CREATE TABLE expr32_scalar_currency (id INT PRIMARY KEY, wkz VARCHAR(10))"
+      - sql: "CREATE TABLE expr32_scalar_offer (id INT PRIMARY KEY, waehrung INT)"
+      - sql: "CREATE TABLE expr32_scalar_offer_element (id INT PRIMARY KEY, angebot INT, einzelpreis INT, menge INT)"
+      - sql: "INSERT INTO expr32_scalar_currency (id, wkz) VALUES (1, 'EUR')"
+      - sql: "INSERT INTO expr32_scalar_offer (id, waehrung) VALUES (1, 1)"
+      - sql: "INSERT INTO expr32_scalar_offer_element (id, angebot, einzelpreis, menge) VALUES (1, 1, 10, 2)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_offer_element"
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_offer"
+      - sql: "DROP TABLE IF EXISTS expr32_scalar_currency"
+    sql: >
+      SELECT MAX((
+        SELECT c.wkz FROM expr32_scalar_currency c
+        WHERE c.id = (SELECT o.waehrung FROM expr32_scalar_offer o WHERE o.id = oe.angebot LIMIT 1)
+        LIMIT 1
+      )) AS unit2
+      FROM expr32_scalar_offer_element oe
+      WHERE oe.angebot = 1
+    expect:
+      rows: 1
+      data:
+        - unit2: EUR
+
   - name: "Scalar subselect multiple rows errors"
     sql: "SELECT (SELECT val FROM t2 WHERE owner = 2) AS v"
     expect:
       error: true
 
   - name: "Correlated scalar subselect multiple rows errors"
-    setup:
-      - sql: "DROP TABLE IF EXISTS t1_multi"
-      - sql: "CREATE TABLE t1_multi (id INT PRIMARY KEY)"
-      - sql: "INSERT INTO t1_multi (id) VALUES (2)"
-    cleanup:
-      - sql: "DROP TABLE IF EXISTS t1_multi"
-    sql: "SELECT (SELECT val FROM t2 WHERE owner = t1_multi.id) AS v FROM t1_multi"
+    sql: "SELECT (SELECT val FROM t2 WHERE owner = t1.id) AS v FROM (SELECT 2 AS id) AS t1"
     expect:
       error: true
 

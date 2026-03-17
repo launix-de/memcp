@@ -615,7 +615,6 @@ func Init(en scm.Env) {
 			// Extract ORC params from the options assoc list.
 			var orcSortCols []string
 			var orcSortDirs []bool
-			orcPartCount := 0
 			var orcMapCols []string
 			var orcMapFn, orcReduceFn, orcReduceInit scm.Scmer
 			for i := 0; i+1 < len(typeparams); i += 2 {
@@ -630,8 +629,6 @@ func Init(en scm.Env) {
 					for j, d := range dirs {
 						orcSortDirs[j] = scm.ToBool(d)
 					}
-				case "partitioncount":
-					orcPartCount = int(scm.ToInt(val))
 				case "mapcols":
 					orcMapCols = scmerSliceToStrings(mustScmerSlice(val, "mapcols"))
 				case "mapfn":
@@ -643,7 +640,7 @@ func Init(en scm.Env) {
 				}
 			}
 			if len(orcSortCols) > 0 {
-				t.ComputeOrderedColumn(colname, orcSortCols, orcSortDirs, orcPartCount, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
+				t.ComputeOrderedColumn(colname, orcSortCols, orcSortDirs, 0, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
 				return scm.NewBool(ok)
 			}
 
@@ -1055,6 +1052,36 @@ func Init(en scm.Env) {
 					proxy.InvalidateAll()
 				}
 			}
+			return scm.NewBool(true)
+		}, false, false, nil,
+		nil,
+	})
+	scm.Declare(&en, &scm.Declaration{
+		"invalidateorc", "invalidates ORC column rows from a sort key onwards via validMask scan",
+		4, 4,
+		[]scm.DeclarationParameter{
+			scm.DeclarationParameter{"schema", "string", "name of the database", nil},
+			scm.DeclarationParameter{"table", "string", "name of the table", nil},
+			scm.DeclarationParameter{"column", "string", "name of the ORC column", nil},
+			scm.DeclarationParameter{"sortkeys", "list", "composite sort key values from which to invalidate", nil},
+		}, "bool",
+		func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewBool(false)
+			}
+			t := db.GetTable(scm.String(a[1]))
+			if t == nil {
+				return scm.NewBool(false)
+			}
+			// Accept both a single value and a list of sort key values
+			var sortKeys []scm.Scmer
+			if a[3].IsSlice() {
+				sortKeys = a[3].Slice()
+			} else {
+				sortKeys = []scm.Scmer{a[3]}
+			}
+			t.invalidateORCFromSortKey(scm.String(a[2]), sortKeys)
 			return scm.NewBool(true)
 		}, false, false, nil,
 		nil,

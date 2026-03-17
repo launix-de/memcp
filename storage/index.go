@@ -561,7 +561,12 @@ start_scan:
 		return
 	}
 	snapMainIndexes := s.mainIndexes
-	snapDeltaBtree := s.deltaBtree
+	var snapDeltaBtree *btree.BTreeG[indexPair]
+	if s.deltaBtree != nil {
+		// Clone under the index lock so scans can iterate a stable delta snapshot
+		// while concurrent inserts keep mutating the live tree.
+		snapDeltaBtree = s.deltaBtree.Clone()
+	}
 	isNative := s.Native
 	s.mu.Unlock()
 

@@ -16,8 +16,10 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "sync"
 import "strings"
 import "runtime/debug"
+import "sync/atomic"
 import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
@@ -158,11 +160,15 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 // reduceInit: initial accumulator value
 func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
 	found := false
+	paramsChanged := false
 	for i, c := range t.Columns {
 		if c.Name == name {
+			// Detect parameter changes (different OVER clause on same column).
+			paramsChanged = !slicesEqual(c.OrcSortCols, sortCols) ||
+				!boolSlicesEqual(c.OrcSortDirs, sortDirs) ||
+				!slicesEqual(c.OrcMapCols, mapCols)
 			t.Columns[i].OrcSortCols = sortCols
 			t.Columns[i].OrcSortDirs = sortDirs
-			t.Columns[i].OrcPartCount = partCount
 			t.Columns[i].OrcMapCols = mapCols
 			t.Columns[i].OrcMapFn = mapFn
 			t.Columns[i].OrcReduceFn = reduceFn
@@ -175,17 +181,21 @@ func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []
 		panic("ComputeOrderedColumn: column " + t.Name + "." + name + " does not exist")
 	}
 
-	// Ensure every shard has an ORC proxy.
+	// Ensure every shard has an ORC proxy (lazy: no eager recompute).
+	// If ORC params changed (different OVER clause), invalidate all proxies.
 	for _, s := range t.ActiveShards() {
 		t.initORCShard(s, name)
+		if paramsChanged {
+			s.mu.RLock()
+			cs := s.columns[name]
+			s.mu.RUnlock()
+			if proxy, ok := cs.(*StorageComputeProxy); ok {
+				proxy.InvalidateAll()
+			}
+		}
 	}
 
-	// Run the initial full recompute (requires orcMu for consistent ordering).
-	t.orcMu.Lock()
-	t.recomputeORC(name)
-	t.orcMu.Unlock()
-
-	// Register Mode A triggers: any mutation → InvalidateAll.
+	// Register triggers: mutations → partial invalidation.
 	t.registerORCTriggers(name)
 
 	// Persist ORC parameters and trigger registrations.
@@ -193,6 +203,7 @@ func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []
 }
 
 // initORCShard ensures a StorageComputeProxy with isOrdered=true exists on shard s.
+// If a proxy already exists and has data (compressed), it is left untouched.
 func (t *table) initORCShard(s *storageShard, name string) {
 	s.ensureLoaded()
 	s.ensureMainCount(false)
@@ -203,7 +214,8 @@ func (t *table) initORCShard(s *storageShard, name string) {
 
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.isOrdered = true
-		proxy.InvalidateAll()
+		// Don't InvalidateAll — keep existing data; triggers handle partial invalidation.
+		return
 	} else {
 		proxy := &StorageComputeProxy{
 			delta:     make(map[uint32]scm.Scmer),
@@ -218,9 +230,18 @@ func (t *table) initORCShard(s *storageShard, name string) {
 	}
 }
 
-// recomputeORC rebuilds any dirty shards (delta → main), then runs a full scan_order
-// pass to materialize the ORC column. Must be called with t.orcMu held.
-func (t *table) recomputeORC(name string) {
+// incrementalRecomputeORC recomputes ORC values starting from the first invalid row
+// in the scan_order sequence, continuing until all requested rows are valid or
+// convergence ($break) is reached. Must be called with t.orcMu held.
+//
+// The invalidation scan (run by triggers) has already set validMask bits to 0
+// for affected rows. This function finds the earliest invalid row's sort key,
+// predicts the accumulator from the last valid predecessor, and scans forward.
+func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32) {
+	// Prevent re-entry: GetValue during scan_order must not trigger another recompute.
+	atomic.AddInt32(&t.orcRecomputing, 1)
+	defer atomic.AddInt32(&t.orcRecomputing, -1)
+
 	var col *column
 	for i := range t.Columns {
 		if t.Columns[i].Name == name {
@@ -229,43 +250,14 @@ func (t *table) recomputeORC(name string) {
 		}
 	}
 	if col == nil || len(col.OrcSortCols) == 0 {
-		panic("recomputeORC: column '" + name + "' is not an ORC column on table " + t.Name)
+		panic("incrementalRecomputeORC: column '" + name + "' is not an ORC column on table " + t.Name)
 	}
 
-	// Reset all shard proxies to accept fresh scan_order writes.
-	// No shard rebuild needed: $set: closures write to the proxy's delta map
-	// which accepts any row index (main or delta storage).
-	for _, s := range t.ActiveShards() {
-		s.mu.RLock()
-		cs := s.columns[name]
-		s.mu.RUnlock()
-		if proxy, ok := cs.(*StorageComputeProxy); ok {
-			proxy.isOrdered = true
-			proxy.InvalidateAll()
-		} else {
-			// Proxy missing (e.g., shard was evicted and reloaded without ORC init).
-			s.ensureLoaded()
-			s.ensureMainCount(false)
-			proxy := &StorageComputeProxy{
-				delta:     make(map[uint32]scm.Scmer),
-				isOrdered: true,
-				shard:     s,
-				colName:   name,
-				count:     s.main_count,
-			}
-			s.mu.Lock()
-			s.columns[name] = proxy
-			s.mu.Unlock()
-		}
-	}
-
-	// Build sortcols as Scmer string values (column name lookup in scan_order).
+	// Build sort infrastructure.
 	sortcolsScmer := make([]scm.Scmer, len(col.OrcSortCols))
 	for i, sc := range col.OrcSortCols {
 		sortcolsScmer[i] = scm.NewString(sc)
 	}
-
-	// Convert bool sort directions to comparator functions (< for ASC, > for DESC).
 	ltFn := scm.OptimizeProcToSerialFunction(scm.Eval(scm.NewSymbol("<"), &scm.Globalenv))
 	gtFn := scm.OptimizeProcToSerialFunction(scm.Eval(scm.NewSymbol(">"), &scm.Globalenv))
 	sortdirsFns := make([]func(...scm.Scmer) scm.Scmer, len(col.OrcSortDirs))
@@ -277,44 +269,256 @@ func (t *table) recomputeORC(name string) {
 		}
 	}
 
-	// "$set:colname" is prepended; mapCols are the additional input columns.
-	callbackCols := make([]string, 0, 1+len(col.OrcMapCols))
-	callbackCols = append(callbackCols, "$set:"+name)
-	callbackCols = append(callbackCols, col.OrcMapCols...)
+	// Determine if the reducer has the identity property (stored value == accumulator).
+	// Identity enables: skip valid prefix (Phase 1) + convergence break (Phase 3).
+	// Non-identity: must compute every row but still benefits from validMask to detect
+	// when the recomputed range ends.
+	isIdentity := analyzeOrcSuffix(col.OrcReduceFn) == OrcSuffixIdentity
 
-	// Full table scan: no filter, no offset/limit.
-	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	// Build condition filter. For partitioned ORCs, restrict the scan to the
+	// partition containing the requested row. This avoids scanning all partitions
+	// when only one was invalidated.
+	partCount := analyzeOrcPartition(col)
+	var condCols []string
+	var condFn scm.Scmer
+
+	if partCount > 0 {
+		// Read partition key of the requested row
+		partCols := col.OrcSortCols[:partCount]
+		partKeys := make([]scm.Scmer, partCount)
+		for i, pc := range partCols {
+			requestShard.mu.RLock()
+			cs := requestShard.columns[pc]
+			requestShard.mu.RUnlock()
+			if cs != nil && requestIdx < requestShard.main_count {
+				partKeys[i] = cs.GetValue(requestIdx)
+			} else if requestIdx >= requestShard.main_count {
+				partKeys[i] = requestShard.getDelta(int(requestIdx-requestShard.main_count), pc)
+			}
+		}
+		// Filter: only rows in the same partition
+		condCols = partCols
+		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			for i := 0; i < partCount; i++ {
+				if scm.Less(a[i], partKeys[i]) || scm.Less(partKeys[i], a[i]) {
+					return scm.NewBool(false) // different partition
+				}
+			}
+			return scm.NewBool(true)
+		})
+	} else {
+		condCols = []string{}
+		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	}
+
+	// Callback: $set + $break + stored ORC value + mapCols
+	// During orcRecomputing, GetValue returns nil for invalid rows.
+	// The reducer uses nil to detect "needs recompute" vs "valid cached value".
+	scanCallbackCols := make([]string, 0, 3+len(col.OrcMapCols))
+	scanCallbackCols = append(scanCallbackCols, "$set:"+name)
+	scanCallbackCols = append(scanCallbackCols, "$break")
+	scanCallbackCols = append(scanCallbackCols, name) // stored ORC value (nil if invalid)
+	scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
+
+	innerMapFn := scm.OptimizeProcToSerialFunction(col.OrcMapFn)
+	scanMapFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		brk := args[1]
+		storedVal := args[2] // nil = invalid row, non-nil = valid cached value
+		innerArgs := make([]scm.Scmer, 1+len(col.OrcMapCols))
+		innerArgs[0] = args[0] // $set
+		copy(innerArgs[1:], args[3:])
+		return scm.NewSlice([]scm.Scmer{brk, storedVal, innerMapFn(innerArgs...)})
+	})
+
+	innerReduceFn := scm.OptimizeProcToSerialFunction(col.OrcReduceFn)
+	recomputeStarted := false
+	scanReduceFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		mapped := args[1].Slice()
+		brk := mapped[0]
+		storedVal := mapped[1] // nil = invalid (orcRecomputing returns nil for invalid rows)
+		innerMapped := mapped[2]
+
+		if isIdentity && !recomputeStarted && !storedVal.IsNil() {
+			// Phase 1 (identity only): valid row before first invalid.
+			// storedVal is non-nil = row was valid. Use as accumulator, skip $set.
+			return storedVal
+		}
+		if !recomputeStarted && storedVal.IsNil() {
+			recomputeStarted = true
+		}
+
+		// Phase 2: compute new value via inner reducer (calls $set internally)
+		newAcc := innerReduceFn(args[0], innerMapped)
+
+		if isIdentity && recomputeStarted && !storedVal.IsNil() && !newAcc.IsNil() {
+			// Phase 3 (identity only): valid row after recompute region.
+			// Convergence: new matches stored → all subsequent are valid → $break.
+			if (newAcc.IsInt() && storedVal.IsInt() && newAcc.Int() == storedVal.Int()) ||
+				(newAcc.IsFloat() && storedVal.IsFloat() && newAcc.Float() == storedVal.Float()) ||
+				(newAcc.IsString() && storedVal.IsString() && newAcc.String() == storedVal.String()) {
+				scm.Apply(brk)
+			}
+		}
+
+		return newAcc
+	})
 
 	t.scan_order(
-		[]string{}, trueFn,
+		condCols, condFn,
 		sortcolsScmer, sortdirsFns,
 		0, -1,
-		callbackCols,
-		col.OrcMapFn,
-		col.OrcReduceFn,
+		scanCallbackCols,
+		scanMapFn,
+		scanReduceFn,
 		col.OrcReduceInit,
 		false,
 	)
+}
 
-	// Mark all shard proxies as computed. Values live in the proxy's delta map
-	// (written by $set: closures during scan_order). Setting compressed=true
-	// prevents GetValue from re-triggering recomputeORC.
-	for _, s := range t.ActiveShards() {
-		s.mu.RLock()
-		cs := s.columns[name]
-		s.mu.RUnlock()
-		if proxy, ok := cs.(*StorageComputeProxy); ok {
-			proxy.mu.Lock()
-			proxy.compressed = true
-			proxy.mu.Unlock()
+// invalidateORCFromSortKey clears validMask bits for rows affected by a mutation.
+// sortKeys is a list of values corresponding to col.OrcSortCols.
+//
+// For partitioned ORCs (detected via analyzeOrcPartition), only rows in the
+// SAME partition are invalidated. Other partitions remain valid.
+// For unpartitioned ORCs, all rows from the mutation sort key onwards.
+func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
+	var col *column
+	for _, c := range t.Columns {
+		if c.Name == colName {
+			col = c
+			break
 		}
 	}
+	if col == nil || len(col.OrcSortCols) == 0 || len(sortKeys) == 0 {
+		return
+	}
+
+	nCols := len(col.OrcSortCols)
+	if len(sortKeys) < nCols {
+		nCols = len(sortKeys)
+	}
+	partCount := analyzeOrcPartition(col)
+
+	// Build boundaries for index-accelerated lookup.
+	// Partition columns → equality points; order columns → range from mutation key.
+	var bounds boundaries
+	for i := 0; i < partCount && i < nCols; i++ {
+		bounds = append(bounds, columnboundaries{
+			col: col.OrcSortCols[i], lower: sortKeys[i], lowerInclusive: true,
+			upper: sortKeys[i], upperInclusive: true, // equality
+		})
+	}
+	// Order columns: range from mutation key onwards.
+	// For ASC: [sortKey, ∞); for DESC: (∞, sortKey].
+	for i := partCount; i < nCols; i++ {
+		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+		if desc {
+			bounds = append(bounds, columnboundaries{
+				col: col.OrcSortCols[i], lower: scm.NewNil(), lowerInclusive: false,
+				upper: sortKeys[i], upperInclusive: true,
+			})
+		} else {
+			bounds = append(bounds, columnboundaries{
+				col: col.OrcSortCols[i], lower: sortKeys[i], lowerInclusive: true,
+				upper: scm.NewNil(), upperInclusive: false,
+			})
+		}
+	}
+	lower, upperLast := indexFromBoundaries(bounds)
+
+	// Build condition function for post-index filtering (index may return superset).
+	condFn := func(rowVals []scm.Scmer) bool {
+		for i := 0; i < partCount && i < len(rowVals); i++ {
+			if scm.Less(rowVals[i], sortKeys[i]) || scm.Less(sortKeys[i], rowVals[i]) {
+				return false
+			}
+		}
+		cmp := 0
+		for i := partCount; i < nCols && i < len(rowVals) && cmp == 0; i++ {
+			desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+			if scm.Less(rowVals[i], sortKeys[i]) {
+				if desc { cmp = 1 } else { cmp = -1 }
+			} else if scm.Less(sortKeys[i], rowVals[i]) {
+				if desc { cmp = -1 } else { cmp = 1 }
+			}
+		}
+		return cmp >= 0
+	}
+
+	// Parallel invalidation across shards using index-accelerated iteration.
+	shards := t.ActiveShards()
+	var wg sync.WaitGroup
+	wg.Add(len(shards))
+	for _, s := range shards {
+		go func(s *storageShard) {
+			defer wg.Done()
+			s.mu.RLock()
+			cs := s.columns[colName]
+			sortCSs := make([]ColumnStorage, nCols)
+			for i := 0; i < nCols; i++ {
+				sortCSs[i] = s.columns[col.OrcSortCols[i]]
+			}
+			s.mu.RUnlock()
+			proxy, ok := cs.(*StorageComputeProxy)
+			if !ok {
+				return
+			}
+			s.ensureLoaded()
+			s.ensureMainCount(false)
+			var buf [1024]uint32
+			rowVals := make([]scm.Scmer, nCols)
+			s.iterateIndex(bounds, lower, upperLast, len(s.inserts), buf[:], func(batch []uint32) bool {
+				for _, idx := range batch {
+					if s.deletions.Get(uint(idx)) {
+						continue
+					}
+					// Read sort values for post-index verification
+					for i := 0; i < nCols; i++ {
+						if sortCSs[i] != nil && idx < s.main_count {
+							rowVals[i] = sortCSs[i].GetValue(idx)
+						} else if idx >= s.main_count {
+							rowVals[i] = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
+						}
+					}
+					if condFn(rowVals) {
+						proxy.validMask.Set(uint(idx), false)
+					}
+				}
+				return true // continue
+			})
+		}(s)
+	}
+	wg.Wait()
 }
 
 // registerORCTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers on the
-// table itself so that any mutation invalidates the ORC column (Mode A: full invalidation).
+// table itself so that any mutation invalidates the ORC column.
 // The triggers are idempotent (skipped if already registered).
 func (t *table) registerORCTriggers(name string) {
+	// Find the column to check for partition support
+	var col *column
+	for _, c := range t.Columns {
+		if c.Name == name {
+			col = c
+			break
+		}
+	}
+	hasSortKey := col != nil && len(col.OrcSortCols) > 0
+
+	// Build composite sort key expression: (list (get_assoc dict "col1") (get_assoc dict "col2") ...)
+	buildSortKeyExpr := func(dictSym string) scm.Scmer {
+		if len(col.OrcSortCols) == 1 {
+			// Single sort col: pass value directly (backward compat)
+			return fkGetAssocExpr(dictSym, col.OrcSortCols[0])
+		}
+		parts := make([]scm.Scmer, 1+len(col.OrcSortCols))
+		parts[0] = scm.NewSymbol("list")
+		for i, sc := range col.OrcSortCols {
+			parts[1+i] = fkGetAssocExpr(dictSym, sc)
+		}
+		return scm.NewSlice(parts)
+	}
+
 	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 		triggerName := ".orc:" + t.Name + ":" + name + "|" + timing.String()
 		exists := false
@@ -327,12 +531,32 @@ func (t *table) registerORCTriggers(name string) {
 		if exists {
 			continue
 		}
-		body := scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("invalidatecolumn"),
-			scm.NewString(t.schema.Name),
-			scm.NewString(t.Name),
-			scm.NewString(name),
-		})
+
+		var body scm.Scmer
+		if hasSortKey {
+			// Invalidate from composite sort key onwards via validMask scan
+			switch timing {
+			case AfterInsert:
+				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("NEW")})
+			case AfterDelete:
+				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("OLD")})
+			case AfterUpdate:
+				// For UPDATE: invalidate from both OLD and NEW positions
+				body = scm.NewSlice([]scm.Scmer{
+					scm.NewSymbol("begin"),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("OLD")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), scm.NewString(t.schema.Name), scm.NewString(t.Name), scm.NewString(name), buildSortKeyExpr("NEW")}),
+				})
+			}
+		} else {
+			// No sort key: full column invalidation
+			body = scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("invalidatecolumn"),
+				scm.NewString(t.schema.Name),
+				scm.NewString(t.Name),
+				scm.NewString(name),
+			})
+		}
 		t.AddTrigger(TriggerDescription{
 			Name:     triggerName,
 			Timing:   timing,
@@ -865,11 +1089,15 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 			incrementBody,
 			invalidateBody,
 		})
+	case AfterDelete:
+		// Incremental subtraction: subtract OLD delta from cached aggregate.
+		// The COUNT column on the keytable naturally tracks group membership;
+		// when COUNT reaches 0, HAVING (COUNT > 0) excludes the empty group.
+		// The keytable cleanup trigger (priority 90) removes the row entirely.
+		oldDelta := extractDeltaExpr(mapFn, "OLD")
+		return buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD", oldDelta, true)
 	default:
-		// AfterDelete and others: use full invalidation.
-		// Incremental subtraction can leave empty groups (value=0) on the
-		// keytable; full invalidation lets the next query recompute and
-		// correctly remove groups with no source rows.
+		// Fallback: full invalidation.
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
 			scm.NewString(targetSchema),
@@ -1004,11 +1232,10 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			}
 			if !exists {
 				var body scm.Scmer
-				if incremental && timing != AfterDelete {
+				if incremental {
 					body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[6], timing)
 				} else {
-					// Full invalidation: correct for all cases including
-					// group removal on DELETE and non-additive aggregates.
+					// Full invalidation: correct for non-additive aggregates.
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						scm.NewString(targetSchema),
@@ -1106,4 +1333,28 @@ func (t *table) removeComputeTriggers(name string) {
 			srcTable.mu.Unlock()
 		}
 	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func boolSlicesEqual(a, b []bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

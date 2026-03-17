@@ -1,0 +1,261 @@
+metadata:
+  version: "1.0"
+  description: "Incremental invalidation: SUM/COUNT DELETE, ORC partition-scoped, concurrency"
+  isolated: true
+
+test_cases:
+
+  # =========================================================================
+  # Part 1: SUM/COUNT incremental DELETE (no full invalidation)
+  # =========================================================================
+
+  - name: "Create orders table"
+    sql: |
+      CREATE TABLE inv_orders (id INT PRIMARY KEY, customer INT, amount INT)
+
+  - name: "Insert order data"
+    sql: |
+      INSERT INTO inv_orders VALUES
+      (1, 1, 100), (2, 1, 200), (3, 1, 50),
+      (4, 2, 300), (5, 2, 150)
+
+  - name: "Initial GROUP BY SUM (creates cache)"
+    sql: "SELECT customer, SUM(amount) AS total FROM inv_orders GROUP BY customer ORDER BY customer"
+    expect:
+      rows: 2
+      data:
+        - {customer: 1, total: 350}
+        - {customer: 2, total: 450}
+
+  - name: "DELETE one row from customer 1"
+    sql: "DELETE FROM inv_orders WHERE id = 3"
+
+  - name: "SUM after DELETE — incremental update (not full recompute)"
+    sql: "SELECT customer, SUM(amount) AS total FROM inv_orders GROUP BY customer ORDER BY customer"
+    expect:
+      rows: 2
+      data:
+        - {customer: 1, total: 300}
+        - {customer: 2, total: 450}
+
+  - name: "DELETE last row of customer 2"
+    sql: "DELETE FROM inv_orders WHERE id = 4"
+
+  - name: "DELETE remaining row of customer 2"
+    sql: "DELETE FROM inv_orders WHERE id = 5"
+
+  - name: "SUM after deleting all rows of a group — group disappears"
+    sql: "SELECT customer, SUM(amount) AS total FROM inv_orders GROUP BY customer ORDER BY customer"
+    expect:
+      rows: 1
+      data:
+        - {customer: 1, total: 300}
+
+  - name: "COUNT after deletions"
+    sql: "SELECT customer, COUNT(*) AS cnt FROM inv_orders GROUP BY customer ORDER BY customer"
+    expect:
+      rows: 1
+      data:
+        - {customer: 1, cnt: 2}
+
+  - name: "Drop orders table"
+    sql: "DROP TABLE IF EXISTS inv_orders"
+
+  # =========================================================================
+  # Part 2: ORC PARTITION BY — partition-scoped invalidation
+  # =========================================================================
+
+  - name: "Create partitioned ORC table"
+    sql: |
+      CREATE TABLE inv_part (id INT PRIMARY KEY, grp INT, val INT, rn INT)
+
+  - name: "Insert partitioned data"
+    sql: |
+      INSERT INTO inv_part (id, grp, val) VALUES
+      (1, 1, 10), (2, 1, 20), (3, 1, 30),
+      (4, 2, 40), (5, 2, 50)
+
+  - name: "Create partitioned ORC column"
+    scm: |
+      (createcolumn "memcp-tests" "inv_part" "rn" "INT" '()
+        (list
+          "sortcols"  '("grp" "val")
+          "sortdirs"  (list false false)
+          "partitioncount" 1
+          "mapcols"   '("grp")
+          "mapfn"     (lambda ($set pk) (cons pk (list $set)))
+          "reducefn"  (lambda (acc mapped)
+                        (begin
+                          (define pk (car mapped))
+                          (define inner (cdr mapped))
+                          (define prev_pk (cadr acc))
+                          (define inner_acc (car acc))
+                          (define eff_acc (if (or (nil? prev_pk) (equal? pk prev_pk)) inner_acc 0))
+                          ((car inner) (+ eff_acc 1))
+                          (list (+ eff_acc 1) pk)))
+          "reduceinit" (list 0 nil)))
+
+  - name: "Initial partitioned rank"
+    sql: "SELECT id, grp, val, rn FROM inv_part ORDER BY grp, val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, grp: 1, val: 10, rn: 1}
+        - {id: 2, grp: 1, val: 20, rn: 2}
+        - {id: 3, grp: 1, val: 30, rn: 3}
+        - {id: 4, grp: 2, val: 40, rn: 1}
+        - {id: 5, grp: 2, val: 50, rn: 2}
+
+  - name: "INSERT into grp=1 only"
+    sql: "INSERT INTO inv_part (id, grp, val) VALUES (6, 1, 15)"
+
+  - name: "Rank after partition-local INSERT — grp=1 recomputed, grp=2 unchanged"
+    sql: "SELECT id, grp, val, rn FROM inv_part ORDER BY grp, val"
+    expect:
+      rows: 6
+      data:
+        - {id: 1, grp: 1, val: 10, rn: 1}
+        - {id: 6, grp: 1, val: 15, rn: 2}
+        - {id: 2, grp: 1, val: 20, rn: 3}
+        - {id: 3, grp: 1, val: 30, rn: 4}
+        - {id: 4, grp: 2, val: 40, rn: 1}
+        - {id: 5, grp: 2, val: 50, rn: 2}
+
+  - name: "DELETE from grp=2"
+    sql: "DELETE FROM inv_part WHERE id = 4"
+
+  - name: "Rank after partition-local DELETE"
+    sql: "SELECT id, grp, val, rn FROM inv_part ORDER BY grp, val"
+    expect:
+      rows: 5
+      data:
+        - {id: 1, grp: 1, val: 10, rn: 1}
+        - {id: 6, grp: 1, val: 15, rn: 2}
+        - {id: 2, grp: 1, val: 20, rn: 3}
+        - {id: 3, grp: 1, val: 30, rn: 4}
+        - {id: 5, grp: 2, val: 50, rn: 1}
+
+  - name: "Drop partitioned table"
+    sql: "DROP TABLE IF EXISTS inv_part"
+
+  # =========================================================================
+  # Part 3: Concurrency — write during cached read (steps with sessions)
+  # =========================================================================
+
+  - name: "Create concurrency test table"
+    sql: |
+      CREATE TABLE inv_conc (id INT PRIMARY KEY, grp INT, val INT)
+
+  - name: "Insert concurrency data (100 rows)"
+    scm: |
+      (begin
+        (define rows (produceN 100 (lambda (i) (list (+ i 1) (mod (+ i 1) 10) (* (+ i 1) 7)))))
+        (insert "memcp-tests" "inv_conc" '("id" "grp" "val") rows '() (lambda () true) false))
+
+  - name: "Create large cross-join table for slow queries"
+    sql: |
+      CREATE TABLE inv_big (id INT PRIMARY KEY, v INT)
+
+  - name: "Insert 200 rows into big table"
+    scm: |
+      (begin
+        (define rows (produceN 200 (lambda (i) (list (+ i 1) (+ i 1)))))
+        (insert "memcp-tests" "inv_big" '("id" "v") rows '() (lambda () true) false))
+
+  - name: "Warm up aggregate cache"
+    sql: "SELECT grp, SUM(val) AS total FROM inv_conc GROUP BY grp ORDER BY grp"
+    expect:
+      rows: 10
+
+  - name: "Concurrent: slow GROUP BY cross-join + INSERT during scan"
+    steps:
+      # Session A: slow cross-join GROUP BY (200*100 = 20k rows to scan)
+      - session_id: "conc-slow-reader"
+        sql: "SELECT a.grp, SUM(a.val) FROM inv_conc a, inv_big b GROUP BY a.grp ORDER BY a.grp"
+        background: true
+        expect:
+          rows: 10
+      # Let the scan start
+      - session_id: "conc-slow-writer"
+        sql: "SELECT 1"
+      # Session B: INSERT rows while scan is running — triggers cache invalidation
+      - session_id: "conc-slow-writer"
+        sql: "INSERT INTO inv_conc VALUES (1001, 5, 9999)"
+      - session_id: "conc-slow-writer"
+        sql: "INSERT INTO inv_conc VALUES (1002, 5, 8888)"
+      - session_id: "conc-slow-writer"
+        sql: "INSERT INTO inv_conc VALUES (1003, 3, 7777)"
+      # Verify: after all mutations, cache is consistent
+      - session_id: "conc-slow-writer"
+        sql: "SELECT grp, SUM(val) AS total FROM inv_conc WHERE grp = 5 GROUP BY grp"
+        expect:
+          rows: 1
+
+  - name: "Concurrent: DELETE during slow GROUP BY"
+    steps:
+      # cleanup from previous test
+      - session_id: "conc-del-setup"
+        sql: "DELETE FROM inv_conc WHERE id > 1000"
+      # Session A: slow cross-join in background
+      - session_id: "conc-del-reader"
+        sql: "SELECT a.grp, COUNT(*) AS n FROM inv_conc a, inv_big b GROUP BY a.grp ORDER BY a.grp"
+        background: true
+        expect:
+          rows: 10
+      - session_id: "conc-del-writer"
+        sql: "SELECT 1"
+      # Session B: DELETE multiple rows while scan runs
+      - session_id: "conc-del-writer"
+        sql: "DELETE FROM inv_conc WHERE id <= 5"
+      # Verify: after DELETE, COUNT reflects removed rows
+      - session_id: "conc-del-writer"
+        sql: "SELECT COUNT(*) AS n FROM inv_conc"
+        expect:
+          rows: 1
+
+  - name: "Create large ORC table"
+    sql: "CREATE TABLE inv_orc_big (id INT PRIMARY KEY, val INT)"
+
+  - name: "Insert 10k rows into ORC table"
+    scm: |
+      (begin
+        (define rows (produceN 10000 (lambda (i) (list (+ i 1) (mod (* (+ i 1) 37) 9973)))))
+        (insert "memcp-tests" "inv_orc_big" '("id" "val") rows '() (lambda () true) false))
+
+  - name: "Concurrent: INSERT during ORC scan_order"
+    steps:
+      # Background: ROW_NUMBER over 10k rows — triggers scan_order + recompute
+      - session_id: "conc-orc-reader"
+        sql: "SELECT COUNT(*) AS n FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY val) AS rn FROM inv_orc_big) t WHERE rn <= 100"
+        background: true
+        timeout: 60
+        expect:
+          rows: 1
+      - session_id: "conc-orc-writer"
+        sql: "SELECT 1"
+      - session_id: "conc-orc-writer"
+        sql: "SELECT 1"
+      # INSERT while ORC scan_order may be running
+      - session_id: "conc-orc-writer"
+        sql: "INSERT INTO inv_orc_big VALUES (100001, 42)"
+      - session_id: "conc-orc-writer"
+        sql: "INSERT INTO inv_orc_big VALUES (100002, 99)"
+      # Verify: table has correct count after concurrent operations
+      - session_id: "conc-orc-writer"
+        sql: "SELECT COUNT(*) AS n FROM inv_orc_big"
+        expect:
+          rows: 1
+
+  - name: "Drop large ORC table"
+    sql: "DROP TABLE IF EXISTS inv_orc_big"
+
+  - name: "Drop big table"
+    sql: "DROP TABLE IF EXISTS inv_big"
+
+  - name: "Drop concurrency table"
+    sql: "DROP TABLE IF EXISTS inv_conc"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS inv_orders"
+  - sql: "DROP TABLE IF EXISTS inv_part"
+  - sql: "DROP TABLE IF EXISTS inv_conc"

@@ -177,11 +177,13 @@ restart:
 				}
 				if TracePrint {
 					d := time.Since(start).String()
+					var msg string
 					if len(list) > 2 {
-						fmt.Println("trace", d, String(Eval(list[2], en)))
+						msg = "trace " + d + " " + String(Eval(list[2], en))
 					} else {
-						fmt.Println("trace", d)
+						msg = "trace " + d
 					}
+					TracePrintFunc(msg)
 				}
 				return timedResult
 			case "if":

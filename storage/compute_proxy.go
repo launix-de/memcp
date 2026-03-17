@@ -19,6 +19,7 @@ package storage
 import "io"
 import "fmt"
 import "sync"
+import "sync/atomic"
 import "reflect"
 import "encoding/json"
 import "encoding/binary"
@@ -40,13 +41,25 @@ type StorageComputeProxy struct {
 	mu         sync.RWMutex                        // protects delta map + compressed flag
 	count      uint32                              // total row count at creation
 	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
-	// Instead, the full table is recomputed via scan_order (coordinated by table.orcMu).
+	// Validity is tracked per-row via validMask (1=valid, 0=needs compute).
+	// Invalidation sets bits to 0; on-demand recompute sets them back to 1.
 	isOrdered bool
 }
 
 func (p *StorageComputeProxy) String() string {
 	return "compute-proxy"
 }
+
+// orcCol returns the column definition for this ORC proxy's column.
+func (p *StorageComputeProxy) orcCol() *column {
+	for _, c := range p.shard.t.Columns {
+		if c.Name == p.colName {
+			return c
+		}
+	}
+	return nil
+}
+
 
 func (p *StorageComputeProxy) ComputeSize() uint {
 	var sz uint = 128 // struct overhead
@@ -58,17 +71,38 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 	return sz
 }
 
+
 // GetValue returns the value at idx, computing on demand if necessary.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
-	// ORC path: values live in delta map, written by $set: during scan_order.
+	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
-		if !p.compressed {
+		if !p.validMask.Get(uint(idx)) {
+			// During an active recompute (scan_order reading ORC values):
+			// Return nil for invalid rows (reducer uses nil to detect "needs compute").
+			// Return cached value for valid rows (enables Phase 1 skip + Phase 3 convergence).
+			if atomic.LoadInt32(&p.shard.t.orcRecomputing) > 0 {
+				if p.validMask.Get(uint(idx)) {
+					// Valid row: return cached value for convergence check
+					p.mu.RLock()
+					if val, ok := p.delta[idx]; ok {
+						p.mu.RUnlock()
+						return val
+					}
+					p.mu.RUnlock()
+					if p.main != nil {
+						return p.main.GetValue(idx)
+					}
+				}
+				return scm.NewNil() // invalid row
+			}
+			// Invalid row → on-demand incremental recompute
 			p.shard.t.orcMu.Lock()
-			if !p.compressed {
-				p.shard.t.recomputeORC(p.colName)
+			if !p.validMask.Get(uint(idx)) {
+				p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx)
 			}
 			p.shard.t.orcMu.Unlock()
 		}
+		// Valid: return from delta or main
 		p.mu.RLock()
 		if val, ok := p.delta[idx]; ok {
 			p.mu.RUnlock()
@@ -288,7 +322,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.compressed {
+	if p.compressed && p.main != nil {
 		if scmer, ok := p.main.(*StorageSCMER); ok {
 			scmer.SetValue(idx, val)
 			return
@@ -304,7 +338,7 @@ func (p *StorageComputeProxy) SetValue(idx uint32, val scm.Scmer) {
 	p.validMask.Set(uint(idx), true)
 }
 
-// InvalidateAll marks all rows as needing recomputation.
+// InvalidateAll marks all rows as needing recomputation (resets validMask).
 func (p *StorageComputeProxy) InvalidateAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()

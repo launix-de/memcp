@@ -213,6 +213,33 @@ func init_alu() {
 		nil, /* TODO: dynamic call: len(a) */
 	})
 	Declare(&Globalenv, &Declaration{
+		"mod", "returns the remainder of integer division (modulo)",
+		2, 2,
+		[]DeclarationParameter{
+			DeclarationParameter{"a", "number", "dividend", nil},
+			DeclarationParameter{"b", "number", "divisor", nil},
+		}, "number",
+		func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
+			if a[0].IsInt() && a[1].IsInt() {
+				b := a[1].Int()
+				if b == 0 {
+					return NewNil()
+				}
+				return NewInt(a[0].Int() % b)
+			}
+			b := a[1].Float()
+			if b == 0 {
+				return NewNil()
+			}
+			return NewFloat(float64(int64(a[0].Float()) % int64(b)))
+		},
+		true, false, nil,
+		nil,
+	})
+	Declare(&Globalenv, &Declaration{
 		"<=", "compares two numbers or strings",
 		2, 2,
 		[]DeclarationParameter{
