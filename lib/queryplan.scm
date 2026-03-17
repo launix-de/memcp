@@ -241,6 +241,7 @@ AND (outer tblvar.col) references in the subplan's fields, condition and stages.
 		(list (quote limit) limit)
 		(list (quote offset) offset)
 		(list (quote dedup) false)
+		(list (quote stage-tables) '())
 	)
 ))
 (define make_dedup_stage (lambda (group)
@@ -251,6 +252,7 @@ AND (outer tblvar.col) references in the subplan's fields, condition and stages.
 		(list (quote limit) nil)
 		(list (quote offset) nil)
 		(list (quote dedup) true)
+		(list (quote stage-tables) '())
 	)
 ))
 (define stage_group_cols (lambda (stage) (reduce stage (lambda (acc item)
@@ -289,6 +291,12 @@ AND (outer tblvar.col) references in the subplan's fields, condition and stages.
 		_ false
 	))
 ) false)))
+(define stage_tables (lambda (stage) (reduce stage (lambda (acc item)
+	(if (not (nil? acc)) acc (match item
+		(cons (quote stage-tables) rest) (if (nil? rest) '() (car rest))
+		_ nil
+	))
+) nil)))
 
 /* query term helpers */
 (define query_union_all_parts (lambda (query) (match query
@@ -1848,6 +1856,14 @@ GROUP BY AGGREGATE PIPELINE:
 	*/
 
 	/* TODO: order tables: outer joins behind */
+	/* separate dependent_scalar tables from base tables.
+	GROUP BY / keytable / window paths only operate on real tables.
+	dependent_scalar tables are re-injected into the final scan via stage-tables
+	or appended to the scan-only paths (ORDER/unordered). */
+	(define _is_ds_table (lambda (t) (match t '(_ _ '((quote dependent_scalar) _ _) _ _) true _ false)))
+	(define _real_tables (filter tables (lambda (t) (not (_is_ds_table t)))))
+	(define _ds_tables (filter tables _is_ds_table))
+	(set tables _real_tables)
 	(set groups (coalesceNil groups '()))
 	(define groups_present (and (not (nil? groups)) (not (equal? groups '()))))
 	(define stage (if groups_present (car groups) nil))
@@ -2620,8 +2636,8 @@ GROUP BY AGGREGATE PIPELINE:
 					/* ordered or limited scan */
 					/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
 					(set stage_order (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
-					/* save full tables list so build_scan closures can extract dependent_scalar outer refs */
-					(define _all_tables tables)
+					/* save full tables list (incl. dependent_scalars) so build_scan can extract outer refs */
+					(define _all_tables (merge tables _ds_tables))
 					/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
 					(define build_scan (lambda (tables condition is_first)
 						(match tables
@@ -2709,14 +2725,14 @@ GROUP BY AGGREGATE PIPELINE:
 							'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 						)
 					))
-					(build_scan tables (replace_find_column condition) true)
+					(build_scan (merge tables _ds_tables) (replace_find_column condition) true)
 				) (begin
 						/* unordered unlimited scan */
 
 						/* TODO: sort tables according to join plan */
 						/* TODO: match tbl to inner query vs string */
-						/* save full tables list so build_scan closures can extract dependent_scalar outer refs */
-						(define _all_tables tables)
+						/* save full tables list (incl. dependent_scalars) so build_scan can extract outer refs */
+						(define _all_tables (merge tables _ds_tables))
 						(define build_scan (lambda (tables condition)
 							(match tables
 								(cons '(tblvar _ '((quote dependent_scalar) subplan output_col) isOuter _) tables) (begin
@@ -2779,7 +2795,7 @@ GROUP BY AGGREGATE PIPELINE:
 								'() /* final inner (=scalar) */ '('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
 							)
 						))
-						(build_scan tables (replace_find_column condition))
+						(build_scan (merge tables _ds_tables) (replace_find_column condition))
 			)))
 	)))
 )))
