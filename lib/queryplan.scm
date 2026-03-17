@@ -603,33 +603,39 @@ PURPOSE: Flatten a parsed SQL query into a logical structure.
 INPUT:  parsed query tuple (schema tables fields condition group having order limit offset outer_schemas_param)
 OUTPUT: 7-tuple (schema tables fields condition groups schemas replace_find_column)
 
-INVARIANTS — the output MUST NOT contain any of these in fields/condition/groups:
-	- scan / scan_order / scalar_scan  (physical scan operators)
-	- !begin / newsession              (runtime state)
-	- resultrow                        (output emission)
-
-	These belong exclusively to build_queryplan / build_scan.
-
-WHAT IT DOES:
+WHAT IT DOES (Neumann "Unnesting Arbitrary Queries"):
 	- Flattens FROM (SELECT ...) derived tables into the parent tables list
 	  with alias prefixing (id:alias) and renamelist for column resolution
-	- Converts scalar/IN/EXISTS subqueries via build_scalar_subselect,
-	  build_in_subselect, build_exists_subselect (runtime code)
+	- Unnests correlated scalar/IN/EXISTS subqueries:
+	  transforms them into LEFT JOIN LIMIT 1 table entries so that all
+	  subqueries become flat table references in the tables list
+	  (currently via build_scalar_subselect which produces inline runtime code;
+	  the goal is to produce pure declarative LEFT JOIN table entries instead)
+	- Pushes domain columns through GROUP BY barriers when decorrelating
+	  (Neumann: D ⋈ Γ_A(T) == Γ_{A∪D}(D ⋈ T))
 	- Canonicalizes get_column markers: resolves ti/ci flags to canonical casing
 	  so all get_column nodes have false/false after this phase
 	- Collects group/having/order/limit/offset into a stages pipeline
 	- Builds schemas (alias -> column definitions) and replace_find_column
 
 WHAT IT MUST NOT DO:
-	- Build physical scan plans (except inline scalar subselects via build_scalar_subselect)
 	- Choose join order (that is join_reorder's job)
 	- Create keytables or aggregate infrastructure (that is build_queryplan's job)
+
+INVARIANTS — the output SHOULD NOT contain (goal, not yet enforced):
+	- scan / scan_order / scalar_scan  (physical scan operators)
+	- !begin / newsession              (runtime state)
+	- resultrow                        (output emission)
+	These belong exclusively to build_queryplan / build_scan.
+	Currently build_scalar_subselect still produces these; migrating to
+	declarative LEFT JOIN table entries is the purpose of this branch.
 
 TABLE ENTRY FORMAT:
 	Base table: (alias schema "table_name" isOuter joinexpr)
 */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
-	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
+	/* TODO: unnest correlated scalar subqueries into LEFT JOIN LIMIT 1 table entries
+	instead of producing inline runtime code via build_scalar_subselect */
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
 	(define sq_cache (newsession))
@@ -1670,32 +1676,29 @@ TABLE ENTRY FORMAT:
 /*
 === CONTRACT: join_reorder ===
 
-PURPOSE: Optimize table order and propagate dependent relations through barriers.
-	Operates on the logical structure from untangle_query BEFORE physical plan building.
-	This is the Neumann decorrelation phase.
+PURPOSE: Optimize table order for physical scan execution.
+	Determines which table to scan first in a nested-loop join based on
+	table sizes, available indexes, and predicate selectivity.
+	Pure physical optimization — does not change query semantics.
 
 INPUT:  7-tuple (schema tables fields condition groups schemas replace_find_column)
-	- tables may contain dependent_scalar entries mixed with base tables
-	- groups is a pipeline of barrier stages (group_barrier, order_limit_barrier, etc.)
-	- fields/condition contain raw get_column markers (not yet resolved)
+	- tables: flat list of base tables (already fully unnested by untangle_query)
+	- condition: conjunction of predicates referencing these tables
+	- fields/condition contain canonicalized get_column markers (false/false)
 
 OUTPUT: 7-tuple (schema tables fields condition groups schemas replace_find_column)
-	- same format, but tables reordered and dependent relations resolved
+	- same format, tables reordered for optimal nested-loop join execution
 
 WHAT IT MAY DO:
-	- Reorder tables within a barrier-free scan segment for optimal join order
+	- Reorder tables within a barrier-free scan segment
+	- Choose which table to drive the scan based on selectivity estimates
 
 WHAT IT MUST NOT DO:
+	- Transform query structure (that is untangle_query's job)
+	- Decorrelate subqueries or create joins (that is untangle_query's job)
 	- Build physical scan plans (that is build_queryplan's job)
 	- Create keytables, scans, or runtime code
-	- Resolve get_column markers to variable references
 	- Reorder tables across a join fence (LEFT/SEMI/ANTI JOIN boundary)
-
-BARRIER RULES:
-	- GROUP BY is a hard barrier: join reordering cannot cross it
-	- ORDER BY + LIMIT is a barrier (conservative; build_queryplan may collapse to scan_order)
-	- LEFT/SEMI/ANTI JOIN fences: tables on RHS must stay on RHS
-	- Within a barrier-free segment, any reordering that preserves semantics is allowed
 */
 /* currently a stub — preserves original table order */
 (define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
@@ -1763,20 +1766,18 @@ INPUT:  7-tuple (schema tables fields condition groups schemas replace_find_colu
 OUTPUT: executable Scheme expression (scan, begin, keytable operations, etc.)
 
 WHAT IT DOES:
+	- Takes a flat, already-reordered table list and builds executable plans
 	- Resolves get_column markers to variable references via replace_find_column
 	- Processes GROUP BY stages: creates keytables, collect/compute/grouped plans
 	- Processes ORDER BY / LIMIT: generates scan_order with offset/limit
 	- Generates nested scan loops via build_scan for multi-table joins
-	- Handles dependent_scalar table entries in build_scan:
-	  executes the subplan per outer row, captures result via promise,
-	  binds result as a variable for subsequent expressions
+	  (table order determined by join_reorder, build_scan follows it)
 	- Handles window functions (ORC, aggregate, LAG/LEAD)
 	- Emits resultrow calls for final output
 
 WHAT IT MUST NOT DO:
 	- Reorder tables (that is join_reorder's job)
-	- Flatten derived tables or resolve subqueries (that is untangle_query's job)
-	- Assume tables are in any particular order — it processes them as given
+	- Flatten derived tables or unnest subqueries (that is untangle_query's job)
 
 TABLE ENTRIES IT HANDLES:
 	- Base table: (alias schema "table_name" isOuter joinexpr)
