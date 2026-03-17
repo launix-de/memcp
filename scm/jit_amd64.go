@@ -21,13 +21,29 @@ package scm
 import (
 	"fmt"
 	"math"
-	"syscall"
 	"unsafe"
 )
 
 // TODO: create this file for other architectures, too
 
 var jitCodeOverflowPanic = &struct{}{}
+
+// jitNextCallback is the runtime/jit Next callback for unwinding through
+// JIT frames with standard RBP frame setup (push rbp; mov rbp, rsp).
+//
+func jitNextCallback(pc, sp uintptr) (callerPC, callerSP, callerBP uintptr, ok bool) {
+	// sp = frame.fp of the Go callee (= caller's SP).
+	// With frame pointers enabled (Go 1.18+ on amd64):
+	//   [sp - 8]  = callee's return address (= pc, pointing into JIT code)
+	//   [sp - 16] = callee's saved BP = JIT code's RBP
+	// JIT prologue sets RBP after "push rbp; mov rbp, rsp", so:
+	//   [JIT_RBP + 0] = saved outer RBP
+	//   [JIT_RBP + 8] = Go caller's return address
+	jitRBP := *(*uintptr)(unsafe.Pointer(sp - 16))
+	savedBP := *(*uintptr)(unsafe.Pointer(jitRBP))
+	goRetAddr := *(*uintptr)(unsafe.Pointer(jitRBP + 8))
+	return goRetAddr, jitRBP + 16, savedBP, true
+}
 
 // jitCompileProc compiles a Proc body to amd64 machine code or returns nil.
 func jitCompileProc(proc *Proc) []byte {
@@ -39,11 +55,8 @@ func jitCompileProc(proc *Proc) []byte {
 // returns GC roots for pointer constants embedded into immediates.
 func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
-	buf, err := allocExec(defaultCodeBufSize)
-	if err != nil {
-		return nil, nil
-	}
-	defer syscall.Munmap((*[1 << 30]byte)(buf.ptr)[:buf.n:buf.n])
+	ptr, _ := globalJITPool.Alloc(defaultCodeBufSize)
+	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize}
 	codeLen, roots, _ := jitCompileProcToExec(proc, buf)
 	if codeLen == 0 {
 		return nil, nil
@@ -58,7 +71,16 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
-		body = body.SourceInfo().value
+		si := body.SourceInfo()
+		if buf.arena != nil && si.source != "" {
+			codeOffset := int32(uintptr(buf.ptr) - uintptr(buf.arena.base))
+			buf.arena.sourceMap = append(buf.arena.sourceMap, jitSourceEntry{
+				offset: codeOffset,
+				file:   si.source,
+				line:   int32(si.line),
+			})
+		}
+		body = si.value
 	}
 	return jitCompileExprBodyToExec(proc, body, proc.NumVars, buf)
 }
@@ -92,8 +114,14 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		FreeRegs:  freeRegs,
 		AllRegs:   freeRegs,
 		SliceBase: RegR12,
+		Arena:     buf.arena,
 	}
 	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
+
+	// RBP frame prologue for runtime/jit unwinding:
+	// push rbp; mov rbp, rsp
+	ctx.emitByte(0x55)                      // push rbp
+	ctx.emitBytes(0x48, 0x89, 0xE5)         // mov rbp, rsp
 
 	// Emit: MOV R12, RAX (save slice base pointer)
 	ctx.emitMovRegReg(RegR12, RegRAX)
@@ -176,6 +204,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		if frameBytes > 0 {
 			ctx.EmitAddRSP32(int32(frameBytes))
 		}
+		ctx.emitByte(0x5D) // pop rbp
 		ctx.emitByte(0xC3) // RET
 	} else {
 		// Ensure non-immediate results are in ABI return registers.
@@ -206,6 +235,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		if frameBytes > 0 {
 			ctx.EmitAddRSP32(int32(frameBytes))
 		}
+		ctx.emitByte(0x5D) // pop rbp
 		ctx.emitByte(0xC3) // RET
 	}
 
@@ -536,7 +566,16 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 // Panics on unsupported expressions (caught by jitCompileExprBodyToExec).
 func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	if expr.GetTag() == tagSourceInfo {
-		expr = expr.SourceInfo().value
+		si := expr.SourceInfo()
+		if ctx.Arena != nil && si.source != "" {
+			codeOffset := int32(uintptr(ctx.Ptr) - uintptr(ctx.Arena.base))
+			ctx.Arena.sourceMap = append(ctx.Arena.sourceMap, jitSourceEntry{
+				offset: codeOffset,
+				file:   si.source,
+				line:   int32(si.line),
+			})
+		}
+		expr = si.value
 	}
 	switch expr.GetTag() {
 	case tagNil:

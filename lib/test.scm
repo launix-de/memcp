@@ -1188,6 +1188,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (_jit_x2p2 0) 2 "jit: 0*2+2 = 2")
 	(assert (_jit_x2p2 -3) -4 "jit: -3*2+2 = -4")
 
+	/* JIT panic propagation: Go(try/recover) → JIT → Go(error) → panic */
+	(print "testing JIT panic propagation ...")
+	(define jit_will_panic (jit (lambda (x) (error "jit-boom"))))
+	(define jit_panic_result (try (lambda () (jit_will_panic 42)) (lambda (e) "caught")))
+	(assert jit_panic_result "caught" "panic through JIT frame must be recoverable")
+
 	/* alu.go: sql_abs */
 	(print "testing sql_abs ...")
 	(assert (equal? (sql_abs -5) 5) true "sql_abs of -5 = 5")

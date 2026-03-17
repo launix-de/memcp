@@ -62,6 +62,11 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool
 	return 0, nil, false
 }
 
+// jitNextCallback is a stub for arm64 — unwinding not yet implemented.
+func jitNextCallback(pc, sp uintptr) (callerPC, callerSP, callerBP uintptr, ok bool) {
+	return 0, 0, 0, false
+}
+
 /* TODO: peephole optimizer:
 - remove argument checks (test rbx,rbx 48 85 db 76 xx)
 - shorten immediate values
