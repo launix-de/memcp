@@ -970,6 +970,15 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	}
 	dv := g.allocDesc()
 	g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, %d)", dv, funcExpr, argList, retWords)
+	// Bind and protect GoCall result registers. The nil-ownership from
+	// EmitGoCallScalar prevents spilling, but BindReg makes it trackable.
+	// We protect until freeDeadOperands releases this value.
+	if retWords == 1 {
+		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
+	} else {
+		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
+		g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
+	}
 	marker := ""
 	if bt, ok := retType.Underlying().(*types.Basic); ok && bt.Kind() == types.String {
 		marker = "_gostring"
@@ -2111,7 +2120,10 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 		g.emit("bbs[%d].RenderPS = func(ps PhiState) JITValueDesc {", bbIdx)
 		g.emit("if !ps.General {")
 		g.emitSpecializedPhiStackWrites(bbIdx, "ps", "\t")
-		g.emit("\tif bbs[%d].VisitCount >= 2 {", bbIdx)
+		// TODO: specialization/unrolling disabled until phi constant propagation
+		// is properly implemented. Factors to consider: loop iteration savings,
+		// fetch elimination, register pressure trade-offs.
+		g.emit("\tif bbs[%d].VisitCount >= 0 {", bbIdx)
 		g.emit("\t\tps.General = true")
 		g.emit("\t\treturn bbs[%d].RenderPS(ps)", bbIdx)
 		g.emit("\t}")
@@ -2275,7 +2287,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 	g.multiBlock = len(fn.Blocks) > 1
 
 	g.emitBody(emitBodyConfig{
-		entryGeneral: true,
+		entryGeneral: false,
 		bbsDeclPrefix: "",
 		emitPhiFrameAdj: func(g *codeGen) {
 			g.emit("for i := range args {")
@@ -4477,18 +4489,17 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
-				// Conservative spill safety for arithmetic BinOps as well.
+				// Ensure both operands are in registers, protecting each from
+				// eviction while the other is loaded.
 				if xVal.isDesc {
 					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
+					g.emit("ctx.ProtectReg(%s.Reg)", xVal.goVar)
 				}
 				if yVal.isDesc {
 					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
 				}
 				if xVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
-				}
-				if yVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
+					g.emit("ctx.UnprotectReg(%s.Reg)", xVal.goVar)
 				}
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))

@@ -793,6 +793,7 @@ func init() {
 				panic("jit: generic call arg expects 2-word value (ComputeSize arg0)")
 			}
 			d2 := ctx.EmitGoCallScalar(GoFuncAddr(ComputeSize), []JITValueDesc{d1}, 1)
+			ctx.BindReg(d2.Reg, &d2)
 			ctx.FreeDesc(&d1)
 			ctx.EnsureDesc(&d2)
 			ctx.EnsureDesc(&d2)
@@ -1101,6 +1102,8 @@ func init() {
 				panic("jit: generic call arg expects 2-word value (NewSymbol arg0)")
 			}
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(NewSymbol), []JITValueDesc{d2}, 2)
+			ctx.BindReg(d4.Reg, &d4)
+			ctx.BindReg(d4.Reg2, &d4)
 			if d4.Loc == LocImm {
 				if result.Loc == LocAny { return d4 }
 			}
@@ -1451,7 +1454,7 @@ Patterns can be any of:
 			lbl3 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -1570,7 +1573,7 @@ Patterns can be any of:
 			}
 			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -1720,7 +1723,7 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d23)
 					ctx.EmitStoreScmerToStack(d23, int32(bbs[2].PhiBase)+int32(0))
 				}
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -1913,6 +1916,8 @@ Patterns can be any of:
 				panic("jit: generic call arg expects 2-word value (Read arg1)")
 			}
 			d27 = ctx.EmitGoCallScalar(GoFuncAddr(Read), []JITValueDesc{d0, d25}, 2)
+			ctx.BindReg(d27.Reg, &d27)
+			ctx.BindReg(d27.Reg2, &d27)
 			ctx.FreeDesc(&d0)
 			ctx.EnsureDesc(&d27)
 			if d27.Loc == LocRegPair {
@@ -1962,7 +1967,7 @@ Patterns can be any of:
 					}
 				}
 			}
-			ps29 := PhiState{General: true}
+			ps29 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps29)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()

@@ -340,6 +340,8 @@ func init_sync() {
 				panic("jit: generic call arg expects 2-word value (WithSession arg1)")
 			}
 			d3 := ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d1, d2}, 2)
+			ctx.BindReg(d3.Reg, &d3)
+			ctx.BindReg(d3.Reg2, &d3)
 			ctx.FreeDesc(&d1)
 			ctx.FreeDesc(&d2)
 			if d3.Loc == LocImm {
@@ -478,6 +480,7 @@ func init_sync() {
 				}
 			}
 			d1 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
+			ctx.BindReg(d1.Reg, &d1)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d1)

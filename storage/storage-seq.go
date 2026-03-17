@@ -738,7 +738,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			lbl14 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -755,15 +755,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl1)
 				ctx.ResolveFixups()
 			}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -951,7 +951,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 					ctx.EnsureDesc(&d23)
 					ctx.EmitStoreToStack(d23, int32(bbs[1].PhiBase)+int32(32))
 				}
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -968,15 +968,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
 			}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
-			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -1115,9 +1115,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d26)
 			ctx.EnsureDesc(&d28)
 			ctx.EnsureDesc(&d26)
+			ctx.ProtectReg(d26.Reg)
 			ctx.EnsureDesc(&d28)
-			ctx.EnsureDesc(&d26)
-			ctx.EnsureDesc(&d28)
+			ctx.UnprotectReg(d26.Reg)
 			var d29 scm.JITValueDesc
 			if d26.Loc == scm.LocImm && d28.Loc == scm.LocImm {
 				d29 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d26.Imm.Int() * d28.Imm.Int())}
@@ -1292,9 +1292,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d35)
 			ctx.EnsureDesc(&d36)
 			ctx.EnsureDesc(&d35)
+			ctx.ProtectReg(d35.Reg)
 			ctx.EnsureDesc(&d36)
-			ctx.EnsureDesc(&d35)
-			ctx.EnsureDesc(&d36)
+			ctx.UnprotectReg(d35.Reg)
 			var d37 scm.JITValueDesc
 			if d35.Loc == scm.LocImm && d36.Loc == scm.LocImm {
 				d37 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d35.Imm.Int() + d36.Imm.Int())}
@@ -1429,9 +1429,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d43 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d42)
 			ctx.EnsureDesc(&d43)
+			ctx.ProtectReg(d43.Reg)
 			ctx.EnsureDesc(&d42)
-			ctx.EnsureDesc(&d43)
-			ctx.EnsureDesc(&d42)
+			ctx.UnprotectReg(d43.Reg)
 			var d44 scm.JITValueDesc
 			if d43.Loc == scm.LocImm && d42.Loc == scm.LocImm {
 				d44 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d43.Imm.Int() - d42.Imm.Int())}
@@ -1593,9 +1593,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d50 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d49)
 			ctx.EnsureDesc(&d50)
+			ctx.ProtectReg(d50.Reg)
 			ctx.EnsureDesc(&d49)
-			ctx.EnsureDesc(&d50)
-			ctx.EnsureDesc(&d49)
+			ctx.UnprotectReg(d50.Reg)
 			var d51 scm.JITValueDesc
 			if d50.Loc == scm.LocImm && d49.Loc == scm.LocImm {
 				d51 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d50.Imm.Int() - d49.Imm.Int())}
@@ -1765,9 +1765,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d56)
 			ctx.EnsureDesc(&d57)
 			ctx.EnsureDesc(&d56)
+			ctx.ProtectReg(d56.Reg)
 			ctx.EnsureDesc(&d57)
-			ctx.EnsureDesc(&d56)
-			ctx.EnsureDesc(&d57)
+			ctx.UnprotectReg(d56.Reg)
 			var d58 scm.JITValueDesc
 			if d56.Loc == scm.LocImm && d57.Loc == scm.LocImm {
 				d58 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d56.Imm.Int() + d57.Imm.Int())}
@@ -2301,7 +2301,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 					ctx.EnsureDesc(&d134)
 					ctx.EmitStoreToStack(d134, int32(bbs[2].PhiBase)+int32(0))
 				}
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -2318,15 +2318,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
+			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
-			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
-			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -2623,9 +2623,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d138)
 			ctx.EnsureDesc(&d140)
 			ctx.EnsureDesc(&d138)
+			ctx.ProtectReg(d138.Reg)
 			ctx.EnsureDesc(&d140)
-			ctx.EnsureDesc(&d138)
-			ctx.EnsureDesc(&d140)
+			ctx.UnprotectReg(d138.Reg)
 			var d141 scm.JITValueDesc
 			if d138.Loc == scm.LocImm && d140.Loc == scm.LocImm {
 				d141 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d138.Imm.Int() * d140.Imm.Int())}
@@ -2800,9 +2800,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d147)
 			ctx.EnsureDesc(&d148)
 			ctx.EnsureDesc(&d147)
+			ctx.ProtectReg(d147.Reg)
 			ctx.EnsureDesc(&d148)
-			ctx.EnsureDesc(&d147)
-			ctx.EnsureDesc(&d148)
+			ctx.UnprotectReg(d147.Reg)
 			var d149 scm.JITValueDesc
 			if d147.Loc == scm.LocImm && d148.Loc == scm.LocImm {
 				d149 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d147.Imm.Int() + d148.Imm.Int())}
@@ -2937,9 +2937,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d155 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d154)
 			ctx.EnsureDesc(&d155)
+			ctx.ProtectReg(d155.Reg)
 			ctx.EnsureDesc(&d154)
-			ctx.EnsureDesc(&d155)
-			ctx.EnsureDesc(&d154)
+			ctx.UnprotectReg(d155.Reg)
 			var d156 scm.JITValueDesc
 			if d155.Loc == scm.LocImm && d154.Loc == scm.LocImm {
 				d156 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d155.Imm.Int() - d154.Imm.Int())}
@@ -3101,9 +3101,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d162 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d161)
 			ctx.EnsureDesc(&d162)
+			ctx.ProtectReg(d162.Reg)
 			ctx.EnsureDesc(&d161)
-			ctx.EnsureDesc(&d162)
-			ctx.EnsureDesc(&d161)
+			ctx.UnprotectReg(d162.Reg)
 			var d163 scm.JITValueDesc
 			if d162.Loc == scm.LocImm && d161.Loc == scm.LocImm {
 				d163 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d162.Imm.Int() - d161.Imm.Int())}
@@ -3273,9 +3273,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d168)
 			ctx.EnsureDesc(&d169)
 			ctx.EnsureDesc(&d168)
+			ctx.ProtectReg(d168.Reg)
 			ctx.EnsureDesc(&d169)
-			ctx.EnsureDesc(&d168)
-			ctx.EnsureDesc(&d169)
+			ctx.UnprotectReg(d168.Reg)
 			var d170 scm.JITValueDesc
 			if d168.Loc == scm.LocImm && d169.Loc == scm.LocImm {
 				d170 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d168.Imm.Int() + d169.Imm.Int())}
@@ -4002,7 +4002,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[3].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[3].VisitCount >= 2 {
+				if bbs[3].VisitCount >= 0 {
 					ps.General = true
 					return bbs[3].RenderPS(ps)
 				}
@@ -4019,15 +4019,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl4)
 				ctx.ResolveFixups()
 			}
+			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
 			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
-			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -4602,7 +4602,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 					ctx.EnsureDesc(&d297)
 					ctx.EmitStoreToStack(d297, int32(bbs[4].PhiBase)+int32(32))
 				}
-				if bbs[4].VisitCount >= 2 {
+				if bbs[4].VisitCount >= 0 {
 					ps.General = true
 					return bbs[4].RenderPS(ps)
 				}
@@ -4619,15 +4619,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl5)
 				ctx.ResolveFixups()
 			}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
-			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5901,7 +5901,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[5].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[5].VisitCount >= 2 {
+				if bbs[5].VisitCount >= 0 {
 					ps.General = true
 					return bbs[5].RenderPS(ps)
 				}
@@ -5918,15 +5918,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl6)
 				ctx.ResolveFixups()
 			}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
-			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
 			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -6563,7 +6563,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[6].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[6].VisitCount >= 2 {
+				if bbs[6].VisitCount >= 0 {
 					ps.General = true
 					return bbs[6].RenderPS(ps)
 				}
@@ -6580,15 +6580,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl7)
 				ctx.ResolveFixups()
 			}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -7066,9 +7066,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d456)
 			ctx.EnsureDesc(&d458)
 			ctx.EnsureDesc(&d456)
+			ctx.ProtectReg(d456.Reg)
 			ctx.EnsureDesc(&d458)
-			ctx.EnsureDesc(&d456)
-			ctx.EnsureDesc(&d458)
+			ctx.UnprotectReg(d456.Reg)
 			var d459 scm.JITValueDesc
 			if d456.Loc == scm.LocImm && d458.Loc == scm.LocImm {
 				d459 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d456.Imm.Int() * d458.Imm.Int())}
@@ -7243,9 +7243,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d465)
 			ctx.EnsureDesc(&d466)
 			ctx.EnsureDesc(&d465)
+			ctx.ProtectReg(d465.Reg)
 			ctx.EnsureDesc(&d466)
-			ctx.EnsureDesc(&d465)
-			ctx.EnsureDesc(&d466)
+			ctx.UnprotectReg(d465.Reg)
 			var d467 scm.JITValueDesc
 			if d465.Loc == scm.LocImm && d466.Loc == scm.LocImm {
 				d467 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d465.Imm.Int() + d466.Imm.Int())}
@@ -7380,9 +7380,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d473 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d472)
 			ctx.EnsureDesc(&d473)
+			ctx.ProtectReg(d473.Reg)
 			ctx.EnsureDesc(&d472)
-			ctx.EnsureDesc(&d473)
-			ctx.EnsureDesc(&d472)
+			ctx.UnprotectReg(d473.Reg)
 			var d474 scm.JITValueDesc
 			if d473.Loc == scm.LocImm && d472.Loc == scm.LocImm {
 				d474 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d473.Imm.Int() - d472.Imm.Int())}
@@ -7544,9 +7544,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d480 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d479)
 			ctx.EnsureDesc(&d480)
+			ctx.ProtectReg(d480.Reg)
 			ctx.EnsureDesc(&d479)
-			ctx.EnsureDesc(&d480)
-			ctx.EnsureDesc(&d479)
+			ctx.UnprotectReg(d480.Reg)
 			var d481 scm.JITValueDesc
 			if d480.Loc == scm.LocImm && d479.Loc == scm.LocImm {
 				d481 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d480.Imm.Int() - d479.Imm.Int())}
@@ -7702,9 +7702,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d486)
 			ctx.EnsureDesc(&d57)
 			ctx.EnsureDesc(&d486)
+			ctx.ProtectReg(d486.Reg)
 			ctx.EnsureDesc(&d57)
-			ctx.EnsureDesc(&d486)
-			ctx.EnsureDesc(&d57)
+			ctx.UnprotectReg(d486.Reg)
 			var d487 scm.JITValueDesc
 			if d486.Loc == scm.LocImm && d57.Loc == scm.LocImm {
 				d487 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d486.Imm.Int() + d57.Imm.Int())}
@@ -8896,7 +8896,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[7].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[7].VisitCount >= 2 {
+				if bbs[7].VisitCount >= 0 {
 					ps.General = true
 					return bbs[7].RenderPS(ps)
 				}
@@ -8913,15 +8913,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl8)
 				ctx.ResolveFixups()
 			}
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -9728,7 +9728,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 					ctx.EnsureDesc(&d681)
 					ctx.EmitStoreToStack(d681, int32(bbs[8].PhiBase)+int32(16))
 				}
-				if bbs[8].VisitCount >= 2 {
+				if bbs[8].VisitCount >= 0 {
 					ps.General = true
 					return bbs[8].RenderPS(ps)
 				}
@@ -9745,15 +9745,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl9)
 				ctx.ResolveFixups()
 			}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
-			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -11618,7 +11618,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[9].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[9].VisitCount >= 2 {
+				if bbs[9].VisitCount >= 0 {
 					ps.General = true
 					return bbs[9].RenderPS(ps)
 				}
@@ -11635,15 +11635,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl10)
 				ctx.ResolveFixups()
 			}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -12493,7 +12493,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[10].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[10].VisitCount >= 2 {
+				if bbs[10].VisitCount >= 0 {
 					ps.General = true
 					return bbs[10].RenderPS(ps)
 				}
@@ -12510,15 +12510,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl11)
 				ctx.ResolveFixups()
 			}
-			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
-			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
-			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
+			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
+			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
 			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
+			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -13126,9 +13126,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d7)
 			ctx.EnsureDesc(&d8)
 			ctx.EnsureDesc(&d7)
+			ctx.ProtectReg(d7.Reg)
 			ctx.EnsureDesc(&d8)
-			ctx.EnsureDesc(&d7)
-			ctx.EnsureDesc(&d8)
+			ctx.UnprotectReg(d7.Reg)
 			var d899 scm.JITValueDesc
 			if d7.Loc == scm.LocImm && d8.Loc == scm.LocImm {
 				d899 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d7.Imm.Int() + d8.Imm.Int())}
@@ -13495,7 +13495,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[11].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[11].VisitCount >= 2 {
+				if bbs[11].VisitCount >= 0 {
 					ps.General = true
 					return bbs[11].RenderPS(ps)
 				}
@@ -13512,15 +13512,15 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl12)
 				ctx.ResolveFixups()
 			}
-			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
+			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != scm.LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -14167,7 +14167,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[12].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[12].VisitCount >= 2 {
+				if bbs[12].VisitCount >= 0 {
 					ps.General = true
 					return bbs[12].RenderPS(ps)
 				}
@@ -14184,12 +14184,12 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl13)
 				ctx.ResolveFixups()
 			}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}
@@ -14892,9 +14892,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d914)
 			ctx.EnsureDesc(&d916)
 			ctx.EnsureDesc(&d914)
+			ctx.ProtectReg(d914.Reg)
 			ctx.EnsureDesc(&d916)
-			ctx.EnsureDesc(&d914)
-			ctx.EnsureDesc(&d916)
+			ctx.UnprotectReg(d914.Reg)
 			var d917 scm.JITValueDesc
 			if d914.Loc == scm.LocImm && d916.Loc == scm.LocImm {
 				d917 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d914.Imm.Int() * d916.Imm.Int())}
@@ -15069,9 +15069,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d923)
 			ctx.EnsureDesc(&d924)
 			ctx.EnsureDesc(&d923)
+			ctx.ProtectReg(d923.Reg)
 			ctx.EnsureDesc(&d924)
-			ctx.EnsureDesc(&d923)
-			ctx.EnsureDesc(&d924)
+			ctx.UnprotectReg(d923.Reg)
 			var d925 scm.JITValueDesc
 			if d923.Loc == scm.LocImm && d924.Loc == scm.LocImm {
 				d925 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d923.Imm.Int() + d924.Imm.Int())}
@@ -15206,9 +15206,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d931 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d930)
 			ctx.EnsureDesc(&d931)
+			ctx.ProtectReg(d931.Reg)
 			ctx.EnsureDesc(&d930)
-			ctx.EnsureDesc(&d931)
-			ctx.EnsureDesc(&d930)
+			ctx.UnprotectReg(d931.Reg)
 			var d932 scm.JITValueDesc
 			if d931.Loc == scm.LocImm && d930.Loc == scm.LocImm {
 				d932 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d931.Imm.Int() - d930.Imm.Int())}
@@ -15370,9 +15370,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d938 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d937)
 			ctx.EnsureDesc(&d938)
+			ctx.ProtectReg(d938.Reg)
 			ctx.EnsureDesc(&d937)
-			ctx.EnsureDesc(&d938)
-			ctx.EnsureDesc(&d937)
+			ctx.UnprotectReg(d938.Reg)
 			var d939 scm.JITValueDesc
 			if d938.Loc == scm.LocImm && d937.Loc == scm.LocImm {
 				d939 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d938.Imm.Int() - d937.Imm.Int())}
@@ -15542,9 +15542,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d944)
 			ctx.EnsureDesc(&d945)
 			ctx.EnsureDesc(&d944)
+			ctx.ProtectReg(d944.Reg)
 			ctx.EnsureDesc(&d945)
-			ctx.EnsureDesc(&d944)
-			ctx.EnsureDesc(&d945)
+			ctx.UnprotectReg(d944.Reg)
 			var d946 scm.JITValueDesc
 			if d944.Loc == scm.LocImm && d945.Loc == scm.LocImm {
 				d946 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d944.Imm.Int() + d945.Imm.Int())}
@@ -15644,9 +15644,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d949)
 			ctx.EnsureDesc(&d951)
 			ctx.EnsureDesc(&d949)
+			ctx.ProtectReg(d949.Reg)
 			ctx.EnsureDesc(&d951)
-			ctx.EnsureDesc(&d949)
-			ctx.EnsureDesc(&d951)
+			ctx.UnprotectReg(d949.Reg)
 			var d952 scm.JITValueDesc
 			if d949.Loc == scm.LocImm && d951.Loc == scm.LocImm {
 				d952 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d949.Imm.Int() * d951.Imm.Int())}
@@ -15821,9 +15821,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d958)
 			ctx.EnsureDesc(&d959)
 			ctx.EnsureDesc(&d958)
+			ctx.ProtectReg(d958.Reg)
 			ctx.EnsureDesc(&d959)
-			ctx.EnsureDesc(&d958)
-			ctx.EnsureDesc(&d959)
+			ctx.UnprotectReg(d958.Reg)
 			var d960 scm.JITValueDesc
 			if d958.Loc == scm.LocImm && d959.Loc == scm.LocImm {
 				d960 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d958.Imm.Int() + d959.Imm.Int())}
@@ -15958,9 +15958,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d966 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d965)
 			ctx.EnsureDesc(&d966)
+			ctx.ProtectReg(d966.Reg)
 			ctx.EnsureDesc(&d965)
-			ctx.EnsureDesc(&d966)
-			ctx.EnsureDesc(&d965)
+			ctx.UnprotectReg(d966.Reg)
 			var d967 scm.JITValueDesc
 			if d966.Loc == scm.LocImm && d965.Loc == scm.LocImm {
 				d967 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d966.Imm.Int() - d965.Imm.Int())}
@@ -16122,9 +16122,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			d973 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d972)
 			ctx.EnsureDesc(&d973)
+			ctx.ProtectReg(d973.Reg)
 			ctx.EnsureDesc(&d972)
-			ctx.EnsureDesc(&d973)
-			ctx.EnsureDesc(&d972)
+			ctx.UnprotectReg(d973.Reg)
 			var d974 scm.JITValueDesc
 			if d973.Loc == scm.LocImm && d972.Loc == scm.LocImm {
 				d974 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d973.Imm.Int() - d972.Imm.Int())}
@@ -16281,9 +16281,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d979)
 			ctx.EnsureDesc(&d57)
 			ctx.EnsureDesc(&d979)
+			ctx.ProtectReg(d979.Reg)
 			ctx.EnsureDesc(&d57)
-			ctx.EnsureDesc(&d979)
-			ctx.EnsureDesc(&d57)
+			ctx.UnprotectReg(d979.Reg)
 			var d980 scm.JITValueDesc
 			if d979.Loc == scm.LocImm && d57.Loc == scm.LocImm {
 				d980 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d979.Imm.Int() + d57.Imm.Int())}
@@ -16341,9 +16341,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d981)
 			ctx.EnsureDesc(&d980)
 			ctx.EnsureDesc(&d981)
+			ctx.ProtectReg(d981.Reg)
 			ctx.EnsureDesc(&d980)
-			ctx.EnsureDesc(&d981)
-			ctx.EnsureDesc(&d980)
+			ctx.UnprotectReg(d981.Reg)
 			var d982 scm.JITValueDesc
 			if d981.Loc == scm.LocImm && d980.Loc == scm.LocImm {
 				d982 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d981.Imm.Int() - d980.Imm.Int())}
@@ -16385,9 +16385,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d982)
 			ctx.EnsureDesc(&d946)
 			ctx.EnsureDesc(&d982)
+			ctx.ProtectReg(d982.Reg)
 			ctx.EnsureDesc(&d946)
-			ctx.EnsureDesc(&d982)
-			ctx.EnsureDesc(&d946)
+			ctx.UnprotectReg(d982.Reg)
 			var d983 scm.JITValueDesc
 			if d982.Loc == scm.LocImm && d946.Loc == scm.LocImm {
 				d983 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d982.Imm.Int() * d946.Imm.Int())}
@@ -16424,9 +16424,9 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			ctx.EnsureDesc(&d170)
 			ctx.EnsureDesc(&d983)
 			ctx.EnsureDesc(&d170)
+			ctx.ProtectReg(d170.Reg)
 			ctx.EnsureDesc(&d983)
-			ctx.EnsureDesc(&d170)
-			ctx.EnsureDesc(&d983)
+			ctx.UnprotectReg(d170.Reg)
 			var d984 scm.JITValueDesc
 			if d170.Loc == scm.LocImm && d983.Loc == scm.LocImm {
 				d984 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d170.Imm.Int() + d983.Imm.Int())}
@@ -16490,7 +16490,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 			}
 			bbs[13].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[13].VisitCount >= 2 {
+				if bbs[13].VisitCount >= 0 {
 					ps.General = true
 					return bbs[13].RenderPS(ps)
 				}
@@ -16507,12 +16507,12 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				ctx.MarkLabel(lbl14)
 				ctx.ResolveFixups()
 			}
-			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
-			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d0 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
-			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
 			d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(32)}
+			d4 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(64)}
 			d5 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(80)}
+			d1 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(16)}
+			d3 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(48)}
 			d6 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(96)}
 			d7 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(112)}
 			d8 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(128)}

@@ -1349,15 +1349,16 @@ func (ctx *JITContext) EmitGoCallScalar(funcAddr uint64, args []JITValueDesc, nu
 	var resultsBuf [16]Reg
 	words := ctx.flattenArgs(args, &wordsBuf)
 	results := ctx.EmitGoCall(funcAddr, words, numResultWords, &resultsBuf)
-	if numResultWords == 1 {
-		d := JITValueDesc{Loc: LocReg, Reg: results[0]}
-		ctx.BindReg(results[0], &d)
-		return d
+	// Result registers are already allocated by EmitGoCall (removed from FreeRegs).
+	// Set RegOwners to nil — the caller MUST BindReg to a long-lived descriptor.
+	// The nil ownership prevents AllocReg's spill path from evicting the result.
+	for i := 0; i < numResultWords && i < len(results); i++ {
+		ctx.RegOwners[results[i]] = nil
 	}
-	d := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
-	ctx.BindReg(results[0], &d)
-	ctx.BindReg(results[1], &d)
-	return d
+	if numResultWords == 1 {
+		return JITValueDesc{Loc: LocReg, Reg: results[0]}
+	}
+	return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
 }
 
 // EmitMovPairToResult moves a LocRegPair value into the result descriptor registers.

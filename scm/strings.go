@@ -239,7 +239,7 @@ func init_strings() {
 			lbl3 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -358,6 +358,7 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d4 = ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d3}, 1)
+			ctx.BindReg(d4.Reg, &d4)
 			ctx.FreeDesc(&d3)
 			d5 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 			ctx.EnsureDesc(&d5)
@@ -466,7 +467,7 @@ func init_strings() {
 			}
 			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -547,13 +548,14 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d22 = ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d21}, 1)
+			ctx.BindReg(d22.Reg, &d22)
 			ctx.FreeDesc(&d21)
 			ctx.EnsureDesc(&d4)
 			ctx.EnsureDesc(&d22)
 			ctx.EnsureDesc(&d4)
+			ctx.ProtectReg(d4.Reg)
 			ctx.EnsureDesc(&d22)
-			ctx.EnsureDesc(&d4)
-			ctx.EnsureDesc(&d22)
+			ctx.UnprotectReg(d4.Reg)
 			var d23 JITValueDesc
 			if d4.Loc == LocImm && d22.Loc == LocImm {
 				d23 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d4.Imm.Int() + d22.Imm.Int())}
@@ -664,7 +666,7 @@ func init_strings() {
 			}
 			bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -827,7 +829,7 @@ func init_strings() {
 					}
 				}
 			}
-			ps36 := PhiState{General: true}
+			ps36 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps36)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()
@@ -1046,7 +1048,7 @@ func init_strings() {
 			lbl13 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -1160,7 +1162,7 @@ func init_strings() {
 			}
 			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -1177,8 +1179,8 @@ func init_strings() {
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
 			}
-			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
+			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -1205,7 +1207,7 @@ func init_strings() {
 			}
 			bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -1222,8 +1224,8 @@ func init_strings() {
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -1361,6 +1363,7 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d22 = ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d21}, 1)
+			ctx.BindReg(d22.Reg, &d22)
 			ctx.FreeDesc(&d21)
 			ctx.EnsureDesc(&d22)
 			ctx.EnsureDesc(&d22)
@@ -1581,7 +1584,7 @@ func init_strings() {
 			}
 			bbs[3].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[3].VisitCount >= 2 {
+				if bbs[3].VisitCount >= 0 {
 					ps.General = true
 					return bbs[3].RenderPS(ps)
 				}
@@ -1697,7 +1700,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d56)
 					ctx.EmitStoreToStack(d56, int32(bbs[4].PhiBase)+int32(0))
 				}
-				if bbs[4].VisitCount >= 2 {
+				if bbs[4].VisitCount >= 0 {
 					ps.General = true
 					return bbs[4].RenderPS(ps)
 				}
@@ -2010,7 +2013,7 @@ func init_strings() {
 			}
 			bbs[5].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[5].VisitCount >= 2 {
+				if bbs[5].VisitCount >= 0 {
 					ps.General = true
 					return bbs[5].RenderPS(ps)
 				}
@@ -2110,7 +2113,7 @@ func init_strings() {
 			}
 			bbs[6].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[6].VisitCount >= 2 {
+				if bbs[6].VisitCount >= 0 {
 					ps.General = true
 					return bbs[6].RenderPS(ps)
 				}
@@ -2127,8 +2130,8 @@ func init_strings() {
 				ctx.MarkLabel(lbl7)
 				ctx.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -2432,7 +2435,7 @@ func init_strings() {
 			}
 			bbs[7].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[7].VisitCount >= 2 {
+				if bbs[7].VisitCount >= 0 {
 					ps.General = true
 					return bbs[7].RenderPS(ps)
 				}
@@ -2575,13 +2578,14 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d127 = ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d126}, 1)
+			ctx.BindReg(d127.Reg, &d127)
 			ctx.FreeDesc(&d126)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d127)
 			ctx.EnsureDesc(&d0)
+			ctx.ProtectReg(d0.Reg)
 			ctx.EnsureDesc(&d127)
-			ctx.EnsureDesc(&d0)
-			ctx.EnsureDesc(&d127)
+			ctx.UnprotectReg(d0.Reg)
 			var d128 JITValueDesc
 			if d0.Loc == LocImm && d127.Loc == LocImm {
 				d128 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d0.Imm.Int() + d127.Imm.Int())}
@@ -2955,7 +2959,7 @@ func init_strings() {
 			}
 			bbs[8].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[8].VisitCount >= 2 {
+				if bbs[8].VisitCount >= 0 {
 					ps.General = true
 					return bbs[8].RenderPS(ps)
 				}
@@ -3162,7 +3166,7 @@ func init_strings() {
 			}
 			bbs[9].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[9].VisitCount >= 2 {
+				if bbs[9].VisitCount >= 0 {
 					ps.General = true
 					return bbs[9].RenderPS(ps)
 				}
@@ -3179,8 +3183,8 @@ func init_strings() {
 				ctx.MarkLabel(lbl10)
 				ctx.ResolveFixups()
 			}
-			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			d0 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(0)}
+			d1 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(16)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -3314,9 +3318,9 @@ func init_strings() {
 			ctx.EnsureDesc(&d20)
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d20)
+			ctx.ProtectReg(d20.Reg)
 			ctx.EnsureDesc(&d0)
-			ctx.EnsureDesc(&d20)
-			ctx.EnsureDesc(&d0)
+			ctx.UnprotectReg(d20.Reg)
 			var d183 JITValueDesc
 			if d20.Loc == LocImm && d0.Loc == LocImm {
 				d183 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d20.Imm.Int() - d0.Imm.Int())}
@@ -3435,7 +3439,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d187)
 					ctx.EmitStoreToStack(d187, int32(bbs[10].PhiBase)+int32(0))
 				}
-				if bbs[10].VisitCount >= 2 {
+				if bbs[10].VisitCount >= 0 {
 					ps.General = true
 					return bbs[10].RenderPS(ps)
 				}
@@ -3959,7 +3963,7 @@ func init_strings() {
 			}
 			bbs[11].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[11].VisitCount >= 2 {
+				if bbs[11].VisitCount >= 0 {
 					ps.General = true
 					return bbs[11].RenderPS(ps)
 				}
@@ -4137,7 +4141,7 @@ func init_strings() {
 			}
 			bbs[12].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[12].VisitCount >= 2 {
+				if bbs[12].VisitCount >= 0 {
 					ps.General = true
 					return bbs[12].RenderPS(ps)
 				}
@@ -4313,9 +4317,9 @@ func init_strings() {
 			ctx.EnsureDesc(&d0)
 			ctx.EnsureDesc(&d1)
 			ctx.EnsureDesc(&d0)
+			ctx.ProtectReg(d0.Reg)
 			ctx.EnsureDesc(&d1)
-			ctx.EnsureDesc(&d0)
-			ctx.EnsureDesc(&d1)
+			ctx.UnprotectReg(d0.Reg)
 			var d247 JITValueDesc
 			if d0.Loc == LocImm && d1.Loc == LocImm {
 				d247 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d0.Imm.Int() + d1.Imm.Int())}
@@ -4447,7 +4451,7 @@ func init_strings() {
 					}
 				}
 			}
-			ps254 := PhiState{General: true}
+			ps254 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps254)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()
@@ -4592,6 +4596,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (Simplify arg0)")
 			}
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(Simplify), []JITValueDesc{d2}, 2)
+			ctx.BindReg(d4.Reg, &d4)
+			ctx.BindReg(d4.Reg2, &d4)
 			if d4.Loc == LocImm {
 				if result.Loc == LocAny { return d4 }
 			}
@@ -4905,7 +4911,7 @@ func init_strings() {
 			lbl5 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -5204,7 +5210,7 @@ func init_strings() {
 			}
 			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -5221,9 +5227,9 @@ func init_strings() {
 				ctx.MarkLabel(lbl2)
 				ctx.ResolveFixups()
 			}
-			d2 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(32)}
 			d0 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(16)}
+			d2 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(32)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5366,6 +5372,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 			}
 			d36 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d34}, 2)
+			ctx.BindReg(d36.Reg, &d36)
+			ctx.BindReg(d36.Reg2, &d36)
 			ctx.EnsureDesc(&d36)
 			if d36.Loc == LocReg {
 				ctx.ProtectReg(d36.Reg)
@@ -5426,7 +5434,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d40)
 					ctx.EmitStoreScmerToStack(d40, int32(bbs[2].PhiBase)+int32(0))
 				}
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -5443,9 +5451,9 @@ func init_strings() {
 				ctx.MarkLabel(lbl3)
 				ctx.ResolveFixups()
 			}
+			d0 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			d1 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(16)}
 			d2 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(32)}
-			d0 = JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(0)}
 			if !ps.General && len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
 				d0 = ps.OverlayValues[0]
 			}
@@ -5586,6 +5594,7 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.Contains arg1)")
 			}
 			d42 = ctx.EmitGoCallScalar(GoFuncAddr(strings.Contains), []JITValueDesc{d0, d41}, 1)
+			ctx.BindReg(d42.Reg, &d42)
 			ctx.FreeDesc(&d0)
 			d43 = d42
 			ctx.EnsureDesc(&d43)
@@ -5914,7 +5923,7 @@ func init_strings() {
 			}
 			bbs[3].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[3].VisitCount >= 2 {
+				if bbs[3].VisitCount >= 0 {
 					ps.General = true
 					return bbs[3].RenderPS(ps)
 				}
@@ -6071,6 +6080,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 			}
 			d91 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d4}, 2)
+			ctx.BindReg(d91.Reg, &d91)
+			ctx.BindReg(d91.Reg2, &d91)
 			ctx.EnsureDesc(&d7)
 			ctx.EnsureDesc(&d7)
 			if d7.Loc == LocImm {
@@ -6108,6 +6119,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 			}
 			d92 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d7}, 2)
+			ctx.BindReg(d92.Reg, &d92)
+			ctx.BindReg(d92.Reg2, &d92)
 			ctx.EnsureDesc(&d91)
 			if d91.Loc == LocReg {
 				ctx.ProtectReg(d91.Reg)
@@ -6215,7 +6228,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d99)
 					ctx.EmitStoreScmerToStack(d99, int32(bbs[4].PhiBase)+int32(16))
 				}
-				if bbs[4].VisitCount >= 2 {
+				if bbs[4].VisitCount >= 0 {
 					ps.General = true
 					return bbs[4].RenderPS(ps)
 				}
@@ -6438,6 +6451,7 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (StrLike arg1)")
 			}
 			d100 = ctx.EmitGoCallScalar(GoFuncAddr(StrLike), []JITValueDesc{d1, d2}, 1)
+			ctx.BindReg(d100.Reg, &d100)
 			ctx.FreeDesc(&d1)
 			ctx.FreeDesc(&d2)
 			ctx.EnsureDesc(&d100)
@@ -6470,7 +6484,7 @@ func init_strings() {
 					}
 				}
 			}
-			ps102 := PhiState{General: true}
+			ps102 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps102)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()
@@ -6714,6 +6728,7 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (StrLike arg1)")
 			}
 			d7 := ctx.EmitGoCallScalar(GoFuncAddr(StrLike), []JITValueDesc{d2, d5}, 1)
+			ctx.BindReg(d7.Reg, &d7)
 			ctx.EnsureDesc(&d7)
 			if result.Loc == LocAny {
 				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -6866,6 +6881,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
 			}
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d2}, 2)
+			ctx.BindReg(d4.Reg, &d4)
+			ctx.BindReg(d4.Reg2, &d4)
 			d5 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d4}, 2)
 			if result.Loc == LocAny { return d5 }
 			ctx.EmitMovPairToResult(&d5, &result)
@@ -7009,6 +7026,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.ToUpper arg0)")
 			}
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ToUpper), []JITValueDesc{d2}, 2)
+			ctx.BindReg(d4.Reg, &d4)
+			ctx.BindReg(d4.Reg2, &d4)
 			d5 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d4}, 2)
 			if result.Loc == LocAny { return d5 }
 			ctx.EmitMovPairToResult(&d5, &result)
@@ -7350,6 +7369,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.ReplaceAll arg2)")
 			}
 			d10 := ctx.EmitGoCallScalar(GoFuncAddr(strings.ReplaceAll), []JITValueDesc{d2, d5, d8}, 2)
+			ctx.BindReg(d10.Reg, &d10)
+			ctx.BindReg(d10.Reg2, &d10)
 			d11 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d10}, 2)
 			if result.Loc == LocAny { return d11 }
 			ctx.EmitMovPairToResult(&d11, &result)
@@ -7493,6 +7514,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.TrimSpace arg0)")
 			}
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimSpace), []JITValueDesc{d2}, 2)
+			ctx.BindReg(d4.Reg, &d4)
+			ctx.BindReg(d4.Reg2, &d4)
 			d5 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d4}, 2)
 			if result.Loc == LocAny { return d5 }
 			ctx.EmitMovPairToResult(&d5, &result)
@@ -7672,6 +7695,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.TrimLeft arg1)")
 			}
 			d5 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimLeft), []JITValueDesc{d2, d4}, 2)
+			ctx.BindReg(d5.Reg, &d5)
+			ctx.BindReg(d5.Reg2, &d5)
 			d6 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d5}, 2)
 			if result.Loc == LocAny { return d6 }
 			ctx.EmitMovPairToResult(&d6, &result)
@@ -7851,6 +7876,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.TrimRight arg1)")
 			}
 			d5 := ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimRight), []JITValueDesc{d2, d4}, 2)
+			ctx.BindReg(d5.Reg, &d5)
+			ctx.BindReg(d5.Reg2, &d5)
 			d6 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d5}, 2)
 			if result.Loc == LocAny { return d6 }
 			ctx.EmitMovPairToResult(&d6, &result)
@@ -7913,7 +7940,7 @@ func init_strings() {
 			lbl3 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -8007,7 +8034,7 @@ func init_strings() {
 			}
 			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -8044,7 +8071,7 @@ func init_strings() {
 			}
 			bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -8173,6 +8200,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.TrimSpace arg0)")
 			}
 			d16 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimSpace), []JITValueDesc{d14}, 2)
+			ctx.BindReg(d16.Reg, &d16)
+			ctx.BindReg(d16.Reg2, &d16)
 			d17 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d16}, 2)
 			ctx.EmitMovPairToResult(&d17, &result)
 			result.Type = tagString
@@ -8201,7 +8230,7 @@ func init_strings() {
 					}
 				}
 			}
-			ps19 := PhiState{General: true}
+			ps19 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps19)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()
@@ -8263,7 +8292,7 @@ func init_strings() {
 			lbl3 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -8357,7 +8386,7 @@ func init_strings() {
 			}
 			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -8394,7 +8423,7 @@ func init_strings() {
 			}
 			bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -8559,6 +8588,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.TrimLeft arg1)")
 			}
 			d17 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimLeft), []JITValueDesc{d14, d16}, 2)
+			ctx.BindReg(d17.Reg, &d17)
+			ctx.BindReg(d17.Reg2, &d17)
 			d18 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d17}, 2)
 			ctx.EmitMovPairToResult(&d18, &result)
 			result.Type = tagString
@@ -8587,7 +8618,7 @@ func init_strings() {
 					}
 				}
 			}
-			ps20 := PhiState{General: true}
+			ps20 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps20)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()
@@ -8649,7 +8680,7 @@ func init_strings() {
 			lbl3 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -8743,7 +8774,7 @@ func init_strings() {
 			}
 			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -8780,7 +8811,7 @@ func init_strings() {
 			}
 			bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -8945,6 +8976,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (strings.TrimRight arg1)")
 			}
 			d17 = ctx.EmitGoCallScalar(GoFuncAddr(strings.TrimRight), []JITValueDesc{d14, d16}, 2)
+			ctx.BindReg(d17.Reg, &d17)
+			ctx.BindReg(d17.Reg2, &d17)
 			d18 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d17}, 2)
 			ctx.EmitMovPairToResult(&d18, &result)
 			result.Type = tagString
@@ -8973,7 +9006,7 @@ func init_strings() {
 					}
 				}
 			}
-			ps20 := PhiState{General: true}
+			ps20 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps20)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()
@@ -9076,7 +9109,7 @@ func init_strings() {
 			lbl5 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -9170,7 +9203,7 @@ func init_strings() {
 			}
 			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -9207,7 +9240,7 @@ func init_strings() {
 			}
 			bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -9276,6 +9309,7 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (ToInt arg0)")
 			}
 			d14 = ctx.EmitGoCallScalar(GoFuncAddr(ToInt), []JITValueDesc{d13}, 1)
+			ctx.BindReg(d14.Reg, &d14)
 			ctx.FreeDesc(&d13)
 			ctx.EnsureDesc(&d14)
 			var d15 JITValueDesc
@@ -9382,7 +9416,7 @@ func init_strings() {
 			}
 			bbs[3].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[3].VisitCount >= 2 {
+				if bbs[3].VisitCount >= 0 {
 					ps.General = true
 					return bbs[3].RenderPS(ps)
 				}
@@ -9432,7 +9466,7 @@ func init_strings() {
 			}
 			bbs[4].RenderPS = func(ps PhiState) JITValueDesc {
 			if !ps.General {
-				if bbs[4].VisitCount >= 2 {
+				if bbs[4].VisitCount >= 0 {
 					ps.General = true
 					return bbs[4].RenderPS(ps)
 				}
@@ -9580,6 +9614,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 1-word value")
 			}
 			d34 = ctx.EmitGoCallScalar(GoFuncAddr(strings.Repeat), []JITValueDesc{d32, d14}, 2)
+			ctx.BindReg(d34.Reg, &d34)
+			ctx.BindReg(d34.Reg2, &d34)
 			ctx.FreeDesc(&d14)
 			d35 = ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d34}, 2)
 			ctx.EmitMovPairToResult(&d35, &result)
@@ -9609,7 +9645,7 @@ func init_strings() {
 					}
 				}
 			}
-			ps37 := PhiState{General: true}
+			ps37 := PhiState{General: false}
 			_ = bbs[0].RenderPS(ps37)
 			ctx.MarkLabel(lbl0)
 			ctx.ResolveFixups()
@@ -9940,6 +9976,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (html.EscapeString arg0)")
 			}
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(html.EscapeString), []JITValueDesc{d2}, 2)
+			ctx.BindReg(d4.Reg, &d4)
+			ctx.BindReg(d4.Reg2, &d4)
 			d5 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d4}, 2)
 			if result.Loc == LocAny { return d5 }
 			ctx.EmitMovPairToResult(&d5, &result)
@@ -10083,6 +10121,8 @@ func init_strings() {
 				panic("jit: generic call arg expects 2-word value (url.QueryEscape arg0)")
 			}
 			d4 := ctx.EmitGoCallScalar(GoFuncAddr(url.QueryEscape), []JITValueDesc{d2}, 2)
+			ctx.BindReg(d4.Reg, &d4)
+			ctx.BindReg(d4.Reg2, &d4)
 			d5 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d4}, 2)
 			if result.Loc == LocAny { return d5 }
 			ctx.EmitMovPairToResult(&d5, &result)

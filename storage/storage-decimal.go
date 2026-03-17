@@ -332,7 +332,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			lbl6 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -411,9 +411,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ctx.EnsureDesc(&d2)
 			ctx.EnsureDesc(&d4)
 			ctx.EnsureDesc(&d2)
+			ctx.ProtectReg(d2.Reg)
 			ctx.EnsureDesc(&d4)
-			ctx.EnsureDesc(&d2)
-			ctx.EnsureDesc(&d4)
+			ctx.UnprotectReg(d2.Reg)
 			var d5 scm.JITValueDesc
 			if d2.Loc == scm.LocImm && d4.Loc == scm.LocImm {
 				d5 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d2.Imm.Int() * d4.Imm.Int())}
@@ -588,9 +588,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ctx.EnsureDesc(&d11)
 			ctx.EnsureDesc(&d12)
 			ctx.EnsureDesc(&d11)
+			ctx.ProtectReg(d11.Reg)
 			ctx.EnsureDesc(&d12)
-			ctx.EnsureDesc(&d11)
-			ctx.EnsureDesc(&d12)
+			ctx.UnprotectReg(d11.Reg)
 			var d13 scm.JITValueDesc
 			if d11.Loc == scm.LocImm && d12.Loc == scm.LocImm {
 				d13 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d11.Imm.Int() + d12.Imm.Int())}
@@ -725,9 +725,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			d19 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d18)
 			ctx.EnsureDesc(&d19)
+			ctx.ProtectReg(d19.Reg)
 			ctx.EnsureDesc(&d18)
-			ctx.EnsureDesc(&d19)
-			ctx.EnsureDesc(&d18)
+			ctx.UnprotectReg(d19.Reg)
 			var d20 scm.JITValueDesc
 			if d19.Loc == scm.LocImm && d18.Loc == scm.LocImm {
 				d20 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d19.Imm.Int() - d18.Imm.Int())}
@@ -889,9 +889,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			d26 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 			ctx.EnsureDesc(&d25)
 			ctx.EnsureDesc(&d26)
+			ctx.ProtectReg(d26.Reg)
 			ctx.EnsureDesc(&d25)
-			ctx.EnsureDesc(&d26)
-			ctx.EnsureDesc(&d25)
+			ctx.UnprotectReg(d26.Reg)
 			var d27 scm.JITValueDesc
 			if d26.Loc == scm.LocImm && d25.Loc == scm.LocImm {
 				d27 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d26.Imm.Int() - d25.Imm.Int())}
@@ -1296,7 +1296,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			}
 			bbs[1].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -1425,7 +1425,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			}
 			bbs[2].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
@@ -1576,9 +1576,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ctx.EnsureDesc(&d74)
 			ctx.EnsureDesc(&d75)
 			ctx.EnsureDesc(&d74)
+			ctx.ProtectReg(d74.Reg)
 			ctx.EnsureDesc(&d75)
-			ctx.EnsureDesc(&d74)
-			ctx.EnsureDesc(&d75)
+			ctx.UnprotectReg(d74.Reg)
 			var d76 scm.JITValueDesc
 			if d74.Loc == scm.LocImm && d75.Loc == scm.LocImm {
 				d76 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d74.Imm.Int() + d75.Imm.Int())}
@@ -1936,7 +1936,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			}
 			bbs[3].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[3].VisitCount >= 2 {
+				if bbs[3].VisitCount >= 0 {
 					ps.General = true
 					return bbs[3].RenderPS(ps)
 				}
@@ -2436,7 +2436,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			}
 			bbs[4].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[4].VisitCount >= 2 {
+				if bbs[4].VisitCount >= 0 {
 					ps.General = true
 					return bbs[4].RenderPS(ps)
 				}
@@ -2606,9 +2606,9 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ctx.EnsureDesc(&d76)
 			ctx.EnsureDesc(&d178)
 			ctx.EnsureDesc(&d76)
+			ctx.ProtectReg(d76.Reg)
 			ctx.EnsureDesc(&d178)
-			ctx.EnsureDesc(&d76)
-			ctx.EnsureDesc(&d178)
+			ctx.UnprotectReg(d76.Reg)
 			var d179 scm.JITValueDesc
 			if d76.Loc == scm.LocImm && d178.Loc == scm.LocImm {
 				d179 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d76.Imm.Int() * d178.Imm.Int())}
@@ -2653,7 +2653,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			}
 			bbs[5].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[5].VisitCount >= 2 {
+				if bbs[5].VisitCount >= 0 {
 					ps.General = true
 					return bbs[5].RenderPS(ps)
 				}

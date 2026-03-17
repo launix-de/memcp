@@ -112,7 +112,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			lbl3 := ctx.ReserveLabel()
 			bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[0].VisitCount >= 2 {
+				if bbs[0].VisitCount >= 0 {
 					ps.General = true
 					return bbs[0].RenderPS(ps)
 				}
@@ -176,6 +176,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 				panic("jit: generic call arg expects 1-word value")
 			}
 			d2 = ctx.EmitGoCallScalar(scm.GoFuncAddr(math.IsNaN), []scm.JITValueDesc{d1}, 1)
+			ctx.BindReg(d2.Reg, &d2)
 			ctx.FreeDesc(&d1)
 			d3 = d2
 			ctx.EnsureDesc(&d3)
@@ -247,7 +248,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			}
 			bbs[1].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[1].VisitCount >= 2 {
+				if bbs[1].VisitCount >= 0 {
 					ps.General = true
 					return bbs[1].RenderPS(ps)
 				}
@@ -286,7 +287,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 			}
 			bbs[2].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 			if !ps.General {
-				if bbs[2].VisitCount >= 2 {
+				if bbs[2].VisitCount >= 0 {
 					ps.General = true
 					return bbs[2].RenderPS(ps)
 				}
