@@ -232,6 +232,73 @@ AND (outer tblvar.col) references in the subplan's fields, condition and stages.
 
 (import "sql-metadata.scm")
 
+/* canonicalize_columns: resolve case-insensitive get_column markers against schemas.
+After this pass, all get_column nodes have ti=false ci=false with canonical casing.
+This must run before derived table flattening and scope resolution. */
+/* symbols that canonicalize_columns must NOT recurse into — they have their own scope */
+(define _is_opaque_scope_sym (lambda (sym) (match sym
+	(symbol inner_select) true '(quote inner_select) true
+	(symbol inner_select_in) true '(quote inner_select_in) true
+	(symbol inner_select_exists) true '(quote inner_select_exists) true
+	/* runtime code produced by build_scalar_subselect — has inner scan context */
+	(symbol !begin) true '(quote !begin) true '!begin true
+	(symbol scan) true '(quote scan) true 'scan true
+	(symbol scan_order) true '(quote scan_order) true 'scan_order true
+	(symbol scalar_scan) true '(quote scalar_scan) true 'scalar_scan true
+	(symbol newsession) true '(quote newsession) true 'newsession true
+	_ false)))
+/* canonicalize_columns resolves ti/ci flags to canonical casing.
+all_schemas includes outer schemas (for qualified outer refs like src.ID).
+Unqualified refs are only resolved against local tables (non-prefixed aliases)
+to avoid matching outer tables which would break scope resolution. */
+(define canonicalize_columns (lambda (expr all_schemas) (match expr
+	'((symbol get_column) alias_ ti col ci) (if (or ti ci)
+		(begin
+			/* find canonical alias and column name */
+			(define resolved_alias (if (nil? alias_)
+				/* unqualified: search non-prefixed aliases only (local tables) */
+				(reduce_assoc all_schemas (lambda (a alias cols)
+					(if (and (equal? (replace (string alias) ":" "") (string alias))
+						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+						alias a)) nil)
+				/* qualified: search all schemas including outer */
+				(reduce_assoc all_schemas (lambda (a alias cols)
+					(if (and ((if ti equal?? equal?) alias_ alias)
+						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+						alias a)) nil)))
+			(if (nil? resolved_alias)
+				expr /* leave unresolved — replace_find_column will handle or error */
+				(begin
+					(define canonical_col (coalesce
+						(reduce (all_schemas resolved_alias) (lambda (a coldef)
+							(if (not (nil? a)) a
+								(if ((if ci equal?? equal?) (coldef "Field") col) (coldef "Field") nil))) nil)
+						col))
+					(list (quote get_column) resolved_alias false canonical_col false))))
+		expr /* ti=false ci=false: already canonical */
+	)
+	/* do not recurse into opaque scope nodes — inner_select, runtime code */
+	(cons sym args) (if (_is_opaque_scope_sym sym) expr
+		(cons (canonicalize_columns sym all_schemas) (map args (lambda (a) (canonicalize_columns a all_schemas)))))
+	expr
+)))
+/* canonicalize all get_column markers in a group stage */
+(define canonicalize_stage (lambda (stage all_schemas) (begin
+	(define canon (lambda (expr) (canonicalize_columns expr all_schemas)))
+	(define sg (coalesceNil (stage_group_cols stage) '()))
+	(define sh (stage_having_expr stage))
+	(define so (coalesceNil (stage_order_list stage) '()))
+	(define sl (stage_limit_val stage))
+	(define soff (stage_offset_val stage))
+	(if (stage_is_dedup stage)
+		(make_dedup_stage (map sg canon))
+		(make_group_stage
+			(map sg canon)
+			(canon sh)
+			(map so (lambda (o) (match o '(c d) (list (canon c) d))))
+			sl soff))
+)))
+
 /* group stage constructors and accessors - shared between untangle_query and build_queryplan */
 (define make_group_stage (lambda (group having order limit offset)
 	(list
@@ -1278,13 +1345,18 @@ TABLE ENTRY FORMAT:
 				(define _groups_final (if (and _has_aggregates (not _has_group_stage))
 					(merge (list (make_group_stage '(1) nil nil nil nil)) _groups_clean)
 					_groups_clean))
+				/* canonicalize outer refs in subplan: inner schemas were already canonicalized
+				by the recursive untangle_query, but outer refs (e.g. src.ID → src.id) need
+				the merged schemas to resolve case-insensitive column names. */
+				(define _ds_all_schemas (merge_assoc schemas2 outer_schemas))
+				(define _ds_canon (lambda (expr) (canonicalize_columns expr _ds_all_schemas)))
 				/* keep get_column markers raw — build_queryplan resolves them via replace_find_column (7th element) */
 				(define subplan (list
 					schema2
 					tables2
-					fields2
-					(coalesceNil condition2 true)
-					_groups_final
+					(map_assoc fields2 (lambda (k v) (_ds_canon v)))
+					(_ds_canon (coalesceNil condition2 true))
+					(map _groups_final (lambda (stage) (canonicalize_stage stage _ds_all_schemas)))
 					schemas2
 					replace_find_column_subselect))
 				(pending_dependent_scalars "tables"
@@ -1725,7 +1797,15 @@ TABLE ENTRY FORMAT:
 						_cd_limit _cd_offset))
 				/* normal: single group stage */
 				(if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil)))
-			(list schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll groups schemas replace_find_column)
+			/* canonicalize all get_column markers: resolve ti/ci flags to canonical casing.
+			After this, all get_column nodes have false false — no case ambiguity remains.
+			Only use local schemas — outer refs are canonicalized by their own untangle scope
+			or by replace_find_column_subselect which has access to outer_schemas. */
+			(define _canon (lambda (expr) (canonicalize_columns expr schemas)))
+			(define _canon_fields (map_assoc fields (lambda (k v) (_canon (replace_rename v)))))
+			(define _canon_condition (_canon conditionAll))
+			(define _canon_groups (map (coalesceNil groups '()) (lambda (stage) (canonicalize_stage stage schemas))))
+			(list schema tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
 		)
 	)
 )
