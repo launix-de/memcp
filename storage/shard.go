@@ -46,7 +46,7 @@ type storageShard struct {
 	logfile      PersistenceLogfile                  // only in safe mode
 	mu           sync.RWMutex                        // delta write lock (working on main storage is lock free)
 	uniquelock   sync.Mutex                          // unique insert lock (only used in the sharded case)
-	next         *storageShard                       // TODO: also make a next-partition-schema
+	next         atomic.Pointer[storageShard]        // rebuild successor published lock-free to concurrent writers
 	// indexes
 	Indexes    []*StorageIndex // sorted keys
 	indexMutex sync.Mutex
@@ -63,6 +63,18 @@ type storageShard struct {
 
 	// guards RemoveFromDisk against double execution (finalizer + explicit cleanup)
 	cleanupOnce sync.Once
+}
+
+func (s *storageShard) loadNext() *storageShard {
+	return s.next.Load()
+}
+
+func (s *storageShard) storeNext(next *storageShard) {
+	s.next.Store(next)
+}
+
+func (s *storageShard) clearNext(next *storageShard) {
+	s.next.CompareAndSwap(next, nil)
 }
 
 // computeSizeLocked computes the shard's memory footprint without acquiring s.mu.
@@ -1057,11 +1069,14 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 				}
 			}
 		}
-		if result && t.next != nil {
-			// also change in next storage
-			// idx translation (subtract the amount of deletions from that idx)
-			idx2 := targetIdx - uint32(t.deletions.CountUntil(uint(targetIdx)))
-			t.next.UpdateFunction(idx2, false, false)(a...) // propagate to succeeding shard
+		if result {
+			next := t.loadNext()
+			if next != nil {
+				// also change in next storage
+				// idx translation (subtract the amount of deletions from that idx)
+				idx2 := targetIdx - uint32(t.deletions.CountUntil(uint(targetIdx)))
+				next.UpdateFunction(idx2, false, false)(a...) // propagate to succeeding shard
+			}
 		}
 		return scm.NewBool(result) // maybe instead return UpdateFunction for newly inserted item??
 	}
@@ -1500,9 +1515,9 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 		}
 		t.logfile.Write(LogEntryInsert{idx2col, logVals})
 	}
-	if t.next != nil {
+	if next := t.loadNext(); next != nil {
 		// also insert into next storage
-		t.next.Insert(columns, values, false, nil, false)
+		next.Insert(columns, values, false, nil, false)
 	}
 	// transaction bookkeeping
 	if tx := CurrentTx(); tx != nil {
@@ -1936,19 +1951,19 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			t.mu.Unlock()
 		}
 	}()
-	if t.next != nil {
+	if next := t.loadNext(); next != nil {
 		t.mu.Unlock()
 		locked = false
 		// lock+unlock the next shard so we don't return too early (sync hazards)
-		t.next.mu.Lock()
-		t.next.mu.Unlock()
-		return t.next // already rebuilding (happens on parallel inserts)
+		next.mu.Lock()
+		next.mu.Unlock()
+		return next // already rebuilding (happens on parallel inserts)
 		// possible problem: this call may return the t.next shard faster than the competing rebuild() call that actually rebuilds; maybe use a additional lock on t.next??
 	}
 	result := new(storageShard)
 	result.t = t.t
 	result.srState = WRITE // mark as live so ensureLoaded() won't reset columns
-	t.next = result
+	t.storeNext(result)
 	result.mu.Lock() // interlock so no one will rebuild the shard twice
 	resultLocked := true
 	defer func() {
@@ -1961,11 +1976,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			// If rebuild panics, ensure we don't leave a half-built shard reachable via t.next.
 			// Otherwise, later rebuild/save cycles may publish a schema referencing a UUID whose
 			// column files were never written.
-			t.mu.Lock()
-			if t.next == result {
-				t.next = nil
-			}
-			t.mu.Unlock()
+			t.clearNext(result)
 			if result.logfile != nil {
 				func() { defer func() { _ = recover() }(); result.logfile.Close() }()
 			}

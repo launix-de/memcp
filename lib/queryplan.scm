@@ -203,6 +203,69 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 	'()
 )))
 
+/* symbols that canonicalize_columns must NOT recurse into — they have their own scope */
+(define _is_opaque_scope_sym (lambda (sym) (match sym
+	(symbol inner_select) true '(quote inner_select) true
+	(symbol inner_select_in) true '(quote inner_select_in) true
+	(symbol inner_select_exists) true '(quote inner_select_exists) true
+	/* runtime code produced by build_scalar_subselect — has inner scan context */
+	(symbol !begin) true '(quote !begin) true '!begin true
+	(symbol scan) true '(quote scan) true 'scan true
+	(symbol scan_order) true '(quote scan_order) true 'scan_order true
+	(symbol scalar_scan) true '(quote scalar_scan) true 'scalar_scan true
+	(symbol newsession) true '(quote newsession) true 'newsession true
+	_ false)))
+/* canonicalize_columns resolves ti/ci flags to canonical casing.
+all_schemas includes outer schemas (for qualified outer refs like src.ID).
+Unqualified refs are only resolved against local tables (non-prefixed aliases)
+to avoid matching outer tables which would break scope resolution. */
+(define canonicalize_columns (lambda (expr all_schemas) (match expr
+	'((symbol get_column) alias_ ti col ci) (if (or ti ci)
+		(begin
+			(define resolved_alias (if (nil? alias_)
+				/* unqualified: search non-prefixed aliases only (local tables) */
+				(reduce_assoc all_schemas (lambda (a alias cols)
+					(if (and (equal? (replace (string alias) ":" "") (string alias))
+						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+						alias a)) nil)
+				/* qualified: search all schemas including outer */
+				(reduce_assoc all_schemas (lambda (a alias cols)
+					(if (and ((if ti equal?? equal?) alias_ alias)
+						(reduce cols (lambda (a coldef) (or a ((if ci equal?? equal?) (coldef "Field") col))) false))
+						alias a)) nil)))
+			(if (nil? resolved_alias)
+				expr /* leave unresolved — replace_find_column will handle or error */
+				(begin
+					(define canonical_col (coalesce
+						(reduce (all_schemas resolved_alias) (lambda (a coldef)
+							(if (not (nil? a)) a
+								(if ((if ci equal?? equal?) (coldef "Field") col) (coldef "Field") nil))) nil)
+						col))
+					(list (quote get_column) resolved_alias false canonical_col false))))
+		expr /* ti=false ci=false: already canonical */
+	)
+	/* do not recurse into opaque scope nodes — inner_select, runtime code */
+	(cons sym args) (if (_is_opaque_scope_sym sym) expr
+		(cons (canonicalize_columns sym all_schemas) (map args (lambda (a) (canonicalize_columns a all_schemas)))))
+	expr
+)))
+/* canonicalize all get_column markers in a group stage */
+(define canonicalize_stage (lambda (stage all_schemas) (begin
+	(define canon (lambda (expr) (canonicalize_columns expr all_schemas)))
+	(define sg (coalesceNil (stage_group_cols stage) '()))
+	(define sh (stage_having_expr stage))
+	(define so (coalesceNil (stage_order_list stage) '()))
+	(define sl (stage_limit_val stage))
+	(define soff (stage_offset_val stage))
+	(if (stage_is_dedup stage)
+		(make_dedup_stage (map sg canon))
+		(make_group_stage
+			(map sg canon)
+			(canon sh)
+			(map so (lambda (o) (match o '(c d) (list (canon c) d))))
+			sl soff))
+)))
+
 (import "sql-metadata.scm")
 
 /* group stage constructors and accessors - shared between untangle_query and build_queryplan */
@@ -527,11 +590,37 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 	)
 ))
 
-/* recursively preprocess a query and return the flattened query. The returned parameterset will be passed to build_queryplan */
-(define untangle_query (lambda (schema tables fields condition group having order limit offset) (begin
-	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
+/*
+=== CONTRACT: untangle_query ===
+
+PURPOSE: Flatten a parsed SQL query into a logical structure (Neumann unnesting).
+	Recursively resolves derived tables, expression subqueries, and stages.
+	Goal: all correlated subqueries become LEFT JOIN LIMIT 1 table entries
+	so the output is a flat table list with predicates — no nested runtime code.
+
+INPUT:  parsed query tuple (schema tables fields condition group having order limit offset outer_schemas_param)
+OUTPUT: 7-tuple (schema tables fields condition groups schemas replace_find_column)
+
+WHAT IT DOES:
+	- Flattens FROM (SELECT ...) derived tables into the parent tables list
+	- Unnests correlated scalar/IN/EXISTS subqueries into flat table entries
+	  (currently via build_scalar_subselect which produces inline runtime code;
+	  the goal is LEFT JOIN LIMIT 1 table entries instead)
+	- Pushes domain columns through GROUP BY barriers when decorrelating
+	  (Neumann: D ⋈ Γ_A(T) == Γ_{A∪D}(D ⋈ T))
+	- Canonicalizes get_column markers (ti/ci → false/false)
+	- Collects group/having/order/limit/offset into a stages pipeline
+
+WHAT IT MUST NOT DO:
+	- Choose join order (that is join_reorder's job)
+	- Create keytables or aggregate infrastructure (that is build_queryplan's job)
+*/
+(define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
+	/* TODO: unnest correlated scalar subqueries into LEFT JOIN LIMIT 1 table entries
+	instead of producing inline runtime code via build_scalar_subselect */
 	/* TODO: multiple group levels, limit+offset for each group level */
 	(set rename_prefix (coalesce rename_prefix ""))
+	(define outer_schemas_chain (coalesceNil outer_schemas_param '()))
 	(define sq_cache (newsession))
 
 	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
@@ -1576,17 +1665,46 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 						_cd_limit _cd_offset))
 				/* normal: single group stage */
 				(if (or group having order limit offset) (list (make_group_stage group having order limit offset)) nil)))
-			(list schema tables (map_assoc fields (lambda (k v) (replace_rename v))) conditionAll groups schemas replace_find_column)
+			/* canonicalize all get_column markers: resolve ti/ci flags to canonical casing.
+			After this, all get_column nodes have false false — no case ambiguity remains. */
+			(define _canon (lambda (expr) (canonicalize_columns expr schemas)))
+			(define _canon_fields (map_assoc fields (lambda (k v) (_canon (replace_rename v)))))
+			(define _canon_condition (_canon conditionAll))
+			(define _canon_groups (map (coalesceNil groups '()) (lambda (stage) (canonicalize_stage stage schemas))))
+			(list schema tables _canon_fields _canon_condition _canon_groups schemas replace_find_column)
 		)
 	)
 )
 ))
 
+/*
+=== CONTRACT: join_reorder ===
+
+PURPOSE: Optimize table order for physical scan execution.
+	Determines which table to scan first in a nested-loop join based on
+	table sizes, available indexes, and predicate selectivity.
+	Pure physical optimization — does not change query semantics.
+
+INPUT/OUTPUT: 7-tuple (schema tables fields condition groups schemas replace_find_column)
+
+WHAT IT MAY DO:
+	- Reorder tables within a barrier-free scan segment
+
+WHAT IT MUST NOT DO:
+	- Transform query structure (that is untangle_query's job)
+	- Decorrelate subqueries or create joins (that is untangle_query's job)
+	- Build physical scan plans (that is build_queryplan's job)
+	- Reorder tables across a join fence (LEFT/SEMI/ANTI JOIN boundary)
+*/
+/* currently a stub — preserves original table order */
+(define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
+	(list schema tables fields condition groups schemas replace_find_column)))
+
 (define build_queryplan_term (lambda (query) (begin
 	(define union_parts (query_union_all_parts query))
 	(if (nil? union_parts)
 		(if (query_is_select_core query)
-			(apply build_queryplan (apply untangle_query query))
+			(apply build_queryplan (apply join_reorder (apply untangle_query (merge query (list nil)))))
 			(error "invalid SELECT query term"))
 		(match union_parts '(branches order limit offset) (begin
 			(if (or (nil? branches) (equal? branches '()))
@@ -1630,15 +1748,33 @@ Returns an S-expression that, when wrapped in (lambda (OLD NEW) ...) and eval'd,
 	)
 )))
 
-/* build queryplan from parsed query
-GROUP BY aggregate pipeline:
-When a GROUP BY query has aggregates (SUM, COUNT, etc.), three phases run:
-1. collect_plan: extract unique group keys from base table into a keytable
-2. compute_plan: for each aggregate in 'ags', scan base table per group key
-and store results as keytable columns named "expr|condition"
-3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
-All aggregates from fields, ORDER BY, and HAVING are collected into 'ags' so that
-e.g. ORDER BY SUM(amount) works even if SUM(amount) only appears in ORDER BY.
+/*
+=== CONTRACT: build_queryplan ===
+
+PURPOSE: Generate physical execution plans from the logical structure.
+	Takes a flat, already-reordered table list and builds executable plans.
+
+INPUT:  7-tuple (schema tables fields condition groups schemas replace_find_column)
+	After join_reorder, tables are in optimal scan order.
+
+OUTPUT: executable Scheme expression (scan, keytable operations, resultrow, etc.)
+
+WHAT IT DOES:
+	- Resolves get_column markers to variable references via replace_find_column
+	- Processes GROUP BY stages: creates keytables, collect/compute/grouped plans
+	- Processes ORDER BY / LIMIT: generates scan_order with offset/limit
+	- Generates nested scan loops via build_scan (follows table order from join_reorder)
+	- Handles window functions (ORC, aggregate, LAG/LEAD)
+
+WHAT IT MUST NOT DO:
+	- Reorder tables (that is join_reorder's job)
+	- Flatten derived tables or unnest subqueries (that is untangle_query's job)
+
+GROUP BY AGGREGATE PIPELINE:
+	1. collect_plan: extract unique group keys from base table into a keytable
+	2. compute_plan: for each aggregate, scan base table per group key,
+	   store results as keytable columns named "expr|condition"
+	3. grouped_plan: scan populated keytable for final output (ORDER BY, HAVING, LIMIT)
 */
 (define build_queryplan (lambda (schema tables fields condition groups schemas replace_find_column) (begin
 	/* tables: '('(alias schema tbl isOuter joinexpr) ...), tbl might be string or '(schema tables fields condition groups) */

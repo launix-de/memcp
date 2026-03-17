@@ -331,7 +331,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		defer func() {
 			if r := recover(); r != nil {
 				errMsg := fmt.Sprint(r)
-				PrintError("error in mysql connection: " + errMsg)
+				buf := make([]byte, 8192)
+				n := runtime.Stack(buf, false)
+				PrintError("error in mysql connection: " + errMsg + "\n" + string(buf[:n]))
 				myerr = ErrorWrapper(errMsg)
 			}
 		}()

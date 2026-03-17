@@ -12,4 +12,6 @@ trace*.json
 go.sum
 todos/
 .perf_baseline.json
+.gocache/
+.gomodcache/
 __pycache__/
