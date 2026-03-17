@@ -1267,13 +1267,24 @@ TABLE ENTRY FORMAT:
 			'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
 			(begin
 				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
+				/* If fields contain aggregates (COUNT/SUM/etc.) but no GROUP stage exists,
+				add a global GROUP BY '(1) stage. Without this, build_queryplan would treat
+				the aggregate expression as a regular value and not run the keytable pipeline. */
+				(define _has_aggregates (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_aggregates v)))) '())))
+				(define _groups_clean (coalesceNil groups2 '()))
+				(define _has_group_stage (and (not (nil? _groups_clean)) (not (equal? _groups_clean '()))
+					(reduce _groups_clean (lambda (a stage)
+						(or a (and (not (nil? (stage_group_cols stage))) (not (equal? (stage_group_cols stage) '()))))) false)))
+				(define _groups_final (if (and _has_aggregates (not _has_group_stage))
+					(merge (list (make_group_stage '(1) nil nil nil nil)) _groups_clean)
+					_groups_clean))
 				/* keep get_column markers raw — build_queryplan resolves them via replace_find_column (7th element) */
 				(define subplan (list
 					schema2
 					tables2
 					fields2
 					(coalesceNil condition2 true)
-					(coalesceNil groups2 '())
+					_groups_final
 					schemas2
 					replace_find_column_subselect))
 				(pending_dependent_scalars "tables"
@@ -1422,10 +1433,25 @@ TABLE ENTRY FORMAT:
 								expr
 							)))
 							/* prefix all table aliases and transform their joinexprs.
-							dependent_scalar subplans keep raw get_column markers — their replace_find_column
-							(7th element) resolves them later in build_queryplan */
-							(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schemax tbl a innerJoinexpr)
-								(list (concat id ":" alias) schemax tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+							For dependent_scalar subplans: wrap their replace_find_column (7th element)
+							so that resolved expressions pass through replace_column_alias to pick up
+							the id: prefix. The raw get_column markers stay intact in the subplan. */
+							(set tablesPrefixed (map tables2 (lambda (x) (match x
+								'(alias schemax '((quote dependent_scalar) subplan output_col) a innerJoinexpr) (begin
+									/* wrap the subplan's replace_find_column with replace_column_alias
+									so that (outer t3.id) becomes (outer t:t3.id) after resolution */
+									(define wrapped_rfc (match subplan
+										'(_ _ _ _ _ _ sp_rfc) (lambda (expr) (replace_column_alias (sp_rfc expr)))
+										_ (error "dependent_scalar subplan is not a 7-tuple")))
+									(define wrapped_subplan (match subplan
+										'(sp1 sp2 sp3 sp4 sp5 sp6 _)
+											(list sp1 sp2 sp3 sp4 sp5 sp6 wrapped_rfc)
+										_ subplan))
+									(list (concat id ":" alias) schemax
+										(list (quote dependent_scalar) wrapped_subplan output_col)
+										a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr))))
+								'(alias schemax tbl a innerJoinexpr)
+									(list (concat id ":" alias) schemax tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
 							/* helper function to transform joinexpr: only transform references to subquery alias id */
 							(define transform_joinexpr (lambda (expr) (match expr
 								'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
