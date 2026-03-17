@@ -203,33 +203,6 @@ Used to detect which tables a computor lambda reads from, so we can register inv
 	'()
 )))
 
-/* extract columns that a dependent_scalar subplan needs from tblvar.
-With raw get_column markers, we look for (get_column tblvar ...) references
-AND (outer tblvar.col) references in the subplan's fields, condition and stages. */
-(define extract_dependent_scalar_outer_columns_for_tblvar (lambda (tblvar tables) (begin
-	(define extract_both (lambda (expr) (merge_unique (list
-		(extract_columns_for_tblvar tblvar expr)
-		(extract_outer_columns_for_tblvar tblvar expr)))))
-	(define extract_stage_refs (lambda (stage)
-		(merge_unique (list
-			(merge_unique (map (coalesceNil (stage_group_cols stage) '()) extract_both))
-			(extract_both (stage_having_expr stage))
-			(merge_unique (map (coalesceNil (stage_order_list stage) '()) (lambda (o) (match o '(col dir) (extract_both col)))))
-	))))
-	(merge_unique (map tables (lambda (tdesc) (match tdesc
-		'(alias schema '((quote dependent_scalar) subplan output_col) isOuter joinexpr) (match subplan
-			'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
-			(merge_unique (list
-				(merge_unique (extract_assoc fields2 (lambda (k v) (extract_both v))))
-				(extract_both condition2)
-				(merge_unique (map (coalesceNil groups2 '()) extract_stage_refs))
-				(extract_dependent_scalar_outer_columns_for_tblvar tblvar tables2)
-			))
-			_ '())
-		_ '()
-	)))))
-)))
-
 (import "sql-metadata.scm")
 
 /* canonicalize_columns: resolve case-insensitive get_column markers against schemas.
@@ -308,7 +281,6 @@ to avoid matching outer tables which would break scope resolution. */
 		(list (quote limit) limit)
 		(list (quote offset) offset)
 		(list (quote dedup) false)
-		(list (quote stage-tables) '())
 	)
 ))
 (define make_dedup_stage (lambda (group)
@@ -319,7 +291,6 @@ to avoid matching outer tables which would break scope resolution. */
 		(list (quote limit) nil)
 		(list (quote offset) nil)
 		(list (quote dedup) true)
-		(list (quote stage-tables) '())
 	)
 ))
 (define stage_group_cols (lambda (stage) (reduce stage (lambda (acc item)
@@ -358,13 +329,6 @@ to avoid matching outer tables which would break scope resolution. */
 		_ false
 	))
 ) false)))
-(define stage_tables (lambda (stage) (reduce stage (lambda (acc item)
-	(if (not (nil? acc)) acc (match item
-		(cons (quote stage-tables) rest) (if (nil? rest) '() (car rest))
-		_ nil
-	))
-) nil)))
-
 /* query term helpers */
 (define query_union_all_parts (lambda (query) (match query
 	'(union_all branches order limit offset) (list branches order limit offset)
@@ -649,27 +613,20 @@ INVARIANTS — the output MUST NOT contain any of these in fields/condition/grou
 WHAT IT DOES:
 	- Flattens FROM (SELECT ...) derived tables into the parent tables list
 	  with alias prefixing (id:alias) and renamelist for column resolution
-	- Converts correlated scalar subqueries into dependent_scalar table entries:
-	  (alias schema (dependent_scalar subplan output_col) true nil)
-	  The subplan is a raw 7-tuple with UNRESOLVED get_column markers.
-	  Resolution happens later via the subplan's replace_find_column (7th element).
-	- Converts non-correlated scalar/IN/EXISTS subqueries via build_scalar_subselect
-	  (these produce runtime code — to be migrated to dependent nodes later)
+	- Converts scalar/IN/EXISTS subqueries via build_scalar_subselect,
+	  build_in_subselect, build_exists_subselect (runtime code)
+	- Canonicalizes get_column markers: resolves ti/ci flags to canonical casing
+	  so all get_column nodes have false/false after this phase
 	- Collects group/having/order/limit/offset into a stages pipeline
 	- Builds schemas (alias -> column definitions) and replace_find_column
 
 WHAT IT MUST NOT DO:
-	- Build physical scan plans
+	- Build physical scan plans (except inline scalar subselects via build_scalar_subselect)
 	- Choose join order (that is join_reorder's job)
 	- Create keytables or aggregate infrastructure (that is build_queryplan's job)
-	- Resolve get_column markers in dependent_scalar subplans (too early — derived
-	  table flattening may prefix aliases after the subplan is created)
 
 TABLE ENTRY FORMAT:
-	Base table:       (alias schema "table_name" isOuter joinexpr)
-	Dependent scalar: (alias schema (dependent_scalar subplan output_col) isOuter nil)
-	  subplan = (schema tables fields condition groups schemas replace_find_column)
-	  subplan contains raw get_column markers, not (outer ...) references
+	Base table: (alias schema "table_name" isOuter joinexpr)
 */
 (define untangle_query (lambda (schema tables fields condition group having order limit offset outer_schemas_param) (begin
 	/* TODO: unnest arbitrary queries -> turn them into a left join limit 1 */
@@ -678,10 +635,6 @@ TABLE ENTRY FORMAT:
 	(define sq_cache (newsession))
 	/* accumulated outer schemas from enclosing query levels (for nested correlated subqueries) */
 	(define outer_schemas_chain (coalesceNil outer_schemas_param '()))
-	/* pending declarative dependent scalar nodes created while rewriting expressions */
-	(define pending_dependent_scalars (newsession))
-	(define pending_scalar_counter (newsession))
-	(pending_scalar_counter "value" 0)
 
 	/* COUNT(DISTINCT) rewrite helpers - do not descend into inner_select nodes (subqueries are processed separately) */
 	(define _cd_is_subquery (lambda (sym) (match sym
@@ -1302,74 +1255,6 @@ TABLE ENTRY FORMAT:
 		'(symbol get_column) true
 		_ false
 	)))
-	(define expr_references_outer (lambda (expr outer_schemas) (match expr
-		(cons sym args) (if (get_column_symbol sym)
-			(match args
-				'(tblvar ti col ci) (and
-					(not (nil? tblvar))
-					(reduce_assoc outer_schemas (lambda (acc alias cols) (or acc
-						((if ti equal?? equal?) tblvar alias)
-						((if ti equal?? equal?) tblvar (string alias)))) false))
-				_ (reduce args (lambda (a b) (or a (expr_references_outer b outer_schemas))) false)
-			)
-			(reduce args (lambda (a b) (or a (expr_references_outer b outer_schemas))) false))
-		false)))
-	(define subquery_is_correlated (lambda (subquery outer_schemas)
-		(and (list? subquery) (>= (count subquery) 9)
-			(or
-				(reduce_assoc (nth subquery 2) (lambda (a k v) (or a (expr_references_outer v outer_schemas))) false)
-				(expr_references_outer (nth subquery 3) outer_schemas)
-				(reduce (coalesceNil (nth subquery 4) '()) (lambda (a b) (or a (expr_references_outer b outer_schemas))) false)
-				(expr_references_outer (nth subquery 5) outer_schemas)
-				(reduce (coalesceNil (nth subquery 6) '()) (lambda (a b) (or a (match b '(col dir) (expr_references_outer col outer_schemas)))) false)
-	))))
-	(define make_dependent_scalar (lambda (subquery outer_schemas) (begin
-		(pending_scalar_counter "value" (+ (pending_scalar_counter "value") 1))
-		(define scalar_alias (concat "__dscalar_" (pending_scalar_counter "value")))
-		(define output_cols (query_branch_field_names subquery))
-		(define output_col (if (and (not (nil? output_cols)) (equal? (count output_cols) 1))
-			(car output_cols)
-			(error "scalar subselect must return single column")))
-		(match (apply untangle_query (merge subquery (list outer_schemas)))
-			'(schema2 tables2 fields2 condition2 groups2 schemas2 replace_find_column2)
-			(begin
-				(define replace_find_column_subselect (make_replace_find_column_subselect schemas2 outer_schemas))
-				/* If fields contain aggregates (COUNT/SUM/etc.) but no GROUP stage exists,
-				add a global GROUP BY '(1) stage. Without this, build_queryplan would treat
-				the aggregate expression as a regular value and not run the keytable pipeline. */
-				(define _has_aggregates (not (equal? (merge (extract_assoc fields2 (lambda (k v) (extract_aggregates v)))) '())))
-				(define _groups_clean (coalesceNil groups2 '()))
-				(define _has_group_stage (and (not (nil? _groups_clean)) (not (equal? _groups_clean '()))
-					(reduce _groups_clean (lambda (a stage)
-						(or a (and (not (nil? (stage_group_cols stage))) (not (equal? (stage_group_cols stage) '()))))) false)))
-				(define _groups_final (if (and _has_aggregates (not _has_group_stage))
-					(merge (list (make_group_stage '(1) nil nil nil nil)) _groups_clean)
-					_groups_clean))
-				/* canonicalize outer refs in subplan: inner schemas were already canonicalized
-				by the recursive untangle_query, but outer refs (e.g. src.ID → src.id) need
-				the merged schemas to resolve case-insensitive column names. */
-				(define _ds_all_schemas (merge_assoc schemas2 outer_schemas))
-				(define _ds_canon (lambda (expr) (canonicalize_columns expr _ds_all_schemas)))
-				/* keep get_column markers raw — build_queryplan resolves them via replace_find_column (7th element) */
-				(define subplan (list
-					schema2
-					tables2
-					(map_assoc fields2 (lambda (k v) (_ds_canon v)))
-					(_ds_canon (coalesceNil condition2 true))
-					(map _groups_final (lambda (stage) (canonicalize_stage stage _ds_all_schemas)))
-					schemas2
-					replace_find_column_subselect))
-				(pending_dependent_scalars "tables"
-					(merge (pending_dependent_scalars "tables")
-						(list (list scalar_alias schema (list (quote dependent_scalar) subplan output_col) true nil))))
-				(pending_dependent_scalars "schemas"
-					(merge (pending_dependent_scalars "schemas")
-						(list scalar_alias (list (list "Field" output_col "Type" "any")))))
-				(list (quote get_column) scalar_alias false output_col false)
-			)
-			_ (error "non matching return value for dependent scalar subquery")
-		)
-	)))
 	(define replace_inner_selects (lambda (expr outer_schemas) (match expr
 		(cons sym args) (begin
 			(define kind (inner_select_kind sym))
@@ -1393,17 +1278,7 @@ TABLE ENTRY FORMAT:
 			(if (nil? not_expr)
 				(match kind
 					(quote inner_select) (match args
-						(cons subquery '()) (begin
-							(define _sq_tables (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 1) nil))
-							(define _sq_has_from (and (not (nil? _sq_tables)) (not (equal? _sq_tables '()))))
-							(define _sq_fields (if (and (list? subquery) (>= (count subquery) 9)) (nth subquery 2) nil))
-							/* detect aggregates in subquery fields — keytable path can't handle (outer) refs
-							correctly for correlated aggregates, so use build_scalar_subselect for those */
-							(define _sq_has_agg (if (nil? _sq_fields) false
-								(not (equal? (merge (extract_assoc _sq_fields (lambda (k v) (extract_aggregates v)))) '()))))
-							/* TODO: route non-aggregate correlated scalars through make_dependent_scalar
-							once the derived-table flattening replace_find_column wrapping is fixed */
-							(build_scalar_subselect subquery outer_schemas))
+						(cons subquery '()) (build_scalar_subselect subquery outer_schemas)
 						_ (cons sym (map args (lambda (arg) (replace_inner_selects arg outer_schemas))))
 					)
 					(quote inner_select_in) (match args
@@ -1507,26 +1382,9 @@ TABLE ENTRY FORMAT:
 								(cons sym args) /* function call */ (cons (replace_column_alias sym) (map args replace_column_alias))
 								expr
 							)))
-							/* prefix all table aliases and transform their joinexprs.
-							For dependent_scalar subplans: wrap their replace_find_column (7th element)
-							so that resolved expressions pass through replace_column_alias to pick up
-							the id: prefix. The raw get_column markers stay intact in the subplan. */
-							(set tablesPrefixed (map tables2 (lambda (x) (match x
-								'(alias schemax '((quote dependent_scalar) subplan output_col) a innerJoinexpr) (begin
-									/* wrap the subplan's replace_find_column with replace_column_alias
-									so that (outer t3.id) becomes (outer t:t3.id) after resolution */
-									(define wrapped_rfc (match subplan
-										'(_ _ _ _ _ _ sp_rfc) (lambda (expr) (replace_column_alias (sp_rfc expr)))
-										_ (error "dependent_scalar subplan is not a 7-tuple")))
-									(define wrapped_subplan (match subplan
-										'(sp1 sp2 sp3 sp4 sp5 sp6 _)
-											(list sp1 sp2 sp3 sp4 sp5 sp6 wrapped_rfc)
-										_ subplan))
-									(list (concat id ":" alias) schemax
-										(list (quote dependent_scalar) wrapped_subplan output_col)
-										a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr))))
-								'(alias schemax tbl a innerJoinexpr)
-									(list (concat id ":" alias) schemax tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
+							/* prefix all table aliases and transform their joinexprs */
+							(set tablesPrefixed (map tables2 (lambda (x) (match x '(alias schemax tbl a innerJoinexpr)
+								(list (concat id ":" alias) schemax tbl a (if (nil? innerJoinexpr) nil (replace_column_alias innerJoinexpr)))))))
 							/* helper function to transform joinexpr: only transform references to subquery alias id */
 							(define transform_joinexpr (lambda (expr) (match expr
 								'((symbol get_column) alias_ ti col ci) (if (equal?? alias_ id)
@@ -1733,11 +1591,6 @@ TABLE ENTRY FORMAT:
 			(set group (map group (lambda (g) (replace_inner_selects g _outer_schemas_merged))))
 			(set having (replace_inner_selects having _outer_schemas_merged))
 			(set order (map order (lambda (o) (match o '(col dir) (list (replace_inner_selects col _outer_schemas_merged) dir)))))
-			(define _ds_tables (pending_dependent_scalars "tables"))
-			(define _ds_schemas (pending_dependent_scalars "schemas"))
-			(set tables (if (nil? _ds_tables) tables (merge tables _ds_tables)))
-			(set schemas (if (nil? _ds_schemas) schemas (merge schemas _ds_schemas)))
-
 			/* apply renamelist (assoc of assoc of expr) */
 			/* ci_assoc_lookup: case-insensitive key lookup on an assoc/session */
 			(define ci_assoc_lookup (lambda (assoc_fn col ci)
@@ -1831,30 +1684,18 @@ OUTPUT: 7-tuple (schema tables fields condition groups schemas replace_find_colu
 
 WHAT IT MAY DO:
 	- Reorder tables within a barrier-free scan segment for optimal join order
-	- Separate dependent_scalar tables from base tables
-	- Push dependent_scalar domain columns into GROUP BY keys
-	  (Neumann rule: D ⋈ Γ_A(T) == Γ_{A∪D}(D ⋈ T))
-	- Propagate dependent relations through barrier stages
-	- Add hidden domain columns to the schema
 
 WHAT IT MUST NOT DO:
 	- Build physical scan plans (that is build_queryplan's job)
 	- Create keytables, scans, or runtime code
 	- Resolve get_column markers to variable references
 	- Reorder tables across a join fence (LEFT/SEMI/ANTI JOIN boundary)
-	- Modify the replace_find_column function
 
 BARRIER RULES:
 	- GROUP BY is a hard barrier: join reordering cannot cross it
 	- ORDER BY + LIMIT is a barrier (conservative; build_queryplan may collapse to scan_order)
 	- LEFT/SEMI/ANTI JOIN fences: tables on RHS must stay on RHS
 	- Within a barrier-free segment, any reordering that preserves semantics is allowed
-
-DEPENDENT_SCALAR HANDLING:
-	- If a dependent_scalar is referenced only in output fields (not in GROUP keys
-	  or WHERE), it belongs AFTER the GROUP stage — in the grouped_plan's tables
-	- If a dependent_scalar is referenced in WHERE or GROUP, its domain columns
-	  must be added to the GROUP keys before it can be decorrelated
 */
 /* currently a stub — preserves original table order */
 (define join_reorder (lambda (schema tables fields condition groups schemas replace_find_column)
@@ -1940,10 +1781,6 @@ WHAT IT MUST NOT DO:
 TABLE ENTRIES IT HANDLES:
 	- Base table: (alias schema "table_name" isOuter joinexpr)
 	  → generates scan/scan_order on the physical table
-	- Dependent scalar: (alias schema (dependent_scalar subplan output_col) isOuter nil)
-	  → in build_scan: executes subplan, captures scalar result via promise
-	  → the subplan's replace_find_column resolves get_column markers including
-	    outer references that become (outer ...) at resolution time
 
 GROUP BY AGGREGATE PIPELINE:
 	1. collect_plan: extract unique group keys from base table into a keytable
@@ -1965,14 +1802,6 @@ GROUP BY AGGREGATE PIPELINE:
 	*/
 
 	/* TODO: order tables: outer joins behind */
-	/* separate dependent_scalar tables from base tables.
-	GROUP BY / keytable / window paths only operate on real tables.
-	dependent_scalar tables are re-injected into the final scan via stage-tables
-	or appended to the scan-only paths (ORDER/unordered). */
-	(define _is_ds_table (lambda (t) (match t '(_ _ '((quote dependent_scalar) _ _) _ _) true _ false)))
-	(define _real_tables (filter tables (lambda (t) (not (_is_ds_table t)))))
-	(define _ds_tables (filter tables _is_ds_table))
-	(set tables _real_tables)
 	(set groups (coalesceNil groups '()))
 	(define groups_present (and (not (nil? groups)) (not (equal? groups '()))))
 	(define stage (if groups_present (car groups) nil))
@@ -2745,32 +2574,9 @@ GROUP BY AGGREGATE PIPELINE:
 					/* ordered or limited scan */
 					/* TODO: ORDER, LIMIT, OFFSET -> find or create all tables that have to be nestedly scanned. when necessary create prejoins. */
 					(set stage_order (map (coalesce stage_order '()) (lambda (x) (match x '(col dir) (list (replace_find_column col) dir)))))
-					/* save full tables list (incl. dependent_scalars) so build_scan can extract outer refs */
-					(define _all_tables (merge tables _ds_tables))
 					/* build_scan now takes is_first parameter to apply offset/limit only to outermost scan */
 					(define build_scan (lambda (tables condition is_first)
 						(match tables
-							(cons '(tblvar _ '((quote dependent_scalar) subplan output_col) isOuter _) tables) (begin
-								(define _ds_plan (apply build_queryplan subplan))
-								(define _ds_promise (symbol (concat "__dsp_" tblvar)))
-								(define _ds_saved_rr (symbol (concat "__dssr_" tblvar)))
-								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-									(define _ds_body (build_scan tables later_condition false))
-									(list (quote begin)
-										(list (quote set) _ds_promise (list (quote newpromise)))
-										(list (quote set) _ds_saved_rr (symbol "resultrow"))
-										(list (quote set) (symbol "resultrow")
-											(list (quote lambda) (list (symbol "__ds_row"))
-												(list _ds_promise "once"
-													(list (quote nth) (symbol "__ds_row") 1)
-													"scalar subselect returned more than one row")))
-										_ds_plan
-										(list (quote set) (symbol "resultrow") _ds_saved_rr)
-										(list (quote set) (symbol (concat tblvar "." output_col))
-											(list (quote if) (list (quote nil?) (list _ds_promise "state")) nil (list _ds_promise "value")))
-										(if (or (nil? now_condition) (equal? now_condition true))
-											_ds_body
-											(list (quote if) (replace_columns_from_expr now_condition) _ds_body nil))))))
 							(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
 								(set cols (merge_unique
 									(list
@@ -2786,8 +2592,7 @@ GROUP BY AGGREGATE PIPELINE:
 												(extract_assoc fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
 											)
 										)
-										(extract_dependent_scalar_outer_columns_for_tblvar tblvar _all_tables)
-									)
+																			)
 								))
 								(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
 									(set filtercols (merge_unique (list (extract_columns_for_tblvar tblvar now_condition) (extract_outer_columns_for_tblvar tblvar now_condition))))
@@ -2834,37 +2639,14 @@ GROUP BY AGGREGATE PIPELINE:
 							'() /* final inner */ '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v)))))
 						)
 					))
-					(build_scan (merge tables _ds_tables) (replace_find_column condition) true)
+					(build_scan tables (replace_find_column condition) true)
 				) (begin
 						/* unordered unlimited scan */
 
 						/* TODO: sort tables according to join plan */
 						/* TODO: match tbl to inner query vs string */
-						/* save full tables list (incl. dependent_scalars) so build_scan can extract outer refs */
-						(define _all_tables (merge tables _ds_tables))
 						(define build_scan (lambda (tables condition)
 							(match tables
-								(cons '(tblvar _ '((quote dependent_scalar) subplan output_col) isOuter _) tables) (begin
-									(define _ds_plan (apply build_queryplan subplan))
-									(define _ds_promise (symbol (concat "__dsp_" tblvar)))
-									(define _ds_saved_rr (symbol (concat "__dssr_" tblvar)))
-									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
-										(define _ds_body (build_scan tables later_condition))
-										(list (quote begin)
-											(list (quote set) _ds_promise (list (quote newpromise)))
-											(list (quote set) _ds_saved_rr (symbol "resultrow"))
-											(list (quote set) (symbol "resultrow")
-												(list (quote lambda) (list (symbol "__ds_row"))
-													(list _ds_promise "once"
-														(list (quote nth) (symbol "__ds_row") 1)
-														"scalar subselect returned more than one row")))
-											_ds_plan
-											(list (quote set) (symbol "resultrow") _ds_saved_rr)
-											(list (quote set) (symbol (concat tblvar "." output_col))
-												(list (quote if) (list (quote nil?) (list _ds_promise "state")) nil (list _ds_promise "value")))
-											(if (or (nil? now_condition) (equal? now_condition true))
-												_ds_body
-												(list (quote if) (replace_columns_from_expr now_condition) _ds_body nil))))))
 								(cons '(tblvar schema tbl isOuter _) tables) (begin /* outer scan */
 									(set cols (merge_unique
 										(list
@@ -2880,8 +2662,7 @@ GROUP BY AGGREGATE PIPELINE:
 													(extract_assoc fields (lambda (k v) (extract_outer_columns_for_tblvar tblvar v)))
 												)
 											)
-											(extract_dependent_scalar_outer_columns_for_tblvar tblvar _all_tables)
-										)
+																					)
 									))
 									/* split condition in those ANDs that still contain get_column from tables and those evaluatable now */
 									(match (split_condition (coalesceNil condition true) tables) '(now_condition later_condition) (begin
@@ -2904,7 +2685,7 @@ GROUP BY AGGREGATE PIPELINE:
 								'() /* final inner (=scalar) */ '('if (coalesceNil condition true) '((symbol "resultrow") (cons (symbol "list") (map_assoc fields (lambda (k v) (replace_columns_from_expr v))))))
 							)
 						))
-						(build_scan (merge tables _ds_tables) (replace_find_column condition))
+						(build_scan tables (replace_find_column condition))
 			)))
 	)))
 )))
