@@ -141,16 +141,16 @@ func TestMatcherIsSorted(t *testing.T) {
 	}
 }
 
-// TestRowWithinBoundsEqual verifies equalMatcherData.Match + Beyond.
+// TestRowWithinBoundsEqual verifies sorted (equal) column matching via lower/upper.
 func TestRowWithinBoundsEqual(t *testing.T) {
 	idx := &StorageIndex{Cols: []string{"id"}, ColMatchers: []BoundaryMatcher{EqualMatcher}}
-	data := []BoundaryMatcherData{EqualMatcher.ProduceData(idx, 0, scm.NewInt(5), scm.NewInt(5))}
+	lower := []scm.Scmer{scm.NewInt(5)}
 
-	inRange, _ := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewInt(5) })
+	inRange, _ := idx.rowWithinBounds(1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(5) })
 	if !inRange {
 		t.Error("expected match for equal value")
 	}
-	inRange, beyond := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewInt(10) })
+	inRange, beyond := idx.rowWithinBounds(1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(10) })
 	if inRange {
 		t.Error("expected no match for different value")
 	}
@@ -159,23 +159,15 @@ func TestRowWithinBoundsEqual(t *testing.T) {
 	}
 }
 
-// TestRowWithinBoundsLike verifies that LIKE columns are skipped in rowWithinBounds
-// (non-sorted columns are handled by block-level skipping, scan() filters exact).
+// TestRowWithinBoundsLike verifies that LIKE columns are skipped in rowWithinBounds.
 func TestRowWithinBoundsLike(t *testing.T) {
 	idx := &StorageIndex{Cols: []string{"name"}, ColMatchers: []BoundaryMatcher{LikeMatcher}}
-	data := []BoundaryMatcherData{LikeMatcher.ProduceData(idx, 0, scm.NewString("%Klaus%"), scm.NewString("%Klaus%"))}
+	lower := []scm.Scmer{scm.NewString("%Klaus%")}
 
-	// rowWithinBounds always returns true for non-sorted columns (LIKE)
-	inRange, _ := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewString("Hans Klaus Müller") })
+	// rowWithinBounds skips non-sorted columns entirely
+	inRange, _ := idx.rowWithinBounds(1, lower, scm.NewString("%Klaus%"), true, func(i int) scm.Scmer { return scm.NewString("anything") })
 	if !inRange {
 		t.Error("expected inRange=true (LIKE skipped in rowWithinBounds)")
-	}
-	inRange, beyond := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewString("Hans Peter Müller") })
-	if !inRange {
-		t.Error("expected inRange=true (LIKE skipped, scan() filters)")
-	}
-	if beyond {
-		t.Error("expected beyond=false for LIKE")
 	}
 }
 

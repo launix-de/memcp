@@ -28,16 +28,15 @@ func mustSymbolValue(v scm.Scmer) scm.Symbol {
 }
 
 // BoundaryMatcher is the plugin interface for index column types.
-// Every index column has a matcher (Equal, Range, Like, ...).
-// Singletons are created at startup; zero per-query allocation.
+// Three singletons (Equal, Range, Like) are created at startup.
+// Zero per-query allocation — the singletons are stored on columnboundaries
+// and on StorageIndex.ColMatchers as type markers.
 //
 // To add a new index-aware operation:
-//   1. Implement BoundaryMatcher + BoundaryMatcherData.
+//   1. Implement BoundaryMatcher.
 //   2. Add a singleton to boundaryMatchers below.
 //   3. Add detection logic in extractBoundaries (hardcoded for now).
-//   Future: generalize extractBoundaries to iterate boundaryMatchers and
-//   auto-detect via a TryMatch(funcName, col, operand) method, enabling
-//   user-defined matchers at runtime (trigram, phonetic, geo-distance, etc.).
+//   Future: generalize via TryMatch method for user-defined matchers.
 type BoundaryMatcher interface {
 	// Kind returns a short identifier (e.g. "equal", "range", "like").
 	// Used for index deduplication: same column + same kind = same index.
@@ -51,27 +50,52 @@ type BoundaryMatcher interface {
 	// Equal and Like: true (sorted before range). Range: false.
 	IsPointLike() bool
 
-	// ProduceData creates query-specific data for a concrete lower/upper bound.
-	// Called once per query per column; result is cached on StorageIndex.
-	ProduceData(index *StorageIndex, colIdx int, lower scm.Scmer, upper scm.Scmer) BoundaryMatcherData
+	// BuildSkipList is called once during buildIndex to create the skip list
+	// for this column. Only meaningful for non-sorted matchers (LIKE etc.).
+	// For sorted matchers this is a no-op. The pattern is the search value
+	// (e.g. the LIKE pattern). The result is stored on the StorageIndex.
+	// colStorage is the column's ColumnStorage for reading values.
+	BuildSkipList(pattern string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage) *SkipList
 }
 
-// BoundaryMatcherData holds query-specific match + skip data for one column.
-// Produced by BoundaryMatcher.ProduceData, cached on StorageIndex, consumed by iterate().
-type BoundaryMatcherData interface {
-	// Match tests whether value is within bounds / satisfies the condition.
-	Match(value scm.Scmer) bool
+// SkipList holds precomputed interval data for block-level skipping.
+// Built once during index construction, stored on StorageIndex, used by iterate().
+type SkipList struct {
+	starts StorageInt // interval start positions (index order), bit-packed
+	lens   StorageInt // interval lengths, bit-packed
+	count  uint32     // number of intervals
+}
 
-	// MatchUpper checks if value exceeds the upper bound (scan should stop).
-	// Returns true if beyond upper bound. Only meaningful for sorted matchers.
-	Beyond(value scm.Scmer) bool
+// NextBlock returns the next block of potentially matching records at or after pos.
+// Returns (0, 0, false) when no more blocks exist.
+func (s *SkipList) NextBlock(pos uint32) (start uint32, length uint32, ok bool) {
+	if s == nil || s.count == 0 {
+		return 0, 0, false
+	}
+	lo, hi := uint32(0), s.count
+	for lo < hi {
+		mid := (lo + hi) / 2
+		st := uint32(int64(s.starts.GetValueUInt(mid)) + s.starts.offset)
+		ln := uint32(int64(s.lens.GetValueUInt(mid)) + s.lens.offset)
+		if st+ln <= pos {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo >= s.count {
+		return 0, 0, false
+	}
+	st := uint32(int64(s.starts.GetValueUInt(lo)) + s.starts.offset)
+	ln := uint32(int64(s.lens.GetValueUInt(lo)) + s.lens.offset)
+	return st, ln, true
+}
 
-	// NextBlock returns the next block of potentially matching records at or after pos.
-	// Returns (0, 0, false) when no more blocks exist or no block-skip is available.
-	NextBlock(pos uint32) (start uint32, length uint32, ok bool)
-
-	// ComputeSize returns the approximate heap size in bytes for cache accounting.
-	ComputeSize() uint
+func (s *SkipList) ComputeSize() uint {
+	if s == nil {
+		return 0
+	}
+	return s.starts.ComputeSize() + s.lens.ComputeSize() + 16
 }
 
 // Built-in matcher singletons. Every columnboundaries.matcher points to one of these.
@@ -91,16 +115,9 @@ type equalMatcher struct{}
 func (m *equalMatcher) Kind() string      { return "equal" }
 func (m *equalMatcher) IsSorted() bool    { return true }
 func (m *equalMatcher) IsPointLike() bool { return true }
-func (m *equalMatcher) ProduceData(_ *StorageIndex, _ int, lower scm.Scmer, _ scm.Scmer) BoundaryMatcherData {
-	return &equalMatcherData{value: lower}
+func (m *equalMatcher) BuildSkipList(_ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
+	return nil // sorted: no skip list needed
 }
-
-type equalMatcherData struct{ value scm.Scmer }
-
-func (d *equalMatcherData) Match(v scm.Scmer) bool  { return !scm.Less(v, d.value) && !scm.Less(d.value, v) }
-func (d *equalMatcherData) Beyond(v scm.Scmer) bool { return scm.Less(d.value, v) }
-func (d *equalMatcherData) NextBlock(_ uint32) (uint32, uint32, bool)        { return 0, 0, false }
-func (d *equalMatcherData) ComputeSize() uint                               { return 24 }
 
 // --- Range ---
 
@@ -109,26 +126,9 @@ type rangeMatcher struct{}
 func (m *rangeMatcher) Kind() string      { return "range" }
 func (m *rangeMatcher) IsSorted() bool    { return true }
 func (m *rangeMatcher) IsPointLike() bool { return false }
-func (m *rangeMatcher) ProduceData(_ *StorageIndex, _ int, lower scm.Scmer, upper scm.Scmer) BoundaryMatcherData {
-	return &rangeMatcherData{lower: lower, upper: upper}
+func (m *rangeMatcher) BuildSkipList(_ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
+	return nil // sorted: no skip list needed
 }
-
-type rangeMatcherData struct{ lower, upper scm.Scmer }
-
-func (d *rangeMatcherData) Match(v scm.Scmer) bool {
-	if !d.lower.IsNil() && scm.Less(v, d.lower) {
-		return false
-	}
-	if !d.upper.IsNil() && scm.Less(d.upper, v) {
-		return false
-	}
-	return true
-}
-func (d *rangeMatcherData) Beyond(v scm.Scmer) bool {
-	return !d.upper.IsNil() && scm.Less(d.upper, v)
-}
-func (d *rangeMatcherData) NextBlock(_ uint32) (uint32, uint32, bool) { return 0, 0, false }
-func (d *rangeMatcherData) ComputeSize() uint                        { return 32 }
 
 // --- LIKE ---
 
@@ -137,34 +137,12 @@ type likeMatcher struct{}
 func (m *likeMatcher) Kind() string      { return "like" }
 func (m *likeMatcher) IsSorted() bool    { return false }
 func (m *likeMatcher) IsPointLike() bool { return true }
-func (m *likeMatcher) ProduceData(index *StorageIndex, colIdx int, lower scm.Scmer, _ scm.Scmer) BoundaryMatcherData {
-	pattern := lower.String()
-	if !index.active || index.t == nil {
-		return &likeMatcherData{pattern: pattern}
-	}
-	// Build interval skip list by scanning main storage column values.
-	// Tolerates up to 3 consecutive non-matching rows before splitting an interval.
-	count := index.t.main_count
-	if count == 0 {
-		return &likeMatcherData{pattern: pattern}
+func (m *likeMatcher) BuildSkipList(pattern string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage) *SkipList {
+	if count == 0 || colStorage == nil {
+		return nil
 	}
 
-	// Get column getter for the LIKE column
-	col := index.t.getColumnStorageRLocked(index.Cols[colIdx])
-	if col == nil {
-		return &likeMatcherData{pattern: pattern}
-	}
-
-	// Resolve index order: for native indexes, recid == position.
-	// For non-native, dereference through mainIndexes.
-	getRecid := func(pos uint32) uint32 {
-		if index.Native {
-			return pos
-		}
-		return uint32(int64(index.mainIndexes.GetValueUInt(pos)) + index.mainIndexes.offset)
-	}
-
-	// Pass 1: scan to find intervals with 3-miss tolerance
+	// Scan to find intervals with 3-miss tolerance
 	type interval struct{ start, len uint32 }
 	var intervals []interval
 	inInterval := false
@@ -175,7 +153,7 @@ func (m *likeMatcher) ProduceData(index *StorageIndex, colIdx int, lower scm.Scm
 
 	for pos := uint32(0); pos < count; pos++ {
 		recid := getRecid(pos)
-		v := col.GetValue(recid)
+		v := colStorage.GetValue(recid)
 		hit := v.IsString() && scm.StrLike(v.String(), pattern)
 
 		if hit {
@@ -201,69 +179,27 @@ func (m *likeMatcher) ProduceData(index *StorageIndex, colIdx int, lower scm.Scm
 	}
 
 	if len(intervals) == 0 {
-		return &likeMatcherData{pattern: pattern}
+		return nil
 	}
 
-	// Pass 2: pack into two StorageInt (compact bit-packed representation)
+	// Pack into two StorageInt (compact bit-packed representation)
 	n := uint32(len(intervals))
-	var starts, lens StorageInt
-	starts.prepare()
-	lens.prepare()
+	sl := &SkipList{count: n}
+	sl.starts.prepare()
+	sl.lens.prepare()
 	for i, iv := range intervals {
-		starts.scan(uint32(i), scm.NewInt(int64(iv.start)))
-		lens.scan(uint32(i), scm.NewInt(int64(iv.len)))
+		sl.starts.scan(uint32(i), scm.NewInt(int64(iv.start)))
+		sl.lens.scan(uint32(i), scm.NewInt(int64(iv.len)))
 	}
-	starts.init(n)
-	lens.init(n)
+	sl.starts.init(n)
+	sl.lens.init(n)
 	for i, iv := range intervals {
-		starts.build(uint32(i), scm.NewInt(int64(iv.start)))
-		lens.build(uint32(i), scm.NewInt(int64(iv.len)))
+		sl.starts.build(uint32(i), scm.NewInt(int64(iv.start)))
+		sl.lens.build(uint32(i), scm.NewInt(int64(iv.len)))
 	}
-	starts.finish()
-	lens.finish()
-
-	return &likeMatcherData{
-		pattern: pattern,
-		starts:  starts,
-		lens:    lens,
-		count:   n,
-	}
-}
-
-type likeMatcherData struct {
-	pattern string
-	starts  StorageInt // interval start positions (index order), bit-packed
-	lens    StorageInt // interval lengths, bit-packed
-	count   uint32     // number of intervals
-}
-
-func (d *likeMatcherData) Match(_ scm.Scmer) bool { return true } // scan() filters exact; index returns candidates
-func (d *likeMatcherData) Beyond(_ scm.Scmer) bool { return false }
-func (d *likeMatcherData) NextBlock(pos uint32) (start uint32, length uint32, ok bool) {
-	if d.count == 0 {
-		return 0, 0, false
-	}
-	// Binary search for first interval whose end (start+len) > pos
-	lo, hi := uint32(0), d.count
-	for lo < hi {
-		mid := (lo + hi) / 2
-		s := uint32(int64(d.starts.GetValueUInt(mid)) + d.starts.offset)
-		l := uint32(int64(d.lens.GetValueUInt(mid)) + d.lens.offset)
-		if s+l <= pos {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	if lo >= d.count {
-		return 0, 0, false
-	}
-	s := uint32(int64(d.starts.GetValueUInt(lo)) + d.starts.offset)
-	l := uint32(int64(d.lens.GetValueUInt(lo)) + d.lens.offset)
-	return s, l, true
-}
-func (d *likeMatcherData) ComputeSize() uint {
-	return uint(len(d.pattern)) + d.starts.ComputeSize() + d.lens.ComputeSize() + 48
+	sl.starts.finish()
+	sl.lens.finish()
+	return sl
 }
 
 type columnboundaries struct {
