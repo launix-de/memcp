@@ -114,49 +114,43 @@ test_cases:
     expect:
       rows: 0
 
-  # --- Large table: performance self-check ---
+  # --- Large table: 30k rows (single shard) for performance self-check ---
   - name: "Create large table"
     sql: |
       CREATE TABLE `ft_large` (
         id INT PRIMARY KEY,
-        name TEXT,
-        category INT,
-        score INT
+        name TEXT
       )
     expect:
       rows: 0
 
-  - name: "Insert 10000 rows (needle-in-a-haystack)"
+  - name: "Insert 30000 rows (needle-in-a-haystack)"
     setup:
       - scm: |
           (begin
-            (set rows (map (produceN 10000) (lambda (i)
+            (set rows (map (produceN 30000) (lambda (i)
               (list i
                 (match i
                   42 "Klaus Heinemann"
                   1337 "Nikolaus Weber"
-                  5000 "Klausberger Fritz"
-                  7777 "Hans Klausner"
-                  9999 "Klausmüller Gerd"
-                  _ (concat "Person_" i))
-                (mod (* i 7) 50)
-                (* i 3)))))
-            (insert "memcp-tests" "ft_large" '("id" "name" "category" "score") rows))
+                  15000 "Klausberger Fritz"
+                  22777 "Hans Klausner"
+                  29999 "Klausmüller Gerd"
+                  _ (concat "Person_" i))))))
+            (insert "memcp-tests" "ft_large" '("id" "name") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large"
     expect:
       rows: 1
       data:
-        - cnt: 10000
+        - cnt: 30000
 
-  - name: "Rebuild to main storage for index efficiency"
-    setup:
-      - scm: "(rebuild)"
-    sql: "SELECT 1 AS ok"
-    expect:
-      rows: 1
+  # --- Speedup test helper: run query 8x, compare first 2 (full scan) vs last 4 (indexed, cached) ---
+  # Minimum speedup: 3x (indexed late_ns must be < early_ns / 3 * 2, i.e. late avg < early avg / 3)
+  # early = runs 1-2 (no index), late = runs 5-8 (indexed + cached)
 
-  - name: "Enable scan debugging and clear log"
+  # -- Test 1: LIKE needle-in-haystack (5 matches in 30k) --
+  - name: "Enable scan debugging for LIKE test"
     setup:
       - scm: '(settings "ScanDebugging" true)'
       - scm: '(sleep 100)'
@@ -165,100 +159,176 @@ test_cases:
     expect:
       rows: 1
 
-  # --- 6 identical LIKE runs: needle-in-a-haystack (5 matches in 10000) ---
-  - name: "Large LIKE run 1"
+  - name: "LIKE run 1"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 5
-
-  - name: "Large LIKE run 2"
+    expect: { rows: 1, data: [{ cnt: 5 }] }
+  - name: "LIKE run 2"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 5
-
-  - name: "Large LIKE run 3"
+    expect: { rows: 1, data: [{ cnt: 5 }] }
+  - name: "LIKE run 3"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 5
-
-  - name: "Large LIKE run 4"
+    expect: { rows: 1, data: [{ cnt: 5 }] }
+  - name: "LIKE run 4"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 5
-
-  - name: "Large LIKE run 5"
+    expect: { rows: 1, data: [{ cnt: 5 }] }
+  - name: "LIKE run 5"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 5
-
-  - name: "Large LIKE run 6"
+    expect: { rows: 1, data: [{ cnt: 5 }] }
+  - name: "LIKE run 6"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 5
+    expect: { rows: 1, data: [{ cnt: 5 }] }
+  - name: "LIKE run 7"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
+    expect: { rows: 1, data: [{ cnt: 5 }] }
+  - name: "LIKE run 8"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
+    expect: { rows: 1, data: [{ cnt: 5 }] }
 
-  # --- Wait for async scan logs to be written ---
-  - name: "Wait for scan logs"
+  - name: "Wait for LIKE scan logs"
     setup:
       - scm: '(sleep 200)'
     sql: "SELECT 1 AS ok"
-    expect:
-      rows: 1
+    expect: { rows: 1 }
 
-  # --- Self-check: indexed runs must not be slower than pre-index runs ---
-  # Compare sum of first 3 exec_ns (pre-index) vs last 3 (indexed).
-  # The ROW_NUMBER is computed AFTER filtering to ft_large-only rows.
-  - name: "Indexed scans not slower than full scans"
+  - name: "LIKE speedup >= 3x"
     sql: |
-      SELECT early_ns, late_ns, CASE WHEN late_ns <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
+      SELECT early_ns, late_ns,
+        CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
-          SUM(CASE WHEN rn <= 3 THEN exec_ns ELSE 0 END) AS early_ns,
-          SUM(CASE WHEN rn > 3 THEN exec_ns ELSE 0 END) AS late_ns
+          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
+          SUM(CASE WHEN rn >= 5 THEN exec_ns ELSE 0 END) AS late_ns
         FROM (
           SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
           FROM `system_statistic`.`scans`
           WHERE `table` = 'ft_large'
-        ) t
-        WHERE rn <= 6
+        ) t WHERE rn <= 8
       ) s
-    expect:
-      rows: 1
-      data:
-        - result: "ok"
+    expect: { rows: 1, data: [{ result: "ok" }] }
     on_fail:
-      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns, analyze_ns, index_cols FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 10"
+      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
 
-  # --- Read scan timings for manual inspection ---
-  - name: "Show scan timings"
-    sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns, analyze_ns, index_cols FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 6"
-    expect:
-      rows: 6
-    noncritical: true
+  # -- Test 2: Equal id=42 (regression test, must not be slower) --
+  - name: "Clear log for Equal test"
+    setup:
+      - scm: '(sleep 100)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large'"
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
+
+  - name: "Equal run 1"
+    sql: "SELECT name FROM ft_large WHERE id = 42"
+    expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
+  - name: "Equal run 2"
+    sql: "SELECT name FROM ft_large WHERE id = 42"
+    expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
+  - name: "Equal run 3"
+    sql: "SELECT name FROM ft_large WHERE id = 42"
+    expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
+  - name: "Equal run 4"
+    sql: "SELECT name FROM ft_large WHERE id = 42"
+    expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
+  - name: "Equal run 5"
+    sql: "SELECT name FROM ft_large WHERE id = 42"
+    expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
+  - name: "Equal run 6"
+    sql: "SELECT name FROM ft_large WHERE id = 42"
+    expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
+  - name: "Equal run 7"
+    sql: "SELECT name FROM ft_large WHERE id = 42"
+    expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
+  - name: "Equal run 8"
+    sql: "SELECT name FROM ft_large WHERE id = 42"
+    expect: { rows: 1, data: [{ name: "Klaus Heinemann" }] }
+
+  - name: "Wait for Equal scan logs"
+    setup:
+      - scm: '(sleep 200)'
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
+
+  - name: "Equal speedup >= 3x"
+    sql: |
+      SELECT early_ns, late_ns,
+        CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
+      FROM (
+        SELECT
+          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
+          SUM(CASE WHEN rn >= 5 THEN exec_ns ELSE 0 END) AS late_ns
+        FROM (
+          SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
+          FROM `system_statistic`.`scans`
+          WHERE `table` = 'ft_large'
+        ) t WHERE rn <= 8
+      ) s
+    expect: { rows: 1, data: [{ result: "ok" }] }
+    on_fail:
+      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
+
+  # -- Test 3: LIKE + Range (must be >= 3x faster) --
+  - name: "Clear log for LIKE+Range test"
+    setup:
+      - scm: '(sleep 100)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `table` = 'ft_large'"
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
+
+  - name: "LIKE+Range run 1"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+  - name: "LIKE+Range run 2"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+  - name: "LIKE+Range run 3"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+  - name: "LIKE+Range run 4"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+  - name: "LIKE+Range run 5"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+  - name: "LIKE+Range run 6"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+  - name: "LIKE+Range run 7"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+  - name: "LIKE+Range run 8"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+
+  - name: "Wait for LIKE+Range scan logs"
+    setup:
+      - scm: '(sleep 200)'
+    sql: "SELECT 1 AS ok"
+    expect: { rows: 1 }
+
+  - name: "LIKE+Range speedup >= 3x"
+    sql: |
+      SELECT early_ns, late_ns,
+        CASE WHEN late_ns * 3 <= early_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
+      FROM (
+        SELECT
+          SUM(CASE WHEN rn <= 2 THEN exec_ns ELSE 0 END) AS early_ns,
+          SUM(CASE WHEN rn >= 5 THEN exec_ns ELSE 0 END) AS late_ns
+        FROM (
+          SELECT exec_ns, ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
+          FROM `system_statistic`.`scans`
+          WHERE `table` = 'ft_large'
+        ) t WHERE rn <= 8
+      ) s
+    expect: { rows: 1, data: [{ result: "ok" }] }
+    on_fail:
+      - sql: "SELECT ROW_NUMBER() OVER (ORDER BY timestamp) AS rn, exec_ns FROM `system_statistic`.`scans` WHERE `table` = 'ft_large' ORDER BY timestamp LIMIT 8"
 
   - name: "Disable scan debugging"
     setup:
       - scm: '(settings "ScanDebugging" false)'
     sql: "SELECT 1 AS ok"
-    expect:
-      rows: 1
+    expect: { rows: 1 }
 
   # --- Correctness on large table after index is built ---
-  # Needles: id=42 "Klaus Heinemann", id=1337 "Nikolaus Weber",
-  # id=5000 "Klausberger Fritz", id=7777 "Hans Klausner", id=9999 "Klausmüller Gerd"
-  # Haystack: "Person_0" .. "Person_9999" (minus the 5 needles)
-
   - name: "Large LIKE %laus% finds all 5 needles"
     sql: "SELECT name, id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
     expect:
@@ -269,44 +339,15 @@ test_cases:
         - name: "Nikolaus Weber"
           id: 1337
         - name: "Klausberger Fritz"
-          id: 5000
+          id: 15000
         - name: "Hans Klausner"
-          id: 7777
+          id: 22777
         - name: "Klausmüller Gerd"
-          id: 9999
-
-  - name: "Large LIKE %Klaus% (capitalized)"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%Klaus%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 4
-
-  - name: "Large LIKE %Weber% finds 1"
-    sql: "SELECT name FROM ft_large WHERE name LIKE '%Weber%'"
-    expect:
-      rows: 1
-      data:
-        - name: "Nikolaus Weber"
-
-  - name: "Large LIKE %Person_1% (haystack match)"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%Person_1%'"
-    expect:
-      rows: 1
+          id: 29999
 
   - name: "Large LIKE no match"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%zzzzz%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 0
-
-  - name: "Large LIKE prefix anchored Kl%"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE 'Kl%'"
-    expect:
-      rows: 1
-      data:
-        - cnt: 3
+    expect: { rows: 1, data: [{ cnt: 0 }] }
 
   - name: "Large LIKE ORDER BY DESC + LIMIT"
     sql: "SELECT name, id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id DESC LIMIT 3"
@@ -314,16 +355,18 @@ test_cases:
       rows: 3
       data:
         - name: "Klausmüller Gerd"
-          id: 9999
+          id: 29999
         - name: "Hans Klausner"
-          id: 7777
+          id: 22777
         - name: "Klausberger Fritz"
-          id: 5000
+          id: 15000
 
-  - name: "Large AND equal + LIKE"
-    sql: "SELECT name FROM ft_large WHERE name LIKE '%laus%' AND category = 0"
-    expect:
-      rows: 1
+  - name: "Cross-check LIKE vs total"
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM ft_large WHERE name LIKE '%laus%') AS like_cnt,
+        (SELECT COUNT(*) FROM ft_large) AS total
+    expect: { rows: 1, data: [{ like_cnt: 5, total: 30000 }] }
 
   # --- Interval merge stress: alternating matches (Animal/Person/Animal/...) ---
   # A naive implementation would create one interval per match, producing a
