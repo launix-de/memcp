@@ -126,13 +126,21 @@ test_cases:
     expect:
       rows: 0
 
-  - name: "Insert 10000 rows"
+  - name: "Insert 10000 rows (needle-in-a-haystack)"
     setup:
       - scm: |
           (begin
-            (set names (list "Heinrich" "Klausberger" "Petermann" "Nikolausweg" "Annette" "Frankreich" "Thomasson" "Wernerke" "Klausmüller" "Sabinchen" "Ericsson" "Dieterle" "Hansklaus" "Marianne" "Gutenberg" "Hofmeister"))
-            (set nlen (count names))
-            (set rows (map (produceN 10000) (lambda (i) (list i (nth names (mod i nlen)) (mod (* i 7) 50) (* i 3)))))
+            (set rows (map (produceN 10000) (lambda (i)
+              (list i
+                (match i
+                  42 "Klaus Heinemann"
+                  1337 "Nikolaus Weber"
+                  5000 "Klausberger Fritz"
+                  7777 "Hans Klausner"
+                  9999 "Klausmüller Gerd"
+                  _ (concat "Person_" i))
+                (mod (* i 7) 50)
+                (* i 3)))))
             (insert "memcp-tests" "ft_large" '("id" "name" "category" "score") rows))
       - scm: "(rebuild)"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large"
@@ -140,6 +148,13 @@ test_cases:
       rows: 1
       data:
         - cnt: 10000
+
+  - name: "Rebuild to main storage for index efficiency"
+    setup:
+      - scm: "(rebuild)"
+    sql: "SELECT 1 AS ok"
+    expect:
+      rows: 1
 
   - name: "Enable scan debugging and clear log"
     setup:
@@ -150,36 +165,48 @@ test_cases:
     expect:
       rows: 1
 
-  # --- 6 identical LIKE runs on large table ---
+  # --- 6 identical LIKE runs: needle-in-a-haystack (5 matches in 10000) ---
   - name: "Large LIKE run 1"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       rows: 1
+      data:
+        - cnt: 5
 
   - name: "Large LIKE run 2"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       rows: 1
+      data:
+        - cnt: 5
 
   - name: "Large LIKE run 3"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       rows: 1
+      data:
+        - cnt: 5
 
   - name: "Large LIKE run 4"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       rows: 1
+      data:
+        - cnt: 5
 
   - name: "Large LIKE run 5"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       rows: 1
+      data:
+        - cnt: 5
 
   - name: "Large LIKE run 6"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%'"
     expect:
       rows: 1
+      data:
+        - cnt: 5
 
   # --- Wait for async scan logs to be written ---
   - name: "Wait for scan logs"
@@ -226,6 +253,109 @@ test_cases:
     sql: "SELECT 1 AS ok"
     expect:
       rows: 1
+
+  # --- Correctness on large table after index is built ---
+  # Needles: id=42 "Klaus Heinemann", id=1337 "Nikolaus Weber",
+  # id=5000 "Klausberger Fritz", id=7777 "Hans Klausner", id=9999 "Klausmüller Gerd"
+  # Haystack: "Person_0" .. "Person_9999" (minus the 5 needles)
+
+  - name: "Large LIKE %laus% finds all 5 needles"
+    sql: "SELECT name, id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
+    expect:
+      rows: 5
+      data:
+        - name: "Klaus Heinemann"
+          id: 42
+        - name: "Nikolaus Weber"
+          id: 1337
+        - name: "Klausberger Fritz"
+          id: 5000
+        - name: "Hans Klausner"
+          id: 7777
+        - name: "Klausmüller Gerd"
+          id: 9999
+
+  - name: "Large LIKE %Klaus% (capitalized)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%Klaus%'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 4
+
+  - name: "Large LIKE %Weber% finds 1"
+    sql: "SELECT name FROM ft_large WHERE name LIKE '%Weber%'"
+    expect:
+      rows: 1
+      data:
+        - name: "Nikolaus Weber"
+
+  - name: "Large LIKE %Person_1% (haystack match)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%Person_1%'"
+    expect:
+      rows: 1
+
+  - name: "Large LIKE no match"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%zzzzz%'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+  - name: "Large LIKE prefix anchored Kl%"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE 'Kl%'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 3
+
+  - name: "Large LIKE ORDER BY DESC + LIMIT"
+    sql: "SELECT name, id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - name: "Klausmüller Gerd"
+          id: 9999
+        - name: "Hans Klausner"
+          id: 7777
+        - name: "Klausberger Fritz"
+          id: 5000
+
+  - name: "Large AND equal + LIKE"
+    sql: "SELECT name FROM ft_large WHERE name LIKE '%laus%' AND category = 0"
+    expect:
+      rows: 1
+
+  # --- Low selectivity: every other row matches (interval merging stress test) ---
+  - name: "Low selectivity LIKE (Person_ matches 9995 of 10000)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%Person_%'"
+    expect:
+      rows: 1
+      data:
+        - cnt: 9995
+
+  - name: "Low selectivity LIKE with ORDER BY + LIMIT"
+    sql: "SELECT name, id FROM ft_large WHERE name LIKE '%Person_%' ORDER BY id DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - name: "Person_9998"
+          id: 9998
+        - name: "Person_9997"
+          id: 9997
+        - name: "Person_9996"
+          id: 9996
+
+  # --- Cross-check ---
+  - name: "Cross-check LIKE vs total"
+    sql: |
+      SELECT
+        (SELECT COUNT(*) FROM ft_large WHERE name LIKE '%laus%') AS like_cnt,
+        (SELECT COUNT(*) FROM ft_large) AS total
+    expect:
+      rows: 1
+      data:
+        - like_cnt: 5
+          total: 10000
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS `ft_customers`"
