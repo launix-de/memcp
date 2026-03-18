@@ -27,8 +27,16 @@ func mustSymbolValue(v scm.Scmer) scm.Symbol {
 	panic("expected symbol")
 }
 
+type boundaryOp uint8
+const (
+	boundaryOpRange boundaryOp = iota // lower/upper define a range (default zero value)
+	boundaryOpEqual                   // point lookup: lower == upper
+	boundaryOpLike                    // LIKE pattern: lower == upper == pattern
+)
+
 type columnboundaries struct {
 	col            string
+	op             boundaryOp
 	lower          scm.Scmer
 	lowerInclusive bool
 	upper          scm.Scmer
@@ -47,17 +55,11 @@ func boundaryValueEqual(a, b scm.Scmer) bool {
 	return !scm.Less(a, b) && !scm.Less(b, a)
 }
 
-// boundaryIsPoint reports whether a boundary represents an exact point lookup.
-// Special case: nil..nil is only a point for explicit IS NULL bounds where both
-// inclusiveness flags are true; unbounded placeholders use nil..nil with false flags.
+// boundaryIsPoint reports whether a boundary represents a point-like lookup
+// (equality or LIKE), i.e. whether it should be sorted before range columns
+// in the canonical index ordering.
 func boundaryIsPoint(b columnboundaries) bool {
-	if !boundaryValueEqual(b.lower, b.upper) {
-		return false
-	}
-	if b.lower.IsNil() && b.upper.IsNil() {
-		return b.lowerInclusive && b.upperInclusive
-	}
-	return true
+	return b.op == boundaryOpEqual || b.op == boundaryOpLike
 }
 
 // addConstraint merges a column boundary into an existing set, narrowing the
@@ -65,6 +67,10 @@ func boundaryIsPoint(b columnboundaries) bool {
 func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 	for i, b := range in {
 		if b.col == b2.col {
+			// op promotion: equal wins over like, like wins over range
+			if b2.op > b.op {
+				in[i].op = b2.op
+			}
 			// lower: pick the tighter (higher) bound
 			if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
 				in[i].lower = b2.lower
@@ -97,6 +103,10 @@ func widenBounds(a, b boundaries) boundaries {
 				continue
 			}
 			found = true
+			// op demotion: OR takes the weaker (lower) op
+			if cb.op < a[i].op {
+				a[i].op = cb.op
+			}
 			// widen lower: take the smaller
 			if a[i].lower.IsNil() {
 				// already unbounded
@@ -226,13 +236,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
-					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
+					return boundaries{columnboundaries{col: col, op: boundaryOpEqual, lower: v2, upper: v2}}
 				}
 			}
 			// reversed: (equal? const col)
 			if col, ok := resolveColVar(v[2]); ok {
 				if v2, ok := extractConstant(v[1]); ok {
-					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
+					return boundaries{columnboundaries{col: col, op: boundaryOpEqual, lower: v2, upper: v2}}
 				}
 			}
 			// computed col: (equal? rawDataset independent) or reversed
@@ -242,7 +252,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, op: boundaryOpEqual, lower: v2, upper: v2, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -253,7 +263,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, op: boundaryOpEqual, lower: v2, upper: v2, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -338,21 +348,24 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		} else if funcIs(v[0], "nil?") && len(v) >= 2 {
 			// IS NULL: (nil? col)
 			if col, ok := resolveColVar(v[1]); ok {
-				return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
+				return boundaries{columnboundaries{col: col, op: boundaryOpEqual, lower: scm.NewNil(), upper: scm.NewNil()}}
 			}
 			return nil
 		} else if funcIs(v[0], "strlike") && len(v) >= 3 {
-			// LIKE prefix: (strlike col "foo%" collation) → range [prefix, prefix+1)
+			// LIKE: (strlike col "pattern" collation)
 			if col, ok := resolveColVar(v[1]); ok {
 				if pat, ok := extractConstant(v[2]); ok && pat.IsString() {
 					pattern := pat.String()
 					idx := strings.IndexAny(pattern, "%_")
 					if idx > 0 {
+						// prefix-anchored LIKE "foo%" → range boundary
 						prefix := pattern[:idx]
 						upperBytes := []byte(prefix)
 						upperBytes[len(upperBytes)-1]++
-						return boundaries{columnboundaries{col: col, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
+						return boundaries{columnboundaries{col: col, op: boundaryOpRange, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
 					}
+					// non-prefix LIKE "%foo%" → fulltext boundary
+					return boundaries{columnboundaries{col: col, op: boundaryOpLike, lower: pat, upper: pat}}
 				}
 			}
 			return nil
@@ -379,7 +392,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				canon := canonicalColName(node, params, conditionCols)
 				mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 				if !mf.IsNil() && mc != nil {
-					return boundaries{columnboundaries{col: canon, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
+					return boundaries{columnboundaries{col: canon, op: boundaryOpEqual, lower: scm.NewBool(true), upper: scm.NewBool(true), mapCols: mc, mapFn: mf}}
 				}
 			}
 			var result boundaries
@@ -406,30 +419,23 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			canon := canonicalColName(node, params, conditionCols)
 			mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 			if !mf.IsNil() && mc != nil {
-				return boundaries{columnboundaries{col: canon, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
+				return boundaries{columnboundaries{col: canon, op: boundaryOpEqual, lower: scm.NewBool(true), upper: scm.NewBool(true), mapCols: mc, mapFn: mf}}
 			}
 		}
 		return nil
 	}
 	cols := traverseCondition(p.Body)
 
-	// Sort columns so that equality conditions come first, remainder alphabetically.
-	// This canonical ordering serves two purposes:
-	//   1. Deduplication: queries with the same equality columns in different AST order
-	//      (e.g. "WHERE a=1 AND b=2" vs "WHERE b=2 AND a=1") map to the same column
-	//      sequence and thus reuse the same adaptive index instead of creating duplicates.
-	//   2. Selectivity: placing equality columns as the index key prefix lets the shard
-	//      skip directly to the matching bucket before applying any range bound, which
-	//      reduces both the scan window and memory pressure during index lookup.
-	// Precompute isEq to avoid repeated scm.Equal calls inside the sort comparator.
+	// Sort columns: point-like (equal + like) first, then range, alphabetically within
+	// each group. LIKE columns are treated as point-like because the index sort treats
+	// them like any other column; the LIKE pattern is a query-level overlay that filters
+	// via rowWithinBounds, not via sort order. The binary search skips LIKE columns.
 	if len(cols) > 1 {
-		isEq := make([]bool, len(cols))
-		for i := range cols {
-			isEq[i] = boundaryIsPoint(cols[i])
-		}
 		sort.Slice(cols, func(i, j int) bool {
-			if isEq[i] != isEq[j] {
-				return isEq[i] // equality conditions leftmost
+			iPoint := boundaryIsPoint(cols[i])
+			jPoint := boundaryIsPoint(cols[j])
+			if iPoint != jPoint {
+				return iPoint // point-like (equal/like) before range
 			}
 			return cols[i].col < cols[j].col // tiebreak alphabetically
 		})
