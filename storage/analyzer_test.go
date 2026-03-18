@@ -35,9 +35,8 @@ func buildProc(params []string, body scm.Scmer) scm.Scmer {
 	})
 }
 
-// TestBoundaryOpEqual verifies that equal? produces boundaryOpEqual.
-func TestBoundaryOpEqual(t *testing.T) {
-	// (equal? col "hello")
+// TestBoundaryEqual verifies that equal? produces EqualMatcher.
+func TestBoundaryEqual(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal?"),
 		scm.NewSymbol("x"),
@@ -48,8 +47,8 @@ func TestBoundaryOpEqual(t *testing.T) {
 	if len(bounds) != 1 {
 		t.Fatalf("expected 1 boundary, got %d", len(bounds))
 	}
-	if bounds[0].op != boundaryOpEqual {
-		t.Errorf("expected boundaryOpEqual, got %d", bounds[0].op)
+	if bounds[0].matcher.Kind() != "equal" {
+		t.Errorf("expected equal matcher, got %q", bounds[0].matcher.Kind())
 	}
 	if bounds[0].col != "name" {
 		t.Errorf("expected col 'name', got %q", bounds[0].col)
@@ -59,9 +58,8 @@ func TestBoundaryOpEqual(t *testing.T) {
 	}
 }
 
-// TestBoundaryOpRange verifies that < produces boundaryOpRange.
-func TestBoundaryOpRange(t *testing.T) {
-	// (< col 100)
+// TestBoundaryRange verifies that < produces RangeMatcher.
+func TestBoundaryRange(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("<"),
 		scm.NewSymbol("x"),
@@ -72,14 +70,13 @@ func TestBoundaryOpRange(t *testing.T) {
 	if len(bounds) != 1 {
 		t.Fatalf("expected 1 boundary, got %d", len(bounds))
 	}
-	if bounds[0].op != boundaryOpRange {
-		t.Errorf("expected boundaryOpRange, got %d", bounds[0].op)
+	if bounds[0].matcher.Kind() != "range" {
+		t.Errorf("expected range matcher, got %q", bounds[0].matcher.Kind())
 	}
 }
 
-// TestBoundaryOpLikePrefixIsRange verifies that prefix LIKE "foo%" becomes a range.
-func TestBoundaryOpLikePrefixIsRange(t *testing.T) {
-	// (strlike col "foo%")
+// TestBoundaryLikePrefixIsRange verifies that prefix LIKE "foo%" becomes RangeMatcher.
+func TestBoundaryLikePrefixIsRange(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("strlike"),
 		scm.NewSymbol("x"),
@@ -90,17 +87,13 @@ func TestBoundaryOpLikePrefixIsRange(t *testing.T) {
 	if len(bounds) != 1 {
 		t.Fatalf("expected 1 boundary, got %d", len(bounds))
 	}
-	if bounds[0].op != boundaryOpRange {
-		t.Errorf("expected boundaryOpRange for prefix LIKE, got %d", bounds[0].op)
-	}
-	if bounds[0].lower.String() != "foo" {
-		t.Errorf("expected lower 'foo', got %v", bounds[0].lower)
+	if bounds[0].matcher.Kind() != "range" {
+		t.Errorf("expected range matcher for prefix LIKE, got %q", bounds[0].matcher.Kind())
 	}
 }
 
-// TestBoundaryOpLikeNonPrefix verifies that non-prefix LIKE "%Klaus%" produces boundaryOpLike.
-func TestBoundaryOpLikeNonPrefix(t *testing.T) {
-	// (strlike col "%Klaus%")
+// TestBoundaryLikeNonPrefix verifies that "%Klaus%" produces LikeMatcher.
+func TestBoundaryLikeNonPrefix(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("strlike"),
 		scm.NewSymbol("x"),
@@ -111,88 +104,88 @@ func TestBoundaryOpLikeNonPrefix(t *testing.T) {
 	if len(bounds) != 1 {
 		t.Fatalf("expected 1 boundary, got %d", len(bounds))
 	}
-	if bounds[0].op != boundaryOpLike {
-		t.Errorf("expected boundaryOpLike, got %d", bounds[0].op)
+	if bounds[0].matcher.Kind() != "like" {
+		t.Errorf("expected like matcher, got %q", bounds[0].matcher.Kind())
 	}
-	if bounds[0].col != "name" {
-		t.Errorf("expected col 'name', got %q", bounds[0].col)
+	if !bounds[0].matcher.IsPointLike() {
+		t.Error("LIKE matcher should be point-like")
 	}
-	if bounds[0].lower.String() != "%Klaus%" {
-		t.Errorf("expected pattern '%%Klaus%%', got %v", bounds[0].lower)
-	}
-}
-
-// TestBoundaryOpLikeIsPointLike verifies that LIKE boundaries are treated as point-like
-// for canonical index ordering (sorted before range columns).
-func TestBoundaryOpLikeIsPointLike(t *testing.T) {
-	if !boundaryIsPoint(columnboundaries{op: boundaryOpLike}) {
-		t.Error("boundaryOpLike should be point-like")
-	}
-	if !boundaryIsPoint(columnboundaries{op: boundaryOpEqual}) {
-		t.Error("boundaryOpEqual should be point-like")
-	}
-	if boundaryIsPoint(columnboundaries{op: boundaryOpRange}) {
-		t.Error("boundaryOpRange should not be point-like")
+	if bounds[0].matcher.IsSorted() {
+		t.Error("LIKE matcher should not be sorted")
 	}
 }
 
-// TestRowWithinBoundsLike verifies that rowWithinBounds applies LIKE matching.
-func TestRowWithinBoundsLike(t *testing.T) {
-	idx := &StorageIndex{Cols: []string{"name"}}
-	ops := []boundaryOp{boundaryOpLike}
-	pattern := scm.NewString("%Klaus%")
-	lower := []scm.Scmer{pattern}
+// TestMatcherIsPointLike verifies IsPointLike for all matcher types.
+func TestMatcherIsPointLike(t *testing.T) {
+	if !EqualMatcher.IsPointLike() {
+		t.Error("EqualMatcher should be point-like")
+	}
+	if !LikeMatcher.IsPointLike() {
+		t.Error("LikeMatcher should be point-like")
+	}
+	if RangeMatcher.IsPointLike() {
+		t.Error("RangeMatcher should not be point-like")
+	}
+}
 
-	// matching row
-	inRange, beyond := idx.rowWithinBounds(1, lower, pattern, true, ops, func(i int) scm.Scmer {
-		return scm.NewString("Hans Klaus Müller")
-	})
+// TestMatcherIsSorted verifies IsSorted for all matcher types.
+func TestMatcherIsSorted(t *testing.T) {
+	if !EqualMatcher.IsSorted() {
+		t.Error("EqualMatcher should be sorted")
+	}
+	if !RangeMatcher.IsSorted() {
+		t.Error("RangeMatcher should be sorted")
+	}
+	if LikeMatcher.IsSorted() {
+		t.Error("LikeMatcher should not be sorted")
+	}
+}
+
+// TestRowWithinBoundsEqual verifies equalMatcherData.Match + Beyond.
+func TestRowWithinBoundsEqual(t *testing.T) {
+	idx := &StorageIndex{Cols: []string{"id"}, ColMatchers: []BoundaryMatcher{EqualMatcher}}
+	data := []BoundaryMatcherData{EqualMatcher.ProduceData(idx, 0, scm.NewInt(5), scm.NewInt(5))}
+
+	inRange, _ := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewInt(5) })
 	if !inRange {
-		t.Error("expected inRange=true for matching LIKE")
+		t.Error("expected match for equal value")
 	}
-	if beyond {
-		t.Error("expected beyond=false for LIKE")
-	}
-
-	// non-matching row
-	inRange, beyond = idx.rowWithinBounds(1, lower, pattern, true, ops, func(i int) scm.Scmer {
-		return scm.NewString("Hans Peter Müller")
-	})
+	inRange, beyond := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewInt(10) })
 	if inRange {
-		t.Error("expected inRange=false for non-matching LIKE")
+		t.Error("expected no match for different value")
 	}
-	if beyond {
-		t.Error("expected beyond=false for LIKE (no sort-order beyond)")
-	}
-
-	// nil value
-	inRange, _ = idx.rowWithinBounds(1, lower, pattern, true, ops, func(i int) scm.Scmer {
-		return scm.NewNil()
-	})
-	if inRange {
-		t.Error("expected inRange=false for nil value with LIKE")
+	if !beyond {
+		t.Error("expected beyond=true for value > equal point")
 	}
 }
 
-// TestAddConstraintOpPromotion verifies that AND-merging promotes to the stronger op.
-func TestAddConstraintOpPromotion(t *testing.T) {
-	b1 := boundaries{columnboundaries{col: "name", op: boundaryOpRange, lower: scm.NewString("a"), upper: scm.NewString("z")}}
-	b2 := columnboundaries{col: "name", op: boundaryOpEqual, lower: scm.NewString("hello"), upper: scm.NewString("hello")}
-	result := addConstraint(b1, b2)
-	if result[0].op != boundaryOpEqual {
-		t.Errorf("expected boundaryOpEqual after promotion, got %d", result[0].op)
+// TestRowWithinBoundsLike verifies likeMatcherData.Match.
+func TestRowWithinBoundsLike(t *testing.T) {
+	idx := &StorageIndex{Cols: []string{"name"}, ColMatchers: []BoundaryMatcher{LikeMatcher}}
+	data := []BoundaryMatcherData{LikeMatcher.ProduceData(idx, 0, scm.NewString("%Klaus%"), scm.NewString("%Klaus%"))}
+
+	inRange, _ := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewString("Hans Klaus Müller") })
+	if !inRange {
+		t.Error("expected match")
+	}
+	inRange, beyond := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewString("Hans Peter Müller") })
+	if inRange {
+		t.Error("expected no match")
+	}
+	if beyond {
+		t.Error("expected beyond=false for LIKE (not sorted)")
 	}
 }
 
-// TestWidenBoundsOpDemotion verifies that OR-merging demotes to the weaker op.
-func TestWidenBoundsOpDemotion(t *testing.T) {
-	a := boundaries{columnboundaries{col: "name", op: boundaryOpEqual, lower: scm.NewString("hello"), upper: scm.NewString("hello")}}
-	b := boundaries{columnboundaries{col: "name", op: boundaryOpLike, lower: scm.NewString("%test%"), upper: scm.NewString("%test%")}}
-	result := widenBounds(a, b)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 boundary, got %d", len(result))
+// TestMatcherKindEqual verifies index deduplication by kind.
+func TestMatcherKindEqual(t *testing.T) {
+	if !matcherKindEqual(EqualMatcher, EqualMatcher) {
+		t.Error("same matcher should be kind-equal")
 	}
-	if result[0].op != boundaryOpEqual {
-		t.Errorf("expected boundaryOpEqual (weaker numerically) after demotion, got %d", result[0].op)
+	if matcherKindEqual(EqualMatcher, LikeMatcher) {
+		t.Error("different matchers should not be kind-equal")
+	}
+	if matcherKindEqual(RangeMatcher, LikeMatcher) {
+		t.Error("range and like should not be kind-equal")
 	}
 }

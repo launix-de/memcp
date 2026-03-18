@@ -1738,7 +1738,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Build equality boundaries for the index lookup
 	bounds := make(boundaries, len(columns))
 	for i, col := range columns {
-		bounds[i] = columnboundaries{col: col, lower: values[i], lowerInclusive: true, upper: values[i], upperInclusive: true}
+		bounds[i] = columnboundaries{col: col, matcher: EqualMatcher, lower: values[i], upper: values[i]}
 	}
 	lower, upperLast := indexFromBoundaries(bounds)
 

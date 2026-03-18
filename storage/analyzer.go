@@ -27,16 +27,134 @@ func mustSymbolValue(v scm.Scmer) scm.Symbol {
 	panic("expected symbol")
 }
 
-type boundaryOp uint8
-const (
-	boundaryOpRange boundaryOp = iota // lower/upper define a range (default zero value)
-	boundaryOpEqual                   // point lookup: lower == upper
-	boundaryOpLike                    // LIKE pattern: lower == upper == pattern
+// BoundaryMatcher is the plugin interface for index column types.
+// Every index column has a matcher (Equal, Range, Like, ...).
+// Singletons are created at startup; zero per-query allocation.
+//
+// To add a new index-aware operation:
+//   1. Implement BoundaryMatcher + BoundaryMatcherData.
+//   2. Add a singleton to boundaryMatchers below.
+//   3. Add detection logic in extractBoundaries (hardcoded for now).
+//   Future: generalize extractBoundaries to iterate boundaryMatchers and
+//   auto-detect via a TryMatch(funcName, col, operand) method, enabling
+//   user-defined matchers at runtime (trigram, phonetic, geo-distance, etc.).
+type BoundaryMatcher interface {
+	// Kind returns a short identifier (e.g. "equal", "range", "like").
+	// Used for index deduplication: same column + same kind = same index.
+	Kind() string
+
+	// IsSorted reports whether this column participates in index sort order.
+	// Equal and Range: true. LIKE, Regex, IN: false.
+	IsSorted() bool
+
+	// IsPointLike reports whether this column is a point lookup for index ordering.
+	// Equal and Like: true (sorted before range). Range: false.
+	IsPointLike() bool
+
+	// ProduceData creates query-specific data for a concrete lower/upper bound.
+	// Called once per query per column; result is cached on StorageIndex.
+	ProduceData(index *StorageIndex, colIdx int, lower scm.Scmer, upper scm.Scmer) BoundaryMatcherData
+}
+
+// BoundaryMatcherData holds query-specific match + skip data for one column.
+// Produced by BoundaryMatcher.ProduceData, cached on StorageIndex, consumed by iterate().
+type BoundaryMatcherData interface {
+	// Match tests whether value is within bounds / satisfies the condition.
+	Match(value scm.Scmer) bool
+
+	// MatchUpper checks if value exceeds the upper bound (scan should stop).
+	// Returns true if beyond upper bound. Only meaningful for sorted matchers.
+	Beyond(value scm.Scmer) bool
+
+	// NextBlock returns the next block of potentially matching records at or after pos.
+	// Returns (0, 0, false) when no more blocks exist or no block-skip is available.
+	NextBlock(pos uint32) (start uint32, length uint32, ok bool)
+
+	// ComputeSize returns the approximate heap size in bytes for cache accounting.
+	ComputeSize() uint
+}
+
+// Built-in matcher singletons. Every columnboundaries.matcher points to one of these.
+var (
+	EqualMatcher BoundaryMatcher = &equalMatcher{}
+	RangeMatcher BoundaryMatcher = &rangeMatcher{}
+	LikeMatcher  BoundaryMatcher = &likeMatcher{}
 )
+
+// boundaryMatchers lists all known matcher types.
+var boundaryMatchers = []BoundaryMatcher{EqualMatcher, RangeMatcher, LikeMatcher}
+
+// --- Equal ---
+
+type equalMatcher struct{}
+
+func (m *equalMatcher) Kind() string      { return "equal" }
+func (m *equalMatcher) IsSorted() bool    { return true }
+func (m *equalMatcher) IsPointLike() bool { return true }
+func (m *equalMatcher) ProduceData(_ *StorageIndex, _ int, lower scm.Scmer, _ scm.Scmer) BoundaryMatcherData {
+	return &equalMatcherData{value: lower}
+}
+
+type equalMatcherData struct{ value scm.Scmer }
+
+func (d *equalMatcherData) Match(v scm.Scmer) bool                          { return scm.Equal(v, d.value) }
+func (d *equalMatcherData) Beyond(v scm.Scmer) bool                         { return scm.Less(d.value, v) }
+func (d *equalMatcherData) NextBlock(_ uint32) (uint32, uint32, bool)        { return 0, 0, false }
+func (d *equalMatcherData) ComputeSize() uint                               { return 24 }
+
+// --- Range ---
+
+type rangeMatcher struct{}
+
+func (m *rangeMatcher) Kind() string      { return "range" }
+func (m *rangeMatcher) IsSorted() bool    { return true }
+func (m *rangeMatcher) IsPointLike() bool { return false }
+func (m *rangeMatcher) ProduceData(_ *StorageIndex, _ int, lower scm.Scmer, upper scm.Scmer) BoundaryMatcherData {
+	return &rangeMatcherData{lower: lower, upper: upper}
+}
+
+type rangeMatcherData struct{ lower, upper scm.Scmer }
+
+func (d *rangeMatcherData) Match(v scm.Scmer) bool {
+	if !d.lower.IsNil() && scm.Less(v, d.lower) {
+		return false
+	}
+	if !d.upper.IsNil() && scm.Less(d.upper, v) {
+		return false
+	}
+	return true
+}
+func (d *rangeMatcherData) Beyond(v scm.Scmer) bool {
+	return !d.upper.IsNil() && scm.Less(d.upper, v)
+}
+func (d *rangeMatcherData) NextBlock(_ uint32) (uint32, uint32, bool) { return 0, 0, false }
+func (d *rangeMatcherData) ComputeSize() uint                        { return 32 }
+
+// --- LIKE ---
+
+type likeMatcher struct{}
+
+func (m *likeMatcher) Kind() string      { return "like" }
+func (m *likeMatcher) IsSorted() bool    { return false }
+func (m *likeMatcher) IsPointLike() bool { return true }
+func (m *likeMatcher) ProduceData(_ *StorageIndex, _ int, lower scm.Scmer, _ scm.Scmer) BoundaryMatcherData {
+	return &likeMatcherData{pattern: lower.String()} // TODO: add interval skip list
+}
+
+type likeMatcherData struct {
+	pattern string
+}
+
+func (d *likeMatcherData) Match(value scm.Scmer) bool {
+	return value.IsString() && scm.StrLike(value.String(), d.pattern)
+}
+func (d *likeMatcherData) Beyond(_ scm.Scmer) bool                         { return false } // not sorted, can't determine beyond
+func (d *likeMatcherData) NextBlock(_ uint32) (uint32, uint32, bool)        { return 0, 0, false } // TODO: interval skip list
+func (d *likeMatcherData) ComputeSize() uint                               { return uint(len(d.pattern)) + 16 }
 
 type columnboundaries struct {
 	col            string
-	op             boundaryOp
+	matcher        BoundaryMatcher // always set: EqualMatcher, RangeMatcher, LikeMatcher, ...
 	lower          scm.Scmer
 	lowerInclusive bool
 	upper          scm.Scmer
@@ -55,11 +173,9 @@ func boundaryValueEqual(a, b scm.Scmer) bool {
 	return !scm.Less(a, b) && !scm.Less(b, a)
 }
 
-// boundaryIsPoint reports whether a boundary represents a point-like lookup
-// (equality or LIKE), i.e. whether it should be sorted before range columns
-// in the canonical index ordering.
+// boundaryIsPoint delegates to the matcher's IsPointLike.
 func boundaryIsPoint(b columnboundaries) bool {
-	return b.op == boundaryOpEqual || b.op == boundaryOpLike
+	return b.matcher.IsPointLike()
 }
 
 // addConstraint merges a column boundary into an existing set, narrowing the
@@ -67,9 +183,9 @@ func boundaryIsPoint(b columnboundaries) bool {
 func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 	for i, b := range in {
 		if b.col == b2.col {
-			// op promotion: equal wins over like, like wins over range
-			if b2.op > b.op {
-				in[i].op = b2.op
+			// matcher promotion: more selective matcher wins (equal > like > range)
+			if b2.matcher.IsPointLike() && !b.matcher.IsPointLike() {
+				in[i].matcher = b2.matcher
 			}
 			// lower: pick the tighter (higher) bound
 			if b.lower.IsNil() || (!b2.lower.IsNil() && scm.Less(b.lower, b2.lower)) {
@@ -103,9 +219,9 @@ func widenBounds(a, b boundaries) boundaries {
 				continue
 			}
 			found = true
-			// op demotion: OR takes the weaker (lower) op
-			if cb.op < a[i].op {
-				a[i].op = cb.op
+			// matcher demotion: OR takes the weaker matcher (range < like < equal)
+			if !cb.matcher.IsPointLike() && a[i].matcher.IsPointLike() {
+				a[i].matcher = cb.matcher
 			}
 			// widen lower: take the smaller
 			if a[i].lower.IsNil() {
@@ -236,13 +352,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
-					return boundaries{columnboundaries{col: col, op: boundaryOpEqual, lower: v2, upper: v2}}
+					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, upper: v2}}
 				}
 			}
 			// reversed: (equal? const col)
 			if col, ok := resolveColVar(v[2]); ok {
 				if v2, ok := extractConstant(v[1]); ok {
-					return boundaries{columnboundaries{col: col, op: boundaryOpEqual, lower: v2, upper: v2}}
+					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, upper: v2}}
 				}
 			}
 			// computed col: (equal? rawDataset independent) or reversed
@@ -252,7 +368,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, op: boundaryOpEqual, lower: v2, upper: v2, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, upper: v2, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -263,7 +379,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, op: boundaryOpEqual, lower: v2, upper: v2, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, upper: v2, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -273,13 +389,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			incl := v[0].SymbolEquals("<=")
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
-					return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
+					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
 			}
 			// reversed: (< const col) means col > const, (<= const col) means col >= const
 			if col, ok := resolveColVar(v[2]); ok {
 				if v2, ok := extractConstant(v[1]); ok {
-					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
+					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
 			}
 			// computed col: rawDataset < independent → rawDataset has upper bound
@@ -289,7 +405,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -301,7 +417,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -311,13 +427,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			incl := v[0].SymbolEquals(">=")
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
-					return boundaries{columnboundaries{col: col, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
+					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
 			}
 			// reversed: (> const col) means col < const, (>= const col) means col <= const
 			if col, ok := resolveColVar(v[2]); ok {
 				if v2, ok := extractConstant(v[1]); ok {
-					return boundaries{columnboundaries{col: col, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
+					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
 			}
 			// computed col: rawDataset > independent → rawDataset has lower bound
@@ -327,7 +443,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -339,7 +455,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -348,7 +464,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		} else if funcIs(v[0], "nil?") && len(v) >= 2 {
 			// IS NULL: (nil? col)
 			if col, ok := resolveColVar(v[1]); ok {
-				return boundaries{columnboundaries{col: col, op: boundaryOpEqual, lower: scm.NewNil(), upper: scm.NewNil()}}
+				return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: scm.NewNil(), upper: scm.NewNil()}}
 			}
 			return nil
 		} else if funcIs(v[0], "strlike") && len(v) >= 3 {
@@ -362,10 +478,10 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						prefix := pattern[:idx]
 						upperBytes := []byte(prefix)
 						upperBytes[len(upperBytes)-1]++
-						return boundaries{columnboundaries{col: col, op: boundaryOpRange, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
+						return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
 					}
-					// non-prefix LIKE "%foo%" → fulltext boundary
-					return boundaries{columnboundaries{col: col, op: boundaryOpLike, lower: pat, upper: pat}}
+					// non-prefix LIKE "%foo%" → matcher boundary
+					return boundaries{columnboundaries{col: col, matcher: LikeMatcher, lower: pat, upper: pat}}
 				}
 			}
 			return nil
@@ -392,7 +508,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				canon := canonicalColName(node, params, conditionCols)
 				mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 				if !mf.IsNil() && mc != nil {
-					return boundaries{columnboundaries{col: canon, op: boundaryOpEqual, lower: scm.NewBool(true), upper: scm.NewBool(true), mapCols: mc, mapFn: mf}}
+					return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), upper: scm.NewBool(true), mapCols: mc, mapFn: mf}}
 				}
 			}
 			var result boundaries
@@ -419,7 +535,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			canon := canonicalColName(node, params, conditionCols)
 			mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 			if !mf.IsNil() && mc != nil {
-				return boundaries{columnboundaries{col: canon, op: boundaryOpEqual, lower: scm.NewBool(true), upper: scm.NewBool(true), mapCols: mc, mapFn: mf}}
+				return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), upper: scm.NewBool(true), mapCols: mc, mapFn: mf}}
 			}
 		}
 		return nil
