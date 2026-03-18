@@ -99,6 +99,12 @@ func (s *SkipList) ComputeSize() uint {
 }
 
 // Built-in matcher singletons. Every columnboundaries.matcher points to one of these.
+// Created once at startup, never reallocated.
+//
+// TODO: future matcher types to add:
+//   - RegexMatcher: IsSorted=false, same SkipList architecture as LIKE, different match fn
+//   - InMatcher: IsSorted=false, SkipList from sorted ID list
+//   - VectorDistanceMatcher: IsSorted=true, ORDER BY vector_distance(col, query)
 var (
 	EqualMatcher BoundaryMatcher = &equalMatcher{}
 	RangeMatcher BoundaryMatcher = &rangeMatcher{}
