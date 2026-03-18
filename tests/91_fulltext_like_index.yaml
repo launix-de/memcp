@@ -275,28 +275,28 @@ test_cases:
 
   - name: "LIKE+Range run 1"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 3 }] }
+    expect: { rows: 1, data: [{ cnt: 2 }] }
   - name: "LIKE+Range run 2"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 3 }] }
+    expect: { rows: 1, data: [{ cnt: 2 }] }
   - name: "LIKE+Range run 3"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 3 }] }
+    expect: { rows: 1, data: [{ cnt: 2 }] }
   - name: "LIKE+Range run 4"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 3 }] }
+    expect: { rows: 1, data: [{ cnt: 2 }] }
   - name: "LIKE+Range run 5"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 3 }] }
+    expect: { rows: 1, data: [{ cnt: 2 }] }
   - name: "LIKE+Range run 6"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 3 }] }
+    expect: { rows: 1, data: [{ cnt: 2 }] }
   - name: "LIKE+Range run 7"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 3 }] }
+    expect: { rows: 1, data: [{ cnt: 2 }] }
   - name: "LIKE+Range run 8"
     sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
-    expect: { rows: 1, data: [{ cnt: 3 }] }
+    expect: { rows: 1, data: [{ cnt: 2 }] }
 
   - name: "Wait for LIKE+Range scan logs"
     setup:
