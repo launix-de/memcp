@@ -159,21 +159,23 @@ func TestRowWithinBoundsEqual(t *testing.T) {
 	}
 }
 
-// TestRowWithinBoundsLike verifies likeMatcherData.Match.
+// TestRowWithinBoundsLike verifies that LIKE columns are skipped in rowWithinBounds
+// (non-sorted columns are handled by block-level skipping, scan() filters exact).
 func TestRowWithinBoundsLike(t *testing.T) {
 	idx := &StorageIndex{Cols: []string{"name"}, ColMatchers: []BoundaryMatcher{LikeMatcher}}
 	data := []BoundaryMatcherData{LikeMatcher.ProduceData(idx, 0, scm.NewString("%Klaus%"), scm.NewString("%Klaus%"))}
 
+	// rowWithinBounds always returns true for non-sorted columns (LIKE)
 	inRange, _ := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewString("Hans Klaus Müller") })
 	if !inRange {
-		t.Error("expected match")
+		t.Error("expected inRange=true (LIKE skipped in rowWithinBounds)")
 	}
 	inRange, beyond := idx.rowWithinBounds(1, data, func(i int) scm.Scmer { return scm.NewString("Hans Peter Müller") })
-	if inRange {
-		t.Error("expected no match")
+	if !inRange {
+		t.Error("expected inRange=true (LIKE skipped, scan() filters)")
 	}
 	if beyond {
-		t.Error("expected beyond=false for LIKE (not sorted)")
+		t.Error("expected beyond=false for LIKE")
 	}
 }
 

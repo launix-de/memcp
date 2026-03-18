@@ -150,8 +150,14 @@ func (s *StorageIndex) getDeltaColValue(data []scm.Scmer, colIdx int) scm.Scmer 
 	return s.getDeltaValue(data, s.Cols[colIdx])
 }
 
+// rowWithinBounds checks sorted (equal/range) columns only.
+// Non-sorted columns (LIKE etc.) are handled by block-level skipping
+// in iterate(); the scan layer applies the full condition afterwards.
 func (s *StorageIndex) rowWithinBounds(cmpCols int, matcherData []BoundaryMatcherData, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
 	for i := 0; i < cmpCols; i++ {
+		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+			continue // non-sorted: block-skip handles this, scan() filters exact
+		}
 		v := getter(i)
 		if !matcherData[i].Match(v) {
 			return false, matcherData[i].Beyond(v)
@@ -590,12 +596,39 @@ start_scan:
 	isNative := s.Native
 	s.mu.Unlock()
 
-	// Produce per-column matcher data (cached across queries with same pattern).
+	// Produce per-column matcher data, cached across queries with same pattern.
 	var matcherData []BoundaryMatcherData
 	if len(queryMatchers) > 0 {
 		matcherData = make([]BoundaryMatcherData, len(queryMatchers))
 		for i, qm := range queryMatchers {
-			matcherData[i] = qm.ProduceData(s, i, lower[i], uppers[i])
+			if qm.IsSorted() {
+				// Equal/Range: cheap to produce, no caching needed
+				matcherData[i] = qm.ProduceData(s, i, lower[i], uppers[i])
+				continue
+			}
+			// Non-sorted (LIKE etc.): cache by pattern
+			cacheKey := qm.Kind() + ":" + lower[i].String()
+			s.mu.Lock()
+			if s.matcherDataCache == nil {
+				s.matcherDataCache = make([]map[string]BoundaryMatcherData, len(s.Cols))
+			}
+			if len(s.matcherDataCache) > i && s.matcherDataCache[i] != nil {
+				if cached, ok := s.matcherDataCache[i][cacheKey]; ok {
+					matcherData[i] = cached
+					s.mu.Unlock()
+					continue
+				}
+			}
+			s.mu.Unlock()
+			// Cache miss: build and store
+			data := qm.ProduceData(s, i, lower[i], uppers[i])
+			s.mu.Lock()
+			if s.matcherDataCache[i] == nil {
+				s.matcherDataCache[i] = make(map[string]BoundaryMatcherData)
+			}
+			s.matcherDataCache[i][cacheKey] = data
+			s.mu.Unlock()
+			matcherData[i] = data
 		}
 	}
 
@@ -659,8 +692,58 @@ start_scan:
 		}
 	}
 
+	// Precompute which columns have block-level skip lists (non-sorted matchers).
+	type blockSkip struct {
+		colIdx   int
+		data     BoundaryMatcherData
+		blockEnd uint32 // current block end (start+len); 0 = needs lookup
+	}
+	var skips []blockSkip
+	for i := 0; i < cmpCols; i++ {
+		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+			skips = append(skips, blockSkip{colIdx: i, data: matcherData[i]})
+		}
+	}
+
+	// advanceToNextBlock jumps mainIdx forward to the next position covered
+	// by ALL skip lists. Returns false if no more blocks exist.
+	advanceToNextBlock := func() bool {
+		if len(skips) == 0 {
+			return uint32(mainIdx) < s.t.main_count
+		}
+		for {
+			if uint32(mainIdx) >= s.t.main_count {
+				return false
+			}
+			pos := uint32(mainIdx)
+			allOk := true
+			for si := range skips {
+				if pos < skips[si].blockEnd {
+					continue // still inside current block
+				}
+				start, length, ok := skips[si].data.NextBlock(pos)
+				if !ok {
+					return false // no more blocks for this column
+				}
+				skips[si].blockEnd = start + length
+				if start > pos {
+					// jump forward to this block's start
+					mainIdx = int(start)
+					allOk = false
+					break // re-check all skips from new position
+				}
+			}
+			if allOk {
+				return true
+			}
+		}
+	}
+
 	nextMain := func() (uint32, bool) {
 		for {
+			if !advanceToNextBlock() {
+				return 0, false
+			}
 			if uint32(mainIdx) >= s.t.main_count {
 				return 0, false
 			}

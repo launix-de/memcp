@@ -137,20 +137,134 @@ type likeMatcher struct{}
 func (m *likeMatcher) Kind() string      { return "like" }
 func (m *likeMatcher) IsSorted() bool    { return false }
 func (m *likeMatcher) IsPointLike() bool { return true }
-func (m *likeMatcher) ProduceData(_ *StorageIndex, _ int, lower scm.Scmer, _ scm.Scmer) BoundaryMatcherData {
-	return &likeMatcherData{pattern: lower.String()} // TODO: add interval skip list
+func (m *likeMatcher) ProduceData(index *StorageIndex, colIdx int, lower scm.Scmer, _ scm.Scmer) BoundaryMatcherData {
+	pattern := lower.String()
+	if !index.active || index.t == nil {
+		return &likeMatcherData{pattern: pattern}
+	}
+	// Build interval skip list by scanning main storage column values.
+	// Tolerates up to 3 consecutive non-matching rows before splitting an interval.
+	count := index.t.main_count
+	if count == 0 {
+		return &likeMatcherData{pattern: pattern}
+	}
+
+	// Get column getter for the LIKE column
+	col := index.t.getColumnStorageRLocked(index.Cols[colIdx])
+	if col == nil {
+		return &likeMatcherData{pattern: pattern}
+	}
+
+	// Resolve index order: for native indexes, recid == position.
+	// For non-native, dereference through mainIndexes.
+	getRecid := func(pos uint32) uint32 {
+		if index.Native {
+			return pos
+		}
+		return uint32(int64(index.mainIndexes.GetValueUInt(pos)) + index.mainIndexes.offset)
+	}
+
+	// Pass 1: scan to find intervals with 3-miss tolerance
+	type interval struct{ start, len uint32 }
+	var intervals []interval
+	inInterval := false
+	var intervalStart uint32
+	var intervalLen uint32
+	missCount := 0
+	const maxMiss = 3
+
+	for pos := uint32(0); pos < count; pos++ {
+		recid := getRecid(pos)
+		v := col.GetValue(recid)
+		hit := v.IsString() && scm.StrLike(v.String(), pattern)
+
+		if hit {
+			if !inInterval {
+				intervalStart = pos
+				intervalLen = 1
+				inInterval = true
+			} else {
+				intervalLen = pos - intervalStart + 1
+			}
+			missCount = 0
+		} else if inInterval {
+			missCount++
+			if missCount > maxMiss {
+				intervals = append(intervals, interval{intervalStart, intervalLen})
+				inInterval = false
+				missCount = 0
+			}
+		}
+	}
+	if inInterval {
+		intervals = append(intervals, interval{intervalStart, intervalLen})
+	}
+
+	if len(intervals) == 0 {
+		return &likeMatcherData{pattern: pattern}
+	}
+
+	// Pass 2: pack into two StorageInt (compact bit-packed representation)
+	n := uint32(len(intervals))
+	var starts, lens StorageInt
+	starts.prepare()
+	lens.prepare()
+	for i, iv := range intervals {
+		starts.scan(uint32(i), scm.NewInt(int64(iv.start)))
+		lens.scan(uint32(i), scm.NewInt(int64(iv.len)))
+	}
+	starts.init(n)
+	lens.init(n)
+	for i, iv := range intervals {
+		starts.build(uint32(i), scm.NewInt(int64(iv.start)))
+		lens.build(uint32(i), scm.NewInt(int64(iv.len)))
+	}
+	starts.finish()
+	lens.finish()
+
+	return &likeMatcherData{
+		pattern: pattern,
+		starts:  starts,
+		lens:    lens,
+		count:   n,
+	}
 }
 
 type likeMatcherData struct {
 	pattern string
+	starts  StorageInt // interval start positions (index order), bit-packed
+	lens    StorageInt // interval lengths, bit-packed
+	count   uint32     // number of intervals
 }
 
-func (d *likeMatcherData) Match(value scm.Scmer) bool {
-	return value.IsString() && scm.StrLike(value.String(), d.pattern)
+func (d *likeMatcherData) Match(_ scm.Scmer) bool { return true } // scan() filters exact; index returns candidates
+func (d *likeMatcherData) Beyond(_ scm.Scmer) bool { return false }
+func (d *likeMatcherData) NextBlock(pos uint32) (start uint32, length uint32, ok bool) {
+	if d.count == 0 {
+		return 0, 0, false
+	}
+	// Binary search for first interval whose end (start+len) > pos
+	lo, hi := uint32(0), d.count
+	for lo < hi {
+		mid := (lo + hi) / 2
+		s := uint32(int64(d.starts.GetValueUInt(mid)) + d.starts.offset)
+		l := uint32(int64(d.lens.GetValueUInt(mid)) + d.lens.offset)
+		if s+l <= pos {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo >= d.count {
+		return 0, 0, false
+	}
+	s := uint32(int64(d.starts.GetValueUInt(lo)) + d.starts.offset)
+	l := uint32(int64(d.lens.GetValueUInt(lo)) + d.lens.offset)
+	return s, l, true
 }
-func (d *likeMatcherData) Beyond(_ scm.Scmer) bool                         { return false } // not sorted, can't determine beyond
-func (d *likeMatcherData) NextBlock(_ uint32) (uint32, uint32, bool)        { return 0, 0, false } // TODO: interval skip list
-func (d *likeMatcherData) ComputeSize() uint                               { return uint(len(d.pattern)) + 16 }
+func (d *likeMatcherData) ComputeSize() uint {
+	return uint(len(d.pattern)) + d.starts.ComputeSize() + d.lens.ComputeSize() + 48
+}
 
 type columnboundaries struct {
 	col            string
