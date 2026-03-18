@@ -404,8 +404,8 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	var bounds boundaries
 	for i := 0; i < partCount && i < nCols; i++ {
 		bounds = append(bounds, columnboundaries{
-			col: col.OrcSortCols[i], lower: sortKeys[i], lowerInclusive: true,
-			upper: sortKeys[i], upperInclusive: true, // equality
+			col: col.OrcSortCols[i], matcher: EqualMatcher, lower: sortKeys[i], lowerInclusive: true,
+			upper: sortKeys[i], upperInclusive: true,
 		})
 	}
 	// Order columns: range from mutation key onwards.
@@ -414,12 +414,12 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
 		if desc {
 			bounds = append(bounds, columnboundaries{
-				col: col.OrcSortCols[i], lower: scm.NewNil(), lowerInclusive: false,
+				col: col.OrcSortCols[i], matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false,
 				upper: sortKeys[i], upperInclusive: true,
 			})
 		} else {
 			bounds = append(bounds, columnboundaries{
-				col: col.OrcSortCols[i], lower: sortKeys[i], lowerInclusive: true,
+				col: col.OrcSortCols[i], matcher: RangeMatcher, lower: sortKeys[i], lowerInclusive: true,
 				upper: scm.NewNil(), upperInclusive: false,
 			})
 		}
