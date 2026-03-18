@@ -121,9 +121,21 @@ func (idx *StorageIndex) ComputeSize() uint {
 	return sz
 }
 
-// pretty-print
+// pretty-print: name(like)|birthdate(range)
 func (idx *StorageIndex) String() string {
-	return strings.Join(idx.Cols, "|")
+	var b strings.Builder
+	for i, col := range idx.Cols {
+		if i > 0 {
+			b.WriteByte('|')
+		}
+		b.WriteString(col)
+		if len(idx.ColMatchers) > i && idx.ColMatchers[i] != nil {
+			b.WriteByte('(')
+			b.WriteString(idx.ColMatchers[i].Kind())
+			b.WriteByte(')')
+		}
+	}
+	return b.String()
 }
 
 // getDeltaValue returns the raw column value for a delta row.
@@ -235,8 +247,12 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 			// naive index search algo; TODO: improve
 			if len(index.Cols) >= len(lower) {
 				for i := 0; i < len(lower); i++ {
-					if cols[i].col != index.Cols[i] || !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
-						goto skip_index // this index does not fit
+					if cols[i].col != index.Cols[i] {
+						goto skip_index // column mismatch
+					}
+					// matcher kind check (old indexes without ColMatchers are equal/range only)
+					if len(index.ColMatchers) > i && !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
+						goto skip_index // matcher kind mismatch
 					}
 				}
 				// this index fits!
@@ -257,7 +273,11 @@ func (t *storageShard) iterateIndex(cols boundaries, lower []scm.Scmer, upperLas
 			if len(index.Cols) >= len(lower) {
 				covered := true
 				for i := 0; i < len(lower); i++ {
-					if cols[i].col != index.Cols[i] || !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
+					if cols[i].col != index.Cols[i] {
+						covered = false
+						break
+					}
+					if len(index.ColMatchers) > i && !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
 						covered = false
 						break
 					}

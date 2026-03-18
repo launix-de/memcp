@@ -18,13 +18,14 @@ package storage
 
 import "testing"
 
-func TestScanErrorOmitsStackFromClientError(t *testing.T) {
+func TestScanErrorIncludesStack(t *testing.T) {
 	err := scanError{
 		r:     "Column does not exist: `test`.`tbl`.`col`",
 		stack: "goroutine 1 [running]:\nexample stack",
 	}
 
-	if got, want := err.Error(), "Column does not exist: `test`.`tbl`.`col`"; got != want {
+	want := "Column does not exist: `test`.`tbl`.`col`\ngoroutine 1 [running]:\nexample stack"
+	if got := err.Error(); got != want {
 		t.Fatalf("scanError.Error() = %q, want %q", got, want)
 	}
 }

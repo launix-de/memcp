@@ -35,20 +35,21 @@ import (
 type EvictableType uint8
 
 const (
-	TypeTempColumn    EvictableType = iota // factor 1
-	TypeShard                              // factor 20
-	TypeIndex                              // factor 1
-	TypeTempKeytable                       // factor 10
-	TypeCacheEntry                         // factor 1
-	TypeStringDict                         // factor 1 — lz4-compressed StorageString materialized dictionary
+	TypeTempColumn    EvictableType = iota // weight 20 — cheap to recompute
+	TypeShard                              // weight 1  — expensive (disk I/O)
+	TypeIndex                              // weight 20 — cheap (rebuild from shard data)
+	TypeTempKeytable                       // weight 2  — medium (join intermediate)
+	TypeCacheEntry                         // weight 20 — cheap (reload from disk)
+	TypeStringDict                         // weight 20 — cheap (decompression)
 	numEvictableTypes                      // sentinel for array sizing
 )
 
 // evictableWeights maps EvictableType → eviction weight.
 // Higher weight = higher evictionScore = evicted sooner.
 // Low weight = more protected (expensive to rebuild).
+// Weights are exact inverses of the old factors (20/factor) to preserve behavior.
 //                                         TempCol Shard Index TempKT CacheEntry StringDict
-var evictableWeights = [numEvictableTypes]int64{20, 1, 2, 10, 5, 20}
+var evictableWeights = [numEvictableTypes]int64{20, 1, 20, 2, 20, 20}
 
 var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry", "StringDict"}
 
