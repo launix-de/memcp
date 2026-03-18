@@ -401,8 +401,9 @@ func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
 		clone := new(StorageIndex)
 		clone.Cols = make([]string, len(idx.Cols))
 		copy(clone.Cols, idx.Cols)
-		clone.ColMapCols = idx.ColMapCols // shallow copy OK (immutable per-col slices)
-		clone.ColMapFn = idx.ColMapFn     // shallow copy OK
+		clone.ColMapCols = idx.ColMapCols   // shallow copy OK (immutable per-col slices)
+		clone.ColMapFn = idx.ColMapFn       // shallow copy OK
+		clone.ColMatchers = idx.ColMatchers // shallow copy OK (singletons)
 		clone.Savings = idx.Savings * 0.9
 		clone.t = t2
 		clone.active = false
