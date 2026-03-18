@@ -97,8 +97,8 @@ func (m *equalMatcher) ProduceData(_ *StorageIndex, _ int, lower scm.Scmer, _ sc
 
 type equalMatcherData struct{ value scm.Scmer }
 
-func (d *equalMatcherData) Match(v scm.Scmer) bool                          { return scm.Equal(v, d.value) }
-func (d *equalMatcherData) Beyond(v scm.Scmer) bool                         { return scm.Less(d.value, v) }
+func (d *equalMatcherData) Match(v scm.Scmer) bool  { return !scm.Less(v, d.value) && !scm.Less(d.value, v) }
+func (d *equalMatcherData) Beyond(v scm.Scmer) bool { return scm.Less(d.value, v) }
 func (d *equalMatcherData) NextBlock(_ uint32) (uint32, uint32, bool)        { return 0, 0, false }
 func (d *equalMatcherData) ComputeSize() uint                               { return 24 }
 
@@ -466,13 +466,13 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
 			if col, ok := resolveColVar(v[1]); ok {
 				if v2, ok := extractConstant(v[2]); ok {
-					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, upper: v2}}
+					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
 			}
 			// reversed: (equal? const col)
 			if col, ok := resolveColVar(v[2]); ok {
 				if v2, ok := extractConstant(v[1]); ok {
-					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, upper: v2}}
+					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
 			}
 			// computed col: (equal? rawDataset independent) or reversed
@@ -482,7 +482,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, upper: v2, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -493,7 +493,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
-							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, upper: v2, mapCols: mc, mapFn: mf}}
+							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
 				}
@@ -578,7 +578,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		} else if funcIs(v[0], "nil?") && len(v) >= 2 {
 			// IS NULL: (nil? col)
 			if col, ok := resolveColVar(v[1]); ok {
-				return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: scm.NewNil(), upper: scm.NewNil()}}
+				return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
 			}
 			return nil
 		} else if funcIs(v[0], "strlike") && len(v) >= 3 {
@@ -622,7 +622,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				canon := canonicalColName(node, params, conditionCols)
 				mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 				if !mf.IsNil() && mc != nil {
-					return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), upper: scm.NewBool(true), mapCols: mc, mapFn: mf}}
+					return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
 				}
 			}
 			var result boundaries
@@ -649,7 +649,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			canon := canonicalColName(node, params, conditionCols)
 			mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 			if !mf.IsNil() && mc != nil {
-				return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), upper: scm.NewBool(true), mapCols: mc, mapFn: mf}}
+				return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: scm.NewBool(true), lowerInclusive: true, upper: scm.NewBool(true), upperInclusive: true, mapCols: mc, mapFn: mf}}
 			}
 		}
 		return nil

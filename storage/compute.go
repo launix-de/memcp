@@ -404,8 +404,8 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	var bounds boundaries
 	for i := 0; i < partCount && i < nCols; i++ {
 		bounds = append(bounds, columnboundaries{
-			col: col.OrcSortCols[i], matcher: EqualMatcher, lower: sortKeys[i],
-			upper: sortKeys[i],
+			col: col.OrcSortCols[i], matcher: EqualMatcher, lower: sortKeys[i], lowerInclusive: true,
+			upper: sortKeys[i], upperInclusive: true,
 		})
 	}
 	// Order columns: range from mutation key onwards.
