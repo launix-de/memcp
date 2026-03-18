@@ -325,25 +325,53 @@ test_cases:
     expect:
       rows: 1
 
-  # --- Low selectivity: every other row matches (interval merging stress test) ---
-  - name: "Low selectivity LIKE (Person_ matches 9995 of 10000)"
-    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%Person_%'"
+  # --- Interval merge stress: alternating matches (Animal/Person/Animal/...) ---
+  # A naive implementation would create one interval per match, producing a
+  # skip list larger than the data. The 3-block merge tolerance must collapse
+  # adjacent intervals to keep the list small.
+  - name: "Create alternating table"
+    sql: |
+      CREATE TABLE IF NOT EXISTS `ft_alternating` (
+        id INT PRIMARY KEY,
+        name TEXT
+      )
+    expect:
+      rows: 0
+
+  - name: "Insert alternating data"
+    setup:
+      - scm: |
+          (begin
+            (set rows (map (produceN 10000) (lambda (i)
+              (list i (match (mod i 3)
+                0 "Animal"
+                1 "Person"
+                _ "Object")))))
+            (insert "memcp-tests" "ft_alternating" '("id" "name") rows))
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_alternating"
     expect:
       rows: 1
       data:
-        - cnt: 9995
+        - cnt: 10000
 
-  - name: "Low selectivity LIKE with ORDER BY + LIMIT"
-    sql: "SELECT name, id FROM ft_large WHERE name LIKE '%Person_%' ORDER BY id DESC LIMIT 3"
+  - name: "Alternating LIKE correctness"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_alternating WHERE name LIKE '%Person%'"
     expect:
-      rows: 3
+      rows: 1
       data:
-        - name: "Person_9998"
-          id: 9998
-        - name: "Person_9997"
-          id: 9997
-        - name: "Person_9996"
-          id: 9996
+        - cnt: 3333
+
+  - name: "Alternating LIKE with ORDER BY + LIMIT"
+    sql: "SELECT id FROM ft_alternating WHERE name LIKE '%Person%' ORDER BY id LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 1
+        - id: 4
+        - id: 7
+        - id: 10
+        - id: 13
 
   # --- Cross-check ---
   - name: "Cross-check LIKE vs total"
@@ -360,3 +388,4 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS `ft_customers`"
   - sql: "DROP TABLE IF EXISTS `ft_large`"
+  - sql: "DROP TABLE IF EXISTS `ft_alternating`"
