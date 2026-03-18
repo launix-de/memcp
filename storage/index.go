@@ -576,6 +576,12 @@ func (s *StorageIndex) getOrBuildSkipList(colIdx int, pattern string) *SkipList 
 	}
 	s.skipLists[colIdx][pattern] = sl
 	s.mu.Unlock()
+	// Register skip list with CacheManager at 1/100 of the index priority,
+	// so rarely used patterns are evicted before the whole index.
+	if sl != nil {
+		entry := &skipListCacheEntry{index: s, colIdx: colIdx, pattern: pattern}
+		GlobalCache.AddItem(entry, int64(sl.ComputeSize()), TypeIndex, skipListCleanup, skipListLastUsed, skipListGetScore)
+	}
 	return sl
 }
 
@@ -894,4 +900,34 @@ func indexLastUsed(ptr any) time.Time {
 
 func indexGetScore(ptr any) float64 {
 	return ptr.(*StorageIndex).Savings
+}
+
+// skipListCacheEntry wraps a single skip list for CacheManager eviction.
+type skipListCacheEntry struct {
+	index   *StorageIndex
+	colIdx  int
+	pattern string
+}
+
+func skipListCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
+	e := ptr.(*skipListCacheEntry)
+	if !e.index.mu.TryLock() {
+		return false
+	}
+	if len(e.index.skipLists) > e.colIdx && e.index.skipLists[e.colIdx] != nil {
+		delete(e.index.skipLists[e.colIdx], e.pattern)
+	}
+	e.index.mu.Unlock()
+	return true
+}
+
+func skipListLastUsed(ptr any) time.Time {
+	e := ptr.(*skipListCacheEntry)
+	return time.Unix(0, int64(atomic.LoadUint64(&e.index.t.lastAccessed)))
+}
+
+func skipListGetScore(ptr any) float64 {
+	// 1/100 of index score: evict skip lists before evicting the whole index
+	e := ptr.(*skipListCacheEntry)
+	return e.index.Savings * 0.01
 }
