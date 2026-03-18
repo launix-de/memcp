@@ -328,6 +328,36 @@ test_cases:
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
+  # --- Range operator corner cases (>, >=, <, <=) with LIKE ---
+  # Needles at id: 42, 1337, 15000, 22777, 29999
+  - name: "LIKE + id > 15000 (strict, excludes boundary)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id > 15000"
+    expect: { rows: 1, data: [{ cnt: 2 }] }
+
+  - name: "LIKE + id >= 15000 (inclusive, includes boundary)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id >= 15000"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+
+  - name: "LIKE + id < 1337 (strict, excludes boundary)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id < 1337"
+    expect: { rows: 1, data: [{ cnt: 1 }] }
+
+  - name: "LIKE + id <= 1337 (inclusive, includes boundary)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id <= 1337"
+    expect: { rows: 1, data: [{ cnt: 2 }] }
+
+  - name: "LIKE + BETWEEN (id >= 1337 AND id <= 22777)"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id >= 1337 AND id <= 22777"
+    expect: { rows: 1, data: [{ cnt: 3 }] }
+
+  - name: "LIKE + id = exact needle"
+    sql: "SELECT name FROM ft_large WHERE name LIKE '%laus%' AND id = 22777"
+    expect: { rows: 1, data: [{ name: "Hans Klausner" }] }
+
+  - name: "LIKE + id = non-needle"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_large WHERE name LIKE '%laus%' AND id = 100"
+    expect: { rows: 1, data: [{ cnt: 0 }] }
+
   # --- Correctness on large table after index is built ---
   - name: "Large LIKE %laus% finds all 5 needles"
     sql: "SELECT name, id FROM ft_large WHERE name LIKE '%laus%' ORDER BY id"
